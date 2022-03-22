@@ -43,7 +43,7 @@ def test_multiple_statements():
 
     loop = Loop(
         p := iterset.point_index,
-        statements=[func1(dat), func2(dat)]
+        statements=[func1(dat[p]), func2(dat[p])]
     )
 
     code = pyop3.codegen.generate_pseudocode(loop)

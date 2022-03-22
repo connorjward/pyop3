@@ -22,7 +22,10 @@ class PseudoContext:
         self.temporaries = {}
 
 
-def generate_pseudocode(op: loops.Statement):
+def generate_pseudocode(expr):
+    expr = replace_implicit_tensors(expr)
+    expr = replace_restrictions_with_loops(expr)
+
     context = PseudoContext()
     return _generate_pseudocode(op, context)
 
@@ -64,20 +67,42 @@ def _(op: loops.Assign, context):
 
 
 @functools.singledispatch
-def _generate_argument_pseudocode(argument, context):
-    raise NotImplementedError
+def replace_implicit_tensors(expr: loops.Statement):
+    """Replace non-temporary arguments to functions.
+
+    (with temporaries and explicit packing instructions.)
+    """
+    raise AssertionError
 
 
-@_generate_argument_pseudocode.register
-def _(arg: arguments.Dat, context):
-    return ""
+@replace_implicit_tensors.register
+def _(expr: loops.Loop):
+    return type(expr)(expr.indices, chain(map(replace_implicit_tensors, expr.statements)))
 
 
-index_name_generator = domains.NameGenerator(prefix="i")
+@replace_implicit_tensors.register
+def _(expr: loops.FunctionCall):
+    statements = []
+    arguments = []
+    for arg in expr.arguments:
+        if arg.is_temporary:
+            arguments.append(arg)
+        else:
+            new_temp = "some_temporary"
+            statements.append(loops.Restrict(arg.parent, arg.restriction, new_temp))
+            arguments.append(new_temp)
+    statements.append(type(expr)(expr.func, arguments))
+    return tuple(statements)
 
 
-@_generate_argument_pseudocode.register
-def _(arg: arguments.DatSlice, ctx: PseudoContext):
+@functools.singledispatch
+def replace_restrictions_with_loops(expr):
+    """Replace Restrict nodes (which correspond to linear transformations) with explicit loops."""
+    raise AssertionError
+
+
+@replace_restrictions_with_loops.register
+def _(expr: loops.Restrict):
     # check if indexed by a single index (and hence no loop is needed)
     if isinstance(arg.point_set, domains.Index):
         return ""
@@ -90,5 +115,3 @@ def _(arg: arguments.DatSlice, ctx: PseudoContext):
         [i := arg.point_set.count_index, p := arg.point_set.point_index],
         tmp[i].assign(arg[p])
     )
-
-    return _generate_pseudocode(loop, ctx)
