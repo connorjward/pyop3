@@ -28,55 +28,68 @@ class Restriction(enum.Enum):
         return self.name
 
 
-class DomainIndex:
-    """Class representing an index in a domain."""
-
-    def __init__(self, name, domain):
-        self.name = name
-        self.domain = domain
+class Index(abc.ABC):
 
     def __str__(self):
         return self.name
 
 
-class Domain(abc.ABC):
+class PointIndex(Index):
+    """Class representing a point in a plex."""
 
-    _iname_generator = NameGenerator(prefix="i")
+    _name_generator = NameGenerator(prefix="p")
+
+    def __init__(self, point_set, name=None):
+        self.point_set = point_set
+        self.name = name or next(self._name_generator)
+
+
+class CountIndex(Index):
+
+    _name_generator = NameGenerator(prefix="i")
+
+    def __init__(self, point_set):
+        self.point_set = point_set
+        self.name = next(self._name_generator)
+
+
+class PointSet(abc.ABC):
+    """A set of plex points."""
 
     def __init__(self):
-        self._index = DomainIndex(next(self._iname_generator), self)
-
-    @property
-    def index(self):
-        return self._index
+        self.count_index = CountIndex(self)
+        self.point_index = PointIndex(self)
 
 
-class FreeDomain(Domain):
+class FreePointSet(PointSet):
     """An unrestricted domain (must be the outermost one)."""
 
-    def __init__(self, extent):
-        self.extent = extent
+    def __init__(self, name):
+        self.name = name
         super().__init__()
 
     def __str__(self):
-        return f"range({self.extent})"
+        return self.name
 
 
-class RestrictedDomain(Domain):
+class RestrictedPointSet(PointSet):
     """E.g. closure(i)."""
 
-    def __init__(self, parent_index: DomainIndex, restriction: Restriction):
-        self.restriction = restriction
+    def __init__(self, parent_index: PointIndex, restriction: Restriction):
         self.parent_index = parent_index
+        self.restriction = restriction
         super().__init__()
 
     def __str__(self):
-        return f"{self.restriction}({self.parent_index})"
+        if self.restriction == Restriction.CLOSURE:
+            return f"closure({self.parent_index.name})"
+        else:
+            raise AssertionError
 
 
-def closure(index):
-    return RestrictedDomain(index, Restriction.CLOSURE)
+def closure(point_index):
+    return RestrictedPointSet(point_index, Restriction.CLOSURE)
 
 
-def star(index):
-    return RestrictedDomain(index, Restriction.STAR)
+def star(point_index):
+    return RestrictedPointSet(point_index, Restriction.STAR)

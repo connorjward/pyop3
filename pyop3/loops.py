@@ -1,3 +1,4 @@
+import abc
 import collections.abc
 
 
@@ -5,13 +6,13 @@ def as_tuple(item):
     return tuple(item) if isinstance(item, collections.abc.Iterable) else (item,)
 
 
-class Op:
+class Statement(abc.ABC):
 
     def __init__(self):
         ...
 
 
-class Loop(Op):
+class Loop(Statement):
     """A loop that acts on terminals or other loops.
 
     Parameters
@@ -25,14 +26,20 @@ class Loop(Op):
     scope: ?, optional
         The plex op relating this loop to a surrounding one.
     """
-    def __init__(self, domain_index, arguments=(), temporaries=(), statements=()):
-        self.domain_index = domain_index
-        self.arguments = as_tuple(arguments)
-        self.temporaries = as_tuple(temporaries)
+    def __init__(self, indices, statements=()):
+        self.indices = as_tuple(indices)
+        try:
+            self.point_set, = set(index.point_set for index in self.indices)
+        except ValueError:
+            raise ValueError("Must use the same base point set")
         self.statements = as_tuple(statements)
 
+    @property
+    def arguments(self):
+        return tuple(arg for stmt in self.statements for arg in stmt.arguments)
 
-class Terminal(Op):
+
+class Terminal(Statement):
     """A terminal operation."""
 
 
@@ -55,3 +62,11 @@ class FunctionCall(Terminal):
 
     def __str__(self):
         return f"{self.func}({', '.join(map(str, self.arguments))})"
+
+
+class Assign(Terminal):
+
+    def __init__(self, lhs, rhs):
+        self.lhs = lhs
+        self.rhs = rhs
+        self.arguments = lhs, rhs

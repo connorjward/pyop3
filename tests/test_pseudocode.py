@@ -2,7 +2,7 @@ import pyop3.codegen
 import pyop3.loops
 from pyop3.arguments import Dat
 from pyop3.loops import Loop, Function
-from pyop3.domains import FreeDomain, closure
+from pyop3.domains import FreePointSet, closure
 
 
 def test_pseudocode():
@@ -12,27 +12,63 @@ def test_pseudocode():
 
 
 def test_nested_domains():
-    iterset = FreeDomain("extent")
+    iterset = FreePointSet("P")
+    func = Function("func")
     loop = Loop(
-        i := iterset.index,
-        arguments=[],
-        temporaries=[],
-        statements=Loop(j := closure(i).index, [], [], Function("myfunc"))
-    )
+        p := iterset.point_index,
+        statements=Loop(q := closure(p).point_index, func()))
     
-    assert "\n".join(pyop3.codegen.generate_pseudocode(loop)) == "something that fails"
+    assert pyop3.codegen.generate_pseudocode(loop) == "something that fails"
 
 
 def test_arguments():
-    iterset = FreeDomain(100)
+    iterset = FreePointSet("P")
     dat = Dat("dat0")
     func = Function("myfunc")
 
     loop = Loop(
-        i := iterset.index,
-        arguments=[d0 := dat[closure(i)]],
-        statements=[func(d0)]
+        p := iterset.point_index,
+        statements=[func(dat[closure(p)])]
     )
 
     code = pyop3.codegen.generate_pseudocode(loop)
-    assert "\n".join(code) == "something that fails"
+    assert code == "something that fails"
+
+
+def test_multiple_statements():
+    iterset = FreePointSet("P")
+    dat = Dat("dat0")
+    func1 = Function("func1")
+    func2 = Function("func2")
+
+    loop = Loop(
+        p := iterset.point_index,
+        statements=[func1(dat), func2(dat)]
+    )
+
+    code = pyop3.codegen.generate_pseudocode(loop)
+    assert code == "something that fails"
+
+
+"""
+An example of a pack
+
+t0 = [0, ...]
+for i, p' in closure(p)
+    t0[i] = dat[p']
+end for
+
+loop(p' := closure(p).index,
+     [t0, dat[p']]
+     [Assign(t0, dat)])
+
+loop(p' := closure(p).index,
+     [Assign("t0", dat[p'])])
+
+for something directly accessed:
+
+    loop(p := P.index, [d := dat], [kernel(d)])
+
+
+    loop(p := P.index, [kernel(dat[closure(p)])])
+"""
