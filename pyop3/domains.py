@@ -14,7 +14,6 @@ class Restriction(enum.Enum):
 
 
 class Index(abc.ABC):
-
     def __str__(self):
         return self.name
 

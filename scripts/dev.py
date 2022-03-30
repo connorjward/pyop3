@@ -1,8 +1,6 @@
 import argparse
 
-from pyop3 import (
-    Dat, FreePointSet, Function, Loop, closure, star
-)
+from pyop3 import Dat, FreePointSet, Function, Loop, closure, star
 from pyop3.codegen.pseudo import lower, preprocess
 from pyop3.tools.visualize import visualize
 
@@ -27,10 +25,7 @@ def basic():
 def with_nested_domains():
     iterset = FreePointSet("P")
     func = Function("func")
-    return Loop(
-        p := iterset.point_index,
-        statements=Loop(closure(p).index, func())
-    )
+    return Loop(p := iterset.point_index, statements=Loop(closure(p).index, func()))
 
 
 @register_func
@@ -39,10 +34,7 @@ def with_arguments():
     dat = Dat("dat0")
     func = Function("myfunc")
 
-    return Loop(
-        p := iterset.point_index,
-        statements=[func(dat[closure(p)])]
-    )
+    return Loop(p := iterset.point_index, statements=[func(dat[closure(p)])])
 
 
 @register_func
@@ -52,10 +44,7 @@ def with_multiple_statements():
     func1 = Function("func1")
     func2 = Function("func2")
 
-    return Loop(
-        p := iterset.point_index,
-        statements=[func1(dat[p]), func2(dat[p])]
-    )
+    return Loop(p := iterset.point_index, statements=[func1(dat[p]), func2(dat[p])])
 
 
 def main():

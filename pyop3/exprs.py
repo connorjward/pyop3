@@ -9,7 +9,6 @@ class Expression(abc.ABC):
 
 # FIXME Do I need Expression and Statement?
 class Statement(Expression):
-
     def __init__(self):
         ...
 
@@ -28,10 +27,11 @@ class Loop(Statement):
     scope: ?, optional
         The plex op relating this loop to a surrounding one.
     """
+
     def __init__(self, indices, statements=()):
         self.indices = utils.as_tuple(indices)
         try:
-            self.point_set, = set(index.point_set for index in self.indices)
+            (self.point_set,) = set(index.point_set for index in self.indices)
         except ValueError:
             raise ValueError("Must use the same base point set")
         self.statements = utils.as_tuple(statements)
@@ -41,7 +41,9 @@ class Loop(Statement):
         return tuple(arg for stmt in self.statements for arg in stmt.arguments)
 
     def __str__(self):
-        return f"for {', '.join(index.name for index in self.indices)} ∊ {self.point_set}"
+        return (
+            f"for {', '.join(index.name for index in self.indices)} ∊ {self.point_set}"
+        )
 
 
 class Terminal(Statement, abc.ABC):
@@ -58,7 +60,6 @@ class FunctionCall(Terminal):
 
 
 class Assign(Terminal):
-
     def __init__(self, lhs, rhs):
         self.lhs = lhs
         self.rhs = rhs

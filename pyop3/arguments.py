@@ -44,7 +44,6 @@ class Dat(Tensor):
 
 
 class RestrictedTensor(Tensor):
-
     def __init__(self, parent, restriction: pyop3.domains.RestrictedPointSet):
         self.parent = parent
         self.restriction = restriction

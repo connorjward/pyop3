@@ -3,7 +3,6 @@ import itertools
 
 
 class NameGenerator:
-
     def __init__(self, prefix="", suffix=""):
         if not (prefix or suffix):
             raise ValueError("Must specify either a prefix or suffix")

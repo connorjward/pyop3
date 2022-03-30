@@ -11,9 +11,8 @@ def replace_restricted_tensors(expr: pyop3.exprs.Expression):
     (with temporaries and explicit packing instructions.)
     """
     temp_namer = pyop3.utils.NameGenerator(prefix="t")
-    expr, = _replace_restricted_tensors(expr, temporary_namer=temp_namer)
+    (expr,) = _replace_restricted_tensors(expr, temporary_namer=temp_namer)
     return expr
-
 
 
 @functools.singledispatch
@@ -26,12 +25,12 @@ def _(expr: pyop3.exprs.Loop, **kwargs):
     statements = ()
     for stmt in expr.statements:
         statements += _replace_restricted_tensors(stmt, **kwargs)
-    return type(expr)(expr.indices, statements),
+    return (type(expr)(expr.indices, statements),)
 
 
 @_replace_restricted_tensors.register
 def _(expr: pyop3.exprs.Restrict, **kwargs):
-    return expr,
+    return (expr,)
 
 
 @_replace_restricted_tensors.register
@@ -74,5 +73,5 @@ def _(expr: pyop3.Restrict):
 
     loop = loops.Loop(
         [i := arg.point_set.count_index, p := arg.point_set.point_index],
-        tmp[i].assign(arg[p])
+        tmp[i].assign(arg[p]),
     )

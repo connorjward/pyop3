@@ -50,7 +50,11 @@ def _(op: pyop3.Loop, context):
     # remove empty lines
     code = filter(None, code)
 
-    return f"for {', '.join(index.name for index in op.indices)} ∊ {op.point_set}\n" + textwrap.indent("\n".join(code), "  ") + "\nend for"
+    return (
+        f"for {', '.join(index.name for index in op.indices)} ∊ {op.point_set}\n"
+        + textwrap.indent("\n".join(code), "  ")
+        + "\nend for"
+    )
 
 
 @_lower.register
