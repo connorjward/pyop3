@@ -1,22 +1,7 @@
 import abc
 import enum
-import itertools
 
-
-class NameGenerator:
-
-    def __init__(self, prefix="", suffix=""):
-        if not (prefix or suffix):
-            raise ValueError("Must specify either a prefix or suffix")
-        self.prefix = prefix
-        self.suffix = suffix
-        self._counter = itertools.count()
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        return f"{self.prefix}{next(self._counter)}{self.suffix}"
+import pyop3.utils
 
 
 class Restriction(enum.Enum):
@@ -37,7 +22,7 @@ class Index(abc.ABC):
 class PointIndex(Index):
     """Class representing a point in a plex."""
 
-    _name_generator = NameGenerator(prefix="p")
+    _name_generator = pyop3.utils.NameGenerator(prefix="p")
 
     def __init__(self, point_set, name=None):
         self.point_set = point_set
@@ -46,7 +31,7 @@ class PointIndex(Index):
 
 class CountIndex(Index):
 
-    _name_generator = NameGenerator(prefix="i")
+    _name_generator = pyop3.utils.NameGenerator(prefix="i")
 
     def __init__(self, point_set):
         self.point_set = point_set
@@ -59,6 +44,11 @@ class PointSet(abc.ABC):
     def __init__(self):
         self.count_index = CountIndex(self)
         self.point_index = PointIndex(self)
+
+    @property
+    def index(self):
+        """Alias for point_index."""
+        return self.point_index
 
 
 class FreePointSet(PointSet):

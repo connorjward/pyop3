@@ -1,12 +1,14 @@
 import abc
-import functools
-
-import graphviz
 
 from pyop3 import utils
 
 
-class Statement(abc.ABC):
+class Expression(abc.ABC):
+    pass
+
+
+# FIXME Do I need Expression and Statement?
+class Statement(Expression):
 
     def __init__(self):
         ...
@@ -42,20 +44,8 @@ class Loop(Statement):
         return f"for {', '.join(index.name for index in self.indices)} ∊ {self.point_set}"
 
 
-class Terminal(Statement):
+class Terminal(Statement, abc.ABC):
     """A terminal operation."""
-
-
-class Function:
-
-    def __init__(self, name):
-        self.name = name
-
-    def __str__(self):
-        return self.name
-
-    def __call__(self, *args):
-        return FunctionCall(self, args)
 
 
 class FunctionCall(Terminal):
@@ -76,47 +66,13 @@ class Assign(Terminal):
 
 
 class Restrict(Statement):
+    """Pack/unpack statement object"""
 
+    # TODO This should be two-way (pack + unpack)
     def __init__(self, tensor, restriction, out):
-        ...
+        self._tensor = tensor
+        self._restriction = restriction
+        self._output = out
 
-
-def visualize(expr, *, view=True):
-    """Render loop expression as a DAG."""
-    dot = graphviz.Digraph()
-    _visualize(expr, dot)
-
-    if view:
-        dot.render("mything", view=True)
-
-    return dot
-
-
-@functools.singledispatch
-def _visualize(expr: Statement, dot: graphviz.Digraph):
-    raise AssertionError
-
-
-@_visualize.register
-def _(expr: Loop, dot: graphviz.Digraph):
-    label = str(expr)
-    dot.node(label)
-
-    for stmt in expr.statements:
-        child_label = _visualize(stmt, dot)
-        dot.edge(label, child_label)
-    return label
-
-
-@_visualize.register
-def _(expr: Restrict, dot: graphviz.Digraph):
-    label = str(expr)
-    dot.node(label)
-    return label
-
-
-@_visualize.register
-def _(expr: FunctionCall, dot: graphviz.Digraph):
-    label = str(expr)
-    dot.node(label)
-    return label
+    def __str__(self):
+        return f"{self._output} = {self._tensor}[{self._restriction}]"
