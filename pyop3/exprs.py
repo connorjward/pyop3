@@ -64,16 +64,3 @@ class Assign(Terminal):
         self.lhs = lhs
         self.rhs = rhs
         self.arguments = lhs, rhs
-
-
-class Restrict(Statement):
-    """Pack/unpack statement object"""
-
-    # TODO This should be two-way (pack + unpack)
-    def __init__(self, tensor, restriction, out):
-        self._tensor = tensor
-        self._restriction = restriction
-        self._output = out
-
-    def __str__(self):
-        return f"{self._output} = {self._tensor}[{self._restriction}]"

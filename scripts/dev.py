@@ -47,6 +47,18 @@ def with_multiple_statements():
     return Loop(p := iterset.point_index, statements=[func1(dat[p]), func2(dat[p])])
 
 
+@register_func
+def with_temporaries():
+    iterset = FreePointSet("P")
+    dat0 = Dat("dat0")
+    dat1 = Dat("dat1")
+    func1 = Function("func1")
+    func2 = Function("func2")
+
+    return Loop(p := iterset.point_index, [func1(dat0[p], "t0"), func2("t0", dat1[p])])
+
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("func", type=int)

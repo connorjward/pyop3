@@ -1,18 +1,15 @@
 import functools
 import itertools
 
+import npdtl
+
 import pyop3.arguments
 import pyop3.exprs
 
 
 def replace_restricted_tensors(expr: pyop3.exprs.Expression):
-    """Replace non-temporary arguments to functions.
-
-    (with temporaries and explicit packing instructions.)
-    """
-    temp_namer = pyop3.utils.NameGenerator(prefix="t")
-    (expr,) = _replace_restricted_tensors(expr, temporary_namer=temp_namer)
-    return expr
+    """Replace restricted tensors with a DTL expression."""
+    return _replace_restricted_tensors(expr)
 
 
 @functools.singledispatch
@@ -21,57 +18,29 @@ def _replace_restricted_tensors(expr: pyop3.exprs.Expression, **kwargs):
 
 
 @_replace_restricted_tensors.register
-def _(expr: pyop3.exprs.Loop, **kwargs):
+def _(expr: pyop3.exprs.Loop):
     statements = ()
     for stmt in expr.statements:
         statements += _replace_restricted_tensors(stmt, **kwargs)
-    return (type(expr)(expr.indices, statements),)
+    return type(expr)(expr.indices, statements)
 
 
 @_replace_restricted_tensors.register
-def _(expr: pyop3.exprs.Restrict, **kwargs):
-    return (expr,)
-
-
-@_replace_restricted_tensors.register
-def _(expr: pyop3.exprs.FunctionCall, *, temporary_namer: pyop3.utils.NameGenerator):
-    statements = []
+def _(expr: pyop3.exprs.FunctionCall):
     arguments = []
 
     for arg in expr.arguments:
         if isinstance(arg, pyop3.arguments.RestrictedTensor):
-            tmp = pyop3.arguments.Dat(next(temporary_namer))
-            statements.append(pyop3.exprs.Restrict(arg.parent, arg.restriction, tmp))
+            """
+            replace with a TensorExpr
+            UnitSpace is a vector space containing a single one and otherwise zeros
+            what about if the space doesn't contain a zero? that should also be valid
+            """
+            tspace = arg.parent.space * npdtl.UnitSpace() * npdtl.UnitSpace()
+            permutation_tensor = dtl.TensorVariable("S", tspace)
+            p, i, j = dtl.indices("p", "i", "j")
+            arg = (permutation_tensor[p, i, j] * arg.parent[p]).forall(i, j)
             arguments.append(tmp)
         else:
             arguments.append(arg)
-    statements.append(type(expr)(expr.func, arguments))
-    return tuple(statements)
-
-
-@functools.singledispatch
-def replace_restrictions_with_loops(expr):
-    """Replace Restrict nodes (which correspond to linear transformations) with explicit loops."""
-    raise AssertionError
-
-
-@replace_restrictions_with_loops.register(pyop3.Loop)
-def _(expr):
-    raise NotImplementedError
-    return type(self)
-
-
-@replace_restrictions_with_loops.register
-def _(expr: pyop3.Restrict):
-    # check if indexed by a single index (and hence no loop is needed)
-    if isinstance(arg.point_set, domains.Index):
-        return ""
-
-    # TODO I don't think that we can treat this the same as other loops since
-    # we loop over pts AND integers.
-    tmp = ctx.temporaries[arg]
-
-    loop = loops.Loop(
-        [i := arg.point_set.count_index, p := arg.point_set.point_index],
-        tmp[i].assign(arg[p]),
-    )
+    return type(expr)(expr.func, arguments)
