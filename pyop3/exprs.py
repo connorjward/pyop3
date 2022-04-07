@@ -1,19 +1,26 @@
-import abc
+from typing import Tuple
+
+import dtl
+import dtlpp
+
+import dtlpp.monads
 
 from pyop3 import utils
 
 
-class Expression(abc.ABC):
-    pass
+def loop(index, statements):
+    statements = utils.as_tuple(statements)
+    function = None
+    # this must be done in reverse like this to get the correct dependencies
+    # between states/statements
+    for stmt in statements:
+        function = stmt.bind(function)
+    iterable = index.point_set
+
+    return Loop(function, None, iterable)
 
 
-# FIXME Do I need Expression and Statement?
-class Statement(Expression):
-    def __init__(self):
-        ...
-
-
-class Loop(Statement):
+class Loop(dtlpp.LeftFold, dtlpp.monads.StateMonad):
     """A loop that acts on terminals or other loops.
 
     Parameters
@@ -28,39 +35,31 @@ class Loop(Statement):
         The plex op relating this loop to a surrounding one.
     """
 
-    def __init__(self, indices, statements=()):
-        self.indices = utils.as_tuple(indices)
-        try:
-            (self.point_set,) = set(index.point_set for index in self.indices)
-        except ValueError:
-            raise ValueError("Must use the same base point set")
-        self.statements = utils.as_tuple(statements)
+    """A loop is a left fold. It takes:
+
+        some initial state S
+        an iterable of points
+        a function that takes S and a point and returns a new state
+    """
 
     @property
-    def arguments(self):
-        return tuple(arg for stmt in self.statements for arg in stmt.arguments)
+    def indices(self):
+        return self.iterable.index,
+
+    @property
+    def point_set(self):
+        return self.iterable
 
     def __str__(self):
         return (
             f"for {', '.join(index.name for index in self.indices)} ∊ {self.point_set}"
         )
 
+    @property
+    def is_bound(self):
+        return bool(self.initializer)
 
-class Terminal(Statement, abc.ABC):
-    """A terminal operation."""
-
-
-class FunctionCall(Terminal):
-    def __init__(self, func, arguments):
-        self.func = func
-        self.arguments = arguments
-
-    def __str__(self):
-        return f"{self.func}({', '.join(map(str, self.arguments))})"
-
-
-class Assign(Terminal):
-    def __init__(self, lhs, rhs):
-        self.lhs = lhs
-        self.rhs = rhs
-        self.arguments = lhs, rhs
+    def bind(self, monad_expr):
+        # this should only be called once.
+        assert not self.is_bound
+        return type(self)(self.function, monad_expr, self.iterable)

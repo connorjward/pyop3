@@ -1,6 +1,9 @@
 import functools
 import textwrap
 
+import dtl
+import dtlpp.monads
+
 import pyop3
 import pyop3.arguments
 import pyop3.transforms
@@ -18,7 +21,7 @@ class PseudoContext:
 
 
 def preprocess(expr):
-    expr = pyop3.transforms.replace_restricted_tensors(expr)
+    # expr = pyop3.transforms.replace_restricted_tensors(expr)
     # expr = replace_restrictions_with_loops(expr)
     return expr
 
@@ -33,12 +36,12 @@ def lower(expr):
 
 
 @functools.singledispatch
-def _lower(op: pyop3.Expression, context):
+def _lower(op: dtl.Node, context):
     raise AssertionError
 
 
 @_lower.register
-def _(expr: pyop3.FunctionCall, context: PseudoContext):
+def _(expr: dtlpp.monads.FunctionCall, context: PseudoContext):
     return str(expr)
 
 
@@ -55,13 +58,3 @@ def _(op: pyop3.Loop, context):
         + textwrap.indent("\n".join(code), "  ")
         + "\nend for"
     )
-
-
-@_lower.register
-def _(op: pyop3.Assign, context):
-    return f"{op.lhs} = {op.rhs}"
-
-
-@_lower.register
-def _(expr: pyop3.Restrict, context):
-    return str(expr)

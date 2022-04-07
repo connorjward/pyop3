@@ -1,6 +1,8 @@
 import abc
 import enum
 
+import dtl
+
 import pyop3.utils
 
 
@@ -13,7 +15,10 @@ class Restriction(enum.Enum):
         return self.name
 
 
-class Index(abc.ABC):
+class Index(dtl.Node, abc.ABC):
+
+    operands = ()
+
     def __str__(self):
         return self.name
 
@@ -37,12 +42,16 @@ class CountIndex(Index):
         self.name = next(self._name_generator)
 
 
-class PointSet(abc.ABC):
+class PointSet(dtl.Node, abc.ABC):
     """A set of plex points."""
 
     def __init__(self):
         self.count_index = CountIndex(self)
         self.point_index = PointIndex(self)
+
+    @property
+    def operands(self):
+        return self.point_index,
 
     @property
     def index(self):
@@ -72,6 +81,8 @@ class RestrictedPointSet(PointSet):
     def __str__(self):
         if self.restriction == Restriction.CLOSURE:
             return f"closure({self.parent_index.name})"
+        if self.restriction == Restriction.STAR:
+            return f"star({self.parent_index.name})"
         else:
             raise AssertionError
 

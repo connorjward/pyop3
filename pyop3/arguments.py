@@ -1,5 +1,7 @@
 import abc
 
+import dtl
+
 import pyop3.domains
 import pyop3.exprs
 import pyop3.utils
@@ -20,7 +22,12 @@ class Tensor(abc.ABC):
         raise NotImplementedError
 
 
-class Dat(Tensor):
+class Global(dtl.TensorVariable):
+    def __init__(self, name):
+        self.name = name
+
+
+class Dat(dtl.TensorVariable):
     def __init__(self, name):
         self.name = name
 
@@ -33,7 +40,7 @@ class Dat(Tensor):
         **collective**
         """
         if isinstance(key, pyop3.domains.Index):
-            return self.apply_multiindex(key)
+            return Global(self.name)
         elif isinstance(key, pyop3.domains.RestrictedPointSet):
             return self.restrict(key)
         else:

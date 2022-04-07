@@ -1,8 +1,10 @@
 import argparse
 
+import dtlutils
 from pyop3 import Dat, FreePointSet, Function, Loop, closure, star
 from pyop3.codegen.pseudo import lower, preprocess
-from pyop3.tools.visualize import visualize
+
+from pyop3.exprs import loop
 
 
 FUNC_LOOKUP = {}
@@ -58,19 +60,40 @@ def with_temporaries():
     return Loop(p := iterset.point_index, [func1(dat0[p], "t0"), func2("t0", dat1[p])])
 
 
+@register_func
+def pcpatch():
+    iterset = FreePointSet("P")
+
+    dat1 = Dat("dat1")
+    dat2 = Dat("dat2")
+    sol = Dat("sol")
+
+    assemble_mat = Function("assemble_mat")
+    assemble_vec = Function("assemble_vec")
+    solve = Function("solve")
+
+    return loop(
+        p := iterset.point_index,
+        [
+            loop(q := star(p).index, assemble_mat(dat1[q], "mat")),
+            loop(q := star(p).index, assemble_vec(dat2[q], "vec")),
+            solve("mat", "vec", sol[p])
+        ]
+    )
+
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("func", type=int)
+    parser.add_argument("function", type=str)
     args = parser.parse_args()
 
-    func = FUNC_LOOKUP[args.func]
+    func = FUNC_LOOKUP[args.function]
     expr = func()
     expr = preprocess(expr)
 
     print(func.__name__)
-    print(lower(expr))
-    visualize(expr, name=func.__name__, view=True)
+    # print(lower(expr))
+    dtlutils.plot_dag(expr, name=func.__name__, view=True)
 
 
 if __name__ == "__main__":
