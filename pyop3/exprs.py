@@ -1,26 +1,22 @@
+import functools
 from typing import Tuple
 
 import dtl
+import dtlutils
 import dtlpp
 
 import dtlpp.monads
 
-from pyop3 import utils
-
 
 def loop(index, statements):
-    statements = utils.as_tuple(statements)
-    function = None
-    # this must be done in reverse like this to get the correct dependencies
-    # between states/statements
-    for stmt in statements:
-        function = stmt.bind(function)
-    iterable = index.point_set
+    statements = dtlutils.as_tuple(statements)
 
-    return Loop(function, None, iterable)
+    function = functools.reduce(dtlpp.Monad.then, statements, dtlpp.NullState())
+
+    return Loop(function, index.point_set, dtlpp.NullState())
 
 
-class Loop(dtlpp.LeftFold, dtlpp.monads.StateMonad):
+class Loop:
     """A loop that acts on terminals or other loops.
 
     Parameters
@@ -42,6 +38,9 @@ class Loop(dtlpp.LeftFold, dtlpp.monads.StateMonad):
         a function that takes S and a point and returns a new state
     """
 
+    def __init__(self, function: dtlpp.monads.MonadFunction, iterable, initializer=dtlpp.NullState()):
+        super().__init__(function, iterable, initializer)
+
     @property
     def indices(self):
         return self.iterable.index,
@@ -56,10 +55,9 @@ class Loop(dtlpp.LeftFold, dtlpp.monads.StateMonad):
         )
 
     @property
-    def is_bound(self):
-        return bool(self.initializer)
+    def input_expr(self):
+        return self.initializer
 
-    def bind(self, monad_expr):
-        # this should only be called once.
-        assert not self.is_bound
-        return type(self)(self.function, monad_expr, self.iterable)
+    def reconstruct(self, *, input_expr=None):
+        initializer = self.initializer if input_expr is None else input_expr
+        return type(self)(self.function, self.iterable, initializer)

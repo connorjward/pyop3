@@ -2,8 +2,9 @@ import abc
 import enum
 
 import dtl
+import dtlutils
 
-import pyop3.utils
+from dtlpp import RealVectorSpace
 
 
 class Restriction(enum.Enum):
@@ -15,55 +16,37 @@ class Restriction(enum.Enum):
         return self.name
 
 
-class Index(dtl.Node, abc.ABC):
-
-    operands = ()
-
-    def __str__(self):
-        return self.name
-
-
-class PointIndex(Index):
+class PointIndex(dtl.Index):
     """Class representing a point in a plex."""
 
-    _name_generator = pyop3.utils.NameGenerator(prefix="p")
+    _name_generator = dtlutils.NameGenerator(prefix="p")
 
     def __init__(self, point_set, name=None):
+        name = name or next(self._name_generator)
+        extent = point_set.extent
+
+        super().__init__(name, extent)
         self.point_set = point_set
-        self.name = name or next(self._name_generator)
 
-
-class CountIndex(Index):
-
-    _name_generator = pyop3.utils.NameGenerator(prefix="i")
-
-    def __init__(self, point_set):
-        self.point_set = point_set
-        self.name = next(self._name_generator)
 
 
 class PointSet(dtl.Node, abc.ABC):
     """A set of plex points."""
 
     def __init__(self):
-        self.count_index = CountIndex(self)
-        self.point_index = PointIndex(self)
+        self.index = PointIndex(self)
 
     @property
     def operands(self):
-        return self.point_index,
-
-    @property
-    def index(self):
-        """Alias for point_index."""
-        return self.point_index
+        return (self.index,)
 
 
 class FreePointSet(PointSet):
     """An unrestricted domain (must be the outermost one)."""
 
-    def __init__(self, name):
+    def __init__(self, name, extent):
         self.name = name
+        self.extent = extent  # FIXME this should not be defined as it is runtime
         super().__init__()
 
     def __str__(self):
@@ -73,9 +56,22 @@ class FreePointSet(PointSet):
 class RestrictedPointSet(PointSet):
     """E.g. closure(i)."""
 
-    def __init__(self, parent_index: PointIndex, restriction: Restriction):
+    _count = 0
+
+    def __init__(self, parent_index: PointIndex, restriction: Restriction, extent):
         self.parent_index = parent_index
         self.restriction = restriction
+
+
+        tspace = dtl.TensorSpace([
+            RealVectorSpace(parent_index.point_set.extent),
+            RealVectorSpace(parent_index.point_set.extent),
+            RealVectorSpace(extent)
+            ])
+        self.restriction_tensor = dtl.TensorVariable(tspace, f"{restriction}{self._count}")
+        self._count += 1
+
+        self.extent = extent
         super().__init__()
 
     def __str__(self):
@@ -87,9 +83,13 @@ class RestrictedPointSet(PointSet):
             raise AssertionError
 
 
-def closure(point_index):
-    return RestrictedPointSet(point_index, Restriction.CLOSURE)
+# FIXME we should determine the arity from point_index.point_set.mesh.get_arity(p, CLOSURE)
+# or similar
+def closure(point_index, arity):
+    return RestrictedPointSet(point_index, Restriction.CLOSURE, arity)
 
 
-def star(point_index):
-    return RestrictedPointSet(point_index, Restriction.STAR)
+# FIXME we should determine the arity from point_index.point_set.mesh.get_arity(p, CLOSURE)
+# or similar
+def star(point_index, arity):
+    return RestrictedPointSet(point_index, Restriction.STAR, arity)
