@@ -36,6 +36,7 @@ class Dat(dtl.TensorVariable):
                         t0[j] += R[p, i, j] * dat[i]
             """
             return (restriction[p, i, j] * self[i]).forall(p, j)
+            # return restriction[p, i, j] * self[i]
 
         return super().__getitem__(index)
 

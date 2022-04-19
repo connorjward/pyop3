@@ -3,10 +3,16 @@ import argparse
 import dtl
 import dtlutils
 from pyop3 import Dat, Mat, FreePointSet, Loop, closure, star
-import dtlpp
-from dtlpp.functions import Function, ArgumentSpec
-from dtlc.backends.pseudo import lower
-from dtlpp import READ, WRITE, INC, RealVectorSpace
+from pyop3.exprs import FunctionCall, AccessDescriptor, Function, ArgumentSpec
+# import dtlpp
+# from dtlpp.functions import Function, ArgumentSpec
+# from dtlc.backends.pseudo import lower
+from pyop3.codegen import lower
+from dtlpp import RealVectorSpace
+
+READ = AccessDescriptor.READ
+WRITE = AccessDescriptor.WRITE
+INC = AccessDescriptor.INC
 
 from pyop3.exprs import loop
 
@@ -17,16 +23,19 @@ DEMOS = {}
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("demo", type=str, choices=DEMOS.keys())
-    parser.add_argument("--show")
+    parser.add_argument("--show", action="store_true")
     args = parser.parse_args()
 
     expr = DEMOS[args.demo]()
 
-    print(args.demo)
-    print(lower(expr))
+    # print(args.demo)
+    # print(lower(expr))
+    from pyop3.codegen import _CodegenContext, _lower
+    context = _CodegenContext()
+    _lower(expr, context)
 
     if args.show:
-        dtlutils.plot_dag(expr, name=args.demo, view=True)
+        dtlutils.plot_dag(context.roots, name=args.demo, view=True)
 
 
 NPOINTS = 25
@@ -75,13 +84,15 @@ def basic_parloop():
             ArgumentSpec(INC, CLOSURE_SPACE**1)
         ]
     )
-    return loop(
+    return Loop(
         p := ITERSET.index,
-        kernel(
-            dat1[closure(p, CLOSURE_ARITY)],
-            dat2[closure(p, CLOSURE_ARITY)],
-            result[closure(p, CLOSURE_ARITY)]
-        )
+        [
+            kernel(
+                dat1[closure(p, CLOSURE_ARITY)],
+                dat2[closure(p, CLOSURE_ARITY)],
+                result[closure(p, CLOSURE_ARITY)]
+            )
+        ]
     )
 
 
@@ -122,11 +133,11 @@ def pcpatch():
         ]
     )
 
-    return loop(
+    return Loop(
         p := ITERSET.index,
         [
-            loop(q := star(p, STAR_ARITY).index, assemble_mat(dat1[q], "mat")),
-            loop(q := star(p, STAR_ARITY).index, assemble_vec(dat2[q], "vec")),
+            Loop(q := star(p, STAR_ARITY).index, [assemble_mat(dat1[q], "mat")]),
+            Loop(q := star(p, STAR_ARITY).index, [assemble_vec(dat2[q], "vec")]),
             solve("mat", "vec", result[p])
         ]
     )
