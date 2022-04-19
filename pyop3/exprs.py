@@ -8,16 +8,6 @@ import dtl
 import dtlutils
 import dtlpp
 
-import dtlpp.monads
-
-
-def loop(index, statements):
-    statements = dtlutils.as_tuple(statements)
-
-    function = functools.reduce(dtlpp.Monad.then, statements, dtlpp.NullState())
-
-    return Loop(function, index.point_set, dtlpp.NullState())
-
 
 class Expr:
     pass
@@ -53,6 +43,10 @@ class Loop(Operator):
         self.index = index
         self.statements = statements
 
+    @property
+    def set(self):
+        return self.index.set
+
     def __str__(self):
         return (
             f"for {self.index} ∊ {self.index.point_set}"
@@ -69,6 +63,8 @@ class AccessDescriptor(enum.Enum):
     READ = enum.auto()
     WRITE = enum.auto()
     INC = enum.auto()
+    MIN = enum.auto()
+    MAX = enum.auto()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -125,92 +121,3 @@ class FunctionCall(Terminal):
                 self.argspec
             )
         )
-
-
-class TensorList(dtl.Node):
-
-    @abc.abstractmethod
-    def __len__(self):
-        pass
-
-
-# TODO Move this to DTL
-class DTLFunctionCall(TensorList):
-
-    def __init__(self, function, inputs):
-        self.function = function
-        self.inputs = inputs
-
-    @property
-    def hashkey(self):
-        return self.function, self.inputs
-
-    @property
-    def operands(self):
-        return self.inputs
-
-    def __len__(self):
-        return len(self.function.outputs)
-
-
-class Take(dtl.TensorExpr):
-
-    def __init__(self, tlist: TensorList, index: int):
-        self.tlist = tlist
-        self.index = index
-
-    @property
-    def tensor(self):
-        return self.tlist.outputs[self.index]
-
-    @property
-    def hashkey(self):
-        return self.tlist, self.index
-
-    @property
-    def indices(self):
-        return self.tensor.indices
-
-    @property
-    def space(self):
-        return self.tensor.space
-
-    @property
-    def shape(self):
-        return self.tensor.shape
-
-    @property
-    def operands(self):
-        return self.tlist,
-
-    def __str__(self):
-        return str(self.tensor)
-
-
-class FunctionOutput(dtl.TensorExpr):
-
-    def __init__(self, function: FunctionCall, indices, shape, space):
-        self.function = function
-        self._indices = indices
-        self._shape = shape
-        self._space = space
-
-    @property
-    def hashkey(self):
-        return type(self), self.function, self.indices, self.shape, self.space
-
-    @property
-    def indices(self):
-        return self._indices
-
-    @property
-    def shape(self):
-        return self._shape
-
-    @property
-    def space(self):
-        return self._space
-
-    @property
-    def operands(self):
-        return (self.function,)

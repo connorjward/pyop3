@@ -5,6 +5,7 @@ from typing import Set
 import dtl
 import dtlpp
 import dtlc.backends.pseudo
+import loopy as lp
 
 import pyop3.exprs
 
@@ -12,13 +13,58 @@ from pyop3.exprs import AccessDescriptor
 
 
 def lower(expr):
-    # lower an expression to DTL
     context = _CodegenContext()
     expr = _lower(expr, context)
-
-    # expr = merge_outputs()
-
     return dtlc.backends.pseudo.lower(context.roots.pop())
+
+
+def to_loopy(expr):
+    context = ...
+    kernels = _build_loopy_kernels(expr, context)
+    return lp.fuse_kernels(kernels, data_flow=context.dependencies)
+
+
+def _build_loopy_kernels(expr, context):
+    raise NotImplementedError
+
+
+@_build_loopy_kernels.register
+def _(expr: Loop, context):
+    context.within_inames.add(expr.index.name)
+
+
+@_build_loopy_kernels.register
+def _(expr: FunctionCall, context):
+    function = lp.Callable()  # or something
+
+    reads = [
+        read_tensor(arg) for arg, spec in zip(expr.arguments, expr.argspec)
+        if spec.access in {READ}
+    ]
+
+    # used for data_flow in fuse_kernels
+    context.dependencies += [(arg.name, reads[arg], function) for ...]
+
+    writes += [
+        write_tensor(arg) for arg, spec in zip(expr.arguments, expr.argspec)
+        if spec.access in {WRITE}
+    ]
+
+
+def read_tensor(tensor: IndexedTensor):
+    # convert the pyop3 tensor to a DTL tensor expression
+    # this is normally just len 1 since we mostly have dats
+    if len(tensor.indices) != 1:
+        raise NotImplementedError
+
+    restriction = functools.reduce(operator.mul, (index.set.dtl_expr for index in tensor.indices))
+
+    # we contract over the last index of dtl_expr as this makes things easy
+    # to keep track of
+    dtl_expr = restriction * tensor.dtl_tensor[tuple(index.set.dtl_expr.indices[-1]
+                                               for index in expr.indices)]
+
+    return dtlc.lower(dtl_expr, target=dtlc.targets.LOOPY)
 
 
 @dataclasses.dataclass
