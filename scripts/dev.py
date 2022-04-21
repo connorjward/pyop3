@@ -41,13 +41,19 @@ class DemoMesh:
 
     def __init__(self, ncells):
         self.ncells = ncells
+        self.map_cache = {}
 
     @property
     def cells(self):
         return pyop3.Domain(self.ncells, self)
 
     def closure(self, index):
-        return pyop3.Domain(self.CLOSURE_ARITY, self, index)
+        key = (self.closure.__name__, index)
+        try:
+            return self.map_cache[key]
+        except KeyError:
+            domain = pyop3.Domain(self.CLOSURE_ARITY, self, index)
+            return self.map_cache.setdefault(key, domain)
 
 
 NPOINTS = 25

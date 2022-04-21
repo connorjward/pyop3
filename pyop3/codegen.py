@@ -61,7 +61,7 @@ class _LoopyKernelBuilder:
         self.instructions = []
         self.arguments_dict = {}
         self.subkernels = []
-        self.maps = {}
+        self.maps_dict = {}
         self.temporaries_dict = {}
         self.namer = UniqueNamer()
 
@@ -70,12 +70,16 @@ class _LoopyKernelBuilder:
         return tuple(self.arguments_dict.values())
 
     @property
+    def maps(self):
+        return tuple(self.maps_dict.values())
+
+    @property
     def temporaries(self):
         return tuple(self.temporaries_dict.values())
 
     @property
     def kernel_data(self):
-        return self.arguments + tuple(self.maps.values()) + self.temporaries
+        return self.arguments + self.maps + self.temporaries
 
     def build(self):
         self._fill_loopy_context(self.expr, within_inames={})
@@ -130,6 +134,9 @@ class _LoopyKernelBuilder:
                 # this is not true if we repeat arguments to a kernel or if we have multiple kernels
                 raise NotImplementedError
             self.arguments_dict[arg] = lp.GlobalArg(arg.name, dtype=spec.dtype)
+
+            for index in arg.indices:
+                self.register_maps(index.domain)
 
         gathers = self.register_gathers(expr, within_inames)
         call_insn = self.register_function_call(
@@ -265,7 +272,6 @@ class _LoopyKernelBuilder:
         )
         self.instructions.append(instruction)
 
-        self.register_maps(index)
         return instruction
 
     def zero_tensor(self, tensor, temporary, within_inames):
@@ -299,7 +305,6 @@ class _LoopyKernelBuilder:
         )
         self.instructions.append(instruction)
 
-        self.register_maps(index)
         return instruction
 
     def write_tensor(self, tensor, temporary, within_inames, depends_on):
@@ -338,7 +343,6 @@ class _LoopyKernelBuilder:
         )
         self.instructions.append(instruction)
 
-        self.register_maps(index)
         return instruction
 
     def inc_tensor(self, tensor, temporary, within_inames, depends_on):
@@ -381,7 +385,6 @@ class _LoopyKernelBuilder:
         )
         self.instructions.append(instruction)
 
-        self.register_maps(index)
         return instruction
 
     def stack_subscripts(self, index, within_inames):
@@ -398,11 +401,11 @@ class _LoopyKernelBuilder:
         else:
             return pym.Variable(iname)
 
-    def register_maps(self, index):
-        if (map_ := index.domain.map) and map_.name not in self.maps:
-            self.maps[map_.name] = lp.GlobalArg(
+    def register_maps(self, domain):
+        if (map_ := domain.map) and map_ not in self.maps_dict:
+            self.maps_dict[map_] = lp.GlobalArg(
                 map_.name, dtype=map_.dtype, shape=(None, map_.arity)
             )
 
-        if index.domain.parent_index:
-            self.register_maps(index.domain.parent_index)
+        if domain.parent_index:
+            self.register_maps(domain.parent_index.domain)
