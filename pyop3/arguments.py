@@ -1,17 +1,65 @@
-import abc
-
-import dtl
+import collections.abc
 
 import pyop3.domains
 import pyop3.exprs
 
 
-class Global(dtl.TensorVariable):
+def flatten_inames(index):
+    if index.domain.parent_index:
+        return frozenset({index.name}) + flatten_inames(index.domain.parent_index)
+    else:
+        return frozenset({index.name})
+
+
+class IndexedTensor:
+    def __init__(self, tensor, indices, broadcast=False):
+        if type(tensor) != Dat:
+            raise NotImplementedError("Only dealing with dats atm")
+
+        self.tensor = tensor
+
+        # if we are indexing a vector indices must have length 1
+        self.indices = indices
+
+        (self.index,) = indices
+
+        # this is needed for taking slices
+        self.broadcast = broadcast
+
+    @property
+    def within_inames(self):
+        (index,) = self.indices
+
+        # if broadcasting then the innermost index is not included here
+        if self.broadcast:
+            index = index.domain.parent_index
+
+        return flatten_inames(index)
+
+    @property
+    def name(self):
+        return self.tensor.name
+
+
+class Tensor:
+    ...
+
+
+class Global(Tensor):
+
+    shape = ()
+
     def __init__(self, name):
         self.name = name
 
 
-class Dat(dtl.TensorVariable):
+class Dat(Tensor):
+    def __init__(self, shape, name):
+        if not isinstance(shape, collections.abc.Sequence):
+            shape = (shape,)
+
+        self.shape = tuple(shape)
+        self.name = name
 
     def __str__(self):
         return self.name
@@ -21,25 +69,17 @@ class Dat(dtl.TensorVariable):
 
         **collective**
         """
-        if isinstance(index, pyop3.domains.RestrictedPointSet):
-            restriction = index.restriction_tensor
-            p = index.parent_index
-            i = dtl.Index("itest", restriction.space.spaces[1].dim)
-            j = dtl.Index("jtest", restriction.space.spaces[2].dim)
-            # contract one index since we want something that is 2D back
-            """
-            This magic line says:
-            
-            (for p)  # outside
-                for i in range(P)  # big
-                    for j in range(arity)  # small
-                        t0[j] += R[p, i, j] * dat[i]
-            """
-            return (restriction[p, i, j] * self[i]).forall(p, j)
-            # return restriction[p, i, j] * self[i]
+        # index must be a PointIndex (which is a multiindex plus maps)
+        # because you can index either with dat[star(p)] or dat[star(p).index]
+        if isinstance(index, pyop3.domains.Domain):
+            index = index.index
+            broadcast_indices = frozenset({index})
+        else:
+            broadcast_indices = frozenset()
 
-        return super().__getitem__(index)
+        return IndexedTensor(self, (index,), broadcast_indices)
 
 
-class Mat(dtl.TensorVariable):
-    ...
+class Mat(Tensor):
+    def __init__(self, shape, name):
+        ...

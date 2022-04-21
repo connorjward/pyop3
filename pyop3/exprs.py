@@ -8,6 +8,8 @@ import dtl
 import dtlutils
 import dtlpp
 
+import numpy as np
+
 
 class Expr:
     pass
@@ -48,9 +50,7 @@ class Loop(Operator):
         return self.index.set
 
     def __str__(self):
-        return (
-            f"for {self.index} ∊ {self.index.point_set}"
-        )
+        return f"for {self.index} ∊ {self.index.point_set}"
 
     def reconstruct(self, *, input_expr=None):
         raise NotImplementedError
@@ -63,22 +63,32 @@ class AccessDescriptor(enum.Enum):
     READ = enum.auto()
     WRITE = enum.auto()
     INC = enum.auto()
+    RW = enum.auto()
     MIN = enum.auto()
     MAX = enum.auto()
+
+
+READ = AccessDescriptor.READ
+WRITE = AccessDescriptor.WRITE
+INC = AccessDescriptor.INC
+RW = AccessDescriptor.RW
+MIN = AccessDescriptor.MIN
+MAX = AccessDescriptor.MAX
 
 
 @dataclasses.dataclass(frozen=True)
 class ArgumentSpec:
 
     access: AccessDescriptor
+    dtype: np.dtype
     space: Tuple[int]
 
 
 class Function:
-
-    def __init__(self, name: str, argspec: Iterable[ArgumentSpec]):
+    def __init__(self, name: str, argspec: Iterable[ArgumentSpec], loopy_kernel):
         self.name = name
         self.argspec = argspec
+        self.loopy_kernel = loopy_kernel
 
     def __call__(self, *args):
         return FunctionCall(self, args)
@@ -89,7 +99,6 @@ class Terminal(Expr):
 
 
 class FunctionCall(Terminal):
-
     def __init__(self, function, arguments):
         self.function = function
         self.arguments = arguments
@@ -104,20 +113,27 @@ class FunctionCall(Terminal):
 
     @property
     def inputs(self):
-        return tuple(arg for arg, spec in zip(self.arguments, self.argspec)
-                     if spec.access == AccessDescriptor.READ)
+        return tuple(
+            arg
+            for arg, spec in zip(self.arguments, self.argspec)
+            if spec.access == AccessDescriptor.READ
+        )
 
     @property
     def outputs(self):
-        return tuple(arg for arg, spec in zip(self.arguments, self.argspec)
-                     if spec.access in {AccessDescriptor.WRITE, AccessDescriptor.INC})
+        return tuple(
+            arg
+            for arg, spec in zip(self.arguments, self.argspec)
+            if spec.access in {AccessDescriptor.WRITE, AccessDescriptor.INC}
+        )
 
     @property
     def output_specs(self):
 
         return tuple(
             filter(
-                lambda spec: spec.access in {AccessDescriptor.WRITE, AccessDescriptor.INC},
-                self.argspec
+                lambda spec: spec.access
+                in {AccessDescriptor.WRITE, AccessDescriptor.INC},
+                self.argspec,
             )
         )
