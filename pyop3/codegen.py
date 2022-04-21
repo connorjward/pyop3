@@ -59,19 +59,23 @@ class _LoopyKernelBuilder:
 
         self.domains = []
         self.instructions = []
-        self.arguments = set()
+        self.arguments_dict = {}
         self.subkernels = []
         self.maps = {}
         self.temporaries_dict = {}
         self.namer = UniqueNamer()
 
     @property
+    def arguments(self):
+        return tuple(self.arguments_dict.values())
+
+    @property
     def temporaries(self):
-        return list(self.temporaries_dict.values())
+        return tuple(self.temporaries_dict.values())
 
     @property
     def kernel_data(self):
-        return list(self.arguments) + list(self.maps.values()) + self.temporaries
+        return self.arguments + tuple(self.maps.values()) + self.temporaries
 
     def build(self):
         self._fill_loopy_context(self.expr, within_inames={})
@@ -121,6 +125,12 @@ class _LoopyKernelBuilder:
                 tshape = ()
             self.register_temporary(arg, dtype=spec.dtype, shape=tshape)
 
+            if arg in self.arguments_dict:
+                # TODO I currently assume that we only ever register arguments once.
+                # this is not true if we repeat arguments to a kernel or if we have multiple kernels
+                raise NotImplementedError
+            self.arguments_dict[arg] = lp.GlobalArg(arg.name, dtype=spec.dtype)
+
         gathers = self.register_gathers(expr, within_inames)
         call_insn = self.register_function_call(
             expr, within_inames, depends_on=frozenset(insn.id for insn in gathers)
@@ -134,13 +144,13 @@ class _LoopyKernelBuilder:
         for arg, spec in zip(call.arguments, call.argspec):
             temporary = self.temporaries_dict[arg]
             if spec.access == pyop3.exprs.READ:
-                gathers.append(self.read_tensor(arg, temporary, spec, within_inames))
+                gathers.append(self.read_tensor(arg, temporary, within_inames))
             elif spec.access == pyop3.exprs.WRITE:
                 continue
             elif spec.access == pyop3.exprs.INC:
-                gathers.append(self.zero_tensor(arg, temporary, spec, within_inames))
+                gathers.append(self.zero_tensor(arg, temporary, within_inames))
             elif spec.access == pyop3.exprs.RW:
-                gathers.append(self.read_tensor(arg, temporary, spec, within_inames))
+                gathers.append(self.read_tensor(arg, temporary, within_inames))
             else:
                 raise NotImplementedError
         return tuple(gathers)
@@ -171,15 +181,15 @@ class _LoopyKernelBuilder:
                 continue
             elif spec.access == pyop3.exprs.WRITE:
                 scatters.append(
-                    self.write_tensor(arg, temporary, spec, within_inames, depends_on)
+                    self.write_tensor(arg, temporary, within_inames, depends_on)
                 )
             elif spec.access == pyop3.exprs.INC:
                 scatters.append(
-                    self.inc_tensor(arg, temporary, spec, within_inames, depends_on)
+                    self.inc_tensor(arg, temporary, within_inames, depends_on)
                 )
             elif spec.access == pyop3.exprs.RW:
                 scatters.append(
-                    self.write_tensor(arg, temporary, spec, within_inames, depends_on)
+                    self.write_tensor(arg, temporary, within_inames, depends_on)
                 )
             else:
                 raise NotImplementedError
@@ -222,7 +232,7 @@ class _LoopyKernelBuilder:
             myarg = temp_var
         return myarg
 
-    def read_tensor(self, tensor, temporary, spec, within_inames):
+    def read_tensor(self, tensor, temporary, within_inames):
         # so we want something like:
         # for i:
         #   for j:
@@ -254,12 +264,11 @@ class _LoopyKernelBuilder:
             within_inames=within_inames_set,
         )
         self.instructions.append(instruction)
-        self.arguments.add(lp.GlobalArg(tensor.name, dtype=spec.dtype))
 
         self.register_maps(index)
         return instruction
 
-    def zero_tensor(self, tensor, temporary, spec, within_inames):
+    def zero_tensor(self, tensor, temporary, within_inames):
         # so we want something like:
         # for i:
         #   for j:
@@ -289,12 +298,11 @@ class _LoopyKernelBuilder:
             within_inames=within_inames_set,
         )
         self.instructions.append(instruction)
-        self.arguments.add(lp.GlobalArg(tensor.name, dtype=spec.dtype))
 
         self.register_maps(index)
         return instruction
 
-    def write_tensor(self, tensor, temporary, spec, within_inames, depends_on):
+    def write_tensor(self, tensor, temporary, within_inames, depends_on):
         # so we want something like:
         # for i:
         #   for j:
@@ -329,12 +337,11 @@ class _LoopyKernelBuilder:
             depends_on=depends_on,
         )
         self.instructions.append(instruction)
-        self.arguments.add(lp.GlobalArg(tensor.name, dtype=spec.dtype))
 
         self.register_maps(index)
         return instruction
 
-    def inc_tensor(self, tensor, temporary, spec, within_inames, depends_on):
+    def inc_tensor(self, tensor, temporary, within_inames, depends_on):
         # so we want something like:
         # for i:
         #   for j:
@@ -373,7 +380,6 @@ class _LoopyKernelBuilder:
             depends_on=depends_on,
         )
         self.instructions.append(instruction)
-        self.arguments.add(lp.GlobalArg(tensor.name, dtype=spec.dtype))
 
         self.register_maps(index)
         return instruction
