@@ -4,10 +4,6 @@ import enum
 import functools
 from typing import Iterable, Tuple
 
-import dtl
-import dtlutils
-import dtlpp
-
 import numpy as np
 
 
@@ -84,6 +80,30 @@ class ArgumentSpec:
     space: Tuple[int]
 
 
+@dataclasses.dataclass(frozen=True)
+class FunctionArgument:
+
+    tensor: "IndexedTensor"
+    spec: ArgumentSpec
+
+    @property
+    def name(self):
+        return self.tensor.name
+
+    @property
+    def access(self) -> AccessDescriptor:
+        return self.spec.access
+
+    @property
+    def dtype(self):
+        # assert self.tensor.dtype == self.spec.dtype
+        return self.spec.dtype
+
+    @property
+    def indices(self):
+        return self.tensor.indices
+
+
 class Function:
     def __init__(self, name: str, argspec: Iterable[ArgumentSpec], loopy_kernel):
         self.name = name
@@ -91,7 +111,18 @@ class Function:
         self.loopy_kernel = loopy_kernel
 
     def __call__(self, *args):
-        return FunctionCall(self, args)
+        if len(args) != len(self.argspec):
+            raise ValueError(
+                f"Wrong number of arguments provided, expected {len(self.argspec)} "
+                f"but received {len(args)}"
+            )
+        return FunctionCall(
+            self,
+            tuple(
+                FunctionArgument(tensor, spec)
+                for tensor, spec in zip(args, self.argspec)
+            ),
+        )
 
 
 class Terminal(Expr):

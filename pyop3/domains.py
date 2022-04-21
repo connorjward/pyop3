@@ -1,14 +1,13 @@
-import numbers
-
-import dtlutils
 import numpy as np
+
+import pyop3.utils
 
 
 class Map:
 
     dtype = np.int32
 
-    _name_generator = dtlutils.NameGenerator(prefix="map")
+    _name_generator = pyop3.utils.NameGenerator(prefix="map")
 
     def __init__(self, arity):
         self.arity = arity
@@ -18,7 +17,7 @@ class Map:
 class Index:
     """Class representing a point in a plex."""
 
-    _name_generator = dtlutils.NameGenerator(prefix="i")
+    _name_generator = pyop3.utils.NameGenerator(prefix="i")
 
     def __init__(self, domain, name=None):
         self.domain = domain
@@ -38,11 +37,6 @@ class Domain:
             self.map = Map(extent)
         else:
             self.map = None
-
-    @property
-    def loopy_domain(self):
-        iname = self.index.name
-        return f"{{ [{iname}]: 0 <= {iname} < {self.extent} }}"
 
 
 def closure(index):

@@ -1,40 +1,17 @@
 import collections.abc
+import itertools
 
 import pyop3.domains
 import pyop3.exprs
 
 
-def flatten_inames(index):
-    if index.domain.parent_index:
-        return frozenset({index.name}) + flatten_inames(index.domain.parent_index)
-    else:
-        return frozenset({index.name})
-
-
 class IndexedTensor:
-    def __init__(self, tensor, indices, broadcast=False):
+    def __init__(self, tensor, indices):
         if type(tensor) != Dat:
             raise NotImplementedError("Only dealing with dats atm")
 
         self.tensor = tensor
-
-        # if we are indexing a vector indices must have length 1
         self.indices = indices
-
-        (self.index,) = indices
-
-        # this is needed for taking slices
-        self.broadcast = broadcast
-
-    @property
-    def within_inames(self):
-        (index,) = self.indices
-
-        # if broadcasting then the innermost index is not included here
-        if self.broadcast:
-            index = index.domain.parent_index
-
-        return flatten_inames(index)
 
     @property
     def name(self):
@@ -42,7 +19,35 @@ class IndexedTensor:
 
 
 class Tensor:
-    ...
+    def __getitem__(self, indices):
+        """You can index a dat with a domain to get an argument to a loop.
+
+        **collective**
+        """
+        if not isinstance(indices, collections.abc.Sequence):
+            indices = (indices,)
+
+        if len(indices) > len(self.shape):
+            raise ValueError
+
+        # handle things like vector dats
+        new_indices = []
+        for index, dim in itertools.zip_longest(indices, self.shape):
+            if index:
+                # index must be a PointIndex (which is a multiindex plus maps)
+                # because you can index either with dat[star(p)] or dat[star(p).index]
+                if isinstance(index, pyop3.domains.Domain):
+                    index = index.index
+                new_indices.append(index)
+            else:
+                # if not indexed loop over whole subdomain
+                new_indices.append(
+                    pyop3.domains.Domain(
+                        dim, new_indices[-1].mesh, new_indices[-1]
+                    ).index
+                )
+
+        return IndexedTensor(self, tuple(new_indices))
 
 
 class Global(Tensor):
@@ -64,21 +69,8 @@ class Dat(Tensor):
     def __str__(self):
         return self.name
 
-    def __getitem__(self, index):
-        """You can index a dat with a domain to get an argument to a loop.
-
-        **collective**
-        """
-        # index must be a PointIndex (which is a multiindex plus maps)
-        # because you can index either with dat[star(p)] or dat[star(p).index]
-        if isinstance(index, pyop3.domains.Domain):
-            index = index.index
-            broadcast_indices = frozenset({index})
-        else:
-            broadcast_indices = frozenset()
-
-        return IndexedTensor(self, (index,), broadcast_indices)
-
+# TODO what is the difference between a vector dat and a mat?
+# different domains
 
 class Mat(Tensor):
     def __init__(self, shape, name):
