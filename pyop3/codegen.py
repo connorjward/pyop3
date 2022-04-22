@@ -109,7 +109,9 @@ class _LoopyKernelBuilder:
     @_fill_loopy_context.register
     def _(self, expr: pyop3.exprs.FunctionCall, within_indices, **kwargs):
         for argument in expr.arguments:
-            if broadcast_indices := self.register_broadcast_indices(argument, within_indices):
+            if broadcast_indices := self.register_broadcast_indices(
+                argument, within_indices
+            ):
                 shape = tuple(index.extent for index in broadcast_indices)
             else:
                 shape = ()
@@ -121,7 +123,9 @@ class _LoopyKernelBuilder:
                 raise NotImplementedError
             # check for scalar values
             self.arguments_dict[argument] = lp.GlobalArg(
-                argument.name, dtype=argument.dtype, shape=tuple(domain.extent for domain in argument.tensor.domains)
+                argument.name,
+                dtype=argument.dtype,
+                shape=tuple(domain.extent for domain in argument.tensor.domains),
             )
 
             for index in argument.indices:
@@ -214,7 +218,9 @@ class _LoopyKernelBuilder:
         """Register an argument to a function."""
         broadcast_indices = self.register_broadcast_indices(argument, within_indices)
         indices = tuple(pym.Variable(iname) for iname in broadcast_indices.values())
-        return lp.symbolic.SubArrayRef(indices, pym.Subscript(pym.Variable(temporary.name), indices))
+        return lp.symbolic.SubArrayRef(
+            indices, pym.Subscript(pym.Variable(temporary.name), indices)
+        )
 
     def register_assignment(
         self,
@@ -253,12 +259,22 @@ class _LoopyKernelBuilder:
 
         if argument.indices:
             expression = pym.Subscript(
-                pym.Variable(argument.name), tuple(self.stack_subscripts(index, within_indices|broadcast_indices) for index in itertools.chain(argument.tensor.indices, argument.tensor.shape_indices))
+                pym.Variable(argument.name),
+                tuple(
+                    self.stack_subscripts(index, within_indices | broadcast_indices)
+                    for index in itertools.chain(
+                        argument.tensor.indices, argument.tensor.shape_indices
+                    )
+                ),
             )
         else:
             expression = pym.Variable(argument.name)
-        within_inames = frozenset({*within_indices.values(), *broadcast_indices.values()})
-        return self.register_assignment(assignee, expression, within_inames, depends_on, "read")
+        within_inames = frozenset(
+            {*within_indices.values(), *broadcast_indices.values()}
+        )
+        return self.register_assignment(
+            assignee, expression, within_inames, depends_on, "read"
+        )
 
     def zero_tensor(self, argument, temporary, within_indices, depends_on=frozenset()):
         # so we want something like:
@@ -278,8 +294,12 @@ class _LoopyKernelBuilder:
             assignee = pym.Variable(temporary.name)
 
         expression = 0
-        within_inames = frozenset({*within_indices.values(), *broadcast_indices.values()})
-        return self.register_assignment(assignee, expression, within_inames, depends_on=depends_on, prefix="zero")
+        within_inames = frozenset(
+            {*within_indices.values(), *broadcast_indices.values()}
+        )
+        return self.register_assignment(
+            assignee, expression, within_inames, depends_on=depends_on, prefix="zero"
+        )
 
     def write_tensor(self, argument, temporary, within_indices, depends_on):
         # so we want something like:
@@ -301,12 +321,16 @@ class _LoopyKernelBuilder:
         assignee = pym.Subscript(
             pym.Variable(argument.name),
             tuple(
-                self.stack_subscripts(index, within_indices|broadcast_indices)
-                for index in itertools.chain(argument.tensor.indices, argument.tensor.shape_indices)
+                self.stack_subscripts(index, within_indices | broadcast_indices)
+                for index in itertools.chain(
+                    argument.tensor.indices, argument.tensor.shape_indices
+                )
             ),
         )
 
-        within_inames = frozenset({*within_indices.values(), *broadcast_indices.values()})
+        within_inames = frozenset(
+            {*within_indices.values(), *broadcast_indices.values()}
+        )
         return self.register_assignment(
             assignee, expression, within_inames, depends_on, "write"
         )
@@ -324,16 +348,30 @@ class _LoopyKernelBuilder:
             pym.Variable(argument.name),
             tuple(
                 self.stack_subscripts(index, within_indices | broadcast_indices)
-                for index in itertools.chain(argument.tensor.indices, argument.tensor.shape_indices)
+                for index in itertools.chain(
+                    argument.tensor.indices, argument.tensor.shape_indices
+                )
             ),
         )
 
         if broadcast_indices:
-            expression = pym.Sum((assignee, pym.Subscript(pym.Variable(temporary.name), tuple(pym.Variable(iname) for iname in broadcast_indices.values()))))
+            expression = pym.Sum(
+                (
+                    assignee,
+                    pym.Subscript(
+                        pym.Variable(temporary.name),
+                        tuple(
+                            pym.Variable(iname) for iname in broadcast_indices.values()
+                        ),
+                    ),
+                )
+            )
         else:
             expression = pym.Sum((assignee, pym.Variable(temporary.name)))
 
-        within_inames = frozenset({*within_indices.values(), *broadcast_indices.values()})
+        within_inames = frozenset(
+            {*within_indices.values(), *broadcast_indices.values()}
+        )
         return self.register_assignment(
             assignee, expression, within_inames, depends_on, "inc"
         )
@@ -343,7 +381,8 @@ class _LoopyKernelBuilder:
 
         if index.parent:
             indices = self.stack_subscripts(
-                    index.parent, index_map,
+                index.parent,
+                index_map,
             ), pym.Variable(iname)
             return pym.Subscript(pym.Variable(index.map.name), indices)
         else:

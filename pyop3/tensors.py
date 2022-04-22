@@ -12,7 +12,7 @@ class Tensor:
     name_generator = pyop3.utils.UniqueNameGenerator()
     prefix = "tensor"
 
-    def __init__(self, domains=(), indices=(), *, name: str=None):
+    def __init__(self, domains=(), indices=(), *, name: str = None):
         if not isinstance(domains, collections.abc.Sequence):
             domains = (domains,)
         if not isinstance(indices, collections.abc.Sequence):
@@ -31,7 +31,7 @@ class Tensor:
         if len(indices) > len(self.domains):
             raise ValueError
 
-        return self.copy(indices=self.indices+indices)
+        return self.copy(indices=self.indices + indices)
 
     @property
     def shape_indices(self):
@@ -39,7 +39,7 @@ class Tensor:
         # TODO This doesn't seem quite right. I need a nice way to resolve
         # free indices and shape whilst still retaining some notion of the
         # original shape information (needed for codegen).
-        return self.domains[len(self.indices):]
+        return self.domains[len(self.indices) :]
 
     def copy(self, **kwargs):
         domains = kwargs.get("domains", self.domains)
@@ -48,19 +48,19 @@ class Tensor:
         return type(self)(domains=domains, indices=indices, name=name)
 
 
-def Global(*, name: str=None):
+def Global(*, name: str = None):
     if not name:
         name = Tensor.name_generator.generate(prefix="global")
     return Tensor(name=name)
 
 
-def Dat(domain: Index, *, name: str=None):
+def Dat(domain: Index, *, name: str = None):
     if not name:
         name = Tensor.name_generator.generate(prefix="dat")
     return Tensor(domain, name=name)
 
 
-def Mat(domains: Tuple[Index, Index], *, name: str=None):
+def Mat(domains: Tuple[Index, Index], *, name: str = None):
     if not name:
         name = Tensor.name_generator.generate(prefix="mat")
     return Tensor(domains, name=name)

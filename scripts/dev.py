@@ -63,7 +63,6 @@ class DemoMesh:
 
 
 class DemoExtrudedMesh:
-
     @property
     def cells(self):
         base = pyop3.Index(self.ncells_base, self)
@@ -141,12 +140,10 @@ def basic_parloop():
 def global_parloop():
     result = pyop3.Dat(MESH.points, name="result")
     loopy_kernel = lp.make_kernel(
-            [f"{{ [i]: 0 <= i < {MESH.CLOSURE_ARITY} }}"],
+        [f"{{ [i]: 0 <= i < {MESH.CLOSURE_ARITY} }}"],
         ["z[i] = g"],
         [
-            lp.GlobalArg(
-                "g", np.float64, (), is_input=True, is_output=False
-            ),
+            lp.GlobalArg("g", np.float64, (), is_input=True, is_output=False),
             lp.GlobalArg(
                 "z", np.float64, (MESH.CLOSURE_ARITY,), is_input=False, is_output=True
             ),
@@ -165,11 +162,7 @@ def global_parloop():
     )
     return pyop3.Loop(
         p := ITERSET,
-        [
-            kernel(
-                glob1, result[pyop3.closure(p)]
-            )
-        ],
+        [kernel(glob1, result[pyop3.closure(p)])],
     )
 
 
@@ -177,7 +170,7 @@ def global_parloop():
 def vdat_parloop():
     result = pyop3.Dat(MESH.points, name="result")
     loopy_kernel = lp.make_kernel(
-            [f"{{ [i]: 0 <= i < {MESH.CLOSURE_ARITY} }}", "{ [j]: 0<= j < 3}"],
+        [f"{{ [i]: 0 <= i < {MESH.CLOSURE_ARITY} }}", "{ [j]: 0<= j < 3}"],
         ["z[i] = z[i] + x[i, j] * y[i, j]"],
         [
             lp.GlobalArg(
@@ -207,7 +200,9 @@ def vdat_parloop():
         p := ITERSET,
         [
             kernel(
-                vdat1[pyop3.closure(p)], vdat2[pyop3.closure(p)], result[pyop3.closure(p)]
+                vdat1[pyop3.closure(p)],
+                vdat2[pyop3.closure(p)],
+                result[pyop3.closure(p)],
             )
         ],
     )
