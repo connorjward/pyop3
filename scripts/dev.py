@@ -142,10 +142,10 @@ def global_parloop():
     result = pyop3.Dat(MESH.points, name="result")
     loopy_kernel = lp.make_kernel(
             [f"{{ [i]: 0 <= i < {MESH.CLOSURE_ARITY} }}"],
-        ["z[i] = z[i] + g"],
+        ["z[i] = g"],
         [
             lp.GlobalArg(
-                "g", np.float64, (1,), is_input=True, is_output=False
+                "g", np.float64, (), is_input=True, is_output=False
             ),
             lp.GlobalArg(
                 "z", np.float64, (MESH.CLOSURE_ARITY,), is_input=False, is_output=True

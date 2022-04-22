@@ -212,11 +212,9 @@ class _LoopyKernelBuilder:
 
     def as_subarrayref(self, argument, temporary, within_indices):
         """Register an argument to a function."""
-        if broadcast_indices := self.register_broadcast_indices(argument, within_indices):
-            indices = tuple(pym.Variable(iname) for iname in broadcast_indices.values())
-            return lp.symbolic.SubArrayRef(indices, pym.Subscript(pym.Variable(temporary.name), indices))
-        else:
-            return pym.Variable(temporary.name)
+        broadcast_indices = self.register_broadcast_indices(argument, within_indices)
+        indices = tuple(pym.Variable(iname) for iname in broadcast_indices.values())
+        return lp.symbolic.SubArrayRef(indices, pym.Subscript(pym.Variable(temporary.name), indices))
 
     def register_assignment(
         self,
@@ -253,9 +251,12 @@ class _LoopyKernelBuilder:
         else:
             assignee = pym.Variable(temporary.name)
 
-        expression = pym.Subscript(
-            pym.Variable(argument.name), tuple(self.stack_subscripts(index, within_indices|broadcast_indices) for index in itertools.chain(argument.tensor.indices, argument.tensor.shape_indices))
-        )
+        if argument.indices:
+            expression = pym.Subscript(
+                pym.Variable(argument.name), tuple(self.stack_subscripts(index, within_indices|broadcast_indices) for index in itertools.chain(argument.tensor.indices, argument.tensor.shape_indices))
+            )
+        else:
+            expression = pym.Variable(argument.name)
         within_inames = frozenset({*within_indices.values(), *broadcast_indices.values()})
         return self.register_assignment(assignee, expression, within_inames, depends_on, "read")
 

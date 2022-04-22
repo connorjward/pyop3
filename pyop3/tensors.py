@@ -51,9 +51,7 @@ class Tensor:
 def Global(*, name: str=None):
     if not name:
         name = Tensor.name_generator.generate(prefix="global")
-    # TODO this isn't that great to write
-    domain = Index(1, None)
-    return Tensor(domain, name=name)
+    return Tensor(name=name)
 
 
 def Dat(domain: Index, *, name: str=None):
