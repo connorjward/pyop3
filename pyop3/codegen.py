@@ -1,5 +1,6 @@
 import enum
 import functools
+import itertools
 
 import loopy as lp
 import loopy.symbolic
@@ -46,8 +47,7 @@ class _LoopyKernelBuilder:
         self.subkernels = []
         self.maps_dict = {}
         self.temporaries_dict = {}
-        self.namer = pyop3.utils.UniqueNameGenerator()
-        self.iname_namer = pyop3.utils._NameGenerator("i")
+        self.name_generator = pyop3.utils.UniqueNameGenerator()
 
     @property
     def arguments(self):
@@ -82,10 +82,13 @@ class _LoopyKernelBuilder:
         if argument in self.temporaries_dict:
             raise AssertionError
 
-        name = self.namer.next("t")
+        name = self.name_generator.generate("t")
         return self.temporaries_dict.setdefault(
             argument, lp.TemporaryVariable(name, **kwargs)
         )
+
+    def generate_iname(self):
+        return self.name_generator.generate("i")
 
     @functools.singledispatchmethod
     def _fill_loopy_context(self, expr, **kwargs):
@@ -93,8 +96,8 @@ class _LoopyKernelBuilder:
 
     @_fill_loopy_context.register
     def _(self, expr: pyop3.exprs.Loop, *, within_indices, **kwargs):
-        iname = next(self.iname_namer)
-        self.register_domain(iname, expr.index.domain.extent)
+        iname = self.generate_iname()
+        self.register_domain(iname, expr.index.extent)
 
         for statement in expr.statements:
             self._fill_loopy_context(
@@ -106,8 +109,8 @@ class _LoopyKernelBuilder:
     @_fill_loopy_context.register
     def _(self, expr: pyop3.exprs.FunctionCall, within_indices, **kwargs):
         for argument in expr.arguments:
-            if broadcast_indices := self.select_broadcast_indices(argument, within_indices):
-                shape = tuple(index.domain.extent for index in broadcast_indices)
+            if broadcast_indices := self.register_broadcast_indices(argument, within_indices):
+                shape = tuple(index.extent for index in broadcast_indices)
             else:
                 shape = ()
             self.register_temporary(argument, dtype=argument.dtype, shape=shape)
@@ -116,12 +119,13 @@ class _LoopyKernelBuilder:
                 # TODO I currently assume that we only ever register arguments once.
                 # this is not true if we repeat arguments to a kernel or if we have multiple kernels
                 raise NotImplementedError
+            # check for scalar values
             self.arguments_dict[argument] = lp.GlobalArg(
-                argument.name, dtype=argument.dtype
+                argument.name, dtype=argument.dtype, shape=tuple(domain.extent for domain in argument.tensor.domains)
             )
 
             for index in argument.indices:
-                self.register_maps(index.domain)
+                self.register_maps(index)
 
         gathers = self.register_gathers(expr, within_indices)
         call_insn = self.register_function_call(
@@ -138,7 +142,7 @@ class _LoopyKernelBuilder:
             if argument.access == pyop3.exprs.READ:
                 gathers.append(self.read_tensor(argument, temporary, within_indices))
             elif argument.access == pyop3.exprs.WRITE:
-                continue
+                gathers.append(self.zero_tensor(argument, temporary, within_indices))
             elif argument.access == pyop3.exprs.INC:
                 gathers.append(self.zero_tensor(argument, temporary, within_indices))
             elif argument.access == pyop3.exprs.RW:
@@ -157,7 +161,7 @@ class _LoopyKernelBuilder:
         call_insn = lp.CallInstruction(
             assignees,
             expression,
-            id=self.namer.next("func"),
+            id=self.name_generator.generate("func"),
             within_inames=frozenset(within_indices.values()),
             depends_on=depends_on,
         )
@@ -208,7 +212,7 @@ class _LoopyKernelBuilder:
 
     def as_subarrayref(self, argument, temporary, within_indices):
         """Register an argument to a function."""
-        if broadcast_indices := self.select_broadcast_indices(argument, within_indices):
+        if broadcast_indices := self.register_broadcast_indices(argument, within_indices):
             indices = tuple(pym.Variable(iname) for iname in broadcast_indices.values())
             return lp.symbolic.SubArrayRef(indices, pym.Subscript(pym.Variable(temporary.name), indices))
         else:
@@ -225,7 +229,7 @@ class _LoopyKernelBuilder:
         instruction = lp.Assignment(
             assignee,
             expression,
-            id=self.namer.next(prefix),
+            id=self.name_generator.generate(prefix),
             within_inames=within_inames,
             depends_on=depends_on,
         )
@@ -239,7 +243,7 @@ class _LoopyKernelBuilder:
         #     t[k, l] = dat[i, j, k, l]
         # in this case within_indices is i and j
         # we also need to register two new domains to loop over: k and l
-        broadcast_indices = self.select_broadcast_indices(argument, within_indices)
+        broadcast_indices = self.register_broadcast_indices(argument, within_indices)
 
         if broadcast_indices:
             assignee = pym.Subscript(
@@ -250,7 +254,7 @@ class _LoopyKernelBuilder:
             assignee = pym.Variable(temporary.name)
 
         expression = pym.Subscript(
-            pym.Variable(argument.name), tuple(self.stack_subscripts(index, within_indices) for index in argument.indices)
+            pym.Variable(argument.name), tuple(self.stack_subscripts(index, within_indices|broadcast_indices) for index in itertools.chain(argument.tensor.indices, argument.tensor.shape_indices))
         )
         within_inames = frozenset({*within_indices.values(), *broadcast_indices.values()})
         return self.register_assignment(assignee, expression, within_inames, depends_on, "read")
@@ -262,7 +266,7 @@ class _LoopyKernelBuilder:
         #     t[k, l] = 0
         # in this case within_indices is i and j
         # we also need to register two new domains to loop over: k and l
-        broadcast_indices = self.select_broadcast_indices(argument, within_indices)
+        broadcast_indices = self.register_broadcast_indices(argument, within_indices)
 
         if broadcast_indices:
             assignee = pym.Subscript(
@@ -283,7 +287,7 @@ class _LoopyKernelBuilder:
         #     dat[i, j, k, l] = t[k, l]
         # in this case within_indices is i and j
         # we also need to register two new domains to loop over: k and l
-        broadcast_indices = self.select_broadcast_indices(argument, within_indices)
+        broadcast_indices = self.register_broadcast_indices(argument, within_indices)
 
         if broadcast_indices:
             expression = pym.Subscript(
@@ -296,8 +300,8 @@ class _LoopyKernelBuilder:
         assignee = pym.Subscript(
             pym.Variable(argument.name),
             tuple(
-                self.stack_subscripts(index, within_indices)
-                for index in argument.indices
+                self.stack_subscripts(index, within_indices|broadcast_indices)
+                for index in itertools.chain(argument.tensor.indices, argument.tensor.shape_indices)
             ),
         )
 
@@ -313,13 +317,13 @@ class _LoopyKernelBuilder:
         #     dat[i, j, k, l] = dat[i, j, k, l] + t[k, l]
         # in this case within_indices is i and j
         # we also need to register two new domains to loop over: k and l
-        broadcast_indices = self.select_broadcast_indices(argument, within_indices)
+        broadcast_indices = self.register_broadcast_indices(argument, within_indices)
 
         assignee = pym.Subscript(
             pym.Variable(argument.name),
             tuple(
-                self.stack_subscripts(index, within_indices)
-                for index in argument.indices
+                self.stack_subscripts(index, within_indices | broadcast_indices)
+                for index in itertools.chain(argument.tensor.indices, argument.tensor.shape_indices)
             ),
         )
 
@@ -333,28 +337,25 @@ class _LoopyKernelBuilder:
             assignee, expression, within_inames, depends_on, "inc"
         )
 
-    def stack_subscripts(self, index, within_inames):
-        try:
-            iname = within_inames[index]
-        except KeyError:
-            iname = self.namer.next("i")
+    def stack_subscripts(self, index, index_map):
+        iname = index_map[index]
 
-        if index.domain.parent_index:
+        if index.parent:
             indices = self.stack_subscripts(
-                index.domain.parent_index, within_inames
+                    index.parent, index_map,
             ), pym.Variable(iname)
-            return pym.Subscript(pym.Variable(index.domain.map.name), indices)
+            return pym.Subscript(pym.Variable(index.map.name), indices)
         else:
             return pym.Variable(iname)
 
-    def register_maps(self, domain):
-        if (map_ := domain.map) and map_ not in self.maps_dict:
+    def register_maps(self, index):
+        if (map_ := index.map) and map_ not in self.maps_dict:
             self.maps_dict[map_] = lp.GlobalArg(
                 map_.name, dtype=map_.dtype, shape=(None, map_.arity)
             )
 
-        if domain.parent_index:
-            self.register_maps(domain.parent_index.domain)
+        if index.parent:
+            self.register_maps(index.parent)
 
     def register_domain(self, iname, extent):
         domain = f"{{ [{iname}]: 0<= {iname} < {extent} }}"
@@ -362,20 +363,12 @@ class _LoopyKernelBuilder:
             raise ValueError
         self.domains.add(domain)
 
-    # TODO it is not really natural that this function modifies state, think about this
-    def select_broadcast_indices(self, argument, within_indices):
+    def register_broadcast_indices(self, argument, within_indices):
         broadcast_indices = {}
-        for index in argument.indices:
+        for index in itertools.chain(argument.indices, argument.tensor.shape_indices):
             if index not in within_indices:
-                assert index.domain.parent_index in within_indices
-                iname = next(self.iname_namer)
-                self.register_domain(iname, index.domain.extent)
+                iname = self.generate_iname()
+                self.register_domain(iname, index.extent)
                 broadcast_indices[index] = iname
+
         return broadcast_indices
-
-
-def flatten_index(index):
-    if index.domain.parent_index:
-        return (index,) + flatten_index(index.domain.parent_index)
-    else:
-        return (index,)
