@@ -8,7 +8,6 @@ import pymbolic.primitives as pym
 import pyop3.exprs
 import pyop3.utils
 
-
 LOOPY_TARGET = lp.CTarget()
 LOOPY_LANG_VERSION = (2018, 2)
 
@@ -37,20 +36,6 @@ def to_c(expr):
     return lp.generate_code_v2(program).device_code()
 
 
-class UniqueNamer:
-    def __init__(self):
-        self.name_generators = {}
-
-    def next(self, prefix="", suffix=""):
-        try:
-            namer = self.name_generators[(prefix, suffix)]
-        except KeyError:
-            namer = self.name_generators.setdefault(
-                (prefix, suffix), pyop3.utils.NameGenerator(prefix, suffix)
-            )
-        return next(namer)
-
-
 class _LoopyKernelBuilder:
     def __init__(self, expr):
         self.expr = expr
@@ -61,8 +46,8 @@ class _LoopyKernelBuilder:
         self.subkernels = []
         self.maps_dict = {}
         self.temporaries_dict = {}
-        self.namer = UniqueNamer()
-        self.iname_namer = pyop3.utils.NameGenerator("i")
+        self.namer = pyop3.utils.UniqueNameGenerator()
+        self.iname_namer = pyop3.utils._NameGenerator("i")
 
     @property
     def arguments(self):

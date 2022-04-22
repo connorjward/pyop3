@@ -1,7 +1,21 @@
 import itertools
 
 
-class NameGenerator:
+class UniqueNameGenerator:
+    def __init__(self):
+        self.name_generators = {}
+
+    def generate(self, prefix="", suffix=""):
+        try:
+            namer = self.name_generators[(prefix, suffix)]
+        except KeyError:
+            namer = self.name_generators.setdefault(
+                (prefix, suffix), _NameGenerator(prefix, suffix)
+            )
+        return next(namer)
+
+
+class _NameGenerator:
     def __init__(self, prefix="", suffix=""):
         if not (prefix or suffix):
             raise ValueError

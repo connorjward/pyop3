@@ -3,6 +3,7 @@ import pdb
 
 import loopy as lp
 import numpy as np
+
 import pyop3
 import pyop3.codegen
 
@@ -54,6 +55,17 @@ class DemoMesh:
         except KeyError:
             domain = pyop3.Domain(self.CLOSURE_ARITY, self, index)
             return self.map_cache.setdefault(key, domain)
+
+
+class DemoExtrudedMesh:
+
+    @property
+    def cells(self):
+        base = pyop3.Domain(self.ncells_base, self)
+        # for now assume that the inner dimension is not ragged
+        extruded = pyop3.Domain(self.ncells_extruded, self)
+        # composite_domain.index returns a tuple of indices, one for each domain
+        return pyop3.CompositeDomain(base, extruded)
 
 
 NPOINTS = 25
