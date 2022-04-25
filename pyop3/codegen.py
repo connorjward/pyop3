@@ -4,10 +4,12 @@ import itertools
 
 import loopy as lp
 import loopy.symbolic
+import numpy as np
 import pymbolic.primitives as pym
 
 import pyop3.exprs
 import pyop3.utils
+from pyop3.domains import Domain, SparseDomain
 
 LOOPY_TARGET = lp.CTarget()
 LOOPY_LANG_VERSION = (2018, 2)
@@ -97,7 +99,7 @@ class _LoopyKernelBuilder:
     @_fill_loopy_context.register
     def _(self, expr: pyop3.exprs.Loop, *, within_indices, **kwargs):
         iname = self.generate_iname()
-        self.register_domain(iname, expr.index.extent)
+        self.register_domain(iname, expr.index.start, expr.index.stop, expr.index.step)
 
         for statement in expr.statements:
             self._fill_loopy_context(
@@ -384,21 +386,27 @@ class _LoopyKernelBuilder:
                 index.parent,
                 index_map,
             ), pym.Variable(iname)
-            return pym.Subscript(pym.Variable(index.map.name), indices)
+            return pym.Subscript(pym.Variable(index.name), indices)
         else:
             return pym.Variable(iname)
 
-    def register_maps(self, index):
-        if (map_ := index.map) and map_ not in self.maps_dict:
-            self.maps_dict[map_] = lp.GlobalArg(
-                map_.name, dtype=map_.dtype, shape=(None, map_.arity)
+    def register_maps(self, index: Domain):
+        if isinstance(index, SparseDomain) and index not in self.maps_dict:
+            self.maps_dict[index] = lp.GlobalArg(
+                index.name, dtype=np.int32, shape=(None, index.extent)
             )
 
         if index.parent:
             self.register_maps(index.parent)
 
-    def register_domain(self, iname, extent):
-        domain = f"{{ [{iname}]: 0<= {iname} < {extent} }}"
+    def register_domain(self, iname, start, stop, step):
+
+        domain = f"[{iname}]: {start} <= {iname} < {stop}"
+        if step != 1:
+            tmp_iname = iname + "_tmp"
+            domain += f" and (exists {tmp_iname}: {iname} = {step}*{tmp_iname})"
+        domain = "{" + domain + "}"
+
         if domain in self.domains:
             raise ValueError
         self.domains.add(domain)
@@ -408,7 +416,7 @@ class _LoopyKernelBuilder:
         for index in itertools.chain(argument.indices, argument.tensor.shape_indices):
             if index not in within_indices:
                 iname = self.generate_iname()
-                self.register_domain(iname, index.extent)
+                self.register_domain(iname, index.start, index.stop, index.step)
                 broadcast_indices[index] = iname
 
         return broadcast_indices

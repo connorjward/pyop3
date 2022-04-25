@@ -4,7 +4,7 @@ from typing import Tuple, Union
 import pyop3.domains
 import pyop3.exprs
 import pyop3.utils
-from pyop3.domains import Index
+from pyop3.domains import DenseDomain, Domain, SparseDomain
 
 
 class Tensor:
@@ -24,7 +24,7 @@ class Tensor:
         self.indices = indices
         self.name = name
 
-    def __getitem__(self, indices: Union[Index, Tuple[Index, ...]]):
+    def __getitem__(self, indices: Union[Domain, Tuple[Domain, ...]]):
         if not isinstance(indices, collections.abc.Sequence):
             indices = (indices,)
 
@@ -54,13 +54,13 @@ def Global(*, name: str = None):
     return Tensor(name=name)
 
 
-def Dat(domain: Index, *, name: str = None):
+def Dat(domain: Domain, *, name: str = None):
     if not name:
         name = Tensor.name_generator.generate(prefix="dat")
     return Tensor(domain, name=name)
 
 
-def Mat(domains: Tuple[Index, Index], *, name: str = None):
+def Mat(domains: Tuple[Domain, Domain], *, name: str = None):
     if not name:
         name = Tensor.name_generator.generate(prefix="mat")
     return Tensor(domains, name=name)

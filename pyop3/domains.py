@@ -1,3 +1,4 @@
+import abc
 import collections
 import dataclasses
 
@@ -17,35 +18,67 @@ class Map:
         self.name = next(self._name_generator)
 
 
-# This can also be thought of as a 'domain' or 'set', needs bikeshedding
-class Index:
-    def __init__(self, extent, mesh, parent=None):
+class Domain(abc.ABC):
+
+    _name_generator = pyop3.utils._NameGenerator(prefix="dom")
+
+    @property
+    def mesh(self):
+        if not self._mesh:
+            raise ValueError("Domain is not associated with a mesh")
+        return self._mesh
+
+
+class SparseDomain(Domain):
+    def __init__(self, extent, *, mesh=None, name=None, parent=None):
         self.extent = extent
-        self.mesh = mesh
+        self._mesh = mesh
         self.parent = parent
 
-        if parent:
-            self.map = Map(extent)
+        if name:
+            self.name = name
         else:
-            self.map = None
+            self.name = next(self._name_generator)
+
+        # TODO Eliminate this
+        self.start = 0
+        self.stop = extent
+        self.step = 1
 
 
-def closure(indices):
-    # if index is a sequence (e.g. extruded) then return a tuple of closures,
-    # one per input index
-    # TODO The closure of a dense array is not straightforward as it depends
-    # on things like orientation and offsets
-    if isinstance(indices, collections.abc.Sequence):
-        return tuple(index.mesh.closure(index) for index in indices)
-    else:
-        index = indices
-        return index.mesh.closure(index)
+class DenseDomain(Domain):
+    def __init__(self, *args, mesh=None, name=None, parent=None):
+        if len(args) == 1:
+            (stop,) = args
+            start = 0
+            step = 1
+        elif len(args) == 2:
+            start, stop = args
+            step = 1
+        elif len(args) == 3:
+            start, stop, step = args
+        else:
+            raise ValueError
+
+        self.start = start
+        self.stop = stop
+        self.step = step
+        self._mesh = mesh
+        self.parent = parent
+
+        if name:
+            self.name = name
+        else:
+            self.name = next(self._name_generator)
+
+    @property
+    def extent(self):
+        return (self.stop - self.start) // self.step
+
+
+def closure(index):
+    return index.mesh.closure(index)
 
 
 def star(index):
-    # if index is a sequence (e.g. extruded) then return a tuple of stars,
-    # one per input index
-    if isinstance(index, collections.abc.Sequence):
-        return tuple(idx.mesh.star(idx) for idx in index)
-    else:
-        return index.mesh.star(index)
+    return index.mesh.star(index)

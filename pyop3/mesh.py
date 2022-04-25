@@ -4,7 +4,6 @@ from pyop3.domains import Index
 
 
 class Mesh:
-
     @property
     def has_substructure(self) -> bool:
         """Does the mesh have some kind of substructure?"""
@@ -18,8 +17,11 @@ class UnstructureMesh(Mesh):
     ...
 
 
-class ExtrudedMesh(Mesh):
+class StructuredMesh(Mesh):
+    ...
 
+
+class ExtrudedMesh(Mesh):
     def closure(self, point_set: Index):
         """
 
@@ -37,10 +39,11 @@ class ExtrudedMesh(Mesh):
         assert not base_index.parent
 
         base_map = self.base_mesh.closure(base_index)
-        offset_map = Index(base_map.extent, self, layer_index)
+        offset_map = Index(
+            base_map.extent, self, layer_index
+        )  # this is not right. parent index is i
 
         return base_map, offset_map
-
 
 
 class CubeSphereMesh(Mesh):
@@ -111,7 +114,6 @@ class IndexStrider:
 
     start: int = 0
     """The starting point in the array."""
-
 
 
 def compute_strides(points, plex_op):
