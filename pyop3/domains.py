@@ -99,7 +99,7 @@ class CompositeDomain(Domain):
 
     @property
     def index(self):
-        return Index(self)
+        return tuple(Index(d) for d in self.domains)
 
     def __iter__(self):
         return iter(self.domains)

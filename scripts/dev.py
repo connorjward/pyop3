@@ -243,6 +243,8 @@ def vdat_parloop():
 
 @register_demo
 def extruded_direct():
+    dat1 = pyop3.Dat(EXTRUDED_MESH.cells, name="dat1")
+    dat2 = pyop3.Dat(EXTRUDED_MESH.cells, name="dat2")
     result = pyop3.Dat(EXTRUDED_MESH.cells, name="result")
     loopy_kernel = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
@@ -283,6 +285,8 @@ def extruded_direct():
 
 @register_demo
 def extruded_parloop():
+    dat1 = pyop3.Dat(EXTRUDED_MESH.points, name="dat1")
+    dat2 = pyop3.Dat(EXTRUDED_MESH.points, name="dat2")
     result = pyop3.Dat(EXTRUDED_MESH.points, name="result")
     loopy_kernel = lp.make_kernel(
         f"{{ [i]: 0 <= i < {EXTRUDED_MESH.CLOSURE_ARITY} }}",

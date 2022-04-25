@@ -10,7 +10,7 @@ import pymbolic.primitives as pym
 import pyop3.exprs
 import pyop3.utils
 from pyop3.tensors import Tensor
-from pyop3.domains import Domain, Index, SparseDomain, CompositeDomain
+from pyop3.domains import Domain, Index, SparseDomain
 
 LOOPY_TARGET = lp.CTarget()
 LOOPY_LANG_VERSION = (2018, 2)
@@ -100,16 +100,10 @@ class _LoopyKernelBuilder:
 
     @_fill_loopy_context.register
     def _(self, expr: pyop3.exprs.Loop, *, within_indices, **kwargs):
-
-        if isinstance(expr.index.domain, CompositeDomain):
-            for subdomain in expr.index.domain.domains:
-                iname = self.generate_iname()
-                self.register_domain(iname, subdomain, within_indices)
-                within_indices = within_indices | {subdomain.index: iname}
-        else:
+        for index in expr.indices:
             iname = self.generate_iname()
-            self.register_domain(iname, expr.index.domain, within_indices)
-            within_indices = within_indices | {expr.index: iname}
+            self.register_domain(iname, index.domain, within_indices)
+            within_indices[index] = iname
 
         for statement in expr.statements:
             self._fill_loopy_context(

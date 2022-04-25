@@ -19,7 +19,15 @@ class Tensor:
         if not isinstance(indices, collections.abc.Sequence):
             indices = (indices,)
 
-        self.domains = domains
+        new_domains = []
+
+        for domain in domains:
+            if isinstance(domain, CompositeDomain):
+                new_domains.extend(domain.domains)
+            else:
+                new_domains.append(domain)
+
+        self.domains = tuple(new_domains)
 
         new_indices = []
 
@@ -47,12 +55,10 @@ class Tensor:
         new_indices = []
         new_domains = []
         for index in indices:
-            if isinstance(index.domain, CompositeDomain):
-                new_domains.extend(index.domain.domains)
+            if isinstance(index, collections.abc.Sequence):
+                new_domains.extend(index)
             elif isinstance(index, Index):
                 new_indices.append(index)
-            elif isinstance(index, CompositeDomain):
-                new_domains.extend(index.domains)
             elif isinstance(index, Domain):
                 new_domains.append(index)
             elif isinstance(index, slice):

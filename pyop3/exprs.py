@@ -1,4 +1,5 @@
 import abc
+import collections
 import dataclasses
 import enum
 import functools
@@ -44,6 +45,13 @@ class Loop(Operator):
     @property
     def set(self):
         return self.index.set
+
+    @property
+    def indices(self):
+        if isinstance(self.index, collections.abc.Sequence):
+            return self.index
+        else:
+            return (self.index,)
 
     def __str__(self):
         return f"for {self.index} ∊ {self.index.point_set}"
