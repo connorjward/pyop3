@@ -1,6 +1,8 @@
 import dataclasses
 
-from pyop3.domains import Index
+from pyop3.domains import Index, SparseDomain, DenseDomain
+from pyop3.tensors import Dat
+
 
 
 class Mesh:
@@ -22,28 +24,31 @@ class StructuredMesh(Mesh):
 
 
 class ExtrudedMesh(Mesh):
-    def closure(self, point_set: Index):
+
+    MYARITY = 8
+
+    def __init__(self):
+        domain = DenseDomain(0, self.MYARITY)
+        self.offsets = Dat(domain, "offsets")
+        self.layer_count = Dat(domain, "layer_count")
+
+    def closure(self, index: Index):
         """
 
         Something like:
         for cell
             for layer
                 for i
-                    dat[map[i], offset[i]+layer]
-
+                    dat[map[i], offset[i]+layer*layersize]
         """
-        base_index = point_set.parent
-        layer_index = point_set
 
-        # only expect a single layer of added structure
-        assert not base_index.parent
+        # map from the cell to the starting points for the extruded traversal
+        base_domain = SparseDomain(index, MYARITY)
 
-        base_map = self.base_mesh.closure(base_index)
-        offset_map = Index(
-            base_map.extent, self, layer_index
-        )  # this is not right. parent index is i
+        # strided access to the layers
+        layer_domain = DenseDomain(0, self.layer_count[index]*self.offsets[index], self.offsets[index])
 
-        return base_map, offset_map
+        return base_domain, layer_domain
 
 
 class CubeSphereMesh(Mesh):

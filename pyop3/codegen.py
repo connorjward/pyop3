@@ -9,7 +9,8 @@ import pymbolic.primitives as pym
 
 import pyop3.exprs
 import pyop3.utils
-from pyop3.domains import Domain, SparseDomain
+from pyop3.tensors import Tensor
+from pyop3.domains import Domain, Index, SparseDomain, CompositeDomain
 
 LOOPY_TARGET = lp.CTarget()
 LOOPY_LANG_VERSION = (2018, 2)
@@ -46,6 +47,7 @@ class _LoopyKernelBuilder:
         self.domains = set()
         self.instructions = []
         self.arguments_dict = {}
+        self.parameters = []
         self.subkernels = []
         self.maps_dict = {}
         self.temporaries_dict = {}
@@ -65,7 +67,7 @@ class _LoopyKernelBuilder:
 
     @property
     def kernel_data(self):
-        return self.arguments + self.maps + self.temporaries
+        return self.arguments + self.maps + self.temporaries + tuple(self.parameters)
 
     def build(self):
         self._fill_loopy_context(self.expr, within_indices={})
@@ -98,23 +100,33 @@ class _LoopyKernelBuilder:
 
     @_fill_loopy_context.register
     def _(self, expr: pyop3.exprs.Loop, *, within_indices, **kwargs):
-        iname = self.generate_iname()
-        self.register_domain(iname, expr.index.start, expr.index.stop, expr.index.step)
+
+        if isinstance(expr.index.domain, CompositeDomain):
+            for subdomain in expr.index.domain.domains:
+                iname = self.generate_iname()
+                self.register_domain(iname, subdomain, within_indices)
+                within_indices = within_indices | {subdomain.index: iname}
+        else:
+            iname = self.generate_iname()
+            self.register_domain(iname, expr.index.domain, within_indices)
+            within_indices = within_indices | {expr.index: iname}
 
         for statement in expr.statements:
             self._fill_loopy_context(
                 statement,
-                within_indices | {expr.index: iname},
+                within_indices,
                 **kwargs,
             )
 
     @_fill_loopy_context.register
     def _(self, expr: pyop3.exprs.FunctionCall, within_indices, **kwargs):
         for argument in expr.arguments:
+            # FIXME This currently fails because we don't register parameter shapes very nicely
+            # try again in the morning...
             if broadcast_indices := self.register_broadcast_indices(
                 argument, within_indices
             ):
-                shape = tuple(index.extent for index in broadcast_indices)
+                shape = tuple(index.domain.extent for index in broadcast_indices)
             else:
                 shape = ()
             self.register_temporary(argument, dtype=argument.dtype, shape=shape)
@@ -123,14 +135,14 @@ class _LoopyKernelBuilder:
                 # TODO I currently assume that we only ever register arguments once.
                 # this is not true if we repeat arguments to a kernel or if we have multiple kernels
                 raise NotImplementedError
-            # check for scalar values
+
             self.arguments_dict[argument] = lp.GlobalArg(
                 argument.name,
                 dtype=argument.dtype,
-                shape=tuple(domain.extent for domain in argument.tensor.domains),
+                shape=argument.tensor.orig_shape,
             )
 
-            for index in argument.indices:
+            for index in itertools.chain(argument.indices, argument.tensor.broadcast_indices):
                 self.register_maps(index)
 
         gathers = self.register_gathers(expr, within_indices)
@@ -259,18 +271,19 @@ class _LoopyKernelBuilder:
         else:
             assignee = pym.Variable(temporary.name)
 
-        if argument.indices:
+        if argument.indices or argument.tensor.broadcast_indices:
             expression = pym.Subscript(
                 pym.Variable(argument.name),
                 tuple(
                     self.stack_subscripts(index, within_indices | broadcast_indices)
                     for index in itertools.chain(
-                        argument.tensor.indices, argument.tensor.shape_indices
+                        argument.tensor.indices, argument.tensor.broadcast_indices
                     )
                 ),
             )
         else:
             expression = pym.Variable(argument.name)
+
         within_inames = frozenset(
             {*within_indices.values(), *broadcast_indices.values()}
         )
@@ -325,7 +338,7 @@ class _LoopyKernelBuilder:
             tuple(
                 self.stack_subscripts(index, within_indices | broadcast_indices)
                 for index in itertools.chain(
-                    argument.tensor.indices, argument.tensor.shape_indices
+                    argument.tensor.indices, argument.tensor.broadcast_indices
                 )
             ),
         )
@@ -351,7 +364,7 @@ class _LoopyKernelBuilder:
             tuple(
                 self.stack_subscripts(index, within_indices | broadcast_indices)
                 for index in itertools.chain(
-                    argument.tensor.indices, argument.tensor.shape_indices
+                    argument.tensor.indices, argument.tensor.broadcast_indices
                 )
             ),
         )
@@ -381,42 +394,92 @@ class _LoopyKernelBuilder:
     def stack_subscripts(self, index, index_map):
         iname = index_map[index]
 
-        if index.parent:
-            indices = self.stack_subscripts(
-                index.parent,
-                index_map,
-            ), pym.Variable(iname)
-            return pym.Subscript(pym.Variable(index.name), indices)
+        if isinstance(index.domain, SparseDomain):
+            from_index = self.stack_subscripts(index.domain.parent, index_map)
+            to_index = pym.Variable(iname)
+            # equivalent to map0[map1[i, j], k]
+            return pym.Subscript(pym.Variable(index.domain.name), (from_index, to_index))
         else:
             return pym.Variable(iname)
 
-    def register_maps(self, index: Domain):
-        if isinstance(index, SparseDomain) and index not in self.maps_dict:
-            self.maps_dict[index] = lp.GlobalArg(
-                index.name, dtype=np.int32, shape=(None, index.extent)
-            )
+    def register_maps(self, index: Index):
+        domain = index.domain
+        if isinstance(domain, SparseDomain):
+            if domain not in self.maps_dict:
+                self.maps_dict[domain] = lp.GlobalArg(
+                    domain.name, dtype=np.int32, shape=(None, domain.extent)
+                )
 
-        if index.parent:
-            self.register_maps(index.parent)
+            if domain.parent:
+                self.register_maps(domain.parent)
 
-    def register_domain(self, iname, start, stop, step):
+    def register_domain(self, iname: str, domain: Domain, within_indices):
+        domain_stop = domain.stop
+        domain_step = domain.step
+        for i, slice_param in enumerate([domain.start, domain.stop, domain.step]):
+            # register tensor-like parameters
+            if isinstance(slice_param, Tensor):
+                # must be a scalar
+                assert not slice_param.domains
+                if not hasattr(self, "dodgy_counter"):
+                    self.dodgy_counter = 0
+                new_temp_name = f"mynewtemp{self.dodgy_counter}"
+                self.dodgy_counter += 1
 
-        domain = f"[{iname}]: {start} <= {iname} < {stop}"
-        if step != 1:
+                self.parameters.append(
+                        lp.GlobalArg(
+                    slice_param.name,
+                    dtype=np.int32,
+                    shape=slice_param.orig_shape,
+                ))
+                self.temporaries_dict[slice_param] = lp.TemporaryVariable(new_temp_name)
+
+                tensor = slice_param
+                # write to temporary
+                assignee = pym.Variable(new_temp_name)
+                expression = pym.Subscript(pym.Variable(tensor.name), tuple(pym.Variable(within_indices[index]) for index in tensor.indices))
+                self.register_assignment(
+                    assignee, expression, frozenset(within_indices.values()), prefix="myhack"
+                )
+
+                # string output
+                if tensor.indices:
+                    if i == 1:
+                        domain_stop = new_temp_name
+                    elif i == 2:
+                        domain_step = new_temp_name
+                else:
+                    if i == 1:
+                        domain_stop = f"{tensor.name}"
+                    elif i == 2:
+                        domain_step = f"{tensor.name}"
+            elif isinstance(slice_param, str):
+                self.parameters.append(
+                        lp.GlobalArg(
+                    slice_param,
+                    dtype=np.int32,
+                    shape=(),
+                ))
+
+            else:
+                import numbers
+                if not isinstance(slice_param, numbers.Integral):
+                    raise NotImplementedError
+
+        isl_domain = f"[{iname}]: {domain.start} <= {iname} < {domain_stop}"
+        if domain.step != 1:
             tmp_iname = iname + "_tmp"
-            domain += f" and (exists {tmp_iname}: {iname} = {step}*{tmp_iname})"
-        domain = "{" + domain + "}"
+            isl_domain += f" and (exists {tmp_iname}: {iname} = {domain_step}*{tmp_iname})"
+        isl_domain = "{" + isl_domain + "}"
 
-        if domain in self.domains:
+        if isl_domain in self.domains:
             raise ValueError
-        self.domains.add(domain)
+        self.domains.add(isl_domain)
 
     def register_broadcast_indices(self, argument, within_indices):
         broadcast_indices = {}
-        for index in itertools.chain(argument.indices, argument.tensor.shape_indices):
-            if index not in within_indices:
-                iname = self.generate_iname()
-                self.register_domain(iname, index.start, index.stop, index.step)
-                broadcast_indices[index] = iname
-
+        for index in argument.tensor.broadcast_indices:
+            iname = self.generate_iname()
+            self.register_domain(iname, index.domain, within_indices)
+            broadcast_indices[index] = iname
         return broadcast_indices

@@ -41,34 +41,67 @@ class DemoMesh:
     STAR_ARITY = 5
 
     def __init__(self, npoints, ncells):
-        self.npoints = npoints
-        self.ncells = ncells
+        self.npoints = "npoints"
+        self.ncells = "ncells"
         self.map_cache = {}
 
     @property
     def points(self):
-        return pyop3.DenseDomain(self.npoints, mesh=self)
+        return pyop3.DenseDomain(0, self.npoints, mesh=self)
 
     @property
     def cells(self):
-        return pyop3.DenseDomain(self.ncells, mesh=self)
+        return pyop3.DenseDomain(0, self.ncells, mesh=self)
 
     def closure(self, index):
         key = (self.closure.__name__, index)
         try:
             return self.map_cache[key]
         except KeyError:
-            domain = pyop3.SparseDomain(self.CLOSURE_ARITY, mesh=self, parent=index)
-            return self.map_cache.setdefault(key, domain)
+            map_ = pyop3.SparseDomain(index, self.CLOSURE_ARITY)
+            return self.map_cache.setdefault(key, map_)
 
 
 class DemoExtrudedMesh:
+
+    NPOINTS = 68
+    NCELLS = 12
+    BASE_CLOSURE_ARITY = 5
+
+    def __init__(self):
+        domain = pyop3.DenseDomain(0, self.BASE_CLOSURE_ARITY)
+        self.offsets = pyop3.Dat(domain, name="offsets")
+        self.layer_count = pyop3.Dat(domain, name="layer_count")
+
+    def closure(self, index: pyop3.Index):
+        """
+
+        Something like:
+        for cell
+            for layer
+                for i
+                    dat[map[i], offset[i]+layer*layersize]
+        """
+
+        # map from the cell to the starting points for the extruded traversal
+        # cell -> other base cells
+        base_domain = pyop3.SparseDomain(index.domain.parent, self.BASE_CLOSURE_ARITY)
+
+        # strided access to the layers
+        # should be:
+        # layer_domain = DenseDomain(0, self.layer_count[index]*self.offsets[index], self.offsets[index])
+
+        # FIXME haven't implemented __mul__: is this even right?
+        return pyop3.CompositeDomain(base_domain, index.domain*self.offsets[index])
+
     @property
     def cells(self):
-        base = pyop3.Index(self.ncells_base, self)
-        # for now assume that the inner dimension is not ragged
-        extruded = pyop3.Index(self.ncells_extruded, self)
-        return base, extruded
+        base = pyop3.DenseDomain(0, self.NCELLS, mesh=self)
+        layer_domain = pyop3.DenseDomain(0, self.layer_count[base.index])
+        return pyop3.CompositeDomain(base, layer_domain)
+
+
+EXTRUDED_MESH = DemoExtrudedMesh()
 
 
 NPOINTS = 120
@@ -82,8 +115,8 @@ dat1 = pyop3.Dat(MESH.points, name="dat1")
 dat2 = pyop3.Dat(MESH.points, name="dat2")
 dat3 = pyop3.Dat(MESH.points, name="dat3")
 
-vdat1 = pyop3.Dat((MESH.points, pyop3.DenseDomain(3)), name="dat1")
-vdat2 = pyop3.Dat((MESH.points, pyop3.DenseDomain(3)), name="dat2")
+vdat1 = pyop3.Dat((MESH.points, pyop3.DenseDomain(0, 3)), name="dat1")
+vdat2 = pyop3.Dat((MESH.points, pyop3.DenseDomain(0, 3)), name="dat2")
 
 mat1 = pyop3.Mat((MESH.points, MESH.points), name="mat1")
 
@@ -127,7 +160,7 @@ def basic_parloop():
         loopy_kernel,
     )
     return pyop3.Loop(
-        p := ITERSET,
+        p := ITERSET.index,
         [
             kernel(
                 dat1[pyop3.closure(p)], dat2[pyop3.closure(p)], result[pyop3.closure(p)]
@@ -161,7 +194,7 @@ def global_parloop():
         loopy_kernel,
     )
     return pyop3.Loop(
-        p := ITERSET,
+        p := ITERSET.index,
         [kernel(glob1, result[pyop3.closure(p)])],
     )
 
@@ -207,6 +240,85 @@ def vdat_parloop():
         ],
     )
 
+
+@register_demo
+def extruded_direct():
+    result = pyop3.Dat(EXTRUDED_MESH.cells, name="result")
+    loopy_kernel = lp.make_kernel(
+        "{ [i]: 0 <= i < 1 }",
+        ["z = x + y"],
+        [
+            lp.GlobalArg(
+                "x", np.float64, (), is_input=True, is_output=False
+            ),
+            lp.GlobalArg(
+                "y", np.float64, (), is_input=True, is_output=False
+            ),
+            lp.GlobalArg(
+                "z", np.float64, (), is_input=False, is_output=True
+            ),
+        ],
+        target=pyop3.codegen.LOOPY_TARGET,
+        name="local_kernel",
+        lang_version=pyop3.codegen.LOOPY_LANG_VERSION,
+    )
+    kernel = pyop3.Function(
+        "local_kernel",
+        [
+            pyop3.ArgumentSpec(pyop3.READ, np.float64, ()),
+            pyop3.ArgumentSpec(pyop3.READ, np.float64, ()),
+            pyop3.ArgumentSpec(pyop3.WRITE, np.float64, ()),
+        ],
+        loopy_kernel,
+    )
+    return pyop3.Loop(
+        p := EXTRUDED_MESH.cells.index,
+        [
+            kernel(
+                dat1[p], dat2[p], result[p]
+            )
+        ],
+    )
+
+
+@register_demo
+def extruded_parloop():
+    result = pyop3.Dat(EXTRUDED_MESH.points, name="result")
+    loopy_kernel = lp.make_kernel(
+        f"{{ [i]: 0 <= i < {EXTRUDED_MESH.CLOSURE_ARITY} }}",
+        ["z[i] = z[i] + x[i] * y[i]"],
+        [
+            lp.GlobalArg(
+                "x", np.float64, (EXTRUDED_MESH.CLOSURE_ARITY,), is_input=True, is_output=False
+            ),
+            lp.GlobalArg(
+                "y", np.float64, (EXTRUDED_MESH.CLOSURE_ARITY,), is_input=True, is_output=False
+            ),
+            lp.GlobalArg(
+                "z", np.float64, (EXTRUDED_MESH.CLOSURE_ARITY,), is_input=True, is_output=True
+            ),
+        ],
+        target=lp.CTarget(),
+        name="local_kernel",
+        lang_version=(2018, 2),
+    )
+    kernel = pyop3.Function(
+        "local_kernel",
+        [
+            pyop3.ArgumentSpec(pyop3.READ, np.float64, EXTRUDED_MESH.CLOSURE_ARITY),
+            pyop3.ArgumentSpec(pyop3.READ, np.float64, EXTRUDED_MESH.CLOSURE_ARITY),
+            pyop3.ArgumentSpec(pyop3.INC, np.float64, EXTRUDED_MESH.CLOSURE_ARITY),
+        ],
+        loopy_kernel,
+    )
+    return pyop3.Loop(
+        p := EXTRUDED_ITERSET.index,
+        [
+            kernel(
+                dat1[pyop3.closure(p)], dat2[pyop3.closure(p)], result[pyop3.closure(p)]
+            )
+        ],
+    )
 
 @register_demo
 def multi_kernel():

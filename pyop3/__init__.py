@@ -1,4 +1,4 @@
-from pyop3.domains import DenseDomain, Map, SparseDomain, closure, star  # noqa: F401
+from pyop3.domains import Index, CompositeDomain, Domain, SparseDomain, DenseDomain, closure, star  # noqa: F401
 from pyop3.exprs import (  # noqa: F401
     INC,
     MAX,
