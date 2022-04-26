@@ -115,12 +115,10 @@ class _LoopyKernelBuilder:
     @_fill_loopy_context.register
     def _(self, expr: pyop3.exprs.FunctionCall, within_indices, **kwargs):
         for argument in expr.arguments:
-            # FIXME This currently fails because we don't register parameter shapes very nicely
-            # try again in the morning...
             if broadcast_indices := self.register_broadcast_indices(
                 argument, within_indices
             ):
-                shape = tuple(index.domain.extent for index in broadcast_indices)
+                shape = tuple(idx.stop - idx.start for idx in broadcast_indices)
             else:
                 shape = ()
             self.register_temporary(argument, dtype=argument.dtype, shape=shape)
@@ -137,6 +135,8 @@ class _LoopyKernelBuilder:
             )
 
             for index in argument.indices:
+                if isinstance(index, Tensor):
+                    index = index.index
                 self.register_maps(index)
 
         gathers = self.register_gathers(expr, within_indices)
@@ -270,9 +270,7 @@ class _LoopyKernelBuilder:
                 pym.Variable(argument.name),
                 tuple(
                     self.stack_subscripts(index, within_indices | broadcast_indices)
-                    for index in itertools.chain(
-                        argument.tensor.indices, argument.tensor.broadcast_indices
-                    )
+                    for index in argument.tensor.indices
                 ),
             )
         else:
@@ -331,9 +329,7 @@ class _LoopyKernelBuilder:
             pym.Variable(argument.name),
             tuple(
                 self.stack_subscripts(index, within_indices | broadcast_indices)
-                for index in itertools.chain(
-                    argument.tensor.indices, argument.tensor.broadcast_indices
-                )
+                for index in argument.tensor.indices
             ),
         )
 
@@ -357,9 +353,7 @@ class _LoopyKernelBuilder:
             pym.Variable(argument.name),
             tuple(
                 self.stack_subscripts(index, within_indices | broadcast_indices)
-                for index in itertools.chain(
-                    argument.tensor.indices, argument.tensor.broadcast_indices
-                )
+                for index in argument.tensor.indices
             ),
         )
 
@@ -387,16 +381,15 @@ class _LoopyKernelBuilder:
 
     def stack_subscripts(self, index: Index, index_map):
         """Convert an index tensor expression into a pymbolic expression"""
-        if hasattr(index, "tensor") and index.tensor.indices:
+        if index.tensor.indices:
             return pym.Subscript(
                 pym.Variable(index.tensor.name),
-                tuple(self.stack_subscripts(idx, index_map) for idx in index.tensor.indices)
+                # we do this weird indexing because indices is not very good here since we need to exclude the last one
+                tuple(self.stack_subscripts(idx, index_map) for idx in index.tensor.indices[:-1]) + (pym.Variable(index_map[index]),)
             )
-        elif isinstance(index, Range):
-            return pym.Variable(index.name)
         else:
-            # return pym.Variable(index_map[index])
-            return pym.Variable(index.tensor.name)
+            return pym.Variable(index_map[index])
+            # return pym.Variable(index.tensor.name)
 
     def register_maps(self, index: Index):
         # TODO This seems like quite a hacky way to tell if index is a map

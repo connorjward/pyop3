@@ -14,32 +14,41 @@ class Tensor:
     name_generator = pyop3.utils.UniqueNameGenerator()
     prefix = "x"
 
-    def __init__(self, indices=(), *, mesh=None, name: str = None):
-        # indices can be either indices or ranges/slices
-        # TODO should not need as_tuple
-        self.indices = as_tuple(indices)
+    # TODO open question about whether it is better to have broadcast_indices as input
+    def __init__(self, indices=(), within_indices=frozenset(), *, mesh=None, name: str = None, prefix: str=None):
+        # within_indices are the ones that are not slices
+        assert len(within_indices) <= len(indices)
+
+        self.indices = indices
+        self.within_indices = within_indices
         self.mesh = mesh
-        self.name = name or self.name_generator.generate(self.prefix)
+        self.name = name or self.name_generator.generate(prefix or self.prefix)
 
     def __getitem__(self, indices):
         indices = as_tuple(indices)
 
-        # if len(indices) > len(self.unbound_indices):
-        #     raise ValueError
+        if len(indices) > len(self.broadcast_indices):
+            raise ValueError
 
         new_indices = list(self.indices)
+        new_within_indices = set(self.within_indices)
         index_iterator = list(indices)
         for i, index in enumerate(self.indices):
-            # we can only index into domains that have not yet been fully indexed
-            # if index.is_vector and index_iterator:
-            if isinstance(index, Range) and index_iterator:
-                new_indices[i] = index_iterator.pop(0)
+            if index not in self.within_indices and index_iterator:
+                new_index = index_iterator.pop(0)
+                if self.is_slice(new_index):
+                    # add another broadcast index
+                    if isinstance(new_index, Tensor):
+                        new_indices[i] = new_index.index
+                    else:
+                        assert isinstance(new_index, slice)
+                        assert new_index.step == 1
+                        new_indices[i] = Range(new_index.start, new_index.stop).index
+                else:
+                    new_indices[i] = new_index
+                    new_within_indices.add(index)
 
-        return self.copy(indices=tuple(new_indices))
-
-    # @property
-    # def shape(self):
-    #     return 
+        return self.copy(indices=tuple(new_indices), within_indices=frozenset(new_within_indices))
 
     @property
     def order(self):
@@ -47,35 +56,29 @@ class Tensor:
 
     @property
     def broadcast_indices(self):
-        return self.unbound_indices
+        return tuple(idx for idx in self.indices if idx not in self.within_indices)
 
-    @property
-    def unindexed_domains(self):
-        return tuple(dom for dom, idx in zip(self.domains, self.indices) if idx == slice(None))
-
+    # TODO which name is better?
     @property
     def unbound_indices(self):
-        # TODO replace with slices
-        return tuple(idx for idx in self.indices if isinstance(idx, Range))
+        return self.broadcast_indices
 
     @property
     def index(self):
-        (range_,) = self.unbound_indices
-        return Index(self, range_.start, range_.stop)
-
-    @property
-    def unindexed_shape(self):
-        return tuple(len(dom.range) for dom in self.domains)
-
-    @property
-    def is_vector(self):
-        return self.order == 1
+        assert self.order == 1
+        bindex, = self.broadcast_indices
+        return Index(self, bindex.start, bindex.stop)
 
     def copy(self, **kwargs):
         indices = kwargs.get("indices", self.indices)
+        within_indices = kwargs.get("within_indices", self.within_indices)
         mesh = kwargs.get("indices", self.mesh)
         name = kwargs.get("name", self.name)
-        return type(self)(indices=indices, mesh=mesh, name=name)
+        return type(self)(indices=indices, within_indices=within_indices, mesh=mesh, name=name)
+
+    @staticmethod
+    def is_slice(index):
+        return isinstance(index, (slice, Tensor)) or index is None
 
 
 # class Range(Tensor):
@@ -91,17 +94,11 @@ class Range:
         self.name = "range"
         self.indices = ()
 
-    @property
-    def size(self):
-        return self.stop - self.start
+        self.index = Index(self, self.start, self.stop)
 
     @property
     def order(self):
         return 1
-
-    @property
-    def index(self):
-        return Index(self, self.start, self.stop)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -127,13 +124,13 @@ def Global(*, name: str = None):
 
 def Dat(shape: Tuple[int, ...], *, name: str = None) -> Tensor:
     shape = as_tuple(shape)
-    indices = tuple(Range(extent) for extent in shape)
+    indices = tuple(Range(extent).index for extent in shape)
     if not name:
         name = Tensor.name_generator.generate(prefix="dat")
     return Tensor(indices, name=name)
 
 
-def Mat(domains: Tuple["Domain", "Domain"], *, name: str = None):
+def Mat(shape: Tuple[int, ...], *, name: str = None):
     if not name:
         name = Tensor.name_generator.generate(prefix="mat")
-    return Tensor(domains, name=name)
+    return Tensor(shape, name=name)

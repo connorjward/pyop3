@@ -58,10 +58,7 @@ class DemoMesh:
         try:
             return self.map_cache[key]
         except KeyError:
-            # map from index -> new_index
-            new_range = pyop3.Range(self.CLOSURE_ARITY)
-            new_index = new_range.index
-            map_ = pyop3.Tensor((index, new_range), mesh=self).index
+            map_ = pyop3.Tensor((index, pyop3.Range(self.CLOSURE_ARITY).index), mesh=self, prefix="map")[index]
             return self.map_cache.setdefault(key, map_)
 
 
@@ -114,12 +111,12 @@ ITERSET = MESH.cells
 
 glob1 = pyop3.Global(name="glob1")
 
-dat1 = pyop3.Dat(MESH.points, name="dat1")
-dat2 = pyop3.Dat(MESH.points, name="dat2")
-dat3 = pyop3.Dat(MESH.points, name="dat3")
+dat1 = pyop3.Dat(NPOINTS, name="dat1")
+dat2 = pyop3.Dat(NPOINTS, name="dat2")
+dat3 = pyop3.Dat(NPOINTS, name="dat3")
 
-vdat1 = pyop3.Dat((MESH.points, pyop3.Range(3)), name="dat1")
-vdat2 = pyop3.Dat((MESH.points, pyop3.Range(3)), name="dat2")
+vdat1 = pyop3.Dat((NPOINTS, 3), name="dat1")
+vdat2 = pyop3.Dat((NPOINTS, 3), name="dat2")
 
 mat1 = pyop3.Mat((MESH.points, MESH.points), name="mat1")
 
@@ -134,7 +131,7 @@ def register_demo(func):
 
 @register_demo
 def basic_parloop():
-    result = pyop3.Dat(MESH.points, name="result")
+    result = pyop3.Dat(NPOINTS, name="result")
     loopy_kernel = lp.make_kernel(
         f"{{ [i]: 0 <= i < {MESH.CLOSURE_ARITY} }}",
         ["z[i] = z[i] + x[i] * y[i]"],
