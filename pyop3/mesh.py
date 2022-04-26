@@ -138,8 +138,8 @@ def compute_strides(points, plex_op):
 
 
 def closure(index):
-    return index.range.mesh.closure(index)
+    return index.tensor.mesh.closure(index)
 
 
 def star(index):
-    return index.range.mesh.star(index)
+    return index.tensor.mesh.star(index)

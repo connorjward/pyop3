@@ -37,9 +37,13 @@ class Tensor:
 
         return self.copy(indices=tuple(new_indices))
 
+    # @property
+    # def shape(self):
+    #     return 
+
     @property
-    def shape(self):
-        raise NotImplementedError
+    def order(self):
+        return len(self.broadcast_indices)
 
     @property
     def broadcast_indices(self):
@@ -51,14 +55,13 @@ class Tensor:
 
     @property
     def unbound_indices(self):
+        # TODO replace with slices
         return tuple(idx for idx in self.indices if isinstance(idx, Range))
 
-    # Range also has this property
     @property
     def index(self):
-        # FIXME This will fail if more than one unbound index
         (range_,) = self.unbound_indices
-        return Index(self[range_.index], range_)
+        return Index(self, range_.start, range_.stop)
 
     @property
     def unindexed_shape(self):
@@ -75,6 +78,7 @@ class Tensor:
         return type(self)(indices=indices, mesh=mesh, name=name)
 
 
+# class Range(Tensor):
 class Range:
     def __init__(self, *args, mesh=None):
         try:
@@ -84,25 +88,35 @@ class Range:
             (self.stop,) = args
 
         self.mesh = mesh
+        self.name = "range"
+        self.indices = ()
 
     @property
     def size(self):
         return self.stop - self.start
 
     @property
+    def order(self):
+        return 1
+
+    @property
     def index(self):
-        return Index(Tensor(), self)
+        return Index(self, self.start, self.stop)
 
 
 @dataclasses.dataclass(frozen=True)
 class Index:
-    scalar: Tensor
-    range: Range
+    tensor: Tensor
+    start: Union[Tensor, int]
+    stop: Union[Tensor, int]
 
-    # just for hacks
+    def __post_init__(self):
+        # must be a vector for now (no multi-indexing)
+        assert self.tensor.order == 1
+
     @property
     def domain(self):
-        return self.range
+        return self.start, self.stop
 
 
 def Global(*, name: str = None):

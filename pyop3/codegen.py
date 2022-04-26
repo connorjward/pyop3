@@ -136,7 +136,7 @@ class _LoopyKernelBuilder:
                 shape=(None,) * len(argument.tensor.indices),
             )
 
-            for index in itertools.chain(argument.indices, argument.tensor.broadcast_indices):
+            for index in argument.indices:
                 self.register_maps(index)
 
         gathers = self.register_gathers(expr, within_indices)
@@ -387,27 +387,31 @@ class _LoopyKernelBuilder:
 
     def stack_subscripts(self, index: Index, index_map):
         """Convert an index tensor expression into a pymbolic expression"""
-        if index.scalar.indices:
+        if hasattr(index, "tensor") and index.tensor.indices:
             return pym.Subscript(
-                pym.Variable(index.scalar.name),
-                tuple(self.stack_subscripts(idx, index_map) for idx in index.scalar.indices)
+                pym.Variable(index.tensor.name),
+                tuple(self.stack_subscripts(idx, index_map) for idx in index.tensor.indices)
             )
+        elif isinstance(index, Range):
+            return pym.Variable(index.name)
         else:
             # return pym.Variable(index_map[index])
-            return pym.Variable(index.scalar.name)
+            return pym.Variable(index.tensor.name)
 
     def register_maps(self, index: Index):
         # TODO This seems like quite a hacky way to tell if index is a map
-        if len(index.scalar.indices) == 2 and index not in self.maps_dict:
-            from_index, to_index = index.scalar.indices
+        # FIXME This whole bit needs a rethink
+        if len(index.tensor.indices) == 2 and index not in self.maps_dict:
+            from_index, to_index = index.tensor.indices
             # self.maps_dict[index] = lp.GlobalArg(
             #     index.name, dtype=np.int32, shape=(None, to_index.range.size)
             # )
             self.register_maps(from_index)
 
-    def register_domain(self, iname: str, domain: Range, within_indices):
+    def register_domain(self, iname: str, domain, within_indices):
+        start, stop = domain
         startstop = []
-        for i, slice_param in enumerate([domain.start, domain.stop]):
+        for i, slice_param in enumerate([start, stop]):
             # register tensor-like parameters
             if isinstance(slice_param, Tensor):
                 tensor = slice_param
