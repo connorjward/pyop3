@@ -47,18 +47,21 @@ class DemoMesh:
 
     @property
     def points(self):
-        return pyop3.DenseDomain(0, self.npoints, mesh=self)
+        return pyop3.Range(self.npoints, mesh=self)
 
     @property
     def cells(self):
-        return pyop3.DenseDomain(0, self.ncells, mesh=self)
+        return pyop3.Range(self.ncells, mesh=self)
 
     def closure(self, index):
         key = (self.closure.__name__, index)
         try:
             return self.map_cache[key]
         except KeyError:
-            map_ = pyop3.SparseDomain(index, self.CLOSURE_ARITY)
+            # map from index -> new_index
+            new_range = pyop3.Range(self.CLOSURE_ARITY)
+            new_index = new_range.index
+            map_ = pyop3.Tensor((index, new_range), mesh=self).index
             return self.map_cache.setdefault(key, map_)
 
 
@@ -69,7 +72,7 @@ class DemoExtrudedMesh:
     BASE_CLOSURE_ARITY = 5
 
     def __init__(self):
-        domain = pyop3.DenseDomain(0, self.BASE_CLOSURE_ARITY)
+        domain = pyop3.Range(self.BASE_CLOSURE_ARITY)
         self.offsets = pyop3.Dat(domain, name="offsets")
         self.layer_count = pyop3.Dat(domain, name="layer_count")
 
@@ -115,8 +118,8 @@ dat1 = pyop3.Dat(MESH.points, name="dat1")
 dat2 = pyop3.Dat(MESH.points, name="dat2")
 dat3 = pyop3.Dat(MESH.points, name="dat3")
 
-vdat1 = pyop3.Dat((MESH.points, pyop3.DenseDomain(0, 3)), name="dat1")
-vdat2 = pyop3.Dat((MESH.points, pyop3.DenseDomain(0, 3)), name="dat2")
+vdat1 = pyop3.Dat((MESH.points, pyop3.Range(3)), name="dat1")
+vdat2 = pyop3.Dat((MESH.points, pyop3.Range(3)), name="dat2")
 
 mat1 = pyop3.Mat((MESH.points, MESH.points), name="mat1")
 

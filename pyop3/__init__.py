@@ -1,4 +1,3 @@
-from pyop3.domains import Index, CompositeDomain, Domain, SparseDomain, DenseDomain, closure, star  # noqa: F401
 from pyop3.exprs import (  # noqa: F401
     INC,
     MAX,
@@ -10,4 +9,5 @@ from pyop3.exprs import (  # noqa: F401
     FunctionCall,
     Loop,
 )
-from pyop3.tensors import Dat, Global, Mat, Tensor  # noqa: F401
+from pyop3.mesh import closure, star
+from pyop3.tensors import Range, Index, Dat, Global, Mat, Tensor  # noqa: F401

@@ -1,7 +1,6 @@
 import dataclasses
 
-from pyop3.domains import Index, SparseDomain, DenseDomain
-from pyop3.tensors import Dat
+from pyop3.tensors import Dat, Index
 
 
 
@@ -136,3 +135,11 @@ def compute_strides(points, plex_op):
         if base_points not in strides_per_base_point_group:
             striders = tuple(IndexStrider(p.stride, p.start) for p in plex_op(point))
             strides_per_base_point_group[base_points] = striders
+
+
+def closure(index):
+    return index.range.mesh.closure(index)
+
+
+def star(index):
+    return index.range.mesh.star(index)

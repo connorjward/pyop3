@@ -1,3 +1,4 @@
+import collections
 import itertools
 
 
@@ -29,3 +30,10 @@ class _NameGenerator:
 
     def __next__(self):
         return f"{self._prefix}{next(self._counter)}{self._suffix}"
+
+
+def as_tuple(item):
+    if isinstance(item, collections.abc.Sequence):
+        return item
+    else:
+        return (item,)

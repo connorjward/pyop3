@@ -10,7 +10,7 @@ import pymbolic.primitives as pym
 import pyop3.exprs
 import pyop3.utils
 from pyop3.tensors import Tensor
-from pyop3.domains import Domain, Index, SparseDomain
+from pyop3.tensors import Range, Index
 
 LOOPY_TARGET = lp.CTarget()
 LOOPY_LANG_VERSION = (2018, 2)
@@ -133,7 +133,7 @@ class _LoopyKernelBuilder:
             self.arguments_dict[argument] = lp.GlobalArg(
                 argument.name,
                 dtype=argument.dtype,
-                shape=argument.tensor.orig_shape,
+                shape=(None,) * len(argument.tensor.indices),
             )
 
             for index in itertools.chain(argument.indices, argument.tensor.broadcast_indices):
@@ -385,68 +385,61 @@ class _LoopyKernelBuilder:
             assignee, expression, within_inames, depends_on, "inc"
         )
 
-    def stack_subscripts(self, index, index_map):
-        iname = index_map[index]
-
-        if isinstance(index.domain, SparseDomain):
-            from_index = self.stack_subscripts(index.domain.parent, index_map)
-            to_index = pym.Variable(iname)
-            # equivalent to map0[map1[i, j], k]
-            return pym.Subscript(pym.Variable(index.domain.name), (from_index, to_index))
+    def stack_subscripts(self, index: Index, index_map):
+        """Convert an index tensor expression into a pymbolic expression"""
+        if index.scalar.indices:
+            return pym.Subscript(
+                pym.Variable(index.scalar.name),
+                tuple(self.stack_subscripts(idx, index_map) for idx in index.scalar.indices)
+            )
         else:
-            return pym.Variable(iname)
+            # return pym.Variable(index_map[index])
+            return pym.Variable(index.scalar.name)
 
     def register_maps(self, index: Index):
-        domain = index.domain
-        if isinstance(domain, SparseDomain):
-            if domain not in self.maps_dict:
-                self.maps_dict[domain] = lp.GlobalArg(
-                    domain.name, dtype=np.int32, shape=(None, domain.extent)
-                )
+        # TODO This seems like quite a hacky way to tell if index is a map
+        if len(index.scalar.indices) == 2 and index not in self.maps_dict:
+            from_index, to_index = index.scalar.indices
+            # self.maps_dict[index] = lp.GlobalArg(
+            #     index.name, dtype=np.int32, shape=(None, to_index.range.size)
+            # )
+            self.register_maps(from_index)
 
-            if domain.parent:
-                self.register_maps(domain.parent)
-
-    def register_domain(self, iname: str, domain: Domain, within_indices):
-        domain_stop = domain.stop
-        domain_step = domain.step
-        for i, slice_param in enumerate([domain.start, domain.stop, domain.step]):
+    def register_domain(self, iname: str, domain: Range, within_indices):
+        startstop = []
+        for i, slice_param in enumerate([domain.start, domain.stop]):
             # register tensor-like parameters
             if isinstance(slice_param, Tensor):
-                # must be a scalar
-                assert not slice_param.domains
-                if not hasattr(self, "dodgy_counter"):
-                    self.dodgy_counter = 0
-                new_temp_name = f"mynewtemp{self.dodgy_counter}"
-                self.dodgy_counter += 1
-
-                self.parameters.append(
-                        lp.GlobalArg(
-                    slice_param.name,
-                    dtype=np.int32,
-                    shape=slice_param.orig_shape,
-                ))
-                self.temporaries_dict[slice_param] = lp.TemporaryVariable(new_temp_name)
-
                 tensor = slice_param
-                # write to temporary
-                assignee = pym.Variable(new_temp_name)
-                expression = pym.Subscript(pym.Variable(tensor.name), tuple(pym.Variable(within_indices[index]) for index in tensor.indices))
-                self.register_assignment(
-                    assignee, expression, frozenset(within_indices.values()), prefix="myhack"
-                )
 
-                # string output
                 if tensor.indices:
-                    if i == 1:
-                        domain_stop = new_temp_name
-                    elif i == 2:
-                        domain_step = new_temp_name
+                    # must be a scalar
+                    assert not tensor.shape
+
+                    if not hasattr(self, "dodgy_counter"):
+                        self.dodgy_counter = 0
+                    new_temp_name = f"mynewtemp{self.dodgy_counter}"
+                    self.dodgy_counter += 1
+
+                    self.parameters.append(
+                            lp.GlobalArg(
+                        slice_param.name,
+                        dtype=np.int32,
+                        shape=(None,) * len(tensor.indices),
+                    ))
+                    self.temporaries_dict[slice_param] = lp.TemporaryVariable(new_temp_name)
+
+                    tensor = slice_param
+                    # write to temporary
+                    assignee = pym.Variable(new_temp_name)
+                    expression = pym.Subscript(pym.Variable(tensor.name), tuple(pym.Variable(within_indices[index]) for index in tensor.indices))
+                    self.register_assignment(
+                        assignee, expression, frozenset(within_indices.values()), prefix="myhack"
+                    )
+
+                    param = new_temp_name
                 else:
-                    if i == 1:
-                        domain_stop = f"{tensor.name}"
-                    elif i == 2:
-                        domain_step = f"{tensor.name}"
+                    param = tensor.name
             elif isinstance(slice_param, str):
                 self.parameters.append(
                         lp.GlobalArg(
@@ -454,18 +447,16 @@ class _LoopyKernelBuilder:
                     dtype=np.int32,
                     shape=(),
                 ))
-
+                param = slice_param
             else:
                 import numbers
                 if not isinstance(slice_param, numbers.Integral):
                     raise NotImplementedError
+                param = slice_param
 
-        isl_domain = f"[{iname}]: {domain.start} <= {iname} < {domain_stop}"
-        if domain.step != 1:
-            tmp_iname = iname + "_tmp"
-            isl_domain += f" and (exists {tmp_iname}: {iname} = {domain_step}*{tmp_iname})"
-        isl_domain = "{" + isl_domain + "}"
+            startstop.append(param)
 
+        isl_domain = f"{{ [{iname}]: {startstop[0]} <= {iname} < {startstop[1]} }}"
         if isl_domain in self.domains:
             raise ValueError
         self.domains.add(isl_domain)
