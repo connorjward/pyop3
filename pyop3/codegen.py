@@ -1,3 +1,5 @@
+import collections
+import numbers
 import enum
 import functools
 import itertools
@@ -49,8 +51,9 @@ class _LoopyKernelBuilder:
         self.arguments_dict = {}
         self.parameters = []
         self.subkernels = []
+        self.temporaries = []
         self.maps_dict = {}
-        self.temporaries_dict = {}
+        self.function_temporaries = collections.defaultdict(dict)
         self.name_generator = pyop3.utils.UniqueNameGenerator()
 
     @property
@@ -62,12 +65,8 @@ class _LoopyKernelBuilder:
         return tuple(self.maps_dict.values())
 
     @property
-    def temporaries(self):
-        return tuple(self.temporaries_dict.values())
-
-    @property
     def kernel_data(self):
-        return self.arguments + self.maps + self.temporaries + tuple(self.parameters)
+        return self.arguments + self.maps + tuple(self.temporaries) + tuple(self.parameters)
 
     def build(self):
         self._fill_loopy_context(self.expr, within_indices={})
@@ -82,14 +81,10 @@ class _LoopyKernelBuilder:
 
         return lp.merge((translation_unit, *self.subkernels))
 
-    def register_temporary(self, argument, **kwargs):
-        if argument in self.temporaries_dict:
-            raise AssertionError
-
+    def register_temporary(self, **kwargs):
         name = self.name_generator.generate("t")
-        return self.temporaries_dict.setdefault(
-            argument, lp.TemporaryVariable(name, **kwargs)
-        )
+        self.temporaries.append(temporary := lp.TemporaryVariable(name, **kwargs))
+        return temporary
 
     def generate_iname(self):
         return self.name_generator.generate("i")
@@ -121,7 +116,9 @@ class _LoopyKernelBuilder:
                 shape = tuple(idx.domain.stop - idx.domain.start for idx in broadcast_indices)
             else:
                 shape = ()
-            self.register_temporary(argument, dtype=argument.dtype, shape=shape)
+
+            temporary = self.register_temporary(dtype=argument.dtype, shape=shape)
+            self.function_temporaries[expr][argument] = temporary
 
             if argument in self.arguments_dict:
                 # TODO I currently assume that we only ever register arguments once.
@@ -148,7 +145,7 @@ class _LoopyKernelBuilder:
     def register_gathers(self, call, within_indices, *, depends_on=frozenset()):
         gathers = []
         for argument in call.arguments:
-            temporary = self.temporaries_dict[argument]
+            temporary = self.function_temporaries[call][argument]
             if argument.access == pyop3.exprs.READ:
                 gathers.append(self.read_tensor(argument, temporary, within_indices))
             elif argument.access == pyop3.exprs.WRITE:
@@ -182,7 +179,7 @@ class _LoopyKernelBuilder:
     def register_scatters(self, call, within_indices, *, depends_on=frozenset()):
         scatters = []
         for argument in call.arguments:
-            temporary = self.temporaries_dict[argument]
+            temporary = self.function_temporaries[call][argument]
             if argument.access == pyop3.exprs.READ:
                 continue
             elif argument.access == pyop3.exprs.WRITE:
@@ -205,7 +202,7 @@ class _LoopyKernelBuilder:
         reads = []
         writes = []
         for argument in call.arguments:
-            temporary = self.temporaries_dict[argument]
+            temporary = self.function_temporaries[call][argument]
             access = argument.access
 
             ref = self.as_subarrayref(argument, temporary, within_indices)
@@ -397,59 +394,45 @@ class _LoopyKernelBuilder:
             )
             self.register_maps(index.indices[0])
 
-    def register_domain(self, iname: str, domain, within_indices):
-        start, stop = domain.start, domain.stop
-        startstop = []
-        for i, slice_param in enumerate([start, stop]):
-            # register tensor-like parameters
-            if isinstance(slice_param, Tensor):
-                tensor = slice_param
+    def register_parameter(self, **kwargs):
+        self.parameters.append(parameter := lp.GlobalArg(**kwargs))
+        return parameter
 
-                if tensor.indices:
-                    # must be a scalar
-                    assert not tensor.shape
+    def register_domain_parameter(self, parameter, within_indices):
+        if isinstance(parameter, Tensor):
+            assert parameter.is_scalar
 
-                    if not hasattr(self, "dodgy_counter"):
-                        self.dodgy_counter = 0
-                    new_temp_name = f"mynewtemp{self.dodgy_counter}"
-                    self.dodgy_counter += 1
+            self.register_parameter(
+                name=parameter.name, dtype=parameter.dtype, shape=(None,) * len(parameter.indices)
+            )
 
-                    self.parameters.append(
-                            lp.GlobalArg(
-                        slice_param.name,
-                        dtype=np.int32,
-                        shape=(None,) * len(tensor.indices),
-                    ))
-                    self.temporaries_dict[slice_param] = lp.TemporaryVariable(new_temp_name)
-
-                    tensor = slice_param
-                    # write to temporary
-                    assignee = pym.Variable(new_temp_name)
-                    expression = pym.Subscript(pym.Variable(tensor.name), tuple(pym.Variable(within_indices[index]) for index in tensor.indices))
-                    self.register_assignment(
-                        assignee, expression, frozenset(within_indices.values()), prefix="myhack"
-                    )
-
-                    param = new_temp_name
-                else:
-                    param = tensor.name
-            elif isinstance(slice_param, str):
-                self.parameters.append(
-                        lp.GlobalArg(
-                    slice_param,
-                    dtype=np.int32,
-                    shape=(),
-                ))
-                param = slice_param
+            # if the tensor is an indexed expression we need to create a temporary for it
+            if parameter.indices:
+                temporary = self.register_temporary()
+                assignee = pym.Variable(temporary.name)
+                # TODO Put into utility function
+                expression = pym.Subscript(
+                    pym.Variable(parameter.name),
+                    tuple(pym.Variable(within_indices[index]) for index in parameter.indices)
+                )
+                self.register_assignment(
+                    assignee, expression, frozenset(within_indices.values())
+                )
+                return temporary.name
             else:
-                import numbers
-                if not isinstance(slice_param, numbers.Integral):
-                    raise NotImplementedError
-                param = slice_param
+                return parameter.name
+        elif isinstance(parameter, str):
+            self.register_parameter(name=parameter, dtype=np.int32, shape=())
+            return parameter
+        elif isinstance(parameter, numbers.Integral):
+            return parameter
+        else:
+            raise ValueError
 
-            startstop.append(param)
-
-        isl_domain = f"{{ [{iname}]: {startstop[0]} <= {iname} < {startstop[1]} }}"
+    def register_domain(self, iname: str, domain, within_indices):
+        start, stop = (self.register_domain_parameter(param, within_indices)
+                       for param in [domain.start, domain.stop])
+        isl_domain = f"{{ [{iname}]: {start} <= {iname} < {stop} }}"
         if isl_domain in self.domains:
             raise ValueError
         self.domains.add(isl_domain)
