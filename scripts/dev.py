@@ -58,7 +58,7 @@ class DemoMesh:
         try:
             return self.map_cache[key]
         except KeyError:
-            map_ = pyop3.Tensor((index, pyop3.Range(self.CLOSURE_ARITY).index), mesh=self, prefix="map")[index]
+            map_ = pyop3.Tensor(self.CLOSURE_ARITY, index, mesh=self, prefix="map")
             return self.map_cache.setdefault(key, map_)
 
 
@@ -69,11 +69,12 @@ class DemoExtrudedMesh:
     BASE_CLOSURE_ARITY = 5
 
     def __init__(self):
-        domain = pyop3.Range(self.BASE_CLOSURE_ARITY)
-        self.offsets = pyop3.Dat(domain, name="offsets")
-        self.layer_count = pyop3.Dat(domain, name="layer_count")
+        pass
+        # domain = pyop3.Range(self.BASE_CLOSURE_ARITY)
+        # self.offsets = pyop3.Dat(domain, name="offsets")
+        # self.layer_count = pyop3.Dat(domain, name="layer_count")
 
-    def closure(self, index: pyop3.Index):
+    def closure(self, index):
         """
 
         Something like:
@@ -118,7 +119,7 @@ dat3 = pyop3.Dat(NPOINTS, name="dat3")
 vdat1 = pyop3.Dat((NPOINTS, 3), name="dat1")
 vdat2 = pyop3.Dat((NPOINTS, 3), name="dat2")
 
-mat1 = pyop3.Mat((MESH.points, MESH.points), name="mat1")
+# mat1 = pyop3.Mat((MESH.points, MESH.points), name="mat1")
 
 DEMOS = {}
 
@@ -160,7 +161,7 @@ def basic_parloop():
         loopy_kernel,
     )
     return pyop3.Loop(
-        p := ITERSET.index,
+        p := ITERSET,
         [
             kernel(
                 dat1[pyop3.closure(p)], dat2[pyop3.closure(p)], result[pyop3.closure(p)]

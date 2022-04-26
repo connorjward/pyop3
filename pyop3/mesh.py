@@ -1,6 +1,6 @@
 import dataclasses
 
-from pyop3.tensors import Dat, Index
+from pyop3.tensors import Dat
 
 
 
@@ -10,7 +10,7 @@ class Mesh:
         """Does the mesh have some kind of substructure?"""
 
     # TODO decorate with some sort of cache
-    def cone(self, point_set: Index):
+    def cone(self, point_set):
         """Return a map."""
 
 
@@ -31,7 +31,7 @@ class ExtrudedMesh(Mesh):
         self.offsets = Dat(domain, "offsets")
         self.layer_count = Dat(domain, "layer_count")
 
-    def closure(self, index: Index):
+    def closure(self, index):
         """
 
         Something like:
@@ -138,8 +138,8 @@ def compute_strides(points, plex_op):
 
 
 def closure(index):
-    return index.tensor.mesh.closure(index)
+    return index.mesh.closure(index)
 
 
 def star(index):
-    return index.tensor.mesh.star(index)
+    return index.mesh.star(index)

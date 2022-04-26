@@ -10,7 +10,7 @@ import pymbolic.primitives as pym
 import pyop3.exprs
 import pyop3.utils
 from pyop3.tensors import Tensor
-from pyop3.tensors import Range, Index
+from pyop3.tensors import Range
 
 LOOPY_TARGET = lp.CTarget()
 LOOPY_LANG_VERSION = (2018, 2)
@@ -118,7 +118,7 @@ class _LoopyKernelBuilder:
             if broadcast_indices := self.register_broadcast_indices(
                 argument, within_indices
             ):
-                shape = tuple(idx.stop - idx.start for idx in broadcast_indices)
+                shape = tuple(idx.domain.stop - idx.domain.start for idx in broadcast_indices)
             else:
                 shape = ()
             self.register_temporary(argument, dtype=argument.dtype, shape=shape)
@@ -135,8 +135,6 @@ class _LoopyKernelBuilder:
             )
 
             for index in argument.indices:
-                if isinstance(index, Tensor):
-                    index = index.index
                 self.register_maps(index)
 
         gathers = self.register_gathers(expr, within_indices)
@@ -379,30 +377,28 @@ class _LoopyKernelBuilder:
             assignee, expression, within_inames, depends_on, "inc"
         )
 
-    def stack_subscripts(self, index: Index, index_map):
+    def stack_subscripts(self, index, index_map):
         """Convert an index tensor expression into a pymbolic expression"""
-        if index.tensor.indices:
+        if index.indices:
             return pym.Subscript(
-                pym.Variable(index.tensor.name),
-                # we do this weird indexing because indices is not very good here since we need to exclude the last one
-                tuple(self.stack_subscripts(idx, index_map) for idx in index.tensor.indices[:-1]) + (pym.Variable(index_map[index]),)
+                pym.Variable(index.name),
+                tuple(self.stack_subscripts(idx, index_map) for idx in index.indices) + (pym.Variable(index_map[index]),)
             )
         else:
             return pym.Variable(index_map[index])
-            # return pym.Variable(index.tensor.name)
 
-    def register_maps(self, index: Index):
+    def register_maps(self, index):
         # TODO This seems like quite a hacky way to tell if index is a map
         # FIXME This whole bit needs a rethink
-        if len(index.tensor.indices) == 2 and index not in self.maps_dict:
-            from_index, to_index = index.tensor.indices
-            # self.maps_dict[index] = lp.GlobalArg(
-            #     index.name, dtype=np.int32, shape=(None, to_index.range.size)
-            # )
-            self.register_maps(from_index)
+        is_map = index.is_vector and len(index.indices) == 1
+        if is_map and index not in self.maps_dict:
+            self.maps_dict[index] = lp.GlobalArg(
+                index.name, dtype=np.int32, shape=(None, len(index.domain))
+            )
+            self.register_maps(index.indices[0])
 
     def register_domain(self, iname: str, domain, within_indices):
-        start, stop = domain
+        start, stop = domain.start, domain.stop
         startstop = []
         for i, slice_param in enumerate([start, stop]):
             # register tensor-like parameters
@@ -460,7 +456,8 @@ class _LoopyKernelBuilder:
 
     def register_broadcast_indices(self, argument, within_indices):
         broadcast_indices = {}
-        for index in argument.tensor.broadcast_indices:
+        indices = tuple(filter(lambda idx: idx not in within_indices, argument.tensor.indices))
+        for index in indices + tuple(dom.to_range() for dom in argument.tensor.shape):
             iname = self.generate_iname()
             self.register_domain(iname, index.domain, within_indices)
             broadcast_indices[index] = iname

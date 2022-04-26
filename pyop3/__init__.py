@@ -10,4 +10,4 @@ from pyop3.exprs import (  # noqa: F401
     Loop,
 )
 from pyop3.mesh import closure, star
-from pyop3.tensors import Range, Index, Dat, Global, Mat, Tensor  # noqa: F401
+from pyop3.tensors import Range, Dat, Global, Mat, Tensor  # noqa: F401
