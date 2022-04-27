@@ -98,8 +98,17 @@ class DemoExtrudedMesh:
 
     @property
     def cells(self):
-        layers = pyop3.Range(self.layer_count[self.basecells])
-        return self.basecells, layers
+        layers = pyop3.Range(self.layer_count[self.basecells.index])
+        return IndexBag(self.basecells, layers)
+
+
+class IndexBag:
+    def __init__(self, *indices):
+        self.indices = indices
+
+    @property
+    def index(self):
+        return tuple(idx.index for idx in self.indices)
 
 
 EXTRUDED_MESH = DemoExtrudedMesh()
@@ -161,7 +170,7 @@ def basic_parloop():
         loopy_kernel,
     )
     return pyop3.Loop(
-        p := ITERSET,
+        p := ITERSET.index,
         [
             kernel(
                 dat1[pyop3.closure(p)], dat2[pyop3.closure(p)], result[pyop3.closure(p)]
@@ -195,7 +204,7 @@ def global_parloop():
         loopy_kernel,
     )
     return pyop3.Loop(
-        p := ITERSET,
+        p := ITERSET.index,
         [kernel(glob1, result[pyop3.closure(p)])],
     )
 
@@ -231,7 +240,7 @@ def vdat_parloop():
         loopy_kernel,
     )
     return pyop3.Loop(
-        p := ITERSET,
+        p := ITERSET.index,
         [
             kernel(
                 vdat1[pyop3.closure(p)],
@@ -244,9 +253,9 @@ def vdat_parloop():
 
 @register_demo
 def extruded_direct():
-    dat1 = pyop3.Dat(EXTRUDED_MESH.NBASECELLS, name="dat1")
-    dat2 = pyop3.Dat(EXTRUDED_MESH.NBASECELLS, name="dat2")
-    result = pyop3.Dat(EXTRUDED_MESH.NBASECELLS, name="result")
+    dat1 = pyop3.Dat((EXTRUDED_MESH.NBASECELLS, 5), name="dat1")
+    dat2 = pyop3.Dat((EXTRUDED_MESH.NBASECELLS, 5), name="dat2")
+    result = pyop3.Dat((EXTRUDED_MESH.NBASECELLS, 5), name="result")
     loopy_kernel = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
         ["z = x + y"],
@@ -275,7 +284,7 @@ def extruded_direct():
         loopy_kernel,
     )
     return pyop3.Loop(
-        p := EXTRUDED_MESH.cells,
+        p := EXTRUDED_MESH.cells.index,
         [
             kernel(
                 dat1[p], dat2[p], result[p]

@@ -1,4 +1,5 @@
 import collections
+import dataclasses
 import numbers
 import enum
 import functools
@@ -42,14 +43,30 @@ def to_c(expr):
     return lp.generate_code_v2(program).device_code()
 
 
+@dataclasses.dataclass(frozen=True)
+class DomainContext:
+    iname: str
+    start: pym.Variable
+    stop: pym.Variable
+
+    def __str__(self):
+        return f"{{ [{self.iname}]: {self.start} <= {self.iname} < {self.stop} }}"
+
+    @property
+    def shape(self):
+        return self.stop - self.start
+
+
+
 class _LoopyKernelBuilder:
     def __init__(self, expr):
         self.expr = expr
 
-        self.domains_dict = {}
+        self.domains = []
         self.instructions = []
         self.arguments_dict = {}
         self.parameter_dict = {}
+        self.parameters_dict = {}
         self.subkernels = []
         self.temporaries = []
         self.domain_parameters = {}
@@ -60,10 +77,6 @@ class _LoopyKernelBuilder:
     @property
     def arguments(self):
         return tuple(self.arguments_dict.values())
-
-    @property
-    def domains(self):
-        return frozenset(self.domains_dict.values())
 
     @property
     def parameters(self):
@@ -78,10 +91,10 @@ class _LoopyKernelBuilder:
         return self.arguments + self.maps + tuple(self.temporaries) + self.parameters
 
     def build(self):
-        self._fill_loopy_context(self.expr, within_domains={})
+        self._fill_loopy_context(self.expr, within_inames={})
 
         translation_unit = lp.make_kernel(
-            self.domains,
+            frozenset(str(dom) for dom in self.domains),
             self.instructions,
             self.kernel_data,
             target=LOOPY_TARGET,
@@ -103,37 +116,51 @@ class _LoopyKernelBuilder:
         raise NotImplementedError
 
     @_fill_loopy_context.register
-    def _(self, expr: pyop3.exprs.Loop, *, within_domains, **kwargs):
+    def _(self, expr: pyop3.exprs.Loop, *, within_inames, **kwargs):
+        new_within_inames = {}
         for index in expr.indices:
-            iname = self.generate_iname()
-            self.register_domain(iname, index.domain, within_domains)
-            within_domains[index.domain] = iname
+            new_within_inames[index.domain] = self.register_domain(index.domain, within_inames|new_within_inames)
 
         for statement in expr.statements:
             self._fill_loopy_context(
                 statement,
-                within_domains,
+                within_inames=within_inames|new_within_inames,
                 **kwargs,
             )
 
-    def as_shape(self, domains, within_domains, *, first_is_none=False):
+    def as_shape(self, domains, *, first_is_none=False):
         shape = []
         for i, domain in enumerate(domains):
             if first_is_none and i == 0:
                 shape.append(None)
             else:
-                start, stop = self.domain_parameters[domain]
-                # TODO This will fail for certain types of inputs
-                shape.append(f"{stop}-{start}")
+                assert domain.start in self.parameters_dict
+                assert domain.stop in self.parameters_dict
+                start = self.register_domain_parameter(domain.start, None)
+                stop = self.register_domain_parameter(domain.stop, None)
+                shape.append(stop-start)
+        return tuple(shape)
+
+    def as_orig_shape(self, domains):
+        def as_pym_var(param):
+            if isinstance(param, numbers.Integral):
+                return param
+            else:
+                return pym.Variable(param)
+
+        shape = [None]
+        for domain in domains[1:]:
+            start = as_pym_var(domain.start)
+            stop = as_pym_var(domain.stop)
+            shape.append(stop-start)
         return tuple(shape)
 
     @_fill_loopy_context.register
-    def _(self, expr: pyop3.exprs.FunctionCall, within_domains, **kwargs):
+    def _(self, expr: pyop3.exprs.FunctionCall, within_inames, **kwargs):
         for argument in expr.arguments:
-            if broadcast_domains := self.register_broadcast_domains(
-                argument, within_domains
-            ):
-                shape = self.as_shape(broadcast_domains, within_domains)
+            if argument.tensor.broadcast_domains:
+                self.register_broadcast_domains(argument, within_inames)
+                shape = self.as_shape(argument.tensor.broadcast_domains)
             else:
                 shape = ()
 
@@ -148,18 +175,18 @@ class _LoopyKernelBuilder:
             self.arguments_dict[argument] = lp.GlobalArg(
                 argument.name,
                 dtype=argument.dtype,
-                shape=self.as_shape(argument.tensor.broadcast_domains, within_domains, first_is_none=True)
+                shape=self.as_orig_shape(argument.tensor.orig_shape)
             )
 
             for index in argument.indices:
                 self.register_maps(index)
 
-        gathers = self.register_gathers(expr, within_domains)
+        gathers = self.register_gathers(expr, within_inames)
         call_insn = self.register_function_call(
-            expr, within_domains, depends_on=frozenset(insn.id for insn in gathers)
+            expr, within_inames, depends_on=frozenset(insn.id for insn in gathers)
         )
         _ = self.register_scatters(
-            expr, within_domains, depends_on=frozenset({call_insn.id})
+            expr, within_inames, depends_on=frozenset({call_insn.id})
         )
 
     def register_gathers(self, call, within_domains, *, depends_on=frozenset()):
@@ -178,8 +205,8 @@ class _LoopyKernelBuilder:
                 raise NotImplementedError
         return tuple(gathers)
 
-    def register_function_call(self, call, within_domains, *, depends_on=frozenset()):
-        reads, writes = self.get_function_rw(call, within_domains)
+    def register_function_call(self, call, within_inames, *, depends_on=frozenset()):
+        reads, writes = self.get_function_rw(call, within_inames)
         assignees = tuple(writes)
         expression = pym.Call(
             pym.Variable(call.function.loopy_kernel.default_entrypoint.name),
@@ -189,7 +216,7 @@ class _LoopyKernelBuilder:
             assignees,
             expression,
             id=self.name_generator.generate("func"),
-            within_inames=frozenset(within_domains.values()),
+            within_inames=frozenset(within_inames.values()),
             depends_on=depends_on,
         )
         self.instructions.append(call_insn)
@@ -239,8 +266,8 @@ class _LoopyKernelBuilder:
 
     def as_subarrayref(self, argument, temporary, within_domains):
         """Register an argument to a function."""
-        broadcast_domains = self.register_broadcast_domains(argument, within_domains)
-        indices = tuple(pym.Variable(iname) for iname in broadcast_domains.values())
+        inames = self.register_broadcast_domains(argument, within_domains)
+        indices = tuple(pym.Variable(iname) for iname in inames.values())
         return lp.symbolic.SubArrayRef(
             indices, pym.Subscript(pym.Variable(temporary.name), indices)
         )
@@ -257,25 +284,25 @@ class _LoopyKernelBuilder:
             assignee,
             expression,
             id=self.name_generator.generate(prefix),
-            within_inames=within_inames,
+            within_inames=frozenset(within_inames.values()),
             depends_on=depends_on,
         )
         self.instructions.append(instruction)
         return instruction
 
-    def read_tensor(self, argument, temporary, within_domains, depends_on=frozenset()):
+    def read_tensor(self, argument, temporary, within_inames, depends_on=frozenset()):
         # so we want something like:
         # for i:
         #   for j:
         #     t[k, l] = dat[i, j, k, l]
         # in this case within_indices is i and j
         # we also need to register two new domains to loop over: k and l
-        broadcast_domains = self.register_broadcast_domains(argument, within_domains)
+        broadcast_inames = self.register_broadcast_domains(argument, within_inames)
 
-        if broadcast_domains:
+        if argument.tensor.broadcast_domains:
             assignee = pym.Subscript(
                 pym.Variable(temporary.name),
-                tuple(pym.Variable(iname) for iname in broadcast_domains.values()),
+                tuple(pym.Variable(broadcast_inames[dom]) for dom in argument.tensor.broadcast_domains),
             )
         else:
             assignee = pym.Variable(temporary.name)
@@ -284,58 +311,52 @@ class _LoopyKernelBuilder:
             expression = pym.Subscript(
                 pym.Variable(argument.name),
                 tuple(
-                    self.stack_subscripts(index, within_domains | broadcast_domains)
-                    for index in argument.tensor.indices + tuple(dom.to_range() for dom in argument.tensor.shape)
+                    self.stack_subscripts(index, within_inames|broadcast_inames)
+                    for index in argument.tensor.indices + tuple(dom.to_range().index for dom in argument.tensor.shape)
                 ),
             )
         else:
             expression = pym.Variable(argument.name)
 
-        within_inames = frozenset(
-            {*within_domains.values(), *broadcast_domains.values()}
-        )
         return self.register_assignment(
-            assignee, expression, within_inames, depends_on, "read"
+            assignee, expression, within_inames|broadcast_inames, depends_on, "read"
         )
 
-    def zero_tensor(self, argument, temporary, within_domains, depends_on=frozenset()):
+    def zero_tensor(self, argument, temporary, within_inames, depends_on=frozenset()):
         # so we want something like:
         # for i:
         #   for j:
         #     t[k, l] = 0
         # in this case within_indices is i and j
         # we also need to register two new domains to loop over: k and l
-        broadcast_domains = self.register_broadcast_domains(argument, within_domains)
+        broadcast_inames = self.register_broadcast_domains(argument, within_inames)
 
-        if broadcast_domains:
+        if argument.tensor.broadcast_domains:
             assignee = pym.Subscript(
                 pym.Variable(temporary.name),
-                tuple(pym.Variable(iname) for iname in broadcast_domains.values()),
+                tuple(pym.Variable(iname) for iname in broadcast_inames.values()),
             )
         else:
             assignee = pym.Variable(temporary.name)
 
         expression = 0
-        within_inames = frozenset(
-            {*within_domains.values(), *broadcast_domains.values()}
-        )
         return self.register_assignment(
-            assignee, expression, within_inames, depends_on=depends_on, prefix="zero"
+            assignee, expression, within_inames|broadcast_inames, depends_on=depends_on, prefix="zero"
         )
 
-    def write_tensor(self, argument, temporary, within_domains, depends_on):
+    def write_tensor(self, argument, temporary, within_inames, depends_on):
         # so we want something like:
         # for i:
         #   for j:
         #     dat[i, j, k, l] = t[k, l]
         # in this case within_indices is i and j
         # we also need to register two new domains to loop over: k and l
-        broadcast_domains = self.register_broadcast_domains(argument, within_domains)
+        broadcast_inames = self.register_broadcast_domains(argument, within_inames)
 
-        if broadcast_domains:
+        if argument.tensor.broadcast_domains:
             expression = pym.Subscript(
                 pym.Variable(temporary.name),
-                tuple(pym.Variable(iname) for iname in broadcast_domains.values()),
+                tuple(pym.Variable(iname) for iname in broadcast_inames.values()),
             )
         else:
             expression = pym.Variable(temporary.name)
@@ -343,43 +364,40 @@ class _LoopyKernelBuilder:
         assignee = pym.Subscript(
             pym.Variable(argument.name),
             tuple(
-                self.stack_subscripts(index, within_domains | broadcast_domains)
-                for index in argument.tensor.indices + tuple(dom.to_range() for dom in argument.tensor.shape)
+                self.stack_subscripts(index, within_inames|broadcast_inames)
+                for index in argument.tensor.indices + tuple(dom.to_range().index for dom in argument.tensor.shape)
             ),
         )
 
-        within_inames = frozenset(
-            {*within_domains.values(), *broadcast_domains.values()}
-        )
         return self.register_assignment(
-            assignee, expression, within_inames, depends_on, "write"
+            assignee, expression, within_inames|broadcast_inames, depends_on, "write"
         )
 
-    def inc_tensor(self, argument, temporary, within_domains, depends_on):
+    def inc_tensor(self, argument, temporary, within_inames, depends_on):
         # so we want something like:
         # for i:
         #   for j:
         #     dat[i, j, k, l] = dat[i, j, k, l] + t[k, l]
         # in this case within_indices is i and j
         # we also need to register two new domains to loop over: k and l
-        broadcast_domains = self.register_broadcast_domains(argument, within_domains)
+        broadcast_inames = self.register_broadcast_domains(argument, within_inames)
 
         assignee = pym.Subscript(
             pym.Variable(argument.name),
             tuple(
-                self.stack_subscripts(index, within_domains | broadcast_domains)
-                for index in argument.tensor.indices + tuple(dom.to_range() for dom in argument.tensor.shape)
+                self.stack_subscripts(index, within_inames|broadcast_inames)
+                for index in argument.tensor.indices + tuple(dom.to_range().index for dom in argument.tensor.shape)
             ),
         )
 
-        if broadcast_domains:
+        if argument.tensor.broadcast_domains:
             expression = pym.Sum(
                 (
                     assignee,
                     pym.Subscript(
                         pym.Variable(temporary.name),
                         tuple(
-                            pym.Variable(iname) for iname in broadcast_domains.values()
+                            pym.Variable(iname) for iname in broadcast_inames.values()
                         ),
                     ),
                 )
@@ -387,19 +405,16 @@ class _LoopyKernelBuilder:
         else:
             expression = pym.Sum((assignee, pym.Variable(temporary.name)))
 
-        within_inames = frozenset(
-            {*within_domains.values(), *broadcast_domains.values()}
-        )
         return self.register_assignment(
-            assignee, expression, within_inames, depends_on, "inc"
+            assignee, expression, within_inames|broadcast_inames, depends_on, "inc"
         )
 
-    def stack_subscripts(self, index, domain_map):
+    def stack_subscripts(self, index, within_inames):
         """Convert an index tensor expression into a pymbolic expression"""
-        iname_var = pym.Variable(domain_map[index.domain])
+        iname_var = pym.Variable(within_inames[index.domain])
         is_map = index.is_vector and len(index.indices) == 1
         if is_map:
-            subscripts = tuple(self.stack_subscripts(idx, domain_map) for idx in index.indices)
+            subscripts = tuple(self.stack_subscripts(idx, within_inames) for idx in index.indices)
             return pym.Subscript(pym.Variable(index.name), (*subscripts, iname_var))
         else:
             return iname_var
@@ -417,9 +432,12 @@ class _LoopyKernelBuilder:
     def register_parameter(self, parameter, **kwargs):
         return self.parameter_dict.setdefault(parameter, lp.GlobalArg(**kwargs))
 
-    def register_domain_parameter(self, parameter, within_domains):
+    def register_domain_parameter(self, parameter, within_inames):
         """Return a pymbolic expression"""
         if isinstance(parameter, Tensor):
+            if parameter in self.parameters_dict:
+                return self.parameters_dict[parameter]
+
             assert parameter.is_scalar
 
             # FIXME need to validate if already exists here...
@@ -435,37 +453,31 @@ class _LoopyKernelBuilder:
                 # TODO Put into utility function
                 expression = pym.Subscript(
                     pym.Variable(parameter.name),
-                    tuple(pym.Variable(within_domains[index.domain]) for index in parameter.indices)
+                    tuple(pym.Variable(within_inames[index.domain]) for index in parameter.indices)
                 )
                 self.register_assignment(
-                    assignee, expression, frozenset(within_domains.values())
+                    assignee, expression, within_inames=within_inames
                 )
-                return temporary.name
+                return self.parameters_dict.setdefault(parameter, pym.Variable(temporary.name))
             else:
-                return parameter.name
+                return self.parameters_dict.setdefault(parameter, pym.Variable(parameter.name))
         elif isinstance(parameter, str):
             self.register_parameter(parameter, name=parameter, dtype=np.int32, shape=())
-            return parameter
+            return self.parameters_dict.setdefault(parameter, pym.Variable(parameter))
         elif isinstance(parameter, numbers.Integral):
-            return parameter
+            return self.parameters_dict.setdefault(parameter, parameter)
         else:
             raise ValueError
 
-    def register_domain(self, iname: str, domain, within_domains):
-        if domain in self.domains_dict:
-            return
-
-        start, stop = (self.register_domain_parameter(param, within_domains)
+    def register_domain(self, domain, within_inames):
+        iname = self.generate_iname()
+        start, stop = (self.register_domain_parameter(param, within_inames)
                        for param in [domain.start, domain.stop])
-        self.domain_parameters[domain] = start, stop
-        isl_domain = f"{{ [{iname}]: {start} <= {iname} < {stop} }}"
-        assert isl_domain not in self.domains_dict.values()
-        self.domains_dict[domain] = isl_domain
+        self.domains.append(DomainContext(iname, start, stop))
+        return iname
 
-    def register_broadcast_domains(self, argument, within_domains):
-        broadcast_domains = {}
-        for domain in filter(lambda d: d not in within_domains, argument.tensor.all_domains):
-            iname = self.generate_iname()
-            self.register_domain(iname, domain, within_domains)
-            broadcast_domains[domain] = iname
-        return broadcast_domains
+    def register_broadcast_domains(self, argument, within_inames):
+        inames = {}
+        for domain in argument.tensor.broadcast_domains:
+            inames[domain] = self.register_domain(domain, within_inames)
+        return inames

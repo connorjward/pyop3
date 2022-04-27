@@ -23,50 +23,61 @@ class Tensor:
     name_generator = pyop3.utils.UniqueNameGenerator()
     prefix = "ten"
 
-    def __init__(self, shape=(), indices=(), *, mesh=None, name: str = None, prefix: str=None):
+    def __init__(self, shape=(), indices=(), *, mesh=None, name: str = None, prefix: str=None, parent=None):
         self.shape = tuple(as_domain(dom) for dom in as_tuple(shape))
         self.indices = as_tuple(indices)
         self.mesh = mesh
         self.name = name or self.name_generator.generate(prefix or self.prefix)
 
-        self.within_domains = tuple(idx.domain for idx in self.indices if idx.is_scalar)
-        self.broadcast_domains = (
-            *(idx.domain for idx in self.indices if idx.is_vector), *self.shape
-        )
-        self.all_domains = self.within_domains + self.broadcast_domains
+
+        self.shape_domains = frozenset(self.shape)
+        self.broadcast_domains = frozenset((idx.domain for idx in self.indices if not isinstance(idx, IndexLiteral) and idx.is_vector)) | self.shape_domains
+
+        # need to traverse to collect all domains
+        def myrecursion(index):
+            result = {index.domain}
+            for idx in index.indices:
+                result |= myrecursion(idx)
+            return result
+
+        all_domains = set()
+        for index in self.indices:
+            all_domains |= myrecursion(index)
+        self.all_domains = frozenset(all_domains) | self.shape_domains
+        self.within_domains = self.all_domains - self.broadcast_domains
+
+        self.parent = parent
 
     def __getitem__(self, indices):
+        # FIXME You cannot index over the top of slices since these are considered indices
         indices = as_tuple(indices)
 
-        # if len(indices) > len(self.broadcast_indices):
-        #     raise ValueError
-
-        # FIXME You cannot index over the top of slices since these are considered indices
-        # index_iterator = list(indices)
-        # for i, dom in enumerate(self.indices):
-        #     if index not in self.within_indices and index_iterator:
-        #         new_index = index_iterator.pop(0)
-        #         if self.is_slice(new_index):
-        #             # add another broadcast index
-        #             if isinstance(new_index, Tensor):
-        #                 new_indices[i] = new_index.index
-        #             else:
-        #                 assert isinstance(new_index, slice)
-        #                 assert new_index.step == 1
-        #                 new_indices[i] = Range(new_index.start, new_index.stop).index
-        #         else:
-        #             new_indices[i] = new_index
-        #             new_within_indices.add(index)
+        if len(indices) > len(self.shape):
+            raise ValueError
 
         return self.copy(
             shape=self.shape[len(indices):],
-            indices=self.indices + indices
+            indices=self.indices + indices,
+            parent=self
         )
+
+    def __str__(self):
+        return f"{self.name}[{','.join(str(idx) for idx in self.indices)}]"
+
+    @property
+    def orig_shape(self):
+        tensor = self
+        while tensor.parent:
+            tensor = tensor.parent
+        return tensor.shape
+
+    @property
+    def index(self):
+        return self[IndexLiteral(self.shape[0], mesh=self.mesh)]
 
     @property
     def domain(self):
         try:
-            # FIXME this is failing for the extruded case, not entirely sure why...
             (dom,) = self.shape
             return dom
         except ValueError:
@@ -74,7 +85,7 @@ class Tensor:
 
     @property
     def order(self):
-        return len(self.shape)
+        return len(self.broadcast_domains)
 
     @property
     def is_scalar(self):
@@ -89,7 +100,8 @@ class Tensor:
         indices = kwargs.get("indices", self.indices)
         mesh = kwargs.get("mesh", self.mesh)
         name = kwargs.get("name", self.name)
-        return type(self)(shape=shape, indices=indices, mesh=mesh, name=name)
+        parent = kwargs.get("parent", self.parent)
+        return type(self)(shape=shape, indices=indices, mesh=mesh, name=name, parent=parent)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -104,14 +116,37 @@ class Domain:
         return Range(self.start, self.stop)
 
 
-def Range(*args, **kwargs) -> Tensor:
-    try:
-        start, stop = args
-    except ValueError:
-        start = 0
-        (stop,) = args
-    shape = Domain(start, stop)
-    return Tensor(shape, prefix="count", **kwargs)
+@dataclasses.dataclass(frozen=True)
+class IndexLiteral:
+    domain: Domain
+    mesh: int=None
+
+    indices = ()
+    is_vector = False
+    is_scalar = True
+
+
+
+# this just isn't a tensor unfortunately
+# range.index should return i
+# whereas
+# tensor.index should return tensor[i]
+class Range:
+    def __init__(self, *args, mesh=None):
+        try:
+            self.start, self.stop = args
+        except ValueError:
+            self.start = 0
+            (self.stop,) = args
+        self.shape = Domain(self.start, self.stop)
+        self.domain = self.shape
+        self.mesh = mesh
+
+        self.index = IndexLiteral(self.shape, mesh=self.mesh)
+        self.indices = self.index,
+
+    is_vector = True
+    is_scalar = False
 
 
 def Global(*, name: str = None):
