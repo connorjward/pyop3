@@ -10,12 +10,22 @@ import pyop3.codegen
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("demo", type=str, choices=DEMOS.keys())
+    parser.add_argument("demo", type=str, choices=[*DEMOS.keys(), "check"])
     parser.add_argument(
         "-t", "--target", type=str, required=True, choices={"dag", "c", "loopy"}
     )
     parser.add_argument("--pdb", action="store_true", dest="breakpoint")
     args = parser.parse_args()
+
+    if args.demo == "check":
+        for name, demo in DEMOS.items():
+            print(name, end="")
+            try:
+                demo()
+                print(" SUCCESS")
+            except:
+                print(" FAIL")
+        exit()
 
     expr = DEMOS[args.demo]()
 
