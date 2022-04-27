@@ -29,6 +29,12 @@ class Tensor:
         self.mesh = mesh
         self.name = name or self.name_generator.generate(prefix or self.prefix)
 
+        self.within_domains = tuple(idx.domain for idx in self.indices if idx.is_scalar)
+        self.broadcast_domains = (
+            *(idx.domain for idx in self.indices if idx.is_vector), *self.shape
+        )
+        self.all_domains = self.within_domains + self.broadcast_domains
+
     def __getitem__(self, indices):
         indices = as_tuple(indices)
 
@@ -60,6 +66,7 @@ class Tensor:
     @property
     def domain(self):
         try:
+            # FIXME this is failing for the extruded case, not entirely sure why...
             (dom,) = self.shape
             return dom
         except ValueError:
@@ -77,23 +84,15 @@ class Tensor:
     def is_vector(self):
         return self.order == 1
 
-    # @property
-    # def broadcast_indices(self):
-    #     return tuple(idx for idx in self.indices if idx.is_vector)
-    #
-    # @property
-    # def within_indices(self):
-    #     return tuple(idx for idx in self.indices if idx.is_scalar)
-
     def copy(self, **kwargs):
         shape = kwargs.get("shape", self.shape)
         indices = kwargs.get("indices", self.indices)
-        mesh = kwargs.get("indices", self.mesh)
+        mesh = kwargs.get("mesh", self.mesh)
         name = kwargs.get("name", self.name)
         return type(self)(shape=shape, indices=indices, mesh=mesh, name=name)
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(frozen=True)
 class Domain:
     start: Tensor
     stop: Tensor
@@ -121,8 +120,8 @@ def Global(*, name: str = None):
     return Tensor(name=name)
 
 
-def Dat(shape: Tuple[int, ...], *, name: str = None) -> Tensor:
-    return Tensor(shape, name=name, prefix="dat")
+def Dat(shape: Tuple[int, ...], *, prefix="dat", **kwargs) -> Tensor:
+    return Tensor(shape, prefix=prefix, **kwargs)
 
 
 def Mat(shape: Tuple[int, ...], *, name: str = None):

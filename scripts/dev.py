@@ -65,14 +65,14 @@ class DemoMesh:
 class DemoExtrudedMesh:
 
     NPOINTS = 68
-    NCELLS = 12
+    NBASECELLS = 12
     BASE_CLOSURE_ARITY = 5
 
     def __init__(self):
-        pass
-        # domain = pyop3.Range(self.BASE_CLOSURE_ARITY)
-        # self.offsets = pyop3.Dat(domain, name="offsets")
-        # self.layer_count = pyop3.Dat(domain, name="layer_count")
+        base = pyop3.Range(self.NBASECELLS)
+        self.basecells = base
+        # self.offsets = pyop3.Dat(base, name="offsets")
+        self.layer_count = pyop3.Dat(self.NBASECELLS, name="layer_count")
 
     def closure(self, index):
         """
@@ -83,6 +83,7 @@ class DemoExtrudedMesh:
                 for i
                     dat[map[i], offset[i]+layer*layersize]
         """
+        raise NotImplementedError
 
         # map from the cell to the starting points for the extruded traversal
         # cell -> other base cells
@@ -97,9 +98,8 @@ class DemoExtrudedMesh:
 
     @property
     def cells(self):
-        base = pyop3.DenseDomain(0, self.NCELLS, mesh=self)
-        layer_domain = pyop3.DenseDomain(0, self.layer_count[base.index])
-        return pyop3.CompositeDomain(base, layer_domain)
+        layers = pyop3.Range(self.layer_count[self.basecells])
+        return self.basecells, layers
 
 
 EXTRUDED_MESH = DemoExtrudedMesh()
@@ -116,8 +116,8 @@ dat1 = pyop3.Dat(NPOINTS, name="dat1")
 dat2 = pyop3.Dat(NPOINTS, name="dat2")
 dat3 = pyop3.Dat(NPOINTS, name="dat3")
 
-vdat1 = pyop3.Dat((NPOINTS, 3), name="dat1")
-vdat2 = pyop3.Dat((NPOINTS, 3), name="dat2")
+vdat1 = pyop3.Dat((NPOINTS, 3), name="vdat1")
+vdat2 = pyop3.Dat((NPOINTS, 3), name="vdat2")
 
 # mat1 = pyop3.Mat((MESH.points, MESH.points), name="mat1")
 
@@ -172,7 +172,7 @@ def basic_parloop():
 
 @register_demo
 def global_parloop():
-    result = pyop3.Dat(MESH.points, name="result")
+    result = pyop3.Dat(NPOINTS, name="result")
     loopy_kernel = lp.make_kernel(
         [f"{{ [i]: 0 <= i < {MESH.CLOSURE_ARITY} }}"],
         ["z[i] = g"],
@@ -195,14 +195,14 @@ def global_parloop():
         loopy_kernel,
     )
     return pyop3.Loop(
-        p := ITERSET.index,
+        p := ITERSET,
         [kernel(glob1, result[pyop3.closure(p)])],
     )
 
 
 @register_demo
 def vdat_parloop():
-    result = pyop3.Dat(MESH.points, name="result")
+    result = pyop3.Dat(NPOINTS, name="result")
     loopy_kernel = lp.make_kernel(
         [f"{{ [i]: 0 <= i < {MESH.CLOSURE_ARITY} }}", "{ [j]: 0<= j < 3}"],
         ["z[i] = z[i] + x[i, j] * y[i, j]"],
@@ -244,9 +244,9 @@ def vdat_parloop():
 
 @register_demo
 def extruded_direct():
-    dat1 = pyop3.Dat(EXTRUDED_MESH.cells, name="dat1")
-    dat2 = pyop3.Dat(EXTRUDED_MESH.cells, name="dat2")
-    result = pyop3.Dat(EXTRUDED_MESH.cells, name="result")
+    dat1 = pyop3.Dat(EXTRUDED_MESH.NBASECELLS, name="dat1")
+    dat2 = pyop3.Dat(EXTRUDED_MESH.NBASECELLS, name="dat2")
+    result = pyop3.Dat(EXTRUDED_MESH.NBASECELLS, name="result")
     loopy_kernel = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
         ["z = x + y"],
@@ -275,7 +275,7 @@ def extruded_direct():
         loopy_kernel,
     )
     return pyop3.Loop(
-        p := EXTRUDED_MESH.cells.index,
+        p := EXTRUDED_MESH.cells,
         [
             kernel(
                 dat1[p], dat2[p], result[p]
