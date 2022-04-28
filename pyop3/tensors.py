@@ -93,7 +93,7 @@ class Tensor:
 
     @property
     def spaces(self):
-        return tuple(dim for dim in self.dims if isinstance(dim, Slice))
+        return tuple(dim for dim in self.dims if isinstance(dim, Space))
 
     @property
     def shape(self):
@@ -113,17 +113,9 @@ class Tensor:
         elif isinstance(dim, Slice):
             return frozenset({dim})
         elif isinstance(dim, Map):
-            return frozenset({dim}) | cls._get_broadcast_domains(dim.from_index.space)
+            return frozenset({dim.to_space}) | cls._get_broadcast_domains(dim.from_space)
         else:
             raise AssertionError
-
-        domains = set()
-        # the magic here is we broadcast everything that is not an index
-        # e.g. cone(star(p)) has two broadcast domains
-        # TODO Think about if we have a Range here - is that possible?
-        for dim in filter(lambda d: isinstance(d, Tensor), dims):
-            domains |= cls._get_broadcast_domains(dim.dims)
-        return frozenset(domains)
 
     @property
     def orig_shape(self):
@@ -131,7 +123,11 @@ class Tensor:
         for dim in self.dims:
             space = dim.space if isinstance(dim, Index) else dim
             while isinstance(space, Map):
-                space = space.from_index.space
+                space = space.from_space
+
+            # this is because a maps space can either be an index or slice
+            space = space.space if isinstance(space, Index) else space
+
             # FIXME This requires some thought about bin-ops
             # shape.append(space.size)
             shape.append(space.stop)
@@ -165,16 +161,21 @@ class Tensor:
 
 class Map(Tensor, Space):
 
-    def __init__(self, from_index, arity, *, mesh=None):
+    def __init__(self, from_space, arity, *, mesh=None):
         self._arity = arity
         self._mesh = mesh
 
-        dims = from_index, Slice(arity)
+        dims = from_space, Slice(arity)
         super().__init__(dims, prefix="map")
 
+    # TODO rename to from_dim and to_dim (latter always a slice)
     @property
-    def from_index(self):
+    def from_space(self):
         return self.dims[0]
+
+    @property
+    def to_space(self):
+        return self.dims[1]
 
     @property
     def mesh(self):

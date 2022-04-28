@@ -134,22 +134,23 @@ class _LoopyKernelBuilder:
             if first_is_none and i == 0:
                 shape.append(None)
             else:
-                assert domain.start in self.parameters_dict
-                assert domain.stop in self.parameters_dict
-                start = self.register_domain_parameter(domain.start, None)
-                stop = self.register_domain_parameter(domain.stop, None)
+                if isinstance(domain, Map):
+                    start = 0
+                    stop = domain.size
+                elif isinstance(domain, Slice):
+                    start = domain.start
+                    stop = domain.stop
+                else:
+                    raise AssertionError
+
+                assert start in self.parameters_dict
+                assert stop in self.parameters_dict
+                start = self.register_domain_parameter(start, None)
+                stop = self.register_domain_parameter(stop, None)
                 shape.append(stop-start)
         return tuple(shape)
 
     def as_orig_shape(self, domains):
-        # def as_pym_var(param):
-        #     if isinstance(param, numbers.Integral):
-        #         return param
-        #     elif isinstance(param, Tensor):
-        #         return pym.Variable(str(param))
-        #     else:
-        #         return pym.Variable(param)
-
         shape = [None]
         for domain in domains[1:]:
             assert domain.start in self.parameters_dict
@@ -426,11 +427,12 @@ class _LoopyKernelBuilder:
     def stack_subscripts(self, dim, within_inames):
         """Convert an index tensor expression into a pymbolic expression"""
         if isinstance(dim, Space):
-            iname = pym.Variable(within_inames[dim])
             if isinstance(dim, Map):
-                subscripts = self.stack_subscripts(dim.from_index, within_inames)
+                iname = pym.Variable(within_inames[dim.to_space])
+                subscripts = self.stack_subscripts(dim.from_space, within_inames)
                 return pym.Subscript(pym.Variable(dim.name), (subscripts, iname))
             else:
+                iname = pym.Variable(within_inames[dim])
                 return iname
         else:
             assert isinstance(dim, Index)
@@ -441,7 +443,7 @@ class _LoopyKernelBuilder:
             self.maps_dict[map_] = lp.GlobalArg(
                 map_.name, dtype=np.int32, shape=(None, map_.size)
             )
-            self.register_maps(map_.from_index)
+            self.register_maps(map_.from_space)
 
     def register_parameter(self, parameter, **kwargs):
         return self.parameter_dict.setdefault(parameter, lp.GlobalArg(**kwargs))
@@ -467,7 +469,7 @@ class _LoopyKernelBuilder:
                 # TODO Put into utility function
                 expression = pym.Subscript(
                     pym.Variable(parameter.name),
-                    tuple(pym.Variable(within_inames[index.domain]) for index in parameter.indices)
+                    tuple(pym.Variable(within_inames[index.space]) for index in parameter.indices)
                 )
                 self.register_assignment(
                     assignee, expression, within_inames=within_inames
