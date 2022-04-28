@@ -13,7 +13,7 @@ import pymbolic.primitives as pym
 import pyop3.exprs
 import pyop3.utils
 from pyop3.tensors import Tensor, Index, Map
-from pyop3.tensors import Range
+from pyop3.tensors import Slice, Space
 
 LOOPY_TARGET = lp.CTarget()
 LOOPY_LANG_VERSION = (2018, 2)
@@ -119,7 +119,7 @@ class _LoopyKernelBuilder:
     def _(self, expr: pyop3.exprs.Loop, *, within_inames, **kwargs):
         new_within_inames = {}
         for index in expr.indices:
-            new_within_inames[index.domain] = self.register_domain(index.domain, within_inames|new_within_inames)
+            new_within_inames[index.space] = self.register_domain(index.space, within_inames|new_within_inames)
 
         for statement in expr.statements:
             self._fill_loopy_context(
@@ -142,13 +142,13 @@ class _LoopyKernelBuilder:
         return tuple(shape)
 
     def as_orig_shape(self, domains):
-        def as_pym_var(param):
-            if isinstance(param, numbers.Integral):
-                return param
-            elif isinstance(param, Tensor):
-                return pym.Variable(str(param))
-            else:
-                return pym.Variable(param)
+        # def as_pym_var(param):
+        #     if isinstance(param, numbers.Integral):
+        #         return param
+        #     elif isinstance(param, Tensor):
+        #         return pym.Variable(str(param))
+        #     else:
+        #         return pym.Variable(param)
 
         shape = [None]
         for domain in domains[1:]:
@@ -423,20 +423,23 @@ class _LoopyKernelBuilder:
             assignee, expression, within_inames|broadcast_inames, depends_on, "inc"
         )
 
-    def stack_subscripts(self, index, within_inames):
+    def stack_subscripts(self, dim, within_inames):
         """Convert an index tensor expression into a pymbolic expression"""
-        if isinstance(index, Map):
-            subscripts = self.stack_subscripts(index.from_index, within_inames)
-            return pym.Subscript(pym.Variable(index.name), (subscripts, pym.Variable(within_inames[index.range])))
-        elif isinstance(index, (Range, Index)):
-            return pym.Variable(within_inames[index.domain])
+        if isinstance(dim, Space):
+            iname = pym.Variable(within_inames[dim])
+            if isinstance(dim, Map):
+                subscripts = self.stack_subscripts(dim.from_index, within_inames)
+                return pym.Subscript(pym.Variable(dim.name), (subscripts, iname))
+            else:
+                return iname
         else:
-            raise AssertionError
+            assert isinstance(dim, Index)
+            return pym.Variable(within_inames[dim.space])
 
     def register_maps(self, map_):
         if isinstance(map_, Map) and map_ not in self.maps_dict:
             self.maps_dict[map_] = lp.GlobalArg(
-                map_.name, dtype=np.int32, shape=(None, map_.range.stop)
+                map_.name, dtype=np.int32, shape=(None, map_.size)
             )
             self.register_maps(map_.from_index)
 
@@ -481,9 +484,18 @@ class _LoopyKernelBuilder:
             raise ValueError
 
     def register_domain(self, domain, within_inames):
+        if isinstance(domain, Map):
+            start = 0
+            stop = domain.size
+        elif isinstance(domain, Slice):
+            start = domain.start
+            stop = domain.stop
+        else:
+            raise AssertionError
+
         iname = self.generate_iname()
         start, stop = (self.register_domain_parameter(param, within_inames)
-                       for param in [domain.start, domain.stop])
+                       for param in [start, stop])
         self.domains.append(DomainContext(iname, start, stop))
         return iname
 

@@ -10,25 +10,50 @@ import pyop3.utils
 from pyop3.utils import as_tuple
 
 
-def as_domain(domain):
-    if isinstance(domain, Domain):
-        return domain
-    elif isinstance(domain, numbers.Integral):
-        return Domain(0, domain)
-    else:
-        raise ValueError
+class ValidDimension(abc.ABC):
+    """Does it make sense to index a tensor with this object?"""
 
 
-# TODO inherit from slice? how can we accomodate actual slices and integers?
-class Domain:
+class Space(ValidDimension, abc.ABC):
+    @property
+    @abc.abstractmethod
+    def mesh(self):
+        pass
+
+    @property
+    @abc.abstractmethod
+    def size(self):
+        pass
+
     @property
     def index(self):
         return Index(self)
 
+
+# This CANNOT be a subclass of Tensor. This is because if it does then it will need
+# to define dims, which would be itself!
+# We do need the indexer parent class so that we can have maps acting as dims
+class Slice(Space):
+    def __init__(self, *args, mesh=None):
+        if not args or len(args) > 3:
+            raise ValueError
+
+        if len(args) == 1:
+            self.start, self.stop, self.step = 0, *args, 1
+        elif len(args) == 2:
+            self.start, self.stop, self.step = (*args, 1)
+        else:
+            self.start, self.stop, self.step = args
+
+        self._mesh = mesh
+
     @property
-    @abc.abstractmethod
-    def range(self):
-        pass
+    def mesh(self):
+        return self._mesh
+
+    @property
+    def size(self):
+        return (self.stop - self.start) // self.step
 
 
 class Tensor:
@@ -36,12 +61,11 @@ class Tensor:
     name_generator = pyop3.utils.UniqueNameGenerator()
     prefix = "ten"
 
-    def __init__(self, dims=(), *, mesh=None, name: str = None, prefix: str=None):
+    def __init__(self, dims=(), *, name: str = None, prefix: str=None):
         # dims is a tuple of domains (indexing tensors) and indices
-        assert all(isinstance(dim, (Index, Domain)) for dim in dims)
+        assert all(isinstance(dim, ValidDimension) for dim in dims)
 
         self.dims = dims
-        self.mesh = mesh
         self.name = name or self.name_generator.generate(prefix or self.prefix)
 
     def __getitem__(self, indices):
@@ -68,8 +92,12 @@ class Tensor:
         return tuple(dim for dim in self.dims if isinstance(dim, Index))
 
     @property
-    def domains(self):
-        return tuple(dim for dim in self.dims if isinstance(dim, Domain))
+    def spaces(self):
+        return tuple(dim for dim in self.dims if isinstance(dim, Slice))
+
+    @property
+    def shape(self):
+        return tuple(space.size for space in self.spaces)
 
     @property
     def broadcast_domains(self):
@@ -83,9 +111,9 @@ class Tensor:
         if isinstance(dim, Index):
             return frozenset()
         elif isinstance(dim, Slice):
-            return frozenset({dim.domain})
+            return frozenset({dim})
         elif isinstance(dim, Map):
-            return frozenset({dim.range}) | cls._get_broadcast_domains(dim.from_index)
+            return frozenset({dim}) | cls._get_broadcast_domains(dim.from_index.space)
         else:
             raise AssertionError
 
@@ -100,12 +128,13 @@ class Tensor:
     @property
     def orig_shape(self):
         shape = []
-        for domain in self.dims:
-            if isinstance(domain, Index):
-                domain = domain.domain
-            while not isinstance(domain, Slice):
-                domain = domain.from_index.domain
-            shape.append(domain.range)
+        for dim in self.dims:
+            space = dim.space if isinstance(dim, Index) else dim
+            while isinstance(space, Map):
+                space = space.from_index.space
+            # FIXME This requires some thought about bin-ops
+            # shape.append(space.size)
+            shape.append(space.stop)
         return tuple(shape)
 
     # @property
@@ -118,7 +147,7 @@ class Tensor:
 
     @property
     def order(self):
-        return len(self.domains)
+        return len(self.spaces)
 
     @property
     def is_scalar(self):
@@ -130,62 +159,35 @@ class Tensor:
 
     def copy(self, **kwargs):
         dims = kwargs.get("dims", self.dims)
-        mesh = kwargs.get("mesh", self.mesh)
         name = kwargs.get("name", self.name)
-        return type(self)(dims=dims, mesh=mesh, name=name)
+        return type(self)(dims=dims, name=name)
 
 
-@dataclasses.dataclass(frozen=True)
-class Range:
-    start: int
-    stop: int
+class Map(Tensor, Space):
 
+    def __init__(self, from_index, arity, *, mesh=None):
+        self._arity = arity
+        self._mesh = mesh
 
-class Map(Tensor, Domain):
-
-    def __init__(self, from_index, slice_, **kwargs):
-        if isinstance(slice_, int):
-            slice_ = Slice(slice_)
-
-        dims = from_index, slice_
-
-        super().__init__(dims, prefix="map", **kwargs)
+        dims = from_index, Slice(arity)
+        super().__init__(dims, prefix="map")
 
     @property
     def from_index(self):
         return self.dims[0]
 
     @property
-    def slice(self):
-        return self.dims[1]
+    def mesh(self):
+        return self._mesh
 
     @property
-    def range(self):
-        return self.slice.range
+    def size(self):
+        return self._arity
 
 
 @dataclasses.dataclass(frozen=True)
-class Index:
-    domain: Domain
-
-
-# This CANNOT be a subclass of Tensor. This is because if it does then it will need
-# to define dims, which would be itself!
-# We do need the indexer parent class so that we can have maps acting as dims
-class Slice(Domain):
-    def __init__(self, *args, mesh=None):
-        try:
-            start, stop = args
-        except ValueError:
-            start = 0
-            (stop,) = args
-        self.start = start
-        self.stop = stop
-        self.mesh = mesh
-
-    @property
-    def range(self):
-        return Range(self.start, self.stop)
+class Index(ValidDimension):
+    space: Space
 
 
 def Global(*, name: str = None):
