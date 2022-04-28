@@ -153,21 +153,15 @@ class _LoopyKernelBuilder:
     def as_orig_shape(self, domains):
         shape = [None]
         for domain in domains[1:]:
-            assert domain.start in self.parameters_dict
-            assert domain.stop in self.parameters_dict
-            start = self.register_domain_parameter(domain.start, None)
-            stop = self.register_domain_parameter(domain.stop, None)
+            stop = self.register_domain_parameter(domain, None)
 
-            var = stop - start
+            var = stop
 
             # hack for ragged (extruded)
-            if var.name.startswith("t"):
+            if hasattr(var, "name") and var.name.startswith("t"):
                 shape.append(2)
             else:
-                shape.append(stop-start)
-            # start = as_pym_var(domain.start)
-            # stop = as_pym_var(domain.stop)
-            # shape.append(stop-start)
+                shape.append(stop)
         return tuple(shape)
 
     @_fill_loopy_context.register
@@ -314,24 +308,8 @@ class _LoopyKernelBuilder:
         # we also need to register two new domains to loop over: k and l
         broadcast_inames = self.register_broadcast_domains(argument, within_inames)
 
-        if argument.tensor.broadcast_domains:
-            assignee = pym.Subscript(
-                pym.Variable(temporary.name),
-                tuple(pym.Variable(broadcast_inames[dom]) for dom in argument.tensor.broadcast_domains),
-            )
-        else:
-            assignee = pym.Variable(temporary.name)
-
-        if argument.indices or argument.tensor.broadcast_domains:
-            expression = pym.Subscript(
-                pym.Variable(argument.name),
-                tuple(
-                    self.stack_subscripts(dim, within_inames|broadcast_inames)
-                    for dim in argument.tensor.dims
-                ),
-            )
-        else:
-            expression = pym.Variable(argument.name)
+        assignee = ExpressionGenerator.new_temporary(argument.tensor, temporary.name, within_inames | broadcast_inames)
+        expression = ExpressionGenerator.indexed_tensor(argument.tensor, within_inames|broadcast_inames)
 
         return self.register_assignment(
             assignee, expression, within_inames|broadcast_inames, depends_on, "read"
@@ -346,13 +324,7 @@ class _LoopyKernelBuilder:
         # we also need to register two new domains to loop over: k and l
         broadcast_inames = self.register_broadcast_domains(argument, within_inames)
 
-        if argument.tensor.broadcast_domains:
-            assignee = pym.Subscript(
-                pym.Variable(temporary.name),
-                tuple(pym.Variable(iname) for iname in broadcast_inames.values()),
-            )
-        else:
-            assignee = pym.Variable(temporary.name)
+        assignee = ExpressionGenerator.new_temporary(argument.tensor, temporary.name, within_inames | broadcast_inames)
 
         expression = 0
         return self.register_assignment(
@@ -368,21 +340,8 @@ class _LoopyKernelBuilder:
         # we also need to register two new domains to loop over: k and l
         broadcast_inames = self.register_broadcast_domains(argument, within_inames)
 
-        if argument.tensor.broadcast_domains:
-            expression = pym.Subscript(
-                pym.Variable(temporary.name),
-                tuple(pym.Variable(iname) for iname in broadcast_inames.values()),
-            )
-        else:
-            expression = pym.Variable(temporary.name)
-
-        assignee = pym.Subscript(
-            pym.Variable(argument.name),
-            tuple(
-                self.stack_subscripts(dim, within_inames|broadcast_inames)
-                for dim in argument.tensor.dims
-            ),
-        )
+        expression = ExpressionGenerator.new_temporary(argument.tensor, temporary.name, within_inames | broadcast_inames)
+        assignee = ExpressionGenerator.indexed_tensor(argument.tensor, within_inames|broadcast_inames)
 
         return self.register_assignment(
             assignee, expression, within_inames|broadcast_inames, depends_on, "write"
@@ -396,47 +355,14 @@ class _LoopyKernelBuilder:
         # in this case within_indices is i and j
         # we also need to register two new domains to loop over: k and l
         broadcast_inames = self.register_broadcast_domains(argument, within_inames)
+        assignee = ExpressionGenerator.indexed_tensor(argument.tensor, within_inames|broadcast_inames)
 
-        assignee = pym.Subscript(
-            pym.Variable(argument.name),
-            tuple(
-                self.stack_subscripts(dim, within_inames|broadcast_inames)
-                for dim in argument.tensor.dims
-            ),
-        )
-
-        if argument.tensor.broadcast_domains:
-            expression = pym.Sum(
-                (
-                    assignee,
-                    pym.Subscript(
-                        pym.Variable(temporary.name),
-                        tuple(
-                            pym.Variable(iname) for iname in broadcast_inames.values()
-                        ),
-                    ),
-                )
-            )
-        else:
-            expression = pym.Sum((assignee, pym.Variable(temporary.name)))
+        temp_expression = ExpressionGenerator.new_temporary(argument.tensor, temporary.name, within_inames | broadcast_inames)
+        expression = pym.Sum((assignee, temp_expression))
 
         return self.register_assignment(
             assignee, expression, within_inames|broadcast_inames, depends_on, "inc"
         )
-
-    def stack_subscripts(self, dim, within_inames):
-        """Convert an index tensor expression into a pymbolic expression"""
-        if isinstance(dim, Space):
-            if isinstance(dim, Map):
-                iname = pym.Variable(within_inames[dim.to_space])
-                subscripts = self.stack_subscripts(dim.from_space, within_inames)
-                return pym.Subscript(pym.Variable(dim.name), (subscripts, iname))
-            else:
-                iname = pym.Variable(within_inames[dim])
-                return iname
-        else:
-            assert isinstance(dim, Index)
-            return pym.Variable(within_inames[dim.space])
 
     def register_maps(self, map_):
         if isinstance(map_, Map) and map_ not in self.maps_dict:
@@ -506,3 +432,44 @@ class _LoopyKernelBuilder:
         for domain in argument.tensor.broadcast_domains:
             inames[domain] = self.register_domain(domain, within_inames)
         return inames
+
+
+class ExpressionGenerator:
+
+    @staticmethod
+    def new_temporary(tensor, name, inames):
+        if tensor.broadcast_domains:
+            return pym.Subscript(
+                pym.Variable(name),
+                tuple(pym.Variable(inames[dim]) for dim in tensor.broadcast_domains),
+            )
+        else:
+            return pym.Variable(name)
+
+    @classmethod
+    def indexed_tensor(cls, tensor, inames):
+        if tensor.dims:
+            return pym.Subscript(
+                pym.Variable(tensor.name),
+                tuple(
+                    cls.stack_subscripts(dim, inames)
+                    for dim in tensor.dims
+                ),
+            )
+        else:
+            return pym.Variable(tensor.name)
+
+    @classmethod
+    def stack_subscripts(cls, dim, inames):
+        """Convert an index tensor expression into a pymbolic expression"""
+        if isinstance(dim, Space):
+            if isinstance(dim, Map):
+                iname = pym.Variable(inames[dim.to_space])
+                subscripts = cls.stack_subscripts(dim.from_space, inames)
+                return pym.Subscript(pym.Variable(dim.name), (subscripts, iname))
+            else:
+                iname = pym.Variable(inames[dim])
+                return iname
+        else:
+            assert isinstance(dim, Index)
+            return pym.Variable(inames[dim.space])
