@@ -1,7 +1,8 @@
 import abc
+import itertools
 import collections
 import dataclasses
-from typing import Tuple, Union
+from typing import Tuple, Union, Any
 import numbers
 
 import pyop3.exprs
@@ -18,74 +19,106 @@ def as_domain(domain):
         raise ValueError
 
 
+# TODO inherit from slice? how can we accomodate actual slices and integers?
+class Domain:
+    @property
+    def index(self):
+        return Index(self)
+
+    @property
+    @abc.abstractmethod
+    def range(self):
+        pass
+
+
 class Tensor:
 
     name_generator = pyop3.utils.UniqueNameGenerator()
     prefix = "ten"
 
-    def __init__(self, shape=(), indices=(), *, mesh=None, name: str = None, prefix: str=None, parent=None):
-        self.shape = tuple(as_domain(dom) for dom in as_tuple(shape))
-        self.indices = as_tuple(indices)
+    def __init__(self, dims=(), *, mesh=None, name: str = None, prefix: str=None):
+        # dims is a tuple of domains (indexing tensors) and indices
+        assert all(isinstance(dim, (Index, Domain)) for dim in dims)
+
+        self.dims = dims
         self.mesh = mesh
         self.name = name or self.name_generator.generate(prefix or self.prefix)
 
-
-        self.shape_domains = frozenset(self.shape)
-        self.broadcast_domains = frozenset((idx.domain for idx in self.indices if not isinstance(idx, IndexLiteral) and idx.is_vector)) | self.shape_domains
-
-        # need to traverse to collect all domains
-        def myrecursion(index):
-            result = {index.domain}
-            for idx in index.indices:
-                result |= myrecursion(idx)
-            return result
-
-        all_domains = set()
-        for index in self.indices:
-            all_domains |= myrecursion(index)
-        self.all_domains = frozenset(all_domains) | self.shape_domains
-        self.within_domains = self.all_domains - self.broadcast_domains
-
-        self.parent = parent
-
     def __getitem__(self, indices):
-        # FIXME You cannot index over the top of slices since these are considered indices
         indices = as_tuple(indices)
 
-        if len(indices) > len(self.shape):
+        if len(indices) > self.order:
             raise ValueError
 
-        return self.copy(
-            shape=self.shape[len(indices):],
-            indices=self.indices + indices,
-            parent=self
-        )
+        # we can only index dims that are not already indexed
+        new_dims = list(self.dims)
+        indices = list(indices)
+        for i, dim in enumerate(self.dims):
+            if not isinstance(dim, Index) and indices:
+                new_dims[i] = indices.pop(0)
+
+        assert not indices
+        return self.copy(dims=tuple(new_dims))
 
     def __str__(self):
         return f"{self.name}[{','.join(str(idx) for idx in self.indices)}]"
 
     @property
+    def indices(self):
+        return tuple(dim for dim in self.dims if isinstance(dim, Index))
+
+    @property
+    def domains(self):
+        return tuple(dim for dim in self.dims if isinstance(dim, Domain))
+
+    @property
+    def broadcast_domains(self):
+        domains = set()
+        for dim in self.dims:
+            domains |= self._get_broadcast_domains(dim)
+        return frozenset(domains)
+
+    @classmethod
+    def _get_broadcast_domains(cls, dim):
+        if isinstance(dim, Index):
+            return frozenset()
+        elif isinstance(dim, Slice):
+            return frozenset({dim.domain})
+        elif isinstance(dim, Map):
+            return frozenset({dim.range}) | cls._get_broadcast_domains(dim.from_index)
+        else:
+            raise AssertionError
+
+        domains = set()
+        # the magic here is we broadcast everything that is not an index
+        # e.g. cone(star(p)) has two broadcast domains
+        # TODO Think about if we have a Range here - is that possible?
+        for dim in filter(lambda d: isinstance(d, Tensor), dims):
+            domains |= cls._get_broadcast_domains(dim.dims)
+        return frozenset(domains)
+
+    @property
     def orig_shape(self):
-        tensor = self
-        while tensor.parent:
-            tensor = tensor.parent
-        return tensor.shape
+        shape = []
+        for domain in self.dims:
+            if isinstance(domain, Index):
+                domain = domain.domain
+            while not isinstance(domain, Slice):
+                domain = domain.from_index.domain
+            shape.append(domain.range)
+        return tuple(shape)
 
-    @property
-    def index(self):
-        return self[IndexLiteral(self.shape[0], mesh=self.mesh)]
-
-    @property
-    def domain(self):
-        try:
-            (dom,) = self.shape
-            return dom
-        except ValueError:
-            raise TypeError
+    # @property
+    # def domain(self):
+    #     try:
+    #         (dom,) = self.shape
+    #         return dom
+    #     except ValueError:
+    #         raise TypeError
 
     @property
     def order(self):
-        return len(self.broadcast_domains)
+        return len(self.domains)
 
     @property
     def is_scalar(self):
@@ -96,57 +129,63 @@ class Tensor:
         return self.order == 1
 
     def copy(self, **kwargs):
-        shape = kwargs.get("shape", self.shape)
-        indices = kwargs.get("indices", self.indices)
+        dims = kwargs.get("dims", self.dims)
         mesh = kwargs.get("mesh", self.mesh)
         name = kwargs.get("name", self.name)
-        parent = kwargs.get("parent", self.parent)
-        return type(self)(shape=shape, indices=indices, mesh=mesh, name=name, parent=parent)
+        return type(self)(dims=dims, mesh=mesh, name=name)
 
 
 @dataclasses.dataclass(frozen=True)
-class Domain:
-    start: Tensor
-    stop: Tensor
-
-    def __len__(self):
-        return self.stop - self.start
-
-    def to_range(self):
-        return Range(self.start, self.stop)
-
-
-@dataclasses.dataclass(frozen=True)
-class IndexLiteral:
-    domain: Domain
-    mesh: int=None
-
-    indices = ()
-    is_vector = False
-    is_scalar = True
-
-
-
-# this just isn't a tensor unfortunately
-# range.index should return i
-# whereas
-# tensor.index should return tensor[i]
 class Range:
+    start: int
+    stop: int
+
+
+class Map(Tensor, Domain):
+
+    def __init__(self, from_index, slice_, **kwargs):
+        if isinstance(slice_, int):
+            slice_ = Slice(slice_)
+
+        dims = from_index, slice_
+
+        super().__init__(dims, prefix="map", **kwargs)
+
+    @property
+    def from_index(self):
+        return self.dims[0]
+
+    @property
+    def slice(self):
+        return self.dims[1]
+
+    @property
+    def range(self):
+        return self.slice.range
+
+
+@dataclasses.dataclass(frozen=True)
+class Index:
+    domain: Domain
+
+
+# This CANNOT be a subclass of Tensor. This is because if it does then it will need
+# to define dims, which would be itself!
+# We do need the indexer parent class so that we can have maps acting as dims
+class Slice(Domain):
     def __init__(self, *args, mesh=None):
         try:
-            self.start, self.stop = args
+            start, stop = args
         except ValueError:
-            self.start = 0
-            (self.stop,) = args
-        self.shape = Domain(self.start, self.stop)
-        self.domain = self.shape
+            start = 0
+            (stop,) = args
+        self.start = start
+        self.stop = stop
         self.mesh = mesh
 
-        self.index = IndexLiteral(self.shape, mesh=self.mesh)
-        self.indices = self.index,
-
-    is_vector = True
-    is_scalar = False
+    @property
+    def range(self):
+        return Range(self.start, self.stop)
 
 
 def Global(*, name: str = None):
@@ -156,7 +195,9 @@ def Global(*, name: str = None):
 
 
 def Dat(shape: Tuple[int, ...], *, prefix="dat", **kwargs) -> Tensor:
-    return Tensor(shape, prefix=prefix, **kwargs)
+    shape = as_tuple(shape)
+    dims = tuple(Slice(size) for size in shape)
+    return Tensor(dims, prefix=prefix, **kwargs)
 
 
 def Mat(shape: Tuple[int, ...], *, name: str = None):

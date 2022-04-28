@@ -57,18 +57,18 @@ class DemoMesh:
 
     @property
     def points(self):
-        return pyop3.Range(self.npoints, mesh=self)
+        return pyop3.Slice(self.npoints, mesh=self)
 
     @property
     def cells(self):
-        return pyop3.Range(self.ncells, mesh=self)
+        return pyop3.Slice(self.ncells, mesh=self)
 
     def closure(self, index):
         key = (self.closure.__name__, index)
         try:
             return self.map_cache[key]
         except KeyError:
-            map_ = pyop3.Tensor(self.CLOSURE_ARITY, index, mesh=self, prefix="map")
+            map_ = pyop3.Map(index, self.CLOSURE_ARITY, mesh=self)
             return self.map_cache.setdefault(key, map_)
 
 
@@ -79,7 +79,7 @@ class DemoExtrudedMesh:
     BASE_CLOSURE_ARITY = 5
 
     def __init__(self):
-        base = pyop3.Range(self.NBASECELLS)
+        base = pyop3.Slice(self.NBASECELLS)
         self.basecells = base
         # self.offsets = pyop3.Dat(base, name="offsets")
         self.layer_count = pyop3.Dat(self.NBASECELLS, name="layer_count")
@@ -108,7 +108,7 @@ class DemoExtrudedMesh:
 
     @property
     def cells(self):
-        layers = pyop3.Range(self.layer_count[self.basecells.index])
+        layers = pyop3.Slice(self.layer_count[self.basecells.index])
         return IndexBag(self.basecells, layers)
 
 
@@ -150,7 +150,7 @@ def register_demo(func):
 
 
 @register_demo
-def basic_parloop():
+def basic():
     result = pyop3.Dat(NPOINTS, name="result")
     loopy_kernel = lp.make_kernel(
         f"{{ [i]: 0 <= i < {MESH.CLOSURE_ARITY} }}",

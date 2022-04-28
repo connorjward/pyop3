@@ -12,7 +12,7 @@ import pymbolic.primitives as pym
 
 import pyop3.exprs
 import pyop3.utils
-from pyop3.tensors import Tensor
+from pyop3.tensors import Tensor, Index, Map
 from pyop3.tensors import Range
 
 LOOPY_TARGET = lp.CTarget()
@@ -145,20 +145,34 @@ class _LoopyKernelBuilder:
         def as_pym_var(param):
             if isinstance(param, numbers.Integral):
                 return param
+            elif isinstance(param, Tensor):
+                return pym.Variable(str(param))
             else:
                 return pym.Variable(param)
 
         shape = [None]
         for domain in domains[1:]:
-            start = as_pym_var(domain.start)
-            stop = as_pym_var(domain.stop)
-            shape.append(stop-start)
+            assert domain.start in self.parameters_dict
+            assert domain.stop in self.parameters_dict
+            start = self.register_domain_parameter(domain.start, None)
+            stop = self.register_domain_parameter(domain.stop, None)
+
+            var = stop - start
+
+            # hack for ragged (extruded)
+            if var.name.startswith("t"):
+                shape.append(2)
+            else:
+                shape.append(stop-start)
+            # start = as_pym_var(domain.start)
+            # stop = as_pym_var(domain.stop)
+            # shape.append(stop-start)
         return tuple(shape)
 
     @_fill_loopy_context.register
     def _(self, expr: pyop3.exprs.FunctionCall, within_inames, **kwargs):
         for argument in expr.arguments:
-            if argument.tensor.broadcast_domains:
+            if argument.tensor.order:
                 self.register_broadcast_domains(argument, within_inames)
                 shape = self.as_shape(argument.tensor.broadcast_domains)
             else:
@@ -178,8 +192,8 @@ class _LoopyKernelBuilder:
                 shape=self.as_orig_shape(argument.tensor.orig_shape)
             )
 
-            for index in argument.indices:
-                self.register_maps(index)
+            for dim in argument.tensor.dims:
+                self.register_maps(dim)
 
         gathers = self.register_gathers(expr, within_inames)
         call_insn = self.register_function_call(
@@ -311,8 +325,8 @@ class _LoopyKernelBuilder:
             expression = pym.Subscript(
                 pym.Variable(argument.name),
                 tuple(
-                    self.stack_subscripts(index, within_inames|broadcast_inames)
-                    for index in argument.tensor.indices + tuple(dom.to_range().index for dom in argument.tensor.shape)
+                    self.stack_subscripts(dim, within_inames|broadcast_inames)
+                    for dim in argument.tensor.dims
                 ),
             )
         else:
@@ -364,8 +378,8 @@ class _LoopyKernelBuilder:
         assignee = pym.Subscript(
             pym.Variable(argument.name),
             tuple(
-                self.stack_subscripts(index, within_inames|broadcast_inames)
-                for index in argument.tensor.indices + tuple(dom.to_range().index for dom in argument.tensor.shape)
+                self.stack_subscripts(dim, within_inames|broadcast_inames)
+                for dim in argument.tensor.dims
             ),
         )
 
@@ -385,8 +399,8 @@ class _LoopyKernelBuilder:
         assignee = pym.Subscript(
             pym.Variable(argument.name),
             tuple(
-                self.stack_subscripts(index, within_inames|broadcast_inames)
-                for index in argument.tensor.indices + tuple(dom.to_range().index for dom in argument.tensor.shape)
+                self.stack_subscripts(dim, within_inames|broadcast_inames)
+                for dim in argument.tensor.dims
             ),
         )
 
@@ -411,23 +425,20 @@ class _LoopyKernelBuilder:
 
     def stack_subscripts(self, index, within_inames):
         """Convert an index tensor expression into a pymbolic expression"""
-        iname_var = pym.Variable(within_inames[index.domain])
-        is_map = index.is_vector and len(index.indices) == 1
-        if is_map:
-            subscripts = tuple(self.stack_subscripts(idx, within_inames) for idx in index.indices)
-            return pym.Subscript(pym.Variable(index.name), (*subscripts, iname_var))
+        if isinstance(index, Map):
+            subscripts = self.stack_subscripts(index.from_index, within_inames)
+            return pym.Subscript(pym.Variable(index.name), (subscripts, pym.Variable(within_inames[index.range])))
+        elif isinstance(index, (Range, Index)):
+            return pym.Variable(within_inames[index.domain])
         else:
-            return iname_var
+            raise AssertionError
 
-    def register_maps(self, index):
-        # TODO This seems like quite a hacky way to tell if index is a map
-        # FIXME This whole bit needs a rethink
-        is_map = index.is_vector and len(index.indices) == 1
-        if is_map and index not in self.maps_dict:
-            self.maps_dict[index] = lp.GlobalArg(
-                index.name, dtype=np.int32, shape=(None, len(index.domain))
+    def register_maps(self, map_):
+        if isinstance(map_, Map) and map_ not in self.maps_dict:
+            self.maps_dict[map_] = lp.GlobalArg(
+                map_.name, dtype=np.int32, shape=(None, map_.range.stop)
             )
-            self.register_maps(index.indices[0])
+            self.register_maps(map_.from_index)
 
     def register_parameter(self, parameter, **kwargs):
         return self.parameter_dict.setdefault(parameter, lp.GlobalArg(**kwargs))
