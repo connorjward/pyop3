@@ -86,25 +86,52 @@ class DemoExtrudedMesh:
 
     def closure(self, index):
         """
-
-        Something like:
-        for cell
-            for layer
-                for i
-                    dat[map[i], offset[i]+layer*layersize]
+        For semi-structured meshes we return a tuple of slices for plex ops. The
+        first index is for the base mesh entities touched by the stencil. This can have variable arity depending
+        on the number of incident base entities (for example a cubed-sphere mesh can touch
+        just faces, faces and edges or vertices). The inner map is simply an affine start and offset
+        such that the correct memory address can be retrieved given an input point. Like the map, this can have
+        non-unity arity (e.g. if there are 5 DoFs in the cell (edge of base mesh) column but only 2 in the facet column
+        (vertex in base mesh)). The initial start point of the map can also depend on the outer dimension. This
+        is needed for variable layers in extrusion.
         """
-        raise NotImplementedError
+        # TODO clean up the semantics of slices versus index tuples and maps. A slice implies an extent but what we
+        # really need is a map from p -> qs and the extent is merely provided by p. Maybe 'range' is clearer (and our
+        # current slice and map no longer inherit from it). Possibly call the current slice an 'affine map'.
 
-        # map from the cell to the starting points for the extruded traversal
-        # cell -> other base cells
-        base_domain = pyop3.SparseDomain(index.domain.parent, self.BASE_CLOSURE_ARITY)
+        """For this example, let's assume that we have a cell that looks like this (+'s are DoFs):
 
-        # strided access to the layers
-        # should be:
-        # layer_domain = DenseDomain(0, self.layer_count[index]*self.offsets[index], self.offsets[index])
+        +----+----+
+        |         |
+        +   +++   +
+        |         |
+        +----+----+
 
-        # FIXME haven't implemented __mul__: is this even right?
-        return pyop3.CompositeDomain(base_domain, index.domain*self.offsets[index])
+        If we take the closure of the cell then we touch 3 base entities - 2 vertices and 1 edge - so the base map
+        has arity 3. Due to the differing DoF counts for each entity, the arities of the column maps is different
+        for each: 3, 5 and 3 respectively with offsets (0, 1, 2), (0, 1, 2, 3, 4) and (0, 1, 2).
+
+        The base map points to the first entity in each column from which the data is recovered by applying a fixed offset and stride.
+        This resolves problems with variable layers in extruded meshes where we might have a mesh that looks something like:
+
+        +---+
+        | 4 |
+        +---+---+
+        | 3 | 2 |
+        z-a-y---+
+            | 1 |
+            x---+
+
+        We can get around any problems by having base_map(3) return (a, y, z) rather than (a, x, z). If we do that
+        then we can forget about it as an issue later on during code generation.
+        """
+        base_map = pyop3.Map(index, 3, mesh=self)
+        column_maps = (
+            pyop3.Slice(0, 3),
+            pyop3.Slice(0, 5),
+            pyop3.Slice(0, 3),
+        )
+        return base_map, column_maps
 
     @property
     def cells(self):
@@ -220,7 +247,7 @@ def global_parloop():
 
 
 @register_demo
-def vdat_parloop():
+def vdat():
     result = pyop3.Dat(NPOINTS, name="result")
     loopy_kernel = lp.make_kernel(
         [f"{{ [i]: 0 <= i < {MESH.CLOSURE_ARITY} }}", "{ [j]: 0<= j < 3}"],
@@ -262,7 +289,7 @@ def vdat_parloop():
 
 
 @register_demo
-def extruded_direct():
+def extruded():
     dat1 = pyop3.Dat((EXTRUDED_MESH.NBASECELLS, 5), name="dat1")
     dat2 = pyop3.Dat((EXTRUDED_MESH.NBASECELLS, 5), name="dat2")
     result = pyop3.Dat((EXTRUDED_MESH.NBASECELLS, 5), name="result")

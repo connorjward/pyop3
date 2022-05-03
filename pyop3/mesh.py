@@ -71,7 +71,7 @@ My proposed solution looks something like as follows:
     Partition the iteration set (e.g. mesh cells) into groupings requiring a single starting
     indirection (i.e. every point getting iterated over in the partition can be directly
     accessed with strides). This partitioning is accomplished by checking what points are
-    touched by the plex operation (e.g. cone) and then grouping the results by the base
+    touched by the plex stencil operation (e.g. cone) and then grouping the results by the base
     entities of the touched points. This is especially needed for cube-sphere as it allows
     us to iterate up the edge of the mesh but avoiding the vertices whose data lives elsewhere
     and is not iterable.
