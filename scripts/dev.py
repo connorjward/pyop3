@@ -29,13 +29,14 @@ def main():
 
     expr = DEMOS[args.demo]()
 
-    if args.target == "dag":
-        pyop3.visualize.plot_expression_dag(expr, name=args.demo, view=True)
-        exit()
-    elif args.target == "c":
+    if args.target == "c":
         program = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     elif args.target == "loopy":
         program = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.LOOPY)
+    elif args.target == "pyop3":
+        program = expr
+    elif args.target == "tlang":
+        program = pyop3.codegen.to_tlang(expr)
     else:
         raise AssertionError
 
