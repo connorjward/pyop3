@@ -192,9 +192,7 @@ class Index(ValidDimension):
 
 
 def Global(*, name: str = None):
-    if not name:
-        name = Tensor.name_generator.generate(prefix="global")
-    return Tensor(name=name)
+    return Tensor(name=name, prefix="glob")
 
 
 def Dat(shape: Tuple[int, ...], *, prefix="dat", **kwargs) -> Tensor:

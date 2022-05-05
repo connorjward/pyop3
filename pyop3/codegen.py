@@ -151,6 +151,8 @@ class _LoopyKernelBuilder:
         return tuple(shape)
 
     def as_orig_shape(self, domains):
+        if domains == ():
+            return ()
         shape = [None]
         for domain in domains[1:]:
             stop = self.register_domain_parameter(domain, None)
@@ -169,7 +171,7 @@ class _LoopyKernelBuilder:
         for argument in expr.arguments:
             if argument.tensor.order:
                 self.register_broadcast_domains(argument, within_inames)
-                shape = self.as_shape(argument.tensor.broadcast_domains)
+                shape = self.as_shape(argument.tensor.spaces)
             else:
                 shape = ()
 
