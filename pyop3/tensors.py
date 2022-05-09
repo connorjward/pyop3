@@ -5,6 +5,7 @@ import dataclasses
 from typing import Tuple, Union, Any
 import numbers
 
+import pytools
 import pyop3.exprs
 import pyop3.utils
 from pyop3.utils import as_tuple
@@ -14,42 +15,49 @@ class ValidDimension(abc.ABC):
     """Does it make sense to index a tensor with this object?"""
 
 
-class Space(ValidDimension, abc.ABC):
-    @property
-    @abc.abstractmethod
-    def mesh(self):
-        pass
+class IndexedDimension(abc.ABC):
+    """Is this dimension 'free' or has it already been bound to an index?"""
+
+
+class FancyIndex(ValidDimension, abc.ABC):
+    """Name inspired from numpy. This allows you to slice something with a
+    list of indices."""
 
     @property
     @abc.abstractmethod
-    def size(self):
-        pass
-
-    @property
     def index(self):
-        return Index(self)
+        pass
+
+@dataclasses.dataclass(frozen=True)
+class Index(ValidDimension, IndexedDimension):
+    space: FancyIndex
+
+
+class Multiindex:
+    def __init__(self, *indices: Index):
+        self.indices = indices
 
 
 # This CANNOT be a subclass of Tensor. This is because if it does then it will need
 # to define dims, which would be itself!
-# We do need the indexer parent class so that we can have maps acting as dims
-class Slice(Space):
+class Range(FancyIndex):
     def __init__(self, *args, mesh=None):
-        if not args or len(args) > 3:
+        if len(args) == 1:
+            start, stop, step = 0, *args, 1
+        elif len(args) == 2:
+            start, stop, step = (*args, 1)
+        elif len(args) == 3:
+            start, stop, step = args
+        else:
             raise ValueError
 
-        if len(args) == 1:
-            self.start, self.stop, self.step = 0, *args, 1
-        elif len(args) == 2:
-            self.start, self.stop, self.step = (*args, 1)
-        else:
-            self.start, self.stop, self.step = args
-
-        self._mesh = mesh
+        self.start = start
+        self.stop = stop
+        self.step = step
 
     @property
-    def mesh(self):
-        return self._mesh
+    def index(self):
+        return Index(self)
 
     @property
     def size(self):
@@ -61,7 +69,16 @@ class Tensor:
     name_generator = pyop3.utils.UniqueNameGenerator()
     prefix = "ten"
 
-    def __init__(self, dims=(), *, name: str = None, prefix: str=None):
+    def __new__(cls, dims=(), **kwargs):
+        try:
+            dim1, dim2 = dims
+            assert isinstance(dim1, IndexedDimension)
+            assert not isinstance(dim2, IndexedDimension)
+            return NonAffineMap(dims, **kwargs)
+        except:
+            return super().__new__(cls, dims, **kwargs)
+
+    def __init__(self, dims, *, name: str = None, prefix: str=None):
         # dims is a tuple of domains (indexing tensors) and indices
         assert all(isinstance(dim, ValidDimension) for dim in dims)
 
@@ -159,36 +176,57 @@ class Tensor:
         return type(self)(dims=dims, name=name)
 
 
-class Map(Tensor, Space):
-
-    def __init__(self, from_space, arity, *, mesh=None):
-        self._arity = arity
-        self._mesh = mesh
-
-        dims = from_space, Slice(arity)
-        super().__init__(dims, prefix="map")
-
-    # TODO rename to from_dim and to_dim (latter always a slice)
+class Map(FancyIndex, IndexedDimension, abc.ABC):
     @property
-    def from_space(self):
-        return self.dims[0]
+    @abc.abstractmethod
+    def from_dim(self):
+        pass
 
     @property
-    def to_space(self):
-        return self.dims[1]
+    @abc.abstractmethod
+    def to_dim(self):
+        pass
 
     @property
-    def mesh(self):
-        return self._mesh
+    def index(self):
+        return self.to_dim.index
+
+
+class NonAffineMap(Map, Tensor):
+
+    prefix = "map"
 
     @property
-    def size(self):
-        return self._arity
+    def from_dim(self):
+        dim, _ = self.dims
+        assert isinstance(dim, IndexedDimension)
+        return dim
+
+    @property
+    def to_dim(self):
+        _, dim = self.dims
+        assert not isinstance(dim, IndexedDimension)
+        return dim
 
 
-@dataclasses.dataclass(frozen=True)
-class Index(ValidDimension):
-    space: Space
+class AffineMap(Map):
+    def __init__(self, from_dim, offsets=1, strides=1):
+        self.from_dim = from_dim
+        self.offsets = as_tuple(offsets)
+        self.strides = as_tuple(strides)
+
+    @property
+    def arity(self):
+        return pytools.single_valued([len(self.offsets), len(self.strides)])
+
+    # FIXME This will break but do I want to set this in super().__init__ or here?
+    @property
+    def from_dim(self):
+        return self.from_dim
+
+    @property
+    def to_dim(self):
+        return Range(self.arity)
 
 
 def Global(*, name: str = None):
@@ -197,7 +235,7 @@ def Global(*, name: str = None):
 
 def Dat(shape: Tuple[int, ...], *, prefix="dat", **kwargs) -> Tensor:
     shape = as_tuple(shape)
-    dims = tuple(Slice(size) for size in shape)
+    dims = tuple(Range(size) for size in shape)
     return Tensor(dims, prefix=prefix, **kwargs)
 
 
