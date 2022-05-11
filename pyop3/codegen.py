@@ -4,6 +4,7 @@ import numbers
 import enum
 import functools
 import itertools
+from typing import Dict
 
 import loopy as lp
 import loopy.symbolic
@@ -11,6 +12,7 @@ import numpy as np
 import pymbolic.primitives as pym
 
 import pyop3.exprs
+from pyop3 import exprs, tlang
 import pyop3.utils
 from pyop3.tensors import Tensor, Index, Map
 from pyop3.tensors import Slice, Space
@@ -32,6 +34,74 @@ def compile(expr, *, target):
         return to_c(expr)
     else:
         raise ValueError
+
+
+def to_tlang(expr):
+    return TensorLangBuilder(expr).build()
+
+
+@dataclasses.dataclass
+class TensorLangBuilder:
+    expr: exprs.Expression
+
+    def build(self):
+        return self._inspect(self.expr)
+
+    @functools.singledispatchmethod
+    def _inspect(self, expr, **kwargs):
+        raise AssertionError
+
+    @_inspect.register
+    def _(self, expr: exprs.Loop):
+        children = tuple(self._inspect(stmt) for stmt in expr.statements)
+        return tlang.Loop(children)
+
+    @_inspect.register
+    def _(self, expr: exprs.FunctionCall):
+        temporaries = {arg: Tensor(arg.tensor.shape, prefix="t") for arg in expr.arguments}
+
+        scatters = self.make_scatters(temporaries)
+        call = self.make_function_call(expr, temporaries, children=scatters)
+        return self.make_gathers(temporaries, children=(call,))
+
+    def make_gathers(self, temporaries, **kwargs):
+        return tuple(self.make_gather(arg, temp, **kwargs) for arg, temp in temporaries.items())
+
+    def make_gather(self, argument, temporary, **kwargs):
+        if argument.access in {exprs.READ, exprs.RW}:
+            return tlang.Read(temporary, argument.tensor, **kwargs)
+        elif argument.access in {exprs.WRITE, exprs.INC}:
+            return tlang.Zero(temporary, **kwargs)
+        else:
+            raise NotImplementedError
+
+    def make_function_call(self, call, temporaries, **kwargs):
+        assert all(arg.access in {exprs.READ, exprs.WRITE, exprs.INC, exprs.RW} for arg in call.arguments)
+
+        reads = tuple(
+            temporaries[arg] for arg in call.arguments
+            if arg.access in {exprs.READ, exprs.INC, exprs.RW}
+        )
+        writes = tuple(
+            temporaries[arg] for arg in call.arguments
+            if arg.access in {exprs.WRITE, exprs.INC, exprs.RW}
+        )
+        return tlang.FunctionCall(call.function, reads, writes, **kwargs)
+
+    def make_scatters(self, temporaries, **kwargs):
+        return tuple(
+            filter(None, (self.make_scatter(arg, temp, **kwargs) for arg, temp in temporaries.items()))
+        )
+
+    def make_scatter(self, argument, temporary, **kwargs):
+        if argument.access == exprs.READ:
+            return None
+        elif argument.access in {exprs.WRITE, exprs.RW}:
+            return tlang.Write(argument, temporary)
+        elif argument.access == exprs.INC:
+            return tlang.Increment(argument, temporary)
+        else:
+            raise AssertionError
 
 
 def to_loopy(expr):
@@ -74,6 +144,20 @@ class _LoopyKernelBuilder:
         self.function_temporaries = collections.defaultdict(dict)
         self.name_generator = pyop3.utils.UniqueNameGenerator()
 
+            # if argument in self.arguments_dict:
+            #     # TODO I currently assume that we only ever register arguments once.
+            #     # this is not true if we repeat arguments to a kernel or if we have multiple kernels
+            #     raise NotImplementedError
+            #
+            # self.arguments_dict[argument] = lp.GlobalArg(
+            #     argument.name,
+            #     dtype=argument.dtype,
+            #     shape=self.as_orig_shape(argument.tensor.orig_shape)
+            # )
+            #
+            # for dim in argument.tensor.dims:
+            #     self.register_maps(dim)
+            #
     @property
     def arguments(self):
         return tuple(self.arguments_dict.values())
@@ -111,22 +195,6 @@ class _LoopyKernelBuilder:
     def generate_iname(self):
         return self.name_generator.generate("i")
 
-    @functools.singledispatchmethod
-    def _fill_loopy_context(self, expr, **kwargs):
-        raise NotImplementedError
-
-    @_fill_loopy_context.register
-    def _(self, expr: pyop3.exprs.Loop, *, within_inames, **kwargs):
-        new_within_inames = {}
-        for index in expr.indices:
-            new_within_inames[index.space] = self.register_domain(index.space, within_inames|new_within_inames)
-
-        for statement in expr.statements:
-            self._fill_loopy_context(
-                statement,
-                within_inames=within_inames|new_within_inames,
-                **kwargs,
-            )
 
     def as_shape(self, domains, *, first_is_none=False):
         shape = []
@@ -166,57 +234,7 @@ class _LoopyKernelBuilder:
                 shape.append(stop)
         return tuple(shape)
 
-    @_fill_loopy_context.register
-    def _(self, expr: pyop3.exprs.FunctionCall, within_inames, **kwargs):
-        for argument in expr.arguments:
-            if argument.tensor.order:
-                self.register_broadcast_domains(argument, within_inames)
-                shape = self.as_shape(argument.tensor.spaces)
-            else:
-                shape = ()
-
-            temporary = self.register_temporary(dtype=argument.dtype, shape=shape)
-            self.function_temporaries[expr][argument] = temporary
-
-            if argument in self.arguments_dict:
-                # TODO I currently assume that we only ever register arguments once.
-                # this is not true if we repeat arguments to a kernel or if we have multiple kernels
-                raise NotImplementedError
-
-            self.arguments_dict[argument] = lp.GlobalArg(
-                argument.name,
-                dtype=argument.dtype,
-                shape=self.as_orig_shape(argument.tensor.orig_shape)
-            )
-
-            for dim in argument.tensor.dims:
-                self.register_maps(dim)
-
-        gathers = self.register_gathers(expr, within_inames)
-        call_insn = self.register_function_call(
-            expr, within_inames, depends_on=frozenset(insn.id for insn in gathers)
-        )
-        _ = self.register_scatters(
-            expr, within_inames, depends_on=frozenset({call_insn.id})
-        )
-
-    def register_gathers(self, call, within_domains, *, depends_on=frozenset()):
-        gathers = []
-        for argument in call.arguments:
-            temporary = self.function_temporaries[call][argument]
-            if argument.access == pyop3.exprs.READ:
-                gathers.append(self.read_tensor(argument, temporary, within_domains))
-            elif argument.access == pyop3.exprs.WRITE:
-                gathers.append(self.zero_tensor(argument, temporary, within_domains))
-            elif argument.access == pyop3.exprs.INC:
-                gathers.append(self.zero_tensor(argument, temporary, within_domains))
-            elif argument.access == pyop3.exprs.RW:
-                gathers.append(self.read_tensor(argument, temporary, within_domains))
-            else:
-                raise NotImplementedError
-        return tuple(gathers)
-
-    def register_function_call(self, call, within_inames, *, depends_on=frozenset()):
+    def handle_function_call(self, call, within_inames, *, depends_on=frozenset()):
         reads, writes = self.get_function_rw(call, within_inames)
         assignees = tuple(writes)
         expression = pym.Call(
@@ -234,27 +252,7 @@ class _LoopyKernelBuilder:
         self.subkernels.append(call.function.loopy_kernel)
         return call_insn
 
-    def register_scatters(self, call, within_domains, *, depends_on=frozenset()):
-        scatters = []
-        for argument in call.arguments:
-            temporary = self.function_temporaries[call][argument]
-            if argument.access == pyop3.exprs.READ:
-                continue
-            elif argument.access == pyop3.exprs.WRITE:
-                scatters.append(
-                    self.write_tensor(argument, temporary, within_domains, depends_on)
-                )
-            elif argument.access == pyop3.exprs.INC:
-                scatters.append(
-                    self.inc_tensor(argument, temporary, within_domains, depends_on)
-                )
-            elif argument.access == pyop3.exprs.RW:
-                scatters.append(
-                    self.write_tensor(argument, temporary, within_domains, depends_on)
-                )
-            else:
-                raise NotImplementedError
-        return tuple(scatters)
+
 
     def get_function_rw(self, call, within_domains):
         reads = []
