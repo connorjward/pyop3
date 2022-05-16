@@ -11,25 +11,25 @@ class UniqueNameGenerator:
             namer = self.name_generators[(prefix, suffix)]
         except KeyError:
             namer = self.name_generators.setdefault(
-                (prefix, suffix), _NameGenerator(prefix, suffix)
+                (prefix, suffix), NameGenerator(prefix, suffix)
             )
-        return next(namer)
+        return namer.next()
 
 
-class _NameGenerator:
-    def __init__(self, prefix="", suffix=""):
+class NameGenerator:
+    def __init__(self, prefix="", suffix="", existing_names=frozenset()):
         if not (prefix or suffix):
             raise ValueError
 
         self._prefix = prefix
         self._suffix = suffix
+        self._existing_names = existing_names
         self._counter = itertools.count()
 
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        return f"{self._prefix}{next(self._counter)}{self._suffix}"
+    def next(self):
+        while (name := f"{self._prefix}{next(self._counter)}{self._suffix}") in self._existing_names:
+            pass
+        return name
 
 
 def as_tuple(item):
@@ -37,3 +37,10 @@ def as_tuple(item):
         return item
     else:
         return (item,)
+
+
+class CustomTuple(tuple):
+    """Implement a tuple with nice syntax for recursive functions. Like set notation."""
+
+    def __or__(self, other):
+        return self + (other,)

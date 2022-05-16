@@ -1,10 +1,17 @@
 import dataclasses
 
-from pyop3.tensors import Dat
+from pyop3.tensors import *
 
 
 
 class Mesh:
+    def __init__(self, strata_sizes):
+        self.strata_sizes = strata_sizes
+
+    @property
+    def tdim(self):
+        return len(self.strata_sizes)
+
     @property
     def has_substructure(self) -> bool:
         """Does the mesh have some kind of substructure?"""
@@ -13,8 +20,18 @@ class Mesh:
     def cone(self, point_set):
         """Return a map."""
 
+    @property
+    def cells(self):
+        return IndexTree({0: IndexTree({Range("start", "end"): None})})
 
-class UnstructureMesh(Mesh):
+    @property
+    def ncells(self):
+        return self.strata_sizes[0]
+
+
+
+
+class UnstructuredMesh(Mesh):
     ...
 
 

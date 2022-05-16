@@ -2,8 +2,9 @@ import abc
 import itertools
 import collections
 import dataclasses
-from typing import Tuple, Union, Any
+from typing import Tuple, Union, Any, Optional, Sequence
 import numbers
+import pyrsistent
 
 import pytools
 import pyop3.exprs
@@ -11,41 +12,86 @@ import pyop3.utils
 from pyop3.utils import as_tuple
 
 
-class ValidDimension(abc.ABC):
+class Dim(pytools.ImmutableRecord):
+    def __init__(self, size, children=None):
+        if isinstance(size, numbers.Integral) and isinstance(children, collections.abc.Sequence) and len(children) != size:
+            raise ValueError
+        super().__init__(size=size, children=children)
+
+    @property
+    def has_single_child_dim_type(self):
+        return isinstance(self.children, Dim)
+
+    @property
+    def child(self):
+        if not self.has_single_child_dim_type:
+            raise TypeError
+        return self.children
+
+
+# class FixedSizeDim(Dim):
+#     """Dimension whose size is known at compile-time (e.g. a mesh's topological dimension or something mixed).
+#
+#     Such tensor dimensions can have variable children types.
+#     """
+#     def __init__(self, size: numbers.Integral, children: Union[Dim, Sequence]):
+#         # this class can have either a tuple of children or a single child
+#         if isinstance(children, collections.abc.Sequence) and len(children) != size:
+#             raise ValueError
+#         super().__init__(size, children)
+
+
+# class VariableDim(Dim):
+#     """Dimension whose size is unknown at compile-time (e.g. # cells in a mesh)."""
+#     def __init__(self, size, children: Dim):
+#         super().__init__(size, children)
+
+
+class Index(abc.ABC):
     """Does it make sense to index a tensor with this object?"""
 
 
-class IndexedDimension(abc.ABC):
-    """Is this dimension 'free' or has it already been bound to an index?"""
+class BasicIndex(Index):
+    """Not a fancy index (scalar-valued)"""
 
 
-class FancyIndex(ValidDimension, abc.ABC):
+class ScalarIndex(BasicIndex):
+    def __init__(self, value):
+        self.value = value
+
+
+class LoopIndex(BasicIndex):
+    def __init__(self, domain):
+        self.domain = domain
+
+
+class FancyIndex(Index, abc.ABC):
     """Name inspired from numpy. This allows you to slice something with a
     list of indices."""
 
     @property
     @abc.abstractmethod
-    def index(self):
+    def index(self) -> ScalarIndex:
         pass
 
-@dataclasses.dataclass(frozen=True)
-class Index(ValidDimension, IndexedDimension):
-    space: FancyIndex
+
+class PythonicIndex:
+    def __init__(self, value):
+        self.value = value
 
 
-class Multiindex:
-    def __init__(self, *indices: Index):
-        self.indices = indices
+class IntIndex(PythonicIndex):
+    ...
 
-
-# This CANNOT be a subclass of Tensor. This is because if it does then it will need
-# to define dims, which would be itself!
-class Range(FancyIndex):
+class Slice(PythonicIndex, FancyIndex):
     def __init__(self, *args, mesh=None):
-        if len(args) == 1:
-            start, stop, step = 0, *args, 1
+        start, stop, step = None, None, None
+        if len(args) == 0:
+            pass
+        elif len(args) == 1:
+            stop, = args
         elif len(args) == 2:
-            start, stop, step = (*args, 1)
+            start, stop = args
         elif len(args) == 3:
             start, stop, step = args
         else:
@@ -56,65 +102,156 @@ class Range(FancyIndex):
         self.step = step
 
     @property
-    def index(self):
-        return Index(self)
+    def value(self):
+        return slice(self.start, self.stop, self.step)
 
     @property
-    def size(self):
-        return (self.stop - self.start) // self.step
+    def index(self):
+        raise Exception("This doesn't make sense. Can only do this over a range (with extent)")
 
 
-class Tensor:
+class Range(PythonicIndex, FancyIndex):
+    def __init__(self, *args, mesh=None):
+        if len(args) == 1:
+            start, stop, step = 0, *args, 1
+        elif len(args) == 2:
+            start, stop, step = *args, 1
+        elif len(args) == 3:
+            start, stop, step = args
+        else:
+            raise ValueError
+
+        self.start = start
+        self.stop = stop
+        self.step = step
+
+    @property
+    def value(self):
+        return slice(self.start, self.stop, self.step)
+
+    @property
+    def index(self):
+        return LoopIndex(self)
+
+
+class IndexTree(pytools.ImmutableRecord):
+    def __init__(self, indices):
+        indices = self._replace_integers(indices)
+        indices = pyrsistent.pmap(indices)
+        super().__init__(indices=indices)
+
+    @property
+    def index(self):
+        new_indices = {}
+        for idx, itree in self.indices.items():
+            if itree:
+                new_indices[idx] = itree.index
+            elif isinstance(idx, FancyIndex):
+                new_indices[LoopIndex(idx)] = None
+            else:
+                new_indices[idx] = IndexTree({Slice(): None})
+        return self.copy(indices=new_indices)
+
+    @staticmethod
+    def _replace_integers(indices):
+        new_indices = {}
+        for idx, itree in indices.items():
+            if isinstance(idx, numbers.Number):
+                new_indices[IntIndex(idx)] = itree
+            else:
+                new_indices[idx] = itree
+        return new_indices
+
+
+ # class IndexTreeBag(frozenset):
+#     """Collection of IndexTuples."""
+#     def __init__(self, args):
+#         if not all(isinstance(arg, IndexTree) for arg in args):
+#             raise ValueError
+#
+#     @property
+#     def index(self):
+#         if not any(index_tree.is_fancy for index_tree in self):
+#             raise TypeError("All already scalar indices")
+#
+#         return 
+#         new_args = []
+#         for arg in self:
+#             try:
+#                 new_args.append(arg.index)
+#             except TypeError:
+#                 new_args.append(arg)
+#         return type(self)(new_args)
+#
+#     @staticmethod
+#     def _replace_fancy_index_tree(index_tree):
+#         return index_tree.index if index, FancyIndex) else index
+
+
+def index(indices):
+    # if not any(isinstance(idx, FancyIndex) for idx in itertools.chain(*indices)):
+    #     raise ValueError("Already scalar")
+
+    def replace_with_scalar_index(index):
+        if isinstance(index, FancyIndex):
+            return index.index
+        elif isinstance(index, slice):
+            return ChildIndex(slice)
+        else:
+            return index
+
+    return tuple(tuple(map(replace_with_scalar_index, idxs)) for idxs in indices)
+
+
+class Tensor(pytools.ImmutableRecordWithoutPickling):
 
     name_generator = pyop3.utils.UniqueNameGenerator()
     prefix = "ten"
 
-    def __new__(cls, dims=(), **kwargs):
-        try:
-            dim1, dim2 = dims
-            assert isinstance(dim1, IndexedDimension)
-            assert not isinstance(dim2, IndexedDimension)
+    def __new__(cls, dim=None, indices=(), **kwargs):
+        # FIXME what is the right way to think about this now?
+        # if (len(dims) == 2 and isinstance(dims[0], IndexedDimension) and not isinstance(dims[1], IndexedDimension)
+        if False:
             return NonAffineMap(dims, **kwargs)
-        except:
-            return super().__new__(cls, dims, **kwargs)
+        else:
+            return super().__new__(cls)
 
-    def __init__(self, dims, *, name: str = None, prefix: str=None):
-        # dims is a tuple of domains (indexing tensors) and indices
-        assert all(isinstance(dim, ValidDimension) for dim in dims)
-
-        self.dims = dims
-        self.name = name or self.name_generator.generate(prefix or self.prefix)
+    def __init__(self, dim=None, indices=(), *, name: str = None, prefix: str=None):
+        name = name or self.name_generator.generate(prefix or self.prefix)
+        super().__init__(dim=dim, indices=indices, name=name)
 
     def __getitem__(self, indices):
-        indices = as_tuple(indices)
+        # TODO Add support for already indexed items
+        if self.indices:
+            raise NotImplementedError("Needs more thought")
 
-        if len(indices) > self.order:
-            raise ValueError
+        # convert indices to a tuple of tuples
+        # if isinstance(indices, collections.abc.Sequence):
+        #     if all(isinstance(idx, collections.abc.Sequence) for idx in indices):
+        #         pass
+        #     else:
+        #         indices = (indices,)
+        # else:
+        #     indices = ((indices,),)
 
-        # we can only index dims that are not already indexed
-        new_dims = list(self.dims)
-        indices = list(indices)
-        for i, dim in enumerate(self.dims):
-            if not isinstance(dim, Index) and indices:
-                new_dims[i] = indices.pop(0)
+        # now set index types
+        # def to_index(index):
+        #     if isinstance(index, Index):
+        #         return index
+        #     elif isinstance(index, numbers.Integral):
+        #         return ScalarIndex(index)
+        #     else:
+        #         raise ValueError
 
-        assert not indices
-        return self.copy(dims=tuple(new_dims))
+        # indices = tuple(tuple(to_index(idx) for idx in idxs) for idxs in indices)
+
+        return self.copy(indices=indices)
 
     def __str__(self):
-        return f"{self.name}[{','.join(str(idx) for idx in self.indices)}]"
-
-    @property
-    def indices(self):
-        return tuple(dim for dim in self.dims if isinstance(dim, Index))
-
-    @property
-    def spaces(self):
-        return tuple(dim for dim in self.dims if isinstance(dim, Space))
-
-    @property
-    def shape(self):
-        return tuple(space.size for space in self.spaces)
+        if self.indices:
+            return f"{self.name}[{','.join(str(idx) for idx in self.indices)}]"
+        else:
+            return self.name
 
     @property
     def broadcast_domains(self):
@@ -170,22 +307,11 @@ class Tensor:
     def is_vector(self):
         return self.order == 1
 
-    def copy(self, **kwargs):
-        dims = kwargs.get("dims", self.dims)
-        name = kwargs.get("name", self.name)
-        return type(self)(dims=dims, name=name)
 
-
-class Map(FancyIndex, IndexedDimension, abc.ABC):
-    @property
-    @abc.abstractmethod
-    def from_dim(self):
-        pass
-
-    @property
-    @abc.abstractmethod
-    def to_dim(self):
-        pass
+class Map(FancyIndex, abc.ABC):
+    def __init__(self, from_dim, to_dim):
+        self.from_dim = from_dim
+        self.to_dim = to_dim
 
     @property
     def index(self):
@@ -196,17 +322,9 @@ class NonAffineMap(Map, Tensor):
 
     prefix = "map"
 
-    @property
-    def from_dim(self):
-        dim, _ = self.dims
-        assert isinstance(dim, IndexedDimension)
-        return dim
-
-    @property
-    def to_dim(self):
-        _, dim = self.dims
-        assert not isinstance(dim, IndexedDimension)
-        return dim
+    def __init__(self, dims):
+        from_dim, to_dim = dims
+        super().__init__(from_dim, to_dim)
 
 
 class AffineMap(Map):
@@ -226,17 +344,26 @@ class AffineMap(Map):
 
     @property
     def to_dim(self):
-        return Range(self.arity)
+        return Slice(self.arity)
+
+
+class Section:
+    def __init__(self, dofs):
+        # dofs is a list of dofs per stratum in the mesh (for now)
+        self.dofs = dofs
 
 
 def Global(*, name: str = None):
     return Tensor(name=name, prefix="glob")
 
 
-def Dat(shape: Tuple[int, ...], *, prefix="dat", **kwargs) -> Tensor:
-    shape = as_tuple(shape)
-    dims = tuple(Range(size) for size in shape)
-    return Tensor(dims, prefix=prefix, **kwargs)
+def Dat(mesh, dofs: Section, *, prefix="dat", **kwargs) -> Tensor:
+    dim = Dim(
+        mesh.tdim,
+        children=tuple(Dim(mesh.strata_sizes[stratum], Dim(dofs.dofs[stratum]))
+                           for stratum in range(mesh.tdim))
+    )
+    return Tensor(dim, prefix=prefix, **kwargs)
 
 
 def Mat(shape: Tuple[int, ...], *, name: str = None):

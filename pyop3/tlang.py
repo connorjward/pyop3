@@ -8,67 +8,51 @@ or retrieve the right data pointers for calling the thing.
 """
 
 import abc
+import itertools
+from typing import Any
 
 
-class Expression(abc.ABC):
-    def __init__(self, children, id):
-        self.children = children
+class Instruction:
+    def __init__(self, *, id=None, depends_on=frozenset(), within_indices=frozenset()):
         self.id = id
+        self.depends_on = depends_on
+        self.within_indices = within_indices
 
-    def copy(self, **kwargs):
-        return type(self)(**self.parse_kwargs(**kwargs))
-
-    def parse_kwargs(self, **kwargs):
-        children = kwargs.pop("children", self.children)
-        id = kwargs.pop("id", self.id)
-
-        if kwargs:
-            raise ValueError
-
-        return dict(children=children, id=id)
-
-
-class Assignment(Expression):
-    def __init__(self, assignee, expression, **kwargs):
-        self.assignee = assignee
-        self.expression = expression
+class Assignment(Instruction):
+    _count = itertools.count()
+    def __init__(self, tensor, temporary, **kwargs):
+        self.tensor = tensor
+        self.temporary = temporary
+        self.id = f"{self.prefix}{next(self._count)}"
         super().__init__(**kwargs)
 
     def parse_kwargs(self, **kwargs):
         return dict(
-            assignee=kwargs.pop("assignee", self.assignee)
-            expression=kwargs.pop("expression", self.expression)
+            assignee=kwargs.pop("assignee", self.assignee),
+            expression=kwargs.pop("expression", self.expression),
             **super().parse_kwargs(**kwargs)
         )
 
 
 class Read(Assignment):
-    pass
+    prefix = "read"
 
 
 class Write(Assignment):
-    pass
+    prefix = "write"
 
 
 class Increment(Assignment):
-    pass
+    prefix = "inc"
 
 
 class Zero(Assignment):
-    def __init__(self, tensor, **kwargs):
-        super().__init__(tensor, 0, **kwargs)
+    prefix = "zero"
 
 
-class Loop(Expression):
-    ...
-
-
-class FunctionCall(Expression):
-    def __init__(self, function, reads, writes):
+class FunctionCall(Instruction):
+    def __init__(self, function, reads, writes, **kwargs):
         self.function = function
         self.reads = reads
         self.writes = writes
-
-
-def apply(func, expr: Expression):
-    return func(expr).copy(children=tuple(apply(func, child) for child in expr.children))
+        super().__init__(**kwargs)

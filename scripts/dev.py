@@ -21,11 +21,15 @@ def main():
         for name, demo in DEMOS.items():
             print(name, end="")
             try:
-                demo()
+                expr = demo()
+                pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
                 print(" SUCCESS")
             except:
                 print(" FAIL")
         exit()
+
+    # if args.breakpoint:
+    #     pdb.set_trace()
 
     expr = DEMOS[args.demo]()
 
@@ -42,33 +46,29 @@ def main():
 
     print(program)
 
-    if args.breakpoint:
-        pdb.set_trace()
 
 
-class DemoMesh:
+class DemoMesh(pyop3.UnstructuredMesh):
 
-    CLOSURE_ARITY = 2
-    STAR_ARITY = 5
+    NCELLS_IN_CELL_CLOSURE = 1
+    NEDGES_IN_CELL_CLOSURE = 3
+    NVERTS_IN_CELL_CLOSURE = 3
+    CLOSURE_SIZE = NCELLS_IN_CELL_CLOSURE + NEDGES_IN_CELL_CLOSURE + NVERTS_IN_CELL_CLOSURE
 
-    def __init__(self, npoints, ncells):
-        self.npoints = "npoints"
-        self.ncells = "ncells"
-        self.map_cache = {}
+    map_cache = {}
 
     @property
     def points(self):
         return pyop3.Slice(self.npoints, mesh=self)
 
-    @property
-    def cells(self):
-        return pyop3.Slice(self.ncells, mesh=self)
-
     def closure(self, index):
+        raise NotImplementedError
         key = (self.closure.__name__, index)
         try:
             return self.map_cache[key]
         except KeyError:
+            # indices = pyop3.Map(index, 
+            pyop3.IndexTree()
             map_ = pyop3.Map(index, self.CLOSURE_ARITY, mesh=self)
             return self.map_cache.setdefault(key, map_)
 
@@ -140,31 +140,26 @@ class DemoExtrudedMesh:
         return IndexBag(self.basecells, layers)
 
 
-class IndexBag:
-    def __init__(self, *indices):
-        self.indices = indices
-
-    @property
-    def index(self):
-        return tuple(idx.index for idx in self.indices)
+# EXTRUDED_MESH = DemoExtrudedMesh()
 
 
-EXTRUDED_MESH = DemoExtrudedMesh()
-
-
-NPOINTS = 120
 NCELLS = 25
-MESH = DemoMesh(NPOINTS, NCELLS)
+NEDGES = 40
+NVERTS = 30
+MESH = DemoMesh((NCELLS, NEDGES, NVERTS))
 ITERSET = MESH.cells
+
+section = pyop3.Section([6, 7, 8])  # 6 dof per cell, 7 per edge and 8 per vert
 
 glob1 = pyop3.Global(name="glob1")
 
-dat1 = pyop3.Dat(NPOINTS, name="dat1")
-dat2 = pyop3.Dat(NPOINTS, name="dat2")
-dat3 = pyop3.Dat(NPOINTS, name="dat3")
+dat1 = pyop3.Dat(MESH, section, name="dat1")
+dat2 = pyop3.Dat(MESH, section, name="dat2")
+dat3 = pyop3.Dat(MESH, section, name="dat3")
 
-vdat1 = pyop3.Dat((NPOINTS, 3), name="vdat1")
-vdat2 = pyop3.Dat((NPOINTS, 3), name="vdat2")
+# won't work as dat expects two sections when it needs 3
+# vdat1 = pyop3.Dat((MESH, section, vsection), name="vdat1")
+# vdat2 = pyop3.Dat((MESH, section, vsection), name="vdat2")
 
 # mat1 = pyop3.Mat((MESH.points, MESH.points), name="mat1")
 
@@ -178,20 +173,20 @@ def register_demo(func):
 
 
 @register_demo
-def basic():
-    result = pyop3.Dat(NPOINTS, name="result")
+def direct():
+    result = pyop3.Dat(MESH, section, name="result")
     loopy_kernel = lp.make_kernel(
-        f"{{ [i]: 0 <= i < {MESH.CLOSURE_ARITY} }}",
+        "{ [i]: 0 <= i < 1 }",
         ["z[i] = z[i] + x[i] * y[i]"],
         [
             lp.GlobalArg(
-                "x", np.float64, (MESH.CLOSURE_ARITY,), is_input=True, is_output=False
+                "x", np.float64, (), is_input=True, is_output=False
             ),
             lp.GlobalArg(
-                "y", np.float64, (MESH.CLOSURE_ARITY,), is_input=True, is_output=False
+                "y", np.float64, (), is_input=True, is_output=False
             ),
             lp.GlobalArg(
-                "z", np.float64, (MESH.CLOSURE_ARITY,), is_input=True, is_output=True
+                "z", np.float64, (), is_input=True, is_output=True
             ),
         ],
         target=lp.CTarget(),
@@ -201,9 +196,45 @@ def basic():
     kernel = pyop3.Function(
         "local_kernel",
         [
-            pyop3.ArgumentSpec(pyop3.READ, np.float64, MESH.CLOSURE_ARITY),
-            pyop3.ArgumentSpec(pyop3.READ, np.float64, MESH.CLOSURE_ARITY),
-            pyop3.ArgumentSpec(pyop3.INC, np.float64, MESH.CLOSURE_ARITY),
+            pyop3.ArgumentSpec(pyop3.READ, np.float64, ()),
+            pyop3.ArgumentSpec(pyop3.READ, np.float64, ()),
+            pyop3.ArgumentSpec(pyop3.INC, np.float64, ()),
+        ],
+        loopy_kernel,
+    )
+    return pyop3.Loop(
+        p := ITERSET.index,
+        [kernel(dat1[p], dat2[p], result[p])],
+    )
+
+
+@register_demo
+def inc():
+    result = pyop3.Dat(MESH, section, name="result")
+    loopy_kernel = lp.make_kernel(
+        f"{{ [i]: 0 <= i < {MESH.CLOSURE_SIZE} }}",
+        ["z[i] = z[i] + x[i] * y[i]"],
+        [
+            lp.GlobalArg(
+                "x", np.float64, (MESH.CLOSURE_SIZE,), is_input=True, is_output=False
+            ),
+            lp.GlobalArg(
+                "y", np.float64, (MESH.CLOSURE_SIZE,), is_input=True, is_output=False
+            ),
+            lp.GlobalArg(
+                "z", np.float64, (MESH.CLOSURE_SIZE,), is_input=True, is_output=True
+            ),
+        ],
+        target=lp.CTarget(),
+        name="local_kernel",
+        lang_version=(2018, 2),
+    )
+    kernel = pyop3.Function(
+        "local_kernel",
+        [
+            pyop3.ArgumentSpec(pyop3.READ, np.float64, MESH.CLOSURE_SIZE),
+            pyop3.ArgumentSpec(pyop3.READ, np.float64, MESH.CLOSURE_SIZE),
+            pyop3.ArgumentSpec(pyop3.INC, np.float64, MESH.CLOSURE_SIZE),
         ],
         loopy_kernel,
     )
