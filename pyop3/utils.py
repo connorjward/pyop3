@@ -6,7 +6,7 @@ class UniqueNameGenerator:
     def __init__(self):
         self.name_generators = {}
 
-    def generate(self, prefix="", suffix=""):
+    def next(self, prefix="", suffix=""):
         try:
             namer = self.name_generators[(prefix, suffix)]
         except KeyError:

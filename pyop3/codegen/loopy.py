@@ -11,7 +11,7 @@ import loopy as lp
 import loopy.symbolic
 import numpy as np
 import pytools
-import pymbolic.primitives as pym
+import pymbolic as pym
 
 import pyop3.exprs
 from pyop3 import exprs, tlang
@@ -49,27 +49,27 @@ def to_c(expr):
     return lp.generate_code_v2(program).device_code()
 
 
-@dataclasses.dataclass(frozen=True)
-class DomainContext:
-    iname: str
-    start: pym.Variable
-    stop: pym.Variable
-
-    def __str__(self):
-        return f"{{ [{self.iname}]: {self.start} <= {self.iname} < {self.stop} }}"
-
-    @property
-    def shape(self):
-        return self.stop - self.start
-
+# @dataclasses.dataclass(frozen=True)
+# class DomainContext:
+#     iname: str
+#     start: pym.Variable
+#     stop: pym.Variable
+#
+#     def __str__(self):
+#         return f"{{ [{self.iname}]: {self.start} <= {self.iname} < {self.stop} }}"
+#
+#     @property
+#     def shape(self):
+#         return self.stop - self.start
+#
 
 
 class _LoopyKernelBuilder:
     def __init__(self, expr):
         self.expr = expr
 
-        self.mydomains = set()
         self.existing_inames = {}
+        self.tlang_instructions = collections.defaultdict(list)
 
         self.domains = []
         self.instructions = []
@@ -106,12 +106,12 @@ class _LoopyKernelBuilder:
             self.register_instruction(insn)
 
             if not isinstance(insn, tlang.FunctionCall):
-                self.register_temporary(insn.temporary)
+                self.register_temporary(insn.temporary, insn.tensor.indices)
                 self.register_tensor(insn.tensor)
 
         breakpoint()
         translation_unit = lp.make_kernel(
-            self.mydomains,
+            self.domains,
             self.instructions,
             self.kernel_data,
             target=LOOPY_TARGET,
@@ -120,11 +120,11 @@ class _LoopyKernelBuilder:
 
         return lp.merge((translation_unit, *self.subkernels))
 
-    def register_temporary(self, name):
+    def register_temporary(self, name, itree):
         if name in self.temporaries_dict:
             return
 
-        self.temporaries_dict[name] = lp.TemporaryVariable(name)
+        self.temporaries_dict[name] = lp.TemporaryVariable(name, shape=(itree.size,))
 
     def register_tensor(self, tensor):
         if tensor.name in self.arguments_dict:
@@ -197,91 +197,37 @@ class _LoopyKernelBuilder:
     def as_subarrayref(self, argument, temporary, within_domains):
         """Register an argument to a function."""
         inames = self.register_broadcast_domains(argument, within_domains)
-        indices = tuple(pym.Variable(iname) for iname in inames.values())
+        indices = tuple(pym.var(iname) for iname in inames.values())
         return lp.symbolic.SubArrayRef(
-            indices, pym.Subscript(pym.Variable(temporary.name), indices)
+            indices, pym.subscript(pym.var(temporary.name), indices)
         )
 
-    @functools.singledispatchmethod
     def register_instruction(self, instruction: tlang.Instruction):
-        raise TypeError
-
-    @register_instruction.register
-    def _(self, instruction: tlang.Read):
-        # so we want something like:
-        # for i:
-        #   for j:
-        #     t[k, l] = dat[i, j, k, l]
-        # in this case within_indices is i and j
-        # we also need to register two new domains to loop over: k and l
-        converter = ReadConverter(instruction, self.existing_inames)
-        self.existing_inames = converter.traverse()
-        self.mydomains |= converter.domains
-        self.instructions.extend(converter.instructions)
-
-    @register_instruction.register
-    def _(self, instruction: tlang.Zero):
-        # so we want something like:
-        # for i:
-        #   for j:
-        #     t[k, l] = 0
-        # in this case within_indices is i and j
-        # we also need to register two new domains to loop over: k and l
-        converter = ZeroConverter(instruction, self.existing_inames)
-        self.existing_inames = converter.traverse()
-        self.mydomains |= converter.domains
-        self.instructions.extend(converter.instructions)
-
-    @register_instruction.register
-    def _(self, instruction: tlang.Write):
-        # so we want something like:
-        # for i:
-        #   for j:
-        #     dat[i, j, k, l] = t[k, l]
-        # in this case within_indices is i and j
-        # we also need to register two new domains to loop over: k and l
-        converter = WriteConverter(instruction, self.existing_inames)
-        self.existing_inames = converter.traverse()
-        self.mydomains |= converter.domains
-        self.instructions.extend(converter.instructions)
-
-    @register_instruction.register
-    def _(self, instruction: tlang.Increment):
-        # so we want something like:
-        # for i:
-        #   for j:
-        #     dat[i, j, k, l] = dat[i, j, k, l] + t[k, l]
-        # in this case within_indices is i and j
-        # we also need to register two new domains to loop over: k and l
-        converter = IncrementConverter(instruction, self.existing_inames)
-        self.existing_inames = converter.traverse()
-        self.mydomains |= converter.domains
-        self.instructions.extend(converter.instructions)
-
-    @register_instruction.register
-    def _(self, instruction: tlang.FunctionCall):
-        # reads, writes = self.get_function_rw(call, within_inames)
-        reads = tuple(pym.Variable(var) for var in instruction.reads)
-        writes = tuple(pym.Variable(var) for var in instruction.writes)
+        if not isinstance(instruction, tlang.FunctionCall):
+            self.traverse(instruction)
+            return
+        reads = tuple(pym.var(var) for var in instruction.reads)
+        writes = tuple(pym.var(var) for var in instruction.writes)
         assignees = tuple(writes)
-        expression = pym.Call(
-            pym.Variable(instruction.function.loopy_kernel.default_entrypoint.name),
+        expression = pym.primitives.Call(
+            pym.var(instruction.function.loopy_kernel.default_entrypoint.name),
             tuple(reads),
         )
 
         within_inames = frozenset.union(*(self.get_within_inames(index) for index in instruction.within_indices))
 
+        depends_on = frozenset(itertools.chain(*(self.tlang_instructions[insn] for insn in instruction.depends_on)))
         call_insn = lp.CallInstruction(
             assignees,
             expression,
-            id=self.name_generator.generate("func"),
+            id=self.name_generator.next("func"),
             within_inames=within_inames,
-            depends_on=instruction.depends_on
+            depends_on=depends_on
         )
         self.instructions.append(call_insn)
+        self.tlang_instructions[instruction].append(call_insn)
         self.subkernels.append(instruction.function.loopy_kernel)
         return call_insn
-
 
     def get_within_inames(self, itree):
         if not itree:
@@ -292,8 +238,6 @@ class _LoopyKernelBuilder:
                 within_inames.add(self.existing_inames[index])
             within_inames |= self.get_within_inames(subtree)
         return frozenset(within_inames)
-
-
 
     def register_maps(self, map_):
         if isinstance(map_, Map) and map_ not in self.maps_dict:
@@ -322,21 +266,21 @@ class _LoopyKernelBuilder:
             # if the tensor is an indexed expression we need to create a temporary for it
             if parameter.indices:
                 temporary = self.register_temporary()
-                assignee = pym.Variable(temporary.name)
+                assignee = pym.var(temporary.name)
                 # TODO Put into utility function
-                expression = pym.Subscript(
-                    pym.Variable(parameter.name),
-                    tuple(pym.Variable(within_inames[index.space]) for index in parameter.indices)
+                expression = pym.subscript(
+                    pym.var(parameter.name),
+                    tuple(pym.var(within_inames[index.space]) for index in parameter.indices)
                 )
                 self.register_assignment(
                     assignee, expression, within_inames=within_inames
                 )
-                return self.parameters_dict.setdefault(parameter, pym.Variable(temporary.name))
+                return self.parameters_dict.setdefault(parameter, pym.var(temporary.name))
             else:
-                return self.parameters_dict.setdefault(parameter, pym.Variable(parameter.name))
+                return self.parameters_dict.setdefault(parameter, pym.var(parameter.name))
         elif isinstance(parameter, str):
             self.register_parameter(parameter, name=parameter, dtype=np.int32, shape=())
-            return self.parameters_dict.setdefault(parameter, pym.Variable(parameter))
+            return self.parameters_dict.setdefault(parameter, pym.var(parameter))
         elif isinstance(parameter, numbers.Integral):
             return self.parameters_dict.setdefault(parameter, parameter)
         else:
@@ -358,77 +302,67 @@ class _LoopyKernelBuilder:
         self.domains.append(DomainContext(iname, start, stop))
         return iname
 
-    def register_broadcast_domains(self, argument, within_inames):
-        inames = {}
-        for domain in argument.tensor.broadcast_domains:
-            inames[domain] = self.register_domain(domain, within_inames)
-        return inames
+    @functools.singledispatchmethod
+    def resolve(self, instruction, tensor_idxs, temp_idxs):
+        raise AssertionError
+
+    @resolve.register
+    def _(self, read: tlang.Read, tensor_indices, temp_indices):
+        assignee = lp.symbolic.LinearSubscript(pym.var(read.temporary), temp_indices)
+        expression = pym.subscript(pym.var(read.tensor.name), tensor_indices)
+        return assignee, expression
+
+    @resolve.register
+    def _(self, zero: tlang.Zero, tensor_indices, temp_indices):
+        assignee = lp.symbolic.LinearSubscript(pym.var(zero.temporary), temp_indices)
+        expression = 0
+        return assignee, expression
+
+    @resolve.register
+    def _(self, write: tlang.Write, tensor_indices, temp_indices):
+        assignee = pym.subscript(pym.var(write.tensor.name), tensor_indices)
+        expression = lp.symbolic.LinearSubscript(pym.var(write.temporary), temp_indices)
+        return assignee, expression
+
+    @resolve.register
+    def _(self, inc: tlang.Increment, tensor_indices, temp_indices):
+        assignee = pym.subscript(pym.var(inc.tensor.name), tensor_indices)
+        expression = assignee + lp.symbolic.LinearSubscript(pym.var(inc.temporary), temp_indices)
+        return assignee, expression
+
+    def _register_instruction(self, instruction, assignee, expression, within_inames):
+        id_ = self.name_generator.next(instruction.id)
+        depends_on = frozenset(itertools.chain(*(self.tlang_instructions[insn] for insn in instruction.depends_on)))
+        lp_instruction = lp.Assignment(assignee, expression, id=id_,
+                within_inames=within_inames, depends_on=depends_on)
+        self.instructions.append(lp_instruction)
+        self.tlang_instructions[instruction].append(lp_instruction)
 
 
-# TODO rename
-class TensorToLoopyConverter:
-
-    def __init__(self, instruction: tlang.Instruction, existing_inames):
-        self.instruction = instruction
-
-        self.domains = set()
-        self.instructions = []
-        self.dims = {}
-
-        self.iname_dict = {}
-        name_generator = pytools.UniqueNameGenerator(existing_names=set(existing_inames.values()))
-        self.iname_generator = functools.partial(name_generator, "i")
-        self.instruction_generator = functools.partial(name_generator, self.instruction_prefix)
-        self.inames = existing_inames.copy()
-
-    @abc.abstractmethod
-    def resolve(self, *args, **kwargs):
-        pass
-
-    @property
-    def temporary(self):
-        return pym.Variable(self.instruction.temporary)
-
-    @property
-    def tensor(self):
-        return pym.Variable(self.instruction.tensor.name)
-
-    def register_instruction(self, assignee, expression, within_inames):
-        self.instructions.append(
-            lp.Assignment(assignee, expression, id=self.instruction.id,
-                within_inames=within_inames, depends_on=self.instruction.depends_on)
-        )
-
-    def traverse(self):
+    def traverse(self, instruction):
         """Return an indexed expression of whatever the instruction is"""
-        for index, itree in self.instruction.tensor.indices.indices.items():
-            self._traverse(self.instruction.tensor.dim, index, itree)
-        return self.inames
+        offset = 0
+        for index, itree in instruction.tensor.indices.indices.items():
+            self._traverse(instruction, instruction.tensor.dim, index, itree, offset)
+            offset += itree.size
 
-    def _traverse(self, dim: Dim, index, itree, tensor_expr_indices=CustomTuple(), temp_expr_indices=CustomTuple(), within_inames=frozenset()):
-
-
-        # all indices not explicitly described are broadcast over
-        # if not indices:
-        #     indices = (Slice(),)
-
-        # iname = f"i{next(self.iname_counter)}"
-        # self.iname_dict[dim] = iname
-        # temp_expr_indices += (pym.Variable(iname),)
+    def _traverse(self, instruction, dim: Dim, index, itree, offset=0, tensor_expr_indices=(), temp_expr_indices=(), within_inames=frozenset()):
 
         # handle the different indexing that needs to be done
-        iname, temp_idx, tensor_index = self.handle_index(index)
+        inames, temp_idxs, tensor_index = self.handle_index(index)
         tensor_expr_indices += tensor_index
-        temp_expr_indices += temp_idx
 
-        if iname:
-            within_inames |= {iname}
+        temp_expr_indices += temp_idxs
+        temp_expr_indices += (offset,)
+
+        if inames:
+            within_inames |= set(inames)
 
         # if leaf
         if not dim.children:
             assert not itree
-            assignee, expression = self.resolve(tensor_expr_indices, temp_expr_indices)
-            self.register_instruction(assignee, expression, within_inames)
+            assignee, expression = self.resolve(instruction, tensor_expr_indices, temp_expr_indices)
+            self._register_instruction(instruction, assignee, expression, within_inames)
         elif dim.has_single_child_dim_type:
             if not itree:
                 subindex = Range(dim.child.size)
@@ -436,16 +370,20 @@ class TensorToLoopyConverter:
             else:
                 subindex, = itree.indices.keys()
                 subitree, = itree.indices.values()
-            self._traverse(dim.child, subindex, subitree, tensor_expr_indices, temp_expr_indices, within_inames)
+            self._traverse(instruction, dim.child, subindex, subitree, 0, tensor_expr_indices, temp_expr_indices, within_inames)
         else:
             if isinstance(index, Slice):
                 subdims = dim.children[index.value]
             else:
                 subdims = (dim.children[index.value],)
 
+            suboffset = 0
             for subdim, (idx, itree_) in zip(subdims, itree.indices.items()):
-                self._traverse(subdim, idx, itree_, tensor_expr_indices, temp_expr_indices, within_inames)
-
+                self._traverse(instruction, subdim, idx, itree_, suboffset, tensor_expr_indices, temp_expr_indices, within_inames)
+                if itree_:
+                    suboffset += itree_.size
+                else:
+                    suboffset += idx.size
 
     @functools.singledispatchmethod
     def handle_index(self, index):
@@ -455,11 +393,11 @@ class TensorToLoopyConverter:
     @handle_index.register
     def _(self, index: Range):
         try:
-            iname = self.inames[index]
+            iname = self.existing_inames[index]
         except KeyError:
-            iname = self.inames.setdefault(index, self.iname_generator())
-            self.domains.add(f"{{ [{iname}]: {index.start} <= {iname} < {index.stop} }}")
-        return iname, (pym.Variable(iname),), (pym.Variable(iname),)
+            iname = self.existing_inames.setdefault(index, self.name_generator.next("i"))
+            self.domains.append(f"{{ [{iname}]: {index.start} <= {iname} < {index.stop} }}")
+        return (iname,), (pym.var(iname),), (pym.var(iname),)
 
     @handle_index.register
     def _(self, index: IntIndex):
@@ -467,53 +405,15 @@ class TensorToLoopyConverter:
 
     @handle_index.register
     def _(self, index: Map):
-        raise NotImplementedError
+        inames, temp_idxs, tensor_idxs = self.handle_index(index.from_dim)
+        rinames, rtemp_idxs, rtensor_idxs = self.handle_index(index.to_dim)
+        return inames + rinames, temp_idxs*index.to_dim.size + rtemp_idxs, (pym.subscript(pym.var("map"), tensor_idxs+rtensor_idxs),)
 
     @handle_index.register
     def _(self, index: LoopIndex):
         try:
-            iname = self.inames[index]
+            iname = self.existing_inames[index]
         except KeyError:
-            iname = self.inames.setdefault(index, self.iname_generator())
-            self.domains.add(f"{{ [{iname}]: {index.domain.start} <= {iname} < {index.domain.stop} }}")
-        return iname, (), (pym.Variable(iname),)
-
-
-class ReadConverter(TensorToLoopyConverter):
-    instruction_prefix = "read"
-    counter = 0
-
-    def resolve(self, tensor_indices, temp_indices):
-        assignee = pym.Subscript(self.temporary, temp_indices)
-        expression = pym.Subscript(self.tensor, tensor_indices)
-        return assignee, expression
-
-
-class ZeroConverter(TensorToLoopyConverter):
-    instruction_prefix = "zero"
-    counter = 0
-
-    def resolve(self, _, temp_indices):
-        assignee = pym.Subscript(self.temporary, temp_indices)
-        expression = 0
-        return assignee, expression
-
-
-class WriteConverter(TensorToLoopyConverter):
-    instruction_prefix = "write"
-    counter = 0
-
-    def resolve(self, tensor_indices, temp_indices):
-        assignee = pym.Subscript(self.tensor, tensor_indices)
-        expression = pym.Subscript(self.temporary, temp_indices)
-        return assignee, expression
-
-
-class IncrementConverter(TensorToLoopyConverter):
-    instruction_prefix = "inc"
-    counter = 0
-
-    def resolve(self, tensor_indices, temp_indices):
-        assignee = pym.Subscript(self.temporary, temp_indices)
-        expression = pym.Sum((assignee, pym.Subscript(self.tensor, tensor_indices)))
-        return assignee, expression
+            iname = self.existing_inames.setdefault(index, self.name_generator.next("i"))
+            self.domains.append(f"{{ [{iname}]: {index.domain.start} <= {iname} < {index.domain.stop} }}")
+        return (iname,), (), (pym.var(iname),)

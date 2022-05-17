@@ -57,20 +57,26 @@ class DemoMesh(pyop3.UnstructuredMesh):
 
     map_cache = {}
 
-    @property
-    def points(self):
-        return pyop3.Slice(self.npoints, mesh=self)
+    # def cone(self, itree):
+    #     (stratum, subtree), = itree.indices.items()
+    #     range_, = subtree.indices.keys()
 
-    def closure(self, index):
-        raise NotImplementedError
-        key = (self.closure.__name__, index)
+
+    def closure(self, itree):
+        key = (self.closure.__name__, itree)
         try:
             return self.map_cache[key]
         except KeyError:
-            # indices = pyop3.Map(index, 
-            pyop3.IndexTree()
-            map_ = pyop3.Map(index, self.CLOSURE_ARITY, mesh=self)
-            return self.map_cache.setdefault(key, map_)
+            (stratum, subtree), = itree.indices.items()
+            assert stratum.value == 0  # nothing else supported yet
+            range_, = subtree.indices.keys()
+
+            new_itree = pyop3.IndexTree({
+                0: subtree,
+                1: pyop3.IndexTree({pyop3.NonAffineMap(range_, pyop3.Range(self.NEDGES_IN_CELL_CLOSURE)): None}),
+                2: pyop3.IndexTree({pyop3.NonAffineMap(range_, pyop3.Range(self.NVERTS_IN_CELL_CLOSURE)): None})
+            }, mesh=self)
+            return self.map_cache.setdefault(key, new_itree)
 
 
 class DemoExtrudedMesh:

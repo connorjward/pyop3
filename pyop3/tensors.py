@@ -6,6 +6,8 @@ from typing import Tuple, Union, Any, Optional, Sequence
 import numbers
 import pyrsistent
 
+import pymbolic.primitives as pym
+
 import pytools
 import pyop3.exprs
 import pyop3.utils
@@ -53,6 +55,7 @@ class Index(abc.ABC):
 
 class BasicIndex(Index):
     """Not a fancy index (scalar-valued)"""
+    size = 1
 
 
 class ScalarIndex(BasicIndex):
@@ -81,7 +84,7 @@ class PythonicIndex:
 
 
 class IntIndex(PythonicIndex):
-    ...
+    size = 1
 
 class Slice(PythonicIndex, FancyIndex):
     def __init__(self, *args, mesh=None):
@@ -121,9 +124,18 @@ class Range(PythonicIndex, FancyIndex):
         else:
             raise ValueError
 
+        if isinstance(start, str):
+            start = pym.Variable(start)
+        if isinstance(stop, str):
+            stop = pym.Variable(stop)
+
         self.start = start
         self.stop = stop
         self.step = step
+
+    @property
+    def size(self):
+        return (self.stop - self.start) // self.step
 
     @property
     def value(self):
@@ -134,11 +146,21 @@ class Range(PythonicIndex, FancyIndex):
         return LoopIndex(self)
 
 
-class IndexTree(pytools.ImmutableRecord):
-    def __init__(self, indices):
+class IndexTree:
+    def __init__(self, indices, mesh=None):
         indices = self._replace_integers(indices)
         indices = pyrsistent.pmap(indices)
-        super().__init__(indices=indices)
+
+        size = 0
+        for index, itree in indices.items():
+            if itree:
+                size += index.size * itree.size
+            else:
+                size += index.size
+        # super().__init__(indices=indices, mesh=mesh, size=size)
+        self.indices = indices
+        self.mesh = mesh
+        self.size = size
 
     @property
     def index(self):
@@ -150,7 +172,7 @@ class IndexTree(pytools.ImmutableRecord):
                 new_indices[LoopIndex(idx)] = None
             else:
                 new_indices[idx] = IndexTree({Slice(): None})
-        return self.copy(indices=new_indices)
+        return type(self)(indices=new_indices, mesh=self.mesh)
 
     @staticmethod
     def _replace_integers(indices):
@@ -309,22 +331,23 @@ class Tensor(pytools.ImmutableRecordWithoutPickling):
 
 
 class Map(FancyIndex, abc.ABC):
-    def __init__(self, from_dim, to_dim):
-        self.from_dim = from_dim
-        self.to_dim = to_dim
 
     @property
     def index(self):
         return self.to_dim.index
 
 
-class NonAffineMap(Map, Tensor):
+class NonAffineMap(Tensor, Map):
 
     prefix = "map"
 
-    def __init__(self, dims):
-        from_dim, to_dim = dims
-        super().__init__(from_dim, to_dim)
+    def __init__(self, *dims):
+        self.from_dim, self.to_dim = dims
+        super().__init__(dims, name="map")
+
+    @property
+    def size(self):
+        return self.from_dim.size * self.to_dim.size
 
 
 class AffineMap(Map):

@@ -22,7 +22,7 @@ class Mesh:
 
     @property
     def cells(self):
-        return IndexTree({0: IndexTree({Range("start", "end"): None})})
+        return IndexTree({0: IndexTree({Range("start", "end"): None})}, mesh=self)
 
     @property
     def ncells(self):
@@ -154,9 +154,9 @@ def compute_strides(points, plex_op):
             strides_per_base_point_group[base_points] = striders
 
 
-def closure(index):
-    return index.space.mesh.closure(index)
+def closure(itree):
+    return itree.mesh.closure(itree)
 
 
-def star(index):
-    return index.space.mesh.star(index)
+def star(itree):
+    return itree.mesh.star(itree)
