@@ -151,16 +151,31 @@ class IndexTree:
         indices = self._replace_integers(indices)
         indices = pyrsistent.pmap(indices)
 
-        size = 0
-        for index, itree in indices.items():
-            if itree:
-                size += index.size * itree.size
-            else:
-                size += index.size
         # super().__init__(indices=indices, mesh=mesh, size=size)
         self.indices = indices
         self.mesh = mesh
-        self.size = size
+
+    def compute_size(self, dim):
+        size = 0
+        for index, subtree in self.indices.items():
+            if not subtree and dim.children:
+                if dim.has_single_child_dim_type:
+                    size += index.size * dim.child.size
+                else:
+                    for child in dim.children:
+                        size += index.size * child.size
+            else:
+                if isinstance(index, PythonicIndex):
+                    if isinstance(index, Slice):
+                        subdims = dim.children[index.value]
+                    else:
+                        subdims = (dim.children[index.value],)
+                else:
+                    subdims = dim.children
+
+                for subdim in subdims:
+                    size += index.size * subtree.compute_size(subdim)
+        return size
 
     @property
     def index(self):

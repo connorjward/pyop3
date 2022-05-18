@@ -70,6 +70,7 @@ class _LoopyKernelBuilder:
 
         self.existing_inames = {}
         self.tlang_instructions = collections.defaultdict(list)
+        self.temp_to_itree = {}
 
         self.domains = []
         self.instructions = []
@@ -102,11 +103,21 @@ class _LoopyKernelBuilder:
         return tuple(self.arguments) + self.maps + tuple(self.temporaries) + self.parameters
 
     def build(self):
+        # FIXME broken
+        self.arguments_dict["map"] = lp.GlobalArg(
+            "map",
+            dtype=np.int32,  # TODO fix
+            shape=None
+        )
+
         for insn in self.expr.instructions:
             self.register_instruction(insn)
 
             if not isinstance(insn, tlang.FunctionCall):
-                self.register_temporary(insn.temporary, insn.tensor.indices)
+                if insn.temporary not in self.temp_to_itree:
+                    self.temp_to_itree[insn.temporary] = insn.tensor.indices
+
+                self.register_temporary(insn.temporary, insn.tensor.indices, insn.tensor.dim)
                 self.register_tensor(insn.tensor)
 
         breakpoint()
@@ -120,11 +131,11 @@ class _LoopyKernelBuilder:
 
         return lp.merge((translation_unit, *self.subkernels))
 
-    def register_temporary(self, name, itree):
+    def register_temporary(self, name, itree, dim):
         if name in self.temporaries_dict:
             return
 
-        self.temporaries_dict[name] = lp.TemporaryVariable(name, shape=(itree.size,))
+        self.temporaries_dict[name] = lp.TemporaryVariable(name, shape=(itree.compute_size(dim),))
 
     def register_tensor(self, tensor):
         if tensor.name in self.arguments_dict:
@@ -175,39 +186,31 @@ class _LoopyKernelBuilder:
         return tuple(shape)
 
 
-    def get_function_rw(self, call, within_domains):
-        reads = []
-        writes = []
-        for argument in call.arguments:
-            temporary = self.function_temporaries[call][argument]
-            access = argument.access
-
-            ref = self.as_subarrayref(argument, temporary, within_domains)
-            if access == pyop3.exprs.READ:
-                reads.append(ref)
-            elif access == pyop3.exprs.WRITE:
-                writes.append(ref)
-            elif access in {pyop3.exprs.INC, pyop3.exprs.RW}:
-                reads.append(ref)
-                writes.append(ref)
-            else:
-                raise NotImplementedError
-        return tuple(reads), tuple(writes)
-
-    def as_subarrayref(self, argument, temporary, within_domains):
+    def as_subarrayref(self, temporary, itree, dim):
         """Register an argument to a function."""
-        inames = self.register_broadcast_domains(argument, within_domains)
-        indices = tuple(pym.var(iname) for iname in inames.values())
+        iname = self.name_generator.next("i")
+        self.domains.append(f"{{ [{iname}]: 0 <= {iname} < {itree.compute_size(dim)} }}")
+        index = (pym.var(iname),)
         return lp.symbolic.SubArrayRef(
-            indices, pym.subscript(pym.var(temporary.name), indices)
+            index, pym.subscript(pym.var(temporary), index)
         )
 
     def register_instruction(self, instruction: tlang.Instruction):
         if not isinstance(instruction, tlang.FunctionCall):
             self.traverse(instruction)
             return
-        reads = tuple(pym.var(var) for var in instruction.reads)
-        writes = tuple(pym.var(var) for var in instruction.writes)
+
+        # FIXME dim itree nonsense
+        return
+
+        subarrayrefs = {}
+        for temp in itertools.chain(instruction.reads, instruction.writes):
+            if temp in subarrayrefs:
+                continue
+            # subarrayrefs[temp] = self.as_subarrayref(temp, self.temp_to_itree[temp], ???)
+
+        reads = tuple(subarrayrefs[var] for var in instruction.reads)
+        writes = tuple(subarrayrefs[var] for var in instruction.writes)
         assignees = tuple(writes)
         expression = pym.primitives.Call(
             pym.var(instruction.function.loopy_kernel.default_entrypoint.name),
@@ -303,31 +306,31 @@ class _LoopyKernelBuilder:
         return iname
 
     @functools.singledispatchmethod
-    def resolve(self, instruction, tensor_idxs, temp_idxs):
+    def resolve(self, instruction, tensor_idxs, temp_idx):
         raise AssertionError
 
     @resolve.register
-    def _(self, read: tlang.Read, tensor_indices, temp_indices):
-        assignee = lp.symbolic.LinearSubscript(pym.var(read.temporary), temp_indices)
+    def _(self, read: tlang.Read, tensor_indices, temp_index):
+        assignee = pym.subscript(pym.var(read.temporary), temp_index)
         expression = pym.subscript(pym.var(read.tensor.name), tensor_indices)
         return assignee, expression
 
     @resolve.register
     def _(self, zero: tlang.Zero, tensor_indices, temp_indices):
-        assignee = lp.symbolic.LinearSubscript(pym.var(zero.temporary), temp_indices)
+        assignee = pym.subscript(pym.var(zero.temporary), temp_indices)
         expression = 0
         return assignee, expression
 
     @resolve.register
     def _(self, write: tlang.Write, tensor_indices, temp_indices):
         assignee = pym.subscript(pym.var(write.tensor.name), tensor_indices)
-        expression = lp.symbolic.LinearSubscript(pym.var(write.temporary), temp_indices)
+        expression = pym.subscript(pym.var(write.temporary), temp_indices)
         return assignee, expression
 
     @resolve.register
     def _(self, inc: tlang.Increment, tensor_indices, temp_indices):
         assignee = pym.subscript(pym.var(inc.tensor.name), tensor_indices)
-        expression = assignee + lp.symbolic.LinearSubscript(pym.var(inc.temporary), temp_indices)
+        expression = assignee + pym.subscript(pym.var(inc.temporary), temp_indices)
         return assignee, expression
 
     def _register_instruction(self, instruction, assignee, expression, within_inames):
@@ -342,18 +345,21 @@ class _LoopyKernelBuilder:
     def traverse(self, instruction):
         """Return an indexed expression of whatever the instruction is"""
         offset = 0
-        for index, itree in instruction.tensor.indices.indices.items():
+        for dim, (index, itree) in zip(instruction.tensor.dim.children, instruction.tensor.indices.indices.items()):
             self._traverse(instruction, instruction.tensor.dim, index, itree, offset)
-            offset += itree.size
+            offset += itree.compute_size(dim)
 
-    def _traverse(self, instruction, dim: Dim, index, itree, offset=0, tensor_expr_indices=(), temp_expr_indices=(), within_inames=frozenset()):
+    def _traverse(self, instruction, dim: Dim, index, itree, offset=0, tensor_expr_indices=(), temp_expr_index=0, within_inames=frozenset()):
 
         # handle the different indexing that needs to be done
-        inames, temp_idxs, tensor_index = self.handle_index(index)
+        inames, temp_idx, tensor_index = self.handle_index(index)
         tensor_expr_indices += tensor_index
 
-        temp_expr_indices += temp_idxs
-        temp_expr_indices += (offset,)
+        if itree:
+            temp_expr_index += temp_idx * itree.compute_size(dim)
+        else:
+            temp_expr_index += temp_idx
+        temp_expr_index += offset
 
         if inames:
             within_inames |= set(inames)
@@ -361,7 +367,7 @@ class _LoopyKernelBuilder:
         # if leaf
         if not dim.children:
             assert not itree
-            assignee, expression = self.resolve(instruction, tensor_expr_indices, temp_expr_indices)
+            assignee, expression = self.resolve(instruction, tensor_expr_indices, temp_expr_index)
             self._register_instruction(instruction, assignee, expression, within_inames)
         elif dim.has_single_child_dim_type:
             if not itree:
@@ -370,7 +376,7 @@ class _LoopyKernelBuilder:
             else:
                 subindex, = itree.indices.keys()
                 subitree, = itree.indices.values()
-            self._traverse(instruction, dim.child, subindex, subitree, 0, tensor_expr_indices, temp_expr_indices, within_inames)
+            self._traverse(instruction, dim.child, subindex, subitree, 0, tensor_expr_indices, temp_expr_index, within_inames)
         else:
             if isinstance(index, Slice):
                 subdims = dim.children[index.value]
@@ -379,7 +385,7 @@ class _LoopyKernelBuilder:
 
             suboffset = 0
             for subdim, (idx, itree_) in zip(subdims, itree.indices.items()):
-                self._traverse(instruction, subdim, idx, itree_, suboffset, tensor_expr_indices, temp_expr_indices, within_inames)
+                self._traverse(instruction, subdim, idx, itree_, suboffset, tensor_expr_indices, temp_expr_index, within_inames)
                 if itree_:
                     suboffset += itree_.size
                 else:
@@ -397,11 +403,11 @@ class _LoopyKernelBuilder:
         except KeyError:
             iname = self.existing_inames.setdefault(index, self.name_generator.next("i"))
             self.domains.append(f"{{ [{iname}]: {index.start} <= {iname} < {index.stop} }}")
-        return (iname,), (pym.var(iname),), (pym.var(iname),)
+        return (iname,), pym.var(iname), (pym.var(iname),)
 
     @handle_index.register
     def _(self, index: IntIndex):
-        return None, (), (index.value,)
+        return None, 0, (index.value,)
 
     @handle_index.register
     def _(self, index: Map):
@@ -416,4 +422,4 @@ class _LoopyKernelBuilder:
         except KeyError:
             iname = self.existing_inames.setdefault(index, self.name_generator.next("i"))
             self.domains.append(f"{{ [{iname}]: {index.domain.start} <= {iname} < {index.domain.stop} }}")
-        return (iname,), (), (pym.var(iname),)
+        return (iname,), 0, (pym.var(iname),)
