@@ -22,7 +22,7 @@ class Mesh:
 
     @property
     def cells(self):
-        return IndexTree({0: IndexTree({Range("start", "end"): None})}, mesh=self)
+        return IndexTree(None, (IndexTree(Range("start", "end")), None, None), mesh=self)
 
     @property
     def ncells(self):

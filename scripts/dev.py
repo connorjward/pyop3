@@ -67,15 +67,14 @@ class DemoMesh(pyop3.UnstructuredMesh):
         try:
             return self.map_cache[key]
         except KeyError:
-            (stratum, subtree), = itree.indices.items()
-            assert stratum.value == 0  # nothing else supported yet
-            range_, = subtree.indices.keys()
+            subtree, _, _ = itree.children
+            range_ = subtree.index
 
-            new_itree = pyop3.IndexTree({
-                0: subtree,
-                1: pyop3.IndexTree({pyop3.NonAffineMap(range_, pyop3.Range(self.NEDGES_IN_CELL_CLOSURE)): None}),
-                2: pyop3.IndexTree({pyop3.NonAffineMap(range_, pyop3.Range(self.NVERTS_IN_CELL_CLOSURE)): None})
-            }, mesh=self)
+            new_itree = pyop3.IndexTree(None,
+                children=(subtree,
+                          pyop3.IndexTree(pyop3.NonAffineMap(range_, pyop3.Range(self.NEDGES_IN_CELL_CLOSURE))),
+                          pyop3.IndexTree(pyop3.NonAffineMap(range_, pyop3.Range(self.NVERTS_IN_CELL_CLOSURE)))),
+            mesh=self)
             return self.map_cache.setdefault(key, new_itree)
 
 
@@ -209,7 +208,7 @@ def direct():
         loopy_kernel,
     )
     return pyop3.Loop(
-        p := ITERSET.index,
+        p := ITERSET.loop_index,
         [kernel(dat1[p], dat2[p], result[p])],
     )
 
@@ -245,7 +244,7 @@ def inc():
         loopy_kernel,
     )
     return pyop3.Loop(
-        p := ITERSET.index,
+        p := ITERSET.loop_index,
         [
             kernel(
                 dat1[pyop3.closure(p)], dat2[pyop3.closure(p)], result[pyop3.closure(p)]

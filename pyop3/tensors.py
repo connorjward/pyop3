@@ -11,42 +11,33 @@ import pymbolic.primitives as pym
 import pytools
 import pyop3.exprs
 import pyop3.utils
-from pyop3.utils import as_tuple
+from pyop3.utils import as_tuple, checked_zip
 
 
 class Dim(pytools.ImmutableRecord):
-    def __init__(self, size, children=None):
-        if isinstance(size, numbers.Integral) and isinstance(children, collections.abc.Sequence) and len(children) != size:
-            raise ValueError
-        super().__init__(size=size, children=children)
+    @property
+    @abc.abstractmethod
+    def is_leaf(self):
+        pass
+
+
+class UniformDim(Dim):
+    def __init__(self, size, subdim=None):
+        super().__init__(size=size, subdim=subdim)
 
     @property
-    def has_single_child_dim_type(self):
-        return isinstance(self.children, Dim)
+    def is_leaf(self):
+        return not self.subdim
+
+
+class MixedDim(Dim):
+    def __init__(self, size, subdims=None):
+        assert len(subdims) == size
+        super().__init__(size=size, subdims=subdims)
 
     @property
-    def child(self):
-        if not self.has_single_child_dim_type:
-            raise TypeError
-        return self.children
-
-
-# class FixedSizeDim(Dim):
-#     """Dimension whose size is known at compile-time (e.g. a mesh's topological dimension or something mixed).
-#
-#     Such tensor dimensions can have variable children types.
-#     """
-#     def __init__(self, size: numbers.Integral, children: Union[Dim, Sequence]):
-#         # this class can have either a tuple of children or a single child
-#         if isinstance(children, collections.abc.Sequence) and len(children) != size:
-#             raise ValueError
-#         super().__init__(size, children)
-
-
-# class VariableDim(Dim):
-#     """Dimension whose size is unknown at compile-time (e.g. # cells in a mesh)."""
-#     def __init__(self, size, children: Dim):
-#         super().__init__(size, children)
+    def is_leaf(self):
+        return not self.subdims
 
 
 class Index(abc.ABC):
@@ -146,98 +137,71 @@ class Range(PythonicIndex, FancyIndex):
         return LoopIndex(self)
 
 
-class IndexTree:
-    def __init__(self, indices, mesh=None):
-        indices = self._replace_integers(indices)
-        indices = pyrsistent.pmap(indices)
+def indexed_shape(dim, itree):
+    if not dim:
+        return ()
 
-        # super().__init__(indices=indices, mesh=mesh, size=size)
-        self.indices = indices
-        self.mesh = mesh
+    if not itree:
+        itree = IndexTree(Range(dim.size))
 
-    def compute_size(self, dim):
-        size = 0
-        for index, subtree in self.indices.items():
-            if not subtree and dim.children:
-                if dim.has_single_child_dim_type:
-                    size += index.size * dim.child.size
-                else:
-                    for child in dim.children:
-                        size += index.size * child.size
-            else:
-                if isinstance(index, PythonicIndex):
-                    if isinstance(index, Slice):
-                        subdims = dim.children[index.value]
-                    else:
-                        subdims = (dim.children[index.value],)
-                else:
-                    subdims = dim.children
+    if isinstance(dim, UniformDim):
+        if itree.children:
+            child, = itree.children
+            shape = (itree.index.size,) + indexed_shape(dim.subdim, child)
+        else:
+            shape = (itree.index.size,)
+    else:
+        shapes = tuple(
+            indexed_shape(subdim, subtree)
+            for subdim, subtree in checked_zip(dim.subdims, itree.children)
+            if subtree
+        )
 
-                for subdim in subdims:
-                    size += index.size * subtree.compute_size(subdim)
-        return size
+        # This is quite confusing. The idea here is that a mixed dim will produce
+        # multiple children and these need to be combined. As an example, consider
+        # a case where the child shapes are (1, 3), (3, 3) and (3, 3). We want the
+        # final shape to be (7, 3) so we sum the first value and assert that all
+        # subdim shapes are equal.
+        outer = sum(shape[0] for shape in shapes)
+        inner = pytools.single_valued(shape[1:] for shape in shapes)
+        shape = (outer,) + inner
+    return shape
+
+
+class IndexTree(pytools.ImmutableRecord):
+    def __init__(self, index, children=(), mesh=None):
+        if isinstance(index, numbers.Integral):
+            index = IntIndex(index)
+        super().__init__(index=index, children=children, mesh=mesh)
 
     @property
-    def index(self):
-        new_indices = {}
-        for idx, itree in self.indices.items():
-            if itree:
-                new_indices[idx] = itree.index
-            elif isinstance(idx, FancyIndex):
-                new_indices[LoopIndex(idx)] = None
-            else:
-                new_indices[idx] = IndexTree({Slice(): None})
-        return type(self)(indices=new_indices, mesh=self.mesh)
+    def loop_index(self):
+        # if indexing a mixed object
+        if self.index is None:
+            new_children = []
+            for child in self.children:
+                if child:
+                    new_children.append(child.loop_index)
+                else:
+                    new_children.append(None)
+            new_children = tuple(new_children)
+            return self.copy(children=new_children)
 
-    @staticmethod
-    def _replace_integers(indices):
-        new_indices = {}
-        for idx, itree in indices.items():
-            if isinstance(idx, numbers.Number):
-                new_indices[IntIndex(idx)] = itree
-            else:
-                new_indices[idx] = itree
-        return new_indices
+        if isinstance(self.index, BasicIndex) and not self.children:
+            new_children = type(self)(Slice())
+            return self.copy(children=new_children)
 
-
- # class IndexTreeBag(frozenset):
-#     """Collection of IndexTuples."""
-#     def __init__(self, args):
-#         if not all(isinstance(arg, IndexTree) for arg in args):
-#             raise ValueError
-#
-#     @property
-#     def index(self):
-#         if not any(index_tree.is_fancy for index_tree in self):
-#             raise TypeError("All already scalar indices")
-#
-#         return 
-#         new_args = []
-#         for arg in self:
-#             try:
-#                 new_args.append(arg.index)
-#             except TypeError:
-#                 new_args.append(arg)
-#         return type(self)(new_args)
-#
-#     @staticmethod
-#     def _replace_fancy_index_tree(index_tree):
-#         return index_tree.index if index, FancyIndex) else index
-
-
-def index(indices):
-    # if not any(isinstance(idx, FancyIndex) for idx in itertools.chain(*indices)):
-    #     raise ValueError("Already scalar")
-
-    def replace_with_scalar_index(index):
-        if isinstance(index, FancyIndex):
-            return index.index
-        elif isinstance(index, slice):
-            return ChildIndex(slice)
+        if isinstance(self.index, FancyIndex):
+            new_index = LoopIndex(self.index)
         else:
-            return index
+            new_index = self.index
 
-    return tuple(tuple(map(replace_with_scalar_index, idxs)) for idxs in indices)
+        if self.children:
+            new_children = tuple(child.loop_index for child in self.children)
+        else:
+            new_children = ()
+
+        return self.copy(index=new_index, children=new_children)
 
 
 class Tensor(pytools.ImmutableRecordWithoutPickling):
@@ -396,9 +360,9 @@ def Global(*, name: str = None):
 
 
 def Dat(mesh, dofs: Section, *, prefix="dat", **kwargs) -> Tensor:
-    dim = Dim(
+    dim = MixedDim(
         mesh.tdim,
-        children=tuple(Dim(mesh.strata_sizes[stratum], Dim(dofs.dofs[stratum]))
+        tuple(UniformDim(mesh.strata_sizes[stratum], UniformDim(dofs.dofs[stratum]))
                            for stratum in range(mesh.tdim))
     )
     return Tensor(dim, prefix=prefix, **kwargs)

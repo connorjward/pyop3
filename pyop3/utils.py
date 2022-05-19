@@ -1,5 +1,6 @@
 import collections
 import itertools
+import pytools
 
 
 class UniqueNameGenerator:
@@ -44,3 +45,8 @@ class CustomTuple(tuple):
 
     def __or__(self, other):
         return self + (other,)
+
+def checked_zip(*iterables):
+    if not pytools.is_single_valued(set(len(it) for it in iterables)):
+        raise ValueError
+    return zip(*iterables)

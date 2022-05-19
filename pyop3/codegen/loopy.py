@@ -16,9 +16,9 @@ import pymbolic as pym
 import pyop3.exprs
 from pyop3 import exprs, tlang
 import pyop3.utils
-from pyop3.utils import CustomTuple
-from pyop3.tensors import Tensor, Index, Map, Dim, IntIndex, LoopIndex, Range
-from pyop3.tensors import Slice
+from pyop3.utils import CustomTuple, checked_zip
+from pyop3.tensors import Tensor, Index, Map, Dim, IntIndex, LoopIndex, Range, UniformDim, MixedDim
+from pyop3.tensors import Slice, indexed_shape, IndexTree
 from pyop3.codegen.tlang import to_tlang
 
 LOOPY_TARGET = lp.CTarget()
@@ -135,7 +135,8 @@ class _LoopyKernelBuilder:
         if name in self.temporaries_dict:
             return
 
-        self.temporaries_dict[name] = lp.TemporaryVariable(name, shape=(itree.compute_size(dim),))
+        shape = indexed_shape(dim, itree)
+        self.temporaries_dict[name] = lp.TemporaryVariable(name, shape=shape)
 
     def register_tensor(self, tensor):
         if tensor.name in self.arguments_dict:
@@ -344,52 +345,49 @@ class _LoopyKernelBuilder:
 
     def traverse(self, instruction):
         """Return an indexed expression of whatever the instruction is"""
-        offset = 0
-        for dim, (index, itree) in zip(instruction.tensor.dim.children, instruction.tensor.indices.indices.items()):
-            self._traverse(instruction, instruction.tensor.dim, index, itree, offset)
-            offset += itree.compute_size(dim)
+        self._traverse(instruction, instruction.tensor.dim, instruction.tensor.indices)
 
-    def _traverse(self, instruction, dim: Dim, index, itree, offset=0, tensor_expr_indices=(), temp_expr_index=0, within_inames=frozenset()):
+    def _traverse(self, instruction, dim, itree, tensor_offset=0, temp_offset=0, tensor_expr_indices=(), temp_expr_index=(), within_inames=frozenset()):
 
-        # handle the different indexing that needs to be done
-        inames, temp_idx, tensor_index = self.handle_index(index)
-        tensor_expr_indices += tensor_index
+        if not dim or not itree:
+            return
 
-        if itree:
-            temp_expr_index += temp_idx * itree.compute_size(dim)
-        else:
-            temp_expr_index += temp_idx
-        temp_expr_index += offset
+        if isinstance(dim, UniformDim):
+            # handle the different indexing that needs to be done
+            inames, temp_idx, tensor_index = self.handle_index(itree.index)
 
-        if inames:
-            within_inames |= set(inames)
+            if tensor_index:
+                tensor_index = (tensor_index[0] + tensor_offset, *tensor_index[1:])
+                tensor_expr_indices += tensor_index
 
-        # if leaf
-        if not dim.children:
-            assert not itree
+            if temp_idx:
+                temp_idx = (temp_idx[0] + temp_offset, *temp_idx[1:])
+                temp_expr_index += temp_idx
+
+            if inames:
+                within_inames |= set(inames)
+
+        if dim.is_leaf:
             assignee, expression = self.resolve(instruction, tensor_expr_indices, temp_expr_index)
             self._register_instruction(instruction, assignee, expression, within_inames)
-        elif dim.has_single_child_dim_type:
-            if not itree:
-                subindex = Range(dim.child.size)
-                subitree = None
-            else:
-                subindex, = itree.indices.keys()
-                subitree, = itree.indices.values()
-            self._traverse(instruction, dim.child, subindex, subitree, 0, tensor_expr_indices, temp_expr_index, within_inames)
-        else:
-            if isinstance(index, Slice):
-                subdims = dim.children[index.value]
-            else:
-                subdims = (dim.children[index.value],)
+            return
 
-            suboffset = 0
-            for subdim, (idx, itree_) in zip(subdims, itree.indices.items()):
-                self._traverse(instruction, subdim, idx, itree_, suboffset, tensor_expr_indices, temp_expr_index, within_inames)
-                if itree_:
-                    suboffset += itree_.size
-                else:
-                    suboffset += idx.size
+        if isinstance(dim, UniformDim):
+            if itree.children:
+                subtree, = itree.children
+            else:
+                subtree = IndexTree(Range(dim.subdim.size))
+
+            self._traverse(instruction, dim.subdim, subtree, 0, 0, tensor_expr_indices, temp_expr_index, within_inames)
+        else:
+            tensor_suboffset = 0
+            temp_suboffset = 0
+            for subdim, subtree in checked_zip(dim.subdims, itree.children):
+                if not subtree:
+                    continue
+                self._traverse(instruction, subdim, subtree, tensor_suboffset, temp_suboffset, tensor_expr_indices, temp_expr_index, within_inames)
+                tensor_suboffset += subdim.size
+                temp_suboffset += subtree.index.size
 
     @functools.singledispatchmethod
     def handle_index(self, index):
@@ -403,17 +401,22 @@ class _LoopyKernelBuilder:
         except KeyError:
             iname = self.existing_inames.setdefault(index, self.name_generator.next("i"))
             self.domains.append(f"{{ [{iname}]: {index.start} <= {iname} < {index.stop} }}")
-        return (iname,), pym.var(iname), (pym.var(iname),)
+        return (iname,), (pym.var(iname),), (pym.var(iname),)
 
     @handle_index.register
     def _(self, index: IntIndex):
+        raise NotImplementedError
         return None, 0, (index.value,)
 
     @handle_index.register
     def _(self, index: Map):
         inames, temp_idxs, tensor_idxs = self.handle_index(index.from_dim)
         rinames, rtemp_idxs, rtensor_idxs = self.handle_index(index.to_dim)
-        return inames + rinames, temp_idxs*index.to_dim.size + rtemp_idxs, (pym.subscript(pym.var("map"), tensor_idxs+rtensor_idxs),)
+
+        temp_expr = temp_idxs + rtemp_idxs
+        tensor_expr = tensor_idxs+rtensor_idxs
+
+        return inames + rinames, temp_expr, (pym.subscript(pym.var("map"), tensor_expr),)
 
     @handle_index.register
     def _(self, index: LoopIndex):
@@ -422,4 +425,4 @@ class _LoopyKernelBuilder:
         except KeyError:
             iname = self.existing_inames.setdefault(index, self.name_generator.next("i"))
             self.domains.append(f"{{ [{iname}]: {index.domain.start} <= {iname} < {index.domain.stop} }}")
-        return (iname,), 0, (pym.var(iname),)
+        return (iname,), (), (pym.var(iname),)
