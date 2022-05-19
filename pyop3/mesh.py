@@ -22,7 +22,11 @@ class Mesh:
 
     @property
     def cells(self):
-        return IndexTree(None, (IndexTree(Range("start", "end")), None, None), mesh=self)
+        # being very verbose
+        index_group = ((0, Range("start", "end")),)
+        stencil = frozenset({index_group})
+        stencils = frozenset({stencil})
+        return StencilGroup(stencils, mesh=self)
 
     @property
     def ncells(self):

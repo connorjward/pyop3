@@ -32,7 +32,6 @@ class UniformDim(Dim):
 
 class MixedDim(Dim):
     def __init__(self, size, subdims=None):
-        assert len(subdims) == size
         super().__init__(size=size, subdims=subdims)
 
     @property
@@ -137,71 +136,50 @@ class Range(PythonicIndex, FancyIndex):
         return LoopIndex(self)
 
 
-def indexed_shape(dim, itree):
-    if not dim:
-        return ()
+def indexed_shape(dims, stencil):
+    size = 0
+    for index_group in stencil:
+        size += indexed_size_per_index_group(dims, index_group)
+    return (size,) if size else ()
 
-    if not itree:
-        itree = IndexTree(Range(dim.size))
 
-    if isinstance(dim, UniformDim):
-        if itree.children:
-            child, = itree.children
-            shape = (itree.index.size,) + indexed_shape(dim.subdim, child)
-        else:
-            shape = (itree.index.size,)
+def indexed_size_per_index_group(dims, index_group):
+    (dim_id, index), *sub_index_group = index_group
+    subdim = dims[dim_id]
+
+    if not sub_index_group:
+        return index.size * subdim.size
     else:
-        shapes = tuple(
-            indexed_shape(subdim, subtree)
-            for subdim, subtree in checked_zip(dim.subdims, itree.children)
-            if subtree
-        )
-
-        # This is quite confusing. The idea here is that a mixed dim will produce
-        # multiple children and these need to be combined. As an example, consider
-        # a case where the child shapes are (1, 3), (3, 3) and (3, 3). We want the
-        # final shape to be (7, 3) so we sum the first value and assert that all
-        # subdim shapes are equal.
-        outer = sum(shape[0] for shape in shapes)
-        inner = pytools.single_valued(shape[1:] for shape in shapes)
-        shape = (outer,) + inner
-    return shape
+        return index.size * indexed_size_per_index_group(subdim.subdims, sub_index_group)
 
 
-class IndexTree(pytools.ImmutableRecord):
-    def __init__(self, index, children=(), mesh=None):
-        if isinstance(index, numbers.Integral):
-            index = IntIndex(index)
-        super().__init__(index=index, children=children, mesh=mesh)
+class StencilGroup(pytools.ImmutableRecord):
+    def __init__(self, stencils, mesh=None):
+        super().__init__(stencils=stencils, mesh=mesh)
+
+    def __iter__(self):
+        return iter(self.stencils)
 
     @property
-    def loop_index(self):
-        # if indexing a mixed object
-        if self.index is None:
-            new_children = []
-            for child in self.children:
-                if child:
-                    new_children.append(child.loop_index)
-                else:
-                    new_children.append(None)
-            new_children = tuple(new_children)
-            return self.copy(children=new_children)
+    def index(self):
+        new_stencils = set()
+        for stencil in self.stencils:
+            new_stencil = []
+            for index_group in stencil:
+                new_index_group = []
+                for subdim, index in index_group:
+                    if isinstance(index, FancyIndex):
+                        index = index.index
+                    new_index_group.append((subdim, index))
+                new_stencil.append(tuple(new_index_group))
+            new_stencils.add(tuple(new_stencil))
+        new_stencils = frozenset(new_stencils)
+        return self.copy(stencils=new_stencils)
 
-        if isinstance(self.index, BasicIndex) and not self.children:
-            new_children = type(self)(Slice())
-            return self.copy(children=new_children)
 
-        if isinstance(self.index, FancyIndex):
-            new_index = LoopIndex(self.index)
-        else:
-            new_index = self.index
-
-        if self.children:
-            new_children = tuple(child.loop_index for child in self.children)
-        else:
-            new_children = ()
-
-        return self.copy(index=new_index, children=new_children)
+# To avoid annoying errors for now
+class IndexTree:
+    ...
 
 
 class Tensor(pytools.ImmutableRecordWithoutPickling):
@@ -209,7 +187,7 @@ class Tensor(pytools.ImmutableRecordWithoutPickling):
     name_generator = pyop3.utils.UniqueNameGenerator()
     prefix = "ten"
 
-    def __new__(cls, dim=None, indices=(), **kwargs):
+    def __new__(cls, dims=None, stencils=frozenset(), **kwargs):
         # FIXME what is the right way to think about this now?
         # if (len(dims) == 2 and isinstance(dims[0], IndexedDimension) and not isinstance(dims[1], IndexedDimension)
         if False:
@@ -217,13 +195,13 @@ class Tensor(pytools.ImmutableRecordWithoutPickling):
         else:
             return super().__new__(cls)
 
-    def __init__(self, dim=None, indices=(), *, name: str = None, prefix: str=None):
+    def __init__(self, dims=None, stencils=frozenset(), *, name: str = None, prefix: str=None):
         name = name or self.name_generator.generate(prefix or self.prefix)
-        super().__init__(dim=dim, indices=indices, name=name)
+        super().__init__(dims=dims, stencils=stencils, name=name)
 
-    def __getitem__(self, indices):
+    def __getitem__(self, stencils):
         # TODO Add support for already indexed items
-        if self.indices:
+        if self.stencils:
             raise NotImplementedError("Needs more thought")
 
         # convert indices to a tuple of tuples
@@ -246,67 +224,13 @@ class Tensor(pytools.ImmutableRecordWithoutPickling):
 
         # indices = tuple(tuple(to_index(idx) for idx in idxs) for idxs in indices)
 
-        return self.copy(indices=indices)
+        return self.copy(stencils=stencils)
 
     def __str__(self):
         if self.indices:
             return f"{self.name}[{','.join(str(idx) for idx in self.indices)}]"
         else:
             return self.name
-
-    @property
-    def broadcast_domains(self):
-        domains = set()
-        for dim in self.dims:
-            domains |= self._get_broadcast_domains(dim)
-        return frozenset(domains)
-
-    @classmethod
-    def _get_broadcast_domains(cls, dim):
-        if isinstance(dim, Index):
-            return frozenset()
-        elif isinstance(dim, Slice):
-            return frozenset({dim})
-        elif isinstance(dim, Map):
-            return frozenset({dim.to_space}) | cls._get_broadcast_domains(dim.from_space)
-        else:
-            raise AssertionError
-
-    @property
-    def orig_shape(self):
-        shape = []
-        for dim in self.dims:
-            space = dim.space if isinstance(dim, Index) else dim
-            while isinstance(space, Map):
-                space = space.from_space
-
-            # this is because a maps space can either be an index or slice
-            space = space.space if isinstance(space, Index) else space
-
-            # FIXME This requires some thought about bin-ops
-            # shape.append(space.size)
-            shape.append(space.stop)
-        return tuple(shape)
-
-    # @property
-    # def domain(self):
-    #     try:
-    #         (dom,) = self.shape
-    #         return dom
-    #     except ValueError:
-    #         raise TypeError
-
-    @property
-    def order(self):
-        return len(self.spaces)
-
-    @property
-    def is_scalar(self):
-        return self.order == 0
-
-    @property
-    def is_vector(self):
-        return self.order == 1
 
 
 class Map(FancyIndex, abc.ABC):
@@ -360,12 +284,9 @@ def Global(*, name: str = None):
 
 
 def Dat(mesh, dofs: Section, *, prefix="dat", **kwargs) -> Tensor:
-    dim = MixedDim(
-        mesh.tdim,
-        tuple(UniformDim(mesh.strata_sizes[stratum], UniformDim(dofs.dofs[stratum]))
+    dims = tuple(MixedDim(mesh.strata_sizes[stratum], (MixedDim(dofs.dofs[stratum]),))
                            for stratum in range(mesh.tdim))
-    )
-    return Tensor(dim, prefix=prefix, **kwargs)
+    return Tensor(dims, prefix=prefix, **kwargs)
 
 
 def Mat(shape: Tuple[int, ...], *, name: str = None):

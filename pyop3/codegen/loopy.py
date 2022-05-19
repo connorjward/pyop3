@@ -18,7 +18,7 @@ from pyop3 import exprs, tlang
 import pyop3.utils
 from pyop3.utils import CustomTuple, checked_zip
 from pyop3.tensors import Tensor, Index, Map, Dim, IntIndex, LoopIndex, Range, UniformDim, MixedDim
-from pyop3.tensors import Slice, indexed_shape, IndexTree
+from pyop3.tensors import Slice, indexed_shape, IndexTree, indexed_size_per_index_group
 from pyop3.codegen.tlang import to_tlang
 
 LOOPY_TARGET = lp.CTarget()
@@ -114,10 +114,11 @@ class _LoopyKernelBuilder:
             self.register_instruction(insn)
 
             if not isinstance(insn, tlang.FunctionCall):
-                if insn.temporary not in self.temp_to_itree:
-                    self.temp_to_itree[insn.temporary] = insn.tensor.indices
+                # if insn.temporary not in self.temp_to_itree:
+                #     self.temp_to_itree[insn.temporary] = insn.tensor.indices
 
-                self.register_temporary(insn.temporary, insn.tensor.indices, insn.tensor.dim)
+                for stencil in insn.tensor.stencils:
+                    self.register_temporary(insn.temporary, insn.tensor.dims, stencil)
                 self.register_tensor(insn.tensor)
 
         breakpoint()
@@ -131,11 +132,11 @@ class _LoopyKernelBuilder:
 
         return lp.merge((translation_unit, *self.subkernels))
 
-    def register_temporary(self, name, itree, dim):
+    def register_temporary(self, name, dims, stencil):
         if name in self.temporaries_dict:
             return
 
-        shape = indexed_shape(dim, itree)
+        shape = indexed_shape(dims, stencil)
         self.temporaries_dict[name] = lp.TemporaryVariable(name, shape=shape)
 
     def register_tensor(self, tensor):
@@ -311,27 +312,27 @@ class _LoopyKernelBuilder:
         raise AssertionError
 
     @resolve.register
-    def _(self, read: tlang.Read, tensor_indices, temp_index):
-        assignee = pym.subscript(pym.var(read.temporary), temp_index)
-        expression = pym.subscript(pym.var(read.tensor.name), tensor_indices)
+    def _(self, read: tlang.Read, local_idxs, global_idxs, local_offset, global_offset):
+        assignee = pym.subscript(pym.var(read.temporary), local_idxs + local_offset)
+        expression = pym.subscript(pym.var(read.tensor.name), global_idxs + global_offset)
         return assignee, expression
 
     @resolve.register
-    def _(self, zero: tlang.Zero, tensor_indices, temp_indices):
-        assignee = pym.subscript(pym.var(zero.temporary), temp_indices)
+    def _(self, zero: tlang.Zero, local_idxs, global_idxs, local_offset, global_offset):
+        assignee = pym.subscript(pym.var(zero.temporary), local_idxs + local_offset)
         expression = 0
         return assignee, expression
 
     @resolve.register
-    def _(self, write: tlang.Write, tensor_indices, temp_indices):
-        assignee = pym.subscript(pym.var(write.tensor.name), tensor_indices)
-        expression = pym.subscript(pym.var(write.temporary), temp_indices)
+    def _(self, write: tlang.Write, local_idxs, global_idxs, local_offset, global_offset):
+        assignee = pym.subscript(pym.var(write.tensor.name), global_idxs + global_offset)
+        expression = pym.subscript(pym.var(write.temporary), local_idxs + local_offset)
         return assignee, expression
 
     @resolve.register
-    def _(self, inc: tlang.Increment, tensor_indices, temp_indices):
-        assignee = pym.subscript(pym.var(inc.tensor.name), tensor_indices)
-        expression = assignee + pym.subscript(pym.var(inc.temporary), temp_indices)
+    def _(self, inc: tlang.Increment, local_idxs, global_idxs, local_offset, global_offset):
+        assignee = pym.subscript(pym.var(inc.tensor.name), global_idxs + global_offset)
+        expression = assignee + pym.subscript(pym.var(inc.temporary), local_idxs + local_offset)
         return assignee, expression
 
     def _register_instruction(self, instruction, assignee, expression, within_inames):
@@ -342,52 +343,62 @@ class _LoopyKernelBuilder:
         self.instructions.append(lp_instruction)
         self.tlang_instructions[instruction].append(lp_instruction)
 
-
+    # TODO This is next...
+    # I don't want to have to pass the instruction down through the whole thing
+    # I would much rather have a separate class that carried this information
+    # The issue then becomes one of correctly naming inames. I think this should
+    # be doable since we know which are 'LoopIndex' (and hence which need looking up
+    # vs creating.
     def traverse(self, instruction):
         """Return an indexed expression of whatever the instruction is"""
-        self._traverse(instruction, instruction.tensor.dim, instruction.tensor.indices)
+        for stencil in instruction.tensor.stencils:
+            local_offset = 0
+            for index_group in stencil:
+                self._traverse(instruction, instruction.tensor.dims, index_group, local_offset=local_offset)
+                # each entry into the temporary needs to be offset by the size of the previous one
+                local_offset += indexed_size_per_index_group(instruction.tensor.dims, index_group)
 
-    def _traverse(self, instruction, dim, itree, tensor_offset=0, temp_offset=0, tensor_expr_indices=(), temp_expr_index=(), within_inames=frozenset()):
+    def _traverse(
+            self, instruction, dims, index_group,
+            local_idxs=0,
+            global_idxs=0,
+            local_offset=0,
+            global_offset=0,
+            within_inames=frozenset()
+    ):
+        if not index_group:
+            index_group = [(0, Range(dims[0].size))]
 
-        if not dim or not itree:
-            return
+        (dim_id, index), *sub_index_group = index_group
+        subdim = dims[dim_id]
 
-        if isinstance(dim, UniformDim):
-            # handle the different indexing that needs to be done
-            inames, temp_idx, tensor_index = self.handle_index(itree.index)
+        # The global offset is very complicated - we need to build up the offsets every time
+        # we do not take the first subdim by adding the size of the prior subdims. Make sure to
+        # not multiply this value.
+        for dim in dims[:dim_id]:
+            global_offset += dim.size
 
-            if tensor_index:
-                tensor_index = (tensor_index[0] + tensor_offset, *tensor_index[1:])
-                tensor_expr_indices += tensor_index
+        ### tidy up
+        inames, local_idxs_, global_idxs_ = self.handle_index(index)
 
-            if temp_idx:
-                temp_idx = (temp_idx[0] + temp_offset, *temp_idx[1:])
-                temp_expr_index += temp_idx
+        if global_idxs_:
+            global_idxs *= subdim.size
+            global_idxs += global_idxs_
 
-            if inames:
-                within_inames |= set(inames)
+        if local_idxs_:
+            local_idxs *= indexed_size_per_index_group(dims, index_group)
+            local_idxs += local_idxs_
 
-        if dim.is_leaf:
-            assignee, expression = self.resolve(instruction, tensor_expr_indices, temp_expr_index)
+        if inames:
+            within_inames |= set(inames)
+        ### !tidy up
+
+
+        if not subdim.subdims:
+            assignee, expression = self.resolve(instruction, local_idxs, global_idxs, local_offset, global_offset)
             self._register_instruction(instruction, assignee, expression, within_inames)
-            return
-
-        if isinstance(dim, UniformDim):
-            if itree.children:
-                subtree, = itree.children
-            else:
-                subtree = IndexTree(Range(dim.subdim.size))
-
-            self._traverse(instruction, dim.subdim, subtree, 0, 0, tensor_expr_indices, temp_expr_index, within_inames)
         else:
-            tensor_suboffset = 0
-            temp_suboffset = 0
-            for subdim, subtree in checked_zip(dim.subdims, itree.children):
-                if not subtree:
-                    continue
-                self._traverse(instruction, subdim, subtree, tensor_suboffset, temp_suboffset, tensor_expr_indices, temp_expr_index, within_inames)
-                tensor_suboffset += subdim.size
-                temp_suboffset += subtree.index.size
+            self._traverse(instruction, subdim.subdims, sub_index_group, local_idxs, global_idxs, local_offset, global_offset)
 
     @functools.singledispatchmethod
     def handle_index(self, index):
@@ -401,7 +412,7 @@ class _LoopyKernelBuilder:
         except KeyError:
             iname = self.existing_inames.setdefault(index, self.name_generator.next("i"))
             self.domains.append(f"{{ [{iname}]: {index.start} <= {iname} < {index.stop} }}")
-        return (iname,), (pym.var(iname),), (pym.var(iname),)
+        return (iname,), pym.var(iname), pym.var(iname)
 
     @handle_index.register
     def _(self, index: IntIndex):
@@ -413,10 +424,13 @@ class _LoopyKernelBuilder:
         inames, temp_idxs, tensor_idxs = self.handle_index(index.from_dim)
         rinames, rtemp_idxs, rtensor_idxs = self.handle_index(index.to_dim)
 
-        temp_expr = temp_idxs + rtemp_idxs
-        tensor_expr = tensor_idxs+rtensor_idxs
+        if temp_idxs:
+            temp_expr = temp_idxs * index.to_dim.size + rtemp_idxs
+        else:
+            temp_expr = rtemp_idxs
+        tensor_expr = tensor_idxs, rtensor_idxs
 
-        return inames + rinames, temp_expr, (pym.subscript(pym.var("map"), tensor_expr),)
+        return inames + rinames, temp_expr, pym.subscript(pym.var("map"), tensor_expr)
 
     @handle_index.register
     def _(self, index: LoopIndex):
@@ -425,4 +439,4 @@ class _LoopyKernelBuilder:
         except KeyError:
             iname = self.existing_inames.setdefault(index, self.name_generator.next("i"))
             self.domains.append(f"{{ [{iname}]: {index.domain.start} <= {iname} < {index.domain.stop} }}")
-        return (iname,), (), (pym.var(iname),)
+        return (iname,), None, pym.var(iname)

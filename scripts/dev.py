@@ -62,20 +62,28 @@ class DemoMesh(pyop3.UnstructuredMesh):
     #     range_, = subtree.indices.keys()
 
 
-    def closure(self, itree):
-        key = (self.closure.__name__, itree)
+    def closure(self, stencils):
+        key = (self.closure.__name__, stencils)
         try:
             return self.map_cache[key]
         except KeyError:
-            subtree, _, _ = itree.children
-            range_ = subtree.index
+            # be very assertive
+            stencil, = stencils
+            igroup, = stencil
+            (subdim, index), = igroup
 
-            new_itree = pyop3.IndexTree(None,
-                children=(subtree,
-                          pyop3.IndexTree(pyop3.NonAffineMap(range_, pyop3.Range(self.NEDGES_IN_CELL_CLOSURE))),
-                          pyop3.IndexTree(pyop3.NonAffineMap(range_, pyop3.Range(self.NVERTS_IN_CELL_CLOSURE)))),
-            mesh=self)
-            return self.map_cache.setdefault(key, new_itree)
+            assert subdim == 0
+
+            edge_map = pyop3.NonAffineMap(index, pyop3.Range(self.NEDGES_IN_CELL_CLOSURE))
+            vert_map = pyop3.NonAffineMap(index, pyop3.Range(self.NVERTS_IN_CELL_CLOSURE))
+            mapped_stencils = frozenset({  # stencils (i.e. partitions)
+                frozenset({  # stencil (i.e. temporary)
+                    ((0, index),),  # index groups (i.e. loopy instructions)
+                    ((1, edge_map),),
+                    ((2, vert_map),),
+                })
+            })
+            return self.map_cache.setdefault(key, mapped_stencils)
 
 
 class DemoExtrudedMesh:
@@ -208,7 +216,7 @@ def direct():
         loopy_kernel,
     )
     return pyop3.Loop(
-        p := ITERSET.loop_index,
+        p := ITERSET.index,
         [kernel(dat1[p], dat2[p], result[p])],
     )
 
@@ -244,7 +252,7 @@ def inc():
         loopy_kernel,
     )
     return pyop3.Loop(
-        p := ITERSET.loop_index,
+        p := ITERSET.index,
         [
             kernel(
                 dat1[pyop3.closure(p)], dat2[pyop3.closure(p)], result[pyop3.closure(p)]
