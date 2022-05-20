@@ -5,7 +5,7 @@ import numbers
 import enum
 import functools
 import itertools
-from typing import Dict, Any
+from typing import Dict, Any, Tuple, FrozenSet
 
 import loopy as lp
 import loopy.symbolic
@@ -83,6 +83,7 @@ class _LoopyKernelBuilder:
         self.maps_dict = {}
         self.function_temporaries = collections.defaultdict(dict)
         self.name_generator = pyop3.utils.UniqueNameGenerator()
+        self.insn_within_indices = collections.defaultdict(list)
 
     @property
     def parameters(self):
@@ -129,7 +130,16 @@ class _LoopyKernelBuilder:
             target=LOOPY_TARGET,
             lang_version=LOOPY_LANG_VERSION,
         )
+        breakpoint()
 
+        # TODO This needs to fit with subkernels too - not yet addressed
+        # handle indices from outer loops
+        counter = itertools.count()
+        for index, old_inames in self.insn_within_indices.items():
+            new_iname = f"i{next(counter)}"
+            lp.rename_inames(translation_unit, old_inames, new_iname)
+
+        breakpoint()
         return lp.merge((translation_unit, *self.subkernels))
 
     def register_temporary(self, name, dim, stencil):
@@ -197,10 +207,24 @@ class _LoopyKernelBuilder:
             index, pym.subscript(pym.var(temporary), index)
         )
 
+    def get_within_inames(self, itree):
+        if not itree:
+            return frozenset()
+        within_inames = set()
+        for index, subtree in itree.indices.items():
+            if not isinstance(index, IntIndex):
+                within_inames.add(self.existing_inames[index])
+            within_inames |= self.get_within_inames(subtree)
+        return frozenset(within_inames)
+
     def register_instruction(self, instruction: tlang.Instruction):
         if not isinstance(instruction, tlang.FunctionCall):
-            self.traverse(instruction)
-            return
+            insn = LoopyStencilBuilder(instruction).build()
+            self.instructions.extend(insn.loopy_instructions)
+            self.domains.extend(insn.domains)
+
+            for index, iname in insn.within_indices.items():
+                self.insn_within_indices[index].append(iname)
 
         # FIXME dim itree nonsense
         return
@@ -297,65 +321,54 @@ class _LoopyKernelBuilder:
         self.domains.append(DomainContext(iname, start, stop))
         return iname
 
-    @functools.singledispatchmethod
-    def resolve(self, instruction, tensor_idxs, temp_idx):
-        raise AssertionError
 
-    @resolve.register
-    def _(self, read: tlang.Read, local_idxs, global_idxs, local_offset, global_offset):
-        assignee = pym.subscript(pym.var(read.temporary), local_idxs + local_offset)
-        expression = pym.subscript(pym.var(read.tensor.name), global_idxs + global_offset)
-        return assignee, expression
+@dataclasses.dataclass
+class LoopyStencil:
+    loopy_instructions: FrozenSet
+    domains: FrozenSet
+    within_indices: Dict
 
-    @resolve.register
-    def _(self, zero: tlang.Zero, local_idxs, global_idxs, local_offset, global_offset):
-        assignee = pym.subscript(pym.var(zero.temporary), local_idxs + local_offset)
-        expression = 0
-        return assignee, expression
 
-    @resolve.register
-    def _(self, write: tlang.Write, local_idxs, global_idxs, local_offset, global_offset):
-        assignee = pym.subscript(pym.var(write.tensor.name), global_idxs + global_offset)
-        expression = pym.subscript(pym.var(write.temporary), local_idxs + local_offset)
-        return assignee, expression
+class LoopyStencilBuilder:
+    def __init__(self, instruction):
+        self.instruction = instruction
+        self.loopy_instructions = []
+        self.name_generator = pyop3.utils.NameGenerator(prefix=instruction.id)
+        self.iname_generator = pyop3.utils.NameGenerator(prefix=f"{instruction.id}_i")
+        self.within_iname_generator = pyop3.utils.NameGenerator(prefix=f"{instruction.id}_within")
+        self.within_inames = {}
+        self.is_built = False
+        self.inames = {}
+        self.domains = set()
 
-    @resolve.register
-    def _(self, inc: tlang.Increment, local_idxs, global_idxs, local_offset, global_offset):
-        assignee = pym.subscript(pym.var(inc.tensor.name), global_idxs + global_offset)
-        expression = assignee + pym.subscript(pym.var(inc.temporary), local_idxs + local_offset)
-        return assignee, expression
+    def build(self):
+        if self.is_built:
+            raise RuntimeError
 
-    def _register_instruction(self, instruction, assignee, expression, within_inames):
-        id_ = self.name_generator.next(instruction.id)
-        depends_on = frozenset(itertools.chain(*(self.tlang_instructions[insn] for insn in instruction.depends_on)))
-        lp_instruction = lp.Assignment(assignee, expression, id=id_,
-                within_inames=within_inames, depends_on=depends_on)
-        self.instructions.append(lp_instruction)
-        self.tlang_instructions[instruction].append(lp_instruction)
-
-    # TODO This is next...
-    # I don't want to have to pass the instruction down through the whole thing
-    # I would much rather have a separate class that carried this information
-    # The issue then becomes one of correctly naming inames. I think this should
-    # be doable since we know which are 'LoopIndex' (and hence which need looking up
-    # vs creating.
-    def traverse(self, instruction):
-        """Return an indexed expression of whatever the instruction is"""
-        for stencil in instruction.tensor.stencils:
+        for stencil in self.instruction.tensor.stencils:
             local_offset = 0
             for indices in stencil:
-                self._traverse(instruction, instruction.tensor.dim, indices, local_offset=local_offset)
+                self._traverse(self.instruction.tensor.dim, indices, local_offset=local_offset)
                 # each entry into the temporary needs to be offset by the size of the previous one
-                local_offset += indexed_size_per_index_group(instruction.tensor.dim, indices)
+                local_offset += indexed_size_per_index_group(self.instruction.tensor.dim, indices)
+        self.is_built = True
+        return LoopyStencil(self.loopy_instructions, self.domains, self.within_inames)
 
-    def _traverse(
-            self, instruction, dim, indices,
-            local_idxs=0,
-            global_idxs=0,
-            local_offset=0,
-            global_offset=0,
-            within_inames=frozenset()
-    ):
+    def _register_instruction(self, global_idxs, local_idxs, global_offset, local_offset, within_inames):
+        insn_id = self.name_generator.next()
+
+        # wilcard this to catch subinsns
+        depends_on = frozenset({f"{insn}*" for insn in self.instruction.depends_on})
+        # disable for now (func not working)
+        depends_on = frozenset({})
+
+        assignee, expression = self.resolve(self.instruction, global_idxs, local_idxs, global_offset, local_offset)
+
+        lp_instruction = lp.Assignment(assignee, expression, id=insn_id,
+                within_inames=within_inames, depends_on=depends_on)
+        self.loopy_instructions.append(lp_instruction)
+
+    def _traverse(self, dim, indices, local_idxs=0, global_idxs=0, local_offset=0, global_offset=0, within_inames=frozenset()):
         if not indices:
             indices = (Range(dim.size),)
 
@@ -375,24 +388,23 @@ class _LoopyKernelBuilder:
             inames, local_idxs_, global_idxs_ = self.handle_index(index)
 
             if global_idxs_:
-                if subdim:
-                    global_idxs *= subdim.size
                 global_idxs += global_idxs_
 
             if local_idxs_:
-                if subdim:
-                    local_idxs *= indexed_size_per_index_group(subdim, subindices)
                 local_idxs += local_idxs_
 
             if inames:
                 within_inames |= set(inames)
             ### !tidy up
 
+        if subdim:
+            global_idxs *= subdim.size
+            local_idxs *= indexed_size_per_index_group(subdim, subindices)
+
         if not subdim:
-            assignee, expression = self.resolve(instruction, local_idxs, global_idxs, local_offset, global_offset)
-            self._register_instruction(instruction, assignee, expression, within_inames)
+            self._register_instruction(global_idxs, local_idxs, global_offset, local_offset, within_inames)
         else:
-            self._traverse(instruction, subdim, subindices, local_idxs, global_idxs, local_offset, global_offset)
+            self._traverse(subdim, subindices, local_idxs, global_idxs, local_offset, global_offset, within_inames)
 
     @functools.singledispatchmethod
     def handle_index(self, index):
@@ -401,11 +413,8 @@ class _LoopyKernelBuilder:
 
     @handle_index.register
     def _(self, index: Range):
-        try:
-            iname = self.existing_inames[index]
-        except KeyError:
-            iname = self.existing_inames.setdefault(index, self.name_generator.next("i"))
-            self.domains.append(f"{{ [{iname}]: {index.start} <= {iname} < {index.stop} }}")
+        iname = self.inames.setdefault(index, self.iname_generator.next())
+        self.domains.add(f"{{ [{iname}]: {index.start} <= {iname} < {index.stop} }}")
         return (iname,), pym.var(iname), pym.var(iname)
 
     @handle_index.register
@@ -428,9 +437,79 @@ class _LoopyKernelBuilder:
 
     @handle_index.register
     def _(self, index: LoopIndex):
-        try:
-            iname = self.existing_inames[index]
-        except KeyError:
-            iname = self.existing_inames.setdefault(index, self.name_generator.next("i"))
-            self.domains.append(f"{{ [{iname}]: {index.domain.start} <= {iname} < {index.domain.stop} }}")
+        # TODO Streamline name generators (set permananent prefix?)
+        iname = self.within_inames.setdefault(index, self.within_iname_generator.next())
+        self.domains.add(f"{{ [{iname}]: {index.domain.start} <= {iname} < {index.domain.stop} }}")
         return (iname,), None, pym.var(iname)
+
+    def resolve(self, *args):
+        if isinstance(self.instruction, tlang.Read):
+            resolver = ReadAssignmentResolver(*args)
+        elif isinstance(self.instruction, tlang.Zero):
+            resolver = ZeroAssignmentResolver(*args)
+        elif isinstance(self.instruction, tlang.Write):
+            resolver = WriteAssignmentResolver(*args)
+        elif isinstance(self.instruction, tlang.Increment):
+            resolver = IncAssignmentResolver(*args)
+        else:
+            raise AssertionError
+        return resolver.assignee, resolver.expression
+
+
+
+class AssignmentResolver:
+    def __init__(self, instruction, global_idxs, local_idxs, global_offset, local_offset):
+        self.instruction = instruction
+        self.global_idxs = global_idxs
+        self.local_idxs = local_idxs
+        self.global_offset = global_offset
+        self.local_offset = local_offset
+
+    @property
+    def global_expr(self):
+        return pym.subscript(pym.var(self.instruction.tensor.name), self.global_idxs + self.global_offset)
+
+    @property
+    def local_expr(self):
+        return pym.subscript(pym.var(self.instruction.temporary), self.local_idxs + self.local_offset)
+
+
+
+class ReadAssignmentResolver(AssignmentResolver):
+    @property
+    def assignee(self):
+        return self.local_expr
+
+    @property
+    def expression(self):
+        return self.global_expr
+
+
+class ZeroAssignmentResolver(AssignmentResolver):
+    @property
+    def assignee(self):
+        return self.local_expr
+
+    @property
+    def expression(self):
+        return 0
+
+
+class WriteAssignmentResolver(AssignmentResolver):
+    @property
+    def assignee(self):
+        return self.global_expr
+
+    @property
+    def expression(self):
+        return self.local_expr
+
+
+class IncAssignmentResolver(AssignmentResolver):
+    @property
+    def assignee(self):
+        return self.global_expr
+
+    @property
+    def expression(self):
+        return self.global_expr + self.local_expr
