@@ -15,6 +15,8 @@ from pyop3.utils import as_tuple, checked_zip
 
 
 class Dim(pytools.ImmutableRecord):
+    size: int
+
     @property
     @abc.abstractmethod
     def is_leaf(self):
@@ -136,21 +138,23 @@ class Range(PythonicIndex, FancyIndex):
         return LoopIndex(self)
 
 
-def indexed_shape(dims, stencil):
+def indexed_shape(dim, stencil):
     size = 0
-    for index_group in stencil:
-        size += indexed_size_per_index_group(dims, index_group)
-    return (size,) if size else ()
+    for indices in stencil:
+        size += indexed_size_per_index_group(dim, indices)
+    return (size,)
 
 
-def indexed_size_per_index_group(dims, index_group):
-    (dim_id, index), *sub_index_group = index_group
-    subdim = dims[dim_id]
+def indexed_size_per_index_group(dim, indices):
+    if not indices:
+        return dim.size
 
-    if not sub_index_group:
-        return index.size * subdim.size
+    index, *subindices = indices
+    if isinstance(dim, MixedDim):
+        subdim = dim.subdims[index.value]
     else:
-        return index.size * indexed_size_per_index_group(subdim.subdims, sub_index_group)
+        subdim = dim.subdim
+    return index.size * indexed_size_per_index_group(subdim, subindices)
 
 
 class StencilGroup(pytools.ImmutableRecord):
@@ -164,15 +168,15 @@ class StencilGroup(pytools.ImmutableRecord):
     def index(self):
         new_stencils = set()
         for stencil in self.stencils:
-            new_stencil = []
-            for index_group in stencil:
-                new_index_group = []
-                for subdim, index in index_group:
+            new_stencil = set()
+            for indices in stencil:
+                new_indices = []
+                for index in indices:
                     if isinstance(index, FancyIndex):
                         index = index.index
-                    new_index_group.append((subdim, index))
-                new_stencil.append(tuple(new_index_group))
-            new_stencils.add(tuple(new_stencil))
+                    new_indices.append(index)
+                new_stencil.add(tuple(new_indices))
+            new_stencils.add(frozenset(new_stencil))
         new_stencils = frozenset(new_stencils)
         return self.copy(stencils=new_stencils)
 
@@ -187,7 +191,7 @@ class Tensor(pytools.ImmutableRecordWithoutPickling):
     name_generator = pyop3.utils.UniqueNameGenerator()
     prefix = "ten"
 
-    def __new__(cls, dims=None, stencils=frozenset(), **kwargs):
+    def __new__(cls, dim=None, stencils=frozenset(), **kwargs):
         # FIXME what is the right way to think about this now?
         # if (len(dims) == 2 and isinstance(dims[0], IndexedDimension) and not isinstance(dims[1], IndexedDimension)
         if False:
@@ -195,9 +199,9 @@ class Tensor(pytools.ImmutableRecordWithoutPickling):
         else:
             return super().__new__(cls)
 
-    def __init__(self, dims=None, stencils=frozenset(), *, name: str = None, prefix: str=None):
+    def __init__(self, dim=None, stencils=frozenset(), *, name: str = None, prefix: str=None):
         name = name or self.name_generator.generate(prefix or self.prefix)
-        super().__init__(dims=dims, stencils=stencils, name=name)
+        super().__init__(dim=dim, stencils=stencils, name=name)
 
     def __getitem__(self, stencils):
         # TODO Add support for already indexed items
@@ -284,9 +288,14 @@ def Global(*, name: str = None):
 
 
 def Dat(mesh, dofs: Section, *, prefix="dat", **kwargs) -> Tensor:
-    dims = tuple(MixedDim(mesh.strata_sizes[stratum], (MixedDim(dofs.dofs[stratum]),))
-                           for stratum in range(mesh.tdim))
-    return Tensor(dims, prefix=prefix, **kwargs)
+    dim = MixedDim(
+        mesh.tdim,
+        tuple(
+            UniformDim(mesh.strata_sizes[stratum], UniformDim(dofs.dofs[stratum]))
+            for stratum in range(mesh.tdim)
+        )
+    )
+    return Tensor(dim, prefix=prefix, **kwargs)
 
 
 def Mat(shape: Tuple[int, ...], *, name: str = None):

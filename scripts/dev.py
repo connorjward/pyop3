@@ -69,18 +69,18 @@ class DemoMesh(pyop3.UnstructuredMesh):
         except KeyError:
             # be very assertive
             stencil, = stencils
-            igroup, = stencil
-            (subdim, index), = igroup
+            indices, = stencil
+            stratum, index = indices
 
-            assert subdim == 0
+            assert stratum.value == 0  # for now
 
             edge_map = pyop3.NonAffineMap(index, pyop3.Range(self.NEDGES_IN_CELL_CLOSURE))
             vert_map = pyop3.NonAffineMap(index, pyop3.Range(self.NVERTS_IN_CELL_CLOSURE))
             mapped_stencils = frozenset({  # stencils (i.e. partitions)
                 frozenset({  # stencil (i.e. temporary)
-                    ((0, index),),  # index groups (i.e. loopy instructions)
-                    ((1, edge_map),),
-                    ((2, vert_map),),
+                    (pyop3.IntIndex(0), index),  # indices (i.e. loopy instructions)
+                    (pyop3.IntIndex(1), edge_map),
+                    (pyop3.IntIndex(2), vert_map),
                 })
             })
             return self.map_cache.setdefault(key, mapped_stencils)

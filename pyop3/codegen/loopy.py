@@ -118,7 +118,7 @@ class _LoopyKernelBuilder:
                 #     self.temp_to_itree[insn.temporary] = insn.tensor.indices
 
                 for stencil in insn.tensor.stencils:
-                    self.register_temporary(insn.temporary, insn.tensor.dims, stencil)
+                    self.register_temporary(insn.temporary, insn.tensor.dim, stencil)
                 self.register_tensor(insn.tensor)
 
         breakpoint()
@@ -132,11 +132,11 @@ class _LoopyKernelBuilder:
 
         return lp.merge((translation_unit, *self.subkernels))
 
-    def register_temporary(self, name, dims, stencil):
+    def register_temporary(self, name, dim, stencil):
         if name in self.temporaries_dict:
             return
 
-        shape = indexed_shape(dims, stencil)
+        shape = indexed_shape(dim, stencil)
         self.temporaries_dict[name] = lp.TemporaryVariable(name, shape=shape)
 
     def register_tensor(self, tensor):
@@ -233,16 +233,6 @@ class _LoopyKernelBuilder:
         self.tlang_instructions[instruction].append(call_insn)
         self.subkernels.append(instruction.function.loopy_kernel)
         return call_insn
-
-    def get_within_inames(self, itree):
-        if not itree:
-            return frozenset()
-        within_inames = set()
-        for index, subtree in itree.indices.items():
-            if not isinstance(index, IntIndex):
-                within_inames.add(self.existing_inames[index])
-            within_inames |= self.get_within_inames(subtree)
-        return frozenset(within_inames)
 
     def register_maps(self, map_):
         if isinstance(map_, Map) and map_ not in self.maps_dict:
@@ -353,52 +343,56 @@ class _LoopyKernelBuilder:
         """Return an indexed expression of whatever the instruction is"""
         for stencil in instruction.tensor.stencils:
             local_offset = 0
-            for index_group in stencil:
-                self._traverse(instruction, instruction.tensor.dims, index_group, local_offset=local_offset)
+            for indices in stencil:
+                self._traverse(instruction, instruction.tensor.dim, indices, local_offset=local_offset)
                 # each entry into the temporary needs to be offset by the size of the previous one
-                local_offset += indexed_size_per_index_group(instruction.tensor.dims, index_group)
+                local_offset += indexed_size_per_index_group(instruction.tensor.dim, indices)
 
     def _traverse(
-            self, instruction, dims, index_group,
+            self, instruction, dim, indices,
             local_idxs=0,
             global_idxs=0,
             local_offset=0,
             global_offset=0,
             within_inames=frozenset()
     ):
-        if not index_group:
-            index_group = [(0, Range(dims[0].size))]
+        if not indices:
+            indices = (Range(dim.size),)
 
-        (dim_id, index), *sub_index_group = index_group
-        subdim = dims[dim_id]
+        index, *subindices = indices
 
-        # The global offset is very complicated - we need to build up the offsets every time
-        # we do not take the first subdim by adding the size of the prior subdims. Make sure to
-        # not multiply this value.
-        for dim in dims[:dim_id]:
-            global_offset += dim.size
+        if isinstance(dim, MixedDim):
+            subdim = dim.subdims[index.value]
+            # The global offset is very complicated - we need to build up the offsets every time
+            # we do not take the first subdim by adding the size of the prior subdims. Make sure to
+            # not multiply this value.
+            for dim in dim.subdims[:index.value]:
+                global_offset += dim.size
+        else:
+            subdim = dim.subdim
 
-        ### tidy up
-        inames, local_idxs_, global_idxs_ = self.handle_index(index)
+            ### tidy up
+            inames, local_idxs_, global_idxs_ = self.handle_index(index)
 
-        if global_idxs_:
-            global_idxs *= subdim.size
-            global_idxs += global_idxs_
+            if global_idxs_:
+                if subdim:
+                    global_idxs *= subdim.size
+                global_idxs += global_idxs_
 
-        if local_idxs_:
-            local_idxs *= indexed_size_per_index_group(dims, index_group)
-            local_idxs += local_idxs_
+            if local_idxs_:
+                if subdim:
+                    local_idxs *= indexed_size_per_index_group(subdim, subindices)
+                local_idxs += local_idxs_
 
-        if inames:
-            within_inames |= set(inames)
-        ### !tidy up
+            if inames:
+                within_inames |= set(inames)
+            ### !tidy up
 
-
-        if not subdim.subdims:
+        if not subdim:
             assignee, expression = self.resolve(instruction, local_idxs, global_idxs, local_offset, global_offset)
             self._register_instruction(instruction, assignee, expression, within_inames)
         else:
-            self._traverse(instruction, subdim.subdims, sub_index_group, local_idxs, global_idxs, local_offset, global_offset)
+            self._traverse(instruction, subdim, subindices, local_idxs, global_idxs, local_offset, global_offset)
 
     @functools.singledispatchmethod
     def handle_index(self, index):

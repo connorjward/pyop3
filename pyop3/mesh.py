@@ -23,8 +23,8 @@ class Mesh:
     @property
     def cells(self):
         # being very verbose
-        index_group = ((0, Range("start", "end")),)
-        stencil = frozenset({index_group})
+        indices = (IntIndex(0), Range("start", "end"))
+        stencil = frozenset({indices})
         stencils = frozenset({stencil})
         return StencilGroup(stencils, mesh=self)
 
