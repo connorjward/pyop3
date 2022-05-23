@@ -16,7 +16,7 @@ import pymbolic as pym
 import pyop3.exprs
 from pyop3 import exprs, tlang
 import pyop3.utils
-from pyop3.utils import CustomTuple, checked_zip
+from pyop3.utils import CustomTuple, checked_zip, NameGenerator
 from pyop3.tensors import Tensor, Index, Map, Dim, IntIndex, LoopIndex, Range, UniformDim, MixedDim
 from pyop3.tensors import Slice, indexed_shape, IndexTree, indexed_size_per_index_group
 from pyop3.codegen.tlang import to_tlang
@@ -111,31 +111,45 @@ class _LoopyKernelBuilder:
             shape=None
         )
 
-        # register within_inames
+        shared_inames = self._make_shared_inames(self.expr.instructions)
 
-        breakpoint()
-        within_indices = frozenset({index for insn in self.expr.instructions for index in insn.within_indices})
-        within_index_to_iname = {index: self.name_generator.next("i") for index in within_indices}
+        instruction_contexts = {
+            _make_instruction_context(insn, shared_inames)
+            for insn in self.expr.instructions
+        }
 
-        for index, iname in within_index_to_iname.items():
-            self.domains.append(f"{{ [{iname}]: {index.domain.start} <= {iname} < {index.domain.stop} }}")
+        all_inames = shared_inames | {
+            index: iname
+            for handler in instruction_handlers
+            for index, iname in handler.inames.items()
+        }
 
-        for insn in self.expr.instructions:
-            self.register_instruction(insn, within_index_to_iname)
+        domains = {
+            self._make_domain(index, iname) for index, iname in all_inames.items()
+        }
 
-            if not isinstance(insn, tlang.FunctionCall):
-                for stencil in insn.tensor.stencils:
-                    self.register_temporary(insn.temporary, insn.tensor.dim, stencil)
-                self.register_tensor(insn.tensor)
+        instructions = {
+            insn for ctx in instruction_contexts for insn in ctx.loopy_instructions
+        }
 
         translation_unit = lp.make_kernel(
-            self.domains,
-            self.instructions,
+            domains,
+            instructions,
             self.kernel_data,
             target=LOOPY_TARGET,
             lang_version=LOOPY_LANG_VERSION,
         )
         return lp.merge((translation_unit, *self.subkernels))
+
+    @staticmethod
+    def _make_shared_inames(instructions):
+        shared_idxs = {idx for insn in instructions for idx in insn.loop_indices}
+        iname_generator = NameGenerator("i")
+        return {idx.domain: iname_generator.next() for idx in shared_idxs}
+
+    @staticmethod
+    def _make_domain(index, iname):
+        return f"{{ [{iname}]: {index.start} <= {iname} < {index.stop} }}"
 
     def register_temporary(self, temporary, dim, stencil):
         if temporary in self.temporaries_dict:
@@ -202,236 +216,203 @@ class _LoopyKernelBuilder:
             index, pym.subscript(pym.var(temporary.name), index)
         )
 
-    def register_instruction(self, instruction: tlang.Instruction, within_indices):
-        if not isinstance(instruction, tlang.FunctionCall):
-            insn = LoopyStencilBuilder(instruction, within_indices).build()
-            self.instructions.extend(insn.loopy_instructions)
-            self.domains.extend(insn.domains)
-            return
+@functools.singledispatch
+def _make_instruction_context(self, instruction: tlang.Instruction, within_indices_to_inames):
+    raise ValueError
 
-        subarrayrefs = {}
-        for temp in itertools.chain(instruction.reads, instruction.writes):
-            if temp in subarrayrefs:
-                continue
-            subarrayrefs[temp] = self.as_subarrayref(temp)
+@_make_instruction_context.register
+def _(assignment: tlang.FunctionCall, within_indices_to_inames):
+    subarrayrefs = {}
+    for temp in itertools.chain(instruction.reads, instruction.writes):
+        if temp in subarrayrefs:
+            continue
+        subarrayrefs[temp] = self.as_subarrayref(temp)
 
-        reads = tuple(subarrayrefs[var] for var in instruction.reads)
-        writes = tuple(subarrayrefs[var] for var in instruction.writes)
-        assignees = tuple(writes)
-        expression = pym.primitives.Call(
-            pym.var(instruction.function.loopy_kernel.default_entrypoint.name),
-            tuple(reads),
-        )
+    reads = tuple(subarrayrefs[var] for var in instruction.reads)
+    writes = tuple(subarrayrefs[var] for var in instruction.writes)
+    assignees = tuple(writes)
+    expression = pym.primitives.Call(
+        pym.var(instruction.function.loopy_kernel.default_entrypoint.name),
+        tuple(reads),
+    )
 
-        within_inames = frozenset({within_indices[index] for index in instruction.within_indices})
+    within_inames = frozenset({within_indices[index] for index in instruction.within_indices})
 
-        depends_on = frozenset({f"{insn}*" for insn in instruction.depends_on})
-        call_insn = lp.CallInstruction(
-            assignees,
-            expression,
-            id=instruction.id,
-            within_inames=within_inames,
-            depends_on=depends_on
-        )
-        self.instructions.append(call_insn)
-        self.tlang_instructions[instruction].append(call_insn)
-        self.subkernels.append(instruction.function.loopy_kernel)
-        return call_insn
-
-    def register_maps(self, map_):
-        if isinstance(map_, Map) and map_ not in self.maps_dict:
-            self.maps_dict[map_] = lp.GlobalArg(
-                map_.name, dtype=np.int32, shape=(None, map_.size)
-            )
-            self.register_maps(map_.from_space)
-
-    def register_parameter(self, parameter, **kwargs):
-        return self.parameter_dict.setdefault(parameter, lp.GlobalArg(**kwargs))
-
-    def register_domain_parameter(self, parameter, within_inames):
-        """Return a pymbolic expression"""
-        if isinstance(parameter, Tensor):
-            if parameter in self.parameters_dict:
-                return self.parameters_dict[parameter]
-
-            assert parameter.is_scalar
-
-            # FIXME need to validate if already exists here...
-            self.register_parameter(parameter,
-                # TODO should really validate dtype
-                name=parameter.name, dtype=np.int32, shape=(None,) * len(parameter.indices)
-            )
-
-            # if the tensor is an indexed expression we need to create a temporary for it
-            if parameter.indices:
-                temporary = self.register_temporary()
-                assignee = pym.var(temporary.name)
-                # TODO Put into utility function
-                expression = pym.subscript(
-                    pym.var(parameter.name),
-                    tuple(pym.var(within_inames[index.space]) for index in parameter.indices)
-                )
-                self.register_assignment(
-                    assignee, expression, within_inames=within_inames
-                )
-                return self.parameters_dict.setdefault(parameter, pym.var(temporary.name))
-            else:
-                return self.parameters_dict.setdefault(parameter, pym.var(parameter.name))
-        elif isinstance(parameter, str):
-            self.register_parameter(parameter, name=parameter, dtype=np.int32, shape=())
-            return self.parameters_dict.setdefault(parameter, pym.var(parameter))
-        elif isinstance(parameter, numbers.Integral):
-            return self.parameters_dict.setdefault(parameter, parameter)
-        else:
-            raise ValueError
-
-    def register_domain(self, domain, within_inames):
-        if isinstance(domain, Map):
-            start = 0
-            stop = domain.size
-        elif isinstance(domain, Slice):
-            start = domain.start
-            stop = domain.stop
-        else:
-            raise AssertionError
-
-        iname = self.generate_iname()
-        start, stop = (self.register_domain_parameter(param, within_inames)
-                       for param in [start, stop])
-        self.domains.append(DomainContext(iname, start, stop))
-        return iname
+    depends_on = frozenset({f"{insn}*" for insn in instruction.depends_on})
+    call_insn = lp.CallInstruction(
+        assignees,
+        expression,
+        id=instruction.id,
+        within_inames=within_inames,
+        depends_on=depends_on
+    )
+    self.instructions.append(call_insn)
+    self.tlang_instructions[instruction].append(call_insn)
+    self.subkernels.append(instruction.function.loopy_kernel)
+    return call_insn
 
 
 @dataclasses.dataclass
-class LoopyStencil:
+class InstructionContext:
     loopy_instructions: FrozenSet
-    domains: FrozenSet
+    inames: Dict
 
 
-class LoopyStencilBuilder:
-    def __init__(self, instruction, within_indices):
-        self.instruction = instruction
-        self.loopy_instructions = []
-        self.name_generator = pyop3.utils.NameGenerator(prefix=instruction.id)
-        self.iname_generator = pyop3.utils.NameGenerator(prefix=f"{instruction.id}_i")
-        self.within_indices = within_indices
-        self.is_built = False
-        self.inames = {}
-        self.domains = set()
+@_make_instruction_context.register
+def _(assignment: tlang.Assignment, within_indices_to_inames):
+    stencils = frozenset({_complete_stencil(assignment.tensor.dim, stencil) for stencil in assignment.tensor.stencils})
+    inames = _make_inames(stencils, assignment.id, within_indices_to_inames)
+    loopy_instructions = set()
+    for stencil in stencils:
+        # each entry into the temporary needs to be offset by the size of
+        # the previous one
+        local_offset = 0
+        for indices in stencil:
+            local_idxs, global_idxs, within_inames = \
+                _collect_indices(assignment.tensor.dim, indices, local_offset=local_offset, inames_dict=within_indices_to_inames|inames)
+            local_offset += indexed_size_per_index_group(assignment.tensor.dim, indices)
+            loopy_instructions.add(_make_loopy_instruction(within_inames))
 
-    @property
-    def within_inames(self):
-        return frozenset(self.within_indices.values())
+    return InstructionContext(instructions)
 
-    def build(self):
-        if self.is_built:
-            raise RuntimeError
 
-        for stencil in self.instruction.tensor.stencils:
-            local_offset = 0
-            for indices in stencil:
-                self._traverse(self.instruction.tensor.dim, indices, local_offset=local_offset)
-                # each entry into the temporary needs to be offset by the size of the previous one
-                local_offset += indexed_size_per_index_group(self.instruction.tensor.dim, indices)
-        self.is_built = True
-        return LoopyStencil(self.loopy_instructions, self.domains)
+def _make_inames(stencils, instruction_id, within_inames):
+    iname_generator = NameGenerator(prefix=f"{instruction_id}_i")
+    # return {
+    #     idx: iname_generator.next()
+    #     for stencil in stencils for idxs in stencil for idx in idxs
+    #     if idx not in within_inames
+    # }
+    # TODO Make into a comprehension
+    inames = {}
+    for stencil in stencils:
+        for indices in stencil:
+            for index in indices:
+                if index in within_inames:
+                    continue
+                if isinstance(index, LoopIndex):
+                    index = index.domain
+                inames[index] = iname_generator.next()
+    return inames | within_inames
 
-    def _register_instruction(self, global_idxs, local_idxs, global_offset, local_offset, within_inames):
-        insn_id = self.name_generator.next()
 
-        # wilcard this to catch subinsns
-        depends_on = frozenset({f"{insn}*" for insn in self.instruction.depends_on})
+def _complete_stencil(dim, stencil):
+    return frozenset({_complete_indices(dim, indices) for indices in stencil})
 
-        assignee, expression = self.resolve(self.instruction, global_idxs, local_idxs, global_offset, local_offset)
 
-        lp_instruction = lp.Assignment(assignee, expression, id=insn_id,
-                within_inames=within_inames, depends_on=depends_on)
-        self.loopy_instructions.append(lp_instruction)
+def _complete_indices(dim, indices):
+    if not dim:
+        return ()
 
-    def _traverse(self, dim, indices, local_idxs=0, global_idxs=0, local_offset=0, global_offset=0, within_inames=frozenset()):
-        if not indices:
-            indices = (Range(dim.size),)
-
+    if indices:
         index, *subindices = indices
+    else:
+        index, subindices = Range(dim.size), ()
+    if isinstance(dim, MixedDim):
+        subdim = dim.subdims[index.value]
+    else:
+        subdim = dim.subdim
+    return (index,) + _complete_indices(subdim, subindices)
 
-        if isinstance(dim, MixedDim):
-            subdim = dim.subdims[index.value]
-            # The global offset is very complicated - we need to build up the offsets every time
-            # we do not take the first subdim by adding the size of the prior subdims. Make sure to
-            # not multiply this value.
-            for dim in dim.subdims[:index.value]:
-                global_offset += dim.size
-        else:
-            subdim = dim.subdim
 
-            ### tidy up
-            inames, local_idxs_, global_idxs_ = self.handle_index(index)
 
-            if global_idxs_:
-                global_idxs += global_idxs_
+def _make_loopy_instruction(instruction, id, local_idxs, global_idxs, local_offset, global_offset, within_inames):
+    # wilcard this to catch subinsns
+    depends_on = frozenset({f"{insn}*" for insn in instruction.depends_on})
 
-            if local_idxs_:
-                local_idxs += local_idxs_
+    assignee, expression = resolve(instruction, global_idxs, local_idxs, global_offset, local_offset)
 
-            if inames:
-                within_inames |= set(inames)
-            ### !tidy up
+    return lp.Assignment(assignee, expression, id=id,
+            within_inames=within_inames, depends_on=depends_on)
 
-        if subdim:
-            global_idxs *= subdim.size
-            local_idxs *= indexed_size_per_index_group(subdim, subindices)
 
-        if not subdim:
-            self._register_instruction(global_idxs, local_idxs, global_offset, local_offset, within_inames)
-        else:
-            self._traverse(subdim, subindices, local_idxs, global_idxs, local_offset, global_offset, within_inames)
+def _collect_indices(
+        dim, indices,
+        local_idxs=0, global_idxs=0,
+        local_offset=0, global_offset=0,
+        within_inames=frozenset(),
+        inames_dict={}
+):
+    index, *subindices = indices
 
-    @functools.singledispatchmethod
-    def handle_index(self, index):
-        """Return inames and tensor pym expr for indices"""
+    if isinstance(dim, MixedDim):
+        subdim = dim.subdims[index.value]
+        # The global offset is very complicated - we need to build up the offsets every time
+        # we do not take the first subdim by adding the size of the prior subdims. Make sure to
+        # not multiply this value.
+        for dim in dim.subdims[:index.value]:
+            global_offset += dim.size
+    else:
+        subdim = dim.subdim
+
+        ### tidy up
+        inames, local_idxs_, global_idxs_ = handle_index(index, inames_dict)
+
+        if global_idxs_:
+            global_idxs += global_idxs_
+
+        if local_idxs_:
+            local_idxs += local_idxs_
+
+        if inames:
+            within_inames |= set(inames)
+        ### !tidy up
+
+    if subdim:
+        global_idxs *= subdim.size
+        local_idxs *= indexed_size_per_index_group(subdim, subindices)
+
+    if not subdim:
+        return local_idxs, global_idxs, local_offset, global_offset, within_inames
+    else:
+        return _collect_indices(subdim, subindices, local_idxs, global_idxs, local_offset, global_offset, within_inames, inames_dict)
+
+
+@functools.singledispatch
+def handle_index(index, inames):
+    raise AssertionError
+
+@handle_index.register
+def _(range_: Range, inames):
+    iname = inames[range_]
+    return (iname,), pym.var(iname), pym.var(iname)
+
+@handle_index.register
+def _(index: IntIndex):
+    raise NotImplementedError
+    return None, 0, (index.value,)
+
+@handle_index.register
+def _(map_: Map, inames_dict):
+    inames, temp_idxs, tensor_idxs = handle_index(map_.from_dim, inames_dict)
+    rinames, rtemp_idxs, rtensor_idxs = handle_index(map_.to_dim, inames_dict)
+
+    if temp_idxs:
+        temp_expr = temp_idxs * map_.to_dim.size + rtemp_idxs
+    else:
+        temp_expr = rtemp_idxs
+    tensor_expr = tensor_idxs, rtensor_idxs
+
+    return inames + rinames, temp_expr, pym.subscript(pym.var("map"), tensor_expr)
+
+@handle_index.register
+def _(index: LoopIndex, inames):
+    iname = inames[index.domain]
+    return (iname,), None, pym.var(iname)
+
+
+def resolve(self, *args):
+    if isinstance(self.instruction, tlang.Read):
+        resolver = ReadAssignmentResolver(*args)
+    elif isinstance(self.instruction, tlang.Zero):
+        resolver = ZeroAssignmentResolver(*args)
+    elif isinstance(self.instruction, tlang.Write):
+        resolver = WriteAssignmentResolver(*args)
+    elif isinstance(self.instruction, tlang.Increment):
+        resolver = IncAssignmentResolver(*args)
+    else:
         raise AssertionError
-
-    @handle_index.register
-    def _(self, index: Range):
-        iname = self.inames.setdefault(index, self.iname_generator.next())
-        self.domains.add(f"{{ [{iname}]: {index.start} <= {iname} < {index.stop} }}")
-        return (iname,), pym.var(iname), pym.var(iname)
-
-    @handle_index.register
-    def _(self, index: IntIndex):
-        raise NotImplementedError
-        return None, 0, (index.value,)
-
-    @handle_index.register
-    def _(self, index: Map):
-        inames, temp_idxs, tensor_idxs = self.handle_index(index.from_dim)
-        rinames, rtemp_idxs, rtensor_idxs = self.handle_index(index.to_dim)
-
-        if temp_idxs:
-            temp_expr = temp_idxs * index.to_dim.size + rtemp_idxs
-        else:
-            temp_expr = rtemp_idxs
-        tensor_expr = tensor_idxs, rtensor_idxs
-
-        return inames + rinames, temp_expr, pym.subscript(pym.var("map"), tensor_expr)
-
-    @handle_index.register
-    def _(self, index: LoopIndex):
-        iname = self.within_indices[index]
-        return (iname,), None, pym.var(iname)
-
-    def resolve(self, *args):
-        if isinstance(self.instruction, tlang.Read):
-            resolver = ReadAssignmentResolver(*args)
-        elif isinstance(self.instruction, tlang.Zero):
-            resolver = ZeroAssignmentResolver(*args)
-        elif isinstance(self.instruction, tlang.Write):
-            resolver = WriteAssignmentResolver(*args)
-        elif isinstance(self.instruction, tlang.Increment):
-            resolver = IncAssignmentResolver(*args)
-        else:
-            raise AssertionError
-        return resolver.assignee, resolver.expression
+    return resolver.assignee, resolver.expression
 
 
 
@@ -493,5 +474,66 @@ class IncAssignmentResolver(AssignmentResolver):
         return self.global_expr + self.local_expr
 
 
-def replace_expr_iname(expr, old_iname, new_iname):
-    ...
+"""
+def register_maps(self, map_):
+    if isinstance(map_, Map) and map_ not in self.maps_dict:
+        self.maps_dict[map_] = lp.GlobalArg(
+            map_.name, dtype=np.int32, shape=(None, map_.size)
+        )
+        self.register_maps(map_.from_space)
+
+def register_parameter(self, parameter, **kwargs):
+    return self.parameter_dict.setdefault(parameter, lp.GlobalArg(**kwargs))
+
+def register_domain_parameter(self, parameter, within_inames):
+    if isinstance(parameter, Tensor):
+        if parameter in self.parameters_dict:
+            return self.parameters_dict[parameter]
+
+        assert parameter.is_scalar
+
+        # FIXME need to validate if already exists here...
+        self.register_parameter(parameter,
+            # TODO should really validate dtype
+            name=parameter.name, dtype=np.int32, shape=(None,) * len(parameter.indices)
+        )
+
+        # if the tensor is an indexed expression we need to create a temporary for it
+        if parameter.indices:
+            temporary = self.register_temporary()
+            assignee = pym.var(temporary.name)
+            # TODO Put into utility function
+            expression = pym.subscript(
+                pym.var(parameter.name),
+                tuple(pym.var(within_inames[index.space]) for index in parameter.indices)
+            )
+            self.register_assignment(
+                assignee, expression, within_inames=within_inames
+            )
+            return self.parameters_dict.setdefault(parameter, pym.var(temporary.name))
+        else:
+            return self.parameters_dict.setdefault(parameter, pym.var(parameter.name))
+    elif isinstance(parameter, str):
+        self.register_parameter(parameter, name=parameter, dtype=np.int32, shape=())
+        return self.parameters_dict.setdefault(parameter, pym.var(parameter))
+    elif isinstance(parameter, numbers.Integral):
+        return self.parameters_dict.setdefault(parameter, parameter)
+    else:
+        raise ValueError
+
+def register_domain(self, domain, within_inames):
+    if isinstance(domain, Map):
+        start = 0
+        stop = domain.size
+    elif isinstance(domain, Slice):
+        start = domain.start
+        stop = domain.stop
+    else:
+        raise AssertionError
+
+    iname = self.generate_iname()
+    start, stop = (self.register_domain_parameter(param, within_inames)
+                   for param in [start, stop])
+    self.domains.append(DomainContext(iname, start, stop))
+    return iname
+"""

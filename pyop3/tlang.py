@@ -13,10 +13,10 @@ from typing import Any
 
 
 class Instruction:
-    def __init__(self, *, id=None, depends_on=frozenset(), within_indices=frozenset()):
+    def __init__(self, *, id=None, depends_on=frozenset(), loop_indices=frozenset()):
         self.id = id
         self.depends_on = depends_on
-        self.within_indices = within_indices
+        self.loop_indices = loop_indices
 
 class Assignment(Instruction):
     _count = itertools.count()

@@ -48,10 +48,10 @@ class TensorLangKernelBuilder:
             dim = tensors.UniformDim(size)
             temporaries[arg] = tensors.Tensor(dim, name=self._temp_name_generator())
 
-        gathers = self.make_gathers(temporaries, within_indices=within_indices)
-        call = self.make_function_call(expr, temporaries, depends_on=frozenset(gather.id for gather in gathers), within_indices=within_indices)
+        gathers = self.make_gathers(temporaries, loop_indices=within_indices)
+        call = self.make_function_call(expr, temporaries, depends_on=frozenset(gather.id for gather in gathers), loop_indices=within_indices)
         # return needed in case later things depend on this...
-        scatters = self.make_scatters(temporaries, depends_on=frozenset({call.id}), within_indices=within_indices)
+        scatters = self.make_scatters(temporaries, depends_on=frozenset({call.id}), loop_indices=within_indices)
 
         # TODO put somewhere nicer
         for insn in itertools.chain(gathers, [call], scatters):

@@ -154,7 +154,10 @@ def indexed_size_per_index_group(dim, indices):
         subdim = dim.subdims[index.value]
     else:
         subdim = dim.subdim
-    return index.size * indexed_size_per_index_group(subdim, subindices)
+    if subdim:
+        return index.size * indexed_size_per_index_group(subdim, subindices)
+    else:
+        return index.size
 
 
 class StencilGroup(pytools.ImmutableRecord):
