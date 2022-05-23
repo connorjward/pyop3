@@ -36,12 +36,17 @@ class TensorLangKernelBuilder:
 
     @_inspect.register
     def _(self, expr: exprs.Loop, within_indices):
+        loop_indices = frozenset({index for stencil in expr.index for indices in stencil for index in indices if isinstance(index, tensors.LoopIndex)})
         for stmt in expr.statements:
-            self._inspect(stmt, within_indices | {expr.index})
+            self._inspect(stmt, within_indices | loop_indices)
 
     @_inspect.register
     def _(self, expr: exprs.FunctionCall, within_indices):
-        temporaries = {arg: self._temp_name_generator() for arg in expr.arguments}
+        temporaries = {}
+        for arg in expr.arguments:
+            size, = pytools.single_valued(tensors.indexed_shape(arg.tensor.dim, stencil) for stencil in arg.tensor.stencils)
+            dim = tensors.UniformDim(size)
+            temporaries[arg] = tensors.Tensor(dim, name=self._temp_name_generator())
 
         gathers = self.make_gathers(temporaries, within_indices=within_indices)
         call = self.make_function_call(expr, temporaries, depends_on=frozenset(gather.id for gather in gathers), within_indices=within_indices)

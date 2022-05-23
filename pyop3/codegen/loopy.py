@@ -111,18 +111,23 @@ class _LoopyKernelBuilder:
             shape=None
         )
 
+        # register within_inames
+
+        breakpoint()
+        within_indices = frozenset({index for insn in self.expr.instructions for index in insn.within_indices})
+        within_index_to_iname = {index: self.name_generator.next("i") for index in within_indices}
+
+        for index, iname in within_index_to_iname.items():
+            self.domains.append(f"{{ [{iname}]: {index.domain.start} <= {iname} < {index.domain.stop} }}")
+
         for insn in self.expr.instructions:
-            self.register_instruction(insn)
+            self.register_instruction(insn, within_index_to_iname)
 
             if not isinstance(insn, tlang.FunctionCall):
-                # if insn.temporary not in self.temp_to_itree:
-                #     self.temp_to_itree[insn.temporary] = insn.tensor.indices
-
                 for stencil in insn.tensor.stencils:
                     self.register_temporary(insn.temporary, insn.tensor.dim, stencil)
                 self.register_tensor(insn.tensor)
 
-        breakpoint()
         translation_unit = lp.make_kernel(
             self.domains,
             self.instructions,
@@ -130,24 +135,14 @@ class _LoopyKernelBuilder:
             target=LOOPY_TARGET,
             lang_version=LOOPY_LANG_VERSION,
         )
-        breakpoint()
-
-        # TODO This needs to fit with subkernels too - not yet addressed
-        # handle indices from outer loops
-        counter = itertools.count()
-        for index, old_inames in self.insn_within_indices.items():
-            new_iname = f"i{next(counter)}"
-            lp.rename_inames(translation_unit, old_inames, new_iname)
-
-        breakpoint()
         return lp.merge((translation_unit, *self.subkernels))
 
-    def register_temporary(self, name, dim, stencil):
-        if name in self.temporaries_dict:
+    def register_temporary(self, temporary, dim, stencil):
+        if temporary in self.temporaries_dict:
             return
 
         shape = indexed_shape(dim, stencil)
-        self.temporaries_dict[name] = lp.TemporaryVariable(name, shape=shape)
+        self.temporaries_dict[temporary] = lp.TemporaryVariable(temporary.name, shape=shape)
 
     def register_tensor(self, tensor):
         if tensor.name in self.arguments_dict:
@@ -198,42 +193,27 @@ class _LoopyKernelBuilder:
         return tuple(shape)
 
 
-    def as_subarrayref(self, temporary, itree, dim):
+    def as_subarrayref(self, temporary):
         """Register an argument to a function."""
         iname = self.name_generator.next("i")
-        self.domains.append(f"{{ [{iname}]: 0 <= {iname} < {itree.compute_size(dim)} }}")
+        self.domains.append(f"{{ [{iname}]: 0 <= {iname} < {temporary.dim.size} }}")
         index = (pym.var(iname),)
         return lp.symbolic.SubArrayRef(
-            index, pym.subscript(pym.var(temporary), index)
+            index, pym.subscript(pym.var(temporary.name), index)
         )
 
-    def get_within_inames(self, itree):
-        if not itree:
-            return frozenset()
-        within_inames = set()
-        for index, subtree in itree.indices.items():
-            if not isinstance(index, IntIndex):
-                within_inames.add(self.existing_inames[index])
-            within_inames |= self.get_within_inames(subtree)
-        return frozenset(within_inames)
-
-    def register_instruction(self, instruction: tlang.Instruction):
+    def register_instruction(self, instruction: tlang.Instruction, within_indices):
         if not isinstance(instruction, tlang.FunctionCall):
-            insn = LoopyStencilBuilder(instruction).build()
+            insn = LoopyStencilBuilder(instruction, within_indices).build()
             self.instructions.extend(insn.loopy_instructions)
             self.domains.extend(insn.domains)
-
-            for index, iname in insn.within_indices.items():
-                self.insn_within_indices[index].append(iname)
-
-        # FIXME dim itree nonsense
-        return
+            return
 
         subarrayrefs = {}
         for temp in itertools.chain(instruction.reads, instruction.writes):
             if temp in subarrayrefs:
                 continue
-            # subarrayrefs[temp] = self.as_subarrayref(temp, self.temp_to_itree[temp], ???)
+            subarrayrefs[temp] = self.as_subarrayref(temp)
 
         reads = tuple(subarrayrefs[var] for var in instruction.reads)
         writes = tuple(subarrayrefs[var] for var in instruction.writes)
@@ -243,13 +223,13 @@ class _LoopyKernelBuilder:
             tuple(reads),
         )
 
-        within_inames = frozenset.union(*(self.get_within_inames(index) for index in instruction.within_indices))
+        within_inames = frozenset({within_indices[index] for index in instruction.within_indices})
 
-        depends_on = frozenset(itertools.chain(*(self.tlang_instructions[insn] for insn in instruction.depends_on)))
+        depends_on = frozenset({f"{insn}*" for insn in instruction.depends_on})
         call_insn = lp.CallInstruction(
             assignees,
             expression,
-            id=self.name_generator.next("func"),
+            id=instruction.id,
             within_inames=within_inames,
             depends_on=depends_on
         )
@@ -326,20 +306,22 @@ class _LoopyKernelBuilder:
 class LoopyStencil:
     loopy_instructions: FrozenSet
     domains: FrozenSet
-    within_indices: Dict
 
 
 class LoopyStencilBuilder:
-    def __init__(self, instruction):
+    def __init__(self, instruction, within_indices):
         self.instruction = instruction
         self.loopy_instructions = []
         self.name_generator = pyop3.utils.NameGenerator(prefix=instruction.id)
         self.iname_generator = pyop3.utils.NameGenerator(prefix=f"{instruction.id}_i")
-        self.within_iname_generator = pyop3.utils.NameGenerator(prefix=f"{instruction.id}_within")
-        self.within_inames = {}
+        self.within_indices = within_indices
         self.is_built = False
         self.inames = {}
         self.domains = set()
+
+    @property
+    def within_inames(self):
+        return frozenset(self.within_indices.values())
 
     def build(self):
         if self.is_built:
@@ -352,15 +334,13 @@ class LoopyStencilBuilder:
                 # each entry into the temporary needs to be offset by the size of the previous one
                 local_offset += indexed_size_per_index_group(self.instruction.tensor.dim, indices)
         self.is_built = True
-        return LoopyStencil(self.loopy_instructions, self.domains, self.within_inames)
+        return LoopyStencil(self.loopy_instructions, self.domains)
 
     def _register_instruction(self, global_idxs, local_idxs, global_offset, local_offset, within_inames):
         insn_id = self.name_generator.next()
 
         # wilcard this to catch subinsns
         depends_on = frozenset({f"{insn}*" for insn in self.instruction.depends_on})
-        # disable for now (func not working)
-        depends_on = frozenset({})
 
         assignee, expression = self.resolve(self.instruction, global_idxs, local_idxs, global_offset, local_offset)
 
@@ -437,9 +417,7 @@ class LoopyStencilBuilder:
 
     @handle_index.register
     def _(self, index: LoopIndex):
-        # TODO Streamline name generators (set permananent prefix?)
-        iname = self.within_inames.setdefault(index, self.within_iname_generator.next())
-        self.domains.add(f"{{ [{iname}]: {index.domain.start} <= {iname} < {index.domain.stop} }}")
+        iname = self.within_indices[index]
         return (iname,), None, pym.var(iname)
 
     def resolve(self, *args):
@@ -471,7 +449,7 @@ class AssignmentResolver:
 
     @property
     def local_expr(self):
-        return pym.subscript(pym.var(self.instruction.temporary), self.local_idxs + self.local_offset)
+        return pym.subscript(pym.var(self.instruction.temporary.name), self.local_idxs + self.local_offset)
 
 
 
@@ -513,3 +491,7 @@ class IncAssignmentResolver(AssignmentResolver):
     @property
     def expression(self):
         return self.global_expr + self.local_expr
+
+
+def replace_expr_iname(expr, old_iname, new_iname):
+    ...
