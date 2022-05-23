@@ -41,7 +41,7 @@ def compile(expr, *, target):
 
 
 def to_loopy(expr):
-    return _LoopyKernelBuilder(to_tlang(expr)).build()
+    return _make_loopy_kernel(to_tlang(expr))
 
 
 def to_c(expr):
@@ -49,251 +49,166 @@ def to_c(expr):
     return lp.generate_code_v2(program).device_code()
 
 
-# @dataclasses.dataclass(frozen=True)
-# class DomainContext:
-#     iname: str
-#     start: pym.Variable
-#     stop: pym.Variable
-#
-#     def __str__(self):
-#         return f"{{ [{self.iname}]: {self.start} <= {self.iname} < {self.stop} }}"
-#
-#     @property
-#     def shape(self):
-#         return self.stop - self.start
-#
+def _make_loopy_kernel(tlang_kernel):
+    shared_inames = _make_shared_inames(tlang_kernel.instructions)
+
+    instruction_contexts = [
+        _make_instruction_context(insn, shared_inames)
+        for insn in tlang_kernel.instructions
+    ]
+
+    all_inames = list(shared_inames.items())
+    for ctx in instruction_contexts:
+        all_inames.extend(ctx.inames.items())
+
+    domains = {_make_domain(index, iname) for index, iname in all_inames}
+
+    instructions = [
+        insn for ctx in instruction_contexts for insn in ctx.loopy_instructions
+    ]
+
+    kernel_data_in = [
+        arg for ctx in instruction_contexts for arg in ctx.kernel_data
+    ]
+    # uniquify
+    kernel_data = []
+    for kd in kernel_data_in:
+        if kd not in kernel_data:
+            kernel_data.append(kd)
 
 
-class _LoopyKernelBuilder:
-    def __init__(self, expr):
-        self.expr = expr
+    subkernels = [knl for ctx in instruction_contexts for knl in ctx.subkernels]
 
-        self.existing_inames = {}
-        self.tlang_instructions = collections.defaultdict(list)
-        self.temp_to_itree = {}
-
-        self.domains = []
-        self.instructions = []
-        self.arguments_dict = {}
-        self.parameter_dict = {}
-        self.parameters_dict = {}
-        self.subkernels = []
-        self.temporaries_dict = {}
-        self.domain_parameters = {}
-        self.maps_dict = {}
-        self.function_temporaries = collections.defaultdict(dict)
-        self.name_generator = pyop3.utils.UniqueNameGenerator()
-        self.insn_within_indices = collections.defaultdict(list)
-
-    @property
-    def parameters(self):
-        return tuple(self.parameter_dict.values())
-    @property
-    def arguments(self):
-        return tuple(self.arguments_dict.values())
-    @property
-    def temporaries(self):
-        return tuple(self.temporaries_dict.values())
-
-    @property
-    def maps(self):
-        return tuple(self.maps_dict.values())
-
-    @property
-    def kernel_data(self):
-        return tuple(self.arguments) + self.maps + tuple(self.temporaries) + self.parameters
-
-    def build(self):
-        # FIXME broken
-        self.arguments_dict["map"] = lp.GlobalArg(
-            "map",
-            dtype=np.int32,  # TODO fix
-            shape=None
-        )
-
-        shared_inames = self._make_shared_inames(self.expr.instructions)
-
-        instruction_contexts = {
-            _make_instruction_context(insn, shared_inames)
-            for insn in self.expr.instructions
-        }
-
-        all_inames = shared_inames | {
-            index: iname
-            for handler in instruction_handlers
-            for index, iname in handler.inames.items()
-        }
-
-        domains = {
-            self._make_domain(index, iname) for index, iname in all_inames.items()
-        }
-
-        instructions = {
-            insn for ctx in instruction_contexts for insn in ctx.loopy_instructions
-        }
-
-        translation_unit = lp.make_kernel(
-            domains,
-            instructions,
-            self.kernel_data,
-            target=LOOPY_TARGET,
-            lang_version=LOOPY_LANG_VERSION,
-        )
-        return lp.merge((translation_unit, *self.subkernels))
-
-    @staticmethod
-    def _make_shared_inames(instructions):
-        shared_idxs = {idx for insn in instructions for idx in insn.loop_indices}
-        iname_generator = NameGenerator("i")
-        return {idx.domain: iname_generator.next() for idx in shared_idxs}
-
-    @staticmethod
-    def _make_domain(index, iname):
-        return f"{{ [{iname}]: {index.start} <= {iname} < {index.stop} }}"
-
-    def register_temporary(self, temporary, dim, stencil):
-        if temporary in self.temporaries_dict:
-            return
-
-        shape = indexed_shape(dim, stencil)
-        self.temporaries_dict[temporary] = lp.TemporaryVariable(temporary.name, shape=shape)
-
-    def register_tensor(self, tensor):
-        if tensor.name in self.arguments_dict:
-            return
-
-        self.arguments_dict[tensor.name] = lp.GlobalArg(
-            tensor.name,
-            dtype=np.float64,  # TODO fix
-            shape=None
-        )
-
-    def as_shape(self, domains, *, first_is_none=False):
-        shape = []
-        for i, domain in enumerate(domains):
-            if first_is_none and i == 0:
-                shape.append(None)
-            else:
-                if isinstance(domain, Map):
-                    start = 0
-                    stop = domain.size
-                elif isinstance(domain, Slice):
-                    start = domain.start
-                    stop = domain.stop
-                else:
-                    raise AssertionError
-
-                assert start in self.parameters_dict
-                assert stop in self.parameters_dict
-                start = self.register_domain_parameter(start, None)
-                stop = self.register_domain_parameter(stop, None)
-                shape.append(stop-start)
-        return tuple(shape)
-
-    def as_orig_shape(self, domains):
-        if domains == ():
-            return ()
-        shape = [None]
-        for domain in domains[1:]:
-            stop = self.register_domain_parameter(domain, None)
-
-            var = stop
-
-            # hack for ragged (extruded)
-            if hasattr(var, "name") and var.name.startswith("t"):
-                shape.append(2)
-            else:
-                shape.append(stop)
-        return tuple(shape)
+    translation_unit = lp.make_kernel(
+        domains,
+        instructions,
+        kernel_data,
+        target=LOOPY_TARGET,
+        lang_version=LOOPY_LANG_VERSION,
+    )
+    return lp.merge((translation_unit, *subkernels))
 
 
-    def as_subarrayref(self, temporary):
-        """Register an argument to a function."""
-        iname = self.name_generator.next("i")
-        self.domains.append(f"{{ [{iname}]: 0 <= {iname} < {temporary.dim.size} }}")
-        index = (pym.var(iname),)
-        return lp.symbolic.SubArrayRef(
-            index, pym.subscript(pym.var(temporary.name), index)
-        )
+def _make_shared_inames(instructions):
+    shared_idxs = {idx for insn in instructions for idx in insn.loop_indices}
+    iname_generator = NameGenerator("i")
+    return {idx.domain: iname_generator.next() for idx in shared_idxs}
+
+
+def _make_domain(index, iname):
+    return f"{{ [{iname}]: {index.start} <= {iname} < {index.stop} }}"
+
+
+def as_subarrayref(temporary, iname):
+    """Register an argument to a function."""
+    index = (pym.var(iname),)
+    return lp.symbolic.SubArrayRef(
+        index, pym.subscript(pym.var(temporary.name), index)
+    )
 
 @functools.singledispatch
 def _make_instruction_context(self, instruction: tlang.Instruction, within_indices_to_inames):
     raise ValueError
 
 @_make_instruction_context.register
-def _(assignment: tlang.FunctionCall, within_indices_to_inames):
+def _(call: tlang.FunctionCall, within_indices_to_inames):
     subarrayrefs = {}
-    for temp in itertools.chain(instruction.reads, instruction.writes):
+    iname_namer = NameGenerator(prefix=f"{call.id}_i")
+    inames = within_indices_to_inames.copy()
+    for temp in itertools.chain(call.reads, call.writes):
         if temp in subarrayrefs:
             continue
-        subarrayrefs[temp] = self.as_subarrayref(temp)
+        iname = iname_namer.next()
+        inames[Range(temp.dim.size)] = iname
+        subarrayrefs[temp] = as_subarrayref(temp, iname)
 
-    reads = tuple(subarrayrefs[var] for var in instruction.reads)
-    writes = tuple(subarrayrefs[var] for var in instruction.writes)
+    reads = tuple(subarrayrefs[var] for var in call.reads)
+    writes = tuple(subarrayrefs[var] for var in call.writes)
     assignees = tuple(writes)
     expression = pym.primitives.Call(
-        pym.var(instruction.function.loopy_kernel.default_entrypoint.name),
+        pym.var(call.function.loopy_kernel.default_entrypoint.name),
         tuple(reads),
     )
 
-    within_inames = frozenset({within_indices[index] for index in instruction.within_indices})
+    within_inames = frozenset({within_indices_to_inames[index.domain] for index in call.loop_indices})
 
-    depends_on = frozenset({f"{insn}*" for insn in instruction.depends_on})
+    kernel_data = [lp.TemporaryVariable(temp.name, shape=(temp.dim.size,)) for temp in subarrayrefs]
+
+    depends_on = frozenset({f"{insn}*" for insn in call.depends_on})
     call_insn = lp.CallInstruction(
         assignees,
         expression,
-        id=instruction.id,
+        id=call.id,
         within_inames=within_inames,
         depends_on=depends_on
     )
-    self.instructions.append(call_insn)
-    self.tlang_instructions[instruction].append(call_insn)
-    self.subkernels.append(instruction.function.loopy_kernel)
-    return call_insn
+    return InstructionContext([call_insn], inames, kernel_data, {call.function.loopy_kernel})
 
 
-@dataclasses.dataclass
+@dataclasses.dataclass(frozen=True)
 class InstructionContext:
-    loopy_instructions: FrozenSet
+    loopy_instructions: Tuple
     inames: Dict
+    kernel_data: Tuple
+    subkernels: Tuple = ()
 
 
 @_make_instruction_context.register
 def _(assignment: tlang.Assignment, within_indices_to_inames):
+    id_namer = NameGenerator(prefix=f"{assignment.id}_")
     stencils = frozenset({_complete_stencil(assignment.tensor.dim, stencil) for stencil in assignment.tensor.stencils})
     inames = _make_inames(stencils, assignment.id, within_indices_to_inames)
-    loopy_instructions = set()
+    loopy_instructions = []
     for stencil in stencils:
         # each entry into the temporary needs to be offset by the size of
         # the previous one
-        local_offset = 0
+        initial_local_offset = 0
         for indices in stencil:
-            local_idxs, global_idxs, within_inames = \
-                _collect_indices(assignment.tensor.dim, indices, local_offset=local_offset, inames_dict=within_indices_to_inames|inames)
-            local_offset += indexed_size_per_index_group(assignment.tensor.dim, indices)
-            loopy_instructions.add(_make_loopy_instruction(within_inames))
+            local_idxs, global_idxs, local_offset, global_offset, within_inames = \
+                _collect_indices(assignment.tensor.dim, indices, local_offset=initial_local_offset, inames_dict=inames)
+            initial_local_offset += indexed_size_per_index_group(assignment.tensor.dim, indices)
+            loopy_instructions.append(_make_loopy_instruction(assignment, id_namer.next(), local_idxs, global_idxs, local_offset, global_offset, within_inames))
 
-    return InstructionContext(instructions)
+    kernel_data = [
+        lp.GlobalArg(assignment.tensor.name, dtype=np.float64, shape=None),
+        lp.TemporaryVariable(assignment.temporary.name, shape=(assignment.temporary.dim.size,))
+    ]
+
+    return InstructionContext(loopy_instructions, inames, kernel_data)
 
 
 def _make_inames(stencils, instruction_id, within_inames):
     iname_generator = NameGenerator(prefix=f"{instruction_id}_i")
-    # return {
-    #     idx: iname_generator.next()
-    #     for stencil in stencils for idxs in stencil for idx in idxs
-    #     if idx not in within_inames
-    # }
-    # TODO Make into a comprehension
-    inames = {}
-    for stencil in stencils:
-        for indices in stencil:
-            for index in indices:
-                if index in within_inames:
-                    continue
-                if isinstance(index, LoopIndex):
-                    index = index.domain
-                inames[index] = iname_generator.next()
-    return inames | within_inames
+    return within_inames | {
+        index: iname_generator.next()
+        for stencil in stencils for idxs in stencil for idx in idxs
+        for index in _expand_index(idx)
+        if index not in within_inames
+    }
+
+
+@functools.singledispatch
+def _expand_index(index):
+    raise AssertionError
+
+@_expand_index.register
+def _(index: IntIndex):
+    return ()
+
+
+@_expand_index.register
+def _(index: LoopIndex):
+    return (index.domain,)
+
+
+@_expand_index.register
+def _(index: Range):
+    return (index,)
+
+
+@_expand_index.register
+def _(index: Map):
+    return _expand_index(index.from_dim) + _expand_index(index.to_dim)
 
 
 def _complete_stencil(dim, stencil):
@@ -401,15 +316,15 @@ def _(index: LoopIndex, inames):
     return (iname,), None, pym.var(iname)
 
 
-def resolve(self, *args):
-    if isinstance(self.instruction, tlang.Read):
-        resolver = ReadAssignmentResolver(*args)
-    elif isinstance(self.instruction, tlang.Zero):
-        resolver = ZeroAssignmentResolver(*args)
-    elif isinstance(self.instruction, tlang.Write):
-        resolver = WriteAssignmentResolver(*args)
-    elif isinstance(self.instruction, tlang.Increment):
-        resolver = IncAssignmentResolver(*args)
+def resolve(instruction, *args):
+    if isinstance(instruction, tlang.Read):
+        resolver = ReadAssignmentResolver(instruction, *args)
+    elif isinstance(instruction, tlang.Zero):
+        resolver = ZeroAssignmentResolver(instruction, *args)
+    elif isinstance(instruction, tlang.Write):
+        resolver = WriteAssignmentResolver(instruction, *args)
+    elif isinstance(instruction, tlang.Increment):
+        resolver = IncAssignmentResolver(instruction, *args)
     else:
         raise AssertionError
     return resolver.assignee, resolver.expression
@@ -536,4 +451,43 @@ def register_domain(self, domain, within_inames):
                    for param in [start, stop])
     self.domains.append(DomainContext(iname, start, stop))
     return iname
+
+
+def as_shape(self, domains, *, first_is_none=False):
+    shape = []
+    for i, domain in enumerate(domains):
+        if first_is_none and i == 0:
+            shape.append(None)
+        else:
+            if isinstance(domain, Map):
+                start = 0
+                stop = domain.size
+            elif isinstance(domain, Slice):
+                start = domain.start
+                stop = domain.stop
+            else:
+                raise AssertionError
+
+            assert start in self.parameters_dict
+            assert stop in self.parameters_dict
+            start = self.register_domain_parameter(start, None)
+            stop = self.register_domain_parameter(stop, None)
+            shape.append(stop-start)
+    return tuple(shape)
+
+def as_orig_shape(self, domains):
+    if domains == ():
+        return ()
+    shape = [None]
+    for domain in domains[1:]:
+        stop = self.register_domain_parameter(domain, None)
+
+        var = stop
+
+        # hack for ragged (extruded)
+        if hasattr(var, "name") and var.name.startswith("t"):
+            shape.append(2)
+        else:
+            shape.append(stop)
+    return tuple(shape)
 """

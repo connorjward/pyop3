@@ -193,13 +193,13 @@ def direct():
         ["z[i] = z[i] + x[i] * y[i]"],
         [
             lp.GlobalArg(
-                "x", np.float64, (), is_input=True, is_output=False
+                "x", np.float64, (6,), is_input=True, is_output=False
             ),
             lp.GlobalArg(
-                "y", np.float64, (), is_input=True, is_output=False
+                "y", np.float64, (6,), is_input=True, is_output=False
             ),
             lp.GlobalArg(
-                "z", np.float64, (), is_input=True, is_output=True
+                "z", np.float64, (6,), is_input=True, is_output=True
             ),
         ],
         target=lp.CTarget(),
@@ -224,18 +224,19 @@ def direct():
 @register_demo
 def inc():
     result = pyop3.Dat(MESH, section, name="result")
+    size = 6 + MESH.NEDGES_IN_CELL_CLOSURE * 7 + MESH.NVERTS_IN_CELL_CLOSURE * 8
     loopy_kernel = lp.make_kernel(
         f"{{ [i]: 0 <= i < {MESH.CLOSURE_SIZE} }}",
         ["z[i] = z[i] + x[i] * y[i]"],
         [
             lp.GlobalArg(
-                "x", np.float64, (MESH.CLOSURE_SIZE,), is_input=True, is_output=False
+                "x", np.float64, (size,), is_input=True, is_output=False
             ),
             lp.GlobalArg(
-                "y", np.float64, (MESH.CLOSURE_SIZE,), is_input=True, is_output=False
+                "y", np.float64, (size,), is_input=True, is_output=False
             ),
             lp.GlobalArg(
-                "z", np.float64, (MESH.CLOSURE_SIZE,), is_input=True, is_output=True
+                "z", np.float64, (size,), is_input=True, is_output=True
             ),
         ],
         target=lp.CTarget(),
@@ -245,9 +246,9 @@ def inc():
     kernel = pyop3.Function(
         "local_kernel",
         [
-            pyop3.ArgumentSpec(pyop3.READ, np.float64, MESH.CLOSURE_SIZE),
-            pyop3.ArgumentSpec(pyop3.READ, np.float64, MESH.CLOSURE_SIZE),
-            pyop3.ArgumentSpec(pyop3.INC, np.float64, MESH.CLOSURE_SIZE),
+            pyop3.ArgumentSpec(pyop3.READ, np.float64, size),
+            pyop3.ArgumentSpec(pyop3.READ, np.float64, size),
+            pyop3.ArgumentSpec(pyop3.INC, np.float64, size),
         ],
         loopy_kernel,
     )
