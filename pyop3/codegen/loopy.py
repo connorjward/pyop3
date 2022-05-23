@@ -17,7 +17,7 @@ import pyop3.exprs
 from pyop3 import exprs, tlang
 import pyop3.utils
 from pyop3.utils import CustomTuple, checked_zip, NameGenerator
-from pyop3.tensors import Tensor, Index, Map, Dim, IntIndex, LoopIndex, Range, UniformDim, MixedDim
+from pyop3.tensors import Tensor, Index, Map, Dim, IntIndex, LoopIndex, Range, UniformDim, MixedDim, NonAffineMap
 from pyop3.tensors import Slice, indexed_shape, IndexTree, indexed_size_per_index_group
 from pyop3.codegen.tlang import to_tlang
 
@@ -174,7 +174,27 @@ def _(assignment: tlang.Assignment, within_indices_to_inames):
         lp.TemporaryVariable(assignment.temporary.name, shape=(assignment.temporary.dim.size,))
     ]
 
+    kernel_data += [map_ for stencil in stencils for indices in stencil for map_ in _collect_maps(indices)]
+
     return InstructionContext(loopy_instructions, inames, kernel_data)
+
+
+def _collect_maps(indices):
+    if not indices:
+        return ()
+
+    index, *subindices = indices
+    return _collect_maps_from_index(index) + _collect_maps(subindices)
+
+
+@functools.singledispatch
+def _collect_maps_from_index(index):
+    return ()
+
+
+@_collect_maps_from_index.register
+def _(index: NonAffineMap):
+    return _collect_maps_from_index(index.from_dim) + (lp.GlobalArg(index.name, shape=None, dtype=np.int32),)
 
 
 def _make_inames(stencils, instruction_id, within_inames):
