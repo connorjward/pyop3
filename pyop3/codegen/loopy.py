@@ -18,7 +18,7 @@ from pyop3 import exprs, tlang
 import pyop3.utils
 from pyop3.utils import CustomTuple, checked_zip, NameGenerator
 from pyop3.tensors import Tensor, Index, Map, Dim, IntIndex, LoopIndex, Range, UniformDim, MixedDim, NonAffineMap
-from pyop3.tensors import Slice, indexed_shape, IndexTree, indexed_size_per_index_group
+from pyop3.tensors import Slice, indexed_shape, IndexTree, indexed_size_per_index_group, AffineMap
 from pyop3.codegen.tlang import to_tlang
 
 LOOPY_TARGET = lp.CTarget()
@@ -313,12 +313,7 @@ def _(range_: Range, inames):
     return (iname,), pym.var(iname), pym.var(iname)
 
 @handle_index.register
-def _(index: IntIndex):
-    raise NotImplementedError
-    return None, 0, (index.value,)
-
-@handle_index.register
-def _(map_: Map, inames_dict):
+def _(map_: NonAffineMap, inames_dict):
     inames, temp_idxs, tensor_idxs = handle_index(map_.from_dim, inames_dict)
     rinames, rtemp_idxs, rtensor_idxs = handle_index(map_.to_dim, inames_dict)
 
@@ -329,6 +324,28 @@ def _(map_: Map, inames_dict):
     tensor_expr = tensor_idxs, rtensor_idxs
 
     return inames + rinames, temp_expr, pym.subscript(pym.var("map"), tensor_expr)
+
+
+@handle_index.register
+def _(map_: AffineMap, inames_dict):
+    inames, temp_idxs, tensor_idxs = handle_index(map_.from_dim, inames_dict)
+    rinames, rtemp_idxs, rtensor_idxs = handle_index(map_.to_dim, inames_dict)
+
+    """
+    for i
+        for j
+            for d
+                t[j, d] = dat[i+j, d]
+    """
+
+    if temp_idxs:
+        temp_expr = temp_idxs * map_.to_dim.size + rtemp_idxs
+    else:
+        temp_expr = rtemp_idxs
+
+    tensor_expr = tensor_idxs + rtensor_idxs
+
+    return inames + rinames, temp_expr, tensor_expr
 
 @handle_index.register
 def _(index: LoopIndex, inames):

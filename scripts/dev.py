@@ -47,119 +47,14 @@ def main():
     print(program)
 
 
-
-class DemoMesh(pyop3.UnstructuredMesh):
-
-    NCELLS_IN_CELL_CLOSURE = 1
-    NEDGES_IN_CELL_CLOSURE = 3
-    NVERTS_IN_CELL_CLOSURE = 3
-    CLOSURE_SIZE = NCELLS_IN_CELL_CLOSURE + NEDGES_IN_CELL_CLOSURE + NVERTS_IN_CELL_CLOSURE
-
-    map_cache = {}
-
-    # def cone(self, itree):
-    #     (stratum, subtree), = itree.indices.items()
-    #     range_, = subtree.indices.keys()
-
-
-    def closure(self, stencils):
-        key = (self.closure.__name__, stencils)
-        try:
-            return self.map_cache[key]
-        except KeyError:
-            # be very assertive
-            stencil, = stencils
-            indices, = stencil
-            stratum, index = indices
-
-            assert stratum.value == 0  # for now
-
-            edge_map = pyop3.NonAffineMap(index, pyop3.Range(self.NEDGES_IN_CELL_CLOSURE))
-            vert_map = pyop3.NonAffineMap(index, pyop3.Range(self.NVERTS_IN_CELL_CLOSURE))
-            mapped_stencils = frozenset({  # stencils (i.e. partitions)
-                frozenset({  # stencil (i.e. temporary)
-                    (pyop3.IntIndex(0), index),  # indices (i.e. loopy instructions)
-                    (pyop3.IntIndex(1), edge_map),
-                    (pyop3.IntIndex(2), vert_map),
-                })
-            })
-            return self.map_cache.setdefault(key, mapped_stencils)
-
-
-class DemoExtrudedMesh:
-
-    NPOINTS = 68
-    NBASECELLS = 12
-    BASE_CLOSURE_ARITY = 5
-
-    def __init__(self):
-        base = pyop3.Slice(self.NBASECELLS)
-        self.basecells = base
-        # self.offsets = pyop3.Dat(base, name="offsets")
-        self.layer_count = pyop3.Dat(self.NBASECELLS, name="layer_count")
-
-    def closure(self, index):
-        """
-        For semi-structured meshes we return a tuple of slices for plex ops. The
-        first index is for the base mesh entities touched by the stencil. This can have variable arity depending
-        on the number of incident base entities (for example a cubed-sphere mesh can touch
-        just faces, faces and edges or vertices). The inner map is simply an affine start and offset
-        such that the correct memory address can be retrieved given an input point. Like the map, this can have
-        non-unity arity (e.g. if there are 5 DoFs in the cell (edge of base mesh) column but only 2 in the facet column
-        (vertex in base mesh)). The initial start point of the map can also depend on the outer dimension. This
-        is needed for variable layers in extrusion.
-        """
-        # TODO clean up the semantics of slices versus index tuples and maps. A slice implies an extent but what we
-        # really need is a map from p -> qs and the extent is merely provided by p. Maybe 'range' is clearer (and our
-        # current slice and map no longer inherit from it). Possibly call the current slice an 'affine map'.
-
-        """For this example, let's assume that we have a cell that looks like this (+'s are DoFs):
-
-        +----+----+
-        |         |
-        +   +++   +
-        |         |
-        +----+----+
-
-        If we take the closure of the cell then we touch 3 base entities - 2 vertices and 1 edge - so the base map
-        has arity 3. Due to the differing DoF counts for each entity, the arities of the column maps is different
-        for each: 3, 5 and 3 respectively with offsets (0, 1, 2), (0, 1, 2, 3, 4) and (0, 1, 2).
-
-        The base map points to the first entity in each column from which the data is recovered by applying a fixed offset and stride.
-        This resolves problems with variable layers in extruded meshes where we might have a mesh that looks something like:
-
-        +---+
-        | 4 |
-        +---+---+
-        | 3 | 2 |
-        z-a-y---+
-            | 1 |
-            x---+
-
-        We can get around any problems by having base_map(3) return (a, y, z) rather than (a, x, z). If we do that
-        then we can forget about it as an issue later on during code generation.
-        """
-        base_map = pyop3.Map(index, 3, mesh=self)
-        column_maps = (
-            pyop3.Slice(0, 3),
-            pyop3.Slice(0, 5),
-            pyop3.Slice(0, 3),
-        )
-        return base_map, column_maps
-
-    @property
-    def cells(self):
-        layers = pyop3.Slice(self.layer_count[self.basecells.index])
-        return IndexBag(self.basecells, layers)
-
-
-# EXTRUDED_MESH = DemoExtrudedMesh()
-
+NBASE_EDGES = 25
+NBASE_VERTS = 26
+EXTRUDED_MESH = pyop3.ExtrudedMesh((NBASE_EDGES, NBASE_VERTS))
 
 NCELLS = 25
 NEDGES = 40
 NVERTS = 30
-MESH = DemoMesh((NCELLS, NEDGES, NVERTS))
+MESH = pyop3.UnstructuredMesh((NCELLS, NEDGES, NVERTS))
 ITERSET = MESH.cells
 
 section = pyop3.Section([6, 7, 8])  # 6 dof per cell, 7 per edge and 8 per vert
@@ -170,9 +65,13 @@ dat1 = pyop3.Dat(MESH, section, name="dat1")
 dat2 = pyop3.Dat(MESH, section, name="dat2")
 dat3 = pyop3.Dat(MESH, section, name="dat3")
 
-# won't work as dat expects two sections when it needs 3
-# vdat1 = pyop3.Dat((MESH, section, vsection), name="vdat1")
-# vdat2 = pyop3.Dat((MESH, section, vsection), name="vdat2")
+edat1 = pyop3.ExtrudedDat(EXTRUDED_MESH, section, name="edat1")
+edat2 = pyop3.ExtrudedDat(EXTRUDED_MESH, section, name="edat2")
+edat3 = pyop3.ExtrudedDat(EXTRUDED_MESH, section, name="edat3")
+
+vdat1 = pyop3.VectorDat(MESH, section, 3, name="vdat1")
+vdat2 = pyop3.VectorDat(MESH, section, 3, name="vdat2")
+vdat3 = pyop3.VectorDat(MESH, section, 3, name="vdat3")
 
 # mat1 = pyop3.Mat((MESH.points, MESH.points), name="mat1")
 
@@ -226,7 +125,7 @@ def inc():
     result = pyop3.Dat(MESH, section, name="result")
     size = 6 + MESH.NEDGES_IN_CELL_CLOSURE * 7 + MESH.NVERTS_IN_CELL_CLOSURE * 8
     loopy_kernel = lp.make_kernel(
-        f"{{ [i]: 0 <= i < {MESH.CLOSURE_SIZE} }}",
+        f"{{ [i]: 0 <= i < {size} }}",
         ["z[i] = z[i] + x[i] * y[i]"],
         [
             lp.GlobalArg(
@@ -377,22 +276,20 @@ def extruded():
 
 
 @register_demo
-def extruded_parloop():
-    dat1 = pyop3.Dat(EXTRUDED_MESH.points, name="dat1")
-    dat2 = pyop3.Dat(EXTRUDED_MESH.points, name="dat2")
-    result = pyop3.Dat(EXTRUDED_MESH.points, name="result")
+def extr_inc():
+    size = 6 + EXTRUDED_MESH.NEDGES_IN_CELL_CLOSURE * 7 + EXTRUDED_MESH.NVERTS_IN_CELL_CLOSURE * 8
     loopy_kernel = lp.make_kernel(
-        f"{{ [i]: 0 <= i < {EXTRUDED_MESH.CLOSURE_ARITY} }}",
+        f"{{ [i]: 0 <= i < {size} }}",
         ["z[i] = z[i] + x[i] * y[i]"],
         [
             lp.GlobalArg(
-                "x", np.float64, (EXTRUDED_MESH.CLOSURE_ARITY,), is_input=True, is_output=False
+                "x", np.float64, (size,), is_input=True, is_output=False
             ),
             lp.GlobalArg(
-                "y", np.float64, (EXTRUDED_MESH.CLOSURE_ARITY,), is_input=True, is_output=False
+                "y", np.float64, (size,), is_input=True, is_output=False
             ),
             lp.GlobalArg(
-                "z", np.float64, (EXTRUDED_MESH.CLOSURE_ARITY,), is_input=True, is_output=True
+                "z", np.float64, (size,), is_input=True, is_output=True
             ),
         ],
         target=lp.CTarget(),
@@ -402,17 +299,17 @@ def extruded_parloop():
     kernel = pyop3.Function(
         "local_kernel",
         [
-            pyop3.ArgumentSpec(pyop3.READ, np.float64, EXTRUDED_MESH.CLOSURE_ARITY),
-            pyop3.ArgumentSpec(pyop3.READ, np.float64, EXTRUDED_MESH.CLOSURE_ARITY),
-            pyop3.ArgumentSpec(pyop3.INC, np.float64, EXTRUDED_MESH.CLOSURE_ARITY),
+            pyop3.ArgumentSpec(pyop3.READ, np.float64, size),
+            pyop3.ArgumentSpec(pyop3.READ, np.float64, size),
+            pyop3.ArgumentSpec(pyop3.INC, np.float64, size),
         ],
         loopy_kernel,
     )
     return pyop3.Loop(
-        p := EXTRUDED_ITERSET.index,
+        p := EXTRUDED_MESH.cells.index,
         [
             kernel(
-                dat1[pyop3.closure(p)], dat2[pyop3.closure(p)], result[pyop3.closure(p)]
+                edat1[pyop3.closure(p)], edat2[pyop3.closure(p)], edat3[pyop3.closure(p)]
             )
         ],
     )

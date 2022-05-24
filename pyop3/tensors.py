@@ -234,10 +234,7 @@ class Tensor(pytools.ImmutableRecordWithoutPickling):
         return self.copy(stencils=stencils)
 
     def __str__(self):
-        if self.indices:
-            return f"{self.name}[{','.join(str(idx) for idx in self.indices)}]"
-        else:
-            return self.name
+        return self.name
 
 
 class Map(FancyIndex, abc.ABC):
@@ -261,23 +258,14 @@ class NonAffineMap(Tensor, Map):
 
 
 class AffineMap(Map):
-    def __init__(self, from_dim, offsets=1, strides=1):
+    def __init__(self, from_dim, arity):
         self.from_dim = from_dim
-        self.offsets = as_tuple(offsets)
-        self.strides = as_tuple(strides)
+        self.arity = arity
+        self.to_dim = Range(arity)
 
     @property
-    def arity(self):
-        return pytools.single_valued([len(self.offsets), len(self.strides)])
-
-    # FIXME This will break but do I want to set this in super().__init__ or here?
-    @property
-    def from_dim(self):
-        return self.from_dim
-
-    @property
-    def to_dim(self):
-        return Slice(self.arity)
+    def size(self):
+        return self.from_dim.size * self.to_dim.size
 
 
 class Section:
@@ -301,7 +289,48 @@ def Dat(mesh, dofs: Section, *, prefix="dat", **kwargs) -> Tensor:
     return Tensor(dim, prefix=prefix, **kwargs)
 
 
+def VectorDat(mesh, dofs, count, **kwargs):
+    dim = MixedDim(
+        mesh.tdim,
+        tuple(
+            UniformDim(
+                mesh.strata_sizes[stratum],
+                UniformDim(dofs.dofs[stratum], UniformDim(count))
+            )
+            for stratum in range(mesh.tdim)
+        )
+    )
+    return Tensor(dim, **kwargs)
+
+
+def ExtrudedDat(mesh, dofs, **kwargs):
+    dim = MixedDim(
+        2,
+        (
+            UniformDim(  # base edges
+                mesh.strata_sizes[0],
+                MixedDim(
+                    2,
+                    (
+                        UniformDim(11),  # extr cells
+                        UniformDim(12),  # extr 'inner' edges
+                    )
+                )
+            ),
+            UniformDim(  # base verts
+                mesh.strata_sizes[1],
+                MixedDim(
+                    2,
+                    (
+                        UniformDim(11),  # extr 'outer' edges
+                        UniformDim(12),  # extr verts
+                    )
+                )
+            )
+        )
+    )
+    return Tensor(dim, **kwargs)
+
+
 def Mat(shape: Tuple[int, ...], *, name: str = None):
-    if not name:
-        name = Tensor.name_generator.generate(prefix="mat")
-    return Tensor(shape, name=name)
+    raise NotImplementedError
