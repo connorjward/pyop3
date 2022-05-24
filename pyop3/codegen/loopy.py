@@ -232,7 +232,7 @@ def _(index: Map):
 
 
 def _complete_stencil(dim, stencil):
-    return frozenset({_complete_indices(dim, indices) for indices in stencil})
+    return tuple(_complete_indices(dim, indices) for indices in stencil)
 
 
 def _complete_indices(dim, indices):

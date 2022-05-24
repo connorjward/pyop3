@@ -26,7 +26,7 @@ class Mesh:
     def cells(self):
         # being very verbose
         indices = (IntIndex(0), Range("start", "end"))
-        stencil = frozenset({indices})
+        stencil = (indices,)
         stencils = frozenset({stencil})
         return StencilGroup(stencils, mesh=self)
 
@@ -58,11 +58,11 @@ class UnstructuredMesh(Mesh):
             edge_map = pyop3.NonAffineMap(index, pyop3.Range(self.NEDGES_IN_CELL_CLOSURE))
             vert_map = pyop3.NonAffineMap(index, pyop3.Range(self.NVERTS_IN_CELL_CLOSURE))
             mapped_stencils = frozenset({  # stencils (i.e. partitions)
-                frozenset({  # stencil (i.e. temporary)
+                (  # stencil (i.e. temporary)
                     (pyop3.IntIndex(0), index),  # indices (i.e. loopy instructions)
                     (pyop3.IntIndex(1), edge_map),
                     (pyop3.IntIndex(2), vert_map),
-                })
+                )
             })
             return self.map_cache.setdefault(key, mapped_stencils)
 
@@ -162,7 +162,7 @@ class ExtrudedMesh(Mesh):
             )
 
             mapped_stencils = frozenset({  # stencils (i.e. partitions)
-                frozenset({  # stencil (i.e. temporary)
+                (  # stencil (i.e. temporary)
                     # indices (i.e. loopy instructions)
                     # cell data
                     (pyop3.IntIndex(0), base_index, pyop3.IntIndex(0), extr_index),
@@ -172,7 +172,7 @@ class ExtrudedMesh(Mesh):
                     (pyop3.IntIndex(1), base_vert_map, pyop3.IntIndex(0), outer_edge_map),
                     # out-cell verts
                     (pyop3.IntIndex(1), base_vert_map, pyop3.IntIndex(1), outer_vert_map),
-                })
+                )
             })
             return self.map_cache.setdefault(key, mapped_stencils)
 
@@ -182,7 +182,7 @@ class ExtrudedMesh(Mesh):
         base_cells = pyop3.Range("start", "end")
         extr_cells = pyop3.Range(self.layer_count[base_cells.index])
         indices = (pyop3.IntIndex(0), base_cells, pyop3.IntIndex(0), extr_cells)
-        stencil = frozenset({indices})
+        stencil = (indices,)
         stencils = frozenset({stencil})
         return pyop3.StencilGroup(stencils, mesh=self)
 

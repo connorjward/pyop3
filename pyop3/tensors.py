@@ -171,15 +171,15 @@ class StencilGroup(pytools.ImmutableRecord):
     def index(self):
         new_stencils = set()
         for stencil in self.stencils:
-            new_stencil = set()
+            new_stencil = []
             for indices in stencil:
                 new_indices = []
                 for index in indices:
                     if isinstance(index, FancyIndex):
                         index = index.index
                     new_indices.append(index)
-                new_stencil.add(tuple(new_indices))
-            new_stencils.add(frozenset(new_stencil))
+                new_stencil.append(tuple(new_indices))
+            new_stencils.add(tuple(new_stencil))
         new_stencils = frozenset(new_stencils)
         return self.copy(stencils=new_stencils)
 
