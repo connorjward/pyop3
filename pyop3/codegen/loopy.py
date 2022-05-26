@@ -17,7 +17,7 @@ import pyop3.exprs
 from pyop3 import exprs, tlang
 import pyop3.utils
 from pyop3.utils import CustomTuple, checked_zip, NameGenerator
-from pyop3.tensors import Tensor, Index, Map, Dim, IntIndex, LoopIndex, Range, UniformDim, MixedDim, NonAffineMap
+from pyop3.tensors import Tensor, Index, Map, Dim, IntIndex, LoopIndex, UniformDim, MixedDim, NonAffineMap
 from pyop3.tensors import Slice, indexed_shape, IndexTree, indexed_size_per_index_group, AffineMap
 from pyop3.codegen.tlang import to_tlang
 
@@ -50,34 +50,29 @@ def to_c(expr):
 
 
 def _make_loopy_kernel(tlang_kernel):
+    # index -> iname
     shared_inames = _make_shared_inames(tlang_kernel.instructions)
 
-    instruction_contexts = [
-        _make_instruction_context(insn, shared_inames)
-        for insn in tlang_kernel.instructions
-    ]
+    domains = []
+    instructions = []
+    kernel_data_in = []
+    subkernels = []
+    for insn in tlang_kernel.instructions:
+        ctx = _make_instruction_context(insn, shared_inames)
 
-    all_inames = list(shared_inames.items())
-    for ctx in instruction_contexts:
-        all_inames.extend(ctx.inames.items())
+        if isinstance(insn, tlang.Assignment):
+            domains += _make_domains(insn.tensor.dim, insn.tensor.stencils, ctx.inames)
+        instructions += ctx.loopy_instructions
+        kernel_data_in += ctx.kernel_data
+        subkernels += ctx.subkernels
 
-    domains = {_make_domain(index, iname) for index, iname in all_inames}
+    domains = set(domains)
 
-    instructions = [
-        insn for ctx in instruction_contexts for insn in ctx.loopy_instructions
-    ]
-
-    kernel_data_in = [
-        arg for ctx in instruction_contexts for arg in ctx.kernel_data
-    ]
     # uniquify
     kernel_data = []
     for kd in kernel_data_in:
         if kd not in kernel_data:
             kernel_data.append(kd)
-
-
-    subkernels = [knl for ctx in instruction_contexts for knl in ctx.subkernels]
 
     breakpoint()
     translation_unit = lp.make_kernel(
@@ -91,14 +86,61 @@ def _make_loopy_kernel(tlang_kernel):
 
 
 def _make_shared_inames(instructions):
-    breakpoint()
     shared_idxs = {idx for insn in instructions for idx in insn.loop_indices}
     iname_generator = NameGenerator("i")
     return {idx.domain: iname_generator.next() for idx in shared_idxs}
 
 
-def _make_domain(index, iname):
-    return f"{{ [{iname}]: {index.start} <= {iname} < {index.stop} }}"
+def _make_domains(dim, stencils, inames):
+    return [dom for stencil in stencils for indices in stencil for dom in _make_domains_per_indices(dim, indices, inames)]
+
+
+def _make_domains_per_indices(dim, indices, inames, within_indices=()):
+    if not dim:
+        return []
+    if not indices:
+        raise AssertionError
+    domains = []
+    index, *subindices = indices
+
+    if isinstance(index, LoopIndex):
+        index = index.domain
+
+    while isinstance(index, Map):
+        if not isinstance(index, IntIndex):
+            domain = _make_domain(index.to_dim, index, inames, within_indices=within_indices)
+            domains.append(domain)
+        index = index.from_index
+
+    if not isinstance(index, (LoopIndex, IntIndex)):
+        domain = _make_domain(dim, index, inames, within_indices=within_indices)
+        domains.append(domain)
+
+    if isinstance(dim, MixedDim):
+        subdim = dim.subdims[index.value] if dim.subdims else None
+    else:
+        subdim = dim.subdim
+
+    return domains + _make_domains_per_indices(subdim, subindices, inames, within_indices=within_indices + (index,))
+
+
+def _make_domain(dim, index, inames, within_indices):
+    if isinstance(dim.size, Tensor):
+        _, myidxs, _, myoffset, _ = _collect_indices(dim.size.dim, within_indices, inames_dict=inames)
+        size = pym.subscript(pym.var(dim.size.name), myidxs+myoffset)
+    else:
+        size = dim.size
+
+    if isinstance(index, Slice):
+        start = index.start or 0
+        stop = index.stop or size
+    elif isinstance(index, Map):
+        start = 0
+        stop = index.to_dim.size
+    else:
+        raise NotImplementedError
+    iname = inames[index]
+    return f"{{ [{iname}]: {start} <= {iname} < {stop} }}"
 
 
 def as_subarrayref(temporary, iname):
@@ -121,7 +163,7 @@ def _(call: tlang.FunctionCall, within_indices_to_inames):
         if temp in subarrayrefs:
             continue
         iname = iname_namer.next()
-        inames[Range(temp.dim.size)] = iname
+        inames[UniformDim(temp.dim.size)] = iname
         subarrayrefs[temp] = as_subarrayref(temp, iname)
 
     reads = tuple(subarrayrefs[var] for var in call.reads)
@@ -196,7 +238,7 @@ def _collect_maps_from_index(index):
 
 @_collect_maps_from_index.register
 def _(index: NonAffineMap):
-    return _collect_maps_from_index(index.from_dim) + (lp.GlobalArg(index.name, shape=None, dtype=np.int32),)
+    return _collect_maps_from_index(index.from_index) + (lp.GlobalArg(index.name, shape=None, dtype=np.int32),)
 
 
 def _make_inames(stencils, instruction_id, within_inames):
@@ -224,13 +266,13 @@ def _(index: LoopIndex):
 
 
 @_expand_index.register
-def _(index: Range):
+def _(index: Slice):
     return (index,)
 
 
 @_expand_index.register
 def _(index: Map):
-    return _expand_index(index.from_dim) + _expand_index(index.to_dim)
+    return _expand_index(index.from_index) + (index,)
 
 
 def _complete_stencil(dim, stencil):
@@ -245,10 +287,6 @@ def _complete_indices(dim, indices):
         index, *subindices = indices
     else:
         index, subindices = Slice(), ()
-
-    if isinstance(index, Slice):
-        assert not (index.start or index.stop or index.step)  # only handle full slices
-        index = Range(dim.size)
 
     if isinstance(dim, MixedDim):
         subdim = dim.subdims[index.value]
@@ -335,14 +373,18 @@ def handle_index(index, inames):
     raise AssertionError
 
 @handle_index.register
-def _(range_: Range, inames):
-    iname = inames[range_]
+def _(slice_: Slice, inames):
+    iname = inames[slice_]
     return (iname,), pym.var(iname), pym.var(iname)
 
 @handle_index.register
 def _(map_: NonAffineMap, inames_dict):
-    inames, temp_idxs, tensor_idxs = handle_index(map_.from_dim, inames_dict)
-    rinames, rtemp_idxs, rtensor_idxs = handle_index(map_.to_dim, inames_dict)
+    inames, temp_idxs, tensor_idxs = handle_index(map_.from_index, inames_dict)
+
+    riname = inames_dict[map_]
+    rinames = (riname,)
+    rtemp_idxs = pym.var(riname)
+    rtensor_idxs = pym.var(riname)
 
     if temp_idxs:
         temp_expr = temp_idxs * map_.to_dim.size + rtemp_idxs
@@ -355,8 +397,11 @@ def _(map_: NonAffineMap, inames_dict):
 
 @handle_index.register
 def _(map_: AffineMap, inames_dict):
-    inames, temp_idxs, tensor_idxs = handle_index(map_.from_dim, inames_dict)
-    rinames, rtemp_idxs, rtensor_idxs = handle_index(map_.to_dim, inames_dict)
+    inames, temp_idxs, tensor_idxs = handle_index(map_.from_index, inames_dict)
+    riname = inames_dict[map_]
+    rinames = (riname,)
+    rtemp_idxs = pym.var(riname)
+    rtensor_idxs = pym.var(riname)
 
     """
     for i

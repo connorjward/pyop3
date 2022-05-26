@@ -25,7 +25,7 @@ class Mesh:
     @property
     def cells(self):
         # being very verbose
-        indices = (IntIndex(0), Range("start", "end"))
+        indices = (IntIndex(0), Slice())
         stencil = (indices,)
         stencils = frozenset({stencil})
         return StencilGroup(stencils, mesh=self)
@@ -55,8 +55,8 @@ class UnstructuredMesh(Mesh):
 
             assert stratum.value == 0  # for now
 
-            edge_map = pyop3.NonAffineMap(index, pyop3.Range(self.NEDGES_IN_CELL_CLOSURE))
-            vert_map = pyop3.NonAffineMap(index, pyop3.Range(self.NVERTS_IN_CELL_CLOSURE))
+            edge_map = pyop3.NonAffineMap(index, pyop3.UniformDim(self.NEDGES_IN_CELL_CLOSURE))
+            vert_map = pyop3.NonAffineMap(index, pyop3.UniformDim(self.NVERTS_IN_CELL_CLOSURE))
             mapped_stencils = frozenset({  # stencils (i.e. partitions)
                 (  # stencil (i.e. temporary)
                     (pyop3.IntIndex(0), index),  # indices (i.e. loopy instructions)
@@ -156,7 +156,7 @@ class ExtrudedMesh(Mesh):
             assert extr_stratum.value == 0  # for now
 
             base_vert_map = pyop3.NonAffineMap(
-                base_index, pyop3.Range(self.NBASE_VERTS_IN_CELL_CLOSURE)
+                base_index, pyop3.UniformDim(self.NBASE_VERTS_IN_CELL_CLOSURE)
             )
 
             inner_edge_map = pyop3.AffineMap(

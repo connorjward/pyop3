@@ -1,3 +1,4 @@
+import functools
 import abc
 import itertools
 import collections
@@ -47,7 +48,6 @@ class Index(abc.ABC):
 
 class BasicIndex(Index):
     """Not a fancy index (scalar-valued)"""
-    size = 1
 
 
 class ScalarIndex(BasicIndex):
@@ -76,7 +76,7 @@ class PythonicIndex:
 
 
 class IntIndex(PythonicIndex):
-    size = 1
+    ...
 
 
 class Slice(PythonicIndex, FancyIndex):
@@ -102,39 +102,6 @@ class Slice(PythonicIndex, FancyIndex):
         return LoopIndex(self)
 
 
-class Range(PythonicIndex, FancyIndex):
-    def __init__(self, *args, mesh=None):
-        if len(args) == 1:
-            start, stop, step = 0, *args, 1
-        elif len(args) == 2:
-            start, stop, step = *args, 1
-        elif len(args) == 3:
-            start, stop, step = args
-        else:
-            raise ValueError
-
-        if isinstance(start, str):
-            start = pym.Variable(start)
-        if isinstance(stop, str):
-            stop = pym.Variable(stop)
-
-        self.start = start
-        self.stop = stop
-        self.step = step
-
-    @property
-    def size(self):
-        return (self.stop - self.start) // self.step
-
-    @property
-    def value(self):
-        return slice(self.start, self.stop, self.step)
-
-    @property
-    def index(self):
-        return LoopIndex(self)
-
-
 def indexed_shape(dim, stencil):
     size = 0
     for indices in stencil:
@@ -143,8 +110,11 @@ def indexed_shape(dim, stencil):
 
 
 def indexed_size_per_index_group(dim, indices):
+    if not dim:
+        raise AssertionError
+
     if not indices:
-        return dim.size
+        indices = (Slice(),)
 
     index, *subindices = indices
     if isinstance(dim, MixedDim):
@@ -154,10 +124,12 @@ def indexed_size_per_index_group(dim, indices):
             subdim = None
     else:
         subdim = dim.subdim
+
+    size = index_size(index, dim)
     if subdim:
-        return index.size * indexed_size_per_index_group(subdim, subindices)
+        return size * indexed_size_per_index_group(subdim, subindices)
     else:
-        return index.size
+        return size
 
 
 class StencilGroup(pytools.ImmutableRecord):
@@ -249,23 +221,38 @@ class NonAffineMap(Tensor, Map):
     prefix = "map"
 
     def __init__(self, *dims):
-        self.from_dim, self.to_dim = dims
+        self.from_index, self.to_dim = dims
         super().__init__(dims, name="map")
-
-    @property
-    def size(self):
-        return self.from_dim.size * self.to_dim.size
 
 
 class AffineMap(Map):
-    def __init__(self, from_dim, arity):
-        self.from_dim = from_dim
+    def __init__(self, from_index, arity):
+        self.from_index = from_index
         self.arity = arity
-        self.to_dim = Range(arity)
+        self.to_dim = UniformDim(arity)
 
-    @property
-    def size(self):
-        return self.from_dim.size * self.to_dim.size
+
+@functools.singledispatch
+def index_size(index, dim):
+    raise TypeError
+
+
+@index_size.register(IntIndex)
+@index_size.register(LoopIndex)
+def _(slice_, dim):
+    return 1
+
+
+@index_size.register
+def _(slice_: Slice, dim):
+    start = slice_.start or 0
+    stop = slice_.stop or dim.size
+    return stop - start
+
+
+@index_size.register
+def _(map_: Map, dim):
+    return index_size(map_.from_index, dim) * map_.to_dim.size
 
 
 class Section:
