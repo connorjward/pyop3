@@ -78,6 +78,7 @@ class PythonicIndex:
 class IntIndex(PythonicIndex):
     size = 1
 
+
 class Slice(PythonicIndex, FancyIndex):
     def __init__(self, *args, mesh=None):
         start, stop, step = None, None, None
@@ -97,12 +98,8 @@ class Slice(PythonicIndex, FancyIndex):
         self.step = step
 
     @property
-    def value(self):
-        return slice(self.start, self.stop, self.step)
-
-    @property
     def index(self):
-        raise Exception("This doesn't make sense. Can only do this over a range (with extent)")
+        return LoopIndex(self)
 
 
 class Range(PythonicIndex, FancyIndex):
@@ -151,7 +148,10 @@ def indexed_size_per_index_group(dim, indices):
 
     index, *subindices = indices
     if isinstance(dim, MixedDim):
-        subdim = dim.subdims[index.value]
+        if dim.subdims:
+            subdim = dim.subdims[index.value]
+        else:
+            subdim = None
     else:
         subdim = dim.subdim
     if subdim:
@@ -312,8 +312,8 @@ def ExtrudedDat(mesh, dofs, **kwargs):
                 MixedDim(
                     2,
                     (
-                        UniformDim(11),  # extr cells
-                        UniformDim(12),  # extr 'inner' edges
+                        UniformDim(mesh.layer_count),  # extr cells
+                        UniformDim(mesh.layer_count),  # extr 'inner' edges
                     )
                 )
             ),
@@ -322,8 +322,8 @@ def ExtrudedDat(mesh, dofs, **kwargs):
                 MixedDim(
                     2,
                     (
-                        UniformDim(11),  # extr 'outer' edges
-                        UniformDim(12),  # extr verts
+                        UniformDim(mesh.layer_count),  # extr 'outer' edges
+                        UniformDim(mesh.layer_count),  # extr verts
                     )
                 )
             )

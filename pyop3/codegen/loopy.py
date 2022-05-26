@@ -79,6 +79,7 @@ def _make_loopy_kernel(tlang_kernel):
 
     subkernels = [knl for ctx in instruction_contexts for knl in ctx.subkernels]
 
+    breakpoint()
     translation_unit = lp.make_kernel(
         domains,
         instructions,
@@ -90,6 +91,7 @@ def _make_loopy_kernel(tlang_kernel):
 
 
 def _make_shared_inames(instructions):
+    breakpoint()
     shared_idxs = {idx for insn in instructions for idx in insn.loop_indices}
     iname_generator = NameGenerator("i")
     return {idx.domain: iname_generator.next() for idx in shared_idxs}
@@ -242,7 +244,12 @@ def _complete_indices(dim, indices):
     if indices:
         index, *subindices = indices
     else:
-        index, subindices = Range(dim.size), ()
+        index, subindices = Slice(), ()
+
+    if isinstance(index, Slice):
+        assert not (index.start or index.stop or index.step)  # only handle full slices
+        index = Range(dim.size)
+
     if isinstance(dim, MixedDim):
         subdim = dim.subdims[index.value]
     else:
@@ -266,20 +273,26 @@ def _collect_indices(
         local_idxs=0, global_idxs=0,
         local_offset=0, global_offset=0,
         within_inames=frozenset(),
-        inames_dict={}
+        inames_dict={},
+        within_indices=(),
 ):
     index, *subindices = indices
 
+    within_indices += (index,)
+
     if isinstance(dim, MixedDim):
-        subdim = dim.subdims[index.value]
         # The global offset is very complicated - we need to build up the offsets every time
         # we do not take the first subdim by adding the size of the prior subdims. Make sure to
         # not multiply this value.
-        for dim in dim.subdims[:index.value]:
-            global_offset += dim.size
+        if dim.subdims:
+            for d in dim.subdims[:index.value]:
+                if isinstance(d.size, Tensor):
+                    _, myidxs, _, myoffset, _ = _collect_indices(d.size.dim, within_indices, inames_dict=inames_dict)
+                    size = pym.subscript(pym.var(d.size.name), myidxs+myoffset)
+                else:
+                    size = d.size
+                global_offset += size
     else:
-        subdim = dim.subdim
-
         ### tidy up
         inames, local_idxs_, global_idxs_ = handle_index(index, inames_dict)
 
@@ -293,14 +306,28 @@ def _collect_indices(
             within_inames |= set(inames)
         ### !tidy up
 
+    if isinstance(dim, MixedDim):
+        if dim.subdims:
+            subdim = dim.subdims[index.value]
+        else:
+            subdim = None
+    else:
+        subdim = dim.subdim
+
+
     if subdim:
-        global_idxs *= subdim.size
+        if isinstance(subdim.size, Tensor):
+            _, myidxs, _, myoffset, _ = _collect_indices(subdim.size.dim, within_indices, inames_dict=inames_dict)
+            size = pym.subscript(pym.var(subdim.size.name), myidxs+myoffset)
+            global_idxs *= size
+        else:
+            global_idxs *= subdim.size
         local_idxs *= indexed_size_per_index_group(subdim, subindices)
 
     if not subdim:
         return local_idxs, global_idxs, local_offset, global_offset, within_inames
     else:
-        return _collect_indices(subdim, subindices, local_idxs, global_idxs, local_offset, global_offset, within_inames, inames_dict)
+        return _collect_indices(subdim, subindices, local_idxs, global_idxs, local_offset, global_offset, within_inames, inames_dict, within_indices)
 
 
 @functools.singledispatch

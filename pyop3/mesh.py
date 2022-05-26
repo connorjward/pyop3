@@ -72,9 +72,6 @@ class StructuredMesh(Mesh):
 
 
 class ExtrudedMesh(Mesh):
-    NPOINTS = 68
-    NBASECELLS = 12
-
     # just for now
     NCELLS_IN_CELL_CLOSURE = 1
     NEDGES_IN_CELL_CLOSURE = 4
@@ -85,8 +82,22 @@ class ExtrudedMesh(Mesh):
 
     def __init__(self, strata_sizes):
         self.strata_sizes = strata_sizes
-        dim = pyop3.UniformDim(self.NBASECELLS)
-        self.layer_count = pyop3.Tensor(dim, name="layer_count")
+        nbase_edges, nbase_verts = self.strata_sizes
+
+        layer_dims =  MixedDim(
+            2,
+            (
+                UniformDim(  # base edges
+                    strata_sizes[0],
+                    MixedDim(2)
+                ),
+                UniformDim(  # base verts
+                    strata_sizes[1],
+                    MixedDim(2)
+                )
+            )
+        )
+        self.layer_count = Tensor(layer_dims, name="layer_count")
 
     def closure(self, stencils):
         """
@@ -179,8 +190,8 @@ class ExtrudedMesh(Mesh):
     @property
     def cells(self):
         # being very verbose
-        base_cells = pyop3.Range("start", "end")
-        extr_cells = pyop3.Range(self.layer_count[base_cells.index])
+        base_cells = pyop3.Slice()
+        extr_cells = pyop3.Slice()
         indices = (pyop3.IntIndex(0), base_cells, pyop3.IntIndex(0), extr_cells)
         stencil = (indices,)
         stencils = frozenset({stencil})
