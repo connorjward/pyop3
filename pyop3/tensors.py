@@ -12,75 +12,67 @@ import pymbolic.primitives as pym
 import pytools
 import pyop3.exprs
 import pyop3.utils
-from pyop3.utils import as_tuple, checked_zip
+from pyop3.utils import as_tuple, checked_zip, Tree, NameGenerator
 
 
 class Dim(pytools.ImmutableRecord):
-    size: int
+    name_generator = NameGenerator("dim")
 
-    @property
-    @abc.abstractmethod
-    def is_leaf(self):
-        pass
+    def __init__(self, size, *, name=None):
+        if not name:
+            name = self.name_generator.next()
+        super().__init__(size=size, name=name)
 
 
 class UniformDim(Dim):
-    def __init__(self, size, subdim=None):
-        super().__init__(size=size, subdim=subdim)
-
-    @property
-    def is_leaf(self):
-        return not self.subdim
+    pass
 
 
 class MixedDim(Dim):
-    def __init__(self, size, subdims=None):
-        super().__init__(size=size, subdims=subdims)
-
-    @property
-    def is_leaf(self):
-        return not self.subdims
+    pass
 
 
-class Index(abc.ABC):
+class Index(pytools.ImmutableRecord):
     """Does it make sense to index a tensor with this object?"""
+    fields = {"dim"}
+
+    def __init__(self, **kwargs):
+        for kwarg in kwargs:
+            if kwarg not in self.fields:
+                raise ValueError
+        super().__init__(**kwargs)
 
 
 class BasicIndex(Index):
     """Not a fancy index (scalar-valued)"""
 
 
-class ScalarIndex(BasicIndex):
-    def __init__(self, value):
-        self.value = value
-
-
 class LoopIndex(BasicIndex):
-    def __init__(self, domain):
-        self.domain = domain
+    fields = BasicIndex.fields | {"domain"}
+
+    def __init__(self, domain, dim=None, **kwargs):
+        super().__init__(domain=domain, dim=dim, **kwargs)
 
 
-class FancyIndex(Index, abc.ABC):
+class FancyIndex(Index):
     """Name inspired from numpy. This allows you to slice something with a
     list of indices."""
 
     @property
-    @abc.abstractmethod
-    def index(self) -> ScalarIndex:
-        pass
+    def index(self) -> LoopIndex:
+        return LoopIndex(self)
 
 
-class PythonicIndex:
-    def __init__(self, value):
-        self.value = value
+class IntIndex(BasicIndex):
+    fields = BasicIndex.fields | {"value"}
+    def __init__(self, dim, value, **kwargs):
+        super().__init__(dim=dim, value=value, **kwargs)
 
 
-class IntIndex(PythonicIndex):
-    ...
+class Slice(FancyIndex):
+    fields = FancyIndex.fields | {"start", "stop", "step"}
 
-
-class Slice(PythonicIndex, FancyIndex):
-    def __init__(self, *args, mesh=None):
+    def __init__(self, dim, *args):
         start, stop, step = None, None, None
         if len(args) == 0:
             pass
@@ -93,13 +85,7 @@ class Slice(PythonicIndex, FancyIndex):
         else:
             raise ValueError
 
-        self.start = start
-        self.stop = stop
-        self.step = step
-
-    @property
-    def index(self):
-        return LoopIndex(self)
+        super().__init__(dim=dim, start=start, stop=stop, step=step)
 
 
 def indexed_shape(dim, stencil):
@@ -109,25 +95,25 @@ def indexed_shape(dim, stencil):
     return (size,)
 
 
-def indexed_size_per_index_group(dim, indices):
-    if not dim:
+def indexed_size_per_index_group(dim_tree, indices):
+    if not dim_tree:
         raise AssertionError
 
     if not indices:
-        indices = (Slice(),)
+        indices = (Slice(dim_tree.value),)
 
     index, *subindices = indices
-    if isinstance(dim, MixedDim):
-        if dim.subdims:
-            subdim = dim.subdims[index.value]
+    if not dim_tree.is_leaf:
+        if isinstance(dim_tree.value, MixedDim):
+            subtree = dim_tree.children[index.value]
         else:
-            subdim = None
+            subtree = dim_tree.child
     else:
-        subdim = dim.subdim
+        subtree = None
 
-    size = index_size(index, dim)
-    if subdim:
-        return size * indexed_size_per_index_group(subdim, subindices)
+    size = index_size(index, dim_tree.value)
+    if subtree:
+        return size * indexed_size_per_index_group(subtree, subindices)
     else:
         return size
 
@@ -220,8 +206,9 @@ class NonAffineMap(Tensor, Map):
 
     prefix = "map"
 
-    def __init__(self, *dims):
+    def __init__(self, *dims, arity):
         self.from_index, self.to_dim = dims
+        self.arity = arity
         super().__init__(dims, name="map")
 
 
@@ -266,14 +253,13 @@ def Global(*, name: str = None):
 
 
 def Dat(mesh, dofs: Section, *, prefix="dat", **kwargs) -> Tensor:
-    dim = MixedDim(
-        mesh.tdim,
-        tuple(
-            UniformDim(mesh.strata_sizes[stratum], UniformDim(dofs.dofs[stratum]))
-            for stratum in range(mesh.tdim)
-        )
-    )
-    return Tensor(dim, prefix=prefix, **kwargs)
+    new_children = []
+    for i, subtree in enumerate(mesh.dim_tree.children):
+        new_subchildren = Tree(UniformDim(dofs.dofs[i]))
+        new_children.append(subtree.copy(children=new_subchildren))
+    new_children = tuple(new_children)
+    dim_tree = mesh.dim_tree.copy(children=new_children)
+    return Tensor(dim_tree, prefix=prefix, **kwargs)
 
 
 def VectorDat(mesh, dofs, count, **kwargs):

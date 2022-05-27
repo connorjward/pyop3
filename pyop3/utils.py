@@ -50,3 +50,17 @@ def checked_zip(*iterables):
     if not pytools.is_single_valued(set(len(it) for it in iterables)):
         raise ValueError
     return zip(*iterables)
+
+
+class Tree(pytools.ImmutableRecord):
+    def __init__(self, value, children=()):
+        children = as_tuple(children)
+        super().__init__(value=value, children=children)
+
+    @property
+    def child(self):
+        return pytools.one(self.children)
+
+    @property
+    def is_leaf(self):
+        return not self.children

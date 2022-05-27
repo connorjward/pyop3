@@ -49,7 +49,7 @@ def main():
 
 NBASE_EDGES = 25
 NBASE_VERTS = 26
-EXTRUDED_MESH = pyop3.ExtrudedMesh((NBASE_EDGES, NBASE_VERTS))
+# EXTRUDED_MESH = pyop3.ExtrudedMesh((NBASE_EDGES, NBASE_VERTS))
 
 NCELLS = 25
 NEDGES = 40
@@ -65,13 +65,13 @@ dat1 = pyop3.Dat(MESH, section, name="dat1")
 dat2 = pyop3.Dat(MESH, section, name="dat2")
 dat3 = pyop3.Dat(MESH, section, name="dat3")
 
-edat1 = pyop3.ExtrudedDat(EXTRUDED_MESH, section, name="edat1")
-edat2 = pyop3.ExtrudedDat(EXTRUDED_MESH, section, name="edat2")
-edat3 = pyop3.ExtrudedDat(EXTRUDED_MESH, section, name="edat3")
+# edat1 = pyop3.ExtrudedDat(EXTRUDED_MESH, section, name="edat1")
+# edat2 = pyop3.ExtrudedDat(EXTRUDED_MESH, section, name="edat2")
+# edat3 = pyop3.ExtrudedDat(EXTRUDED_MESH, section, name="edat3")
 
-vdat1 = pyop3.VectorDat(MESH, section, 3, name="vdat1")
-vdat2 = pyop3.VectorDat(MESH, section, 3, name="vdat2")
-vdat3 = pyop3.VectorDat(MESH, section, 3, name="vdat3")
+# vdat1 = pyop3.VectorDat(MESH, section, 3, name="vdat1")
+# vdat2 = pyop3.VectorDat(MESH, section, 3, name="vdat2")
+# vdat3 = pyop3.VectorDat(MESH, section, 3, name="vdat3")
 
 # mat1 = pyop3.Mat((MESH.points, MESH.points), name="mat1")
 

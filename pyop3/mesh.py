@@ -1,6 +1,7 @@
 import dataclasses
 
 from pyop3.tensors import *
+from pyop3.utils import Tree
 
 
 
@@ -9,6 +10,10 @@ class Mesh:
 
     def __init__(self, strata_sizes):
         self.strata_sizes = strata_sizes
+        tdim = len(strata_sizes)
+        self.dim_tree = Tree(MixedDim(tdim),
+            tuple(Tree(UniformDim(size)) for size in strata_sizes)
+        )
 
     @property
     def tdim(self):
@@ -25,7 +30,8 @@ class Mesh:
     @property
     def cells(self):
         # being very verbose
-        indices = (IntIndex(0), Slice())
+        dtree = self.dim_tree
+        indices = (IntIndex(dtree.value, 0), Slice(dtree.children[0].value))
         stencil = (indices,)
         stencils = frozenset({stencil})
         return StencilGroup(stencils, mesh=self)
@@ -55,13 +61,13 @@ class UnstructuredMesh(Mesh):
 
             assert stratum.value == 0  # for now
 
-            edge_map = pyop3.NonAffineMap(index, pyop3.UniformDim(self.NEDGES_IN_CELL_CLOSURE))
-            vert_map = pyop3.NonAffineMap(index, pyop3.UniformDim(self.NVERTS_IN_CELL_CLOSURE))
+            edge_map = pyop3.NonAffineMap(index, self.dim_tree.children[1].value, arity=self.NEDGES_IN_CELL_CLOSURE)
+            vert_map = pyop3.NonAffineMap(index, self.dim_tree.children[2].value, arity=self.NVERTS_IN_CELL_CLOSURE)
             mapped_stencils = frozenset({  # stencils (i.e. partitions)
                 (  # stencil (i.e. temporary)
-                    (pyop3.IntIndex(0), index),  # indices (i.e. loopy instructions)
-                    (pyop3.IntIndex(1), edge_map),
-                    (pyop3.IntIndex(2), vert_map),
+                    (pyop3.IntIndex(stratum.dim, 0), index),  # indices (i.e. loopy instructions)
+                    (pyop3.IntIndex(stratum.dim, 1), edge_map),
+                    (pyop3.IntIndex(stratum.dim, 2), vert_map),
                 )
             })
             return self.map_cache.setdefault(key, mapped_stencils)
