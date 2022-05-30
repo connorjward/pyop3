@@ -50,13 +50,29 @@ def to_c(expr):
 
 
 def _make_loopy_kernel(tlang_kernel):
-    # (insn, dim, index) -> iname
+    # (insn, index) -> iname
     within_inames, insn_inames = _make_inames(tlang_kernel.instructions)
 
-    domains = (
-        {dom for (_, index), iname in within_inames.items() for dom in _make_domain(index, iname)}
-        | {dom for (_, index), iname in insn_inames.items() for dom in _make_domain(index, iname)}
-    )
+    bcounter = itertools.count()
+    bounds = {}
+    for instruction in tlang_kernel.instructions:
+        inames_per_insn = {
+            index: iname for (insn, index), iname in itertools.chain(within_inames.items(), insn_inames.items())
+            if insn == instruction.id}
+        if isinstance(instruction, tlang.Assignment):
+            bounds |= {index: bounds
+                    for stencil in instruction.tensor.stencils for indices in stencil
+                    for index, bounds in _collect_tensor_bounds(indices, inames_per_insn, bcounter).items()
+                }
+
+    domains = set()
+    for instruction in tlang_kernel.instructions:
+        inames_per_insn = {index: iname for (insn, index), iname in itertools.chain(within_inames.items(), insn_inames.items()) if insn == instruction.id}
+        if isinstance(instruction, tlang.Assignment):
+            domains |= {dom for stencil in instruction.tensor.stencils for indices in stencil for dom in _make_domains(indices, inames_per_insn, bounds)}
+        elif isinstance(instruction, tlang.FunctionCall):
+            domains |= {_make_domain(index, inames_per_insn, bounds) for index in inames_per_insn.keys()}
+
     instructions = []
     kernel_data_in = []
     subkernels = []
@@ -67,11 +83,21 @@ def _make_loopy_kernel(tlang_kernel):
         kernel_data_in += ctx.kernel_data
         subkernels += ctx.subkernels
 
+    # add tensor bound bits
+    for start, stop in bounds.values():
+        if start:
+            instructions.append(start[0])
+            kernel_data_in.append(start[1])
+        if stop:
+            instructions.append(stop[0])
+            kernel_data_in.append(stop[1])
+
     # uniquify
     kernel_data = []
     for kd in kernel_data_in:
         if kd not in kernel_data:
             kernel_data.append(kd)
+
 
     breakpoint()
     translation_unit = lp.make_kernel(
@@ -95,7 +121,7 @@ def _make_inames(instructions):
         iname = iname_generator.next()
         for insn, index_ in ikeys:
             if index == index_:
-                within_inames[(insn, index.domain)] = iname
+                within_inames[(insn, index)] = iname
     insn_inames = {
         (insn, index): iname_generator.next()
         for (insn, index) in ikeys
@@ -142,18 +168,75 @@ def _collect_assignment_index_keys(indices):
         return frozenset(ikeys)
 
 
-def _make_domain(index, iname):
+def _collect_tensor_bounds(indices, inames, counter, prev_index=None):
+    if not indices:
+        return {}
+
+    index, *subindices = indices
+    bounds = {index: _collect_tensor_bounds_per_index(index, inames, counter, prev_index)}
+    return bounds | _collect_tensor_bounds(subindices, inames, counter, index)
+
+
+def _collect_tensor_bounds_per_index(index, inames, counter, prev_index):
     if isinstance(index, Range):
         start = index.start
         stop = index.stop
     elif isinstance(index, Map):
         start = 0
         stop = index.arity
-    elif isinstance(index, (IntIndex, LoopIndex)):
-        return frozenset()
+    elif isinstance(index, LoopIndex):
+        start = index.domain.start
+        stop = index.domain.stop
     else:
-        raise NotImplementedError
-    return frozenset({f"{{ [{iname}]: {start} <= {iname} < {stop} }}"})
+        raise ValueError
+
+    if isinstance(start, Tensor):
+        temp = f"I{next(counter)}"
+        insn = lp.Assignment(pym.var(temp), pym.subscript(pym.var(start.name), pym.var(inames[prev_index])))
+        var = lp.TemporaryVariable(temp, shape=())
+        start_bound = (insn, var)
+    else:
+        start_bound = None
+
+    if isinstance(stop, Tensor):
+        temp = f"I{next(counter)}"
+        insn = lp.Assignment(pym.var(temp), pym.subscript(pym.var(stop.name), pym.var(inames[prev_index])))
+        var = lp.TemporaryVariable(temp, shape=())
+        stop_bound = (insn, var)
+    else:
+        stop_bound = None
+
+    return start_bound, stop_bound
+
+
+def _make_domains(indices, inames, bounds, prev_index=None):
+    if not indices:
+        return frozenset()
+
+    index, *subindices = indices
+    return frozenset({_make_domain(index, inames, bounds, prev_index)}) | _make_domains(subindices, inames, bounds, index)
+
+
+def _make_domain(index, inames, bounds, prev_index=None):
+    if isinstance(index, Range):
+        start = index.start
+        stop = index.stop
+    elif isinstance(index, Map):
+        start = 0
+        stop = index.arity
+    elif isinstance(index, LoopIndex):
+        start = index.domain.start
+        stop = index.domain.stop
+    else:
+        raise ValueError
+
+    if isinstance(start, Tensor):
+        start = pym.var(bounds[index][0][1].name)
+    if isinstance(stop, Tensor):
+        stop = pym.var(bounds[index][1][1].name)
+
+    iname = inames[index]
+    return f"{{ [{iname}]: {start} <= {iname} < {stop} }}"
 
 
 def as_subarrayref(temporary, iname):
@@ -310,12 +393,19 @@ def _collect_indices(
 
     if subindices:
         subindex, *_ = subindices
-        global_idxs *= subindex.dim.size
+        global_idxs *= subdim_size(index, subindex, inames_dict)
         local_idxs *= subindex.size
         return _collect_indices(subindices, local_idxs, global_idxs, local_offset, within_inames, inames_dict, within_indices)
 
     else:
         return local_idxs, global_idxs, local_offset, within_inames
+
+
+def subdim_size(index, subindex, inames):
+    if isinstance(size := subindex.dim.size, Tensor):
+        return pym.subscript(pym.var(size.name), pym.var(inames[index]))
+    else:
+        return size
 
 
 @functools.singledispatch
@@ -371,7 +461,7 @@ def _(index: AffineMap, inames_dict):
 
 @handle_index.register
 def _(index: LoopIndex, inames):
-    iname = inames[index.domain]
+    iname = inames[index]
     return (iname,), None, pym.var(iname)
 
 

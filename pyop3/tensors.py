@@ -47,6 +47,7 @@ class Index(pytools.ImmutableRecord):
 
 class BasicIndex(Index):
     """Not a fancy index (scalar-valued)"""
+    size = 1
 
 
 class LoopIndex(BasicIndex):
@@ -113,6 +114,12 @@ class Range(FancyIndex):
         self.stop = stop
         self.step = step
         super().__init__(dim)
+
+    @property
+    def size(self):
+        if self.step != 1:
+            raise NotImplementedError
+        return self.stop - self.start
 
 
 def indexed_shape(stencil):
@@ -204,6 +211,10 @@ class Map(FancyIndex, abc.ABC):
     @property
     def index(self):
         return LoopIndex(self)
+
+    @property
+    def size(self):
+        return self.arity
 
 
 # class NonAffineMap(Tensor, Map):
