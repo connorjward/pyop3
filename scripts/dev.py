@@ -123,7 +123,9 @@ def direct():
 @register_demo
 def inc():
     result = pyop3.Dat(MESH, section, name="result")
-    size = 6 + MESH.NEDGES_IN_CELL_CLOSURE * 7 + MESH.NVERTS_IN_CELL_CLOSURE * 8
+    # FIXME since we don't do broadcasting currently
+    # size = 6 + MESH.NEDGES_IN_CELL_CLOSURE * 7 + MESH.NVERTS_IN_CELL_CLOSURE * 8
+    size = 1 + MESH.NEDGES_IN_CELL_CLOSURE + MESH.NVERTS_IN_CELL_CLOSURE
     loopy_kernel = lp.make_kernel(
         f"{{ [i]: 0 <= i < {size} }}",
         ["z[i] = z[i] + x[i] * y[i]"],

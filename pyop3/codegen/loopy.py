@@ -312,6 +312,7 @@ def _(assignment: tlang.Assignment, within_inames_dict, insn_inames_dict, _):
     ]
 
     kernel_data += [map_ for stencil in stencils for indices in stencil for map_ in _collect_maps(indices)]
+    kernel_data += [bound for stencil in stencils for indices in stencil for bound in _collect_bounds_per_instruction(indices)]
 
     return InstructionContext(loopy_instructions, kernel_data)
 
@@ -322,6 +323,35 @@ def _collect_maps(indices):
 
     index, *subindices = indices
     return _collect_maps_from_index(index) + _collect_maps(subindices)
+
+
+def _collect_bounds_per_instruction(indices):
+    if not indices:
+        return ()
+
+    index, *subindices = indices
+
+    bounds = []
+    if isinstance(index, Range):
+        start = index.start
+        stop = index.stop
+    elif isinstance(index, Map):
+        start = 0
+        stop = index.arity
+    elif isinstance(index, LoopIndex):
+        start = index.domain.start
+        stop = index.domain.stop
+    else:
+        raise ValueError
+
+    if isinstance(start, Tensor):
+        bounds.append(lp.GlobalArg(start.name, dtype=np.int32, shape=None))
+    if isinstance(stop, Tensor):
+        bounds.append(lp.GlobalArg(stop.name, dtype=np.int32, shape=None))
+    if isinstance(index.dim.size, Tensor):
+        bounds.append(lp.GlobalArg(index.dim.size.name, dtype=np.int32, shape=None))
+
+    return tuple(bounds) + _collect_bounds_per_instruction(subindices)
 
 
 @functools.singledispatch
@@ -430,7 +460,8 @@ def _(index: NonAffineMap, inames_dict):
         temp_expr = temp_idxs * index.to_dim.size + rtemp_idxs
     else:
         temp_expr = rtemp_idxs
-    tensor_expr = tensor_idxs, rtensor_idxs
+
+    tensor_expr = tensor_idxs * index.size + rtensor_idxs
 
     return inames + rinames, temp_expr, pym.subscript(pym.var(index.name), tensor_expr)
 
