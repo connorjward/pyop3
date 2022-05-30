@@ -11,27 +11,32 @@ import abc
 import itertools
 from typing import Any
 
+import pytools
 
-class Instruction:
-    def __init__(self, *, id=None, depends_on=frozenset(), loop_indices=frozenset()):
+
+class Instruction(pytools.ImmutableRecord):
+    fields = {"id", "depends_on", "within_indices"}
+    prefix = "insn"
+
+    _count = itertools.count()
+
+    def __init__(self, *, id=None, depends_on=frozenset(), within_indices=frozenset()):
+        if not id:
+            id = f"{self.prefix}{next(self._count)}"
+
         self.id = id
         self.depends_on = depends_on
-        self.loop_indices = loop_indices
+        self.within_indices = within_indices
+        super().__init__()
+
 
 class Assignment(Instruction):
-    _count = itertools.count()
+    fields = Instruction.fields | {"tensor", "temporary"}
+
     def __init__(self, tensor, temporary, **kwargs):
         self.tensor = tensor
         self.temporary = temporary
-        self.id = f"{self.prefix}{next(self._count)}"
         super().__init__(**kwargs)
-
-    def parse_kwargs(self, **kwargs):
-        return dict(
-            assignee=kwargs.pop("assignee", self.assignee),
-            expression=kwargs.pop("expression", self.expression),
-            **super().parse_kwargs(**kwargs)
-        )
 
 
 class Read(Assignment):
@@ -51,6 +56,9 @@ class Zero(Assignment):
 
 
 class FunctionCall(Instruction):
+    fields = Instruction.fields | {"function", "reads", "writes"}
+    prefix = "func"
+
     def __init__(self, function, reads, writes, **kwargs):
         self.function = function
         self.reads = reads

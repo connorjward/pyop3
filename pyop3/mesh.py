@@ -12,7 +12,7 @@ class Mesh:
         self.strata_sizes = strata_sizes
         tdim = len(strata_sizes)
         self.dim_tree = Tree(MixedDim(tdim),
-            tuple(Tree(UniformDim(size)) for size in strata_sizes)
+                tuple(Tree(UniformDim(size)) for i, size in enumerate(strata_sizes))
         )
 
     @property
@@ -30,8 +30,7 @@ class Mesh:
     @property
     def cells(self):
         # being very verbose
-        dtree = self.dim_tree
-        indices = (IntIndex(dtree.value, 0), Slice(dtree.children[0].value))
+        indices = (Range(self.dim_tree.children[0].value, self.ncells),)
         stencil = (indices,)
         stencils = frozenset({stencil})
         return StencilGroup(stencils, mesh=self)
@@ -57,17 +56,15 @@ class UnstructuredMesh(Mesh):
             # be very assertive
             stencil, = stencils
             indices, = stencil
-            stratum, index = indices
+            index, = indices
 
-            assert stratum.value == 0  # for now
-
-            edge_map = pyop3.NonAffineMap(index, self.dim_tree.children[1].value, arity=self.NEDGES_IN_CELL_CLOSURE)
-            vert_map = pyop3.NonAffineMap(index, self.dim_tree.children[2].value, arity=self.NVERTS_IN_CELL_CLOSURE)
+            edge_map = pyop3.NonAffineMap(index, self.dim_tree.children[1].value, self.NEDGES_IN_CELL_CLOSURE, name="edge_map")
+            vert_map = pyop3.NonAffineMap(index, self.dim_tree.children[2].value, self.NVERTS_IN_CELL_CLOSURE, name="vert_map")
             mapped_stencils = frozenset({  # stencils (i.e. partitions)
                 (  # stencil (i.e. temporary)
-                    (pyop3.IntIndex(stratum.dim, 0), index),  # indices (i.e. loopy instructions)
-                    (pyop3.IntIndex(stratum.dim, 1), edge_map),
-                    (pyop3.IntIndex(stratum.dim, 2), vert_map),
+                    (index,),  # indices (i.e. loopy instructions)
+                    (edge_map,),
+                    (vert_map,),
                 )
             })
             return self.map_cache.setdefault(key, mapped_stencils)
@@ -90,20 +87,43 @@ class ExtrudedMesh(Mesh):
         self.strata_sizes = strata_sizes
         nbase_edges, nbase_verts = self.strata_sizes
 
-        layer_dims =  MixedDim(
-            2,
+        layer_count00 = Tensor(Tree(UniformDim(strata_sizes[0])), name="layer_count00")
+        layer_count01 = Tensor(Tree(UniformDim(strata_sizes[0])), name="layer_count01")
+        layer_count10 = Tensor(Tree(UniformDim(strata_sizes[1])), name="layer_count10")
+        layer_count11 = Tensor(Tree(UniformDim(strata_sizes[1])), name="layer_count11")
+
+        self.dim_tree = Tree(
+            MixedDim(2),
             (
-                UniformDim(  # base edges
-                    strata_sizes[0],
-                    MixedDim(2)
+                # base edges
+                Tree(
+                    UniformDim(strata_sizes[0]),
+                    (
+                        Tree(
+                            MixedDim(2),
+                            (
+                                Tree(UniformDim(layer_count00)),
+                                Tree(UniformDim(layer_count01))
+                            )
+                        )
+                    )
                 ),
-                UniformDim(  # base verts
-                    strata_sizes[1],
-                    MixedDim(2)
-                )
+                # base verts
+                Tree(
+                    UniformDim(strata_sizes[1]),
+                    (
+                        Tree(
+                            MixedDim(2),
+                            (
+                                Tree(UniformDim(layer_count10)),
+                                Tree(UniformDim(layer_count11)),
+                            )
+                        )
+                    )
+                ),
             )
         )
-        self.layer_count = Tensor(layer_dims, name="layer_count")
+
 
     def closure(self, stencils):
         """
@@ -156,49 +176,54 @@ class ExtrudedMesh(Mesh):
             # this will only work for cells at the moment
             stencil, = stencils
             indices, = stencil
-            base_stratum, base_index, extr_stratum, extr_index = indices
-
-            assert base_stratum.value == 0  # for now
-            assert extr_stratum.value == 0  # for now
+            base_index, extr_index = indices
 
             base_vert_map = pyop3.NonAffineMap(
-                base_index, pyop3.UniformDim(self.NBASE_VERTS_IN_CELL_CLOSURE)
+                base_index, self.dim_tree.children[1].value, self.NBASE_VERTS_IN_CELL_CLOSURE, name="base_vert_map"
             )
 
             inner_edge_map = pyop3.AffineMap(
                 extr_index,
-                arity=2
+                self.dim_tree.children[0].child.children[1].value,
+                arity=2,
+                name="inner_edge_map",
             )
             outer_edge_map = pyop3.AffineMap(
                 extr_index,
+                self.dim_tree.children[1].child.children[0].value,
                 arity=1,
+                name="outer_edge_map",
             )
             outer_vert_map = pyop3.AffineMap(
                 extr_index,
+                self.dim_tree.children[1].child.children[1].value,
                 arity=2,
+                name="outer_vert_map",
             )
 
             mapped_stencils = frozenset({  # stencils (i.e. partitions)
                 (  # stencil (i.e. temporary)
                     # indices (i.e. loopy instructions)
                     # cell data
-                    (pyop3.IntIndex(0), base_index, pyop3.IntIndex(0), extr_index),
+                    (base_index, extr_index),
                     # in-cell edges
-                    (pyop3.IntIndex(0), base_index, pyop3.IntIndex(1), inner_edge_map),
+                    (base_index, inner_edge_map),
                     # out-cell edges
-                    (pyop3.IntIndex(1), base_vert_map, pyop3.IntIndex(0), outer_edge_map),
+                    (base_vert_map, outer_edge_map),
                     # out-cell verts
-                    (pyop3.IntIndex(1), base_vert_map, pyop3.IntIndex(1), outer_vert_map),
+                    (base_vert_map, outer_vert_map),
                 )
             })
             return self.map_cache.setdefault(key, mapped_stencils)
 
     @property
     def cells(self):
+        dtree = self.dim_tree
+
         # being very verbose
-        base_cells = pyop3.Slice()
-        extr_cells = pyop3.Slice()
-        indices = (pyop3.IntIndex(0), base_cells, pyop3.IntIndex(0), extr_cells)
+        base_cells = pyop3.Range(dtree.children[0].value, dtree.children[0].value.size)
+        extr_cells = pyop3.Range(dtree.children[0].child.children[1].value, dtree.children[0].child.children[1].value.size)
+        indices = (base_cells, extr_cells)
         stencil = (indices,)
         stencils = frozenset({stencil})
         return pyop3.StencilGroup(stencils, mesh=self)

@@ -16,12 +16,16 @@ from pyop3.utils import as_tuple, checked_zip, Tree, NameGenerator
 
 
 class Dim(pytools.ImmutableRecord):
+    fields = {"size", "name"}
     name_generator = NameGenerator("dim")
 
     def __init__(self, size, *, name=None):
         if not name:
             name = self.name_generator.next()
-        super().__init__(size=size, name=name)
+
+        self.size = size
+        self.name = name
+        super().__init__()
 
 
 class UniformDim(Dim):
@@ -36,11 +40,9 @@ class Index(pytools.ImmutableRecord):
     """Does it make sense to index a tensor with this object?"""
     fields = {"dim"}
 
-    def __init__(self, **kwargs):
-        for kwarg in kwargs:
-            if kwarg not in self.fields:
-                raise ValueError
-        super().__init__(**kwargs)
+    def __init__(self, dim):
+        self.dim = dim
+        super().__init__()
 
 
 class BasicIndex(Index):
@@ -50,8 +52,9 @@ class BasicIndex(Index):
 class LoopIndex(BasicIndex):
     fields = BasicIndex.fields | {"domain"}
 
-    def __init__(self, domain, dim=None, **kwargs):
-        super().__init__(domain=domain, dim=dim, **kwargs)
+    def __init__(self, domain):
+        self.domain = domain
+        super().__init__(domain.dim)
 
 
 class FancyIndex(Index):
@@ -65,14 +68,16 @@ class FancyIndex(Index):
 
 class IntIndex(BasicIndex):
     fields = BasicIndex.fields | {"value"}
-    def __init__(self, dim, value, **kwargs):
-        super().__init__(dim=dim, value=value, **kwargs)
+
+    def __init__(self, value):
+        self.value = value
+        super().__init__()
 
 
 class Slice(FancyIndex):
     fields = FancyIndex.fields | {"start", "stop", "step"}
 
-    def __init__(self, dim, *args):
+    def __init__(self, *args):
         start, stop, step = None, None, None
         if len(args) == 0:
             pass
@@ -85,37 +90,44 @@ class Slice(FancyIndex):
         else:
             raise ValueError
 
-        super().__init__(dim=dim, start=start, stop=stop, step=step)
+        self.start = start
+        self.stop = stop
+        self.step = step
+        super().__init__()
 
 
-def indexed_shape(dim, stencil):
+class Range(FancyIndex):
+    fields = FancyIndex.fields | {"start", "stop", "step"}
+
+    def __init__(self, dim, *args):
+        if len(args) == 1:
+            start, stop, step = 0, *args, 1
+        elif len(args) == 2:
+            start, stop, step = *args, 1
+        elif len(args) == 3:
+            start, stop, step = args
+        else:
+            raise ValueError
+
+        self.start = start
+        self.stop = stop
+        self.step = step
+        super().__init__(dim)
+
+
+def indexed_shape(stencil):
     size = 0
     for indices in stencil:
-        size += indexed_size_per_index_group(dim, indices)
+        size += indexed_size_per_index_group(indices)
     return (size,)
 
 
-def indexed_size_per_index_group(dim_tree, indices):
-    if not dim_tree:
-        raise AssertionError
-
-    if not indices:
-        indices = (Slice(dim_tree.value),)
-
+def indexed_size_per_index_group(indices):
     index, *subindices = indices
-    if not dim_tree.is_leaf:
-        if isinstance(dim_tree.value, MixedDim):
-            subtree = dim_tree.children[index.value]
-        else:
-            subtree = dim_tree.child
+    if subindices:
+        return index_size(index) * indexed_size_per_index_group(subindices)
     else:
-        subtree = None
-
-    size = index_size(index, dim_tree.value)
-    if subtree:
-        return size * indexed_size_per_index_group(subtree, subindices)
-    else:
-        return size
+        return index_size(index)
 
 
 class StencilGroup(pytools.ImmutableRecord):
@@ -169,26 +181,6 @@ class Tensor(pytools.ImmutableRecordWithoutPickling):
         if self.stencils:
             raise NotImplementedError("Needs more thought")
 
-        # convert indices to a tuple of tuples
-        # if isinstance(indices, collections.abc.Sequence):
-        #     if all(isinstance(idx, collections.abc.Sequence) for idx in indices):
-        #         pass
-        #     else:
-        #         indices = (indices,)
-        # else:
-        #     indices = ((indices,),)
-
-        # now set index types
-        # def to_index(index):
-        #     if isinstance(index, Index):
-        #         return index
-        #     elif isinstance(index, numbers.Integral):
-        #         return ScalarIndex(index)
-        #     else:
-        #         raise ValueError
-
-        # indices = tuple(tuple(to_index(idx) for idx in idxs) for idxs in indices)
-
         return self.copy(stencils=stencils)
 
     def __str__(self):
@@ -196,50 +188,54 @@ class Tensor(pytools.ImmutableRecordWithoutPickling):
 
 
 class Map(FancyIndex, abc.ABC):
+    fields = FancyIndex.fields | {"from_index", "arity", "name"}
+
+    _name_generator = NameGenerator("map")
+
+    def __init__(self, from_index, dim, arity, *, name=None, **kwargs):
+        if not name:
+            name = self._name_generator.next()
+
+        self.from_index = from_index
+        self.arity = arity
+        self.name = name
+        super().__init__(dim=dim, **kwargs)
 
     @property
     def index(self):
-        return self.to_dim.index
+        return LoopIndex(self)
 
 
-class NonAffineMap(Tensor, Map):
-
-    prefix = "map"
-
-    def __init__(self, *dims, arity):
-        self.from_index, self.to_dim = dims
-        self.arity = arity
-        super().__init__(dims, name="map")
+# class NonAffineMap(Tensor, Map):
+class NonAffineMap(Map):
+    pass
 
 
 class AffineMap(Map):
-    def __init__(self, from_index, arity):
-        self.from_index = from_index
-        self.arity = arity
-        self.to_dim = UniformDim(arity)
+    pass
 
 
 @functools.singledispatch
-def index_size(index, dim):
+def index_size(index):
     raise TypeError
 
 
 @index_size.register(IntIndex)
 @index_size.register(LoopIndex)
-def _(slice_, dim):
+def _(index):
     return 1
 
 
 @index_size.register
-def _(slice_: Slice, dim):
+def _(slice_: Slice):
     start = slice_.start or 0
-    stop = slice_.stop or dim.size
+    stop = slice_.stop or slice_.dim.size
     return stop - start
 
 
 @index_size.register
-def _(map_: Map, dim):
-    return index_size(map_.from_index, dim) * map_.to_dim.size
+def _(map_: Map):
+    return index_size(map_.from_index) * map_.arity
 
 
 class Section:
@@ -277,32 +273,38 @@ def VectorDat(mesh, dofs, count, **kwargs):
 
 
 def ExtrudedDat(mesh, dofs, **kwargs):
-    dim = MixedDim(
-        2,
-        (
-            UniformDim(  # base edges
-                mesh.strata_sizes[0],
-                MixedDim(
-                    2,
-                    (
-                        UniformDim(mesh.layer_count),  # extr cells
-                        UniformDim(mesh.layer_count),  # extr 'inner' edges
-                    )
-                )
-            ),
-            UniformDim(  # base verts
-                mesh.strata_sizes[1],
-                MixedDim(
-                    2,
-                    (
-                        UniformDim(mesh.layer_count),  # extr 'outer' edges
-                        UniformDim(mesh.layer_count),  # extr verts
-                    )
-                )
-            )
-        )
-    )
-    return Tensor(dim, **kwargs)
+    # dim = MixedDim(
+    #     2,
+    #     (
+    #         UniformDim(  # base edges
+    #             mesh.strata_sizes[0],
+    #             MixedDim(
+    #                 2,
+    #                 (
+    #                     UniformDim(mesh.layer_count),  # extr cells
+    #                     UniformDim(mesh.layer_count),  # extr 'inner' edges
+    #                 )
+    #             )
+    #         ),
+    #         UniformDim(  # base verts
+    #             mesh.strata_sizes[1],
+    #             MixedDim(
+    #                 2,
+    #                 (
+    #                     UniformDim(mesh.layer_count),  # extr 'outer' edges
+    #                     UniformDim(mesh.layer_count),  # extr verts
+    #                 )
+    #             )
+    #         )
+    #     )
+    # )
+    # dim = mesh.dim.copy(children=(
+    #     mesh.dim.children[0].copy(children=(
+    #         
+    #     ))
+    # ))
+    # TODO Actually attach a section to it.
+    return Tensor(mesh.dim_tree, **kwargs)
 
 
 def Mat(shape: Tuple[int, ...], *, name: str = None):

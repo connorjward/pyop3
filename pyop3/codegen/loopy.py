@@ -18,7 +18,7 @@ from pyop3 import exprs, tlang
 import pyop3.utils
 from pyop3.utils import CustomTuple, checked_zip, NameGenerator
 from pyop3.tensors import Tensor, Index, Map, Dim, IntIndex, LoopIndex, UniformDim, MixedDim, NonAffineMap
-from pyop3.tensors import Slice, indexed_shape, IndexTree, indexed_size_per_index_group, AffineMap, BasicIndex
+from pyop3.tensors import Range, Slice, indexed_shape, IndexTree, indexed_size_per_index_group, AffineMap, BasicIndex
 from pyop3.codegen.tlang import to_tlang
 
 LOOPY_TARGET = lp.CTarget()
@@ -115,28 +115,20 @@ def _(assign: tlang.Assignment):
         (assign.id, index)
         for stencil in assign.tensor.stencils
         for indices in stencil
-        for index in _collect_assignment_index_keys(assign.tensor.dim, indices)
+        for index in _collect_assignment_index_keys(indices)
     })
 
 
 @_collect_index_keys_per_instruction.register
 def _(call: tlang.FunctionCall):
     return frozenset({
-        (call.id, Slice(temp.dim))
+        (call.id, Range(temp.dim, temp.dim.size))
         for temp in itertools.chain(call.reads, call.writes)
     })
 
 
-def _collect_assignment_index_keys(dim_tree, indices):
-    if indices:
-        index, *subindices = indices
-    else:
-        index, subindices = Slice(dim_tree.value), ()
-
-    if not dim_tree.is_leaf:
-        subtree = dim_tree.children[index.value] if isinstance(dim_tree.value, MixedDim) else dim_tree.child
-    else:
-        subtree = None
+def _collect_assignment_index_keys(indices):
+    index, *subindices = indices
 
     ikeys = set()
     while isinstance(index, Map):
@@ -144,19 +136,19 @@ def _collect_assignment_index_keys(dim_tree, indices):
         index = index.from_index
     ikeys.add(index)
 
-    if subtree:
-        return frozenset(ikeys) | _collect_assignment_index_keys(subtree, subindices)
+    if subindices:
+        return frozenset(ikeys) | _collect_assignment_index_keys(subindices)
     else:
         return frozenset(ikeys)
 
 
 def _make_domain(index, iname):
-    if isinstance(index, Slice):
-        start = index.start or 0
-        stop = index.stop or index.dim.size
+    if isinstance(index, Range):
+        start = index.start
+        stop = index.stop
     elif isinstance(index, Map):
         start = 0
-        stop = index.to_dim.size
+        stop = index.arity
     elif isinstance(index, (IntIndex, LoopIndex)):
         return frozenset()
     else:
@@ -179,7 +171,7 @@ def _make_instruction_context(self, instruction: tlang.Instruction, within_iname
 def _(call: tlang.FunctionCall, within_inames, instruction_inames, all_insns):
     subarrayrefs = {}
     for temp in itertools.chain(call.reads, call.writes):
-        subarrayrefs[temp] = as_subarrayref(temp, instruction_inames[(call.id, Slice(temp.dim))])
+        subarrayrefs[temp] = as_subarrayref(temp, instruction_inames[(call.id, Range(temp.dim, temp.dim.size))])
 
     reads = tuple(subarrayrefs[var] for var in call.reads)
     writes = tuple(subarrayrefs[var] for var in call.writes)
@@ -226,10 +218,10 @@ def _(assignment: tlang.Assignment, within_inames_dict, insn_inames_dict, _):
         # the previous one
         initial_local_offset = 0
         for indices in stencil:
-            local_idxs, global_idxs, local_offset, global_offset, within_inames = \
-                _collect_indices(assignment.tensor.dim, indices, local_offset=initial_local_offset, inames_dict=inames_dict)
-            initial_local_offset += indexed_size_per_index_group(assignment.tensor.dim, indices)
-            loopy_instructions.append(_make_loopy_instruction(assignment, id_namer.next(), local_idxs, global_idxs, local_offset, global_offset, within_inames))
+            local_idxs, global_idxs, local_offset, within_inames = \
+                _collect_indices(indices, local_offset=initial_local_offset, inames_dict=inames_dict)
+            initial_local_offset += indexed_size_per_index_group(indices)
+            loopy_instructions.append(_make_loopy_instruction(assignment, id_namer.next(), local_idxs, global_idxs, local_offset, within_inames))
 
     kernel_data = [
         lp.GlobalArg(assignment.tensor.name, dtype=np.float64, shape=None),
@@ -283,70 +275,47 @@ def _complete_indices(dim_tree, indices):
 
 
 
-def _make_loopy_instruction(instruction, id, local_idxs, global_idxs, local_offset, global_offset, within_inames):
+def _make_loopy_instruction(instruction, id, local_idxs, global_idxs, local_offset, within_inames):
     # wilcard this to catch subinsns
     depends_on = frozenset({f"{insn}*" for insn in instruction.depends_on})
 
-    assignee, expression = resolve(instruction, global_idxs, local_idxs, global_offset, local_offset)
+    assignee, expression = resolve(instruction, global_idxs, local_idxs, local_offset)
 
     return lp.Assignment(assignee, expression, id=id,
             within_inames=within_inames, depends_on=depends_on)
 
 
 def _collect_indices(
-        dim_tree, indices,
+        indices,
         local_idxs=0, global_idxs=0,
-        local_offset=0, global_offset=0,
+        local_offset=0,
         within_inames=frozenset(),
         inames_dict={},
         within_indices=(),
 ):
-    if indices:
-        index, *subindices = indices
-    else:
-        index, subindices = Slice(dim_tree.value), ()
+    index, *subindices = indices
 
     within_indices += (index,)
 
-    if isinstance(dim_tree.value, MixedDim):
-        # The global offset is very complicated - we need to build up the offsets every time
-        # we do not take the first subdim by adding the size of the prior subdims. Make sure to
-        # not multiply this value.
-        if not dim_tree.is_leaf:
-            for d in dim_tree.children[:index.value]:
-                global_offset += d.value.size
+    inames, local_idxs_, global_idxs_ = handle_index(index, inames_dict)
+
+    if global_idxs_:
+        global_idxs += global_idxs_
+
+    if local_idxs_:
+        local_idxs += local_idxs_
+
+    if inames:
+        within_inames |= set(inames)
+
+    if subindices:
+        subindex, *_ = subindices
+        global_idxs *= subindex.dim.size
+        local_idxs *= subindex.size
+        return _collect_indices(subindices, local_idxs, global_idxs, local_offset, within_inames, inames_dict, within_indices)
+
     else:
-        ### tidy up
-        inames, local_idxs_, global_idxs_ = handle_index(index, inames_dict)
-
-        if global_idxs_:
-            global_idxs += global_idxs_
-
-        if local_idxs_:
-            local_idxs += local_idxs_
-
-        if inames:
-            within_inames |= set(inames)
-        ### !tidy up
-
-    if not dim_tree.is_leaf:
-        if isinstance(dim_tree.value, MixedDim):
-            subtree = dim_tree.children[index.value]
-        else:
-            subtree = dim_tree.child
-    else:
-        subtree = None
-
-
-    if subtree:
-        global_idxs *= subtree.value.size
-        # FIXME this might be wrong (just mul by current level?)
-        local_idxs *= indexed_size_per_index_group(subtree, subindices)
-
-    if not subtree:
-        return local_idxs, global_idxs, local_offset, global_offset, within_inames
-    else:
-        return _collect_indices(subtree, subindices, local_idxs, global_idxs, local_offset, global_offset, within_inames, inames_dict, within_indices)
+        return local_idxs, global_idxs, local_offset, within_inames
 
 
 @functools.singledispatch
@@ -373,7 +342,7 @@ def _(index: NonAffineMap, inames_dict):
         temp_expr = rtemp_idxs
     tensor_expr = tensor_idxs, rtensor_idxs
 
-    return inames + rinames, temp_expr, pym.subscript(pym.var("map"), tensor_expr)
+    return inames + rinames, temp_expr, pym.subscript(pym.var(index.name), tensor_expr)
 
 
 @handle_index.register
@@ -422,16 +391,15 @@ def resolve(instruction, *args):
 
 
 class AssignmentResolver:
-    def __init__(self, instruction, global_idxs, local_idxs, global_offset, local_offset):
+    def __init__(self, instruction, global_idxs, local_idxs, local_offset):
         self.instruction = instruction
         self.global_idxs = global_idxs
         self.local_idxs = local_idxs
-        self.global_offset = global_offset
         self.local_offset = local_offset
 
     @property
     def global_expr(self):
-        return pym.subscript(pym.var(self.instruction.tensor.name), self.global_idxs + self.global_offset)
+        return pym.subscript(pym.var(self.instruction.tensor.name), self.global_idxs)
 
     @property
     def local_expr(self):
