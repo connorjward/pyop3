@@ -168,7 +168,7 @@ class IndexTree:
 
 class Tensor(pytools.ImmutableRecordWithoutPickling):
 
-    name_generator = pyop3.utils.UniqueNameGenerator()
+    name_generator = pyop3.utils.MultiNameGenerator()
     prefix = "ten"
 
     def __new__(cls, dim=None, stencils=frozenset(), **kwargs):

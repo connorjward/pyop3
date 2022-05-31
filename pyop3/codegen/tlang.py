@@ -21,7 +21,7 @@ class TensorLangKernelBuilder:
         self._expr = expr
         self._instructions = []
 
-        name_generator = pyop3.utils.UniqueNameGenerator()
+        name_generator = pyop3.utils.MultiNameGenerator()
         self.name_generator = name_generator
         self._iname_generator = functools.partial(name_generator.next, "i")
         self._temp_name_generator = functools.partial(name_generator.next, "t")

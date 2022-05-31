@@ -3,39 +3,38 @@ import itertools
 import pytools
 
 
-class UniqueNameGenerator:
+class MultiNameGenerator:
     def __init__(self):
-        self.name_generators = {}
+        self._namers = {}
 
     def next(self, prefix="", suffix=""):
+        key = prefix, suffix
         try:
-            namer = self.name_generators[(prefix, suffix)]
+            namer = self._namers[key]
         except KeyError:
-            namer = self.name_generators.setdefault(
-                (prefix, suffix), NameGenerator(prefix, suffix)
-            )
+            namer = self._namers.setdefault(key, NameGenerator(prefix, suffix))
         return namer.next()
+
+    def reset(self):
+        self._namers = {}
 
 
 class NameGenerator:
-    def __init__(self, prefix="", suffix="", existing_names=frozenset()):
+    def __init__(self, prefix="", suffix=""):
         if not (prefix or suffix):
             raise ValueError
 
         self._prefix = prefix
         self._suffix = suffix
-        self._existing_names = existing_names
         self._counter = itertools.count()
 
     def next(self):
-        while (name := f"{self._prefix}{next(self._counter)}{self._suffix}") in self._existing_names:
-            pass
-        return name
+        return f"{self._prefix}{next(self._counter)}{self._suffix}"
 
 
 def as_tuple(item):
     if isinstance(item, collections.abc.Sequence):
-        return item
+        return tuple(item)
     else:
         return (item,)
 
@@ -64,3 +63,11 @@ class Tree(pytools.ImmutableRecord):
     @property
     def is_leaf(self):
         return not self.children
+
+
+def unique(iterable):
+    unique_items = []
+    for item in iterable:
+        if item not in unique_items:
+            unique_items.append(item)
+    return tuple(unique_items)

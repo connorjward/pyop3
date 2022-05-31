@@ -16,6 +16,8 @@ import pymbolic as pym
 import pyop3.exprs
 from pyop3 import exprs, tlang
 import pyop3.utils
+from pyop3 import utils
+from pyop3.utils import MultiNameGenerator, NameGenerator
 from pyop3.utils import CustomTuple, checked_zip, NameGenerator
 from pyop3.tensors import Tensor, Index, Map, Dim, IntIndex, LoopIndex, UniformDim, MixedDim, NonAffineMap
 from pyop3.tensors import Range, Slice, indexed_shape, IndexTree, indexed_size_per_index_group, AffineMap, BasicIndex
@@ -49,85 +51,97 @@ def to_c(expr):
     return lp.generate_code_v2(program).device_code()
 
 
+class LoopyKernelBuilder:
+    def __init__(self):
+        self._namer = MultiNameGenerator()
+
+    def build(self, tlang_kernel):
+        self._namer.reset()
+
+        # index: LoopContext
+        within_loops = {}
+        for insn in tlang_kernel.instructions:
+            within_loops |= self._collect_within_loops_per_instruction(insn, within_loops, self._namer)
+
+        ctxs = tuple(
+            ctx for insn in tlang_kernel.instructions
+            for ctx in _make_instruction_context(insn, within_loops, self._namer)
+        )
+        breakpoint()
+
+        instructions = []
+        kernel_data_in = []
+        subkernels = []
+        for insn in tlang_kernel.instructions:
+            ctx = _make_instruction_context(insn, within_inames, insn_inames, tlang_kernel.instructions)
+
+            instructions += ctx.loopy_instructions
+            kernel_data_in += ctx.kernel_data
+            subkernels += ctx.subkernels
+
+        # add tensor bound bits
+        for start, stop in bounds.values():
+            if start:
+                instructions.append(start[0])
+                kernel_data_in.append(start[1])
+            if stop:
+                instructions.append(stop[0])
+                kernel_data_in.append(stop[1])
+
+        # uniquify
+        kernel_data = []
+        for kd in kernel_data_in:
+            if kd not in kernel_data:
+                kernel_data.append(kd)
+
+
+        breakpoint()
+        translation_unit = lp.make_kernel(
+            domains,
+            instructions,
+            kernel_data,
+            target=LOOPY_TARGET,
+            lang_version=LOOPY_LANG_VERSION,
+        )
+        return lp.merge((translation_unit, *subkernels))
+
+    @functools.singledispatchmethod
+    def _collect_within_loops_per_instruction(self, instruction, within_loops, namer):
+        return ()
+
+    @_collect_within_loops_per_instruction.register
+    def _(self, assignment: tlang.Assignment, existing_loops, namer):
+        loops = existing_loops.copy()
+        for stencil in assignment.tensor.stencils:
+            for indices in stencil:
+                for prev_index, index in zip((None,)+indices, indices):
+                    while isinstance(index, Map):
+                        index = index.from_index
+
+                    if isinstance(index, LoopIndex) and index not in loops:
+                        loops[index] = LoopContext.from_dim(index.dim, prev_index, namer, loops)
+        return loops
+
+
+@dataclasses.dataclass(frozen=True)
+class LoopContext:
+    iname: str
+    extent_temp: Any
+    extent_expr: Any
+
+    @classmethod
+    def from_dim(cls, dim, prev_index, namer, existing_loops):
+        iname = namer.next("i")
+        temp = namer.next("t")
+        if isinstance(dim.size, Tensor):
+            extent_expr = pym.subscript(pym.var(dim.size.name), pym.var(existing_loops[prev_index].iname))
+        else:
+            extent_expr = dim.size
+        return cls(iname, temp, extent_expr)
+
+
 def _make_loopy_kernel(tlang_kernel):
-    # (insn, index) -> iname
-    within_inames, insn_inames = _make_inames(tlang_kernel.instructions)
-
-    bcounter = itertools.count()
-    bounds = {}
-    for instruction in tlang_kernel.instructions:
-        inames_per_insn = {
-            index: iname for (insn, index), iname in itertools.chain(within_inames.items(), insn_inames.items())
-            if insn == instruction.id}
-        if isinstance(instruction, tlang.Assignment):
-            bounds |= {index: bounds
-                    for stencil in instruction.tensor.stencils for indices in stencil
-                    for index, bounds in _collect_tensor_bounds(indices, inames_per_insn, bcounter).items()
-                }
-
-    domains = set()
-    for instruction in tlang_kernel.instructions:
-        inames_per_insn = {index: iname for (insn, index), iname in itertools.chain(within_inames.items(), insn_inames.items()) if insn == instruction.id}
-        if isinstance(instruction, tlang.Assignment):
-            domains |= {dom for stencil in instruction.tensor.stencils for indices in stencil for dom in _make_domains(indices, inames_per_insn, bounds)}
-        elif isinstance(instruction, tlang.FunctionCall):
-            domains |= {_make_domain(index, inames_per_insn, bounds) for index in inames_per_insn.keys()}
-
-    instructions = []
-    kernel_data_in = []
-    subkernels = []
-    for insn in tlang_kernel.instructions:
-        ctx = _make_instruction_context(insn, within_inames, insn_inames, tlang_kernel.instructions)
-
-        instructions += ctx.loopy_instructions
-        kernel_data_in += ctx.kernel_data
-        subkernels += ctx.subkernels
-
-    # add tensor bound bits
-    for start, stop in bounds.values():
-        if start:
-            instructions.append(start[0])
-            kernel_data_in.append(start[1])
-        if stop:
-            instructions.append(stop[0])
-            kernel_data_in.append(stop[1])
-
-    # uniquify
-    kernel_data = []
-    for kd in kernel_data_in:
-        if kd not in kernel_data:
-            kernel_data.append(kd)
-
-
-    breakpoint()
-    translation_unit = lp.make_kernel(
-        domains,
-        instructions,
-        kernel_data,
-        target=LOOPY_TARGET,
-        lang_version=LOOPY_LANG_VERSION,
-    )
-    return lp.merge((translation_unit, *subkernels))
-
-
-def _make_inames(instructions):
-    iname_generator = NameGenerator("i")
-    ikeys = {
-        ikey for insn in instructions for ikey in _collect_index_keys_per_instruction(insn)
-    }
-
-    within_inames = {}
-    for index in {i for _, i in ikeys if isinstance(i, LoopIndex)}:
-        iname = iname_generator.next()
-        for insn, index_ in ikeys:
-            if index == index_:
-                within_inames[(insn, index)] = iname
-    insn_inames = {
-        (insn, index): iname_generator.next()
-        for (insn, index) in ikeys
-        if not isinstance(index, BasicIndex)
-    }
-    return within_inames, insn_inames
+    return LoopyKernelBuilder().build(tlang_kernel)
 
 
 @functools.singledispatch
@@ -217,26 +231,8 @@ def _make_domains(indices, inames, bounds, prev_index=None):
     return frozenset({_make_domain(index, inames, bounds, prev_index)}) | _make_domains(subindices, inames, bounds, index)
 
 
-def _make_domain(index, inames, bounds, prev_index=None):
-    if isinstance(index, Range):
-        start = index.start
-        stop = index.stop
-    elif isinstance(index, Map):
-        start = 0
-        stop = index.arity
-    elif isinstance(index, LoopIndex):
-        start = index.domain.start
-        stop = index.domain.stop
-    else:
-        raise ValueError
-
-    if isinstance(start, Tensor):
-        start = pym.var(bounds[index][0][1].name)
-    if isinstance(stop, Tensor):
-        stop = pym.var(bounds[index][1][1].name)
-
-    iname = inames[index]
-    return f"{{ [{iname}]: {start} <= {iname} < {stop} }}"
+def _make_domain(iname, size):
+    return f"{{ [{iname}]: 0 <= {iname} < {size} }}"
 
 
 def as_subarrayref(temporary, iname):
@@ -246,12 +242,30 @@ def as_subarrayref(temporary, iname):
         index, pym.subscript(pym.var(temporary.name), index)
     )
 
+
+class AssignmentContextBuilder:
+    def __init__(self, namer):
+        self._namer = namer
+
+    def build(self):
+        ...
+
+
+@dataclasses.dataclass(frozen=True)
+class InstructionContext:
+    domains: Tuple
+    loopy_instructions: Tuple
+    kernel_data: Tuple
+    subkernels: Tuple = ()
+
+
 @functools.singledispatch
-def _make_instruction_context(self, instruction: tlang.Instruction, within_inames, instruction_inames):
-    raise ValueError
+def _make_instruction_context(instruction: tlang.Instruction, within_inames, namer):
+    raise TypeError
+
 
 @_make_instruction_context.register
-def _(call: tlang.FunctionCall, within_inames, instruction_inames, all_insns):
+def _(call: tlang.FunctionCall, within_inames, namer):
     subarrayrefs = {}
     for temp in itertools.chain(call.reads, call.writes):
         subarrayrefs[temp] = as_subarrayref(temp, instruction_inames[(call.id, Range(temp.dim, temp.dim.size))])
@@ -279,33 +293,19 @@ def _(call: tlang.FunctionCall, within_inames, instruction_inames, all_insns):
     return InstructionContext([call_insn], kernel_data, {call.function.loopy_kernel})
 
 
-@dataclasses.dataclass(frozen=True)
-class InstructionContext:
-    loopy_instructions: Tuple
-    kernel_data: Tuple
-    subkernels: Tuple = ()
-
-
 @_make_instruction_context.register
-def _(assignment: tlang.Assignment, within_inames_dict, insn_inames_dict, _):
-    id_namer = NameGenerator(prefix=f"{assignment.id}_")
-    # stencils = frozenset({_complete_stencil(assignment.tensor.dim, stencil) for stencil in assignment.tensor.stencils})
-    stencils = assignment.tensor.stencils
-    loopy_instructions = []
-    inames_dict = (
-        {index: iname for (insn, index), iname in within_inames_dict.items() if insn == assignment.id}
-        | {index: iname for (insn, index), iname in insn_inames_dict.items() if insn == assignment.id}
-    )
-    for stencil in stencils:
-        # each entry into the temporary needs to be offset by the size of
-        # the previous one
-        initial_local_offset = 0
-        for indices in stencil:
-            local_idxs, global_idxs, local_offset, within_inames = \
-                _collect_indices(indices, local_offset=initial_local_offset, inames_dict=inames_dict)
-            initial_local_offset += indexed_size_per_index_group(indices)
-            loopy_instructions.append(_make_loopy_instruction(assignment, id_namer.next(), local_idxs, global_idxs, local_offset, within_inames))
+def _(assignment: tlang.Assignment, within_inames, namer):
+    # I need a map of index -> LoopContext for all indices in insn
+    loops = {index: loop for stencil in assignment.tensor.stencils for index, loop in _collect_loops_per_stencil(stencil, namer, within_inames).items()}
+    loops |= within_inames
 
+    domains = frozenset({_make_domain(loop.iname, loop.extent_temp) for loop in loops.values()})
+
+        # for indices in stencil:
+        #     local_idxs, global_idxs, local_offset, within_inames = \
+        #         _collect_indices(indices, local_offset=initial_local_offset, inames_dict=inames_dict)
+        #     loopy_instructions.append(_make_loopy_instruction(assignment, id_namer.next(prefix=assignment.id), local_idxs, global_idxs, local_offset, within_inames))
+        #
     kernel_data = [
         lp.GlobalArg(assignment.tensor.name, dtype=np.float64, shape=None),
         lp.TemporaryVariable(assignment.temporary.name, shape=(assignment.temporary.dim.size,))
@@ -314,8 +314,24 @@ def _(assignment: tlang.Assignment, within_inames_dict, insn_inames_dict, _):
     kernel_data += [map_ for stencil in stencils for indices in stencil for map_ in _collect_maps(indices)]
     kernel_data += [bound for stencil in stencils for indices in stencil for bound in _collect_bounds_per_instruction(indices)]
 
-    return InstructionContext(loopy_instructions, kernel_data)
+    return InstructionContext(domains, loopy_instructions, kernel_data)
 
+
+def _collect_loops_per_stencil(stencil, namer, existing_loops):
+    return {index: loop
+        for indices in stencil
+        for index, loop in _collect_loops(indices, namer, existing_loops).items()
+    }
+
+
+def _collect_indices_per_stencil():
+    local_offsets = itertools.accumulate((indexed_size_per_index_group(indices) for indices in stencil), initial=0)
+
+    # something like this...
+
+    #     for indices, offset in zip(stencil, local_offsets)
+    #     for loop in _collect_loops(indices, local_offset=offset, namer=namer)
+    # )
 
 def _collect_maps(indices):
     if not indices:
@@ -364,30 +380,6 @@ def _(index: NonAffineMap):
     return _collect_maps_from_index(index.from_index) + (lp.GlobalArg(index.name, shape=None, dtype=np.int32),)
 
 
-def _complete_stencil(dim, stencil):
-    return tuple(_complete_indices(dim, indices) for indices in stencil)
-
-
-def _complete_indices(dim_tree, indices):
-    if not dim_tree:
-        return ()
-
-    if indices:
-        index, *subindices = indices
-    else:
-        index, subindices = Slice(dim_tree.value), ()
-
-    if dim_tree.is_leaf:
-        if isinstance(dim_tree.value, MixedDim):
-            subtree = dim_tree.children[index.value]
-        else:
-            subtree = dim_tree.child
-    else:
-        subtree = None
-    return (index,) + _complete_indices(subtree, subindices)
-
-
-
 def _make_loopy_instruction(instruction, id, local_idxs, global_idxs, local_offset, within_inames):
     # wilcard this to catch subinsns
     depends_on = frozenset({f"{insn}*" for insn in instruction.depends_on})
@@ -398,8 +390,22 @@ def _make_loopy_instruction(instruction, id, local_idxs, global_idxs, local_offs
             within_inames=within_inames, depends_on=depends_on)
 
 
+def _collect_loops(indices, namer, prev_index=None, existing_loops=None):
+    if not indices:
+        return {}
+
+    if not existing_loops:
+        existing_loops = {}
+
+    index, *subindices = indices
+
+    loops = _collect_loops_per_index(index, prev_index, namer, existing_loops)
+    return loops | _collect_loops(subindices, namer, index, loops)
+
+
 def _collect_indices(
         indices,
+        loops,
         local_idxs=0, global_idxs=0,
         local_offset=0,
         within_inames=frozenset(),
@@ -410,7 +416,9 @@ def _collect_indices(
 
     within_indices += (index,)
 
-    inames, local_idxs_, global_idxs_ = handle_index(index, inames_dict)
+    # inames, local_idxs_, global_idxs_ = handle_index(index, inames_dict)
+    # do something with LoopContext
+    loop = ...
 
     if global_idxs_:
         global_idxs += global_idxs_
@@ -439,34 +447,45 @@ def subdim_size(index, subindex, inames):
 
 
 @functools.singledispatch
-def handle_index(index, inames):
-    raise AssertionError
-
-@handle_index.register
-def _(index: Slice, inames):
-    iname = inames[index]
-    return (iname,), pym.var(iname), pym.var(iname)
-
-@handle_index.register
-def _(index: NonAffineMap, inames_dict):
-    inames, temp_idxs, tensor_idxs = handle_index(index.from_index, inames_dict)
-
-    riname = inames_dict[index]
-    rinames = (riname,)
-    rtemp_idxs = pym.var(riname)
-    rtensor_idxs = pym.var(riname)
-
-    if temp_idxs:
-        temp_expr = temp_idxs * index.to_dim.size + rtemp_idxs
-    else:
-        temp_expr = rtemp_idxs
-
-    tensor_expr = tensor_idxs * index.size + rtensor_idxs
-
-    return inames + rinames, temp_expr, pym.subscript(pym.var(index.name), tensor_expr)
+def _collect_loops_per_index(index, prev_index, namer, existing_loops):
+    raise TypeError
 
 
-@handle_index.register
+@_collect_loops_per_index.register
+def _(index: LoopIndex, prev_index, namer, existing_loops):
+    # already registered
+    return {}
+
+
+@_collect_loops_per_index.register
+def _(index: Slice, prev_index, namer, existing_loops):
+    return {index: LoopContext.from_dim(index.dim, prev_index, namer, existing_loops)}
+
+
+@_collect_loops_per_index.register
+def _(index: NonAffineMap, prev_index, namer, existing_loops):
+    return {index: LoopContext.from_dim(index.dim, index.from_index, namer, existing_loops)} | _collect_loops_per_index(index.from_index, prev_index, namer, existing_loops)
+
+# @handle_index.register
+# def _(index: NonAffineMap, inames_dict):
+#     inames, temp_idxs, tensor_idxs = handle_index(index.from_index, inames_dict)
+#
+#     riname = inames_dict[index]
+#     rinames = (riname,)
+#     rtemp_idxs = pym.var(riname)
+#     rtensor_idxs = pym.var(riname)
+#
+#     if temp_idxs:
+#         temp_expr = temp_idxs * index.to_dim.size + rtemp_idxs
+#     else:
+#         temp_expr = rtemp_idxs
+#
+#     tensor_expr = tensor_idxs * index.size + rtensor_idxs
+#
+#     return inames + rinames, temp_expr, pym.subscript(pym.var(index.name), tensor_expr)
+
+
+# @handle_index.register
 def _(index: AffineMap, inames_dict):
     inames, temp_idxs, tensor_idxs = handle_index(index.from_index, inames_dict)
     riname = inames_dict[index]
@@ -490,7 +509,7 @@ def _(index: AffineMap, inames_dict):
 
     return inames + rinames, temp_expr, tensor_expr
 
-@handle_index.register
+# @handle_index.register
 def _(index: LoopIndex, inames):
     iname = inames[index]
     return (iname,), None, pym.var(iname)
