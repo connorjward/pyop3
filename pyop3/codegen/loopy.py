@@ -88,9 +88,6 @@ class LoopyKernelBuilder:
             utils.unique(kernel_data),
             target=LOOPY_TARGET,
             lang_version=LOOPY_LANG_VERSION,
-            # FIXME
-            # This is only needed because the local_offset is missing
-            options=lp.Options(enforce_variable_access_ordered=False)
         )
         return lp.merge((translation_unit, *subkernels))
 
@@ -123,6 +120,9 @@ class LoopContext:
     extent_expr: Any
     extent_tensor: Any
 
+    # FIXME this needs to get set somehow
+    global_offset: Any = 0
+
     @classmethod
     def from_dim(cls, index, prev_loop, namer):
         iname = namer.next("i")
@@ -143,6 +143,19 @@ class LoopContext:
 
 def _make_loopy_kernel(tlang_kernel):
     return LoopyKernelBuilder().build(tlang_kernel)
+
+
+@functools.singledispatch
+def _get_arguments_per_instruction(instruction):
+    """Return a canonical collection of kernel arguments.
+    This can be used by both codegen and execution to get args in the right order."""
+    raise TypeError
+
+
+@_get_arguments_per_instruction.register
+def _(assignment: tlang.Assignment):
+    raise NotImplementedError
+    return data, maps, parameters
 
 
 def _make_domains(indices, inames, bounds, prev_index=None):
@@ -225,9 +238,10 @@ def _(assignment: tlang.Assignment, within_loops, namer):
     domains = []
     kernel_data = []
     for stencil in assignment.tensor.stencils:
+        local_offset = 0
+        old_ids = set()  # this gives us deterministic codegen and avoids a warning
         for indices in stencil:
             loops = _collect_loops(indices, namer, within_loops)
-            # breakpoint()
 
             assign_id = namer.next(assignment.id)
 
@@ -247,10 +261,9 @@ def _(assignment: tlang.Assignment, within_loops, namer):
             init_insns, inc_insns, innermost_indices, kdata = _traverse_and_build(loops, assign_id, active, local_active, namer)
 
             global_idxs, local_idxs = innermost_indices
-            local_offset = 0  # FIXME
 
             main_within_inames = frozenset({loop.iname for loop in loops})
-            main_insn = _make_loopy_instruction(assignment, assign_id, local_idxs, global_idxs, local_offset, main_within_inames, depends_on={insn.id for insn in active_init_insns})
+            main_insn = _make_loopy_instruction(assignment, assign_id, local_idxs, global_idxs, local_offset, main_within_inames, depends_on={insn.id for insn in active_init_insns} | old_ids)
 
             all_insns.extend(active_init_insns)
             all_insns.extend(init_insns)
@@ -262,8 +275,11 @@ def _(assignment: tlang.Assignment, within_loops, namer):
             kernel_data.extend(kdata)
 
             for loop in loops:
-                if isinstance(loop.index, Map):
+                if isinstance(loop.index, NonAffineMap):
                     kernel_data.append(lp.GlobalArg(loop.index.name, dtype=np.int32, shape=None))
+
+            old_ids.add(assign_id)
+            local_offset += indexed_size_per_index_group(indices)
 
     kernel_data += [
         lp.GlobalArg(assignment.tensor.name, dtype=np.float64, shape=None),
@@ -318,33 +334,6 @@ def _traverse_and_build(loops, assign_id, active_index, local_active, namer, wit
         return loop_bound_insn + init_insn, inc_insns, (active_index, local_active), kdata
 
 
-def _collect_indices_per_stencil():
-    local_offsets = itertools.accumulate((indexed_size_per_index_group(indices) for indices in stencil), initial=0)
-
-    # something like this...
-
-    #     for indices, offset in zip(stencil, local_offsets)
-    #     for loop in _collect_loops(indices, local_offset=offset, namer=namer)
-    # )
-
-def _collect_maps(indices):
-    if not indices:
-        return ()
-
-    index, *subindices = indices
-    return _collect_maps_from_index(index) + _collect_maps(subindices)
-
-
-@functools.singledispatch
-def _collect_maps_from_index(index):
-    return ()
-
-
-@_collect_maps_from_index.register
-def _(index: NonAffineMap):
-    return _collect_maps_from_index(index.from_index) + (lp.GlobalArg(index.name, shape=None, dtype=np.int32),)
-
-
 def _make_loopy_instruction(instruction, id, local_idxs, global_idxs, local_offset, within_inames, depends_on=frozenset()):
     # wilcard this to catch subinsns
     depends_on = frozenset({f"{insn}*" for insn in instruction.depends_on}) | depends_on
@@ -363,49 +352,6 @@ def _collect_loops(indices, namer, within_loops, prev_loop=None):
 
     loops = _collect_loops_per_index(index, prev_loop, namer, within_loops)
     return loops + _collect_loops(subindices, namer, within_loops, loops[-1])
-
-
-def _collect_indices(
-        indices,
-        loops,
-        local_idxs=0, global_idxs=0,
-        local_offset=0,
-        within_inames=frozenset(),
-        inames_dict={},
-        within_indices=(),
-):
-    index, *subindices = indices
-
-    within_indices += (index,)
-
-    # inames, local_idxs_, global_idxs_ = handle_index(index, inames_dict)
-    # do something with LoopContext
-    loop = ...
-
-    if global_idxs_:
-        global_idxs += global_idxs_
-
-    if local_idxs_:
-        local_idxs += local_idxs_
-
-    if inames:
-        within_inames |= set(inames)
-
-    if subindices:
-        subindex, *_ = subindices
-        global_idxs *= subdim_size(index, subindex, inames_dict)
-        local_idxs *= subindex.size
-        return _collect_indices(subindices, local_idxs, global_idxs, local_offset, within_inames, inames_dict, within_indices)
-
-    else:
-        return local_idxs, global_idxs, local_offset, within_inames
-
-
-def subdim_size(index, subindex, inames):
-    if isinstance(size := subindex.dim.size, Tensor):
-        return pym.subscript(pym.var(size.name), pym.var(inames[index]))
-    else:
-        return size
 
 
 @functools.singledispatch
@@ -429,49 +375,6 @@ def _(index: Map, prev_loop, namer, within_loops):
     loops = _collect_loops_per_index(index.from_index, prev_loop, namer, within_loops)
     return loops + (LoopContext.from_dim(index, loops[-1], namer),)
 
-# @handle_index.register
-# def _(index: NonAffineMap, inames_dict):
-#     inames, temp_idxs, tensor_idxs = handle_index(index.from_index, inames_dict)
-#
-#     riname = inames_dict[index]
-#     rinames = (riname,)
-#     rtemp_idxs = pym.var(riname)
-#     rtensor_idxs = pym.var(riname)
-#
-#     if temp_idxs:
-#         temp_expr = temp_idxs * index.to_dim.size + rtemp_idxs
-#     else:
-#         temp_expr = rtemp_idxs
-#
-#     tensor_expr = tensor_idxs * index.size + rtensor_idxs
-#
-#     return inames + rinames, temp_expr, pym.subscript(pym.var(index.name), tensor_expr)
-
-
-# @handle_index.register
-# def _(index: AffineMap, inames_dict):
-#     inames, temp_idxs, tensor_idxs = handle_index(index.from_index, inames_dict)
-#     riname = inames_dict[index]
-#     rinames = (riname,)
-#     rtemp_idxs = pym.var(riname)
-#     rtensor_idxs = pym.var(riname)
-#
-#     """
-#     for i
-#         for j
-#             for d
-#                 t[j, d] = dat[i+j, d]
-#     """
-#
-#     if temp_idxs:
-#         temp_expr = temp_idxs * index.to_dim.size + rtemp_idxs
-#     else:
-#         temp_expr = rtemp_idxs
-#
-#     tensor_expr = tensor_idxs + rtensor_idxs
-#
-#     return inames + rinames, temp_expr, tensor_expr
-
 
 def resolve(instruction, *args):
     if isinstance(instruction, tlang.Read):
@@ -485,7 +388,6 @@ def resolve(instruction, *args):
     else:
         raise AssertionError
     return resolver.assignee, resolver.expression
-
 
 
 class AssignmentResolver:
@@ -543,3 +445,48 @@ class IncAssignmentResolver(AssignmentResolver):
     @property
     def expression(self):
         return self.global_expr + self.local_expr
+
+
+"""
+def _collect_indices(
+        indices,
+        loops,
+        local_idxs=0, global_idxs=0,
+        local_offset=0,
+        within_inames=frozenset(),
+        inames_dict={},
+        within_indices=(),
+):
+    index, *subindices = indices
+
+    within_indices += (index,)
+
+    # inames, local_idxs_, global_idxs_ = handle_index(index, inames_dict)
+    # do something with LoopContext
+    loop = ...
+
+    if global_idxs_:
+        global_idxs += global_idxs_
+
+    if local_idxs_:
+        local_idxs += local_idxs_
+
+    if inames:
+        within_inames |= set(inames)
+
+    if subindices:
+        subindex, *_ = subindices
+        global_idxs *= subdim_size(index, subindex, inames_dict)
+        local_idxs *= subindex.size
+        return _collect_indices(subindices, local_idxs, global_idxs, local_offset, within_inames, inames_dict, within_indices)
+
+    else:
+        return local_idxs, global_idxs, local_offset, within_inames
+
+
+def subdim_size(index, subindex, inames):
+    if isinstance(size := subindex.dim.size, Tensor):
+        return pym.subscript(pym.var(size.name), pym.var(inames[index]))
+    else:
+        return size
+"""

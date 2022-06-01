@@ -193,6 +193,9 @@ class Tensor(pytools.ImmutableRecordWithoutPickling):
         if self.stencils:
             raise NotImplementedError("Needs more thought")
 
+        # not really important, a niceity
+        # stencils = _extract_stencils(stencils)
+
         stencils = frozenset({
             tuple(
                 _complete_indices(indices, self.dim) for indices in stencil
@@ -206,16 +209,77 @@ class Tensor(pytools.ImmutableRecordWithoutPickling):
         return self.name
 
 
-def _complete_indices(indices, dtree):
-    extra_indices = []
+# TODO I should calculate the global offset here...
+"""
+so I like it if we could go dat[:mesh.ncells, 2] to access the right part of the mixed dim. How to do multiple stencils?
 
-    # see if the final index has children
-    if child := _get_child(dtree, indices[-1].dim):
-        while child:
-            extra_indices.append(Slice(child.value))
-            child = child.child
+dat[(), ()] for a single stencil
+or dat[((), ()), ((), ())] for stencils
 
-    return tuple(indices) + tuple(extra_indices)
+also dat[:] should return multiple indicess (for each part of the mixed dim) (but same stencil/temp)
+
+how to handle dat[2:mesh.ncells] with raggedness? Global offset required.
+
+N.B. dim tree no longer used for codegen - can probably get removed. Though a tree still needed since dims should
+be independent of their children.
+
+What about LoopIndex?
+
+N.B. it is really difficult to support partial indexing (inc. integers) because, for ragged tensors, the initial offset
+is non-trivial and needs to be computed by summing all preceding entries.
+"""
+def _complete_indices(indices, dtree, existing=()):
+    if not dtree:
+        return (existing,)
+
+    if indices:
+        index, *subindices = indices
+    else:
+        index, *subindices = slice(None), ()
+
+    complete = []
+    if isinstance(index, slice):
+        for idx, subtree in _partition_slice(index, dtree):
+            complete.extend(_complete_indices(subindices, subtree, existing+(idx,)))
+
+    return tuple(complete)
+
+
+def _partition_slice(slice_, dtree):
+    ptr = 0
+    offset = 0
+    for child in dtree.children:
+        dsize = child.value.size
+        dstart = ptr
+        dstop = ptr + dsize
+
+        # check for overlap
+        if dstart <= slice_.start < dstop or dstart <= slice_.stop < dstop:
+            start = max(dstart, slice_.start)
+            stop = min(dstop, slice_.stop)
+
+            # do not permit partial slices
+            assert start == dstart
+            assert stop == dstop
+
+            yield Slice(child.value, offset=offset), child  # TODO rename to DimView
+        ptr += child.value.size
+        offset += _calc_size(child)
+
+
+def _calc_size(dtree):
+    dim = dtree.value
+
+    if isinstance(dim, MixedDim):
+        raise NotImplementedError
+
+    if isinstance(dim.size, Tensor):
+        raise NotImplementedError
+    else:
+        if dtree.is_leaf:
+            return dim.size
+        else:
+            return dim.size * _calc_size(dtree.child)
 
 
 def _get_child(tree, item):
