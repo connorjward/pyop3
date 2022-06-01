@@ -138,7 +138,7 @@ class LoopContext:
         else:
             extent_expr = index_.size
             extent_tensor = None
-        return cls(index_, iname, temp, extent_expr, extent_tensor)
+        return cls(index, iname, temp, extent_expr, extent_tensor)
 
 
 def _make_loopy_kernel(tlang_kernel):
@@ -227,6 +227,7 @@ def _(assignment: tlang.Assignment, within_loops, namer):
     for stencil in assignment.tensor.stencils:
         for indices in stencil:
             loops = _collect_loops(indices, namer, within_loops)
+            # breakpoint()
 
             assign_id = namer.next(assignment.id)
 
@@ -275,6 +276,9 @@ def _(assignment: tlang.Assignment, within_loops, namer):
 def _traverse_and_build(loops, assign_id, active_index, local_active, namer, within_inames=frozenset()):
     loop, *other_loops = loops
 
+    # this is needed to get a valid iname ordering
+    within_inames = within_inames | {l.iname for l in loops if isinstance(l.index, LoopIndex)}
+
     # do these elsewhere (uniquify)
     if not isinstance(loop.index, LoopIndex):
         loop_bound_insn = (lp.Assignment(pym.var(loop.extent_temp), loop.extent_expr, within_inames=within_inames),)
@@ -296,6 +300,7 @@ def _traverse_and_build(loops, assign_id, active_index, local_active, namer, wit
         inc_insns = ()
 
     if isinstance(loop.index, NonAffineMap):
+        # breakpoint()
         temp = namer.next("T")
         new_active_index = pym.var(temp)
         kdata = bound_kdata + (lp.TemporaryVariable(temp, shape=(), dtype=np.int32),)

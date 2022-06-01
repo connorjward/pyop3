@@ -123,6 +123,7 @@ class Range(FancyIndex):
     def size(self):
         if self.step != 1:
             raise NotImplementedError
+        return self.dim.size
         return self.stop - self.start
 
 
