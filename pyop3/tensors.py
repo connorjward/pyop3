@@ -96,6 +96,10 @@ class Slice(FancyIndex):
         self.step = step
         super().__init__(dim)
 
+    @property
+    def size(self):
+        return self.dim.size
+
 
 class Range(FancyIndex):
     fields = FancyIndex.fields | {"start", "stop", "step"}

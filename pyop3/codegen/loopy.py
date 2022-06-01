@@ -75,16 +75,11 @@ class LoopyKernelBuilder:
             kernel_data += ctx.kernel_data
             subkernels += ctx.subkernels
 
-        # breakpoint()
-        #
-        # # add tensor bound bits
-        # for start, stop in bounds.values():
-        #     if start:
-        #         instructions.append(start[0])
-        #         kernel_data_in.append(start[1])
-        #     if stop:
-        #         instructions.append(stop[0])
-        #         kernel_data_in.append(stop[1])
+        for loop in within_loops.values():
+            instructions.append(lp.Assignment(pym.var(loop.extent_temp), loop.extent_expr))
+            kernel_data.append(lp.TemporaryVariable(loop.extent_temp, shape=(), dtype=np.int32))
+            if loop.extent_tensor:
+                kernel_data.append(lp.GlobalArg(loop.extent_tensor.name, shape=None, dtype=np.int32))
 
         breakpoint()
         translation_unit = lp.make_kernel(
@@ -113,7 +108,10 @@ class LoopyKernelBuilder:
                         index = index.from_index
 
                     if isinstance(index, LoopIndex) and index not in loops:
-                        loops[index] = LoopContext.from_dim(index, prev_index, namer)
+                        if prev_index in loops:
+                            loops[index] = LoopContext.from_dim(index, loops[prev_index], namer)
+                        else:
+                            loops[index] = LoopContext.from_dim(index, None, namer)
         return loops
 
 
@@ -123,99 +121,28 @@ class LoopContext:
     iname: str
     extent_temp: Any
     extent_expr: Any
+    extent_tensor: Any
 
     @classmethod
     def from_dim(cls, index, prev_loop, namer):
         iname = namer.next("i")
         temp = namer.next("n")
-        if isinstance(index.dim.size, Tensor):
-            extent_expr = pym.subscript(pym.var(index.dim.size.name), pym.var(prev_loop.iname))
+        if isinstance(index, LoopIndex):
+            index_ = index.domain
         else:
-            extent_expr = index.dim.size
-        return cls(index, iname, temp, extent_expr)
+            index_ = index
+
+        if isinstance(index_.size, Tensor):
+            extent_expr = pym.subscript(pym.var(index_.size.name), pym.var(prev_loop.iname))
+            extent_tensor = index_.size
+        else:
+            extent_expr = index_.size
+            extent_tensor = None
+        return cls(index_, iname, temp, extent_expr, extent_tensor)
 
 
 def _make_loopy_kernel(tlang_kernel):
     return LoopyKernelBuilder().build(tlang_kernel)
-
-
-@functools.singledispatch
-def _collect_index_keys_per_instruction(instruction):
-    raise TypeError
-
-
-@_collect_index_keys_per_instruction.register
-def _(assign: tlang.Assignment):
-    return frozenset({
-        (assign.id, index)
-        for stencil in assign.tensor.stencils
-        for indices in stencil
-        for index in _collect_assignment_index_keys(indices)
-    })
-
-
-@_collect_index_keys_per_instruction.register
-def _(call: tlang.FunctionCall):
-    return frozenset({
-        (call.id, Range(temp.dim, temp.dim.size))
-        for temp in itertools.chain(call.reads, call.writes)
-    })
-
-
-def _collect_assignment_index_keys(indices):
-    index, *subindices = indices
-
-    ikeys = set()
-    while isinstance(index, Map):
-        ikeys.add(index)
-        index = index.from_index
-    ikeys.add(index)
-
-    if subindices:
-        return frozenset(ikeys) | _collect_assignment_index_keys(subindices)
-    else:
-        return frozenset(ikeys)
-
-
-def _collect_tensor_bounds(indices, inames, counter, prev_index=None):
-    if not indices:
-        return {}
-
-    index, *subindices = indices
-    bounds = {index: _collect_tensor_bounds_per_index(index, inames, counter, prev_index)}
-    return bounds | _collect_tensor_bounds(subindices, inames, counter, index)
-
-
-def _collect_tensor_bounds_per_index(index, inames, counter, prev_index):
-    if isinstance(index, Range):
-        start = index.start
-        stop = index.stop
-    elif isinstance(index, Map):
-        start = 0
-        stop = index.arity
-    elif isinstance(index, LoopIndex):
-        start = index.domain.start
-        stop = index.domain.stop
-    else:
-        raise ValueError
-
-    if isinstance(start, Tensor):
-        temp = f"I{next(counter)}"
-        insn = lp.Assignment(pym.var(temp), pym.subscript(pym.var(start.name), pym.var(inames[prev_index])))
-        var = lp.TemporaryVariable(temp, shape=())
-        start_bound = (insn, var)
-    else:
-        start_bound = None
-
-    if isinstance(stop, Tensor):
-        temp = f"I{next(counter)}"
-        insn = lp.Assignment(pym.var(temp), pym.subscript(pym.var(stop.name), pym.var(inames[prev_index])))
-        var = lp.TemporaryVariable(temp, shape=())
-        stop_bound = (insn, var)
-    else:
-        stop_bound = None
-
-    return start_bound, stop_bound
 
 
 def _make_domains(indices, inames, bounds, prev_index=None):
@@ -342,20 +269,21 @@ def _(assignment: tlang.Assignment, within_loops, namer):
         lp.TemporaryVariable(assignment.temporary.name, shape=(assignment.temporary.dim.size,))
     ]
 
-    # kernel_data += [map_ for stencil in stencils for indices in stencil for map_ in _collect_maps(indices)]
-    # kernel_data += [bound for stencil in stencils for indices in stencil for bound in _collect_bounds_per_instruction(indices)]
-
     return InstructionContext(domains, all_insns, kernel_data)
 
 
 def _traverse_and_build(loops, assign_id, active_index, local_active, namer, within_inames=frozenset()):
     loop, *other_loops = loops
 
-    loop_bound_insn = (lp.Assignment(pym.var(loop.extent_temp), loop.extent_expr, within_inames=within_inames),)
-    bound_kdata = (lp.TemporaryVariable(loop.extent_temp, shape=(), dtype=np.int32),)
-    if not isinstance(loop.extent_expr, numbers.Integral):
-        breakpoint()
-        # bound_kdata += (lp.GlobalArg(loop.index.
+    # do these elsewhere (uniquify)
+    if not isinstance(loop.index, LoopIndex):
+        loop_bound_insn = (lp.Assignment(pym.var(loop.extent_temp), loop.extent_expr, within_inames=within_inames),)
+        bound_kdata = (lp.TemporaryVariable(loop.extent_temp, shape=(), dtype=np.int32),)
+        if loop.extent_tensor:
+            bound_kdata += (lp.GlobalArg(loop.extent_tensor.name, shape=None, dtype=np.int32),)
+    else:
+        loop_bound_insn = ()
+        bound_kdata = ()
 
     within_inames |= {loop.iname}
 
@@ -367,7 +295,7 @@ def _traverse_and_build(loops, assign_id, active_index, local_active, namer, wit
     else:
         inc_insns = ()
 
-    if isinstance(loop.index, Map):
+    if isinstance(loop.index, NonAffineMap):
         temp = namer.next("T")
         new_active_index = pym.var(temp)
         kdata = bound_kdata + (lp.TemporaryVariable(temp, shape=(), dtype=np.int32),)
@@ -400,35 +328,6 @@ def _collect_maps(indices):
 
     index, *subindices = indices
     return _collect_maps_from_index(index) + _collect_maps(subindices)
-
-
-def _collect_bounds_per_instruction(indices):
-    if not indices:
-        return ()
-
-    index, *subindices = indices
-
-    bounds = []
-    if isinstance(index, Range):
-        start = index.start
-        stop = index.stop
-    elif isinstance(index, Map):
-        start = 0
-        stop = index.arity
-    elif isinstance(index, LoopIndex):
-        start = index.domain.start
-        stop = index.domain.stop
-    else:
-        raise ValueError
-
-    if isinstance(start, Tensor):
-        bounds.append(lp.GlobalArg(start.name, dtype=np.int32, shape=None))
-    if isinstance(stop, Tensor):
-        bounds.append(lp.GlobalArg(stop.name, dtype=np.int32, shape=None))
-    if isinstance(index.dim.size, Tensor):
-        bounds.append(lp.GlobalArg(index.dim.size.name, dtype=np.int32, shape=None))
-
-    return tuple(bounds) + _collect_bounds_per_instruction(subindices)
 
 
 @functools.singledispatch
@@ -521,7 +420,7 @@ def _(index: Slice, prev_loop, namer, within_loops):
 
 
 @_collect_loops_per_index.register
-def _(index: NonAffineMap, prev_loop, namer, within_loops):
+def _(index: Map, prev_loop, namer, within_loops):
     loops = _collect_loops_per_index(index.from_index, prev_loop, namer, within_loops)
     return loops + (LoopContext.from_dim(index, loops[-1], namer),)
 
@@ -545,33 +444,28 @@ def _(index: NonAffineMap, prev_loop, namer, within_loops):
 
 
 # @handle_index.register
-def _(index: AffineMap, inames_dict):
-    inames, temp_idxs, tensor_idxs = handle_index(index.from_index, inames_dict)
-    riname = inames_dict[index]
-    rinames = (riname,)
-    rtemp_idxs = pym.var(riname)
-    rtensor_idxs = pym.var(riname)
-
-    """
-    for i
-        for j
-            for d
-                t[j, d] = dat[i+j, d]
-    """
-
-    if temp_idxs:
-        temp_expr = temp_idxs * index.to_dim.size + rtemp_idxs
-    else:
-        temp_expr = rtemp_idxs
-
-    tensor_expr = tensor_idxs + rtensor_idxs
-
-    return inames + rinames, temp_expr, tensor_expr
-
-# @handle_index.register
-def _(index: LoopIndex, inames):
-    iname = inames[index]
-    return (iname,), None, pym.var(iname)
+# def _(index: AffineMap, inames_dict):
+#     inames, temp_idxs, tensor_idxs = handle_index(index.from_index, inames_dict)
+#     riname = inames_dict[index]
+#     rinames = (riname,)
+#     rtemp_idxs = pym.var(riname)
+#     rtensor_idxs = pym.var(riname)
+#
+#     """
+#     for i
+#         for j
+#             for d
+#                 t[j, d] = dat[i+j, d]
+#     """
+#
+#     if temp_idxs:
+#         temp_expr = temp_idxs * index.to_dim.size + rtemp_idxs
+#     else:
+#         temp_expr = rtemp_idxs
+#
+#     tensor_expr = tensor_idxs + rtensor_idxs
+#
+#     return inames + rinames, temp_expr, tensor_expr
 
 
 def resolve(instruction, *args):
