@@ -45,6 +45,8 @@ def main():
         raise AssertionError
 
     print(program)
+    breakpoint()
+    pass
 
 
 NBASE_EDGES = 25

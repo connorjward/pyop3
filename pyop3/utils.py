@@ -58,7 +58,10 @@ class Tree(pytools.ImmutableRecord):
 
     @property
     def child(self):
-        return pytools.one(self.children)
+        if self.children:
+            return pytools.one(self.children)
+        else:
+            return None
 
     @property
     def is_leaf(self):

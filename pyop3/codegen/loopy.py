@@ -63,51 +63,45 @@ class LoopyKernelBuilder:
         for insn in tlang_kernel.instructions:
             within_loops |= self._collect_within_loops_per_instruction(insn, within_loops, self._namer)
 
-        ctxs = tuple(
-            ctx for insn in tlang_kernel.instructions
-            for ctx in _make_instruction_context(insn, within_loops, self._namer)
-        )
-        breakpoint()
-
+        domains = []
         instructions = []
-        kernel_data_in = []
+        kernel_data = []
         subkernels = []
         for insn in tlang_kernel.instructions:
-            ctx = _make_instruction_context(insn, within_inames, insn_inames, tlang_kernel.instructions)
+            ctx = _make_instruction_context(insn, within_loops, self._namer)
 
+            domains += ctx.domains
             instructions += ctx.loopy_instructions
-            kernel_data_in += ctx.kernel_data
+            kernel_data += ctx.kernel_data
             subkernels += ctx.subkernels
 
-        # add tensor bound bits
-        for start, stop in bounds.values():
-            if start:
-                instructions.append(start[0])
-                kernel_data_in.append(start[1])
-            if stop:
-                instructions.append(stop[0])
-                kernel_data_in.append(stop[1])
-
-        # uniquify
-        kernel_data = []
-        for kd in kernel_data_in:
-            if kd not in kernel_data:
-                kernel_data.append(kd)
-
+        # breakpoint()
+        #
+        # # add tensor bound bits
+        # for start, stop in bounds.values():
+        #     if start:
+        #         instructions.append(start[0])
+        #         kernel_data_in.append(start[1])
+        #     if stop:
+        #         instructions.append(stop[0])
+        #         kernel_data_in.append(stop[1])
 
         breakpoint()
         translation_unit = lp.make_kernel(
-            domains,
-            instructions,
-            kernel_data,
+            utils.unique(domains),
+            utils.unique(instructions),
+            utils.unique(kernel_data),
             target=LOOPY_TARGET,
             lang_version=LOOPY_LANG_VERSION,
+            # FIXME
+            # This is only needed because the local_offset is missing
+            options=lp.Options(enforce_variable_access_ordered=False)
         )
         return lp.merge((translation_unit, *subkernels))
 
     @functools.singledispatchmethod
     def _collect_within_loops_per_instruction(self, instruction, within_loops, namer):
-        return ()
+        return {}
 
     @_collect_within_loops_per_instruction.register
     def _(self, assignment: tlang.Assignment, existing_loops, namer):
@@ -119,25 +113,26 @@ class LoopyKernelBuilder:
                         index = index.from_index
 
                     if isinstance(index, LoopIndex) and index not in loops:
-                        loops[index] = LoopContext.from_dim(index.dim, prev_index, namer, loops)
+                        loops[index] = LoopContext.from_dim(index, prev_index, namer)
         return loops
 
 
 @dataclasses.dataclass(frozen=True)
 class LoopContext:
+    index: Index
     iname: str
     extent_temp: Any
     extent_expr: Any
 
     @classmethod
-    def from_dim(cls, dim, prev_index, namer, existing_loops):
+    def from_dim(cls, index, prev_loop, namer):
         iname = namer.next("i")
-        temp = namer.next("t")
-        if isinstance(dim.size, Tensor):
-            extent_expr = pym.subscript(pym.var(dim.size.name), pym.var(existing_loops[prev_index].iname))
+        temp = namer.next("n")
+        if isinstance(index.dim.size, Tensor):
+            extent_expr = pym.subscript(pym.var(index.dim.size.name), pym.var(prev_loop.iname))
         else:
-            extent_expr = dim.size
-        return cls(iname, temp, extent_expr)
+            extent_expr = index.dim.size
+        return cls(index, iname, temp, extent_expr)
 
 
 def _make_loopy_kernel(tlang_kernel):
@@ -265,10 +260,14 @@ def _make_instruction_context(instruction: tlang.Instruction, within_inames, nam
 
 
 @_make_instruction_context.register
-def _(call: tlang.FunctionCall, within_inames, namer):
+def _(call: tlang.FunctionCall, within_loops, namer):
     subarrayrefs = {}
-    for temp in itertools.chain(call.reads, call.writes):
-        subarrayrefs[temp] = as_subarrayref(temp, instruction_inames[(call.id, Range(temp.dim, temp.dim.size))])
+    domains = []
+    for temp in utils.unique(itertools.chain(call.reads, call.writes)):
+        iname = namer.next("i")
+        subarrayrefs[temp] = as_subarrayref(temp, iname)
+        domains.append(_make_domain(iname, temp.dim.size))
+    domains = frozenset(domains)
 
     reads = tuple(subarrayrefs[var] for var in call.reads)
     writes = tuple(subarrayrefs[var] for var in call.writes)
@@ -278,7 +277,7 @@ def _(call: tlang.FunctionCall, within_inames, namer):
         tuple(reads),
     )
 
-    within_inames = frozenset({iname for (insn, _), iname in within_inames.items() if insn in call.depends_on})
+    within_inames = frozenset({loop.iname for loop in within_loops.values()})
 
     kernel_data = [lp.TemporaryVariable(temp.name, shape=(temp.dim.size,)) for temp in subarrayrefs]
 
@@ -290,38 +289,100 @@ def _(call: tlang.FunctionCall, within_inames, namer):
         within_inames=within_inames,
         depends_on=depends_on
     )
-    return InstructionContext([call_insn], kernel_data, {call.function.loopy_kernel})
+    return InstructionContext(domains, [call_insn], kernel_data, {call.function.loopy_kernel})
 
 
 @_make_instruction_context.register
-def _(assignment: tlang.Assignment, within_inames, namer):
-    # I need a map of index -> LoopContext for all indices in insn
-    loops = {index: loop for stencil in assignment.tensor.stencils for index, loop in _collect_loops_per_stencil(stencil, namer, within_inames).items()}
-    loops |= within_inames
+def _(assignment: tlang.Assignment, within_loops, namer):
+    all_insns = []
+    domains = []
+    kernel_data = []
+    for stencil in assignment.tensor.stencils:
+        for indices in stencil:
+            loops = _collect_loops(indices, namer, within_loops)
 
-    domains = frozenset({_make_domain(loop.iname, loop.extent_temp) for loop in loops.values()})
+            assign_id = namer.next(assignment.id)
 
-        # for indices in stencil:
-        #     local_idxs, global_idxs, local_offset, within_inames = \
-        #         _collect_indices(indices, local_offset=initial_local_offset, inames_dict=inames_dict)
-        #     loopy_instructions.append(_make_loopy_instruction(assignment, id_namer.next(prefix=assignment.id), local_idxs, global_idxs, local_offset, within_inames))
-        #
-    kernel_data = [
+            temp_active = namer.next("T")
+            active = pym.var(temp_active)
+            kernel_data.append(lp.TemporaryVariable(temp_active, shape=(), dtype=np.int32))
+
+            local_temp = namer.next("T")
+            local_active = pym.var(local_temp)
+            kernel_data.append(lp.TemporaryVariable(local_temp, shape=(), dtype=np.int32))
+
+            active_init_insns = (
+                lp.Assignment(active, 0, id=assign_id+"active"),
+                lp.Assignment(local_active, 0, id=assign_id+"local"),
+            )
+
+            init_insns, inc_insns, innermost_indices, kdata = _traverse_and_build(loops, assign_id, active, local_active, namer)
+
+            global_idxs, local_idxs = innermost_indices
+            local_offset = 0  # FIXME
+
+            main_within_inames = frozenset({loop.iname for loop in loops})
+            main_insn = _make_loopy_instruction(assignment, assign_id, local_idxs, global_idxs, local_offset, main_within_inames, depends_on={insn.id for insn in active_init_insns})
+
+            all_insns.extend(active_init_insns)
+            all_insns.extend(init_insns)
+            all_insns.extend(inc_insns)
+            all_insns.append(main_insn)
+
+            domains.extend([_make_domain(loop.iname, loop.extent_temp) for loop in loops])
+
+            kernel_data.extend(kdata)
+
+            for loop in loops:
+                if isinstance(loop.index, Map):
+                    kernel_data.append(lp.GlobalArg(loop.index.name, dtype=np.int32, shape=None))
+
+    kernel_data += [
         lp.GlobalArg(assignment.tensor.name, dtype=np.float64, shape=None),
         lp.TemporaryVariable(assignment.temporary.name, shape=(assignment.temporary.dim.size,))
     ]
 
-    kernel_data += [map_ for stencil in stencils for indices in stencil for map_ in _collect_maps(indices)]
-    kernel_data += [bound for stencil in stencils for indices in stencil for bound in _collect_bounds_per_instruction(indices)]
+    # kernel_data += [map_ for stencil in stencils for indices in stencil for map_ in _collect_maps(indices)]
+    # kernel_data += [bound for stencil in stencils for indices in stencil for bound in _collect_bounds_per_instruction(indices)]
 
-    return InstructionContext(domains, loopy_instructions, kernel_data)
+    return InstructionContext(domains, all_insns, kernel_data)
 
 
-def _collect_loops_per_stencil(stencil, namer, existing_loops):
-    return {index: loop
-        for indices in stencil
-        for index, loop in _collect_loops(indices, namer, existing_loops).items()
-    }
+def _traverse_and_build(loops, assign_id, active_index, local_active, namer, within_inames=frozenset()):
+    loop, *other_loops = loops
+
+    loop_bound_insn = (lp.Assignment(pym.var(loop.extent_temp), loop.extent_expr, within_inames=within_inames),)
+    bound_kdata = (lp.TemporaryVariable(loop.extent_temp, shape=(), dtype=np.int32),)
+    if not isinstance(loop.extent_expr, numbers.Integral):
+        breakpoint()
+        # bound_kdata += (lp.GlobalArg(loop.index.
+
+    within_inames |= {loop.iname}
+
+    if not other_loops:
+        inc_insns = (
+            lp.Assignment(local_active, local_active+1, depends_on=frozenset({assign_id}), within_inames=within_inames),
+            lp.Assignment(active_index, active_index+1, depends_on=frozenset({assign_id}), within_inames=within_inames)
+        )
+    else:
+        inc_insns = ()
+
+    if isinstance(loop.index, Map):
+        temp = namer.next("T")
+        new_active_index = pym.var(temp)
+        kdata = bound_kdata + (lp.TemporaryVariable(temp, shape=(), dtype=np.int32),)
+        init_insn = (lp.Assignment(new_active_index, pym.subscript(pym.var(loop.index.name), active_index), within_inames=within_inames),)
+        inc_insns += (lp.Assignment(active_index, active_index+1, depends_on=frozenset({assign_id}), within_inames=within_inames),)
+        active_index = new_active_index
+    else:
+        init_insn = ()
+        kdata = bound_kdata
+
+    if other_loops:
+        other_init, other_inc, innermost, other_kdata = _traverse_and_build(other_loops, assign_id, active_index, local_active, namer, within_inames)
+        return loop_bound_insn + init_insn + other_init, inc_insns+other_inc, innermost, kdata + other_kdata
+    else:
+        return loop_bound_insn + init_insn, inc_insns, (active_index, local_active), kdata
 
 
 def _collect_indices_per_stencil():
@@ -380,9 +441,9 @@ def _(index: NonAffineMap):
     return _collect_maps_from_index(index.from_index) + (lp.GlobalArg(index.name, shape=None, dtype=np.int32),)
 
 
-def _make_loopy_instruction(instruction, id, local_idxs, global_idxs, local_offset, within_inames):
+def _make_loopy_instruction(instruction, id, local_idxs, global_idxs, local_offset, within_inames, depends_on=frozenset()):
     # wilcard this to catch subinsns
-    depends_on = frozenset({f"{insn}*" for insn in instruction.depends_on})
+    depends_on = frozenset({f"{insn}*" for insn in instruction.depends_on}) | depends_on
 
     assignee, expression = resolve(instruction, global_idxs, local_idxs, local_offset)
 
@@ -390,17 +451,14 @@ def _make_loopy_instruction(instruction, id, local_idxs, global_idxs, local_offs
             within_inames=within_inames, depends_on=depends_on)
 
 
-def _collect_loops(indices, namer, prev_index=None, existing_loops=None):
+def _collect_loops(indices, namer, within_loops, prev_loop=None):
     if not indices:
-        return {}
-
-    if not existing_loops:
-        existing_loops = {}
+        return ()
 
     index, *subindices = indices
 
-    loops = _collect_loops_per_index(index, prev_index, namer, existing_loops)
-    return loops | _collect_loops(subindices, namer, index, loops)
+    loops = _collect_loops_per_index(index, prev_loop, namer, within_loops)
+    return loops + _collect_loops(subindices, namer, within_loops, loops[-1])
 
 
 def _collect_indices(
@@ -447,24 +505,25 @@ def subdim_size(index, subindex, inames):
 
 
 @functools.singledispatch
-def _collect_loops_per_index(index, prev_index, namer, existing_loops):
+def _collect_loops_per_index(index, prev_index, namer, within_loops):
     raise TypeError
 
 
 @_collect_loops_per_index.register
-def _(index: LoopIndex, prev_index, namer, existing_loops):
+def _(index: LoopIndex, prev_index, namer, within_loops):
     # already registered
-    return {}
+    return (within_loops[index],)
 
 
 @_collect_loops_per_index.register
-def _(index: Slice, prev_index, namer, existing_loops):
-    return {index: LoopContext.from_dim(index.dim, prev_index, namer, existing_loops)}
+def _(index: Slice, prev_loop, namer, within_loops):
+    return (LoopContext.from_dim(index, prev_loop, namer),)
 
 
 @_collect_loops_per_index.register
-def _(index: NonAffineMap, prev_index, namer, existing_loops):
-    return {index: LoopContext.from_dim(index.dim, index.from_index, namer, existing_loops)} | _collect_loops_per_index(index.from_index, prev_index, namer, existing_loops)
+def _(index: NonAffineMap, prev_loop, namer, within_loops):
+    loops = _collect_loops_per_index(index.from_index, prev_loop, namer, within_loops)
+    return loops + (LoopContext.from_dim(index, loops[-1], namer),)
 
 # @handle_index.register
 # def _(index: NonAffineMap, inames_dict):

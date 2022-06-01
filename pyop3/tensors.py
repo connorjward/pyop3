@@ -78,7 +78,7 @@ class IntIndex(BasicIndex):
 class Slice(FancyIndex):
     fields = FancyIndex.fields | {"start", "stop", "step"}
 
-    def __init__(self, *args):
+    def __init__(self, dim, *args):
         start, stop, step = None, None, None
         if len(args) == 0:
             pass
@@ -94,7 +94,7 @@ class Slice(FancyIndex):
         self.start = start
         self.stop = stop
         self.step = step
-        super().__init__()
+        super().__init__(dim)
 
 
 class Range(FancyIndex):
@@ -188,10 +188,42 @@ class Tensor(pytools.ImmutableRecordWithoutPickling):
         if self.stencils:
             raise NotImplementedError("Needs more thought")
 
+        stencils = frozenset({
+            tuple(
+                _complete_indices(indices, self.dim) for indices in stencil
+            )
+            for stencil in stencils
+        })
+
         return self.copy(stencils=stencils)
 
     def __str__(self):
         return self.name
+
+
+def _complete_indices(indices, dtree):
+    extra_indices = []
+
+    # see if the final index has children
+    if child := _get_child(dtree, indices[-1].dim):
+        while child:
+            extra_indices.append(Slice(child.value))
+            child = child.child
+
+    return tuple(indices) + tuple(extra_indices)
+
+
+def _get_child(tree, item):
+    if tree.value == item:
+        try:
+            return tree.child
+        except ValueError:
+            return None
+    else:
+        for child in tree.children:
+            if (res := _get_child(child, item)) is not None:
+                return res
+        return None
 
 
 class Map(FancyIndex, abc.ABC):
