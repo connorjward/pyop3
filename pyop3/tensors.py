@@ -193,21 +193,55 @@ class Tensor(pytools.ImmutableRecordWithoutPickling):
         if self.stencils:
             raise NotImplementedError("Needs more thought")
 
-        # not really important, a niceity
-        # stencils = _extract_stencils(stencils)
-
-        stencils = frozenset({
-            tuple(
-                _complete_indices(indices, self.dim) for indices in stencil
-            )
-            for stencil in stencils
-        })
+        stencils = _extract_stencils(stencils)
+        stencils = _break_mixed_slices(stencils, self.dim)
 
         return self.copy(stencils=stencils)
 
     def __str__(self):
         return self.name
 
+
+def _extract_stencils(stencils):
+    is_sequence = lambda seq: isinstance(seq, collections.abc.Sequence)
+
+    # case 1: dat[x]
+    if not is_sequence(stencils):
+        return (((stencils,),),)
+    # case 2: dat[x, y]
+    elif not is_sequence(stencils[0]):
+        return ((stencils,),)
+    # case 3: dat[(a, b), (c, d)]
+    elif not is_sequence(stencils[0][0]):
+        return (stencils,)
+    # case 4: dat[((a, b), (c, d)), ((e, f), (g, h))]
+    elif not is_sequence(stencils[0][0][0]):
+        return stencils
+    # default
+    else:
+        raise ValueError
+
+
+def _break_mixed_slices(stencils, dtree):
+    return tuple(
+        tuple(idxs
+            for indices in stencil
+            for idxs in _break_mixed_slices_per_indices(indices, dtree)
+        )
+        for stencil in stencils
+    )
+
+
+def _break_mixed_slices_per_indices(indices, dtree):
+    """Every slice over a mixed dim should branch the indices."""
+    if not indices:
+        yield ()
+    else:
+        index, *subindices = indices
+        for i, idx in _partition_slice(index, dtree):
+            subtree = dtree.children[i]
+            for subidxs in _break_mixed_slices_per_indices(subindices, subtree):
+                yield (idx, *subidxs)
 
 # TODO I should calculate the global offset here...
 """
@@ -228,43 +262,25 @@ What about LoopIndex?
 N.B. it is really difficult to support partial indexing (inc. integers) because, for ragged tensors, the initial offset
 is non-trivial and needs to be computed by summing all preceding entries.
 """
-def _complete_indices(indices, dtree, existing=()):
-    if not dtree:
-        return (existing,)
-
-    if indices:
-        index, *subindices = indices
-    else:
-        index, *subindices = slice(None), ()
-
-    complete = []
-    if isinstance(index, slice):
-        for idx, subtree in _partition_slice(index, dtree):
-            complete.extend(_complete_indices(subindices, subtree, existing+(idx,)))
-
-    return tuple(complete)
 
 
 def _partition_slice(slice_, dtree):
-    ptr = 0
-    offset = 0
-    for child in dtree.children:
-        dsize = child.value.size
-        dstart = ptr
-        dstop = ptr + dsize
+    if isinstance(slice_, slice):
+        ptr = 0
+        for i, child in enumerate(dtree.children):
+            dsize = child.value.size
+            dstart = ptr
+            dstop = ptr + dsize
 
-        # check for overlap
-        if dstart <= slice_.start < dstop or dstart <= slice_.stop < dstop:
-            start = max(dstart, slice_.start)
-            stop = min(dstop, slice_.stop)
-
-            # do not permit partial slices
-            assert start == dstart
-            assert stop == dstop
-
-            yield Slice(child.value, offset=offset), child  # TODO rename to DimView
-        ptr += child.value.size
-        offset += _calc_size(child)
+            # check for overlap
+            if ((slice_.stop is None or dstart < slice_.stop)
+                    and (slice_.start is None or dstop > slice_.start)):
+                start = max(dstart, slice_.start) if slice_.start is not None else dstart
+                stop = min(dstop, slice_.stop) if slice_.stop is not None else dstop
+                yield i, slice(start, stop)
+            ptr += dsize
+    else:
+        yield 0, slice_
 
 
 def _calc_size(dtree):

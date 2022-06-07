@@ -67,6 +67,12 @@ dat1 = pyop3.Dat(MESH, section, name="dat1")
 dat2 = pyop3.Dat(MESH, section, name="dat2")
 dat3 = pyop3.Dat(MESH, section, name="dat3")
 
+# x1 = dat1[3]
+# x2 = dat1[3:8]
+# x3 = dat1[4:]
+# x4 = dat1[4:, 2]
+# breakpoint()
+
 edat1 = pyop3.ExtrudedDat(EXTRUDED_MESH, section, name="edat1")
 edat2 = pyop3.ExtrudedDat(EXTRUDED_MESH, section, name="edat2")
 edat3 = pyop3.ExtrudedDat(EXTRUDED_MESH, section, name="edat3")
