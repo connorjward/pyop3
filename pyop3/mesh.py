@@ -8,13 +8,6 @@ from pyop3.utils import Tree
 class Mesh:
     map_cache = {}
 
-    def __init__(self, strata_sizes):
-        self.strata_sizes = strata_sizes
-        tdim = len(strata_sizes)
-        self.dim_tree = Tree(MixedDim(tdim),
-                tuple(Tree(UniformDim(size)) for i, size in enumerate(strata_sizes))
-        )
-
     @property
     def tdim(self):
         return len(self.strata_sizes)
@@ -27,18 +20,6 @@ class Mesh:
     def cone(self, point_set):
         """Return a map."""
 
-    @property
-    def cells(self):
-        # being very verbose
-        indices = (Range(self.dim_tree.children[0].value, self.ncells),)
-        stencil = (indices,)
-        stencils = frozenset({stencil})
-        return StencilGroup(stencils, mesh=self)
-
-    @property
-    def ncells(self):
-        return self.strata_sizes[0]
-
 
 
 class UnstructuredMesh(Mesh):
@@ -47,27 +28,73 @@ class UnstructuredMesh(Mesh):
     NEDGES_IN_CELL_CLOSURE = 3
     NVERTS_IN_CELL_CLOSURE = 3
     CLOSURE_SIZE = NCELLS_IN_CELL_CLOSURE + NEDGES_IN_CELL_CLOSURE + NVERTS_IN_CELL_CLOSURE
+    CELL_CONE_SIZE = 3
+    EDGE_CONE_SIZE = 2
+
+    def __init__(self, strata_sizes):
+        self.strata_sizes = strata_sizes
+        tdim = len(strata_sizes)
+        self.dims = Tree.from_nest(
+            (MixedDim(tdim), tuple(UniformDim(size) for size in strata_sizes))
+        )
+        self.dim_tree = self.dims  # deprecated
+
+        cdim, edim, vdim = self.dims.get_children(self.dims.root)
+
+        cone_map0_dim = Tree.from_nest([cdim, [UniformDim(self.CELL_CONE_SIZE)]])
+        cone_map0 = Tensor(cone_map0_dim, mesh=self, name="cone0")
+
+        cone_map1_dim = Tree.from_nest([edim, [UniformDim(self.EDGE_CONE_SIZE)]])
+        cone_map1 = Tensor(cone_map1_dim, mesh=self, name="cone1")
+
+        self.maps = {
+            self.cone.__name__: {
+                cdim: (cone_map0, edim),
+                edim: (cone_map1, vdim),
+            }
+        }
+
+    @property
+    def cells(self):
+        dim0 = self.dims.root
+        dim1 = self.dims.get_children(dim0)[0]
+        return StencilGroup([Stencil([
+            (Slice(dim0, 0, 1, 1), Slice(dim1, 0, None, 1))
+        ])])
+
+    @property
+    def ncells(self):
+        return self.strata_sizes[0]
+
 
     def closure(self, stencils):
-        key = (self.closure.__name__, stencils)
-        try:
-            return self.map_cache[key]
-        except KeyError:
-            # be very assertive
-            stencil, = stencils
-            indices, = stencil
-            index, = indices
+        new_stencils = []
+        for stencil in as_stencil_group(stencils, self.dims):
+            new_stencil = []
+            for indices in stencil:
+                idxs = indices
+                while True:
+                    new_stencil.append(idxs)
+                    try:
+                        idxs = self._cone(idxs)
+                    except KeyError:
+                        break
+            new_stencils.append(Stencil(new_stencil))
+        return StencilGroup(new_stencils)
 
-            edge_map = pyop3.NonAffineMap(index, self.dim_tree.children[1].value, self.NEDGES_IN_CELL_CLOSURE, name="edge_map")
-            vert_map = pyop3.NonAffineMap(index, self.dim_tree.children[2].value, self.NVERTS_IN_CELL_CLOSURE, name="vert_map")
-            mapped_stencils = frozenset({  # stencils (i.e. partitions)
-                (  # stencil (i.e. temporary)
-                    (index,),  # indices (i.e. loopy instructions)
-                    (edge_map,),
-                    (vert_map,),
-                )
-            })
-            return self.map_cache.setdefault(key, mapped_stencils)
+    def cone(self, stencils):
+        return StencilGroup([
+            Stencil([
+                self._cone(indices)
+                for indices in stencil
+            ])
+            for stencil in as_stencil_group(stencils, self.dims)
+        ])
+
+    def _cone(self, indices):
+        # FIXME This doesn't quite make sense - how to reason about this?
+        map_, to_dim = self.maps[self.cone.__name__][indices[-1].dim]
+        return NonAffineMap(map_, to_dim),
 
 
 class StructuredMesh(Mesh):
@@ -225,8 +252,7 @@ class ExtrudedMesh(Mesh):
         extr_cells = pyop3.Range(dtree.children[0].child.children[1].value, dtree.children[0].child.children[1].value.size)
         indices = (base_cells, extr_cells)
         stencil = (indices,)
-        stencils = frozenset({stencil})
-        return pyop3.StencilGroup(stencils, mesh=self)
+        return (stencil,)
 
 
 class CubeSphereMesh(Mesh):
@@ -288,37 +314,30 @@ My proposed solution looks something like as follows:
 """
 
 
-@dataclasses.dataclass
-class IndexStrider:
-    # TODO This should optionally be a tuple to allow for cube-sphered
-    # and different orientations
-    stride: int
-    """Stride between adjacent points."""
-
-    start: int = 0
-    """The starting point in the array."""
+@dataclasses.dataclass(frozen=True)
+class PlexOp:
+    index: Any
 
 
-def compute_strides(points, plex_op):
-    """
-
-    points: iterable of plex points (ints) to iterate over
-    plex_op: the plex operation to perform (e.g. cone())
-
-    """
-    strides_per_base_point_group = {}
-    for point in points:
-        base_points = frozenset({p.base_point for p in plex_op(point)})
-
-        # we only need to do this computation once per column/entity group
-        if base_points not in strides_per_base_point_group:
-            striders = tuple(IndexStrider(p.stride, p.start) for p in plex_op(point))
-            strides_per_base_point_group[base_points] = striders
+class Closure(PlexOp):
+    pass
 
 
-def closure(itree):
-    return itree.mesh.closure(itree)
+class Cone(PlexOp):
+    pass
 
 
-def star(itree):
-    return itree.mesh.star(itree)
+class Star(PlexOp):
+    pass
+
+
+def closure(index):
+    return Closure(index)
+
+
+def cone(index):
+    return Cone(index)
+
+
+def star(index):
+    return Star(index)

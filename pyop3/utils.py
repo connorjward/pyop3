@@ -1,5 +1,6 @@
 import collections
 import itertools
+import pyrsistent
 import pytools
 
 
@@ -52,20 +53,53 @@ def checked_zip(*iterables):
 
 
 class Tree(pytools.ImmutableRecord):
-    def __init__(self, value, children=()):
-        children = as_tuple(children)
-        super().__init__(value=value, children=children)
+    fields = {"root", "children"}
 
-    @property
-    def child(self):
-        if self.children:
-            return pytools.one(self.children)
+    def __init__(self, root, children=None):
+        self.root = root
+        self.children = pyrsistent.pmap(children or {root: ()})
+        super().__init__()
+
+    def add_child(self, parent, child):
+        new_children = dict(self.children)
+        new_children[parent] += (child,)
+        new_children[child] = ()
+        return self.copy(children=new_children)
+
+    def get_child(self, item):
+        if children := self.get_children(item):
+            return pytools.one(children)
         else:
             return None
 
-    @property
-    def is_leaf(self):
-        return not self.children
+    def get_children(self, item):
+        return self.children[item]
+
+    def is_leaf(self, item):
+        return not self.get_children(item)
+
+    @classmethod
+    def from_nest(cls, nest):
+        root, _ = nest
+        children = cls._collect_children(nest)
+        return cls(root, children)
+
+    @classmethod
+    def _collect_children(cls, nest):
+        try:
+            from_edge, subnests = nest
+        except TypeError:
+            from_edge, subnests = nest, ()
+
+        to_edges = tuple(
+            subnest if not is_sequence(subnest) else subnest[0]
+            for subnest in subnests
+        )
+
+        subchildren = dict(
+            ch for subnest in subnests for ch in cls._collect_children(subnest).items()
+        )
+        return {from_edge: to_edges} | subchildren
 
 
 def unique(iterable):
@@ -74,3 +108,7 @@ def unique(iterable):
         if item not in unique_items:
             unique_items.append(item)
     return tuple(unique_items)
+
+
+def is_sequence(item):
+    return isinstance(item, collections.abc.Sequence)

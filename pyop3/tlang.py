@@ -15,18 +15,17 @@ import pytools
 
 
 class Instruction(pytools.ImmutableRecord):
-    fields = {"id", "depends_on", "within_indices"}
+    fields = {"id", "depends_on"}
     prefix = "insn"
 
     _count = itertools.count()
 
-    def __init__(self, *, id=None, depends_on=frozenset(), within_indices=frozenset()):
+    def __init__(self, *, id=None, depends_on=frozenset()):
         if not id:
             id = f"{self.prefix}{next(self._count)}"
 
         self.id = id
         self.depends_on = depends_on
-        self.within_indices = within_indices
         super().__init__()
 
 

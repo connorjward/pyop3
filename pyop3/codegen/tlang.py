@@ -4,7 +4,7 @@ import functools
 import pytools
 import pyop3.utils
 from pyop3 import exprs, tensors, tlang
-from typing import Any, Optional, List
+from typing import Any
 
 
 def to_tlang(expr):
@@ -27,35 +27,50 @@ class TensorLangKernelBuilder:
         self._temp_name_generator = functools.partial(name_generator.next, "t")
 
     def build(self) -> TensorLangKernel:
-        self._inspect(self._expr, frozenset())
-        return TensorLangKernel(self._instructions)
+        new_expr = self._inspect(self._expr)
+        return new_expr
 
     @functools.singledispatchmethod
     def _inspect(self, expr, **kwargs):
         raise AssertionError
 
     @_inspect.register
-    def _(self, expr: exprs.Loop, within_indices):
-        loop_indices = frozenset({index for stencil in expr.index for indices in stencil for index in indices if isinstance(index, tensors.LoopIndex)})
+    def _(self, expr: exprs.Loop):
+        # assert isinstance(expr.index, tensors.Indexed)
+
+        if not len(expr.statements) == 1:
+            raise NotImplementedError
+
         for stmt in expr.statements:
-            self._inspect(stmt, within_indices | loop_indices)
+            if not isinstance(stmt, exprs.FunctionCall):
+                # no support yet for nested loops as determining the
+                # interleaving of the stencils is quite complicated.
+                # It can maybe be resolved by inspecting Indexed nodes
+                # but I think a better solution is to defer stencils until later.
+                raise NotImplementedError
+
+            stmts = self._inspect(stmt)
+            return expr.copy(statements=stmts)
 
     @_inspect.register
-    def _(self, expr: exprs.FunctionCall, within_indices):
+    def _(self, expr: exprs.FunctionCall):
         temporaries = {}
         for arg in expr.arguments:
-            size, = pytools.single_valued(tensors.indexed_shape(stencil) for stencil in arg.tensor.stencils)
+            # breakpoint()
+            size, = pytools.single_valued(
+                tensors.indexed_shape(stencil) for stencil in arg.tensor.stencils
+            )
             dim = tensors.UniformDim(size)
             temporaries[arg] = tensors.Tensor(dim, name=self._temp_name_generator())
 
-        gathers = self.make_gathers(temporaries, within_indices=within_indices)
-        call = self.make_function_call(expr, temporaries, depends_on=frozenset(gather.id for gather in gathers), within_indices=within_indices)
-        # return needed in case later things depend on this...
-        scatters = self.make_scatters(temporaries, depends_on=frozenset({call.id}), within_indices=within_indices)
+        gathers = self.make_gathers(temporaries)
+        call = self.make_function_call(
+            expr, temporaries,
+            depends_on=frozenset(gather.id for gather in gathers)
+        )
+        scatters = self.make_scatters(temporaries, depends_on=frozenset({call.id}))
 
-        # TODO put somewhere nicer
-        for insn in itertools.chain(gathers, [call], scatters):
-            self._instructions.append(insn)
+        return (*gathers, call, *scatters)
 
     def make_gathers(self, temporaries, **kwargs):
         return tuple(self.make_gather(arg, temp, **kwargs) for arg, temp in temporaries.items())

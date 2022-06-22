@@ -6,6 +6,10 @@ import functools
 from typing import Iterable, Tuple
 
 import numpy as np
+import pytools
+
+import pyop3.tensors
+from pyop3.utils import as_tuple
 
 
 class Expr:
@@ -16,50 +20,29 @@ class Operator(Expr):
     pass
 
 
-class Loop(Operator):
-    """A loop that acts on terminals or other loops.
-
-    Parameters
-    ----------
-    args: ?
-        Iterable of 'global' arguments to the loop.
-    tmps: ?
-        Iterable of temporaries instantiated at each invocation of the loop.
-    stmts: ?
-        Iterable of ordered statements executed by the loop.
-    scope: ?, optional
-        The plex op relating this loop to a surrounding one.
-    """
-
-    """A loop is a left fold. It takes:
-
-        some initial state S
-        an iterable of points
-        a function that takes S and a point and returns a new state
-    """
+class Loop(pytools.ImmutableRecord, Operator):
+    fields = {"index", "statements"}
 
     def __init__(self, index, statements):
+        # FIXME
+        # assert isinstance(index, pyop3.tensors.Indexed)
+
         self.index = index
-        self.statements = statements
-
-    @property
-    def set(self):
-        return self.index.set
-
-    @property
-    def indices(self):
-        if isinstance(self.index, collections.abc.Sequence):
-            return self.index
-        else:
-            return (self.index,)
+        self.statements = as_tuple(statements)
+        super().__init__()
 
     def __str__(self):
         return f"for {self.index} ∊ {self.index.point_set}"
 
-    def reconstruct(self, *, input_expr=None):
-        raise NotImplementedError
-        initializer = self.initializer if input_expr is None else input_expr
-        return type(self)(self.function, self.iterable, initializer)
+    def __call__(self, *args, **kwargs):
+        from pyop3.codegen.loopy import to_c
+        code = to_c(self)
+
+        breakpoint()
+        from pyop2.compilation import load
+        exe = load(code)
+        exe()
+
 
 
 class AccessDescriptor(enum.Enum):
@@ -112,11 +95,11 @@ class FunctionArgument:
         return self.tensor.indices
 
 
-class Function:
-    def __init__(self, name: str, argspec: Iterable[ArgumentSpec], loopy_kernel):
-        self.name = name
-        self.argspec = argspec
-        self.loopy_kernel = loopy_kernel
+class LoopyKernel:
+    """A callable function."""
+    def __init__(self, loopy_kernel, access_descrs):
+        self.code = loopy_kernel
+        self._access_descrs = access_descrs
 
     def __call__(self, *args):
         if len(args) != len(self.argspec):
@@ -131,6 +114,14 @@ class Function:
                 for tensor, spec in zip(args, self.argspec)
             ),
         )
+
+    @property
+    def argspec(self):
+        return tuple(ArgumentSpec(access, arg.dtype, arg.shape) for access, arg in zip(self._access_descrs, self.code.default_entrypoint.args))
+
+    @property
+    def name(self):
+        return self.code.default_entrypoint.name
 
 
 class Terminal(Expr):
@@ -176,3 +167,11 @@ class FunctionCall(Terminal):
                 self.argspec,
             )
         )
+
+
+def loop(*args, **kwargs):
+    return Loop(*args, **kwargs)
+
+
+def do_loop(*args, **kwargs):
+    loop(*args, **kwargs)()

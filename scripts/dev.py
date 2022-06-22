@@ -51,7 +51,7 @@ def main():
 
 NBASE_EDGES = 25
 NBASE_VERTS = 26
-EXTRUDED_MESH = pyop3.ExtrudedMesh((NBASE_EDGES, NBASE_VERTS))
+# EXTRUDED_MESH = pyop3.ExtrudedMesh((NBASE_EDGES, NBASE_VERTS))
 
 NCELLS = 25
 NEDGES = 40
@@ -67,15 +67,9 @@ dat1 = pyop3.Dat(MESH, section, name="dat1")
 dat2 = pyop3.Dat(MESH, section, name="dat2")
 dat3 = pyop3.Dat(MESH, section, name="dat3")
 
-# x1 = dat1[3]
-# x2 = dat1[3:8]
-# x3 = dat1[4:]
-# x4 = dat1[4:, 2]
-# breakpoint()
-
-edat1 = pyop3.ExtrudedDat(EXTRUDED_MESH, section, name="edat1")
-edat2 = pyop3.ExtrudedDat(EXTRUDED_MESH, section, name="edat2")
-edat3 = pyop3.ExtrudedDat(EXTRUDED_MESH, section, name="edat3")
+# edat1 = pyop3.ExtrudedDat(EXTRUDED_MESH, section, name="edat1")
+# edat2 = pyop3.ExtrudedDat(EXTRUDED_MESH, section, name="edat2")
+# edat3 = pyop3.ExtrudedDat(EXTRUDED_MESH, section, name="edat3")
 
 # vdat1 = pyop3.VectorDat(MESH, section, 3, name="vdat1")
 # vdat2 = pyop3.VectorDat(MESH, section, 3, name="vdat2")
@@ -113,27 +107,16 @@ def direct():
         name="local_kernel",
         lang_version=(2018, 2),
     )
-    kernel = pyop3.Function(
-        "local_kernel",
-        [
-            pyop3.ArgumentSpec(pyop3.READ, np.float64, ()),
-            pyop3.ArgumentSpec(pyop3.READ, np.float64, ()),
-            pyop3.ArgumentSpec(pyop3.INC, np.float64, ()),
-        ],
-        loopy_kernel,
-    )
+    kernel = pyop3.LoopyKernel(loopy_kernel, [pyop3.READ, pyop3.READ, pyop3.INC])
     return pyop3.Loop(
-        p := ITERSET.index,
-        [kernel(dat1[p], dat2[p], result[p])],
+        p := pyop3.index(ITERSET),
+        kernel(dat1[p], dat2[p], result[p])
     )
 
 
 @register_demo
 def inc():
-    result = pyop3.Dat(MESH, section, name="result")
-    # FIXME since we don't do broadcasting currently
-    # size = 6 + MESH.NEDGES_IN_CELL_CLOSURE * 7 + MESH.NVERTS_IN_CELL_CLOSURE * 8
-    size = 1 + MESH.NEDGES_IN_CELL_CLOSURE + MESH.NVERTS_IN_CELL_CLOSURE
+    size = 6 + MESH.NEDGES_IN_CELL_CLOSURE * 7 + MESH.NVERTS_IN_CELL_CLOSURE * 8
     loopy_kernel = lp.make_kernel(
         f"{{ [i]: 0 <= i < {size} }}",
         ["z[i] = z[i] + x[i] * y[i]"],
@@ -152,22 +135,10 @@ def inc():
         name="local_kernel",
         lang_version=(2018, 2),
     )
-    kernel = pyop3.Function(
-        "local_kernel",
-        [
-            pyop3.ArgumentSpec(pyop3.READ, np.float64, size),
-            pyop3.ArgumentSpec(pyop3.READ, np.float64, size),
-            pyop3.ArgumentSpec(pyop3.INC, np.float64, size),
-        ],
-        loopy_kernel,
-    )
+    kernel = pyop3.LoopyKernel(loopy_kernel, [pyop3.READ, pyop3.READ, pyop3.INC])
     return pyop3.Loop(
-        p := ITERSET.index,
-        [
-            kernel(
-                dat1[pyop3.closure(p)], dat2[pyop3.closure(p)], result[pyop3.closure(p)]
-            )
-        ],
+        p := pyop3.index(ITERSET),
+        kernel(dat1[MESH.closure(p)], dat2[MESH.closure(p)], dat3[MESH.closure(p)])
     )
 
 

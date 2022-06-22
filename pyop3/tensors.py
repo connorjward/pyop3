@@ -38,93 +38,71 @@ class MixedDim(Dim):
 
 class Index(pytools.ImmutableRecord):
     """Does it make sense to index a tensor with this object?"""
-    fields = {"dim"}
+    fields = {"dim", "within"}
 
-    def __init__(self, dim):
+    def __init__(self, dim, within=False):
         self.dim = dim
+        self.within = within
         super().__init__()
 
 
-class BasicIndex(Index):
+class ScalarIndex(Index):
     """Not a fancy index (scalar-valued)"""
-    size = 1
-
-
-class LoopIndex(BasicIndex):
-    fields = BasicIndex.fields | {"domain"}
-
-    def __init__(self, domain):
-        self.domain = domain
-        super().__init__(domain.dim)
 
 
 class FancyIndex(Index):
     """Name inspired from numpy. This allows you to slice something with a
     list of indices."""
 
-    @property
-    def index(self) -> LoopIndex:
-        return LoopIndex(self)
-
-
-class IntIndex(BasicIndex):
-    fields = BasicIndex.fields | {"value"}
-
-    def __init__(self, value):
-        self.value = value
-        super().__init__()
-
 
 class Slice(FancyIndex):
     fields = FancyIndex.fields | {"start", "stop", "step"}
 
-    def __init__(self, dim, *args):
-        start, stop, step = None, None, None
-        if len(args) == 0:
-            pass
-        elif len(args) == 1:
-            stop, = args
-        elif len(args) == 2:
-            start, stop = args
-        elif len(args) == 3:
-            start, stop, step = args
-        else:
-            raise ValueError
+
+    def __init__(self, dim, start, stop, step, within=False):
+        # start, stop, step = None, None, None
+        # if len(args) == 0:
+        #     pass
+        # elif len(args) == 1:
+        #     stop, = args
+        # elif len(args) == 2:
+        #     start, stop = args
+        # elif len(args) == 3:
+        #     start, stop, step = args
+        # else:
+        #     raise ValueError
 
         self.start = start
         self.stop = stop
         self.step = step
-        super().__init__(dim)
+        super().__init__(dim, within)
+        self.map = Tensor(name="slice_map")
 
     @property
     def size(self):
         return self.dim.size
 
 
-class Range(FancyIndex):
-    fields = FancyIndex.fields | {"start", "stop", "step"}
+class Stencil(tuple):
+    pass
 
-    def __init__(self, dim, *args):
-        if len(args) == 1:
-            start, stop, step = 0, *args, 1
-        elif len(args) == 2:
-            start, stop, step = *args, 1
-        elif len(args) == 3:
-            start, stop, step = args
+
+class StencilGroup(tuple):
+    def __mul__(self, other):
+        """Do some interleaving magic - needed for matrices."""
+        if isinstance(other, StencilGroup):
+            return StencilGroup(
+                Stencil(
+                    tuple(
+                        idx for pair in itertools.zip_longest(idxs1, idxs2)
+                        for idx in pair if idx is not None
+                    )
+                    for idxs1, idxs2 in itertools.product(stcl1, stcl2)
+                )
+                for stcl1, stcl2 in itertools.product(self, other)
+            )
         else:
-            raise ValueError
-
-        self.start = start
-        self.stop = stop
-        self.step = step
-        super().__init__(dim)
-
-    @property
-    def size(self):
-        if self.step != 1:
-            raise NotImplementedError
-        return self.dim.size
-        return self.stop - self.start
+            return super().__mul__(other)
 
 
 def indexed_shape(stencil):
@@ -142,35 +120,6 @@ def indexed_size_per_index_group(indices):
         return index_size(index)
 
 
-class StencilGroup(pytools.ImmutableRecord):
-    def __init__(self, stencils, mesh=None):
-        super().__init__(stencils=stencils, mesh=mesh)
-
-    def __iter__(self):
-        return iter(self.stencils)
-
-    @property
-    def index(self):
-        new_stencils = set()
-        for stencil in self.stencils:
-            new_stencil = []
-            for indices in stencil:
-                new_indices = []
-                for index in indices:
-                    if isinstance(index, FancyIndex):
-                        index = index.index
-                    new_indices.append(index)
-                new_stencil.append(tuple(new_indices))
-            new_stencils.add(tuple(new_stencil))
-        new_stencils = frozenset(new_stencils)
-        return self.copy(stencils=new_stencils)
-
-
-# To avoid annoying errors for now
-class IndexTree:
-    ...
-
-
 class Tensor(pytools.ImmutableRecordWithoutPickling):
 
     name_generator = pyop3.utils.MultiNameGenerator()
@@ -184,42 +133,157 @@ class Tensor(pytools.ImmutableRecordWithoutPickling):
         else:
             return super().__new__(cls)
 
-    def __init__(self, dim=None, stencils=frozenset(), *, name: str = None, prefix: str=None):
+    def __init__(self, dim=None, stencils=None, *, mesh = None, name: str = None, prefix: str=None):
         name = name or self.name_generator.generate(prefix or self.prefix)
-        super().__init__(dim=dim, stencils=stencils, name=name)
+        super().__init__(dim=dim, stencils=stencils, mesh=mesh, name=name)
 
     def __getitem__(self, stencils):
+        """The plan of action here is as follows:
+
+        - if a tensor is indexed by a set of stencils then that's great.
+        - if it is indexed by a set of slices and integers then we convert
+          that to a set of stencils.
+        - if passed a combination of stencil groups and integers/slices then
+          the integers/slices are first converted to stencil groups and then
+          the groups are concatenated, multiplying where required.
+
+        N.B. for matrices, we want to take a tensor product of the stencil groups
+        rather than concatenate them. For example:
+
+        mat[f(p), g(q)]
+
+        where f(p) is (0, map[i]) and g(q) is (0, map[j]) would produce the wrong
+        thing because we would get mat[0, map[i], 0, map[j]] where what we really
+        want is mat[0, 0, map[i], map[j]]. Therefore we instead write:
+
+        mat[f(p)*g(q)]
+
+        to get the correct behaviour.
+        """
+
         # TODO Add support for already indexed items
+        # This is complicated because additional indices should theoretically index
+        # pre-existing slices, rather than get appended/prepended as is currently
+        # assumed.
         if self.stencils:
             raise NotImplementedError("Needs more thought")
 
-        stencils = _extract_stencils(stencils)
-        stencils = _break_mixed_slices(stencils, self.dim)
+        if not isinstance(stencils, StencilGroup):
+            empty = StencilGroup([Stencil([()])])
+            stencils = functools.reduce(self._merge_stencils, as_tuple(stencils), empty)
+
+        # fill final indices with full slices
+        stencils = StencilGroup([
+            Stencil([
+                _construct_indices(indices, self.dim, self.dim.root)
+                for indices in stencil
+            ])
+            for stencil in stencils
+        ])
 
         return self.copy(stencils=stencils)
+
 
     def __str__(self):
         return self.name
 
+    def _merge_stencils(self, stencils1, stencils2):
+        return _merge_stencils(stencils1, stencils2, self.dim)
 
-def _extract_stencils(stencils):
+
+def _merge_stencils(stencils1, stencils2, dims):
+    stencils1 = as_stencil_group(stencils1, dims)
+    stencils2 = as_stencil_group(stencils2, dims)
+
+    return StencilGroup(
+        Stencil(
+            idxs1+idxs2
+            for idxs1, idxs2 in itertools.product(stc1, stc2)
+        )
+        for stc1, stc2 in itertools.product(stencils1, stencils2)
+    )
+
+def as_stencil_group(stencils, dims):
+    if isinstance(stencils, StencilGroup):
+        return stencils
+
     is_sequence = lambda seq: isinstance(seq, collections.abc.Sequence)
-
     # case 1: dat[x]
     if not is_sequence(stencils):
-        return (((stencils,),),)
+        return StencilGroup([
+            Stencil([
+                _construct_indices([stencils], dims, dims.root)
+            ])
+        ])
     # case 2: dat[x, y]
     elif not is_sequence(stencils[0]):
-        return ((stencils,),)
+        return StencilGroup([
+            Stencil([
+                _construct_indices(stencils, dims, dims.root)
+            ])
+        ])
     # case 3: dat[(a, b), (c, d)]
     elif not is_sequence(stencils[0][0]):
-        return (stencils,)
+        return StencilGroup([
+            Stencil([
+                _construct_indices(idxs, dims, dims.root)
+                for idxs in stencils
+            ])
+        ])
     # case 4: dat[((a, b), (c, d)), ((e, f), (g, h))]
     elif not is_sequence(stencils[0][0][0]):
-        return stencils
+        return StencilGroup([
+            Stencil([
+                _construct_indices(idxs, dims, dims.root)
+                for idxs in stencil
+            ])
+            for stencil in stencils
+        ])
     # default
     else:
         raise ValueError
+
+
+def _construct_indices(input_indices, dims, current_dim):
+    if not current_dim:
+        return ()
+
+    if not input_indices:
+        input_indices = [slice(0, current_dim.size, 1)]
+
+    index, *subindices = input_indices
+
+    if isinstance(current_dim, MixedDim):
+        # assert isinstance(index, numbers.Integral)
+        if isinstance(index, numbers.Integral):
+            subdim = dims.get_children(current_dim)[index]
+        else:
+            subdim = dims.get_children(current_dim)[index.start]
+    else:
+        subdim = dims.get_child(current_dim)
+
+    if isinstance(index, Index):
+        new_index = index
+    elif isinstance(index, slice):
+        new_index = Slice(current_dim, index.start, index.stop, index.step)
+    elif isinstance(index, numbers.Integral):
+        new_index = Slice(current_dim, index, index+1, 1)
+    else:
+        raise NotImplementedError
+
+    return (new_index,) + _construct_indices(subindices, dims, subdim)
+
+
+
+def index(stencils):
+    """wrap all slices and maps in loop index objs."""
+    return StencilGroup([
+        Stencil([
+            tuple(index.copy(within=True) for index in indices)
+            for indices in stencil
+        ])
+        for stencil in stencils
+    ])
 
 
 def _break_mixed_slices(stencils, dtree):
@@ -243,7 +307,7 @@ def _break_mixed_slices_per_indices(indices, dtree):
             for subidxs in _break_mixed_slices_per_indices(subindices, subtree):
                 yield (idx, *subidxs)
 
-# TODO I should calculate the global offset here...
+
 """
 so I like it if we could go dat[:mesh.ncells, 2] to access the right part of the mixed dim. How to do multiple stencils?
 
@@ -298,19 +362,6 @@ def _calc_size(dtree):
             return dim.size * _calc_size(dtree.child)
 
 
-def _get_child(tree, item):
-    if tree.value == item:
-        try:
-            return tree.child
-        except ValueError:
-            return None
-    else:
-        for child in tree.children:
-            if (res := _get_child(child, item)) is not None:
-                return res
-        return None
-
-
 class Map(FancyIndex, abc.ABC):
     fields = FancyIndex.fields | {"from_index", "arity", "name"}
 
@@ -334,9 +385,22 @@ class Map(FancyIndex, abc.ABC):
         return self.arity
 
 
-# class NonAffineMap(Tensor, Map):
-class NonAffineMap(Map):
-    pass
+class NonAffineMap(Index):
+    start = 0
+    stop = None
+    step = 1
+    def __init__(self, tensor, dim):
+        self.tensor = tensor
+        super().__init__(dim)
+
+    @property
+    def map(self):
+        return self.tensor
+
+    @property
+    def arity(self):
+        dims = self.tensor.dim
+        return dims.get_child(dims.root).size
 
 
 class AffineMap(Map):
@@ -348,22 +412,33 @@ def index_size(index):
     raise TypeError
 
 
-@index_size.register(IntIndex)
-@index_size.register(LoopIndex)
-def _(index):
-    return 1
+# @index_size.register(IntIndex)
+# @index_size.register(LoopIndex)
+# def _(index):
+#     return 1
 
 
 @index_size.register
-def _(slice_: Slice):
-    start = slice_.start or 0
-    stop = slice_.stop or slice_.dim.size
+def _(index: Slice):
+    if index.within:
+        return 1
+    start = index.start or 0
+    stop = index.stop or index.dim.size
     return stop - start
 
 
 @index_size.register
-def _(map_: Map):
-    return index_size(map_.from_index) * map_.arity
+def _(index: NonAffineMap):
+    # FIXME
+    # This doesn't quite work - need to have indexed the map beforehand (different to offset tensors)
+    return index.arity  # * indexed_size_per_index_group(index.tensor.stencils...)
+
+
+def full_dim_size(dim, dtree):
+    if child := dtree.get_child(dim):
+        return dim.size * full_dim_size(child, dtree)
+    else:
+        return dim.size
 
 
 class Section:
@@ -377,13 +452,10 @@ def Global(*, name: str = None):
 
 
 def Dat(mesh, dofs: Section, *, prefix="dat", **kwargs) -> Tensor:
-    new_children = []
-    for i, subtree in enumerate(mesh.dim_tree.children):
-        new_subchildren = Tree(UniformDim(dofs.dofs[i]))
-        new_children.append(subtree.copy(children=new_subchildren))
-    new_children = tuple(new_children)
-    dim_tree = mesh.dim_tree.copy(children=new_children)
-    return Tensor(dim_tree, prefix=prefix, **kwargs)
+    dims = mesh.dim_tree.copy()
+    for i, child in enumerate(mesh.dim_tree.get_children(mesh.dim_tree.root)):
+        dims = dims.add_child(child, UniformDim(dofs.dofs[i]))
+    return Tensor(dims, mesh=mesh, prefix=prefix, **kwargs)
 
 
 def VectorDat(mesh, dofs, count, **kwargs):
