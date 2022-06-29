@@ -33,68 +33,69 @@ class UnstructuredMesh(Mesh):
 
     def __init__(self, strata_sizes):
         self.strata_sizes = strata_sizes
-        tdim = len(strata_sizes)
-        self.dims = Tree.from_nest(
-            (MixedDim(tdim), tuple(UniformDim(size) for size in strata_sizes))
-        )
+        self.dims = Tree(Dim(strata_sizes))
         self.dim_tree = self.dims  # deprecated
 
-        cdim, edim, vdim = self.dims.get_children(self.dims.root)
+        ncells, nedges, nverts = self.dims.root.sizes
 
-        cone_map0_dim = Tree.from_nest([cdim, [UniformDim(self.CELL_CONE_SIZE)]])
-        cone_map0 = Tensor(cone_map0_dim, mesh=self, name="cone0")
+        cone_map0_dim = Tree.from_nest([Dim(ncells), [Dim(self.CELL_CONE_SIZE)]])
+        cone_map0_tensor = Tensor(cone_map0_dim, mesh=self, name="cone0")
+        cone_map0 = NonAffineMap(self.dims.root, 0, 1, cone_map0_tensor)
 
-        cone_map1_dim = Tree.from_nest([edim, [UniformDim(self.EDGE_CONE_SIZE)]])
-        cone_map1 = Tensor(cone_map1_dim, mesh=self, name="cone1")
+        cone_map1_dim = Tree.from_nest([Dim(nedges), [Dim(self.EDGE_CONE_SIZE)]])
+        cone_map1_tensor = Tensor(cone_map1_dim, mesh=self, name="cone1")
+        cone_map1 = NonAffineMap(self.dims.root, 1, 2, cone_map1_tensor)
+
+        closure02_dim = Tree.from_nest([Dim(ncells), [Dim(self.NVERTS_IN_CELL_CLOSURE)]])
+        closure02_tensor = Tensor(closure02_dim, mesh=self, name="closure02")
+        closure02 = NonAffineMap(self.dims.root, 0, 2, closure02_tensor)
 
         self.maps = {
             self.cone.__name__: {
-                cdim: (cone_map0, edim),
-                edim: (cone_map1, vdim),
+                0: cone_map0,
+                1: cone_map1,
+            },
+            self.closure.__name__: {
+                (0, 0): Slice(self.dims.root, 0),
+                (0, 1): cone_map0,
+                (0, 2): closure02,
+                (1, 1): Slice(self.dims.root, 1),
+                (1, 2): cone_map1,
             }
         }
 
     @property
     def cells(self):
-        dim0 = self.dims.root
-        dim1 = self.dims.get_children(dim0)[0]
         return StencilGroup([Stencil([
-            (Slice(dim0, 0, 1, 1), Slice(dim1, 0, None, 1))
+            (Slice(self.dims.root, 0),)
         ])])
 
     @property
     def ncells(self):
         return self.strata_sizes[0]
 
-
     def closure(self, stencils):
         new_stencils = []
-        for stencil in as_stencil_group(stencils, self.dims):
+        for stencil in stencils:
             new_stencil = []
             for indices in stencil:
-                idxs = indices
-                while True:
-                    new_stencil.append(idxs)
-                    try:
-                        idxs = self._cone(idxs)
-                    except KeyError:
-                        break
+                idx, = indices
+                for stratum in range(idx.stratum, self.tdim):
+                    new_stencil.append((self.maps[self.closure.__name__][(idx.stratum, stratum)],))
             new_stencils.append(Stencil(new_stencil))
         return StencilGroup(new_stencils)
 
     def cone(self, stencils):
         return StencilGroup([
             Stencil([
-                self._cone(indices)
-                for indices in stencil
+                tuple(
+                    self.maps[self.cone.__name__][(idx.stratum, idx.stratum+1)]
+                    for idx in idxs
+                )
+                for idxs in stencil
             ])
             for stencil in as_stencil_group(stencils, self.dims)
         ])
-
-    def _cone(self, indices):
-        # FIXME This doesn't quite make sense - how to reason about this?
-        map_, to_dim = self.maps[self.cone.__name__][indices[-1].dim]
-        return NonAffineMap(map_, to_dim),
 
 
 class StructuredMesh(Mesh):

@@ -23,7 +23,7 @@ from pyop3.tensors import Tensor, Index, Map, Dim, UniformDim, MixedDim, NonAffi
 from pyop3.tensors import Slice, indexed_shape, indexed_size_per_index_group, AffineMap, Stencil, StencilGroup, full_dim_size
 from pyop3.codegen.tlang import to_tlang
 
-LOOPY_TARGET = lp.CTarget()
+LOOPY_TARGET = lp.ExecutableCTarget()
 LOOPY_LANG_VERSION = (2018, 2)
 
 
@@ -63,15 +63,17 @@ class LoopyKernelBuilder:
         self._namer.reset()
         self._build(tlang_expr, {})
 
-        breakpoint()
+        # breakpoint()
         translation_unit = lp.make_kernel(
             utils.unique(self.domains),
             utils.unique(self.instructions),
             utils.unique(self.kernel_data),
             target=LOOPY_TARGET,
             lang_version=LOOPY_LANG_VERSION,
+            name="mykernel",
         )
-        return lp.merge((translation_unit, *self.subkernels))
+        tu = lp.merge((translation_unit, *self.subkernels))
+        return tu.with_entrypoints("mykernel")
 
     @functools.singledispatchmethod
     def _build(self, expr, within_loops):
@@ -91,7 +93,15 @@ class LoopyKernelBuilder:
 
             # start, stop, step = (self._register_domain_parameter(param, prev_iname) for param in [index.start, index.stop, index.step])
             if isinstance(index, Slice) and not index.stop:
-                stop = index.dim.size
+                stop = index.dim.sizes[index.stratum]
+            elif isinstance(index.stop, Tensor):
+                temporary_name = self._namer.next("p")
+                temporary = Tensor((), name=temporary_name, dtype=np.int32)
+                indexed = self._index_the_map(index.stop, within_loops)
+                mapassignment = tlang.Read(indexed, temporary)
+                self._make_instruction_context(mapassignment, within_loops)
+                # stop = f"{temporary_name}[0]"
+                stop = temporary_name
             else:
                 stop = index.stop
             self.domains.append(self._make_domain(iname, index.start, stop, index.step))
@@ -152,71 +162,79 @@ class LoopyKernelBuilder:
                 # breakpoint()
                 within_inames = frozenset({iname for iname in within_loops.values()})
                 local_offset = 0
+                local_idxs = 0
                 global_offset = 0
+                current_dim = assignment.tensor.dim.root
                 for i, index in enumerate(indices):
-                    if isinstance(index.dim, MixedDim):
-                        continue
-
+                    # sanity checking
+                    assert index.dim == current_dim
                     try:
                         iname = within_loops[index]
                     except KeyError:
                         iname = self._namer.next("i")
+                        if isinstance(index, NonAffineMap):
+                            start = 0
+                            stop = index.arity
+                            step = 1
+                        else:
+                            start = index.start
+                            stop = index.stop
+                            step = index.step
+                            self.domains.append(self._make_domain(iname, start, stop, step))
 
-                    if isinstance(index, Slice) and not index.stop:
-                        stop = index.dim.size
-                    elif isinstance(index, NonAffineMap):
-                        stop = index.dim.size
-                    else:
-                        stop = index.stop
-                    self.domains.append(self._make_domain(iname, index.start, stop, index.step))
 
-                    local_offset += pym.var("TODO")
+                    # only index temporaries by 'inner' loops
+                    if index not in within_loops:
+                        new_map_name = self._namer.next("map")
+                        local_offset += pym.subscript(pym.var(new_map_name), pym.var(iname))
+                        self.kernel_data.append(lp.GlobalArg(new_map_name, shape=None, dtype=np.int32))
 
-
-                    # if iname == "i2":
-                        # FIXME THIS IS BROKEN
-                        # breakpoint()
+                    # add a map for every index/dim that does index -> offset
+                    if not isinstance(assignment, tlang.Zero):
+                        new_map_name = self._namer.next("map")
+                        global_offset += pym.subscript(pym.var(new_map_name), pym.var(iname))
+                        self.kernel_data.append(lp.GlobalArg(new_map_name, shape=None, dtype=np.int32))
 
                     if isinstance(index, NonAffineMap):
+                        raise NotImplementedError
                         # breakpoint()
                         temporary_name = self._namer.next("t_map")
                         temporary = Tensor((), name=temporary_name)
                         indexed = self._index_the_map(index.map, within_loops)
                         mapassignment = tlang.Read(indexed, temporary)
                         self._make_instruction_context(mapassignment, within_loops)
-                        goff = pym.var(temporary_name)
-                        if child := _tensor.dim.get_child(index.dim):
-                            goff *= full_dim_size(child, _tensor.dim)
-                        global_offset += goff
-                    elif isinstance(index, Slice):
-                        _tensor = assignment.tensor
-                        goff = pym.var(iname) * index.step + index.start
-                        if child := _tensor.dim.get_child(index.dim):
-                            goff *= full_dim_size(child, _tensor.dim)
-                        global_offset += goff
-                    else:
-                        raise NotImplementedError
 
                     within_inames |= {iname}
 
+                    if children := assignment.tensor.dim.get_children(current_dim):
+                        current_dim = children[index.stratum]
+                    else:
+                        # else we must be at the end
+                        assert i == len(indices) - 1
+
+                assignee, expression = resolve(assignment, global_offset, 0, local_offset)
+
                 assign_insn = lp.Assignment(
-                        pym.subscript(pym.var(assignment.temporary.name), local_offset),
-                        pym.subscript(pym.var(assignment.tensor.name), global_offset),
+                        assignee, expression,
                         id=self._namer.next(f"{assignment.id}_"),
-                        within_inames=within_inames)
+                        within_inames=within_inames,
+                        depends_on=frozenset({f"{dep}*" for dep in assignment.depends_on}))
                 self.instructions.append(assign_insn)
 
 
         # breakpoint()
         if assignment.temporary.dim:
             temp_size = assignment.temporary.dim.size
+            temp_shape = (temp_size,)
         else:
             temp_size = 1
+            temp_shape =()
 
+        # breakpoint()
         self.kernel_data += [
-            lp.GlobalArg(assignment.tensor.name, dtype=np.float64, shape=None),
+            lp.GlobalArg(assignment.tensor.name, dtype=assignment.tensor.dtype, shape=None),
 
-            lp.TemporaryVariable(assignment.temporary.name, shape=(temp_size,))
+            lp.TemporaryVariable(assignment.temporary.name, shape=temp_shape)
         ]
 
 
@@ -252,6 +270,12 @@ class LoopyKernelBuilder:
 
     @staticmethod
     def _make_domain(iname, start, stop, step):
+        if start is None:
+            start = 0
+            
+        if step is None:
+            step = 1
+
         if step != 1:
             raise NotImplementedError
 
@@ -422,7 +446,11 @@ class AssignmentResolver:
 
     @property
     def local_expr(self):
-        return pym.subscript(pym.var(self.instruction.temporary.name), self.local_idxs + self.local_offset)
+        name = pym.var(self.instruction.temporary.name)
+        if self.instruction.temporary.dim:
+            return pym.subscript(name, self.local_idxs + self.local_offset)
+        else:
+            return name
 
 
 

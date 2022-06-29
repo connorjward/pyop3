@@ -1,4 +1,5 @@
 import functools
+import numpy as np
 import abc
 import itertools
 import collections
@@ -15,33 +16,55 @@ import pyop3.utils
 from pyop3.utils import as_tuple, checked_zip, Tree, NameGenerator
 
 
+# TODO could this be renamed a 'plex'? I suppose that also implies connectivity.
 class Dim(pytools.ImmutableRecord):
-    fields = {"size", "name"}
+    fields = {"sizes", "permutation", "name"}
     name_generator = NameGenerator("dim")
 
-    def __init__(self, size, *, name=None):
+    def __init__(self, sizes, *, permutation=None, name=None):
+        if not isinstance(sizes, collections.abc.Sequence):
+            sizes = (sizes,)
         if not name:
             name = self.name_generator.next()
 
-        self.size = size
+        self.sizes = sizes
+        self.permutation = permutation
         self.name = name
         super().__init__()
 
+    @property
+    def strata(self):
+        return tuple(range(len(self.sizes)))
 
+    @property
+    def size(self):
+        return pytools.single_valued(self.sizes)
+
+    def __hash__(self):
+        return hash(self.name)
+
+    def __eq__(self, other):
+        return hash(self) == hash(other)
+
+
+# TODO delete - just use dim
 class UniformDim(Dim):
     pass
 
 
+# TODO delete - just use dim
 class MixedDim(Dim):
     pass
 
 
 class Index(pytools.ImmutableRecord):
     """Does it make sense to index a tensor with this object?"""
-    fields = {"dim", "within"}
+    fields = {"dim", "stratum", "within"}
 
-    def __init__(self, dim, within=False):
+    def __init__(self, dim, stratum, within=False):
+        # N.B. dim is only really needed for error checking, make sure that things match
         self.dim = dim
+        self.stratum = stratum
         self.within = within
         super().__init__()
 
@@ -58,8 +81,7 @@ class FancyIndex(Index):
 class Slice(FancyIndex):
     fields = FancyIndex.fields | {"start", "stop", "step"}
 
-
-    def __init__(self, dim, start, stop, step, within=False):
+    def __init__(self, dim, stratum, start=None, stop=None, step=None, within=False):
         # start, stop, step = None, None, None
         # if len(args) == 0:
         #     pass
@@ -72,15 +94,29 @@ class Slice(FancyIndex):
         # else:
         #     raise ValueError
 
-        self.start = start
-        self.stop = stop
-        self.step = step
-        super().__init__(dim, within)
-        self.map = Tensor(name="slice_map")
+        if start:
+            self.start = start
+        elif isinstance(dim.sizes[0], Tensor):
+            # don't know how to handle not starting from zero
+            assert len(dim.sizes) == 1
+            self.start = 0
+        else:
+            self.start = np.cumsum([0] + list(dim.sizes))[stratum]
 
-    @property
-    def size(self):
-        return self.dim.size
+        if stop:
+            self.stop = stop
+        elif isinstance(dim.sizes[0], Tensor):
+            self.stop = dim.sizes[0]
+        else:
+            self.stop = np.cumsum(dim.sizes)[stratum]
+
+        assert not step or step == 1
+        self.step = step or 1
+        super().__init__(dim, stratum, within)
+
+    # @property
+    # def size(self):
+    #     return self.dim.size
 
 
 class Stencil(tuple):
@@ -125,17 +161,19 @@ class Tensor(pytools.ImmutableRecordWithoutPickling):
     name_generator = pyop3.utils.MultiNameGenerator()
     prefix = "ten"
 
-    def __new__(cls, dim=None, stencils=frozenset(), **kwargs):
-        # FIXME what is the right way to think about this now?
-        # if (len(dims) == 2 and isinstance(dims[0], IndexedDimension) and not isinstance(dims[1], IndexedDimension)
-        if False:
-            return NonAffineMap(dims, **kwargs)
-        else:
-            return super().__new__(cls)
+    # def __new__(cls, dim=None, stencils=frozenset(), **kwargs):
+    #     # FIXME what is the right way to think about this now?
+    #     # if (len(dims) == 2 and isinstance(dims[0], IndexedDimension) and not isinstance(dims[1], IndexedDimension)
+    #     if False:
+    #         return NonAffineMap(dims, **kwargs)
+    #     else:
+    #         return super().__new__(cls)
 
-    def __init__(self, dim=None, stencils=None, *, mesh = None, name: str = None, prefix: str=None):
-        name = name or self.name_generator.generate(prefix or self.prefix)
-        super().__init__(dim=dim, stencils=stencils, mesh=mesh, name=name)
+    def __init__(self, dim=None, stencils=None, dtype=None, *, mesh = None, name: str = None, prefix: str=None, data=None):
+        name = name or self.name_generator.next(prefix or self.prefix)
+        self.data = data
+        assert dtype is not None
+        super().__init__(dim=dim, stencils=stencils, mesh=mesh, name=name, dtype=dtype)
 
     def __getitem__(self, stencils):
         """The plan of action here is as follows:
@@ -249,27 +287,26 @@ def _construct_indices(input_indices, dims, current_dim):
         return ()
 
     if not input_indices:
-        input_indices = [slice(0, current_dim.size, 1)]
+        # input_indices = [slice(0, current_dim.size, 1)]
+        input_indices = [Slice(current_dim, 0)]
 
     index, *subindices = input_indices
-
-    if isinstance(current_dim, MixedDim):
-        # assert isinstance(index, numbers.Integral)
-        if isinstance(index, numbers.Integral):
-            subdim = dims.get_children(current_dim)[index]
-        else:
-            subdim = dims.get_children(current_dim)[index.start]
-    else:
-        subdim = dims.get_child(current_dim)
 
     if isinstance(index, Index):
         new_index = index
     elif isinstance(index, slice):
-        new_index = Slice(current_dim, index.start, index.stop, index.step)
-    elif isinstance(index, numbers.Integral):
-        new_index = Slice(current_dim, index, index+1, 1)
+        new_index = Slice(current_dim, 0, index.start, index.stop, index.step)
     else:
         raise NotImplementedError
+
+    if children := dims.get_children(current_dim):
+        if isinstance(index, numbers.Integral):
+            subdim = children[index]
+        else:
+            subdim = children[index.stratum]
+    else:
+        subdim = None
+
 
     return (new_index,) + _construct_indices(subindices, dims, subdim)
 
@@ -386,12 +423,12 @@ class Map(FancyIndex, abc.ABC):
 
 
 class NonAffineMap(Index):
-    start = 0
-    stop = None
-    step = 1
-    def __init__(self, tensor, dim):
+    fields = Index.fields | {"from_stratum", "tensor"}
+
+    def __init__(self, dim, from_stratum, to_stratum, tensor):
+        self.from_stratum = from_stratum
         self.tensor = tensor
-        super().__init__(dim)
+        super().__init__(dim, to_stratum)
 
     @property
     def map(self):
@@ -423,7 +460,7 @@ def _(index: Slice):
     if index.within:
         return 1
     start = index.start or 0
-    stop = index.stop or index.dim.size
+    stop = index.stop or index.dim.sizes[index.stratum]
     return stop - start
 
 
@@ -453,8 +490,8 @@ def Global(*, name: str = None):
 
 def Dat(mesh, dofs: Section, *, prefix="dat", **kwargs) -> Tensor:
     dims = mesh.dim_tree.copy()
-    for i, child in enumerate(mesh.dim_tree.get_children(mesh.dim_tree.root)):
-        dims = dims.add_child(child, UniformDim(dofs.dofs[i]))
+    for i, _ in enumerate(dims.root.sizes):
+        dims = dims.add_child(dims.root, Dim(dofs.dofs[i]))
     return Tensor(dims, mesh=mesh, prefix=prefix, **kwargs)
 
 

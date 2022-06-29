@@ -61,7 +61,7 @@ class TensorLangKernelBuilder:
                 tensors.indexed_shape(stencil) for stencil in arg.tensor.stencils
             )
             dim = tensors.UniformDim(size)
-            temporaries[arg] = tensors.Tensor(dim, name=self._temp_name_generator())
+            temporaries[arg] = tensors.Tensor(dim, name=self._temp_name_generator(), dtype=arg.tensor.dtype)
 
         gathers = self.make_gathers(temporaries)
         call = self.make_function_call(

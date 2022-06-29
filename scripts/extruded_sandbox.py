@@ -6,7 +6,7 @@ from petsc4py import PETSc
 def create_mesh(npoints, edges):
     dm = PETSc.DMPlex()
     dm.create()
-    dm.setChart(1, npoints+1)
+    dm.setChart(0, npoints)
     for start, stops in edges.items():
         dm.setConeSize(start, len(stops))
     dm.setUp()
