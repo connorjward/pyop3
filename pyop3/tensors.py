@@ -18,10 +18,10 @@ from pyop3.utils import as_tuple, checked_zip, Tree, NameGenerator
 
 # TODO could this be renamed a 'plex'? I suppose that also implies connectivity.
 class Dim(pytools.ImmutableRecord):
-    fields = {"sizes", "permutation", "name"}
+    fields = {"sizes", "permutation", "offset", "name"}
     name_generator = NameGenerator("dim")
 
-    def __init__(self, sizes, *, permutation=None, name=None):
+    def __init__(self, sizes, *, permutation=None, offset=0, name=None):
         if not isinstance(sizes, collections.abc.Sequence):
             sizes = (sizes,)
         if not name:
@@ -29,6 +29,7 @@ class Dim(pytools.ImmutableRecord):
 
         self.sizes = sizes
         self.permutation = permutation
+        self.offset = offset
         self.name = name
         super().__init__()
 

@@ -62,7 +62,7 @@ def read_tensor(tensor, imap):
     # assume a flat tensor for now
     assert not tensor.dim.get_children(tensor.dim.root)
 
-    ptr = imap[tensor.dim.root]
+    ptr = imap[tensor.dim.root] - tensor.dim.root.offset
     return tensor.data[ptr]
 
 
@@ -516,15 +516,72 @@ def compute_double_loop_ragged():
 
 def compute_double_loop_ragged_mixed():
     # I don't think this is possible - the nnz array needs to be as big as the outer index.
-    # root = Dim((5, 4))
-    # nnz_data = np.array([3, 2, 1, 3, 2], dtype=np.int32)
-    # nnz = Tensor(Tree(root), data=nnz_data, name="nnz", dtype=np.int32)
-    # subdims = [Dim(nnz), Dim(2)]
-    # dims = Tree.from_nest([
-    #     root,
-    #     [subdim]
-    # ])
-    ...
+    root = Dim((4, 5, 4))
+    nnz_data = np.array([3, 2, 0, 0, 1], dtype=np.int32)
+    nnz = Tensor(Tree(root.copy(offset=4)), data=nnz_data, name="nnz", dtype=np.int32)
+    subdims = [Dim(1), Dim(nnz), Dim(2)]
+    dims = Tree.from_nest([root, subdims])
+
+    dat1 = Tensor(dims, name="dat1", data=np.arange(4+6+8, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor(dims, name="dat2", data=np.zeros(4+6+8, dtype=np.float64), dtype=np.float64)
+
+    iterset = StencilGroup([Stencil([(Slice(root, 1), Slice(subdims[1], 0))])])
+    code = lp.make_kernel(
+        "{ [i]: 0 <= i < 1 }",
+        "y[i] = x[i] + 1",
+        [lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
+        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
+        target=lp.ExecutableCTarget(),
+        name="mylocalkernel",
+        lang_version=(2018, 2),
+    )
+    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+    expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
+
+    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+
+    import time
+    cache_key = str(time.time())
+    jitmodule = JITModule(exe, cache_key)
+    dll = pyop2.compilation._compiler().get_so(jitmodule, "c")
+    fn = getattr(dll, "mykernel")
+
+    """
+  for (int32_t i0 = 4; i0 <= 8; ++i0)
+  {
+    p0 = nnz[map0[i0] + -4];
+    for (int32_t i1 = 0; i1 <= -1 + p0; ++i1)
+    {
+      t1[0] = 0.0;
+      t0[0] = dat1[map1[i0] + map2[i1]];
+      mylocalkernel(&(t0[0]), &(t1[0]));
+      dat2[map3[i0] + map4[i1]] = t1[0];
+    }
+  }
+    """
+
+    # breakpoint()
+    map0 = make_offset_map(nnz.dim.root, nnz.dim)[0]
+    map1 = make_offset_map(dims.root, dims)[0]
+    # map2 = make_offset_map(subdims[0], dims)[0]
+    # FIXME
+    map2 = np.arange(3, dtype=np.int32)
+    map3 = map1.copy()
+    map4 = map2.copy()
+
+    args = [map0, nnz.data, map1, map2, dat1.data, dat2.data, map3, map4]
+    fn.argtypes = (ctypes.c_voidp,) * len(args)
+
+    fn(*(d.ctypes.data for d in args))
+
+    # root = Dim((4, 5, 4))
+    # nnz_data = np.array([3, 2, 0, 0, 1], dtype=np.int32)
+    # nnz = Tensor(Tree(root.copy(offset=4)), data=nnz_data, name="nnz", dtype=np.int32)
+    # subdims = [Dim(1), Dim(nnz), Dim(2)]
+    assert all(dat2.data[:4] == 0)
+    assert all(dat2.data[4:10] == dat1.data[4:10] + 1)
+    assert all(dat2.data[10:] == 0)
+    print("compute_double_loop_ragged PASSED")
 
 
 def compute_ragged_permuted():
@@ -615,4 +672,5 @@ if __name__ == "__main__":
     # compute_double_loop_permuted_mixed()
     # compute_double_loop_scalar()
     # compute_double_loop_ragged()
-    compute_ragged_permuted()
+    # compute_ragged_permuted()
+    compute_double_loop_ragged_mixed()
