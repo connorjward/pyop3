@@ -9,6 +9,9 @@ import pyop3.codegen
 from pyop3.tensors import *
 from pyop3.utils import Tree
 
+from petsc4py import PETSc
+PETSc.Sys.popErrorHandler()
+
 
 pyop2.compilation.set_default_compiler("gcc")
 
@@ -66,30 +69,27 @@ def read_tensor(tensor, imap):
     return tensor.data[ptr]
 
 
-def single_loop():
+def test_single_loop():
     dims = Tree(Dim(10))
     offsets = make_offset_map(dims.root, dims)
-    breakpoint()
-    pass
+    # assert False
 
 
-def double_loop():
+def test_double_loop():
     dims = Tree.from_nest([Dim(10), [Dim(3)]])
     offsets = make_offset_map(dims.root, dims)
-    breakpoint()
-    pass
+    # assert False
 
 
-def double_mixed_loop():
+def test_double_mixed_loop():
     dims = Tree.from_nest([
         Dim((10, 6)),
         [Dim(2), Dim(3)]
     ])
-    offsets = make_offset_map(dims.root, dims)
-    assert offsets == [0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 23, 26, 29, 32, 35, 38]
-    print("double_mixed_loop SUCCESS")
+    offsets = make_offset_map(dims.root, dims)[0]
+    assert all(offsets == np.array([0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 23, 26, 29, 32, 35]))
 
-def permuted_loop():
+def test_permuted_loop():
     perm = (1, 4, 0, 3, 2)  # i.e. first elem 1, then elem 4, then elem 0...
     # start = [a1, a2, a3, a4, a5]
     # resulting data layout: [a2, a5, a1, a4, a3]
@@ -101,13 +101,12 @@ def permuted_loop():
     offsets, size = make_offset_map(dims.root, dims)
     ans = np.array([5, 0, 10, 7, 2])
     assert all(offsets == ans)
-    print("permuted_loop SUCCESS")
 
 
-def ragged_loop():
+def test_ragged_loop():
     root = Dim(5)
     steps = np.array([3, 2, 1, 3, 2])
-    nnz = Tensor(Tree(root), data=steps)
+    nnz = Tensor(Tree(root), data=steps, dtype=np.int32)
     dims = Tree.from_nest([
         root,
         [Dim(nnz)]
@@ -115,14 +114,13 @@ def ragged_loop():
     offsets = make_offset_map(dims.root, dims)[0]
     ans = [0, 3, 5, 6, 9]
     assert all(offsets == ans)
-    print("ragged_loop SUCCESS")
 
 
-def read_single_dim():
+def test_read_single_dim():
     root = Dim(10)
     dims = Tree(root)
-    dat1 = Tensor(dims, name="dat1", data=np.arange(10, dtype=np.float64))
-    dat2 = Tensor(dims, name="dat2", data=np.zeros(10, dtype=np.float64))
+    dat1 = Tensor(dims, name="dat1", data=np.arange(10, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor(dims, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
 
     iterset = StencilGroup([Stencil([(Slice(root, 0),)])])
     code = lp.make_kernel(
@@ -146,8 +144,8 @@ def read_single_dim():
     fn = getattr(dll, "mykernel")
     fn.argtypes = (ctypes.c_voidp, ctypes.c_voidp, ctypes.c_voidp, ctypes.c_voidp)
 
-    map1 = make_offset_map(root, dims)
-    map2 = make_offset_map(root, dims)
+    map1 = make_offset_map(root, dims)[0]
+    map2 = make_offset_map(root, dims)[0]
 
     fn(map1.ctypes.data, dat1.data.ctypes.data, dat2.data.ctypes.data,
             map2.ctypes.data)
@@ -156,12 +154,12 @@ def read_single_dim():
     print("read_single_dim PASSED")
 
 
-def compute_double_loop():
+def test_compute_double_loop():
     root = Dim(10)
     subdim = Dim(3)
     dims = Tree.from_nest([root, [subdim]])
-    dat1 = Tensor(dims, name="dat1", data=np.arange(30, dtype=np.float64))
-    dat2 = Tensor(dims, name="dat2", data=np.zeros(30, dtype=np.float64))
+    dat1 = Tensor(dims, name="dat1", data=np.arange(30, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor(dims, name="dat2", data=np.zeros(30, dtype=np.float64), dtype=np.float64)
 
     iterset = StencilGroup([Stencil([(Slice(root, 0),)])])
     code = lp.make_kernel(
@@ -198,8 +196,8 @@ def compute_double_loop():
       }
     """
 
-    map0 = make_offset_map(root, dims)
-    map1 = make_offset_map(subdim, dims)
+    map0 = make_offset_map(root, dims)[0]
+    map1 = make_offset_map(subdim, dims)[0]
     map2 = map1.copy()
     map3 = map1.copy()
     map4 = map0.copy()
@@ -215,12 +213,12 @@ def compute_double_loop():
     print("compute_double_loop PASSED")
 
 
-def compute_double_loop_mixed():
+def test_compute_double_loop_mixed():
     root = Dim((10, 12))
     subdims = [Dim(3), Dim(2)]
     dims = Tree.from_nest([root, [*subdims]])
-    dat1 = Tensor(dims, name="dat1", data=np.arange(50, dtype=np.float64))
-    dat2 = Tensor(dims, name="dat2", data=np.zeros(50, dtype=np.float64))
+    dat1 = Tensor(dims, name="dat1", data=np.arange(50, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor(dims, name="dat2", data=np.zeros(50, dtype=np.float64), dtype=np.float64)
 
     iterset = StencilGroup([Stencil([(Slice(root, 1),)])])
     code = lp.make_kernel(
@@ -256,8 +254,8 @@ def compute_double_loop_mixed():
   }
     """
 
-    map0 = make_offset_map(root, dims)
-    map1 = make_offset_map(subdims[1], dims)
+    map0 = make_offset_map(root, dims)[0]
+    map1 = make_offset_map(subdims[1], dims)[0]
     map2 = map1.copy()
     map3 = map1.copy()
     map4 = map0.copy()
@@ -274,13 +272,13 @@ def compute_double_loop_mixed():
     print("compute_double_loop_mixed PASSED")
 
 
-def compute_double_loop_scalar():
+def test_compute_double_loop_scalar():
     """As in the temporary lives within both of the loops"""
     root = Dim((6, 4))
     subdims = [Dim(3), Dim(2)]
     dims = Tree.from_nest([root, subdims])
-    dat1 = Tensor(dims, name="dat1", data=np.arange(18+8, dtype=np.float64))
-    dat2 = Tensor(dims, name="dat2", data=np.zeros(18+8, dtype=np.float64))
+    dat1 = Tensor(dims, name="dat1", data=np.arange(18+8, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor(dims, name="dat2", data=np.zeros(18+8, dtype=np.float64), dtype=np.float64)
 
     iterset = StencilGroup([Stencil([(Slice(root, 1), Slice(subdims[1], 0))])])
     code = lp.make_kernel(
@@ -330,12 +328,12 @@ def compute_double_loop_scalar():
 
 
 
-def compute_double_loop_permuted():
+def test_compute_double_loop_permuted():
     root = Dim(6, permutation=(3, 2, 5, 0, 4, 1))
     subdim = Dim(3)
     dims = Tree.from_nest([root, [subdim]])
-    dat1 = Tensor(dims, name="dat1", data=np.arange(18, dtype=np.float64))
-    dat2 = Tensor(dims, name="dat2", data=np.zeros(18, dtype=np.float64))
+    dat1 = Tensor(dims, name="dat1", data=np.arange(18, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor(dims, name="dat2", data=np.zeros(18, dtype=np.float64), dtype=np.float64)
 
     iterset = StencilGroup([Stencil([(Slice(root, 0),)])])
     code = lp.make_kernel(
@@ -387,15 +385,14 @@ def compute_double_loop_permuted():
     fn(*(d.ctypes.data for d in args))
 
     assert all(dat2.data == dat1.data + 1)
-    print("compute_double_loop_permuted PASSED")
 
 
-def compute_double_loop_permuted_mixed():
+def test_compute_double_loop_permuted_mixed():
     root = Dim((4, 3), permutation=(3, 6, 2, 5, 0, 4, 1))
     subdims = [Dim(1), Dim(2)]
     dims = Tree.from_nest([root, subdims])
-    dat1 = Tensor(dims, name="dat1", data=np.arange(10, dtype=np.float64))
-    dat2 = Tensor(dims, name="dat2", data=np.zeros(10, dtype=np.float64))
+    dat1 = Tensor(dims, name="dat1", data=np.arange(10, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor(dims, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
 
     iterset = StencilGroup([Stencil([(Slice(root, 1),)])])
     code = lp.make_kernel(
@@ -450,7 +447,7 @@ def compute_double_loop_permuted_mixed():
     print("compute_double_loop_permuted_mixed PASSED")
 
 
-def compute_double_loop_ragged():
+def test_compute_double_loop_ragged():
     root = Dim(5)
     steps = np.array([3, 2, 1, 3, 2], dtype=np.int32)
     nnz = Tensor(Tree(root), data=steps, name="nnz", dtype=np.int32)
@@ -514,7 +511,7 @@ def compute_double_loop_ragged():
     print("compute_double_loop_ragged PASSED")
 
 
-def compute_double_loop_ragged_mixed():
+def test_compute_double_loop_ragged_mixed():
     # I don't think this is possible - the nnz array needs to be as big as the outer index.
     root = Dim((4, 5, 4))
     nnz_data = np.array([3, 2, 0, 0, 1], dtype=np.int32)
@@ -581,10 +578,10 @@ def compute_double_loop_ragged_mixed():
     assert all(dat2.data[:4] == 0)
     assert all(dat2.data[4:10] == dat1.data[4:10] + 1)
     assert all(dat2.data[10:] == 0)
-    print("compute_double_loop_ragged PASSED")
+    print("compute_double_loop_ragged_mixed PASSED")
 
 
-def compute_ragged_permuted():
+def test_compute_ragged_permuted():
     root = Dim(6, permutation=(3, 2, 5, 0, 4, 1))
     # the nnz array doesn't need to be permuted
     nnz_ = np.array([3, 2, 0, 1, 3, 2], dtype=np.int32)
@@ -652,6 +649,65 @@ def compute_ragged_permuted():
     print("compute_ragged_permuted PASSED")
 
 
+def test_subset():
+    root = Dim(6)
+    dims = Tree(root)
+
+    dat1 = Tensor(dims, name="dat1", data=np.arange(6, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor(dims, name="dat2", data=np.zeros(6, dtype=np.float64), dtype=np.float64)
+
+    subset_dim = Dim(4)
+    subset_tensor = Tensor(Tree.from_nest([subset_dim, [Dim(1)]]),
+            data=np.array([2, 3, 5, 0], dtype=np.int32), dtype=np.int32, prefix="subset")
+    subset = NonAffineMap(root, 0, subset_tensor)
+
+    iterset = StencilGroup([Stencil([(subset,)])])
+    code = lp.make_kernel(
+        "{ [i]: 0 <= i < 1 }",
+        "y[i] = x[i] + 1",
+        [lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
+        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
+        target=lp.ExecutableCTarget(),
+        name="mylocalkernel",
+        lang_version=(2018, 2),
+    )
+    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+    expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
+
+    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+
+    import time
+    cache_key = str(time.time())
+    jitmodule = JITModule(exe, cache_key)
+    dll = pyop2.compilation._compiler().get_so(jitmodule, "c")
+    fn = getattr(dll, "mykernel")
+
+    """
+    for (int32_t i1 = 0; i1 <= 3; ++i1)
+    {
+      t1[0] = 0.0;
+      i0 = subset0[map0[i1] + map1[0]];
+      t0[0] = dat1[map2[i0]];
+      mylocalkernel(&(t0[0]), &(t1[0]));
+      dat2[map3[i0]] = t1[0];
+    }
+    """
+
+    map0 = make_offset_map(subset_tensor.dim.root, subset.tensor.dim)[0]
+    map1 = np.array([0], dtype=np.int32)
+    map2 = make_offset_map(root, dims)[0]
+    map3 = map2.copy()
+
+    args = [map0, map1, subset_tensor.data, map2, dat1.data, dat2.data, map3]
+    fn.argtypes = (ctypes.c_voidp,) * len(args)
+
+    fn(*(d.ctypes.data for d in args))
+
+    assert all(dat2.data[[2, 3, 5, 0]] == dat1.data[[2, 3, 5, 0]] + 1)
+    assert all(dat2.data[[1, 4]] == 0)
+    print("test_subset PASSED")
+
+
 @dataclasses.dataclass
 class JITModule:
     code_to_compile: str
@@ -660,17 +716,18 @@ class JITModule:
 
 
 if __name__ == "__main__":
-    # single_loop()
-    # double_loop()
-    # double_mixed_loop()
-    # permuted_loop()
-    # ragged_loop()
-    # read_single_dim()
-    # compute_double_loop()
-    # compute_double_loop_mixed()
-    # compute_double_loop_permuted()
-    # compute_double_loop_permuted_mixed()
-    # compute_double_loop_scalar()
-    # compute_double_loop_ragged()
-    # compute_ragged_permuted()
-    compute_double_loop_ragged_mixed()
+    test_subset()
+    # test_single_loop()
+    # test_double_loop()
+    # test_double_mixed_loop()
+    # test_permuted_loop()
+    # test_ragged_loop()
+    # test_read_single_dim()
+    # test_compute_double_loop()
+    # test_compute_double_loop_mixed()
+    # test_compute_double_loop_permuted()
+    # test_compute_double_loop_permuted_mixed()
+    # test_compute_double_loop_scalar()
+    # test_compute_double_loop_ragged()
+    # test_compute_ragged_permuted()
+    # test_compute_double_loop_ragged_mixed()

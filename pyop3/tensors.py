@@ -410,7 +410,7 @@ class Map(FancyIndex, abc.ABC):
             name = self._name_generator.next()
 
         self.from_index = from_index
-        self.arity = arity
+        # self.arity = arity
         self.name = name
         super().__init__(dim=dim, **kwargs)
 
@@ -418,18 +418,17 @@ class Map(FancyIndex, abc.ABC):
     def index(self):
         return LoopIndex(self)
 
-    @property
-    def size(self):
-        return self.arity
+    # @property
+    # def size(self):
+    #     return self.arity
 
 
 class NonAffineMap(Index):
-    fields = Index.fields | {"from_stratum", "tensor"}
+    fields = Index.fields | {"tensor"}
 
-    def __init__(self, dim, from_stratum, to_stratum, tensor):
-        self.from_stratum = from_stratum
+    def __init__(self, dim, stratum, tensor, **kwargs):
         self.tensor = tensor
-        super().__init__(dim, to_stratum)
+        super().__init__(dim, stratum, **kwargs)
 
     @property
     def map(self):
@@ -439,6 +438,18 @@ class NonAffineMap(Index):
     def arity(self):
         dims = self.tensor.dim
         return dims.get_child(dims.root).size
+
+    @property
+    def start(self):
+        return 0
+
+    @property
+    def stop(self):
+        return self.arity
+
+    @property
+    def step(self):
+        return 1
 
 
 class AffineMap(Map):
@@ -469,6 +480,10 @@ def _(index: Slice):
 def _(index: NonAffineMap):
     # FIXME
     # This doesn't quite work - need to have indexed the map beforehand (different to offset tensors)
+    if index.within:
+        return 1
+    else:
+        raise NotImplementedError
     return index.arity  # * indexed_size_per_index_group(index.tensor.stencils...)
 
 
