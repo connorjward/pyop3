@@ -80,9 +80,9 @@ class FancyIndex(Index):
 
 
 class Slice(FancyIndex):
-    fields = FancyIndex.fields | {"start", "stop", "step"}
+    fields = FancyIndex.fields | {"start", "stop", "step", "from_dim"}
 
-    def __init__(self, dim, stratum, start=None, stop=None, step=None, within=False):
+    def __init__(self, dim, stratum, start=None, stop=None, step=None, within=False, from_dim=None):
         # start, stop, step = None, None, None
         # if len(args) == 0:
         #     pass
@@ -113,6 +113,9 @@ class Slice(FancyIndex):
 
         assert not step or step == 1
         self.step = step or 1
+        if not from_dim:
+            from_dim = Dim((self.stop-self.start)//self.step)
+        self.from_dim = from_dim
         super().__init__(dim, stratum, within)
 
     # @property
@@ -151,6 +154,7 @@ def indexed_shape(stencil):
 
 def indexed_size_per_index_group(indices):
     index, *subindices = indices
+    # breakpoint()
     if subindices:
         return index_size(index) * indexed_size_per_index_group(subindices)
     else:
@@ -385,21 +389,6 @@ def _partition_slice(slice_, dtree):
         yield 0, slice_
 
 
-def _calc_size(dtree):
-    dim = dtree.value
-
-    if isinstance(dim, MixedDim):
-        raise NotImplementedError
-
-    if isinstance(dim.size, Tensor):
-        raise NotImplementedError
-    else:
-        if dtree.is_leaf:
-            return dim.size
-        else:
-            return dim.size * _calc_size(dtree.child)
-
-
 class Map(FancyIndex, abc.ABC):
     fields = FancyIndex.fields | {"from_index", "arity", "name"}
 
@@ -483,15 +472,10 @@ def _(index: NonAffineMap):
     if index.within:
         return 1
     else:
-        raise NotImplementedError
-    return index.arity  # * indexed_size_per_index_group(index.tensor.stencils...)
-
-
-def full_dim_size(dim, dtree):
-    if child := dtree.get_child(dim):
-        return dim.size * full_dim_size(child, dtree)
-    else:
-        return dim.size
+        stencil, = index.tensor.stencils
+        indices, = stencil
+        from_index, _ = indices
+        return index.arity * indexed_size_per_index_group([from_index])
 
 
 class Section:

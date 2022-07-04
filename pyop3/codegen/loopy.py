@@ -20,7 +20,7 @@ from pyop3 import utils
 from pyop3.utils import MultiNameGenerator, NameGenerator
 from pyop3.utils import CustomTuple, checked_zip, NameGenerator
 from pyop3.tensors import Tensor, Index, Map, Dim, UniformDim, MixedDim, NonAffineMap
-from pyop3.tensors import Slice, indexed_shape, indexed_size_per_index_group, AffineMap, Stencil, StencilGroup, full_dim_size
+from pyop3.tensors import Slice, indexed_shape, indexed_size_per_index_group, AffineMap, Stencil, StencilGroup
 from pyop3.codegen.tlang import to_tlang
 
 LOOPY_TARGET = lp.ExecutableCTarget()
@@ -73,7 +73,6 @@ class LoopyKernelBuilder:
             name="mykernel",
         )
         tu = lp.merge((translation_unit, *self.subkernels))
-        # breakpoint()
         return tu.with_entrypoints("mykernel")
 
     @functools.singledispatchmethod
@@ -88,32 +87,39 @@ class LoopyKernelBuilder:
 
         within_loops = {}
         for index in indices:
-            iname = self._namer.next("i")
+            if isinstance(index, Slice):
+                local_iname = self._namer.next("i")
+                global_iname = self._namer.next("j")
+                within_loops[index.dim] = local_iname, global_iname
+            elif isinstance(index, NonAffineMap):
+                raise NotImplementedError
+                temporary = Tensor((), name=global_iname, dtype=np.int32)
+                indexed = self._index_the_map(index.tensor, within_loops)
+                mapassignment = tlang.Read(indexed, temporary)
+
+                within_loops = self._make_instruction_context(mapassignment, within_loops.copy())
+                within_loops[index.dim] = global_iname
+                stop = index.stop
+            else:
+                raise AssertionError
+
             if isinstance(index, Slice) and not index.stop:
                 stop = index.dim.sizes[index.stratum]
             elif isinstance(index.stop, Tensor):
+                raise NotImplementedError
                 temporary_name = self._namer.next("p")
                 temporary = Tensor((), name=temporary_name, dtype=np.int32)
-                indexed, within_loops = self._index_the_map(index.stop, within_loops)
+                indexed = self._index_the_map(index.stop, within_loops)
                 mapassignment = tlang.Read(indexed, temporary)
-                self._make_instruction_context(mapassignment, within_loops)
+                within_loops = self._make_instruction_context(mapassignment, within_loops)
                 stop = temporary_name
             else:
                 stop = index.stop
 
-            if isinstance(index, NonAffineMap):
-                temporary = Tensor((), name=iname, dtype=np.int32)
-                indexed, within_loops = self._index_the_map(index.tensor, within_loops)
-                mapassignment = tlang.Read(indexed, temporary)
-                self._make_instruction_context(mapassignment, within_loops)
-                stop = index.stop
-                within_loops[index.dim] = iname, False
-            else:
-                within_loops[index.dim] = iname, True
-                self.domains.append(self._make_domain(iname, index.start, stop, index.step))
+            self.domains.append(self._make_domain(local_iname, index.start, stop, index.step))
 
         for stmt in expr.statements:
-            self._build(stmt, within_loops)
+            self._build(stmt, within_loops.copy())
 
     @_build.register
     def _(self, insn: tlang.Instruction, within_loops):
@@ -127,6 +133,7 @@ class LoopyKernelBuilder:
 
     @_make_instruction_context.register
     def _(self, call: tlang.FunctionCall, within_loops):
+        # breakpoint()
         subarrayrefs = {}
         for temp in utils.unique(itertools.chain(call.reads, call.writes)):
             iname = self._namer.next("i")
@@ -141,7 +148,7 @@ class LoopyKernelBuilder:
             tuple(reads),
         )
 
-        within_inames = frozenset({iname for iname, exists in within_loops.values() if exists})
+        within_inames = frozenset({iname for iname, _ in within_loops.values()})
 
         kernel_data = [lp.TemporaryVariable(temp.name, shape=(temp.dim.size,)) for temp in subarrayrefs]
 
@@ -161,67 +168,81 @@ class LoopyKernelBuilder:
 
     @_make_instruction_context.register
     def _(self, assignment: tlang.Assignment, within_loops):
+        # breakpoint()
+        within_loops = within_loops.copy()
         for stencil in assignment.tensor.stencils:
             local_offset = 0  # FIXME
             for indices in stencil:
                 # breakpoint()
-                within_inames = frozenset({iname for iname, exists in within_loops.values() if exists})
                 local_offset = 0
                 global_offset = 0
                 current_dim = assignment.tensor.dim.root
                 for i, index in enumerate(indices):
-                    # breakpoint()
-                    # sanity checking
-                    ismap = isinstance(index, NonAffineMap)
-                    # if isinstance(index, NonAffineMap):
-                    #     assert index.tensor.dim.root == current_dim
-                    # else:
                     assert index.dim == current_dim
-                    try:
-                        if ismap:
-                            dom_iname = within_loops[index.tensor.dim.root][0]
-                            real_iname = within_loops[index.dim][0]
-                        else:
-                            dom_iname = within_loops[index.dim][0]
-                            real_iname = dom_iname
-                    except KeyError:
-                        dom_iname = self._namer.next("i")
-                        if isinstance(index, NonAffineMap):
-                            real_iname = self._namer.next("i")
-                            start = 0
-                            stop = index.arity
-                            step = 1
-                        else:
-                            real_iname = dom_iname
-                            start = index.start
-                            stop = index.stop
-                            step = index.step
-                        self.domains.append(self._make_domain(dom_iname, start, stop, step))
 
+
+                    if isinstance(index, Slice):
+                        # it is possible to have a dim in within_loops but not be index.within
+                        # if, for example, we have a map mapping onto the same dim.
+                        if index.dim in within_loops and index.within:
+                            local_iname, global_iname = within_loops[index.dim]
+                        else:
+                            assert not index.within
+                            local_iname = self._namer.next("i")
+                            global_iname = self._namer.next("j")
+                            self.domains.append(self._make_domain(local_iname, 0, index.stop, 1))
+
+                        within_inames = frozenset({iname for iname, _ in within_loops.values()})
+                        insn = lp.Assignment(
+                                pym.var(global_iname), pym.var(local_iname)*index.step + index.start,
+                                id=self._namer.next(f"{assignment.id}_"),
+                                within_inames=within_inames,
+                                depends_on=frozenset({f"{dep}*" for dep in assignment.depends_on}))
+                        self.instructions.append(insn)
+                        self.kernel_data.append(lp.TemporaryVariable(
+                            name=global_iname, shape=(), dtype=np.int32))
+                    elif isinstance(index, NonAffineMap):
+                        mapdim = index.tensor.dim.root
+                        while child := index.tensor.dim.get_child(mapdim):
+                            mapdim = child
+
+                        # it is possible to have a dim in within_loops but not be index.within
+                        # if, for example, we have a map mapping onto the same dim.
+                        if mapdim in within_loops and index.within:
+                            raise NotImplementedError
+                            local_iname, global_iname = within_loops[mapdim]
+                        else:
+                            assert not index.within
+                            local_iname = self._namer.next("i")
+                            global_iname = self._namer.next("j")
+                            global_iname_ = self._namer.next("j")
+                            self.domains.append(self._make_domain(local_iname, 0, index.stop, 1))
+                            within_loops[mapdim] = local_iname, global_iname_
+
+                        temporary = Tensor((), name=global_iname, dtype=np.int32)
+                        indexed = self._index_the_map(index.tensor, within_loops)
+                        mapassignment = tlang.Read(indexed, temporary)
+                        self._make_instruction_context(mapassignment, within_loops)
+                    else:
+                        raise NotImplementedError
 
                     # only index temporaries by 'inner' loops
-                    # FIXME ismap might be wrong
-                    if index.dim not in within_loops:
-                        new_map_name = self._namer.next("map")
-                        local_offset += pym.subscript(pym.var(new_map_name), pym.var(dom_iname))
-                        self.kernel_data.append(lp.GlobalArg(new_map_name, shape=None, dtype=np.int32))
+                    if not index.within:
+                        # new_map_name = self._namer.next("map")
+                        # local_offset += pym.subscript(pym.var(new_map_name), pym.var(local_iname))
+                        # self.kernel_data.append(lp.GlobalArg(new_map_name, shape=None, dtype=np.int32))
+                        local_offset += pym.var(local_iname)
 
                     # add a map for every index/dim that does index -> offset
                     if not isinstance(assignment, tlang.Zero):
+                        # breakpoint()
                         new_map_name = self._namer.next("map")
-                        global_offset += pym.subscript(pym.var(new_map_name), pym.var(real_iname))
+                        global_offset += pym.subscript(pym.var(new_map_name), pym.var(global_iname))
                         # this allows for ragged+mixed
                         global_offset -= current_dim.offset
                         self.kernel_data.append(lp.GlobalArg(new_map_name, shape=None, dtype=np.int32))
 
-                    if isinstance(index, NonAffineMap) and index.dim not in within_loops:
-                        temporary = Tensor((), name=real_iname, dtype=np.int32)
-                        indexed, within_loops = self._index_the_map(index.tensor, within_loops)
-                        mapassignment = tlang.Read(indexed, temporary)
-                        self._make_instruction_context(mapassignment, within_loops)
-
-                    within_inames |= {dom_iname}
-
+                    # sanity checks
                     if children := assignment.tensor.dim.get_children(current_dim):
                         current_dim = children[index.stratum]
                     else:
@@ -229,6 +250,7 @@ class LoopyKernelBuilder:
                         assert i == len(indices) - 1
 
                 assignee, expression = resolve(assignment, global_offset, 0, local_offset)
+                within_inames = frozenset({iname for iname, _ in within_loops.values()})
 
                 assign_insn = lp.Assignment(
                         assignee, expression,
@@ -253,26 +275,24 @@ class LoopyKernelBuilder:
             lp.TemporaryVariable(assignment.temporary.name, shape=temp_shape)
         ]
 
+        return within_loops.copy()
+
 
     def _index_the_map(self, tensor, within_loops):
         """
             Traverse the tensor dim tree and create new indices/loops as required to get
             it down to a scalar.
         """
-        within_loops = within_loops.copy()
         indices = []
         dim = tensor.dim.root
         while dim:
-            if dim not in within_loops:
-                iname = self._namer.next("i")
-                self.domains.append(self._make_domain(iname, 0, dim.size, 1))
-                within_loops[dim] = iname, True
-            index = Slice(dim, 0, 0, dim.size, 1)
+            within = dim in within_loops
+            index = Slice(dim, 0, 0, dim.size, 1, within=within, from_dim="mydimthing")
             indices.append(index)
             dim = tensor.dim.get_child(dim)
         indices = tuple(indices)
         stencils = StencilGroup([Stencil([indices])])
-        return tensor.copy(stencils=stencils), within_loops
+        return tensor.copy(stencils=stencils)
 
     @staticmethod
     def _make_domain(iname, start, stop, step):

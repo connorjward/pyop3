@@ -708,6 +708,73 @@ def test_subset():
     print("test_subset PASSED")
 
 
+def test_map():
+    root = Dim(5)
+    dims = Tree(root)
+
+    dat1 = Tensor(dims, name="dat1", data=np.arange(5, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor(dims, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
+
+    map_tensor = Tensor(Tree.from_nest([root, [Dim(2)]]),
+            data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32), dtype=np.int32, prefix="imap")
+    code = lp.make_kernel(
+        "{ [i]: 0 <= i < 2 }",
+        "y[0] = y[0] + x[i]",
+        [lp.GlobalArg("x", np.float64, (2,), is_input=True, is_output=False),
+        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
+        target=lp.ExecutableCTarget(),
+        name="mylocalkernel",
+        lang_version=(2018, 2),
+    )
+    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+
+    slice = Slice(root, 0)
+    i1 = pyop3.index(StencilGroup([Stencil([(slice,)])]))
+    map = NonAffineMap(root, 0, map_tensor[i1])
+    i2 = StencilGroup([Stencil([(map,)])])
+    expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
+
+    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+
+    import time
+    cache_key = str(time.time())
+    jitmodule = JITModule(exe, cache_key)
+    dll = pyop2.compilation._compiler().get_so(jitmodule, "c")
+    fn = getattr(dll, "mykernel")
+
+    """
+  for (int32_t i0 = 0; i0 <= 4; ++i0)
+  {
+    t1[0] = 0.0;
+    j0 = i0;
+    for (int32_t i1 = 0; i1 <= 1; ++i1)
+    {
+      j2 = i1;
+      j0 = i0;
+      j1 = imap0[map0[j0] + map1[j2]];
+      t0[i1] = dat1[map2[j1]];
+    }
+    mylocalkernel(&(t0[0]), &(t1[0]));
+    j0 = i0;
+    dat2[map3[j0]] = t1[0];
+  }
+    """
+
+    map0 = make_offset_map(map_tensor.dim.root, map_tensor.dim)[0]
+    map1 = make_offset_map(map_tensor.dim.get_child(map_tensor.dim.root), map_tensor.dim)[0]
+    map2 = make_offset_map(root, dims)[0]
+    map3 = map2.copy()
+
+    args = [map0, map1, map_tensor.data, map2, dat1.data, dat2.data, map3]
+    fn.argtypes = (ctypes.c_voidp,) * len(args)
+
+    fn(*(d.ctypes.data for d in args))
+
+    # from [1, 2, 0, 2, 0, 1, 3, 4, 2, 1]
+    assert all(dat2.data == np.array([1+2, 0+2, 0+1, 3+4, 2+1], dtype=np.int32))
+    print("test_map PASSED")
+
+
 @dataclasses.dataclass
 class JITModule:
     code_to_compile: str
@@ -716,7 +783,8 @@ class JITModule:
 
 
 if __name__ == "__main__":
-    test_subset()
+    # test_subset()
+    test_map()
     # test_single_loop()
     # test_double_loop()
     # test_double_mixed_loop()
