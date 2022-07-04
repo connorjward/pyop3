@@ -80,7 +80,7 @@ class FancyIndex(Index):
 
 
 class Slice(FancyIndex):
-    fields = FancyIndex.fields | {"start", "stop", "step", "from_dim"}
+    fields = FancyIndex.fields | {"start", "stop", "step"}
 
     def __init__(self, dim, stratum, start=None, stop=None, step=None, within=False, from_dim=None):
         # start, stop, step = None, None, None
@@ -113,9 +113,6 @@ class Slice(FancyIndex):
 
         assert not step or step == 1
         self.step = step or 1
-        if not from_dim:
-            from_dim = Dim((self.stop-self.start)//self.step)
-        self.from_dim = from_dim
         super().__init__(dim, stratum, within)
 
     # @property

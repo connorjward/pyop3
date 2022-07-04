@@ -588,7 +588,6 @@ def test_compute_double_loop_ragged():
 
 
 def test_compute_double_loop_ragged_mixed():
-    # I don't think this is possible - the nnz array needs to be as big as the outer index.
     root = Dim((4, 5, 4))
     nnz_data = np.array([3, 2, 0, 0, 1], dtype=np.int32)
     nnz = Tensor(Tree(root.copy(offset=4)), data=nnz_data, name="nnz", dtype=np.int32)

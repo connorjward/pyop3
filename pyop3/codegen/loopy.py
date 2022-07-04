@@ -107,25 +107,25 @@ class LoopyKernelBuilder:
                 within_loops_[mapdim] = local_iname, global_iname_
                 self._make_instruction_context(mapassignment, within_loops_)
                 within_loops[index.dim] = local_iname, global_iname
-
-                stop = index.stop
             else:
                 raise AssertionError
 
-            if isinstance(index, Slice) and not index.stop:
-                stop = index.dim.sizes[index.stratum]
-            elif isinstance(index.stop, Tensor):
-                raise NotImplementedError
-                temporary_name = self._namer.next("p")
-                temporary = Tensor((), name=temporary_name, dtype=np.int32)
-                indexed = self._index_the_map(index.stop, within_loops)
-                mapassignment = tlang.Read(indexed, temporary)
-                within_loops = self._make_instruction_context(mapassignment, within_loops)
-                stop = temporary_name
+            if isinstance(index, Slice):
+                if isinstance(index.stop, Tensor):
+                    temporary_name = self._namer.next("p")
+                    temporary = Tensor((), name=temporary_name, dtype=np.int32)
+                    indexed = self._index_the_map(index.stop, within_loops)
+                    mapassignment = tlang.Read(indexed, temporary)
+                    self._make_instruction_context(mapassignment, within_loops)
+                    size = temporary_name
+                else:
+                    size = (index.stop-index.start)//index.step
+            elif isinstance(index, NonAffineMap):
+                size = index.arity
             else:
-                stop = index.stop
+                raise AssertionError
 
-            self.domains.append(self._make_domain(local_iname, 0, (index.stop-index.start)//index.step, 1))
+            self.domains.append(self._make_domain(local_iname, 0, size, 1))
 
         for stmt in expr.statements:
             self._build(stmt, within_loops.copy())
@@ -181,6 +181,7 @@ class LoopyKernelBuilder:
         within_loops = within_loops.copy()
         for stencil in assignment.tensor.stencils:
             local_offset = 0  # FIXME
+            within_inames = set()
             for indices in stencil:
                 # breakpoint()
                 local_offset = 0
@@ -200,12 +201,13 @@ class LoopyKernelBuilder:
                             local_iname = self._namer.next("i")
                             global_iname = self._namer.next("j")
                             self.domains.append(self._make_domain(local_iname, 0, index.stop, 1))
+                            within_loops[index.dim] = local_iname, global_iname
 
-                        within_inames = frozenset({iname for iname, _ in within_loops.values()})
+                        within_inames.add(within_loops[index.dim][0])
                         insn = lp.Assignment(
                                 pym.var(global_iname), pym.var(local_iname)*index.step + index.start,
                                 id=self._namer.next(f"{assignment.id}_"),
-                                within_inames=within_inames,
+                                within_inames=frozenset(within_inames),
                                 depends_on=frozenset({f"{dep}*" for dep in assignment.depends_on}))
                         self.instructions.append(insn)
                         self.kernel_data.append(lp.TemporaryVariable(
@@ -260,12 +262,10 @@ class LoopyKernelBuilder:
                         assert i == len(indices) - 1
 
                 assignee, expression = resolve(assignment, global_offset, 0, local_offset)
-                within_inames = frozenset({iname for iname, _ in within_loops.values()})
-
                 assign_insn = lp.Assignment(
                         assignee, expression,
                         id=self._namer.next(f"{assignment.id}_"),
-                        within_inames=within_inames,
+                        within_inames=frozenset(within_inames),
                         depends_on=frozenset({f"{dep}*" for dep in assignment.depends_on}))
                 self.instructions.append(assign_insn)
 
@@ -295,12 +295,21 @@ class LoopyKernelBuilder:
         dim = tensor.dim.root
         while dim:
             within = dim in within_loops
-            index = Slice(dim, 0, 0, dim.size, 1, within=within, from_dim="mydimthing")
+            stratum = self.get_stratum(dim)
+            index = Slice(dim, stratum, 0, dim.sizes[stratum], 1, within=within)
             indices.append(index)
             dim = tensor.dim.get_child(dim)
         indices = tuple(indices)
         stencils = StencilGroup([Stencil([indices])])
         return tensor.copy(stencils=stencils)
+
+    def get_stratum(self, dim):
+        ptr = 0
+        for i, size in enumerate(dim.sizes):
+            if dim.offset == ptr:
+                return i
+            ptr += size
+            
 
     @staticmethod
     def _make_domain(iname, start, stop, step):
