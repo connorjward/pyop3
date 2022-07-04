@@ -23,7 +23,7 @@ from pyop3.tensors import Tensor, Index, Map, Dim, UniformDim, MixedDim, NonAffi
 from pyop3.tensors import Slice, indexed_shape, indexed_size_per_index_group, AffineMap, Stencil, StencilGroup
 from pyop3.codegen.tlang import to_tlang
 
-LOOPY_TARGET = lp.ExecutableCTarget()
+LOOPY_TARGET = lp.CTarget()
 LOOPY_LANG_VERSION = (2018, 2)
 
 
@@ -92,13 +92,22 @@ class LoopyKernelBuilder:
                 global_iname = self._namer.next("j")
                 within_loops[index.dim] = local_iname, global_iname
             elif isinstance(index, NonAffineMap):
-                raise NotImplementedError
+                local_iname = self._namer.next("i")
+                global_iname = self._namer.next("j")
+                global_iname_ = self._namer.next("j")
+
                 temporary = Tensor((), name=global_iname, dtype=np.int32)
                 indexed = self._index_the_map(index.tensor, within_loops)
                 mapassignment = tlang.Read(indexed, temporary)
 
-                within_loops = self._make_instruction_context(mapassignment, within_loops.copy())
-                within_loops[index.dim] = global_iname
+                within_loops_ = within_loops.copy()
+                mapdim = index.tensor.dim.root
+                while child := index.tensor.dim.get_child(mapdim):
+                    mapdim = child
+                within_loops_[mapdim] = local_iname, global_iname_
+                self._make_instruction_context(mapassignment, within_loops_)
+                within_loops[index.dim] = local_iname, global_iname
+
                 stop = index.stop
             else:
                 raise AssertionError
@@ -116,7 +125,7 @@ class LoopyKernelBuilder:
             else:
                 stop = index.stop
 
-            self.domains.append(self._make_domain(local_iname, index.start, stop, index.step))
+            self.domains.append(self._make_domain(local_iname, 0, (index.stop-index.start)//index.step, 1))
 
         for stmt in expr.statements:
             self._build(stmt, within_loops.copy())
@@ -212,26 +221,27 @@ class LoopyKernelBuilder:
                             raise NotImplementedError
                             local_iname, global_iname = within_loops[mapdim]
                         else:
-                            assert not index.within
-                            local_iname = self._namer.next("i")
-                            global_iname = self._namer.next("j")
-                            global_iname_ = self._namer.next("j")
-                            self.domains.append(self._make_domain(local_iname, 0, index.stop, 1))
-                            within_loops[mapdim] = local_iname, global_iname_
+                            if index.within:
+                                local_iname, global_iname = within_loops[index.dim]
+                            else:
+                                local_iname = self._namer.next("i")
+                                global_iname = self._namer.next("j")
+                                global_iname_ = self._namer.next("j")
+                                self.domains.append(self._make_domain(local_iname, 0, index.stop, 1))
+                                within_loops[mapdim] = local_iname, global_iname_
 
-                        temporary = Tensor((), name=global_iname, dtype=np.int32)
-                        indexed = self._index_the_map(index.tensor, within_loops)
-                        mapassignment = tlang.Read(indexed, temporary)
-                        self._make_instruction_context(mapassignment, within_loops)
+                                temporary = Tensor((), name=global_iname, dtype=np.int32)
+                                indexed = self._index_the_map(index.tensor, within_loops)
+                                mapassignment = tlang.Read(indexed, temporary)
+                                self._make_instruction_context(mapassignment, within_loops)
                     else:
                         raise NotImplementedError
 
                     # only index temporaries by 'inner' loops
                     if not index.within:
-                        # new_map_name = self._namer.next("map")
-                        # local_offset += pym.subscript(pym.var(new_map_name), pym.var(local_iname))
-                        # self.kernel_data.append(lp.GlobalArg(new_map_name, shape=None, dtype=np.int32))
-                        local_offset += pym.var(local_iname)
+                        new_map_name = self._namer.next("map")
+                        local_offset += pym.subscript(pym.var(new_map_name), pym.var(local_iname))
+                        self.kernel_data.append(lp.GlobalArg(new_map_name, shape=None, dtype=np.int32))
 
                     # add a map for every index/dim that does index -> offset
                     if not isinstance(assignment, tlang.Zero):
@@ -274,8 +284,6 @@ class LoopyKernelBuilder:
 
             lp.TemporaryVariable(assignment.temporary.name, shape=temp_shape)
         ]
-
-        return within_loops.copy()
 
 
     def _index_the_map(self, tensor, within_loops):

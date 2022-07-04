@@ -426,7 +426,10 @@ class NonAffineMap(Index):
     @property
     def arity(self):
         dims = self.tensor.dim
-        return dims.get_child(dims.root).size
+        if child := dims.get_child(dims.root):
+            return child.size
+        else:
+            return 1
 
     @property
     def start(self):

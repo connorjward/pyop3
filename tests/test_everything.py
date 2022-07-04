@@ -1,19 +1,78 @@
+import copy
+import time
+import subprocess
+import os
+from hashlib import md5
 import ctypes
 import loopy as lp
 import dataclasses
 import numpy as np
-import pyop2.compilation
 
 import pyop3
 import pyop3.codegen
 from pyop3.tensors import *
 from pyop3.utils import Tree
 
-from petsc4py import PETSc
-PETSc.Sys.popErrorHandler()
 
+def compilemythings(jitmodule):
+        """Build a shared library and load it
 
-pyop2.compilation.set_default_compiler("gcc")
+        :arg jitmodule: The JIT Module which can generate the code to compile.
+        :arg extension: extension of the source file (c, cpp).
+        Returns a :class:`ctypes.CDLL` object of the resulting shared
+        library."""
+
+        compiler = "gcc"
+        compiler_flags = ("-fPIC", "-Wall", "-std=gnu11","-shared","-O0", "-g")
+
+        extension="c"
+
+        # Determine cache key
+        hsh = md5(str(jitmodule.cache_key).encode())
+
+        basename = hsh.hexdigest()
+
+        cachedir = "mycachedir"
+        dirpart, basename = basename[:2], basename[2:]
+        cachedir = os.path.join(cachedir, dirpart)
+        pid = os.getpid()
+        cname = os.path.join(cachedir, "%s_p%d.%s" % (basename, pid, extension))
+        oname = os.path.join(cachedir, "%s_p%d.o" % (basename, pid))
+        soname = os.path.join(cachedir, "%s.so" % basename)
+        # Link into temporary file, then rename to shared library
+        # atomically (avoiding races).
+        tmpname = os.path.join(cachedir, "%s_p%d.so.tmp" % (basename, pid))
+
+        try:
+            # Are we in the cache?
+            return ctypes.CDLL(soname)
+        except OSError:
+            # No need to do this on all ranks
+            os.makedirs(cachedir, exist_ok=True)
+            logfile = os.path.join(cachedir, "%s_p%d.log" % (basename, pid))
+            errfile = os.path.join(cachedir, "%s_p%d.err" % (basename, pid))
+            with open(cname, "w") as f:
+                f.write(jitmodule.code_to_compile)
+            # Compiler also links
+            cc = (compiler,) \
+                + compiler_flags \
+                + ('-o', tmpname, cname)
+            with open(logfile, "w") as log, open(errfile, "w") as err:
+                log.write("Compilation command:\n")
+                log.write(" ".join(cc))
+                log.write("\n\n")
+                try:
+                    subprocess.check_call(cc, stderr=err, stdout=log)
+                except subprocess.CalledProcessError as e:
+                    raise CompilationError(
+                        """Command "%s" return error status %d.
+Unable to compile code
+Compile log in %s
+Compile errors in %s""" % (e.cmd, e.returncode, logfile, errfile))
+            # Atomically ensure soname exists
+            os.rename(tmpname, soname)
+            # Load resulting library
+            return ctypes.CDLL(soname)
 
 
 def make_offset_map(dim, dtree, points=None, imap=None):
@@ -128,7 +187,7 @@ def test_read_single_dim():
         "y[i] = x[i] + 1",
         [lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
         lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
-        target=lp.ExecutableCTarget(),
+        target=lp.CTarget(),
         name="mylocalkernel",
         lang_version=(2018, 2),
     )
@@ -140,7 +199,7 @@ def test_read_single_dim():
     import time
     cache_key = str(time.time())
     jitmodule = JITModule(exe, cache_key)
-    dll = pyop2.compilation._compiler().get_so(jitmodule, "c")
+    dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
     fn.argtypes = (ctypes.c_voidp, ctypes.c_voidp, ctypes.c_voidp, ctypes.c_voidp)
 
@@ -151,10 +210,11 @@ def test_read_single_dim():
             map2.ctypes.data)
 
     assert all(dat2.data == dat1.data + 1)
-    print("read_single_dim PASSED")
+    print("read_single_dim PASSED", flush=True)
 
 
 def test_compute_double_loop():
+    print("compute_double_loop START", flush=True)
     root = Dim(10)
     subdim = Dim(3)
     dims = Tree.from_nest([root, [subdim]])
@@ -167,7 +227,7 @@ def test_compute_double_loop():
         "y[i] = x[i] + 1",
         [lp.GlobalArg("x", np.float64, (3,), is_input=True, is_output=False),
         lp.GlobalArg("y", np.float64, (3,), is_input=False, is_output=True),],
-        target=lp.ExecutableCTarget(),
+        target=lp.CTarget(),
         name="mylocalkernel",
         lang_version=(2018, 2),
     )
@@ -179,7 +239,7 @@ def test_compute_double_loop():
     import time
     cache_key = str(time.time())
     jitmodule = JITModule(exe, cache_key)
-    dll = pyop2.compilation._compiler().get_so(jitmodule, "c")
+    dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
     # sig: ???
 
@@ -210,15 +270,16 @@ def test_compute_double_loop():
     fn(*(d.ctypes.data for d in args))
 
     assert all(dat2.data == dat1.data + 1)
-    print("compute_double_loop PASSED")
+    print("compute_double_loop PASSED", flush=True)
 
 
 def test_compute_double_loop_mixed():
+    print("compute_double_loop_mixed START", flush=True)
     root = Dim((10, 12))
     subdims = [Dim(3), Dim(2)]
     dims = Tree.from_nest([root, [*subdims]])
-    dat1 = Tensor(dims, name="dat1", data=np.arange(50, dtype=np.float64), dtype=np.float64)
-    dat2 = Tensor(dims, name="dat2", data=np.zeros(50, dtype=np.float64), dtype=np.float64)
+    dat1 = Tensor(dims, name="dat1", data=np.arange(54, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor(dims, name="dat2", data=np.zeros(54, dtype=np.float64), dtype=np.float64)
 
     iterset = StencilGroup([Stencil([(Slice(root, 1),)])])
     code = lp.make_kernel(
@@ -226,7 +287,7 @@ def test_compute_double_loop_mixed():
         "y[i] = x[i] + 1",
         [lp.GlobalArg("x", np.float64, (2,), is_input=True, is_output=False),
         lp.GlobalArg("y", np.float64, (2,), is_input=False, is_output=True),],
-        target=lp.ExecutableCTarget(),
+        target=lp.CTarget(),
         name="mylocalkernel",
         lang_version=(2018, 2),
     )
@@ -234,45 +295,59 @@ def test_compute_double_loop_mixed():
     expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+    # breakpoint()
 
-    import time
     cache_key = str(time.time())
     jitmodule = JITModule(exe, cache_key)
-    dll = pyop2.compilation._compiler().get_so(jitmodule, "c")
+    dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
     """
-  for (int32_t i0 = 10; i0 <= 21; ++i0)
+  for (int32_t i0 = 0; i0 <= 11; ++i0)
   {
+    j0 = i0 + 10l;
     for (int32_t i2 = 0; i2 <= 1; ++i2)
+    {
       t1[map3[i2]] = 0.0;
+    }
     for (int32_t i1 = 0; i1 <= 1; ++i1)
-      t0[map1[i1]] = dat1[map0[i0] + map2[i1]];
+    {
+      j1 = i1;
+      t0[map1[i1]] = dat1[map0[j0] + map2[j1]];
+    }
     mylocalkernel(&(t0[0]), &(t1[0]));
     for (int32_t i5 = 0; i5 <= 1; ++i5)
-      dat2[map4[i0] + map6[i5]] = t1[map5[i5]];
+    {
+      j3 = i5;
+      dat2[map4[j0] + map6[j3]] = t1[map5[i5]];
+    }
   }
     """
 
     map0 = make_offset_map(root, dims)[0]
-    map1 = make_offset_map(subdims[1], dims)[0]
-    map2 = map1.copy()
-    map3 = map1.copy()
-    map4 = map0.copy()
-    map5 = map1.copy()
-    map6 = map1.copy()
+    map1 = np.arange(2, dtype=np.int32)
+    map2 = make_offset_map(subdims[1], dims)[0]
+    map3 = np.arange(2, dtype=np.int32)  # map1.copy()
+    map4 = make_offset_map(root, dims)[0]  # copy.deepcopy(map0)
+    map5 = np.arange(2, dtype=np.int32)  # copy.deepcopy(map1)
+    map6 = make_offset_map(subdims[1], dims)[0] #copy.deepcopy(map2)
 
     args = [map0, map1, map2, dat1.data, map3, dat2.data, map4, map5, map6]
-    fn.argtypes = (ctypes.c_voidp,) * len(args)
+    # fn.argtypes = tuple(ctypes.c_voidp for i in range(len(args)))
+    fn.argtypes = [ctypes.c_voidp for i in range(len(args))]
+    # fn.argtypes = (ctypes.c_voidp,) * len(args)
+    fn.restype = ctypes.c_int
 
-    fn(*(d.ctypes.data for d in args))
+    myargs = [d.ctypes.data for d in args]
+    fn(*myargs)
 
     assert all(dat2.data[:30] == 0)
     assert all(dat2.data[30:] == dat1.data[30:] + 1)
-    print("compute_double_loop_mixed PASSED")
+    print("compute_double_loop_mixed PASSED", flush=True)
 
 
 def test_compute_double_loop_scalar():
+    print("compute_double_loop_scalar START", flush=True)
     """As in the temporary lives within both of the loops"""
     root = Dim((6, 4))
     subdims = [Dim(3), Dim(2)]
@@ -286,7 +361,7 @@ def test_compute_double_loop_scalar():
         "y[i] = x[i] + 1",
         [lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
         lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
-        target=lp.ExecutableCTarget(),
+        target=lp.CTarget(),
         name="mylocalkernel",
         lang_version=(2018, 2),
     )
@@ -298,7 +373,7 @@ def test_compute_double_loop_scalar():
     import time
     cache_key = str(time.time())
     jitmodule = JITModule(exe, cache_key)
-    dll = pyop2.compilation._compiler().get_so(jitmodule, "c")
+    dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
     """
@@ -324,11 +399,12 @@ def test_compute_double_loop_scalar():
 
     assert all(dat2.data[:18] == 0)
     assert all(dat2.data[18:] == dat1.data[18:] + 1)
-    print("compute_double_loop_scalar PASSED")
+    print("compute_double_loop_scalar PASSED", flush=True)
 
 
 
 def test_compute_double_loop_permuted():
+    print("test_compute_double_loop_permuted START", flush=True)
     root = Dim(6, permutation=(3, 2, 5, 0, 4, 1))
     subdim = Dim(3)
     dims = Tree.from_nest([root, [subdim]])
@@ -341,7 +417,7 @@ def test_compute_double_loop_permuted():
         "y[i] = x[i] + 1",
         [lp.GlobalArg("x", np.float64, (3,), is_input=True, is_output=False),
         lp.GlobalArg("y", np.float64, (3,), is_input=False, is_output=True),],
-        target=lp.ExecutableCTarget(),
+        target=lp.CTarget(),
         name="mylocalkernel",
         lang_version=(2018, 2),
     )
@@ -350,10 +426,9 @@ def test_compute_double_loop_permuted():
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
 
-    import time
     cache_key = str(time.time())
     jitmodule = JITModule(exe, cache_key)
-    dll = pyop2.compilation._compiler().get_so(jitmodule, "c")
+    dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
     """
@@ -381,13 +456,14 @@ def test_compute_double_loop_permuted():
 
     args = [map0, map1, map2, dat1.data, map3, dat2.data, map4, map5, map6]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
-
     fn(*(d.ctypes.data for d in args))
 
     assert all(dat2.data == dat1.data + 1)
+    print("test_compute_double_loop_permuted SUCCESS", flush=True)
 
 
 def test_compute_double_loop_permuted_mixed():
+    print("test_compute_double_loop_permuted_mixed START", flush=True)
     root = Dim((4, 3), permutation=(3, 6, 2, 5, 0, 4, 1))
     subdims = [Dim(1), Dim(2)]
     dims = Tree.from_nest([root, subdims])
@@ -400,7 +476,7 @@ def test_compute_double_loop_permuted_mixed():
         "y[i] = x[i] + 1",
         [lp.GlobalArg("x", np.float64, (2,), is_input=True, is_output=False),
         lp.GlobalArg("y", np.float64, (2,), is_input=False, is_output=True),],
-        target=lp.ExecutableCTarget(),
+        target=lp.CTarget(),
         name="mylocalkernel",
         lang_version=(2018, 2),
     )
@@ -412,7 +488,7 @@ def test_compute_double_loop_permuted_mixed():
     import time
     cache_key = str(time.time())
     jitmodule = JITModule(exe, cache_key)
-    dll = pyop2.compilation._compiler().get_so(jitmodule, "c")
+    dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
     """
@@ -444,7 +520,7 @@ def test_compute_double_loop_permuted_mixed():
     fn(*(d.ctypes.data for d in args))
 
     assert all(dat2.data == [0., 2., 3., 0., 5., 6., 0., 8., 9., 0.])
-    print("compute_double_loop_permuted_mixed PASSED")
+    print("compute_double_loop_permuted_mixed PASSED", flush=True)
 
 
 def test_compute_double_loop_ragged():
@@ -465,7 +541,7 @@ def test_compute_double_loop_ragged():
         "y[i] = x[i] + 1",
         [lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
         lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
-        target=lp.ExecutableCTarget(),
+        target=lp.CTarget(),
         name="mylocalkernel",
         lang_version=(2018, 2),
     )
@@ -477,7 +553,7 @@ def test_compute_double_loop_ragged():
     import time
     cache_key = str(time.time())
     jitmodule = JITModule(exe, cache_key)
-    dll = pyop2.compilation._compiler().get_so(jitmodule, "c")
+    dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
     """
@@ -508,7 +584,7 @@ def test_compute_double_loop_ragged():
     fn(*(d.ctypes.data for d in args))
 
     assert all(dat2.data == dat1.data + 1)
-    print("compute_double_loop_ragged PASSED")
+    print("compute_double_loop_ragged PASSED", flush=True)
 
 
 def test_compute_double_loop_ragged_mixed():
@@ -528,7 +604,7 @@ def test_compute_double_loop_ragged_mixed():
         "y[i] = x[i] + 1",
         [lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
         lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
-        target=lp.ExecutableCTarget(),
+        target=lp.CTarget(),
         name="mylocalkernel",
         lang_version=(2018, 2),
     )
@@ -540,7 +616,7 @@ def test_compute_double_loop_ragged_mixed():
     import time
     cache_key = str(time.time())
     jitmodule = JITModule(exe, cache_key)
-    dll = pyop2.compilation._compiler().get_so(jitmodule, "c")
+    dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
     """
@@ -578,7 +654,7 @@ def test_compute_double_loop_ragged_mixed():
     assert all(dat2.data[:4] == 0)
     assert all(dat2.data[4:10] == dat1.data[4:10] + 1)
     assert all(dat2.data[10:] == 0)
-    print("compute_double_loop_ragged_mixed PASSED")
+    print("compute_double_loop_ragged_mixed PASSED", flush=True)
 
 
 def test_compute_ragged_permuted():
@@ -598,7 +674,7 @@ def test_compute_ragged_permuted():
         "y[i] = x[i] + 1",
         [lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
         lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
-        target=lp.ExecutableCTarget(),
+        target=lp.CTarget(),
         name="mylocalkernel",
         lang_version=(2018, 2),
     )
@@ -610,7 +686,7 @@ def test_compute_ragged_permuted():
     import time
     cache_key = str(time.time())
     jitmodule = JITModule(exe, cache_key)
-    dll = pyop2.compilation._compiler().get_so(jitmodule, "c")
+    dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
     """
@@ -646,7 +722,7 @@ def test_compute_ragged_permuted():
     assert all(map1 == np.array([3, 9, 1, 0, 6, 1]))
 
     assert all(dat2.data == dat1.data + 1)
-    print("compute_ragged_permuted PASSED")
+    print("compute_ragged_permuted PASSED", flush=True)
 
 
 def test_subset():
@@ -657,7 +733,7 @@ def test_subset():
     dat2 = Tensor(dims, name="dat2", data=np.zeros(6, dtype=np.float64), dtype=np.float64)
 
     subset_dim = Dim(4)
-    subset_tensor = Tensor(Tree.from_nest([subset_dim, [Dim(1)]]),
+    subset_tensor = Tensor(Tree(subset_dim),
             data=np.array([2, 3, 5, 0], dtype=np.int32), dtype=np.int32, prefix="subset")
     subset = NonAffineMap(root, 0, subset_tensor)
 
@@ -667,7 +743,7 @@ def test_subset():
         "y[i] = x[i] + 1",
         [lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
         lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
-        target=lp.ExecutableCTarget(),
+        target=lp.CTarget(),
         name="mylocalkernel",
         lang_version=(2018, 2),
     )
@@ -679,7 +755,7 @@ def test_subset():
     import time
     cache_key = str(time.time())
     jitmodule = JITModule(exe, cache_key)
-    dll = pyop2.compilation._compiler().get_so(jitmodule, "c")
+    dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
     """
@@ -693,8 +769,8 @@ def test_subset():
     }
     """
 
-    map0 = make_offset_map(subset_tensor.dim.root, subset.tensor.dim)[0]
-    map1 = np.array([0], dtype=np.int32)
+    map0 = np.empty(1)
+    map1 = make_offset_map(subset_tensor.dim.root, subset.tensor.dim)[0]
     map2 = make_offset_map(root, dims)[0]
     map3 = map2.copy()
 
@@ -705,7 +781,7 @@ def test_subset():
 
     assert all(dat2.data[[2, 3, 5, 0]] == dat1.data[[2, 3, 5, 0]] + 1)
     assert all(dat2.data[[1, 4]] == 0)
-    print("test_subset PASSED")
+    print("test_subset PASSED", flush=True)
 
 
 def test_map():
@@ -722,7 +798,7 @@ def test_map():
         "y[0] = y[0] + x[i]",
         [lp.GlobalArg("x", np.float64, (2,), is_input=True, is_output=False),
         lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
-        target=lp.ExecutableCTarget(),
+        target=lp.CTarget(),
         name="mylocalkernel",
         lang_version=(2018, 2),
     )
@@ -736,10 +812,9 @@ def test_map():
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
 
-    import time
     cache_key = str(time.time())
     jitmodule = JITModule(exe, cache_key)
-    dll = pyop2.compilation._compiler().get_so(jitmodule, "c")
+    dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
     """
@@ -752,27 +827,29 @@ def test_map():
       j2 = i1;
       j0 = i0;
       j1 = imap0[map0[j0] + map1[j2]];
-      t0[i1] = dat1[map2[j1]];
+      t0[map2[i1]] = dat1[map3[j1]];
     }
     mylocalkernel(&(t0[0]), &(t1[0]));
     j0 = i0;
-    dat2[map3[j0]] = t1[0];
+    dat2[map4[j0]] = t1[0];
   }
     """
 
+    # import pdb; pdb.set_trace()
     map0 = make_offset_map(map_tensor.dim.root, map_tensor.dim)[0]
     map1 = make_offset_map(map_tensor.dim.get_child(map_tensor.dim.root), map_tensor.dim)[0]
-    map2 = make_offset_map(root, dims)[0]
-    map3 = map2.copy()
+    map2 = np.arange(2, dtype=np.int32)
+    map3 = make_offset_map(root, dims)[0]
+    map4 = map3.copy()
 
-    args = [map0, map1, map_tensor.data, map2, dat1.data, dat2.data, map3]
+    args = [map0, map1, map_tensor.data, map2, map3, dat1.data, dat2.data, map4]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
 
     # from [1, 2, 0, 2, 0, 1, 3, 4, 2, 1]
     assert all(dat2.data == np.array([1+2, 0+2, 0+1, 3+4, 2+1], dtype=np.int32))
-    print("test_map PASSED")
+    print("test_map PASSED", flush=True)
 
 
 @dataclasses.dataclass
@@ -784,18 +861,20 @@ class JITModule:
 
 if __name__ == "__main__":
     # test_subset()
-    test_map()
+    # test_map()
     # test_single_loop()
     # test_double_loop()
     # test_double_mixed_loop()
     # test_permuted_loop()
     # test_ragged_loop()
-    # test_read_single_dim()
-    # test_compute_double_loop()
-    # test_compute_double_loop_mixed()
+    test_read_single_dim()
+    test_compute_double_loop()
+    test_compute_double_loop_mixed()
+    # import gc; gc.collect()
     # test_compute_double_loop_permuted()
     # test_compute_double_loop_permuted_mixed()
     # test_compute_double_loop_scalar()
     # test_compute_double_loop_ragged()
     # test_compute_ragged_permuted()
     # test_compute_double_loop_ragged_mixed()
+    # mfe()
