@@ -56,12 +56,12 @@ class TensorLangKernelBuilder:
     def _(self, expr: exprs.FunctionCall):
         temporaries = {}
         for arg in expr.arguments:
-            # breakpoint()
-            size, = pytools.single_valued(
-                tensors.indexed_shape(stencil) for stencil in arg.tensor.stencils
-            )
-            dim = tensors.UniformDim(size)
-            temporaries[arg] = tensors.Tensor(dim, name=self._temp_name_generator(), dtype=arg.tensor.dtype)
+            # size, = pytools.single_valued(
+            #     tensors.indexed_shape(stencil) for stencil in arg.tensor.stencils
+            # )
+            # dim = tensors.UniformDim(size)
+            dims, stencils = self.collect_temp_bits(arg.tensor.stencils)
+            temporaries[arg] = tensors.Tensor(dims, stencils=stencils, name=self._temp_name_generator(), dtype=arg.tensor.dtype)
 
         gathers = self.make_gathers(temporaries)
         call = self.make_function_call(
@@ -71,6 +71,31 @@ class TensorLangKernelBuilder:
         scatters = self.make_scatters(temporaries, depends_on=frozenset({call.id}))
 
         return (*gathers, call, *scatters)
+
+    def collect_temp_bits(self, stencils):
+        try:
+            stencil, = stencils
+            indices, = stencil
+        except:
+            raise NotImplementedError("More thought needed")
+
+        active_dim = None
+        dims = None
+        new_indices = []
+        for index in indices:
+            if index.within:
+                size = 1
+            else:
+                size = index.size
+            new_dim = index.dim.copy(sizes=(size,))
+            if active_dim:
+                dims.add_child(active_dim, new_dim)
+            else:
+                dims = pyop3.utils.Tree(new_dim)
+            active_dim = new_dim
+
+            new_indices.append(tensors.Slice(index.dim, index.stratum, stop=size))
+        return dims, tensors.StencilGroup([tensors.Stencil([tuple(new_indices)])])
 
     def make_gathers(self, temporaries, **kwargs):
         return tuple(self.make_gather(arg, temp, **kwargs) for arg, temp in temporaries.items())

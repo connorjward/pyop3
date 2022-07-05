@@ -64,7 +64,7 @@ def compilemythings(jitmodule):
                 try:
                     subprocess.check_call(cc, stderr=err, stdout=log)
                 except subprocess.CalledProcessError as e:
-                    raise CompilationError(
+                    raise Exception(
                         """Command "%s" return error status %d.
 Unable to compile code
 Compile log in %s
@@ -201,13 +201,16 @@ def test_read_single_dim():
     jitmodule = JITModule(exe, cache_key)
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
-    fn.argtypes = (ctypes.c_voidp, ctypes.c_voidp, ctypes.c_voidp, ctypes.c_voidp)
+    # import pdb; pdb.set_trace()
 
-    map1 = make_offset_map(root, dims)[0]
-    map2 = make_offset_map(root, dims)[0]
+    sec0 = make_offset_map(root, dims)[0]
+    sec2 = make_offset_map(root, dims)[0]
+    # breakpoint()
 
-    fn(map1.ctypes.data, dat1.data.ctypes.data, dat2.data.ctypes.data,
-            map2.ctypes.data)
+    args = [sec0, dat1.data, sec0, dat2.data, sec2]
+    fn.argtypes = (ctypes.c_voidp,) * len(args)
+
+    fn(*(d.ctypes.data for d in args))
 
     assert all(dat2.data == dat1.data + 1)
     print("read_single_dim PASSED", flush=True)
@@ -867,8 +870,8 @@ if __name__ == "__main__":
     # test_permuted_loop()
     # test_ragged_loop()
     test_read_single_dim()
-    test_compute_double_loop()
-    test_compute_double_loop_mixed()
+    # test_compute_double_loop()
+    # test_compute_double_loop_mixed()
     # import gc; gc.collect()
     # test_compute_double_loop_permuted()
     # test_compute_double_loop_permuted_mixed()

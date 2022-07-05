@@ -52,6 +52,22 @@ def checked_zip(*iterables):
     return zip(*iterables)
 
 
+def rzip(*iterables):
+    if any(not isinstance(it, collections.abc.Sized) for it in iterables):
+        raise ValueError("Can only rzip with objects that have a known length")
+
+    max_length = max(len(it) for it in iterables)
+    return zip(*(pad(it, max_length, False) for it in iterables))
+
+
+def pad(iterable, length, after=True, padding_value=None):
+    missing = [padding_value] * (length - len(iterable))
+    if after:
+        return itertools.chain(iterable, missing)
+    else:
+        return itertools.chain(missing, iterable)
+
+
 class Tree(pytools.ImmutableRecord):
     fields = {"root", "children"}
 

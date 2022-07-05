@@ -41,17 +41,43 @@ class Assignment(Instruction):
 class Read(Assignment):
     prefix = "read"
 
+    @property
+    def lhs(self):
+        return self.temporary
+
+    @property
+    def rhs(self):
+        return self.tensor
+
 
 class Write(Assignment):
     prefix = "write"
 
+    @property
+    def lhs(self):
+        return self.tensor
 
-class Increment(Assignment):
+    @property
+    def rhs(self):
+        return self.temporary
+
+
+class Increment(Write):
     prefix = "inc"
 
 
 class Zero(Assignment):
     prefix = "zero"
+
+    @property
+    def lhs(self):
+        return self.temporary
+
+    # FIXME
+    @property
+    def rhs(self):
+        # return 0
+        return self.tensor
 
 
 class FunctionCall(Instruction):

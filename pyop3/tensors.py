@@ -115,9 +115,9 @@ class Slice(FancyIndex):
         self.step = step or 1
         super().__init__(dim, stratum, within)
 
-    # @property
-    # def size(self):
-    #     return self.dim.size
+    @property
+    def size(self):
+        return (self.stop - self.start) // self.step
 
 
 class Stencil(tuple):
