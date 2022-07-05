@@ -89,19 +89,18 @@ class LoopyKernelBuilder:
         within_loops = {}
         for index in indices:
             if isinstance(index, Slice):
-                iname = self._namer.next("i")
-                within_loops[index] = iname
-
                 if isinstance(index.stop, Tensor):
-                    raise NotImplementedError
                     temporary_name = self._namer.next("p")
                     temporary = Tensor((), name=temporary_name, dtype=np.int32)
-                    indexed = self._index_the_map(index.stop, within_loops)
+                    indexed = self._index_the_map2(index.stop, within_loops)
                     mapassignment = tlang.Read(indexed, temporary)
-                    self._make_instruction_context(mapassignment, within_loops)
+                    self._make_instruction_context(mapassignment, within_loops, scalar=True)
                     size = temporary_name
                 else:
                     size = (index.stop-index.start)//index.step
+                iname = self._namer.next("i")
+                within_loops[index] = iname
+
             elif isinstance(index, NonAffineMap):
                 iname = self._namer.next("i")
                 temporary = Tensor((), name=iname, dtype=np.int32)
@@ -128,12 +127,12 @@ class LoopyKernelBuilder:
 
 
     @functools.singledispatchmethod
-    def _make_instruction_context(self, instruction: tlang.Instruction, within_inames):
+    def _make_instruction_context(self, instruction: tlang.Instruction, within_inames, **kwargs):
         raise TypeError
 
 
     @_make_instruction_context.register
-    def _(self, call: tlang.FunctionCall, within_loops):
+    def _(self, call: tlang.FunctionCall, within_loops, **kwargs):
         def mysize(t):
             stencil, = t.stencils
             indices, = stencil
@@ -176,13 +175,12 @@ class LoopyKernelBuilder:
 
 
     @_make_instruction_context.register
-    def _(self, assignment: tlang.Assignment, within_loops):
+    def _(self, assignment: tlang.Assignment, within_loops, scalar=False):
         # breakpoint()
         assert len(assignment.lhs.stencils) == len(assignment.rhs.stencils)
         for lstencil, rstencil in zip(assignment.lhs.stencils, assignment.rhs.stencils):
             assert len(lstencil) == len(rstencil)
             local_offset = 0  # FIXME
-            within_inames = set()
             for lidxs, ridxs in zip(lstencil, rstencil):
                 linames, rinames = self.sync_inames(assignment.lhs, assignment.rhs, lidxs, ridxs, within_loops)
                 lexpr = self.handle_assignment(assignment.lhs, lidxs, linames, within_loops)
@@ -192,7 +190,7 @@ class LoopyKernelBuilder:
 
                 lname = pym.var(assignment.lhs.name)
                 # lhs = pym.subscript(lname, lexpr)
-                if assignment.lhs.dim:
+                if assignment.lhs.dim or not scalar:
                     lhs = pym.subscript(lname, lexpr)
                 else:
                     lhs = lname
@@ -202,11 +200,12 @@ class LoopyKernelBuilder:
                 else:
                     rname = pym.var(assignment.rhs.name)
                     # rhs = pym.subscript(rname, rexpr)
-                    if assignment.rhs.dim:
+                    if assignment.rhs.dim or not scalar:
                         rhs = pym.subscript(rname, rexpr)
                     else:
                         rhs = rname
 
+                within_inames = frozenset({*linames, *rinames})
                 assign_insn = lp.Assignment(
                         lhs, rhs,
                         id=self._namer.next(f"{assignment.id}_"),
@@ -215,7 +214,7 @@ class LoopyKernelBuilder:
                 self.instructions.append(assign_insn)
 
         # register kernel arguments
-        if assignment.temporary.dim:
+        if assignment.temporary.dim or not scalar:
             stencil, = assignment.temporary.stencils
             indices, = stencil
             temp_size = 1
@@ -223,7 +222,7 @@ class LoopyKernelBuilder:
                 temp_size *= index.size
             temp_shape = (temp_size,)
         else:
-            temp_shape =(1,)
+            temp_shape =()
 
         self.kernel_data += [
             lp.GlobalArg(assignment.tensor.name, dtype=assignment.tensor.dtype, shape=None),
@@ -236,10 +235,10 @@ class LoopyKernelBuilder:
             assert not indices and not inames
             return 0
         within_loops = within_loops.copy()
-        current_dim = tensor.dim.root
         index_expr = 0
+        current_dim = tensor.dim.root
         for index, iname in zip(indices, inames):
-            assert index.dim == current_dim
+            assert current_dim is not None
 
             if isinstance(index, Slice):
                 dim_expr = pym.var(iname)*index.step + index.start
@@ -247,16 +246,21 @@ class LoopyKernelBuilder:
                 temporary = Tensor((), name=iname, dtype=np.int32)
                 indexed = self._index_the_map(index.tensor, within_loops)
                 mapassignment = tlang.Read(indexed, temporary)
-                self._make_instruction_context(mapassignment, within_loops)
+                self._make_instruction_context(mapassignment, within_loops, scalar=True)
                 dim_expr = pym.var(iname)
             else:
                 raise NotImplementedError
 
+            # import pdb; pdb.set_trace()
             new_map_name = self._namer.next("sec")
             index_expr += pym.subscript(pym.var(new_map_name), dim_expr)
             # this allows for ragged+mixed
+            # FIXME This looks weird
             index_expr -= current_dim.offset
             self.kernel_data.append(lp.GlobalArg(new_map_name, shape=None, dtype=np.int32))
+
+            if children := tensor.dim.get_children(current_dim):
+                current_dim = children[index.stratum]
 
         return index_expr
 
@@ -264,24 +268,26 @@ class LoopyKernelBuilder:
         linames = []
         rinames = []
         for lidx, ridx in rzip(lidxs, ridxs):
-            assert lidx.dim == ridx.dim
-            if lidx in within_loops:
-                iname = within_loops[lidx]
-                linames.append(iname)
-                if ridx in within_loops:
+            if lidx:
+                if ridx:
                     assert lidx == ridx
-                    rinames.append(iname)
-                else:
-                    assert ridx.size == 1
-            else:
-                if ridx in within_loops:
-                    rinames.append(within_loops[ridx])
-                else:
-                    iname = self._namer.next("i")
+                    assert lidx not in within_loops
+                    assert ridx not in within_loops
+
                     size, = {lidx.size, ridx.size}
+                    iname = self._namer.next("i")
                     self.domains.append(self._make_domain(iname, 0, size, 1))
                     linames.append(iname)
                     rinames.append(iname)
+                else:
+                    iname = within_loops[lidx]
+                    linames.append(iname)
+            else:
+                if ridx:
+                    iname = within_loops[ridx]
+                    rinames.append(iname)
+                else:
+                    raise AssertionError
         return linames, rinames
 
     def _index_the_map(self, tensor, new_index):
@@ -293,6 +299,34 @@ class LoopyKernelBuilder:
         indices, = stencil
         stencils = StencilGroup([Stencil([indices + (new_index,)])])
         return tensor.copy(stencils=stencils)
+
+    def _index_the_map2(self, tensor, within_loops):
+        # do a nasty backtracking algorithm to search from the bottom of the tree
+        ptr = 1
+        while ptr <= len(within_loops):
+            try:
+                indices = list(within_loops.keys())[-ptr:]
+            except:
+                raise ValueError
+
+            # import pdb; pdb.set_trace()
+            # now check
+            is_valid = True
+            dim = tensor.dim.root
+            for idx in indices:
+                if not dim or idx.dim != dim:
+                    is_valid = False
+                    break
+            # also fail if there are still unindexed dimensions
+            if tensor.dim.get_child(dim):
+                is_valid = False
+
+            if is_valid:
+                stencils = StencilGroup([Stencil([tuple(indices)])])
+                return tensor.copy(stencils=stencils)
+            ptr += 1
+
+        raise ValueError
 
     def get_stratum(self, dim):
         ptr = 0

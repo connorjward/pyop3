@@ -32,7 +32,7 @@ def compilemythings(jitmodule):
 
         basename = hsh.hexdigest()
 
-        cachedir = "mycachedir"
+        cachedir = "mycache"
         dirpart, basename = basename[:2], basename[2:]
         cachedir = os.path.join(cachedir, dirpart)
         pid = os.getpid()
@@ -244,7 +244,6 @@ def test_compute_double_loop():
     jitmodule = JITModule(exe, cache_key)
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
-    # sig: ???
 
     """
       for (int32_t i0 = 0; i0 <= 9; ++i0)
@@ -258,16 +257,19 @@ def test_compute_double_loop():
           dat2[map4[i0] + map6[i5]] = t1[map5[i5]];
       }
     """
+    # import pdb; pdb.set_trace()
 
-    map0 = make_offset_map(root, dims)[0]
-    map1 = make_offset_map(subdim, dims)[0]
-    map2 = map1.copy()
-    map3 = map1.copy()
-    map4 = map0.copy()
-    map5 = map1.copy()
-    map6 = map1.copy()
+    sec0 = np.arange(3, dtype=np.int32)
+    sec1 = make_offset_map(root, dims)[0]
+    sec2 = make_offset_map(subdim, dims)[0]
+    sec3 = sec0.copy()
+    sec4 = sec0.copy()  # skipped
+    sec5 = sec0.copy()  # skipped
+    sec6 = sec1.copy()
+    sec7 = sec2.copy()
+    sec8 = sec0.copy()
 
-    args = [map0, map1, map2, dat1.data, map3, dat2.data, map4, map5, map6]
+    args = [sec0, sec1, sec2, dat1.data, sec3, sec4, sec5, dat2.data, sec6, sec7, sec8]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
@@ -280,7 +282,7 @@ def test_compute_double_loop_mixed():
     print("compute_double_loop_mixed START", flush=True)
     root = Dim((10, 12))
     subdims = [Dim(3), Dim(2)]
-    dims = Tree.from_nest([root, [*subdims]])
+    dims = Tree.from_nest([root, subdims])
     dat1 = Tensor(dims, name="dat1", data=np.arange(54, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor(dims, name="dat2", data=np.zeros(54, dtype=np.float64), dtype=np.float64)
 
@@ -327,18 +329,19 @@ def test_compute_double_loop_mixed():
   }
     """
 
-    map0 = make_offset_map(root, dims)[0]
-    map1 = np.arange(2, dtype=np.int32)
-    map2 = make_offset_map(subdims[1], dims)[0]
-    map3 = np.arange(2, dtype=np.int32)  # map1.copy()
-    map4 = make_offset_map(root, dims)[0]  # copy.deepcopy(map0)
-    map5 = np.arange(2, dtype=np.int32)  # copy.deepcopy(map1)
-    map6 = make_offset_map(subdims[1], dims)[0] #copy.deepcopy(map2)
+    # import pdb; pdb.set_trace()
+    sec0 = np.arange(2, dtype=np.int32)
+    sec1 = make_offset_map(root, dims)[0] 
+    sec2 = make_offset_map(subdims[1], dims)[0]
+    sec3 = sec0.copy()
+    sec4 = np.empty(1)  # missing
+    sec5 = np.empty(1)  # missing
+    sec6 = sec1.copy()
+    sec7 = sec2.copy()
+    sec8 = sec0.copy()
 
-    args = [map0, map1, map2, dat1.data, map3, dat2.data, map4, map5, map6]
-    # fn.argtypes = tuple(ctypes.c_voidp for i in range(len(args)))
-    fn.argtypes = [ctypes.c_voidp for i in range(len(args))]
-    # fn.argtypes = (ctypes.c_voidp,) * len(args)
+    args = [sec0, sec1, sec2, dat1.data, sec3, sec4, sec5, dat2.data, sec6, sec7, sec8]
+    fn.argtypes = (ctypes.c_voidp,) * len(args)
     fn.restype = ctypes.c_int
 
     myargs = [d.ctypes.data for d in args]
@@ -390,12 +393,15 @@ def test_compute_double_loop_scalar():
     }
     """
 
-    map0 = make_offset_map(root, dims)[0]
-    map1 = make_offset_map(subdims[1], dims)[0]
-    map2 = map0.copy()
-    map3 = map1.copy()
+    # import pdb; pdb.set_trace()
+    sec0 = make_offset_map(root, dims)[0]
+    sec1 = make_offset_map(subdims[1], dims)[0]
+    sec2 = np.empty(1)  # missing
+    sec3 = np.empty(1)  # missing
+    sec4 = sec0.copy()
+    sec5 = sec1.copy()
 
-    args = [map0, map1, dat1.data, dat2.data, map2, map3]
+    args = [sec0, sec1, dat1.data, sec2, sec3, dat2.data, sec4, sec5]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
@@ -447,17 +453,18 @@ def test_compute_double_loop_permuted():
   }
     """
 
-    map0 = make_offset_map(root, dims)[0]
-    map1 = make_offset_map(subdim, dims)[0]
-    map2 = map1.copy()
-    map3 = map1.copy()
-    map4 = map0.copy()
-    map5 = map1.copy()
-    map6 = map1.copy()
+    # import pdb; pdb.set_trace()
+    sec0 = np.arange(3, dtype=np.int32)
+    sec1 = make_offset_map(root, dims)[0]
+    sec2 = make_offset_map(subdim, dims)[0]
+    sec3 = sec0.copy()
+    sec4 = np.empty(1)  # missing
+    sec5 = np.empty(1)  # missing
+    sec6 = sec1.copy()
+    sec7 = sec2.copy()
+    sec8 = sec0.copy()
 
-    assert any(map0 != np.arange(len(map0)))
-
-    args = [map0, map1, map2, dat1.data, map3, dat2.data, map4, map5, map6]
+    args = [sec0, sec1, sec2, dat1.data, sec3, sec4, sec5, dat2.data, sec6, sec7, sec8]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
     fn(*(d.ctypes.data for d in args))
 
@@ -507,17 +514,18 @@ def test_compute_double_loop_permuted_mixed():
   }
     """
 
-    map0 = make_offset_map(root, dims)[0]
-    map1 = make_offset_map(subdims[1], dims)[0]
-    map2 = map1.copy()
-    map3 = map1.copy()
-    map4 = map0.copy()
-    map5 = map1.copy()
-    map6 = map1.copy()
+    # import pdb; pdb.set_trace()
+    sec0 = np.arange(3, dtype=np.int32)
+    sec1 = make_offset_map(root, dims)[0]
+    sec2 = make_offset_map(subdims[1], dims)[0]
+    sec3 = sec0.copy()
+    sec4 = np.empty(1)  # missing
+    sec5 = np.empty(1)  # missing
+    sec6 = sec1.copy()
+    sec7 = sec2.copy()
+    sec8 = sec0.copy()
 
-    assert any(map0 != np.arange(len(map0)))
-
-    args = [map0, map1, map2, dat1.data, map3, dat2.data, map4, map5, map6]
+    args = [sec0, sec1, sec2, dat1.data, sec3, sec4, sec5, dat2.data, sec6, sec7, sec8]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
@@ -573,15 +581,17 @@ def test_compute_double_loop_ragged():
   }
     """
 
-    # breakpoint()
-    map0 = make_offset_map(nnz.dim.root, nnz.dim)[0]
-    map1 = make_offset_map(dims.root, dims)[0]
-    # map2 = make_offset_map(subdim, dims)[0]
-    map2 = np.arange(11, dtype=np.int32)
-    map3 = map1.copy()
-    map4 = map2.copy()
+    # import pdb; pdb.set_trace()
+    sec0 = make_offset_map(nnz.dim.root, nnz.dim)[0]
+    sec1 = make_offset_map(dims.root, dims)[0]
+    # sec2 = make_offset_map(subdim, dims)[0]
+    sec2 = np.arange(3, dtype=np.int32)
+    sec3 = np.empty(1, dtype=np.int32)  # missing
+    sec4 = np.empty(1, dtype=np.int32)  # missing
+    sec5 = sec1.copy()
+    sec6 = sec2.copy()
 
-    args = [map0, nnz.data, map1, map2, dat1.data, dat2.data, map3, map4]
+    args = [sec0, nnz.data, sec1, sec2, dat1.data, sec3, sec4, dat2.data, sec5, sec6]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
@@ -635,16 +645,19 @@ def test_compute_double_loop_ragged_mixed():
   }
     """
 
-    # breakpoint()
-    map0 = make_offset_map(nnz.dim.root, nnz.dim)[0]
-    map1 = make_offset_map(dims.root, dims)[0]
-    # map2 = make_offset_map(subdims[0], dims)[0]
+    # import pdb; pdb.set_trace()
+    # sec0 = make_offset_map(nnz.dim.root, nnz.dim)[0]
+    sec0 = np.arange(10, dtype=np.int32)
+    sec1 = make_offset_map(dims.root, dims)[0]
     # FIXME
-    map2 = np.arange(3, dtype=np.int32)
-    map3 = map1.copy()
-    map4 = map2.copy()
+    # sec2 = make_offset_map(subdims[0], dims)[0]
+    sec2 = np.arange(3, dtype=np.int32)
+    sec3 = np.empty(1, dtype=np.int32)  # missing
+    sec4 = np.empty(1, dtype=np.int32)  # missing
+    sec5 = sec1.copy()
+    sec6 = sec2.copy()
 
-    args = [map0, nnz.data, map1, map2, dat1.data, dat2.data, map3, map4]
+    args = [sec0, nnz.data, sec1, sec2, dat1.data, sec3, sec4, dat2.data, sec5, sec6]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
@@ -705,14 +718,17 @@ def test_compute_ragged_permuted():
   }
     """
 
-    map0 = make_offset_map(nnz.dim.root, nnz.dim)[0]
-    map1 = make_offset_map(dims.root, dims)[0]
+    sec0 = make_offset_map(nnz.dim.root, nnz.dim)[0]
+    sec1 = make_offset_map(dims.root, dims)[0]
+    # FIXME
     # map2 = make_offset_map(subdim, dims)[0]
-    map2 = np.arange(11, dtype=np.int32)
-    map3 = map1.copy()
-    map4 = map2.copy()
+    sec2 = np.arange(11, dtype=np.int32)
+    sec3 = np.empty(1, dtype=np.int32)  # missing
+    sec4 = np.empty(1, dtype=np.int32)  # missing
+    sec5 = sec1.copy()
+    sec6 = sec2.copy()
 
-    args = [map0, nnz.data, map1, map2, dat1.data, dat2.data, map3, map4]
+    args = [sec0, nnz.data, sec1, sec2, dat1.data, sec3, sec4, dat2.data, sec5, sec6]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
@@ -720,8 +736,8 @@ def test_compute_ragged_permuted():
     # root = Dim(6, permutation=(3, 2, 5, 0, 4, 1))
     # nnz_ = np.array([3, 2, 0, 1, 3, 2], dtype=np.int32)
     # FIXME
-    assert all(map0 == np.arange(6))
-    assert all(map1 == np.array([3, 9, 1, 0, 6, 1]))
+    assert all(sec0 == np.arange(6))
+    assert all(sec1 == np.array([3, 9, 1, 0, 6, 1]))
 
     assert all(dat2.data == dat1.data + 1)
     print("compute_ragged_permuted PASSED", flush=True)

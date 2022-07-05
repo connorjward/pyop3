@@ -1,4 +1,5 @@
 import dataclasses
+import numpy as np
 import itertools
 import functools
 import pytools
@@ -84,17 +85,21 @@ class TensorLangKernelBuilder:
         new_indices = []
         for index in indices:
             if index.within:
-                size = 1
-            else:
-                size = index.size
-            new_dim = index.dim.copy(sizes=(size,))
+                continue
+            size = index.size
+            new_dim = index.dim.copy(sizes=(size,), offset=0)
             if active_dim:
                 dims.add_child(active_dim, new_dim)
             else:
                 dims = pyop3.utils.Tree(new_dim)
             active_dim = new_dim
+            new_indices.append(tensors.Slice(new_dim, 0, start=0, stop=size))
 
-            new_indices.append(tensors.Slice(index.dim, index.stratum, stop=size))
+        # if the temporary is 'within' all of the indices (i.e. a scalar) then force
+        # it to be an array of size 1 so we can pass pointers to the inner kernel
+        # if not new_indices:
+        #     index = indices[-1]
+        #     new_indices = [tensors.Slice(index.dim.copy(sizes=(1,), offset=0), 0, 0, 1)]
         return dims, tensors.StencilGroup([tensors.Stencil([tuple(new_indices)])])
 
     def make_gathers(self, temporaries, **kwargs):

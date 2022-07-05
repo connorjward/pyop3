@@ -82,7 +82,7 @@ class FancyIndex(Index):
 class Slice(FancyIndex):
     fields = FancyIndex.fields | {"start", "stop", "step"}
 
-    def __init__(self, dim, stratum, start=None, stop=None, step=None, within=False, from_dim=None):
+    def __init__(self, dim, stratum, start=None, stop=None, step=None, within=False):
         # start, stop, step = None, None, None
         # if len(args) == 0:
         #     pass
@@ -175,6 +175,8 @@ class Tensor(pytools.ImmutableRecordWithoutPickling):
         name = name or self.name_generator.next(prefix or self.prefix)
         self.data = data
         assert dtype is not None
+        if stencils is None:
+            stencils = StencilGroup([Stencil([()])])
         super().__init__(dim=dim, stencils=stencils, mesh=mesh, name=name, dtype=dtype)
 
     def __getitem__(self, stencils):
@@ -205,8 +207,8 @@ class Tensor(pytools.ImmutableRecordWithoutPickling):
         # This is complicated because additional indices should theoretically index
         # pre-existing slices, rather than get appended/prepended as is currently
         # assumed.
-        if self.stencils:
-            raise NotImplementedError("Needs more thought")
+        # if self.stencils:
+        #     raise NotImplementedError("Needs more thought")
 
         if not isinstance(stencils, StencilGroup):
             empty = StencilGroup([Stencil([()])])
