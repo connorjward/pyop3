@@ -854,15 +854,15 @@ def test_map():
   }
     """
 
-    sec0 = make_offset_map(map_tensor.dim.root, map_tensor.dim)[0]
-    sec1 = make_offset_map(map_tensor.dim.get_child(map_tensor.dim.root), map_tensor.dim)[0]
-    sec2 = np.arange(2, dtype=np.int32)
+    sec0 = np.arange(2, dtype=np.int32)
+    sec1 = make_offset_map(map_tensor.dim.root, map_tensor.dim)[0]
+    sec2 = make_offset_map(map_tensor.dim.get_child(map_tensor.dim.root), map_tensor.dim)[0]
     sec3 = make_offset_map(root, dims)[0]
     sec4 = np.empty(1, dtype=np.int32)
     sec5 = sec3.copy()
 
-    # import pdb; pdb.set_trace()
-    args = [sec0, sec1, map_tensor.data, sec2, sec3, dat1.data, sec4, dat2.data, sec5]
+    import pdb; pdb.set_trace()
+    args = [sec0, sec1, sec2, map_tensor.data, sec3, dat1.data, sec4, dat2.data, sec5]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))

@@ -64,7 +64,7 @@ class TensorLangKernelBuilder:
             # dims, stencils = self.collect_temp_bits(arg.tensor.stencils)
             stencil, = arg.tensor.stencils
             indices, = stencil
-            dims = pyop3.utils.Tree.from_nest(self.construct_temp_dims(indices, arg.tensor.dim.root, arg.tensor.dim))
+            dims = pyop3.utils.Tree.from_nest(self.construct_temp_dims(arg.tensor, indices))
             # import pdb; pdb.set_trace()
             temporaries[arg] = tensors.Tensor(dims, name=self._temp_name_generator(), dtype=arg.tensor.dtype)["fill"]
 
@@ -77,24 +77,29 @@ class TensorLangKernelBuilder:
 
         return (*gathers, call, *scatters)
 
-    def construct_temp_dims(self, indices, dim, dtree):
+    def construct_temp_dims(self, tensor, indices):
         # N.B. we should switch to a tree of stencils I think as otherwise making 'mixed' temporaries is hard.
-        # import pdb; pdb.set_trace()
-        (subdim_id, index), *subindices = indices
+        shape = tensor.indexed_shape_per_indices(indices)
 
-        subdims = dtree.get_children(dim)
-
-        if index.within:
-            if subdims:
-                return self.construct_temp_dims(subindices, subdims[subdim_id], dtree)
-            else:
-                return ()
-        else:
-            size = tensors.index_size(index, dim, subdim_id)
-            if subdims:
-                return tensors.Dim(size), self.construct_temp_dims(subindices, subdims[subdim_id], dtree)
-            else:
-                return (tensors.Dim(size), ())
+        nest = []
+        for extent in reversed(shape):
+            nest = [tensors.Dim(extent), nest]
+        return nest
+        # (subdim_id, index), *subindices = indices
+        #
+        # subdims = dtree.get_children(dim)
+        #
+        # if index.within:
+        #     if subdims:
+        #         return self.construct_temp_dims(subindices, subdims[subdim_id], dtree)
+        #     else:
+        #         return ()
+        # else:
+        #     size = tensors.index_size(index, dim, subdim_id)
+        #     if subdims:
+        #         return tensors.Dim(size), self.construct_temp_dims(subindices, subdims[subdim_id], dtree)
+        #     else:
+        #         return (tensors.Dim(size), ())
 
     def collect_temp_bits(self, stencils):
         try:

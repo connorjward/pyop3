@@ -161,6 +161,8 @@ def indexed_shape(stencil):
     return (size,)
 
 
+
+
 def indexed_size_per_index_group(indices):
     index, *subindices = indices
     # breakpoint()
@@ -266,6 +268,20 @@ class Tensor(pytools.ImmutableRecordWithoutPickling):
 
     def _merge_stencils(self, stencils1, stencils2):
         return _merge_stencils(stencils1, stencils2, self.dim)
+
+    def indexed_shape_per_indices(self, indices, dim=None):
+        if not dim:
+            dim = self.dim.root
+
+        if not indices:
+            return ()
+
+        (subdim_id, index), *subindices = indices
+
+        if subdims := self.dim.get_children(dim):
+            return index_shape(index, dim, subdim_id) + self.indexed_shape_per_indices(subindices, subdims[subdim_id])
+        else:
+            return index_shape(index, dim, subdim_id)
 
 
 def _merge_stencils(stencils1, stencils2, dims):
@@ -474,6 +490,32 @@ class AffineMap(Map):
 
 
 @functools.singledispatch
+def index_shape(index, dim, subdim_id):
+    ...
+
+
+@index_shape.register(Slice)
+def _(index, dim, subdim_id):
+    if index.within:
+        return ()
+
+    start = index.start or 0
+    stop = index.stop or dim.sizes[subdim_id]
+    step = index.step or 1
+    return ((stop - start) // step,)
+
+
+@index_shape.register(NonAffineMap)
+def _(index, dim, subdim_id):
+    if index.within:
+        return ()
+    else:
+        # cannot be mixed here
+        ((indices,),) = index.tensor.stencils
+        return index.tensor.indexed_shape_per_indices(indices)
+
+
+@functools.singledispatch
 def index_size(index):
     raise TypeError
 
@@ -503,7 +545,7 @@ def _(index: NonAffineMap, dim, subdim_id):
     else:
         # cannot be mixed here
         ((indices,),) = index.tensor.stencils
-        return indexed_size(indices, index.tensor.dim.root, index.tensor.dim)
+        return index.tensor.indexed_shape_per_indices(indices)
 
 
 def indexed_size(indices, dim, dtree):
