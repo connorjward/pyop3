@@ -41,6 +41,10 @@ class Dim(pytools.ImmutableRecord):
     def size(self):
         return pytools.single_valued(self.sizes)
 
+    @property
+    def offsets(self):
+        return tuple(sum(self.sizes[:i]) for i in range(len(self.sizes)))
+
     def __hash__(self):
         return hash(self.name)
 
@@ -60,12 +64,9 @@ class MixedDim(Dim):
 
 class Index(pytools.ImmutableRecord):
     """Does it make sense to index a tensor with this object?"""
-    fields = {"dim", "stratum", "within"}
+    fields = {"within"}
 
-    def __init__(self, dim, stratum, within=False):
-        # N.B. dim is only really needed for error checking, make sure that things match
-        self.dim = dim
-        self.stratum = stratum
+    def __init__(self, within=False):
         self.within = within
         super().__init__()
 
@@ -80,9 +81,17 @@ class FancyIndex(Index):
 
 
 class Slice(FancyIndex):
-    fields = FancyIndex.fields | {"start", "stop", "step"}
+    fields = FancyIndex.fields | {"start", "stop", "step", "id"}
 
-    def __init__(self, dim, stratum, start=None, stop=None, step=None, within=False):
+    counter = 0
+
+    def __init__(self, start=None, stop=None, step=None, within=False, id=None):
+        # import pdb; pdb.set_trace()
+        if id:
+            self.id = id
+        else:
+            self.id = f"slice{self.__class__.counter}"
+            self.__class__.counter += 1
         # start, stop, step = None, None, None
         # if len(args) == 0:
         #     pass
@@ -95,29 +104,32 @@ class Slice(FancyIndex):
         # else:
         #     raise ValueError
 
-        if start:
-            self.start = start
-        elif isinstance(dim.sizes[0], Tensor):
-            # don't know how to handle not starting from zero
-            assert len(dim.sizes) == 1
-            self.start = 0
-        else:
-            self.start = np.cumsum([0] + list(dim.sizes))[stratum]
+        self.start = start
+        self.stop = stop
+        self.step = step
+        # if start:
+        #     self.start = start
+        # elif isinstance(dim.sizes[0], Tensor):
+        #     # don't know how to handle not starting from zero
+        #     assert len(dim.sizes) == 1
+        #     self.start = 0
+        # else:
+        #     self.start = np.cumsum([0] + list(dim.sizes))[stratum]
+        #
+        # if stop:
+        #     self.stop = stop
+        # elif isinstance(dim.sizes[0], Tensor):
+        #     self.stop = dim.sizes[0]
+        # else:
+        #     self.stop = np.cumsum(dim.sizes)[stratum]
+        #
+        # assert not step or step == 1
+        # self.step = step or 1
+        super().__init__(within)
 
-        if stop:
-            self.stop = stop
-        elif isinstance(dim.sizes[0], Tensor):
-            self.stop = dim.sizes[0]
-        else:
-            self.stop = np.cumsum(dim.sizes)[stratum]
-
-        assert not step or step == 1
-        self.step = step or 1
-        super().__init__(dim, stratum, within)
-
-    @property
-    def size(self):
-        return (self.stop - self.start) // self.step
+    # @property
+    # def size(self):
+    #     return (self.stop - self.start) // self.step
 
 
 class Stencil(tuple):
@@ -175,8 +187,6 @@ class Tensor(pytools.ImmutableRecordWithoutPickling):
         name = name or self.name_generator.next(prefix or self.prefix)
         self.data = data
         assert dtype is not None
-        if stencils is None:
-            stencils = StencilGroup([Stencil([()])])
         super().__init__(dim=dim, stencils=stencils, mesh=mesh, name=name, dtype=dtype)
 
     def __getitem__(self, stencils):
@@ -210,24 +220,49 @@ class Tensor(pytools.ImmutableRecordWithoutPickling):
         # if self.stencils:
         #     raise NotImplementedError("Needs more thought")
 
-        if not isinstance(stencils, StencilGroup):
+        if stencils == "fill":
+            stencils = StencilGroup([
+                Stencil([
+                    _construct_indices((), self.dim, self.dim.root)
+                ])
+            ])
+            # import pdb; pdb.set_trace()
+        elif not isinstance(stencils, StencilGroup):
             empty = StencilGroup([Stencil([()])])
             stencils = functools.reduce(self._merge_stencils, as_tuple(stencils), empty)
+        else:
 
-        # fill final indices with full slices
-        stencils = StencilGroup([
-            Stencil([
-                _construct_indices(indices, self.dim, self.dim.root)
-                for indices in stencil
+            # import pdb; pdb.set_trace()
+
+            # fill final indices with full slices
+            stencils = StencilGroup([
+                Stencil([
+                    _construct_indices(indices, self.dim, self.dim.root)
+                    for indices in stencil
+                ])
+                for stencil in stencils
             ])
-            for stencil in stencils
-        ])
 
         return self.copy(stencils=stencils)
 
 
     def __str__(self):
         return self.name
+
+    @property
+    def order(self):
+        return self._compute_order(self.dim.root)
+
+    def _compute_order(self, dim):
+        subdims = self.dim.get_children(dim)
+        ords = {self._compute_order(subdim) for subdim in subdims}
+
+        if len(ords) == 0:
+            return 1
+        elif len(ords) == 1:
+            return 1 + ords.pop()
+        if len(ords) > 1:
+            raise Exception("tensor order cannot be established (subdims are different depths)")
 
     def _merge_stencils(self, stencils1, stencils2):
         return _merge_stencils(stencils1, stencils2, self.dim)
@@ -287,32 +322,23 @@ def as_stencil_group(stencils, dims):
 
 
 def _construct_indices(input_indices, dims, current_dim):
+    # import pdb; pdb.set_trace()
     if not current_dim:
         return ()
 
     if not input_indices:
-        # input_indices = [slice(0, current_dim.size, 1)]
-        input_indices = [Slice(current_dim, 0)]
+        if len(dims.get_children(current_dim)) > 1:
+            raise RuntimeError("Ambiguous subdim_id")
+        input_indices = [(0, Slice())]
 
-    index, *subindices = input_indices
+    (subdim_id, index), *subindices = input_indices
 
-    if isinstance(index, Index):
-        new_index = index
-    elif isinstance(index, slice):
-        new_index = Slice(current_dim, 0, index.start, index.stop, index.step)
-    else:
-        raise NotImplementedError
-
-    if children := dims.get_children(current_dim):
-        if isinstance(index, numbers.Integral):
-            subdim = children[index]
-        else:
-            subdim = children[index.stratum]
+    if subdims := dims.get_children(current_dim):
+        subdim = subdims[subdim_id]
     else:
         subdim = None
 
-
-    return (new_index,) + _construct_indices(subindices, dims, subdim)
+    return ((subdim_id, index),) + _construct_indices(subindices, dims, subdim)
 
 
 
@@ -320,7 +346,7 @@ def index(stencils):
     """wrap all slices and maps in loop index objs."""
     return StencilGroup([
         Stencil([
-            tuple(index.copy(within=True) for index in indices)
+            tuple((subdim_id, index.copy(within=True)) for subdim_id, index in indices)
             for indices in stencil
         ])
         for stencil in stencils
@@ -414,9 +440,9 @@ class Map(FancyIndex, abc.ABC):
 class NonAffineMap(Index):
     fields = Index.fields | {"tensor"}
 
-    def __init__(self, dim, stratum, tensor, **kwargs):
+    def __init__(self, tensor, **kwargs):
         self.tensor = tensor
-        super().__init__(dim, stratum, **kwargs)
+        super().__init__(**kwargs)
 
     @property
     def map(self):
@@ -459,25 +485,35 @@ def index_size(index):
 
 
 @index_size.register
-def _(index: Slice):
+def _(index: Slice, dim, subdim_id):
     if index.within:
         return 1
     start = index.start or 0
-    stop = index.stop or index.dim.sizes[index.stratum]
+    stop = index.stop or dim.sizes[subdim_id]
+    assert index.step is None
     return stop - start
 
 
 @index_size.register
-def _(index: NonAffineMap):
+def _(index: NonAffineMap, dim, subdim_id):
     # FIXME
     # This doesn't quite work - need to have indexed the map beforehand (different to offset tensors)
     if index.within:
         return 1
     else:
-        stencil, = index.tensor.stencils
-        indices, = stencil
-        from_index, _ = indices
-        return index.arity * indexed_size_per_index_group([from_index])
+        # cannot be mixed here
+        ((indices,),) = index.tensor.stencils
+        return indexed_size(indices, index.tensor.dim.root, index.tensor.dim)
+
+
+def indexed_size(indices, dim, dtree):
+    (subdim_id, index), *subindices = indices
+    subdims = dtree.get_children(dim)
+    size = index_size(index, dim, subdim_id)
+    if subdims:
+        return size * indexed_size(subindices, subdims[subdim_id], dtree)
+    else:
+        return size
 
 
 class Section:

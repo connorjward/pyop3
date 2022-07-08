@@ -89,15 +89,20 @@ class Tree(pytools.ImmutableRecord):
             return None
 
     def get_children(self, item):
-        return self.children[item]
+        return self.children.get(item)
+
 
     def is_leaf(self, item):
         return not self.get_children(item)
 
     @classmethod
     def from_nest(cls, nest):
-        root, _ = nest
-        children = cls._collect_children(nest)
+        if not nest:
+            root = None
+            children = {}
+        else:
+            root, _ = nest
+            children = cls._collect_children(nest)
         return cls(root, children)
 
     @classmethod

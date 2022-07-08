@@ -61,8 +61,12 @@ class TensorLangKernelBuilder:
             #     tensors.indexed_shape(stencil) for stencil in arg.tensor.stencils
             # )
             # dim = tensors.UniformDim(size)
-            dims, stencils = self.collect_temp_bits(arg.tensor.stencils)
-            temporaries[arg] = tensors.Tensor(dims, stencils=stencils, name=self._temp_name_generator(), dtype=arg.tensor.dtype)
+            # dims, stencils = self.collect_temp_bits(arg.tensor.stencils)
+            stencil, = arg.tensor.stencils
+            indices, = stencil
+            dims = pyop3.utils.Tree.from_nest(self.construct_temp_dims(indices, arg.tensor.dim.root, arg.tensor.dim))
+            # import pdb; pdb.set_trace()
+            temporaries[arg] = tensors.Tensor(dims, name=self._temp_name_generator(), dtype=arg.tensor.dtype)["fill"]
 
         gathers = self.make_gathers(temporaries)
         call = self.make_function_call(
@@ -72,6 +76,25 @@ class TensorLangKernelBuilder:
         scatters = self.make_scatters(temporaries, depends_on=frozenset({call.id}))
 
         return (*gathers, call, *scatters)
+
+    def construct_temp_dims(self, indices, dim, dtree):
+        # N.B. we should switch to a tree of stencils I think as otherwise making 'mixed' temporaries is hard.
+        # import pdb; pdb.set_trace()
+        (subdim_id, index), *subindices = indices
+
+        subdims = dtree.get_children(dim)
+
+        if index.within:
+            if subdims:
+                return self.construct_temp_dims(subindices, subdims[subdim_id], dtree)
+            else:
+                return ()
+        else:
+            size = tensors.index_size(index, dim, subdim_id)
+            if subdims:
+                return tensors.Dim(size), self.construct_temp_dims(subindices, subdims[subdim_id], dtree)
+            else:
+                return (tensors.Dim(size), ())
 
     def collect_temp_bits(self, stencils):
         try:
@@ -83,7 +106,7 @@ class TensorLangKernelBuilder:
         active_dim = None
         dims = None
         new_indices = []
-        for index in indices:
+        for subdim_id, index in indices:
             if index.within:
                 continue
             size = index.size
@@ -95,12 +118,7 @@ class TensorLangKernelBuilder:
             active_dim = new_dim
             new_indices.append(tensors.Slice(new_dim, 0, start=0, stop=size))
 
-        # if the temporary is 'within' all of the indices (i.e. a scalar) then force
-        # it to be an array of size 1 so we can pass pointers to the inner kernel
-        # if not new_indices:
-        #     index = indices[-1]
-        #     new_indices = [tensors.Slice(index.dim.copy(sizes=(1,), offset=0), 0, 0, 1)]
-        return dims, tensors.StencilGroup([tensors.Stencil([tuple(new_indices)])])
+        return tensors.StencilGroup([tensors.Stencil([tuple(new_indices)])])
 
     def make_gathers(self, temporaries, **kwargs):
         return tuple(self.make_gather(arg, temp, **kwargs) for arg, temp in temporaries.items())
