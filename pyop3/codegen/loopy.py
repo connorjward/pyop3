@@ -275,11 +275,7 @@ class LoopyKernelBuilder:
         return inames
 
     def register_new_within_domain(self, dim, subdim_id, index, within_loops):
-        within_loops = within_loops.copy()
-        try:
-            iname = within_loops[index]
-        except KeyError:
-            iname = within_loops.setdefault(index, self._namer.next("i"))
+        iname = within_loops[index]
 
         # and try to register/check
         start = self.register_extent(index.start or 0, within_loops)
@@ -287,12 +283,13 @@ class LoopyKernelBuilder:
         stop = self.register_extent(index.stop or dimsize, within_loops)
         step = self.register_extent(index.step or 1, within_loops)
 
+        # import pdb; pdb.set_trace()
         if iname in self.domains:
             assert self.domains[iname] == (0, (stop - start) // step, 1)
         else:
             self.domains[iname] = (0, (stop - start) // step, 1)
 
-        return iname, within_loops
+        return iname
 
     def create_domain_stack_inner(self, lhs, rhs, lidxs, ridxs):
         shapes = {lhs.indexed_shape_per_indices(lidxs), rhs.indexed_shape_per_indices(ridxs)}
@@ -346,19 +343,36 @@ class LoopyKernelBuilder:
                 stop = index.stop or current_dim.sizes[subdim_id]
                 step = index.step or 1
 
-                if index.within:
-                    iname, within_loops = self.register_new_within_domain(current_dim, subdim_id, index, within_loops)
+                if index in within_loops:
+                    iname = self.register_new_within_domain(current_dim, subdim_id, index, within_loops)
                 else:
                     iname = dstack.pop(0)
-                # iname = dstack.pop(0)
+                    within_loops[index] = iname
 
                 dim_expr = pym.var(iname)*step + start
             elif isinstance(index, NonAffineMap):
-                # if index.within:
-                if False:
-                    iname, within_loops = self.register_new_within_domain(current_dim, subdim_id, index, within_loops)
-                    dim_expr = pym.var(iname)
+                # don't register inames - these are done 'inside'
+                if index in within_loops:
+                    iname = self.register_new_within_domain(current_dim, subdim_id, index, within_loops)
                 else:
+                    iname = dstack.pop(0)
+                # myexpr, dstack = self.handle_assignment(index.tensor, index.tensor.stencils[0][0], domain_stack=dstack, within_loops=within_loops)
+                within_loops[index.tensor.stencils[0][0][-1][1]] = iname
+                myexpr, dstack = self.handle_assignment(index.tensor, index.tensor.stencils[0][0], domain_stack=dstack, within_loops=within_loops)
+                self.kernel_data.append(lp.GlobalArg(index.tensor.name, shape=None, dtype=index.tensor.dtype))
+                # import pdb; pdb.set_trace()
+                # TODO I expect I need to put index -> dim_expr in within_loops so this is recorded
+                dim_expr = pym.subscript(pym.var(index.tensor.name), myexpr)
+
+                """
+                Explanation for future self:
+
+                We only want to be dealing with one side of the assignment here. Adding
+                a scalar to write to suddenly makes the tensor stuff a lot more
+                complicated. Instead we consume the loops we *already know about* to
+                construct an appropriate expression.
+                """
+
                     # mapped_iname = self._namer.next("i")
                     # temporary = Tensor(pyop3.utils.Tree(None), name=mapped_iname, dtype=np.int32)["fill"]
 
@@ -371,18 +385,6 @@ class LoopyKernelBuilder:
                     # indexed = index.tensor.copy(stencils=new_stencils)
 
                     # mapassignment = tlang.Read(indexed, temporary)
-                    """
-                    Explanation for future self:
-
-                    We only want to be dealing with one side of the assignment here. Adding
-                    a scalar to write to suddenly makes the tensor stuff a lot more
-                    complicated. Instead we consume the loops we *already know about* to
-                    construct an appropriate expression.
-                    """
-                    myexpr, dstack = self.handle_assignment(index.tensor, index.tensor.stencils[0][0], domain_stack=dstack, within_loops=within_loops)
-                    self.kernel_data.append(lp.GlobalArg(index.tensor.name, shape=None, dtype=index.tensor.dtype))
-                    # import pdb; pdb.set_trace()
-                    dim_expr = pym.subscript(pym.var(index.tensor.name), myexpr)
                 # dim_expr = pym.var(mapped_iname)
                 # temporary_name = self._namer.next("p")
                 # temporary = Tensor(pyop3.utils.Tree(None), name=temporary_name, dtype=np.int32)["fill"]

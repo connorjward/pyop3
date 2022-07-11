@@ -797,10 +797,12 @@ def test_subset():
     sec0 = make_offset_map(subset_tensor.dim.root, subset.tensor.dim)[0]
     sec1 = make_offset_map(root, dims)[0]
     sec2 = np.empty(1, dtype=np.int32)  # missing
-    sec3 = sec1.copy()
+    sec3 = sec2.copy()  # missing
+    sec4 = sec0.copy()
+    sec5 = sec1.copy()
 
-    import pdb; pdb.set_trace()
-    args = [sec0, subset_tensor.data, sec1, dat1.data, sec2, dat2.data, sec3]
+    # import pdb; pdb.set_trace()
+    args = [sec0, subset_tensor.data, sec1, dat1.data, sec2, sec3, dat2.data, sec4, sec5]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
