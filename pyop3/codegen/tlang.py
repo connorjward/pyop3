@@ -81,7 +81,7 @@ class TensorLangKernelBuilder:
             if nest:
                 nest = tensors.Dim(extent), [nest]
             else:
-                nest = tensors.Dim(extent)
+                nest = [tensors.Dim(extent), []]
         return nest
         # (subdim_id, index), *subindices = indices
         #

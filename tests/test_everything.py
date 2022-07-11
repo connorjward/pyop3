@@ -583,13 +583,13 @@ def test_compute_double_loop_ragged():
     """
 
     # import pdb; pdb.set_trace()
-    sec0 = make_offset_map(nnz.dim.root, nnz.dim)[0]
-    sec1 = make_offset_map(dims.root, dims)[0]
+    sec1 = make_offset_map(nnz.dim.root, nnz.dim)[0]
+    sec0 = make_offset_map(dims.root, dims)[0]
     # sec2 = make_offset_map(subdim, dims)[0]
     sec2 = np.arange(3, dtype=np.int32)
     sec3 = np.empty(1, dtype=np.int32)  # missing
     sec4 = np.empty(1, dtype=np.int32)  # missing
-    sec5 = sec1.copy()
+    sec5 = sec0.copy()
     sec6 = sec2.copy()
 
     args = [sec0, nnz.data, sec1, sec2, dat1.data, sec3, sec4, dat2.data, sec5, sec6]
@@ -602,9 +602,10 @@ def test_compute_double_loop_ragged():
 
 
 def test_compute_double_loop_ragged_mixed():
+    # import pdb; pdb.set_trace()
     root = Dim((4, 5, 4))
     nnz_data = np.array([3, 2, 0, 0, 1], dtype=np.int32)
-    nnz = Tensor(Tree(root.copy(offset=4)), data=nnz_data, name="nnz", dtype=np.int32)
+    nnz = Tensor(Tree(root.copy(offset=4, sizes=(5,))), data=nnz_data, name="nnz", dtype=np.int32)
     subdims = [Dim(1), Dim(nnz), Dim(2)]
     dims = Tree.from_nest([root, subdims])
 
@@ -648,14 +649,14 @@ def test_compute_double_loop_ragged_mixed():
 
     # import pdb; pdb.set_trace()
     # sec0 = make_offset_map(nnz.dim.root, nnz.dim)[0]
-    sec0 = np.arange(10, dtype=np.int32)
-    sec1 = make_offset_map(dims.root, dims)[0]
+    sec1 = np.arange(10, dtype=np.int32)
+    sec0 = make_offset_map(dims.root, dims)[0]
     # FIXME
     # sec2 = make_offset_map(subdims[0], dims)[0]
     sec2 = np.arange(3, dtype=np.int32)
     sec3 = np.empty(1, dtype=np.int32)  # missing
     sec4 = np.empty(1, dtype=np.int32)  # missing
-    sec5 = sec1.copy()
+    sec5 = sec0.copy()
     sec6 = sec2.copy()
 
     args = [sec0, nnz.data, sec1, sec2, dat1.data, sec3, sec4, dat2.data, sec5, sec6]
@@ -719,17 +720,19 @@ def test_compute_ragged_permuted():
   }
     """
 
-    sec0 = make_offset_map(nnz.dim.root, nnz.dim)[0]
-    sec1 = make_offset_map(dims.root, dims)[0]
+    sec1 = make_offset_map(nnz.dim.root, nnz.dim)[0]
+    sec0 = make_offset_map(dims.root, dims)[0]
     # FIXME
     # map2 = make_offset_map(subdim, dims)[0]
     sec2 = np.arange(11, dtype=np.int32)
     sec3 = np.empty(1, dtype=np.int32)  # missing
     sec4 = np.empty(1, dtype=np.int32)  # missing
-    sec5 = sec1.copy()
+    sec5 = sec0.copy()
     sec6 = sec2.copy()
 
-    args = [sec0, nnz.data, sec1, sec2, dat1.data, sec3, sec4, dat2.data, sec5, sec6]
+    # import pdb; pdb.set_trace()
+
+    args = [sec0, sec1, nnz.data, sec2, dat1.data, sec3, sec4, dat2.data, sec5, sec6]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
@@ -737,8 +740,8 @@ def test_compute_ragged_permuted():
     # root = Dim(6, permutation=(3, 2, 5, 0, 4, 1))
     # nnz_ = np.array([3, 2, 0, 1, 3, 2], dtype=np.int32)
     # FIXME
-    assert all(sec0 == np.arange(6))
-    assert all(sec1 == np.array([3, 9, 1, 0, 6, 1]))
+    assert all(sec1 == np.arange(6))
+    assert all(sec0 == np.array([3, 9, 1, 0, 6, 1]))
 
     assert all(dat2.data == dat1.data + 1)
     print("compute_ragged_permuted PASSED", flush=True)
@@ -754,7 +757,9 @@ def test_subset():
     subset_dim = Dim(4)
     subset_tensor = Tensor(Tree(subset_dim),
             data=np.array([2, 3, 5, 0], dtype=np.int32), dtype=np.int32, prefix="subset")
-    subset = NonAffineMap(subset_tensor)
+
+    i1 = pyop3.index(StencilGroup([Stencil([((0, Slice()), (0, Slice()))])]))
+    subset = NonAffineMap(subset_tensor[i1])
 
     iterset = StencilGroup([Stencil([((0, subset),)])])
     code = lp.make_kernel(
@@ -794,6 +799,7 @@ def test_subset():
     sec2 = np.empty(1, dtype=np.int32)  # missing
     sec3 = sec1.copy()
 
+    import pdb; pdb.set_trace()
     args = [sec0, subset_tensor.data, sec1, dat1.data, sec2, dat2.data, sec3]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
@@ -861,7 +867,7 @@ def test_map():
     sec4 = np.empty(1, dtype=np.int32)
     sec5 = sec3.copy()
 
-    import pdb; pdb.set_trace()
+    # import pdb; pdb.set_trace()
     args = [sec0, sec1, sec2, map_tensor.data, sec3, dat1.data, sec4, dat2.data, sec5]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
@@ -959,8 +965,8 @@ if __name__ == "__main__":
     # test_compute_double_loop_permuted()
     # test_compute_double_loop_permuted_mixed()
     # test_compute_double_loop_scalar()
-    # test_compute_double_loop_ragged()
+    test_compute_double_loop_ragged()
     # test_compute_ragged_permuted()
     # test_compute_double_loop_ragged_mixed()
     # mfe()
-    test_map_composition()
+    # test_map_composition()

@@ -58,6 +58,7 @@ class LoopyKernelBuilder:
         self.instructions = []
         self.kernel_data = []
         self.subkernels = []
+        # self._within_inames = {}
 
     def build(self, tlang_expr):
         self._namer.reset()
@@ -74,7 +75,7 @@ class LoopyKernelBuilder:
             name="mykernel",
         )
         tu = lp.merge((translation_unit, *self.subkernels))
-        import pdb; pdb.set_trace()
+        # import pdb; pdb.set_trace()
         return tu.with_entrypoints("mykernel")
 
     @functools.singledispatchmethod
@@ -99,22 +100,40 @@ class LoopyKernelBuilder:
 
         for subdim_id, index in indices:
             iname = self._namer.next("i")
-            within_loops[index] = iname, (iname,)
+            within_loops[index] = iname
 
-            if isinstance(index, NonAffineMap):
-                raise NotImplementedError("not now")
-                indices = tuple((0, Slice()) for _ in range(index.tensor.order))
-                # N.B. we also tack on within_inames here too
-                for _, idx in indices:
-                    within_loops[idx] = self._namer.next("i")
-                temporary = Tensor(pyop3.utils.Tree(None), name=iname, dtype=np.int32)["fill"]
-                indexed = index.tensor[StencilGroup([Stencil([indices])])]
-                # import pdb; pdb.set_trace()
-                mapassignment = tlang.Read(indexed, temporary)
-                within_inames1 = self._make_instruction_context(mapassignment, within_loops, scalar=True)
-                within_inames |= within_inames1
-            else:
-                within_inames.add(iname)
+            # if isinstance(index, NonAffineMap):
+            #     raise NotImplementedError("not now")
+            #     indices = tuple((0, Slice()) for _ in range(index.tensor.order))
+            #     # N.B. we also tack on within_inames here too
+            #     for _, idx in indices:
+            #         within_loops[idx] = self._namer.next("i")
+            #     temporary = Tensor(pyop3.utils.Tree(None), name=iname, dtype=np.int32)["fill"]
+            #     indexed = index.tensor[StencilGroup([Stencil([indices])])]
+            #     # import pdb; pdb.set_trace()
+            #     mapassignment = tlang.Read(indexed, temporary)
+            #     within_inames1 = self._make_instruction_context(mapassignment, within_loops, scalar=True)
+            #     within_inames |= within_inames1
+            # else:
+            #     within_inames.add(iname)
+
+
+            ###
+
+                    # if isinstance(stop, Tensor):
+                    #     temporary_name = self._namer.next("p")
+                    #     temporary = Tensor(pyop3.utils.Tree(None), name=temporary_name,
+                    #                        dtype=np.int32)["fill"]
+                    #     # import pdb; pdb.set_trace()
+                    #     myindices = tuple((0, idx) for _, idx in indices[-stop.order-i:-i])
+                    #     mystencils = StencilGroup([Stencil([myindices])])
+                    #     indexed = stop[mystencils]
+                    #     mapassignment = tlang.Read(indexed, temporary)
+                    #     self._make_instruction_context(mapassignment, within_loops, scalar=True)
+                    #     size = pym.var(temporary_name)
+                    # else:
+                    #     size = (stop - start) // step
+
 
         for stmt in expr.statements:
             self._build(stmt, within_loops.copy())
@@ -160,7 +179,8 @@ class LoopyKernelBuilder:
             tuple(reads),
         )
 
-        within_inames = frozenset([iname for _, inames in within_loops.values() for iname in inames])
+        # within_inames = frozenset([self._within_inames[iname] for iname in within_loops.values()])
+        within_inames = frozenset(within_loops.values())
 
         kernel_data = [lp.TemporaryVariable(temp.name, shape=(mysize(temp),)) for temp in subarrayrefs]
 
@@ -189,7 +209,7 @@ class LoopyKernelBuilder:
             for lidxs, ridxs in zip(lstencil, rstencil):
                 # 1. Create a domain stack if not provided - this means that we can have consistent inames for the LHS and RHS
                 if not domain_stack:
-                    domain_stack = self.create_domain_stack(assignment.lhs, assignment.rhs, lidxs, ridxs)
+                    domain_stack = self.create_domain_stack(assignment.lhs, assignment.rhs, lidxs, ridxs, within_loops)
 
                 # import pdb; pdb.set_trace()
 
@@ -214,7 +234,7 @@ class LoopyKernelBuilder:
                     else:
                         rhs = rname
 
-                within_inames = frozenset([iname for _, inames in within_loops.values() for iname in inames] + [iname for iname, _ in domain_stack])
+                within_inames = frozenset(list(within_loops.values()) + [iname for iname in domain_stack])
                 # import pdb; pdb.set_trace()
                 assign_insn = lp.Assignment(
                         lhs, rhs,
@@ -249,17 +269,63 @@ class LoopyKernelBuilder:
 
         return domain_stack
 
-    def create_domain_stack(self, lhs, rhs, lidxs, ridxs):
+    def create_domain_stack(self, lhs, rhs, lidxs, ridxs, within_loops):
+        # import pdb; pdb.set_trace()
+        inames = self.create_domain_stack_inner(lhs, rhs, lidxs, ridxs)
+        return inames
+
+    def register_new_within_domain(self, dim, subdim_id, index, within_loops):
+        within_loops = within_loops.copy()
+        try:
+            iname = within_loops[index]
+        except KeyError:
+            iname = within_loops.setdefault(index, self._namer.next("i"))
+
+        # and try to register/check
+        start = self.register_extent(index.start or 0, within_loops)
+        dimsize = dim.sizes[subdim_id] if dim else None
+        stop = self.register_extent(index.stop or dimsize, within_loops)
+        step = self.register_extent(index.step or 1, within_loops)
+
+        if iname in self.domains:
+            assert self.domains[iname] == (0, (stop - start) // step, 1)
+        else:
+            self.domains[iname] = (0, (stop - start) // step, 1)
+
+        return iname, within_loops
+
+    def create_domain_stack_inner(self, lhs, rhs, lidxs, ridxs):
         shapes = {lhs.indexed_shape_per_indices(lidxs), rhs.indexed_shape_per_indices(ridxs)}
         try:
             shape, = shapes
         except ValueError:
             raise ValueError("Shapes do not match")
-        domains = [(self._namer.next("i"), extent) for extent in shape]
-        for iname, extent in domains:
+        inames = [self._namer.next("i") for _ in shape]
+        for iname, extent in zip(inames, shape):
             assert iname not in self.domains
             self.domains[iname] = (0, extent, 1)
-        return domains
+        return inames
+
+    def register_extent(self, extent, within_loops):
+        within_loops = within_loops.copy()
+        within_loops.pop(list(within_loops.keys())[-1])
+        if not hasattr(self, "_extents"):
+            self._extents = {}
+        if isinstance(extent, Tensor):
+            try:
+                return self._extents[extent]
+            except KeyError:
+                temp_name = self._namer.next("p")
+                temp = Tensor(pyop3.utils.Tree(None), name=temp_name, dtype=np.int32)["fill"]
+
+                indices = tuple((0, idx) for idx in list(within_loops.keys())[-extent.order:])
+                stencils = StencilGroup([Stencil([indices])])
+                insn = tlang.Read(extent[stencils], temp)
+                self._make_instruction_context(insn, within_loops, scalar=True)
+
+                return self._extents.setdefault(extent, pym.var(temp_name))
+        else:
+            return extent
 
     def handle_assignment(self, tensor, indices, domain_stack, within_loops):
         # import pdb; pdb.set_trace()
@@ -271,47 +337,52 @@ class LoopyKernelBuilder:
         within_loops = within_loops.copy()
         index_expr = 0
         current_dim = tensor.dim.root
-        for subdim_id, index in indices:
+        for i, (subdim_id, index) in enumerate(indices):
             # import pdb; pdb.set_trace()
             assert current_dim is not None
 
             if isinstance(index, Slice):
                 start = index.start or 0
+                stop = index.stop or current_dim.sizes[subdim_id]
                 step = index.step or 1
 
                 if index.within:
-                    iname = within_loops[index][0]
-                    stop = index.stop or current_dim.sizes[subdim_id]
-                    size = (stop - start) // step
-                    if iname in self.domains:
-                        assert self.domains[iname] == (0, size, 1)
-                    else:
-                        self.domains[iname] = (0, size, 1)
+                    iname, within_loops = self.register_new_within_domain(current_dim, subdim_id, index, within_loops)
                 else:
-                    iname, _ = dstack.pop(0)
+                    iname = dstack.pop(0)
+                # iname = dstack.pop(0)
 
                 dim_expr = pym.var(iname)*step + start
             elif isinstance(index, NonAffineMap):
-                if index.within:
-                    raise NotImplementedError("not yet")
-                    mapped_iname = within_loops[index][0]
+                # if index.within:
+                if False:
+                    iname, within_loops = self.register_new_within_domain(current_dim, subdim_id, index, within_loops)
+                    dim_expr = pym.var(iname)
                 else:
                     # mapped_iname = self._namer.next("i")
                     # temporary = Tensor(pyop3.utils.Tree(None), name=mapped_iname, dtype=np.int32)["fill"]
 
-                    ((indices,),) = index.tensor.stencils
-                    new_within = Slice()
-                    # newiname, _ = dstack.pop()
-                    # within_loops[new_within] = newiname, newiname
-                    new_indices = (indices[0], (0, new_within))
-                    new_stencils = StencilGroup([Stencil([new_indices])])
-                    indexed = index.tensor.copy(stencils=new_stencils)
+                    # ((indices,),) = index.tensor.stencils
+                    # new_within = Slice()
+                    # # newiname, _ = dstack.pop()
+                    # # within_loops[new_within] = newiname, newiname
+                    # new_indices = (indices[0], (0, new_within))
+                    # new_stencils = StencilGroup([Stencil([new_indices])])
+                    # indexed = index.tensor.copy(stencils=new_stencils)
 
                     # mapassignment = tlang.Read(indexed, temporary)
-                    myexpr, dstack = self.handle_assignment(indexed, new_indices, domain_stack=dstack, within_loops=within_loops)
-                    self.kernel_data.append(lp.GlobalArg(indexed.name, shape=None, dtype=indexed.dtype))
+                    """
+                    Explanation for future self:
+
+                    We only want to be dealing with one side of the assignment here. Adding
+                    a scalar to write to suddenly makes the tensor stuff a lot more
+                    complicated. Instead we consume the loops we *already know about* to
+                    construct an appropriate expression.
+                    """
+                    myexpr, dstack = self.handle_assignment(index.tensor, index.tensor.stencils[0][0], domain_stack=dstack, within_loops=within_loops)
+                    self.kernel_data.append(lp.GlobalArg(index.tensor.name, shape=None, dtype=index.tensor.dtype))
                     # import pdb; pdb.set_trace()
-                    dim_expr = pym.subscript(pym.var(indexed.name), myexpr)
+                    dim_expr = pym.subscript(pym.var(index.tensor.name), myexpr)
                 # dim_expr = pym.var(mapped_iname)
                 # temporary_name = self._namer.next("p")
                 # temporary = Tensor(pyop3.utils.Tree(None), name=temporary_name, dtype=np.int32)["fill"]
