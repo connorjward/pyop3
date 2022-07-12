@@ -945,6 +945,72 @@ def test_map_composition():
     print("test_map_composition PASSED", flush=True)
 
 
+def test_iter_map_composition():
+    root = Dim(5)
+    dims = Tree(root)
+
+    dat1 = Tensor(dims, name="dat1", data=np.arange(5, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor(dims, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
+
+    map0_tensor = Tensor(Tree.from_nest([root, [Dim(2)]]),
+                         data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32),
+                         dtype=np.int32, prefix="map")
+    map1_tensor = Tensor(Tree.from_nest([root, [Dim(2)]]),
+                         data=np.array([3, 2, 2, 3, 0, 2, 1, 2, 1, 3], dtype=np.int32),
+                         dtype=np.int32, prefix="map")
+
+    code = lp.make_kernel(
+        "{ [i]: 0 <= i < 1 }",
+        "y[i] = y[i] + x[i]",
+        [lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
+        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
+        target=lp.CTarget(),
+        name="mylocalkernel",
+        lang_version=(2018, 2),
+    )
+    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+
+    i1 = pyop3.index(StencilGroup([Stencil([((0, Slice()),)])]))
+    map0 = NonAffineMap(map0_tensor[i1])
+    i2 = StencilGroup([Stencil([((0, map0),)])])
+    map1 = NonAffineMap(map1_tensor[i2])
+    i3 = StencilGroup([Stencil([((0, map1),)])])
+    expr = pyop3.Loop(p := pyop3.index(i3), kernel(dat1[p], dat2[p]))
+
+    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+
+    cache_key = str(time.time())
+    jitmodule = JITModule(exe, cache_key)
+    dll = compilemythings(jitmodule)
+    fn = getattr(dll, "mykernel")
+
+    sec0 = make_offset_map(map0_tensor.dim.root, map0_tensor.dim)[0]
+    sec1 = make_offset_map(map0_tensor.dim.get_child(map0_tensor.dim.root), map0_tensor.dim)[0]
+    sec2 = make_offset_map(map1_tensor.dim.root, map1_tensor.dim)[0]
+    sec3 = make_offset_map(map1_tensor.dim.get_child(map1_tensor.dim.root), map1_tensor.dim)[0]
+    sec4 = make_offset_map(root, dims)[0]
+    sec5 = np.empty(1, dtype=np.int32)  # missing
+    sec6 = np.empty(1, dtype=np.int32)  # missing
+    sec7 = np.empty(1, dtype=np.int32)  # missing
+    sec8 = np.empty(1, dtype=np.int32)  # missing
+    sec9 = np.empty(1, dtype=np.int32)  # missing
+    sec10 = sec0.copy()
+    sec11 = sec1.copy()
+    sec12 = sec2.copy()
+    sec13 = sec3.copy()
+    sec14 = sec4.copy()
+
+    args = [sec0, sec1, map0_tensor.data, sec2, sec3, map1_tensor.data, sec4, dat1.data, sec5, sec6, sec7, sec8, sec9, dat2.data, sec10, sec11, sec12, sec13, sec14]
+    fn.argtypes = (ctypes.c_voidp,) * len(args)
+
+    fn(*(d.ctypes.data for d in args))
+
+    # import pdb; pdb.set_trace()
+    # data is just written to itself (but not the final one because it's not in map1)
+    ans = [0, 1, 2, 3, 0]
+    assert all(dat2.data == np.array(ans, dtype=np.int32))
+    print("test_iter_map_composition PASSED", flush=True)
+
 @dataclasses.dataclass
 class JITModule:
     code_to_compile: str
@@ -967,8 +1033,9 @@ if __name__ == "__main__":
     # test_compute_double_loop_permuted()
     # test_compute_double_loop_permuted_mixed()
     # test_compute_double_loop_scalar()
-    test_compute_double_loop_ragged()
+    # test_compute_double_loop_ragged()
     # test_compute_ragged_permuted()
     # test_compute_double_loop_ragged_mixed()
     # mfe()
     # test_map_composition()
+    test_iter_map_composition()
