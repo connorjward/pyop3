@@ -178,7 +178,7 @@ class LoopyKernelBuilder:
             for lidxs, ridxs in zip(lstencil, rstencil):
                 # 1. Create a domain stack if not provided - this means that we can have consistent inames for the LHS and RHS
                 if not domain_stack:
-                    domain_stack = self.create_domain_stack(assignment.lhs, assignment.rhs, lidxs, ridxs, within_loops)
+                    domain_stack = self.create_domain_stack(assignment.lhs, assignment.rhs, lidxs, ridxs)
 
                 # import pdb; pdb.set_trace()
 
@@ -238,11 +238,6 @@ class LoopyKernelBuilder:
 
         return domain_stack
 
-    def create_domain_stack(self, lhs, rhs, lidxs, ridxs, within_loops):
-        # import pdb; pdb.set_trace()
-        inames = self.create_domain_stack_inner(lhs, rhs, lidxs, ridxs)
-        return inames
-
     def register_new_within_domain(self, dim, subdim_id, index, within_loops):
         iname = within_loops[index]
 
@@ -260,7 +255,7 @@ class LoopyKernelBuilder:
 
         return iname
 
-    def create_domain_stack_inner(self, lhs, rhs, lidxs, ridxs):
+    def create_domain_stack(self, lhs, rhs, lidxs, ridxs):
         shapes = {lhs.indexed_shape_per_indices(lidxs), rhs.indexed_shape_per_indices(ridxs)}
         try:
             shape, = shapes
