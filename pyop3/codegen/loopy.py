@@ -119,26 +119,12 @@ class LoopyKernelBuilder:
 
     @_make_instruction_context.register
     def _(self, call: tlang.FunctionCall, within_loops, **kwargs):
-        def mysize(t):
-            stencil, = t.stencils
-            indices, = stencil
-            s = 1
-            dim = t.dim.root
-            for subdim_id, index in indices:
-                start = index.start or 0
-                stop = index.stop or dim.sizes[subdim_id]
-                step = index.step or 1
-                size = (stop - start) // step
-                s *= size
-                dim = t.dim.get_child(dim)
-            return s
-
-        # breakpoint()
         subarrayrefs = {}
         for temp in utils.unique(itertools.chain(call.reads, call.writes)):
+            assert temp.size == temp.indexed_size
             iname = self._namer.next("i")
             subarrayrefs[temp] = as_subarrayref(temp, iname)
-            self.domains[iname] = (0, mysize(temp), 1)
+            self.domains[iname] = (0, temp.size, 1)
 
         reads = tuple(subarrayrefs[var] for var in call.reads)
         writes = tuple(subarrayrefs[var] for var in call.writes)
@@ -148,10 +134,9 @@ class LoopyKernelBuilder:
             tuple(reads),
         )
 
-        # within_inames = frozenset([self._within_inames[iname] for iname in within_loops.values()])
         within_inames = frozenset(within_loops.values())
 
-        kernel_data = [lp.TemporaryVariable(temp.name, shape=(mysize(temp),)) for temp in subarrayrefs]
+        kernel_data = [lp.TemporaryVariable(temp.name, shape=(temp.size,)) for temp in subarrayrefs]
 
         depends_on = frozenset({f"{insn}*" for insn in call.depends_on})
         call_insn = lp.CallInstruction(
@@ -170,8 +155,6 @@ class LoopyKernelBuilder:
     @_make_instruction_context.register
     def _(self, assignment: tlang.Assignment, within_loops, scalar=False, domain_stack=None):
         within_loops = within_loops.copy()
-        # within_inames = within_inames.copy()
-        # breakpoint()
         assert len(assignment.lhs.stencils) == len(assignment.rhs.stencils)
         for lstencil, rstencil in zip(assignment.lhs.stencils, assignment.rhs.stencils):
             assert len(lstencil) == len(rstencil)
@@ -179,8 +162,6 @@ class LoopyKernelBuilder:
                 # 1. Create a domain stack if not provided - this means that we can have consistent inames for the LHS and RHS
                 if not domain_stack:
                     domain_stack = self.create_domain_stack(assignment.lhs, assignment.rhs, lidxs, ridxs)
-
-                # import pdb; pdb.set_trace()
 
                 lexpr, ldstack = self.handle_assignment(assignment.lhs, lidxs, domain_stack, within_loops)
                 rexpr, rdstack = self.handle_assignment(assignment.rhs, ridxs, domain_stack, within_loops)
@@ -213,22 +194,10 @@ class LoopyKernelBuilder:
                 self.instructions.append(assign_insn)
 
         # register kernel arguments
-        # import pdb; pdb.set_trace()
-        if assignment.temporary.dim.root or not scalar:
-            stencil, = assignment.temporary.stencils
-            indices, = stencil
-            temp_size = 1
-            dim = assignment.temporary.dim.root
-            for subdim_id, index in indices:
-                start = index.start or 0
-                stop = index.stop or dim.sizes[subdim_id]
-                step = index.step or 1
-                size = (stop - start) // step
-                temp_size *= size
-                dim = assignment.temporary.dim.get_child(dim)
-            temp_shape = (temp_size,)
+        if assignment.temporary.shape or not scalar:
+            temp_shape = (assignment.temporary.size,)
         else:
-            temp_shape =()
+            temp_shape = ()
 
         self.kernel_data += [
             lp.GlobalArg(assignment.tensor.name, dtype=assignment.tensor.dtype, shape=None),

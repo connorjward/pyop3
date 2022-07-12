@@ -1,5 +1,6 @@
 import functools
 import numpy as np
+import operator
 import abc
 import itertools
 import collections
@@ -251,6 +252,39 @@ class Tensor(pytools.ImmutableRecordWithoutPickling):
     def __str__(self):
         return self.name
 
+    # TODO We will remove stencils and make this redundant
+    @property
+    def stencil(self):
+        try:
+            st, = self.stencils
+            return st
+        except ValueError:
+            raise RuntimeError("Invalid state")
+
+    @property
+    def indices(self):
+        try:
+            idxs, = self.stencil
+            return idxs
+        except ValueError:
+            raise RuntimeError("Invalid state")
+
+    @property
+    def indexed_shape(self):
+        return self._compute_indexed_shape(self.indices, self.dim.root)
+
+    @property
+    def indexed_size(self):
+        return functools.reduce(operator.mul, self.indexed_shape, 1)
+
+    @property
+    def shape(self):
+        return self._compute_shape(self.dim.root)
+
+    @property
+    def size(self):
+        return functools.reduce(operator.mul, self.shape, 1)
+
     @property
     def order(self):
         return self._compute_order(self.dim.root)
@@ -269,19 +303,31 @@ class Tensor(pytools.ImmutableRecordWithoutPickling):
     def _merge_stencils(self, stencils1, stencils2):
         return _merge_stencils(stencils1, stencils2, self.dim)
 
-    def indexed_shape_per_indices(self, indices, dim=None):
-        if not dim:
-            dim = self.dim.root
 
-        if not indices:
+    def indexed_shape_per_indices(self, indices, dim=None):
+        import warnings
+        warnings.warn("deprecated", DeprecationWarning)
+        return self._compute_indexed_shape(indices, dim or self.dim.root)
+
+    def _compute_indexed_shape(self, indices, dim):
+        if not dim:
             return ()
 
         (subdim_id, index), *subindices = indices
 
         if subdims := self.dim.get_children(dim):
-            return index_shape(index, dim, subdim_id) + self.indexed_shape_per_indices(subindices, subdims[subdim_id])
+            return index_shape(index, dim, subdim_id) + self._compute_indexed_shape(subindices, subdims[subdim_id])
         else:
             return index_shape(index, dim, subdim_id)
+
+    def _compute_shape(self, dim):
+        if not dim:
+            return ()
+
+        if subdim := self.dim.get_child(dim):
+            return (dim.size,) + self._compute_shape(subdim)
+        else:
+            return (dim.size,)
 
 
 def _merge_stencils(stencils1, stencils2, dims):
@@ -520,12 +566,6 @@ def index_size(index):
     raise TypeError
 
 
-# @index_size.register(IntIndex)
-# @index_size.register(LoopIndex)
-# def _(index):
-#     return 1
-
-
 @index_size.register
 def _(index: Slice, dim, subdim_id):
     if index.within:
@@ -538,8 +578,6 @@ def _(index: Slice, dim, subdim_id):
 
 @index_size.register
 def _(index: NonAffineMap, dim, subdim_id):
-    # FIXME
-    # This doesn't quite work - need to have indexed the map beforehand (different to offset tensors)
     if index.within:
         return 1
     else:
