@@ -9,7 +9,7 @@ from typing import Tuple, Union, Any, Optional, Sequence
 import numbers
 import pyrsistent
 
-import pymbolic.primitives as pym
+import pymbolic as pym
 
 import pytools
 import pyop3.exprs
@@ -155,6 +155,39 @@ class StencilGroup(tuple):
             return super().__mul__(other)
 
 
+class NonAffineMap(Index):
+    fields = Index.fields | {"tensor"}
+
+    def __init__(self, tensor, **kwargs):
+        self.tensor = tensor
+        super().__init__(**kwargs)
+
+    @property
+    def map(self):
+        return self.tensor
+
+    # @property
+    # def arity(self):
+    #     dims = self.tensor.dim
+    #     dim = dims.root
+    #     while subdim := dims.get_child(dim):
+    #         dim = subdim
+    #     return dim.size
+
+    # @property
+    # def start(self):
+    #     return 0
+    #
+    # @property
+    # def stop(self):
+    #     return self.arity
+    #
+    # @property
+    # def step(self):
+    #     return 1
+
+
+
 class Tensor(pytools.ImmutableRecordWithoutPickling):
 
     name_generator = pyop3.utils.MultiNameGenerator()
@@ -168,11 +201,13 @@ class Tensor(pytools.ImmutableRecordWithoutPickling):
     #     else:
     #         return super().__new__(cls)
 
-    def __init__(self, dim=None, stencils=None, dtype=None, *, mesh = None, name: str = None, prefix: str=None, data=None):
+    def __init__(self, dim=None, stencils=None, dtype=None, *, mesh = None, name: str = None, prefix: str=None, data=None, max_value=32):
         name = name or self.name_generator.next(prefix or self.prefix)
         self.data = data
+        self.params = {}
+        self._param_namer = NameGenerator(f"{name}_p")
         assert dtype is not None
-        super().__init__(dim=dim, stencils=stencils, mesh=mesh, name=name, dtype=dtype)
+        super().__init__(dim=dim, stencils=stencils, mesh=mesh, name=name, dtype=dtype, max_value=max_value)
 
     def __getitem__(self, stencils):
         """The plan of action here is as follows:
@@ -277,6 +312,38 @@ class Tensor(pytools.ImmutableRecordWithoutPickling):
     def order(self):
         return self._compute_order(self.dim.root)
 
+    @functools.singledispatchmethod
+    def index_shape(self, index, dim, subdim_id):
+        raise TypeError
+
+    @index_shape.register(Slice)
+    def _(self, index, dim, subdim_id):
+        # import pdb; pdb.set_trace()
+        if index.within:
+            return ()
+
+        start = self._parametrise_if_needed(index.start or 0)
+        stop = self._parametrise_if_needed(index.stop or dim.sizes[subdim_id])
+        step = self._parametrise_if_needed(index.step or 1)
+        return ((stop - start) // step,)
+
+    @index_shape.register(NonAffineMap)
+    def _(self, index, dim, subdim_id):
+        if index.within:
+            return ()
+        else:
+            return index.tensor.indexed_shape
+
+    def _parametrise_if_needed(self, value):
+        if isinstance(value, Tensor):
+            if (param := pym.var(value.name)) in self.params:
+                assert self.params[param] == value
+            else:
+                self.params[param] = value
+            return param
+        else:
+            return value
+
     def _compute_order(self, dim):
         subdims = self.dim.get_children(dim)
         ords = {self._compute_order(subdim) for subdim in subdims}
@@ -303,10 +370,11 @@ class Tensor(pytools.ImmutableRecordWithoutPickling):
 
         (subdim_id, index), *subindices = indices
 
+        # import pdb; pdb.set_trace()
         if subdims := self.dim.get_children(dim):
-            return index_shape(index, dim, subdim_id) + self._compute_indexed_shape(subindices, subdims[subdim_id])
+            return self.index_shape(index, dim, subdim_id) + self._compute_indexed_shape(subindices, subdims[subdim_id])
         else:
-            return index_shape(index, dim, subdim_id)
+            return self.index_shape(index, dim, subdim_id)
 
     def _compute_shape(self, dim):
         if not dim:
@@ -496,66 +564,10 @@ class IndexFunction(Map):
         self.expr = expr
 
 
-class NonAffineMap(Index):
-    fields = Index.fields | {"tensor"}
-
-    def __init__(self, tensor, **kwargs):
-        self.tensor = tensor
-        super().__init__(**kwargs)
-
-    @property
-    def map(self):
-        return self.tensor
-
-    @property
-    def arity(self):
-        dims = self.tensor.dim
-        dim = dims.root
-        while subdim := dims.get_child(dim):
-            dim = subdim
-        return dim.size
-
-    @property
-    def start(self):
-        return 0
-
-    @property
-    def stop(self):
-        return self.arity
-
-    @property
-    def step(self):
-        return 1
-
-
 class AffineMap(Map):
     pass
 
 
-@functools.singledispatch
-def index_shape(index, dim, subdim_id):
-    raise TypeError
-
-
-@index_shape.register(Slice)
-def _(index, dim, subdim_id):
-    if index.within:
-        return ()
-
-    start = index.start or 0
-    stop = index.stop or dim.sizes[subdim_id]
-    step = index.step or 1
-    return ((stop - start) // step,)
-
-
-@index_shape.register(NonAffineMap)
-def _(index, dim, subdim_id):
-    if index.within:
-        return ()
-    else:
-        # cannot be mixed here
-        ((indices,),) = index.tensor.stencils
-        return index.tensor.indexed_shape_per_indices(indices)
 
 
 class Section:

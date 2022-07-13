@@ -74,6 +74,7 @@ class TensorLangKernelBuilder:
         # FIXME This will fail if we start doing mixed (and hence need to think harder
         # about temp dims)
         shape, = tensor.indexed_shapes
+        # import pdb; pdb.set_trace()
 
         nest = None
         for extent in reversed(shape):

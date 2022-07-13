@@ -582,16 +582,16 @@ def test_compute_double_loop_ragged():
   }
     """
 
-    # import pdb; pdb.set_trace()
-    sec1 = make_offset_map(nnz.dim.root, nnz.dim)[0]
-    sec0 = make_offset_map(dims.root, dims)[0]
+    sec0 = make_offset_map(nnz.dim.root, nnz.dim)[0]
+    sec1 = make_offset_map(dims.root, dims)[0]
     # sec2 = make_offset_map(subdim, dims)[0]
     sec2 = np.arange(3, dtype=np.int32)
     sec3 = np.empty(1, dtype=np.int32)  # missing
     sec4 = np.empty(1, dtype=np.int32)  # missing
-    sec5 = sec0.copy()
+    sec5 = sec1.copy()
     sec6 = sec2.copy()
 
+    import pdb; pdb.set_trace()
     args = [sec0, nnz.data, sec1, sec2, dat1.data, sec3, sec4, dat2.data, sec5, sec6]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
@@ -604,7 +604,7 @@ def test_compute_double_loop_ragged():
 def test_compute_double_loop_ragged_inner():
     root = Dim(5)
     steps = np.array([3, 2, 1, 3, 2], dtype=np.int32)
-    nnz = Tensor(Tree(root), data=steps, name="nnz", dtype=np.int32)
+    nnz = Tensor(Tree(root), data=steps, name="nnz", dtype=np.int32, max_value=max(steps))
     subdim = Dim(nnz)
     dims = Tree.from_nest([
         root,
