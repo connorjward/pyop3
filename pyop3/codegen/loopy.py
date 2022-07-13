@@ -91,7 +91,7 @@ class LoopyKernelBuilder:
         def collect_within_loops(idx):
             if isinstance(idx, NonAffineMap):
                 within_loops = {}
-                for _, i in idx.tensor.stencils[0][0]:
+                for _, i in idx.tensor.indices:
                     within_loops |= collect_within_loops(i)
                 return within_loops
             else:
@@ -163,10 +163,13 @@ class LoopyKernelBuilder:
                 if not domain_stack:
                     domain_stack = self.create_domain_stack(assignment.lhs, assignment.rhs, lidxs, ridxs)
 
-                lexpr, ldstack = self.handle_assignment(assignment.lhs, lidxs, domain_stack, within_loops)
-                rexpr, rdstack = self.handle_assignment(assignment.rhs, ridxs, domain_stack, within_loops)
+                ldstack = domain_stack.copy()
+                lexpr = self.handle_assignment(assignment.lhs, lidxs, ldstack, within_loops)
 
-                assert ldstack == rdstack
+                rdstack = domain_stack.copy()
+                rexpr = self.handle_assignment(assignment.rhs, ridxs, rdstack, within_loops)
+
+                assert not ldstack and not rdstack
                 domain_stack = ldstack
 
                 lname = pym.var(assignment.lhs.name)
@@ -259,47 +262,15 @@ class LoopyKernelBuilder:
 
     def handle_assignment(self, tensor, indices, domain_stack, within_loops):
         # import pdb; pdb.set_trace()
-        dstack = domain_stack.copy()
+        # dstack = domain_stack.copy()
 
-        # if not tensor.dim:
-            # assert not indices and not inames
-            # return 0
-        within_loops = within_loops.copy()
         index_expr = 0
         current_dim = tensor.dim.root
         for i, (subdim_id, index) in enumerate(indices):
             # import pdb; pdb.set_trace()
             assert current_dim is not None
 
-            if isinstance(index, Slice):
-                start = index.start or 0
-                stop = index.stop or current_dim.sizes[subdim_id]
-                step = index.step or 1
-
-                if index in within_loops:
-                    iname = self.register_new_within_domain(current_dim, subdim_id, index, within_loops)
-                else:
-                    iname = dstack.pop(0)
-                    within_loops[index] = iname
-
-                dim_expr = pym.var(iname)*step + start
-            elif isinstance(index, NonAffineMap):
-                myexpr, dstack = self.handle_assignment(index.tensor, index.tensor.stencils[0][0], domain_stack=dstack, within_loops=within_loops)
-                self.kernel_data.append(lp.GlobalArg(index.tensor.name, shape=None, dtype=index.tensor.dtype))
-                # import pdb; pdb.set_trace()
-                # TODO I expect I need to put index -> dim_expr in within_loops so this is recorded
-                dim_expr = pym.subscript(pym.var(index.tensor.name), myexpr)
-
-                """
-                Explanation for future self:
-
-                We only want to be dealing with one side of the assignment here. Adding
-                a scalar to write to suddenly makes the tensor stuff a lot more
-                complicated. Instead we consume the loops we *already know about* to
-                construct an appropriate expression.
-                """
-            else:
-                raise NotImplementedError
+            dim_expr = self._as_expr(index, current_dim, subdim_id, domain_stack, within_loops)
 
             new_map_name = self._namer.next("sec")
             index_expr += pym.subscript(pym.var(new_map_name), dim_expr + current_dim.offsets[subdim_id])
@@ -308,7 +279,7 @@ class LoopyKernelBuilder:
             if subdims := tensor.dim.get_children(current_dim):
                 current_dim = subdims[subdim_id]
 
-        return index_expr, dstack
+        return index_expr
 
     @staticmethod
     def _make_domain(iname, start, stop, step):
@@ -323,6 +294,29 @@ class LoopyKernelBuilder:
         assert all(param is not None for param in [start, stop, step])
 
         return f"{{ [{iname}]: {start} <= {iname} < {stop} }}"
+
+    @functools.singledispatchmethod
+    def _as_expr(self, index, *args):
+        raise TypeError
+
+    @_as_expr.register
+    def _(self, index: Slice, current_dim, subdim_id, dstack, within_loops):
+        start = index.start or 0
+        step = index.step or 1
+
+        if index in within_loops:
+            iname = self.register_new_within_domain(current_dim, subdim_id, index, within_loops)
+        else:
+            iname = dstack.pop(0)
+            within_loops[index] = iname
+
+        return pym.var(iname)*step + start
+
+    @_as_expr.register
+    def _(self, index: NonAffineMap, current_dim, subdim_id, dstack, within_loops):
+        myexpr = self.handle_assignment(index.tensor, index.tensor.indices, domain_stack=dstack, within_loops=within_loops)
+        self.kernel_data.append(lp.GlobalArg(index.tensor.name, shape=None, dtype=index.tensor.dtype))
+        return pym.subscript(pym.var(index.tensor.name), myexpr)
 
 
 def _make_loopy_kernel(tlang_kernel):
