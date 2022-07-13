@@ -155,24 +155,6 @@ class StencilGroup(tuple):
             return super().__mul__(other)
 
 
-def indexed_shape(stencil):
-    size = 0
-    for indices in stencil:
-        size += indexed_size_per_index_group(indices)
-    return (size,)
-
-
-
-
-def indexed_size_per_index_group(indices):
-    index, *subindices = indices
-    # breakpoint()
-    if subindices:
-        return index_size(index) * indexed_size_per_index_group(subindices)
-    else:
-        return index_size(index)
-
-
 class Tensor(pytools.ImmutableRecordWithoutPickling):
 
     name_generator = pyop3.utils.MultiNameGenerator()
@@ -272,6 +254,12 @@ class Tensor(pytools.ImmutableRecordWithoutPickling):
     @property
     def indexed_shape(self):
         return self._compute_indexed_shape(self.indices, self.dim.root)
+
+    @property
+    def indexed_shapes(self):
+        return tuple(
+            self._compute_indexed_shape(idxs, self.dim.root) for idxs in self.stencil
+        )
 
     @property
     def indexed_size(self):
@@ -499,6 +487,15 @@ class Map(FancyIndex, abc.ABC):
     #     return self.arity
 
 
+class IndexFunction(Map):
+    """The idea here is that we provide an expression, say, "2*x0 + x1 - 3"
+    and then use pymbolic maps to replace the xN with the correct inames for the
+    outer domains. We could also possibly use pN (or pym.var subclass called Parameter)
+    to describe parameters."""
+    def __init__(self, expr):
+        self.expr = expr
+
+
 class NonAffineMap(Index):
     fields = Index.fields | {"tensor"}
 
@@ -537,7 +534,7 @@ class AffineMap(Map):
 
 @functools.singledispatch
 def index_shape(index, dim, subdim_id):
-    ...
+    raise TypeError
 
 
 @index_shape.register(Slice)
@@ -559,41 +556,6 @@ def _(index, dim, subdim_id):
         # cannot be mixed here
         ((indices,),) = index.tensor.stencils
         return index.tensor.indexed_shape_per_indices(indices)
-
-
-@functools.singledispatch
-def index_size(index):
-    raise TypeError
-
-
-@index_size.register
-def _(index: Slice, dim, subdim_id):
-    if index.within:
-        return 1
-    start = index.start or 0
-    stop = index.stop or dim.sizes[subdim_id]
-    assert index.step is None
-    return stop - start
-
-
-@index_size.register
-def _(index: NonAffineMap, dim, subdim_id):
-    if index.within:
-        return 1
-    else:
-        # cannot be mixed here
-        ((indices,),) = index.tensor.stencils
-        return index.tensor.indexed_shape_per_indices(indices)
-
-
-def indexed_size(indices, dim, dtree):
-    (subdim_id, index), *subindices = indices
-    subdims = dtree.get_children(dim)
-    size = index_size(index, dim, subdim_id)
-    if subdims:
-        return size * indexed_size(subindices, subdims[subdim_id], dtree)
-    else:
-        return size
 
 
 class Section:

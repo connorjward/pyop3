@@ -20,7 +20,7 @@ from pyop3 import utils
 from pyop3.utils import MultiNameGenerator, NameGenerator
 from pyop3.utils import CustomTuple, checked_zip, NameGenerator, rzip
 from pyop3.tensors import Tensor, Index, Map, Dim, UniformDim, MixedDim, NonAffineMap
-from pyop3.tensors import Slice, indexed_shape, indexed_size_per_index_group, AffineMap, Stencil, StencilGroup, index_size
+from pyop3.tensors import Slice, AffineMap, Stencil, StencilGroup
 from pyop3.codegen.tlang import to_tlang
 
 LOOPY_TARGET = lp.CTarget()

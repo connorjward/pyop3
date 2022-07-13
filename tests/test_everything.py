@@ -601,6 +601,73 @@ def test_compute_double_loop_ragged():
     print("compute_double_loop_ragged PASSED", flush=True)
 
 
+def test_compute_double_loop_ragged_inner():
+    root = Dim(5)
+    steps = np.array([3, 2, 1, 3, 2], dtype=np.int32)
+    nnz = Tensor(Tree(root), data=steps, name="nnz", dtype=np.int32)
+    subdim = Dim(nnz)
+    dims = Tree.from_nest([
+        root,
+        [subdim]
+    ])
+    dat1 = Tensor(dims, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor(dims, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
+
+    iterset = StencilGroup([Stencil([((0, Slice()),)])])
+    code = lp.make_kernel(
+        "{ [i]: 0 <= i < n }",
+        "y[i] = x[i] + 1",
+        [lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
+        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),
+        lp.ValueArg("n", dtype=np.int32)],
+        target=lp.CTarget(),
+        name="mylocalkernel",
+        lang_version=(2018, 2),
+    )
+    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+    expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
+
+    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+
+    import time
+    cache_key = str(time.time())
+    jitmodule = JITModule(exe, cache_key)
+    dll = compilemythings(jitmodule)
+    fn = getattr(dll, "mykernel")
+
+    """
+  for (int32_t i0 = 0; i0 <= 4; ++i0)
+  {
+    p0[0] = nnz[map0[i0]];
+    for (int32_t i1 = 0; i1 <= -1 + p0; ++i1)
+    {
+      t1[0] = 0.0;
+      t0[0] = dat1[map1[i0] + map2[i1]];
+      mylocalkernel(&(t0[0]), &(t1[0]));
+      dat2[map3[i0] + map4[i1]] = t1[0];
+    }
+  }
+    """
+
+    sec1 = make_offset_map(nnz.dim.root, nnz.dim)[0]
+    sec0 = make_offset_map(dims.root, dims)[0]
+    # sec2 = make_offset_map(subdim, dims)[0]
+    sec2 = np.arange(3, dtype=np.int32)
+    sec3 = np.empty(1, dtype=np.int32)  # missing
+    sec4 = np.empty(1, dtype=np.int32)  # missing
+    sec5 = sec0.copy()
+    sec6 = sec2.copy()
+    import pdb; pdb.set_trace()
+
+    args = [sec0, nnz.data, sec1, sec2, dat1.data, sec3, sec4, dat2.data, sec5, sec6]
+    fn.argtypes = (ctypes.c_voidp,) * len(args)
+
+    fn(*(d.ctypes.data for d in args))
+
+    assert all(dat2.data == dat1.data + 1)
+    print("compute_double_loop_ragged_inner PASSED", flush=True)
+
+
 def test_compute_double_loop_ragged_mixed():
     # import pdb; pdb.set_trace()
     root = Dim((4, 5, 4))
@@ -1038,4 +1105,5 @@ if __name__ == "__main__":
     # test_compute_double_loop_ragged_mixed()
     # mfe()
     # test_map_composition()
-    test_iter_map_composition()
+    # test_iter_map_composition()
+    test_compute_double_loop_ragged_inner()

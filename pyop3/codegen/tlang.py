@@ -57,9 +57,7 @@ class TensorLangKernelBuilder:
     def _(self, expr: exprs.FunctionCall):
         temporaries = {}
         for arg in expr.arguments:
-            stencil, = arg.tensor.stencils
-            indices, = stencil
-            dims = pyop3.utils.Tree.from_nest(self.construct_temp_dims(arg.tensor, indices))
+            dims = pyop3.utils.Tree.from_nest(self.construct_temp_dims(arg.tensor))
             # import pdb; pdb.set_trace()
             temporaries[arg] = tensors.Tensor(dims, name=self._temp_name_generator(), dtype=arg.tensor.dtype)["fill"]
 
@@ -72,9 +70,10 @@ class TensorLangKernelBuilder:
 
         return (*gathers, call, *scatters)
 
-    def construct_temp_dims(self, tensor, indices):
-        # N.B. we should switch to a tree of stencils I think as otherwise making 'mixed' temporaries is hard.
-        shape = tensor.indexed_shape_per_indices(indices)
+    def construct_temp_dims(self, tensor):
+        # FIXME This will fail if we start doing mixed (and hence need to think harder
+        # about temp dims)
+        shape, = tensor.indexed_shapes
 
         nest = None
         for extent in reversed(shape):
@@ -83,21 +82,6 @@ class TensorLangKernelBuilder:
             else:
                 nest = [tensors.Dim(extent), []]
         return nest
-        # (subdim_id, index), *subindices = indices
-        #
-        # subdims = dtree.get_children(dim)
-        #
-        # if index.within:
-        #     if subdims:
-        #         return self.construct_temp_dims(subindices, subdims[subdim_id], dtree)
-        #     else:
-        #         return ()
-        # else:
-        #     size = tensors.index_size(index, dim, subdim_id)
-        #     if subdims:
-        #         return tensors.Dim(size), self.construct_temp_dims(subindices, subdims[subdim_id], dtree)
-        #     else:
-        #         return (tensors.Dim(size), ())
 
     def make_gathers(self, temporaries, **kwargs):
         return tuple(self.make_gather(arg, temp, **kwargs) for arg, temp in temporaries.items())
