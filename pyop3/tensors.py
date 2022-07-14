@@ -64,6 +64,8 @@ class Index(pytools.ImmutableRecord, abc.ABC):
         self.label = label
         self.within = within
         self.id = id or self._id_generator.next()
+        # if id == "idx3":
+        #     import pdb; pdb.set_trace()
         super().__init__()
 
     # @property
@@ -86,14 +88,22 @@ class Slice(FancyIndex):
 
     def __init__(self, size, start=0, step=1, offset=0, **kwargs):
         self.size = size
+        if isinstance(size, Tensor):
+            assert size.stencils is not None
         self.start = start
         self.step = step
         self.offset = offset
         super().__init__(**kwargs)
 
     @classmethod
-    def from_dim(cls, dim, subdim_id, **kwargs):
-        size = cls._as_pym_var(dim.sizes[subdim_id])
+    def from_dim(cls, dim, subdim_id, *, parent_indices=None, **kwargs):
+        # size = cls._as_pym_var(dim.sizes[subdim_id])
+        # index size with the right indices
+        if isinstance(size := dim.sizes[subdim_id], pym.primitives.Expression):
+            if not isinstance(size, Tensor):
+                raise NotImplementedError
+            if size.stencils is None:
+                size = size[StencilGroup([Stencil([parent_indices[-size.order:]])])]
         label = dim.labels[subdim_id]
         offset = dim.offsets[subdim_id]
         return cls(size=size, label=label, offset=offset, **kwargs)
@@ -175,7 +185,9 @@ class NonAffineMap(Index):
 
 
 
-class Tensor(pytools.ImmutableRecordWithoutPickling):
+class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
+
+    fields = {"dim", "stencils", "dtype", "mesh", "name", "data", "max_value"}
 
     name_generator = pyop3.utils.MultiNameGenerator()
     prefix = "ten"
@@ -194,7 +206,13 @@ class Tensor(pytools.ImmutableRecordWithoutPickling):
         self.params = {}
         self._param_namer = NameGenerator(f"{name}_p")
         assert dtype is not None
-        super().__init__(dim=dim, stencils=stencils, mesh=mesh, name=name, dtype=dtype, max_value=max_value)
+
+        self.dim = dim
+        self.stencils = stencils
+        self.mesh = mesh
+        self.dtype = dtype
+        self.max_value = max_value
+        super().__init__(name)
 
     def __getitem__(self, stencils):
         """The plan of action here is as follows:
@@ -418,7 +436,9 @@ def as_stencil_group(stencils, dims):
         raise ValueError
 
 
-def _construct_indices(input_indices, dims, current_dim):
+def _construct_indices(input_indices, dims, current_dim, parent_indices=None):
+    if not parent_indices:
+        parent_indices = []
     # import pdb; pdb.set_trace()
     if not current_dim:
         return ()
@@ -426,7 +446,7 @@ def _construct_indices(input_indices, dims, current_dim):
     if not input_indices:
         if len(dims.get_children(current_dim)) > 1:
             raise RuntimeError("Ambiguous subdim_id")
-        input_indices = [Slice.from_dim(current_dim, 0)]
+        input_indices = [Slice.from_dim(current_dim, 0, parent_indices=parent_indices)]
 
     index, *subindices = input_indices
 
@@ -437,7 +457,7 @@ def _construct_indices(input_indices, dims, current_dim):
     else:
         subdim = None
 
-    return (index,) + _construct_indices(subindices, dims, subdim)
+    return (index,) + _construct_indices(subindices, dims, subdim, parent_indices + [index.copy(within=True)])
 
 
 

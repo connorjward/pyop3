@@ -6,6 +6,7 @@ import pytools
 import pyop3.utils
 from pyop3 import exprs, tensors, tlang
 from typing import Any
+import pymbolic as pym
 
 
 def to_tlang(expr):
@@ -73,28 +74,30 @@ class TensorLangKernelBuilder:
 
     def preprocess_tensor(self, tensor):
         # index tensor sizes!
-        # TODO actually make this happen
         return tensor
-        new_tree = None
         dims = self._preprocess_tensor(tensor, tensor.dim.root)
         # import pdb; pdb.set_trace()
         return tensor.copy(dim=dims)
 
-    # def _preprocess_tensor(self, dim, dims):
-    #     for subdim, size in zip(dims.get_children(dim), dim.sizes):
-    #         if isinstance(size, tensors.Tensor):
-    #             idxs = tensor.indices[-dim.size.order-i:-i]
-    #             new_size = dim.size[tensors.StencilGroup([tensors.Stencil([idxs])])]
-    #             new_dim = dim.copy(sizes=(new_size,))
-    #         else:
-    #             new_dim = dim
-    #
-    #         if not new_tree:
-    #             new_tree = pyop3.utils.Tree(new_dim)
-    #         else:
-    #             new_tree = new_tree.add_child(curr_dim, new_dim)
-    #
-    #     return nest
+    def _preprocess_tensor(self, dim, dims):
+        new_tree = None
+        for subdim, size in zip(dims.get_children(dim), dim.sizes):
+            if isinstance(size, pym.primitives.Expression):
+                if not isinstance(size, tensors.Tensor):
+                    raise NotImplementedError
+
+                idxs = tensor.indices[-dim.size.order-i:-i]
+                new_size = dim.size[tensors.StencilGroup([tensors.Stencil([idxs])])]
+                new_dim = dim.copy(sizes=(new_size,))
+            else:
+                new_dim = dim
+
+            if not new_tree:
+                new_tree = pyop3.utils.Tree(new_dim)
+            else:
+                new_tree = new_tree.add_child(curr_dim, new_dim)
+
+        return new_tree
 
     def construct_temp_dims(self, tensor):
         # FIXME This will fail if we start doing mixed (and hence need to think harder

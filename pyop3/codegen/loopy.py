@@ -20,7 +20,7 @@ from pyop3 import utils
 from pyop3.utils import MultiNameGenerator, NameGenerator
 from pyop3.utils import CustomTuple, checked_zip, NameGenerator, rzip
 from pyop3.tensors import Tensor, Index, Map, Dim, NonAffineMap, _compute_indexed_shape
-from pyop3.tensors import Slice, AffineMap, Stencil, StencilGroup
+from pyop3.tensors import Slice, AffineMap, Stencil, StencilGroup, index
 from pyop3.codegen.tlang import to_tlang
 
 
@@ -264,8 +264,12 @@ class LoopyKernelBuilder:
         # # import pdb; pdb.set_trace()
         # size = (stop - start) // step
         if isinstance(index.size, pym.primitives.Expression):
-            import pdb; pdb.set_trace()
-            size = VariableReplacer()(index.size)
+            if not isinstance(index.size, Tensor):
+                raise NotImplementedError("need to think hard about more complicated expressions"
+                                          "esp. sharing inames")
+            # import pdb; pdb.set_trace()
+            # size = VariableReplacer()(index.size)
+            size = self.register_extent(index.size, within_loops, parent_indices)
         else:
             size = index.size
         if iname in self.domains:
@@ -285,12 +289,6 @@ class LoopyKernelBuilder:
         return inames
 
     def register_extent(self, extent, within_loops, parent_indices):
-        # this is needed for within_inames - can it be removed?
-        # doesn't seem generic wrt. inner ragged
-        # within_loops = within_loops.copy()
-        # within_loops.pop(list(within_loops.keys())[-1])
-        # if not hasattr(self, "_extents"):
-        #     self._extents = {}
         if isinstance(extent, Tensor):
             try:
                 return self.extents[extent.name]
@@ -299,9 +297,8 @@ class LoopyKernelBuilder:
                 temp_name = self._namer.next("n")
                 temp = Tensor(pyop3.utils.Tree(None), name=temp_name, dtype=np.int32)["fill"]
 
-                # indices = parent_indices[-extent.order:]
-                # stencils = StencilGroup([Stencil([indices])])
-                # insn = tlang.Read(extent[stencils], temp)
+                new_stencils = index(extent.stencils)
+                extent = extent.copy(stencils=new_stencils)
                 insn = tlang.Read(extent, temp)
                 self._make_instruction_context(insn, within_loops, scalar=True)
 
@@ -311,12 +308,21 @@ class LoopyKernelBuilder:
 
     def handle_assignment(self, tensor, indices, within_loops):
         index_expr = 0
+        dim = tensor.dim.root
         for i, index in enumerate(indices):
+            assert dim is not None
+
             dim_expr = self._as_expr(index, within_loops)
 
+            subdim_id = dim.labels.index(index.label)
+
+            # import pdb; pdb.set_trace()
             section_name = self._namer.next("sec")
-            index_expr += pym.subscript(pym.var(section_name), dim_expr + index.offset)
+            index_expr += pym.subscript(pym.var(section_name), dim_expr + dim.offsets[subdim_id])
             self.kernel_data.append(lp.GlobalArg(section_name, shape=None, dtype=np.int32))
+
+            if subdims := tensor.dim.get_children(dim):
+                dim = subdims[subdim_id]
 
         return index_expr
 

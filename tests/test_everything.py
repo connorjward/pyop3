@@ -75,16 +75,15 @@ Compile errors in %s""" % (e.cmd, e.returncode, logfile, errfile))
             return ctypes.CDLL(soname)
 
 
-def make_offset_map(dim, dtree, points=None, imap=None):
+def make_offset_map(dim, dtree, imap=None):
+    # import pdb; pdb.set_trace()
     if imap is None:
         imap = {}
 
-    if points is None:
-        if isinstance(dim.sizes[0], Tensor):
-            points = list(range(read_tensor(dim.sizes[0], imap)))
-        else:
-            points = list(range(sum(dim.sizes)))
-
+    if len(dim.sizes) == 1 and isinstance(dim.size, Tensor):
+        points = list(range(read_tensor(dim.size, imap)))
+    else:
+        points = list(range(sum(dim.sizes)))
 
     ptr = 0
     offsets = {}
@@ -95,9 +94,16 @@ def make_offset_map(dim, dtree, points=None, imap=None):
 
         offsets[point] = ptr
 
-        subdim, label = get_subdim(dim, dtree, point)
+        subdim, label, i = get_subdim(dim, dtree, point)
+
+        # label = dim.labels[i]
+        # if subdims := dtree.get_children(dim):
+        #     subdim = subdims[i]
+        # else:
+        #     subdim = None
+
         if subdim:
-            ptr += make_offset_map(subdim, dtree, imap=imap|{label: point})[1]
+            ptr += make_offset_map(subdim, dtree, imap=imap|{label: point - dim.offsets[i]})[1]
         else:
             ptr += 1
 
@@ -109,14 +115,14 @@ def get_subdim(dim, dtree, point):
     subdims = dtree.get_children(dim)
 
     if not subdims:
-        return None, None
+        return None, None, None
 
     bounds = list(np.cumsum(dim.sizes))
     for i, (start, stop) in enumerate(zip([0]+bounds, bounds)):
         if start <= point < stop:
             stratum = i
             break
-    return subdims[stratum], dim.labels[stratum]
+    return subdims[stratum], dim.labels[stratum], stratum
 
 
 def read_tensor(tensor, imap):
@@ -125,6 +131,7 @@ def read_tensor(tensor, imap):
     assert not tensor.dim.get_children(tensor.dim.root)
 
     # FIXME
+    # the tensor needs to be indexed by all of the appropriate indices
     ptr = imap[tensor.dim.root.labels[0]]# - tensor.dim.root.offset
     return tensor.data[ptr]
 
@@ -548,7 +555,11 @@ def test_compute_double_loop_ragged():
     dat1 = Tensor(dims, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor(dims, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
 
-    iterset = StencilGroup([Stencil([(Slice.from_dim(root, 0), Slice.from_dim(subdim, 0))])])
+    i_ = Slice.from_dim(root, 0, within=True)
+    iterset =  StencilGroup([Stencil([(i_, Slice.from_dim(subdim, 0, parent_indices=(i_,)))])])
+
+    # import pdb; pdb.set_trace()
+
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
         "y[i] = x[i] + 1",
@@ -615,6 +626,10 @@ def test_compute_double_loop_ragged_inner():
     dat2 = Tensor(dims, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
 
     iterset = StencilGroup([Stencil([(Slice.from_dim(root, 0),)])])
+    # import pdb; pdb.set_trace()
+    # this is the problem
+    # dat1[pyop3.index(iterset)]
+
     code = lp.make_kernel(
         "{ [i]: 0 <= i < n }",
         "y[i] = x[i] + 1",
@@ -678,14 +693,16 @@ def test_compute_double_loop_ragged_mixed():
     # import pdb; pdb.set_trace()
     root = Dim((4, 5, 4))
     nnz_data = np.array([3, 2, 0, 0, 1], dtype=np.int32)
-    nnz = Tensor(Tree(root.copy(offset=4, sizes=(5,))), data=nnz_data, name="nnz", dtype=np.int32)
+    # nnz = Tensor(Tree(root.copy(offset=4, sizes=(5,))), data=nnz_data, name="nnz", dtype=np.int32)
+    nnz = Tensor(Tree(root.copy(sizes=(5,), labels=(root.labels[1],))), data=nnz_data, name="nnz", dtype=np.int32)
     subdims = [Dim(1), Dim(nnz), Dim(2)]
     dims = Tree.from_nest([root, subdims])
 
     dat1 = Tensor(dims, name="dat1", data=np.arange(4+6+8, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor(dims, name="dat2", data=np.zeros(4+6+8, dtype=np.float64), dtype=np.float64)
 
-    iterset = StencilGroup([Stencil([(Slice.from_dim(root, 1), Slice.from_dim(subdims[1], 0))])])
+    i0 = Slice.from_dim(root, 1)
+    iterset = StencilGroup([Stencil([(i0, Slice.from_dim(subdims[1], 0, parent_indices=[i0]))])])
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
         "y[i] = x[i] + 1",
@@ -720,17 +737,17 @@ def test_compute_double_loop_ragged_mixed():
   }
     """
 
-    # import pdb; pdb.set_trace()
     # sec0 = make_offset_map(nnz.dim.root, nnz.dim)[0]
-    sec1 = np.arange(10, dtype=np.int32)
-    sec0 = make_offset_map(dims.root, dims)[0]
+    sec0 = np.arange(10, dtype=np.int32)
+    sec1 = make_offset_map(dims.root, dims)[0]
     # FIXME
     # sec2 = make_offset_map(subdims[0], dims)[0]
     sec2 = np.arange(3, dtype=np.int32)
     sec3 = np.empty(1, dtype=np.int32)  # missing
     sec4 = np.empty(1, dtype=np.int32)  # missing
-    sec5 = sec0.copy()
+    sec5 = sec1.copy()
     sec6 = sec2.copy()
+    # import pdb; pdb.set_trace()
 
     args = [sec0, nnz.data, sec1, sec2, dat1.data, sec3, sec4, dat2.data, sec5, sec6]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
@@ -758,7 +775,8 @@ def test_compute_ragged_permuted():
     dat1 = Tensor(dims, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor(dims, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
 
-    iterset = StencilGroup([Stencil([(Slice.from_dim(root, 0), Slice.from_dim(subdim, 0))])])
+    i0 = Slice.from_dim(root, 0)
+    iterset = StencilGroup([Stencil([(i0, Slice.from_dim(subdim, 0, parent_indices=[i0]))])])
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
         "y[i] = x[i] + 1",
