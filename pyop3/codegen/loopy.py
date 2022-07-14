@@ -60,6 +60,7 @@ class LoopyKernelBuilder:
         self.subkernels = []
         # self._within_inames = {}
         self.extents = {}
+        self.assumptions = []
 
     def build(self, tlang_expr):
         self._namer.reset()
@@ -71,6 +72,7 @@ class LoopyKernelBuilder:
             utils.unique(domains),
             utils.unique(self.instructions),
             utils.unique(self.kernel_data),
+            assumptions=",".join(self.assumptions),
             target=LOOPY_TARGET,
             lang_version=LOOPY_LANG_VERSION,
             name="mykernel",
@@ -121,23 +123,40 @@ class LoopyKernelBuilder:
     @_make_instruction_context.register
     def _(self, call: tlang.FunctionCall, within_loops, **kwargs):
         subarrayrefs = {}
+        extents = []
+        # import pdb; pdb.set_trace()
         for temp in utils.unique(itertools.chain(call.reads, call.writes)):
-            assert temp.size == temp.indexed_size
+            temp_size = 1
+            for extent in temp.shape:
+                if isinstance(extent, Tensor):
+                    if (var := self.extents[extent.name]) not in extents:
+                        extents.append(var)
+                        self.assumptions.append(f"{var} <= {extent.max_value}")
+                    extent = extent.max_value
+                temp_size *= extent
+
+            temp_isize = 1
+            for extent in temp.indexed_shape:
+                if isinstance(extent, Tensor):
+                    extent = extent.max_value
+                temp_isize *= extent
+
+            # assert temp.size == temp.indexed_size
+            assert temp_size == temp_isize
+
             iname = self._namer.next("i")
             subarrayrefs[temp] = as_subarrayref(temp, iname)
-            import pdb; pdb.set_trace()
-            # self.domains[iname] = (0, temp.size, 1)
+            # import pdb; pdb.set_trace()
+            self.domains[iname] = (0, temp_size, 1)
+            self.kernel_data.append(lp.TemporaryVariable(temp.name, shape=(temp_size,))) 
 
         assignees = tuple(subarrayrefs[var] for var in call.writes)
         expression = pym.primitives.Call(
             pym.var(call.function.code.default_entrypoint.name),
-            tuple(subarrayrefs[var] for var in call.reads),
+            tuple(subarrayrefs[var] for var in call.reads) + tuple(extents),
         )
 
         within_inames = frozenset(within_loops.values())
-
-        kernel_data = [lp.TemporaryVariable(temp.name, shape=(temp.size,)) for temp in subarrayrefs]
-
         depends_on = frozenset({f"{insn}*" for insn in call.depends_on})
         call_insn = lp.CallInstruction(
             assignees,
@@ -148,7 +167,6 @@ class LoopyKernelBuilder:
         )
 
         self.instructions.append(call_insn)
-        self.kernel_data.extend(kernel_data)
         self.subkernels.append(call.function.code)
 
 
@@ -201,7 +219,13 @@ class LoopyKernelBuilder:
 
         # register kernel arguments
         if assignment.temporary.shape or not scalar:
-            temp_shape = (assignment.temporary.size,)
+            size = 1
+            for extent in assignment.temporary.shape:
+                if isinstance(extent, Tensor):
+                    extent = extent.max_value
+                size *= extent
+            # temp_shape = (assignment.temporary.size,)
+            temp_shape = (size,)  # must be 1D for loopy to be OK with ragged things
         else:
             temp_shape = ()
 
@@ -253,17 +277,19 @@ class LoopyKernelBuilder:
         #     self._extents = {}
         if isinstance(extent, Tensor):
             try:
-                return self.extents[extent]
+                return self.extents[extent.name]
             except KeyError:
+                # import pdb; pdb.set_trace()
                 temp_name = self._namer.next("n")
                 temp = Tensor(pyop3.utils.Tree(None), name=temp_name, dtype=np.int32)["fill"]
 
-                indices = parent_indices[-extent.order:]
-                stencils = StencilGroup([Stencil([indices])])
-                insn = tlang.Read(extent[stencils], temp)
+                # indices = parent_indices[-extent.order:]
+                # stencils = StencilGroup([Stencil([indices])])
+                # insn = tlang.Read(extent[stencils], temp)
+                insn = tlang.Read(extent, temp)
                 self._make_instruction_context(insn, within_loops, scalar=True)
 
-                return self.extents.setdefault(extent, pym.var(temp_name))
+                return self.extents.setdefault(extent.name, pym.var(temp_name))
         else:
             return extent
 
@@ -304,7 +330,7 @@ class LoopyKernelBuilder:
                 within_loops[index] = iname
 
             elif isinstance(index, NonAffineMap):
-                within_loops |= self.register_domains(index.tensor, index.tensor.indices, domain_stack=dstack, within_loops=within_loops)
+                within_loops |= self.register_domains(index.tensor, index.tensor.indices, dstack, within_loops)
                 self.kernel_data.append(lp.GlobalArg(index.tensor.name, shape=None, dtype=index.tensor.dtype))
             else:
                 raise TypeError

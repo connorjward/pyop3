@@ -591,7 +591,7 @@ def test_compute_double_loop_ragged():
     sec5 = sec1.copy()
     sec6 = sec2.copy()
 
-    import pdb; pdb.set_trace()
+    # import pdb; pdb.set_trace()
     args = [sec0, nnz.data, sec1, sec2, dat1.data, sec3, sec4, dat2.data, sec5, sec6]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
@@ -649,17 +649,22 @@ def test_compute_double_loop_ragged_inner():
   }
     """
 
-    sec1 = make_offset_map(nnz.dim.root, nnz.dim)[0]
-    sec0 = make_offset_map(dims.root, dims)[0]
-    # sec2 = make_offset_map(subdim, dims)[0]
-    sec2 = np.arange(3, dtype=np.int32)
-    sec3 = np.empty(1, dtype=np.int32)  # missing
-    sec4 = np.empty(1, dtype=np.int32)  # missing
-    sec5 = sec0.copy()
-    sec6 = sec2.copy()
-    import pdb; pdb.set_trace()
+    sec0 = make_offset_map(nnz.dim.root, nnz.dim)[0]
+    sec1 = np.arange(3, dtype=np.int32)
+    sec2 = make_offset_map(dims.root, dims)[0]
+    # FIXME
+    # sec3 = make_offset_map(subdim, dims)[0]
+    sec3 = sec1.copy()
+    sec4 = sec1.copy()
+    sec5 = np.empty(1, dtype=np.int32)  # missing
+    sec6 = np.empty(1, dtype=np.int32)  # missing
+    sec7 = sec2.copy()
+    sec8 = sec3.copy()
+    sec9 = sec1.copy()
 
-    args = [sec0, nnz.data, sec1, sec2, dat1.data, sec3, sec4, dat2.data, sec5, sec6]
+    # import pdb; pdb.set_trace()
+
+    args = [sec0, nnz.data, sec1, sec2, sec3, dat1.data, sec4, sec5, sec6, dat2.data, sec7, sec8, sec9]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
@@ -787,19 +792,19 @@ def test_compute_ragged_permuted():
   }
     """
 
-    sec1 = make_offset_map(nnz.dim.root, nnz.dim)[0]
-    sec0 = make_offset_map(dims.root, dims)[0]
+    sec0 = make_offset_map(nnz.dim.root, nnz.dim)[0]
+    sec1 = make_offset_map(dims.root, dims)[0]
     # FIXME
     # map2 = make_offset_map(subdim, dims)[0]
     sec2 = np.arange(11, dtype=np.int32)
     sec3 = np.empty(1, dtype=np.int32)  # missing
     sec4 = np.empty(1, dtype=np.int32)  # missing
-    sec5 = sec0.copy()
+    sec5 = sec1.copy()
     sec6 = sec2.copy()
 
     # import pdb; pdb.set_trace()
 
-    args = [sec0, sec1, nnz.data, sec2, dat1.data, sec3, sec4, dat2.data, sec5, sec6]
+    args = [sec0, nnz.data, sec1, sec2, dat1.data, sec3, sec4, dat2.data, sec5, sec6]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
@@ -807,8 +812,8 @@ def test_compute_ragged_permuted():
     # root = Dim(6, permutation=(3, 2, 5, 0, 4, 1))
     # nnz_ = np.array([3, 2, 0, 1, 3, 2], dtype=np.int32)
     # FIXME
-    assert all(sec1 == np.arange(6))
-    assert all(sec0 == np.array([3, 9, 1, 0, 6, 1]))
+    assert all(sec0 == np.arange(6))
+    assert all(sec1 == np.array([3, 9, 1, 0, 6, 1]))
 
     assert all(dat2.data == dat1.data + 1)
     print("compute_ragged_permuted PASSED", flush=True)
@@ -869,7 +874,7 @@ def test_subset():
     sec5 = sec1.copy()
 
     # import pdb; pdb.set_trace()
-    args = [sec0, subset_tensor.data, sec1, dat1.data, sec2, sec3, dat2.data, sec4, sec5]
+    args = [subset_tensor.data, sec0, sec1, dat1.data, sec2, sec3, dat2.data, sec4, sec5]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
@@ -937,7 +942,7 @@ def test_map():
     sec5 = sec3.copy()
 
     # import pdb; pdb.set_trace()
-    args = [sec0, sec1, sec2, map_tensor.data, sec3, dat1.data, sec4, dat2.data, sec5]
+    args = [sec0, map_tensor.data, sec1, sec2, sec3, dat1.data, sec4, dat2.data, sec5]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
@@ -1002,7 +1007,7 @@ def test_map_composition():
     sec8 = sec6.copy()
 
     # import pdb; pdb.set_trace()
-    args = [sec0, sec1, sec2, sec3, map0_tensor.data, sec4, sec5, map1_tensor.data, sec6, dat1.data, sec7, dat2.data, sec8]
+    args = [sec0, sec1, map0_tensor.data, map1_tensor.data, sec2, sec3, sec4, sec5, sec6, dat1.data, sec7, dat2.data, sec8]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
@@ -1067,7 +1072,8 @@ def test_iter_map_composition():
     sec13 = sec3.copy()
     sec14 = sec4.copy()
 
-    args = [sec0, sec1, map0_tensor.data, sec2, sec3, map1_tensor.data, sec4, dat1.data, sec5, sec6, sec7, sec8, sec9, dat2.data, sec10, sec11, sec12, sec13, sec14]
+    # import pdb; pdb.set_trace()
+    args = [map0_tensor.data, map1_tensor.data, sec0, sec1, sec2, sec3, sec4, dat1.data, sec5, sec6, sec7, sec8, sec9, dat2.data, sec10, sec11, sec12, sec13, sec14]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))

@@ -34,6 +34,11 @@ class Dim(pytools.ImmutableRecord):
         self.name = name
         super().__init__()
 
+    # TODO make this the actual property (not id)
+    @property
+    def label(self):
+        return self.name
+
     @property
     def strata(self):
         return tuple(range(len(self.sizes)))
@@ -322,8 +327,14 @@ class Tensor(pytools.ImmutableRecordWithoutPickling):
         if index.within:
             return ()
 
+        stop = index.stop or dim.sizes[subdim_id]
+        # import pdb; pdb.set_trace()
+        # FIXME
+        if isinstance(stop, Tensor):
+            return (stop,)
+
         start = self._parametrise_if_needed(index.start or 0)
-        stop = self._parametrise_if_needed(index.stop or dim.sizes[subdim_id])
+        stop = self._parametrise_if_needed(stop)
         step = self._parametrise_if_needed(index.step or 1)
         return ((stop - start) // step,)
 

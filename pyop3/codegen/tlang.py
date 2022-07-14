@@ -56,8 +56,9 @@ class TensorLangKernelBuilder:
     @_inspect.register
     def _(self, expr: exprs.FunctionCall):
         temporaries = {}
-        for arg in expr.arguments:
-            dims = pyop3.utils.Tree.from_nest(self.construct_temp_dims(arg.tensor))
+        args = [dataclasses.replace(arg, tensor=self.preprocess_tensor(arg.tensor)) for arg in expr.arguments]
+        for arg in args:
+            dims = self.construct_temp_dims(arg.tensor)
             # import pdb; pdb.set_trace()
             temporaries[arg] = tensors.Tensor(dims, name=self._temp_name_generator(), dtype=arg.tensor.dtype)["fill"]
 
@@ -70,19 +71,92 @@ class TensorLangKernelBuilder:
 
         return (*gathers, call, *scatters)
 
+    def preprocess_tensor(self, tensor):
+        # index tensor sizes!
+        new_tree = None
+        curr_dim = None
+        dim = tensor.dim.root
+        for i, (subdim_id, index) in enumerate(tensor.indices):
+            assert dim is not None
+
+            # import pdb; pdb.set_trace()
+            if isinstance(dim.size, tensors.Tensor):
+                idxs = tensor.indices[-dim.size.order-i:-i]
+                new_size = dim.size[tensors.StencilGroup([tensors.Stencil([idxs])])]
+                new_dim = dim.copy(sizes=(new_size,))
+            else:
+                new_dim = dim
+
+            if not new_tree:
+                new_tree = pyop3.utils.Tree(new_dim)
+            else:
+                new_tree = new_tree.add_child(curr_dim, new_dim)
+            curr_dim = new_dim
+
+            if subdims := tensor.dim.get_children(dim):
+                dim = subdims[subdim_id]
+
+        return tensor.copy(dim=new_tree)
+
     def construct_temp_dims(self, tensor):
         # FIXME This will fail if we start doing mixed (and hence need to think harder
         # about temp dims)
-        shape, = tensor.indexed_shapes
         # import pdb; pdb.set_trace()
-
+        shape, = tensor.indexed_shapes
         nest = None
         for extent in reversed(shape):
             if nest:
                 nest = tensors.Dim(extent), [nest]
             else:
                 nest = [tensors.Dim(extent), []]
-        return nest
+        return pyop3.utils.Tree.from_nest(nest)
+        # new_dims = None
+        # dim = tensor.dim.root
+        # for subdim_id, index in tensor.indices:
+        #     assert dim is not None
+        #
+        #     if index.within:
+        #         if subdims := tensor.dim.get_children(dim):
+        #             dim = subdims[subdim_id]
+        #         continue
+        #
+        #     curr_dim = None
+        #     for dim_, size in self._getindexsize(index, subdim_id, dim):
+        #
+        #         new_dim = tensors.Dim(size, name=dim_.name)
+        #         if not new_dims:
+        #             new_dims = pyop3.utils.Tree(new_dim)
+        #         else:
+        #             new_dims.add_child(curr_dim, new_dim)
+        #         curr_dim = new_dim
+        #
+        #     if subdims := tensor.dim.get_children(dim):
+        #         dim = subdims[subdim_id]
+        #
+        # return new_dims or pyop3.utils.Tree(None)
+
+    def _getindexsize(self, index, subdim_id, dim):
+        if isinstance(index, tensors.NonAffineMap):
+            ans = []
+            dim = index.tensor.dim.root
+            for subdim_id, idx in index.tensor.indices:
+                assert dim is not None
+
+                ans.extend(self._getindexsize(idx, subdim_id, dim))
+
+                if subdims := index.tensor.dim.get_children(dim):
+                    dim = subdims[subdim_id]
+            return ans
+        else:
+            # FIXME index_size returns an expression so this would break. Need dim.size
+            # to also be an expression (IndexFunction?)
+            # if isinstance(index.stop, tensors.Tensor):
+            #     size = index.stop
+            # else:
+            #     size = tensor.index_shape(index, subdim_id, dim)
+            size = index.stop or dim.sizes[subdim_id]
+            return (dim, size),
+
 
     def make_gathers(self, temporaries, **kwargs):
         return tuple(self.make_gather(arg, temp, **kwargs) for arg, temp in temporaries.items())
@@ -100,11 +174,13 @@ class TensorLangKernelBuilder:
         assert all(arg.access in {exprs.READ, exprs.WRITE, exprs.INC, exprs.RW} for arg in call.arguments)
 
         reads = tuple(
-            temporaries[arg] for arg in call.arguments
+            # temporaries[arg] for arg in call.arguments
+            temp for arg, temp in temporaries.items()
             if arg.access in {exprs.READ, exprs.INC, exprs.RW}
         )
         writes = tuple(
-            temporaries[arg] for arg in call.arguments
+            temp for arg, temp in temporaries.items()
+            # temporaries[arg] for arg in call.arguments
             if arg.access in {exprs.WRITE, exprs.INC, exprs.RW}
         )
         return tlang.FunctionCall(call.function, reads, writes,id=self.name_generator.next("func"), **kwargs)
