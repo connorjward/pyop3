@@ -19,9 +19,24 @@ import pyop3.utils
 from pyop3 import utils
 from pyop3.utils import MultiNameGenerator, NameGenerator
 from pyop3.utils import CustomTuple, checked_zip, NameGenerator, rzip
-from pyop3.tensors import Tensor, Index, Map, Dim, UniformDim, MixedDim, NonAffineMap
+from pyop3.tensors import Tensor, Index, Map, Dim, NonAffineMap, _compute_indexed_shape
 from pyop3.tensors import Slice, AffineMap, Stencil, StencilGroup
 from pyop3.codegen.tlang import to_tlang
+
+
+class VariableCollector(pym.mapper.Collector):
+    def map_variable(self, expr, *args, **kwargs):
+        return {expr}
+
+
+class VariableReplacer(pym.mapper.IdentityMapper):
+    def __init__(self, handler, *args, **kwargs):
+        self.handler = handler
+        super().__init__(*args, **kwargs)
+
+    def map_variable(self, expr):
+        return self.handler(expr)
+
 
 LOOPY_TARGET = lp.CTarget()
 LOOPY_LANG_VERSION = (2018, 2)
@@ -94,7 +109,7 @@ class LoopyKernelBuilder:
         def collect_within_loops(idx):
             if isinstance(idx, NonAffineMap):
                 within_loops = {}
-                for _, i in idx.tensor.indices:
+                for i in idx.tensor.indices:
                     within_loops |= collect_within_loops(i)
                 return within_loops
             else:
@@ -102,7 +117,7 @@ class LoopyKernelBuilder:
                 return {idx: iname}
 
         within_loops = {}
-        for _, idx in indices:
+        for idx in indices:
             within_loops |= collect_within_loops(idx)
 
         # import pdb; pdb.set_trace()
@@ -237,17 +252,22 @@ class LoopyKernelBuilder:
 
         return domain_stack
 
-    def register_new_domain(self, iname, dim, subdim_id, index, within_loops, parent_indices):
+    def register_new_domain(self, iname, index, within_loops, parent_indices):
         # iname = within_loops[index]
 
         # and try to register/check
-        start = self.register_extent(index.start or 0, within_loops, parent_indices)
-        dimsize = dim.sizes[subdim_id] if dim else None
-        stop = self.register_extent(index.stop or dimsize, within_loops, parent_indices)
-        step = self.register_extent(index.step or 1, within_loops, parent_indices)
-
-        # import pdb; pdb.set_trace()
-        size = (stop - start) // step
+        # start = self.register_extent(index.start or 0, within_loops, parent_indices)
+        # dimsize = dim.sizes[subdim_id] if dim else None
+        # stop = self.register_extent(index.stop or dimsize, within_loops, parent_indices)
+        # step = self.register_extent(index.step or 1, within_loops, parent_indices)
+        #
+        # # import pdb; pdb.set_trace()
+        # size = (stop - start) // step
+        if isinstance(index.size, pym.primitives.Expression):
+            import pdb; pdb.set_trace()
+            size = VariableReplacer()(index.size)
+        else:
+            size = index.size
         if iname in self.domains:
             assert self.domains[iname] == (0, size, 1)
         else:
@@ -256,17 +276,13 @@ class LoopyKernelBuilder:
         return iname
 
     def create_domain_stack(self, lhs, rhs, lidxs, ridxs):
-        shapes = {lhs.indexed_shape_per_indices(lidxs), rhs.indexed_shape_per_indices(ridxs)}
+        shapes = {_compute_indexed_shape(lidxs), _compute_indexed_shape(ridxs)}
         try:
             shape, = shapes
         except ValueError:
             raise ValueError("Shapes do not match")
         inames = [self._namer.next("i") for _ in shape]
         return inames
-        # for iname, extent in zip(inames, shape):
-        #     assert iname not in self.domains
-        #     self.domains[iname] = (0, extent, 1)
-        # return inames
 
     def register_extent(self, extent, within_loops, parent_indices):
         # this is needed for within_inames - can it be removed?
@@ -294,39 +310,28 @@ class LoopyKernelBuilder:
             return extent
 
     def handle_assignment(self, tensor, indices, within_loops):
-        # import pdb; pdb.set_trace()
-        # dstack = domain_stack.copy()
-
         index_expr = 0
-        current_dim = tensor.dim.root
-
-        for i, (subdim_id, index) in enumerate(indices):
-            # import pdb; pdb.set_trace()
-            assert current_dim is not None
-
+        for i, index in enumerate(indices):
             dim_expr = self._as_expr(index, within_loops)
 
-            new_map_name = self._namer.next("sec")
-            index_expr += pym.subscript(pym.var(new_map_name), dim_expr + current_dim.offsets[subdim_id])
-            self.kernel_data.append(lp.GlobalArg(new_map_name, shape=None, dtype=np.int32))
-
-            if subdims := tensor.dim.get_children(current_dim):
-                current_dim = subdims[subdim_id]
+            section_name = self._namer.next("sec")
+            index_expr += pym.subscript(pym.var(section_name), dim_expr + index.offset)
+            self.kernel_data.append(lp.GlobalArg(section_name, shape=None, dtype=np.int32))
 
         return index_expr
 
     def register_domains(self, tensor, indices, dstack, within_loops):
         within_loops = within_loops.copy()
 
-        dim = tensor.dim.root
+        # dim = tensor.dim.root
 
-        for i, (subdim_id, index) in enumerate(indices):
+        for i, index in enumerate(indices):
             if isinstance(index, Slice):
                 if index not in within_loops:
                     iname = dstack.pop(0)
                 else:
                     iname = within_loops.pop(index)
-                self.register_new_domain(iname, dim, subdim_id, index, within_loops, indices[:i])
+                self.register_new_domain(iname, index, within_loops, indices[:i])
                 within_loops[index] = iname
 
             elif isinstance(index, NonAffineMap):
@@ -334,9 +339,6 @@ class LoopyKernelBuilder:
                 self.kernel_data.append(lp.GlobalArg(index.tensor.name, shape=None, dtype=index.tensor.dtype))
             else:
                 raise TypeError
-
-            if subdims := tensor.dim.get_children(dim):
-                dim = subdims[subdim_id]
 
         return within_loops
 

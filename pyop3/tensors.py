@@ -17,20 +17,23 @@ import pyop3.utils
 from pyop3.utils import as_tuple, checked_zip, Tree, NameGenerator
 
 
+# TODO expunge pyop3.utils.Tree in favour of subdims here
 class Dim(pytools.ImmutableRecord):
-    fields = {"sizes", "permutation", "label"}
+    fields = {"sizes", "permutation", "labels"}
 
     _label_generator = NameGenerator("dim")
 
-    def __init__(self, sizes, *, permutation=None, label=None):
+    def __init__(self, sizes, *, permutation=None, labels=None):
         if not isinstance(sizes, collections.abc.Sequence):
             sizes = (sizes,)
-        if not label:
-            label = self._label_generator.next()
+        if not labels:
+            labels = tuple(self._label_generator.next() for _ in sizes)
+
+        assert len(labels) == len(sizes)
 
         self.sizes = sizes
         self.permutation = permutation
-        self.label = label
+        self.labels = labels
         super().__init__()
 
     # Could I tie sizes and subdims together?
@@ -48,23 +51,25 @@ class Dim(pytools.ImmutableRecord):
         return tuple(sum(self.sizes[:i]) for i in range(len(self.sizes)))
 
 
-# TODO delete - just use dim
-class UniformDim(Dim):
-    pass
-
-
-# TODO delete - just use dim
-class MixedDim(Dim):
-    pass
-
-
-class Index(pytools.ImmutableRecord):
+# TODO replace `within` with `LoopIndex`
+# TODO delete `id`
+class Index(pytools.ImmutableRecord, abc.ABC):
     """Does it make sense to index a tensor with this object?"""
-    fields = {"within"}
+    fields = {"label", "within", "id"}
 
-    def __init__(self, within=False):
+    _id_generator = NameGenerator("idx")
+
+    def __init__(self, label, within=False, *, id=None):
+        # self.size = size
+        self.label = label
         self.within = within
+        self.id = id or self._id_generator.next()
         super().__init__()
+
+    # @property
+    # @abc.abstractmethod
+    # def size(self):
+    #     ...
 
 
 class ScalarIndex(Index):
@@ -77,55 +82,35 @@ class FancyIndex(Index):
 
 
 class Slice(FancyIndex):
-    fields = FancyIndex.fields | {"start", "stop", "step", "id"}
+    fields = FancyIndex.fields | {"size", "start", "step", "offset"}
 
-    counter = 0
-
-    def __init__(self, start=None, stop=None, step=None, within=False, id=None):
-        # import pdb; pdb.set_trace()
-        if id:
-            self.id = id
-        else:
-            self.id = f"slice{self.__class__.counter}"
-            self.__class__.counter += 1
-        # start, stop, step = None, None, None
-        # if len(args) == 0:
-        #     pass
-        # elif len(args) == 1:
-        #     stop, = args
-        # elif len(args) == 2:
-        #     start, stop = args
-        # elif len(args) == 3:
-        #     start, stop, step = args
-        # else:
-        #     raise ValueError
-
+    def __init__(self, size, start=0, step=1, offset=0, **kwargs):
+        self.size = size
         self.start = start
-        self.stop = stop
         self.step = step
-        # if start:
-        #     self.start = start
-        # elif isinstance(dim.sizes[0], Tensor):
-        #     # don't know how to handle not starting from zero
-        #     assert len(dim.sizes) == 1
-        #     self.start = 0
-        # else:
-        #     self.start = np.cumsum([0] + list(dim.sizes))[stratum]
-        #
-        # if stop:
-        #     self.stop = stop
-        # elif isinstance(dim.sizes[0], Tensor):
-        #     self.stop = dim.sizes[0]
-        # else:
-        #     self.stop = np.cumsum(dim.sizes)[stratum]
-        #
-        # assert not step or step == 1
-        # self.step = step or 1
-        super().__init__(within)
+        self.offset = offset
+        super().__init__(**kwargs)
 
-    # @property
-    # def size(self):
-    #     return (self.stop - self.start) // self.step
+    @classmethod
+    def from_dim(cls, dim, subdim_id, **kwargs):
+        size = cls._as_pym_var(dim.sizes[subdim_id])
+        label = dim.labels[subdim_id]
+        offset = dim.offsets[subdim_id]
+        return cls(size=size, label=label, offset=offset, **kwargs)
+
+    # @functools.singledispatch
+    @staticmethod
+    def _as_pym_var(param):
+        if pym.primitives.is_valid_operand(param):
+            return param
+        elif isinstance(param, Tensor):
+            return pym.var(param.name)
+        else:
+            raise TypeError
+
+    # @_as_pym_var.register
+    # def _(param: "Tensor"):
+    #     return pym.var(param.name)
 
 
 class Stencil(tuple):
@@ -153,8 +138,15 @@ class StencilGroup(tuple):
 class NonAffineMap(Index):
     fields = Index.fields | {"tensor"}
 
+    # TODO is this ever not valid?
+    offset = 0
+
     def __init__(self, tensor, **kwargs):
         self.tensor = tensor
+        if "label" in kwargs:
+            assert kwargs["label"] == self.tensor.indices[-1].label
+        else:
+            kwargs["label"] = self.tensor.indices[-1].label
         super().__init__(**kwargs)
 
     @property
@@ -283,12 +275,12 @@ class Tensor(pytools.ImmutableRecordWithoutPickling):
 
     @property
     def indexed_shape(self):
-        return self._compute_indexed_shape(self.indices, self.dim.root)
+        return indexed_shape(self)
 
     @property
     def indexed_shapes(self):
         return tuple(
-            self._compute_indexed_shape(idxs, self.dim.root) for idxs in self.stencil
+            _compute_indexed_shape(idxs) for idxs in self.stencil
         )
 
     @property
@@ -306,34 +298,6 @@ class Tensor(pytools.ImmutableRecordWithoutPickling):
     @property
     def order(self):
         return self._compute_order(self.dim.root)
-
-    @functools.singledispatchmethod
-    def index_shape(self, index, dim, subdim_id):
-        raise TypeError
-
-    @index_shape.register(Slice)
-    def _(self, index, dim, subdim_id):
-        # import pdb; pdb.set_trace()
-        if index.within:
-            return ()
-
-        stop = index.stop or dim.sizes[subdim_id]
-        # import pdb; pdb.set_trace()
-        # FIXME
-        if isinstance(stop, Tensor):
-            return (stop,)
-
-        start = self._parametrise_if_needed(index.start or 0)
-        stop = self._parametrise_if_needed(stop)
-        step = self._parametrise_if_needed(index.step or 1)
-        return ((stop - start) // step,)
-
-    @index_shape.register(NonAffineMap)
-    def _(self, index, dim, subdim_id):
-        if index.within:
-            return ()
-        else:
-            return index.tensor.indexed_shape
 
     def _parametrise_if_needed(self, value):
         if isinstance(value, Tensor):
@@ -359,24 +323,6 @@ class Tensor(pytools.ImmutableRecordWithoutPickling):
     def _merge_stencils(self, stencils1, stencils2):
         return _merge_stencils(stencils1, stencils2, self.dim)
 
-
-    def indexed_shape_per_indices(self, indices, dim=None):
-        import warnings
-        warnings.warn("deprecated", DeprecationWarning)
-        return self._compute_indexed_shape(indices, dim or self.dim.root)
-
-    def _compute_indexed_shape(self, indices, dim):
-        if not dim:
-            return ()
-
-        (subdim_id, index), *subindices = indices
-
-        # import pdb; pdb.set_trace()
-        if subdims := self.dim.get_children(dim):
-            return self.index_shape(index, dim, subdim_id) + self._compute_indexed_shape(subindices, subdims[subdim_id])
-        else:
-            return self.index_shape(index, dim, subdim_id)
-
     def _compute_shape(self, dim):
         if not dim:
             return ()
@@ -385,6 +331,38 @@ class Tensor(pytools.ImmutableRecordWithoutPickling):
             return (dim.size,) + self._compute_shape(subdim)
         else:
             return (dim.size,)
+
+
+def indexed_shape(tensor):
+    return _compute_indexed_shape(tensor.indices)
+
+
+def _compute_indexed_shape(indices):
+    if not indices:
+        return ()
+
+    index, *subindices = indices
+
+    return index_shape(index) + _compute_indexed_shape(subindices)
+
+
+@functools.singledispatch
+def index_shape(index):
+    raise TypeError
+
+@index_shape.register(Slice)
+def _(index):
+    # import pdb; pdb.set_trace()
+    if index.within:
+        return ()
+    return (index.size,)
+
+@index_shape.register(NonAffineMap)
+def _(index):
+    if index.within:
+        return ()
+    else:
+        return indexed_shape(index.tensor)
 
 
 def _merge_stencils(stencils1, stencils2, dims):
@@ -448,16 +426,18 @@ def _construct_indices(input_indices, dims, current_dim):
     if not input_indices:
         if len(dims.get_children(current_dim)) > 1:
             raise RuntimeError("Ambiguous subdim_id")
-        input_indices = [(0, Slice())]
+        input_indices = [Slice.from_dim(current_dim, 0)]
 
-    (subdim_id, index), *subindices = input_indices
+    index, *subindices = input_indices
+
+    subdim_id = current_dim.labels.index(index.label)
 
     if subdims := dims.get_children(current_dim):
         subdim = subdims[subdim_id]
     else:
         subdim = None
 
-    return ((subdim_id, index),) + _construct_indices(subindices, dims, subdim)
+    return (index,) + _construct_indices(subindices, dims, subdim)
 
 
 
@@ -465,7 +445,7 @@ def index(stencils):
     """wrap all slices and maps in loop index objs."""
     return StencilGroup([
         Stencil([
-            tuple((subdim_id, index.copy(within=True)) for subdim_id, index in indices)
+            tuple(index.copy(within=True) for index in indices)
             for indices in stencil
         ])
         for stencil in stencils

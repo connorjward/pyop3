@@ -73,30 +73,28 @@ class TensorLangKernelBuilder:
 
     def preprocess_tensor(self, tensor):
         # index tensor sizes!
+        # TODO actually make this happen
+        return tensor
         new_tree = None
-        curr_dim = None
-        dim = tensor.dim.root
-        for i, (subdim_id, index) in enumerate(tensor.indices):
-            assert dim is not None
+        dims = self._preprocess_tensor(tensor, tensor.dim.root)
+        # import pdb; pdb.set_trace()
+        return tensor.copy(dim=dims)
 
-            # import pdb; pdb.set_trace()
-            if isinstance(dim.size, tensors.Tensor):
-                idxs = tensor.indices[-dim.size.order-i:-i]
-                new_size = dim.size[tensors.StencilGroup([tensors.Stencil([idxs])])]
-                new_dim = dim.copy(sizes=(new_size,))
-            else:
-                new_dim = dim
-
-            if not new_tree:
-                new_tree = pyop3.utils.Tree(new_dim)
-            else:
-                new_tree = new_tree.add_child(curr_dim, new_dim)
-            curr_dim = new_dim
-
-            if subdims := tensor.dim.get_children(dim):
-                dim = subdims[subdim_id]
-
-        return tensor.copy(dim=new_tree)
+    # def _preprocess_tensor(self, dim, dims):
+    #     for subdim, size in zip(dims.get_children(dim), dim.sizes):
+    #         if isinstance(size, tensors.Tensor):
+    #             idxs = tensor.indices[-dim.size.order-i:-i]
+    #             new_size = dim.size[tensors.StencilGroup([tensors.Stencil([idxs])])]
+    #             new_dim = dim.copy(sizes=(new_size,))
+    #         else:
+    #             new_dim = dim
+    #
+    #         if not new_tree:
+    #             new_tree = pyop3.utils.Tree(new_dim)
+    #         else:
+    #             new_tree = new_tree.add_child(curr_dim, new_dim)
+    #
+    #     return nest
 
     def construct_temp_dims(self, tensor):
         # FIXME This will fail if we start doing mixed (and hence need to think harder
