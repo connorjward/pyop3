@@ -97,7 +97,7 @@ def make_offset_map(dim, dtree, points=None, imap=None):
 
         subdim = get_subdim(dim, dtree, point)
         if subdim:
-            ptr += make_offset_map(subdim, dtree, imap=imap|{dim: point})[1]
+            ptr += make_offset_map(subdim, dtree, imap=imap|{dim.label: point})[1]
         else:
             ptr += 1
 
@@ -124,7 +124,7 @@ def read_tensor(tensor, imap):
     # assume a flat tensor for now
     assert not tensor.dim.get_children(tensor.dim.root)
 
-    ptr = imap[tensor.dim.root] - tensor.dim.root.offset
+    ptr = imap[tensor.dim.root.label]# - tensor.dim.root.offset
     return tensor.data[ptr]
 
 

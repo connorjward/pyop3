@@ -17,27 +17,23 @@ import pyop3.utils
 from pyop3.utils import as_tuple, checked_zip, Tree, NameGenerator
 
 
-# TODO could this be renamed a 'plex'? I suppose that also implies connectivity.
 class Dim(pytools.ImmutableRecord):
-    fields = {"sizes", "permutation", "offset", "name"}
-    name_generator = NameGenerator("dim")
+    fields = {"sizes", "permutation", "label"}
 
-    def __init__(self, sizes, *, permutation=None, offset=0, name=None):
+    _label_generator = NameGenerator("dim")
+
+    def __init__(self, sizes, *, permutation=None, label=None):
         if not isinstance(sizes, collections.abc.Sequence):
             sizes = (sizes,)
-        if not name:
-            name = self.name_generator.next()
+        if not label:
+            label = self._label_generator.next()
 
         self.sizes = sizes
         self.permutation = permutation
-        self.offset = offset
-        self.name = name
+        self.label = label
         super().__init__()
 
-    # TODO make this the actual property (not id)
-    @property
-    def label(self):
-        return self.name
+    # Could I tie sizes and subdims together?
 
     @property
     def strata(self):
@@ -50,12 +46,6 @@ class Dim(pytools.ImmutableRecord):
     @property
     def offsets(self):
         return tuple(sum(self.sizes[:i]) for i in range(len(self.sizes)))
-
-    def __hash__(self):
-        return hash(self.name)
-
-    def __eq__(self, other):
-        return hash(self) == hash(other)
 
 
 # TODO delete - just use dim
