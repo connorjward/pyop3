@@ -1036,6 +1036,80 @@ def test_map_composition():
     print("test_map_composition PASSED", flush=True)
 
 
+def test_mixed_arity_map():
+    root = Dim(3)
+    dims = Tree(root)
+
+    dat1 = Tensor(dims, name="dat1", data=np.arange(1, 4, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor(dims, name="dat2", data=np.zeros(3, dtype=np.float64), dtype=np.float64)
+
+    nnz_ = np.array([3, 2, 1], dtype=np.int32)
+    nnz = Tensor(Tree(root), data=nnz_, name="nnz", dtype=np.int32, max_value=3)
+
+    map_data = np.array([2, 1, 0, 2, 1, 2], dtype=np.int32)
+    map_tensor = Tensor(Tree.from_nest([root, [Dim(nnz, labels=(root.labels[0],))]]),
+            data=map_data, dtype=np.int32, prefix="map")
+
+
+    code = lp.make_kernel(
+        "{ [i]: 0 <= i < n }",
+        "y[0] = y[0] + x[i]",
+        [lp.GlobalArg("x", np.float64, (2,), is_input=True, is_output=False),
+        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),
+        lp.ValueArg("n", dtype=np.int32)],
+        target=lp.CTarget(),
+        name="mylocalkernel",
+        lang_version=(2018, 2),
+    )
+    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+
+    i1 = pyop3.index(StencilGroup([Stencil([(Slice.from_dim(root, 0),)])]))
+    map = NonAffineMap(map_tensor[i1])
+    i2 = StencilGroup([Stencil([(map,)])])
+    expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
+
+    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+
+    cache_key = str(time.time())
+    jitmodule = JITModule(exe, cache_key)
+    dll = compilemythings(jitmodule)
+    fn = getattr(dll, "mykernel")
+
+    """
+  for (int32_t i0 = 0; i0 <= 4; ++i0)
+  {
+    t1[0] = 0.0;
+    j0 = i0;
+    for (int32_t i1 = 0; i1 <= 1; ++i1)
+    {
+      j2 = i1;
+      j0 = i0;
+      j1 = imap0[map0[j0] + map1[j2]];
+      t0[map2[i1]] = dat1[map3[j1]];
+    }
+    mylocalkernel(&(t0[0]), &(t1[0]));
+    j0 = i0;
+    dat2[map4[j0]] = t1[0];
+  }
+    """
+
+    sec0 = np.arange(3, dtype=np.int32)
+    sec1 = sec0.copy()
+    sec2 = make_offset_map(map_tensor.dim.root, map_tensor.dim)[0]
+    # sec3 = make_offset_map(map_tensor.dim.get_child(map_tensor.dim.root), map_tensor.dim)[0]
+    sec3 = sec0.copy()
+    sec4 = make_offset_map(root, dims)[0]
+    sec5 = np.empty(1, dtype=np.int32)
+    sec6 = sec4.copy()
+
+    args = [sec0, nnz.data, sec1, map_tensor.data, sec2, sec3, sec4, dat1.data, sec5, dat2.data, sec6]
+    fn.argtypes = (ctypes.c_voidp,) * len(args)
+
+    fn(*(d.ctypes.data for d in args))
+
+    assert all(dat2.data == np.array([1+2+3, 2+3, 3], dtype=np.int32))
+    print("test_mixed_arity_map PASSED", flush=True)
+
 def test_iter_map_composition():
     root = Dim(5)
     dims = Tree(root)
@@ -1131,4 +1205,5 @@ if __name__ == "__main__":
     # mfe()
     # test_map_composition()
     # test_iter_map_composition()
-    test_compute_double_loop_ragged_inner()
+    # test_compute_double_loop_ragged_inner()
+    test_mixed_arity_map()
