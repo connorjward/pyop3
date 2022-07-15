@@ -17,13 +17,19 @@ import pyop3.utils
 from pyop3.utils import as_tuple, checked_zip, Tree, NameGenerator
 
 
+@dataclasses.dataclass(frozen=True)
+class Node:
+    value: Any
+    children: Sequence = ()
+
+
 # TODO expunge pyop3.utils.Tree in favour of subdims here
 class Dim(pytools.ImmutableRecord):
     fields = {"sizes", "permutation", "labels"}
 
     _label_generator = NameGenerator("dim")
 
-    def __init__(self, sizes, *, permutation=None, labels=None):
+    def __init__(self, sizes=(), *, permutation=None, labels=None):
         if not isinstance(sizes, collections.abc.Sequence):
             sizes = (sizes,)
         if not labels:
@@ -35,6 +41,10 @@ class Dim(pytools.ImmutableRecord):
         self.permutation = permutation
         self.labels = labels
         super().__init__()
+
+    def __bool__(self):
+        assert len(self.sizes) == len(self.labels)
+        return bool(self.sizes)
 
     # Could I tie sizes and subdims together?
 
@@ -89,7 +99,7 @@ class Slice(FancyIndex):
     def __init__(self, size, start=0, step=1, offset=0, **kwargs):
         self.size = size
         if isinstance(size, Tensor):
-            assert size.stencils is not None
+            assert size.indices is not None
         self.start = start
         self.step = step
         self.offset = offset
@@ -102,7 +112,8 @@ class Slice(FancyIndex):
         if isinstance(size := dim.sizes[subdim_id], pym.primitives.Expression):
             if not isinstance(size, Tensor):
                 raise NotImplementedError
-            if size.stencils is None:
+            if size.indices is None:
+                raise NotImplementedError
                 size = size[StencilGroup([Stencil([parent_indices[-size.order:]])])]
         label = dim.labels[subdim_id]
         offset = dim.offsets[subdim_id]
@@ -123,26 +134,26 @@ class Slice(FancyIndex):
     #     return pym.var(param.name)
 
 
-class Stencil(tuple):
-    pass
-
-
-class StencilGroup(tuple):
-    def __mul__(self, other):
-        """Do some interleaving magic - needed for matrices."""
-        if isinstance(other, StencilGroup):
-            return StencilGroup(
-                Stencil(
-                    tuple(
-                        idx for pair in itertools.zip_longest(idxs1, idxs2)
-                        for idx in pair if idx is not None
-                    )
-                    for idxs1, idxs2 in itertools.product(stcl1, stcl2)
-                )
-                for stcl1, stcl2 in itertools.product(self, other)
-            )
-        else:
-            return super().__mul__(other)
+# class Stencil(tuple):
+#     pass
+#
+#
+# class StencilGroup(tuple):
+#     def __mul__(self, other):
+#         """Do some interleaving magic - needed for matrices."""
+#         if isinstance(other, StencilGroup):
+#             return StencilGroup(
+#                 Stencil(
+#                     tuple(
+#                         idx for pair in itertools.zip_longest(idxs1, idxs2)
+#                         for idx in pair if idx is not None
+#                     )
+#                     for idxs1, idxs2 in itertools.product(stcl1, stcl2)
+#                 )
+#                 for stcl1, stcl2 in itertools.product(self, other)
+#             )
+#         else:
+#             return super().__mul__(other)
 
 
 class NonAffineMap(Index):
@@ -154,9 +165,9 @@ class NonAffineMap(Index):
     def __init__(self, tensor, **kwargs):
         self.tensor = tensor
         if "label" in kwargs:
-            assert kwargs["label"] == self.tensor.indices[-1].label
+            assert kwargs["label"] == self.tensor.linear_indices[-1].label
         else:
-            kwargs["label"] = self.tensor.indices[-1].label
+            kwargs["label"] = self.tensor.linear_indices[-1].label
         super().__init__(**kwargs)
 
     @property
@@ -187,7 +198,7 @@ class NonAffineMap(Index):
 
 class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
 
-    fields = {"dim", "stencils", "dtype", "mesh", "name", "data", "max_value"}
+    fields = {"dim", "indices", "dtype", "mesh", "name", "data", "max_value"}
 
     name_generator = pyop3.utils.MultiNameGenerator()
     prefix = "ten"
@@ -200,7 +211,7 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
     #     else:
     #         return super().__new__(cls)
 
-    def __init__(self, dim=None, stencils=None, dtype=None, *, mesh = None, name: str = None, prefix: str=None, data=None, max_value=32):
+    def __init__(self, dim=None, indices=None, dtype=None, *, mesh = None, name: str = None, prefix: str=None, data=None, max_value=32):
         name = name or self.name_generator.next(prefix or self.prefix)
         self.data = data
         self.params = {}
@@ -208,13 +219,23 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
         assert dtype is not None
 
         self.dim = dim
-        self.stencils = stencils
+        # if not self._is_valid_indices(indices, dim.root):
+        assert self._is_valid_indices(indices, dim.root, dim)
+        self.indices = indices # self._parse_indices(dim.root, indices)
+        # self.linear_indices
+        # import pdb; pdb.set_trace()
+
         self.mesh = mesh
         self.dtype = dtype
         self.max_value = max_value
         super().__init__(name)
 
-    def __getitem__(self, stencils):
+    @classmethod
+    def new(cls, dim=None, indices=None, *args, **kwargs):
+        indices = cls._parse_indices(dim.root, dim, indices)
+        return cls(dim, indices, *args, **kwargs)
+
+    def __getitem__(self, indices):
         """The plan of action here is as follows:
 
         - if a tensor is indexed by a set of stencils then that's great.
@@ -242,64 +263,153 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
         # This is complicated because additional indices should theoretically index
         # pre-existing slices, rather than get appended/prepended as is currently
         # assumed.
-        # if self.stencils:
-        #     raise NotImplementedError("Needs more thought")
+        if self.is_indexed:
+            raise NotImplementedError("Needs more thought")
 
-        if stencils == "fill":
-            stencils = StencilGroup([
-                Stencil([
-                    _construct_indices((), self.dim, self.dim.root)
-                ])
-            ])
+        # if stencils == "fill":
+        #     stencils = StencilGroup([
+        #         Stencil([
+        #             _construct_indices((), self.dim, self.dim.root)
+        #         ])
+        #     ])
             # import pdb; pdb.set_trace()
-        elif not isinstance(stencils, StencilGroup):
-            empty = StencilGroup([Stencil([()])])
-            stencils = functools.reduce(self._merge_stencils, as_tuple(stencils), empty)
-        else:
+        # elif not isinstance(stencils, StencilGroup):
+        #     empty = StencilGroup([Stencil([()])])
+        #     stencils = functools.reduce(self._merge_stencils, as_tuple(stencils), empty)
+        # else:
+        #
+        #     # import pdb; pdb.set_trace()
+        #
+        #     # fill final indices with full slices
+        #     stencils = StencilGroup([
+        #         Stencil([
+        #             _construct_indices(indices, self.dim, self.dim.root)
+        #             for indices in stencil
+        #         ])
+        #         for stencil in stencils
+        #     ])
 
-            # import pdb; pdb.set_trace()
+        # import pdb; pdb.set_trace()
+        indices = self._parse_indices(self.dim.root, self.dim, indices)
+        return self.copy(indices=indices)
 
-            # fill final indices with full slices
-            stencils = StencilGroup([
-                Stencil([
-                    _construct_indices(indices, self.dim, self.dim.root)
-                    for indices in stencil
-                ])
-                for stencil in stencils
-            ])
+    @classmethod
+    def _is_valid_indices(cls, indices, dim, dtree):
+        if dim.sizes and not indices:
+            return False
 
-        return self.copy(stencils=stencils)
+        # scalar case
+        if not dim.sizes and not indices:
+            return True
 
+        for idx, children in indices:
+            assert idx.label in dim.labels
+
+            subdim_id = dim.labels.index(idx.label)
+            if subdims := dtree.get_children(dim):
+                subdim = subdims[subdim_id]
+                if not cls._is_valid_indices(children, subdim, dtree):
+                    return False
+        return True
 
     def __str__(self):
         return self.name
 
-    # TODO We will remove stencils and make this redundant
     @property
-    def stencil(self):
-        try:
-            st, = self.stencils
-            return st
-        except ValueError:
-            raise RuntimeError("Invalid state")
+    def is_indexed(self):
+        return self._check_indexed(self.dim.root, self.indices)
+
+    def _check_indexed(self, dim, indices):
+        for label, size in zip(dim.labels, dim.sizes):
+            try:
+                (index, subindices), = [(idx, subidxs) for idx, subidxs in indices if idx.label == label]
+
+                subdim_id = dim.labels.index(index.label)
+
+                if subdims := self.dim.get_children(dim):
+                    subdim = subdims[subdim_id]
+                    return self._check_indexed(subdim, subindices)
+                else:
+                    return index.size != size
+            except:
+                return True
+
+    @classmethod
+    def _parse_indices(cls, dim, dtree, indices, parent_indices=None):
+        # import pdb; pdb.set_trace()
+        if not parent_indices:
+            parent_indices = []
+
+        # TODO firm up the idea of an empty dim/index
+        if not indices or indices == [[]]:
+            if dim.sizes:
+                indices = [(Slice.from_dim(dim, i), []) for i, _ in enumerate(dim.sizes)]
+            else:
+                return None
+
+        # import pdb; pdb.set_trace()
+        new_indices = []
+        for idx, subidxs in indices:
+            if isinstance(idx, NonAffineMap):
+                new_indices.append((idx, subidxs))
+            else:
+                # reindex dim.size s.t. it references the correct parent indices
+                if isinstance(idx.size, pym.primitives.Expression):
+                    if not isinstance(idx.size, Tensor):
+                        raise NotImplementedError
+                    myidxs = []
+                    for myidx in reversed(parent_indices[-idx.size.order:]):
+                        if not myidxs:
+                            myidxs = [myidx, myidxs]
+                        else:
+                            myidxs = [myidx, [myidxs]]
+                    # import pdb; pdb.set_trace()
+                    idx = idx.copy(size=idx.size[[myidxs]])
+
+                subdim_id = dim.labels.index(idx.label)
+                if subdims := dtree.get_children(dim):
+                    subdim = subdims[subdim_id]
+                    new_indices.append((idx, cls._parse_indices(subdim, dtree, subidxs, parent_indices+[idx])))
+                else:
+                    new_indices.append((idx, subidxs))
+
+        return new_indices
 
     @property
-    def indices(self):
+    def linear_indices(self):
         try:
-            idxs, = self.stencil
+            idxs, = self.linear_indicess
             return idxs
         except ValueError:
-            raise RuntimeError("Invalid state")
+            raise RuntimeError
+
+    @property
+    def linear_indicess(self):
+        # import pdb; pdb.set_trace()
+        if not self.indices:
+            return [[]]
+        return [val for item in self.indices for val in self._linearize(item)]
+
+    def _linearize(self, item):
+        # import pdb; pdb.set_trace()
+        value, children = item
+
+        if children:
+            return [[value] + result for child in children for result in self._linearize(child)]
+        else:
+            return [[value]]
 
     @property
     def indexed_shape(self):
-        return indexed_shape(self)
+        try:
+            sh, = self.indexed_shapes
+            return sh
+        except ValueError:
+            raise RuntimeError
 
     @property
     def indexed_shapes(self):
-        return tuple(
-            _compute_indexed_shape(idxs) for idxs in self.stencil
-        )
+        return indexed_shapes(self)
 
     @property
     def indexed_size(self):
@@ -307,7 +417,15 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
 
     @property
     def shape(self):
-        return self._compute_shape(self.dim.root)
+        try:
+            sh, = self.shapes
+            return sh
+        except ValueError:
+            raise RuntimeError
+
+    @property
+    def shapes(self):
+        return self._compute_shapes(self.dim.root)
 
     @property
     def size(self):
@@ -341,27 +459,50 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
     def _merge_stencils(self, stencils1, stencils2):
         return _merge_stencils(stencils1, stencils2, self.dim)
 
-    def _compute_shape(self, dim):
+    def _compute_shapes(self, dim):
+        # import pdb; pdb.set_trace()
         if not dim:
-            return ()
+            return ((),)
 
-        if subdim := self.dim.get_child(dim):
-            return (dim.size,) + self._compute_shape(subdim)
+        if subdims := self.dim.get_children(dim):
+            return tuple(
+                (dim.size, *sh) for subdim in subdims for sh in self._compute_shape(subdim)
+            )
         else:
-            return (dim.size,)
+            return ((dim.size,),)
 
 
-def indexed_shape(tensor):
-    return _compute_indexed_shape(tensor.indices)
+def indexed_shapes(tensor):
+    if not tensor.indices:
+        return ((),)
+    return tuple(v for item in tensor.indices for v in _compute_indexed_shape(item))
 
 
-def _compute_indexed_shape(indices):
-    if not indices:
-        return ()
+def _compute_indexed_shape(item):
+    # if not indices:
+    #     return ()
+    #
+    # index, *subindices = indices
+    #
+    # return index_shape(index) + _compute_indexed_shape(subindices)
+    # import pdb; pdb.set_trace()
+    # if not dim:
+    #     return ((),)
+    index, children = item
 
-    index, *subindices = indices
+    if children:
+        return tuple(
+            index_shape(index) + sh for child in children for sh in _compute_indexed_shape(child)
+        )
+    else:
+        return (index_shape(index),)
 
-    return index_shape(index) + _compute_indexed_shape(subindices)
+
+def _compute_indexed_shape2(flat_indices):
+    shape = ()
+    for index in flat_indices:
+        shape += index_shape(index)
+    return shape
 
 
 @functools.singledispatch
@@ -461,15 +602,15 @@ def _construct_indices(input_indices, dims, current_dim, parent_indices=None):
 
 
 
-def index(stencils):
+def index(indices):
     """wrap all slices and maps in loop index objs."""
-    return StencilGroup([
-        Stencil([
-            tuple(index.copy(within=True) for index in indices)
-            for indices in stencil
-        ])
-        for stencil in stencils
-    ])
+    return tuple(_myindex(index) for index in indices)
+
+
+def _myindex(item):
+    value, children = item
+
+    return value.copy(within=True), tuple(_myindex(child) for child in children)
 
 
 def _break_mixed_slices(stencils, dtree):

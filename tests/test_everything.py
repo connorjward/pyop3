@@ -173,7 +173,7 @@ def test_permuted_loop():
 def test_ragged_loop():
     root = Dim(5)
     steps = np.array([3, 2, 1, 3, 2])
-    nnz = Tensor(Tree(root), data=steps, dtype=np.int32)
+    nnz = Tensor.new(Tree(root), data=steps, dtype=np.int32)
     dims = Tree.from_nest([
         root,
         [Dim(nnz)]
@@ -186,10 +186,10 @@ def test_ragged_loop():
 def test_read_single_dim():
     root = Dim(10)
     dims = Tree(root)
-    dat1 = Tensor(dims, name="dat1", data=np.arange(10, dtype=np.float64), dtype=np.float64)
-    dat2 = Tensor(dims, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
+    dat1 = Tensor.new(dims, name="dat1", data=np.arange(10, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor.new(dims, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
 
-    iterset = StencilGroup([Stencil([(Slice.from_dim(root, 0),)])])
+    iterset = [(Slice.from_dim(root, 0), [])]
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
         "y[i] = x[i] + 1",
@@ -229,10 +229,10 @@ def test_compute_double_loop():
     root = Dim(10)
     subdim = Dim(3)
     dims = Tree.from_nest([root, [subdim]])
-    dat1 = Tensor(dims, name="dat1", data=np.arange(30, dtype=np.float64), dtype=np.float64)
-    dat2 = Tensor(dims, name="dat2", data=np.zeros(30, dtype=np.float64), dtype=np.float64)
+    dat1 = Tensor.new(dims, name="dat1", data=np.arange(30, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor.new(dims, name="dat2", data=np.zeros(30, dtype=np.float64), dtype=np.float64)
 
-    iterset = StencilGroup([Stencil([(Slice.from_dim(root, 0),)])])
+    iterset = ((Slice.from_dim(root, 0), ()),)
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 3 }",
         "y[i] = x[i] + 1",
@@ -291,11 +291,11 @@ def test_compute_double_loop_mixed():
     root = Dim((10, 12))
     subdims = [Dim(3), Dim(2)]
     dims = Tree.from_nest([root, subdims])
-    dat1 = Tensor(dims, name="dat1", data=np.arange(54, dtype=np.float64), dtype=np.float64)
-    dat2 = Tensor(dims, name="dat2", data=np.zeros(54, dtype=np.float64), dtype=np.float64)
+    dat1 = Tensor.new(dims, name="dat1", data=np.arange(54, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor.new(dims, name="dat2", data=np.zeros(54, dtype=np.float64), dtype=np.float64)
 
     # import pdb; pdb.set_trace()
-    iterset = StencilGroup([Stencil([(Slice.from_dim(root, 1),)])])
+    iterset = ((Slice.from_dim(root, 1), ()),)
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 2 }",
         "y[i] = x[i] + 1",
@@ -367,10 +367,10 @@ def test_compute_double_loop_scalar():
     root = Dim((6, 4))
     subdims = [Dim(3), Dim(2)]
     dims = Tree.from_nest([root, subdims])
-    dat1 = Tensor(dims, name="dat1", data=np.arange(18+8, dtype=np.float64), dtype=np.float64)
-    dat2 = Tensor(dims, name="dat2", data=np.zeros(18+8, dtype=np.float64), dtype=np.float64)
+    dat1 = Tensor.new(dims, name="dat1", data=np.arange(18+8, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor.new(dims, name="dat2", data=np.zeros(18+8, dtype=np.float64), dtype=np.float64)
 
-    iterset = StencilGroup([Stencil([(Slice.from_dim(root, 1), Slice.from_dim(subdims[1], 0))])])
+    iterset = ((Slice.from_dim(root, 1), ((Slice.from_dim(subdims[1], 0), ()),)),)
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
         "y[i] = x[i] + 1",
@@ -426,10 +426,10 @@ def test_compute_double_loop_permuted():
     root = Dim(6, permutation=(3, 2, 5, 0, 4, 1))
     subdim = Dim(3)
     dims = Tree.from_nest([root, [subdim]])
-    dat1 = Tensor(dims, name="dat1", data=np.arange(18, dtype=np.float64), dtype=np.float64)
-    dat2 = Tensor(dims, name="dat2", data=np.zeros(18, dtype=np.float64), dtype=np.float64)
+    dat1 = Tensor.new(dims, name="dat1", data=np.arange(18, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor.new(dims, name="dat2", data=np.zeros(18, dtype=np.float64), dtype=np.float64)
 
-    iterset = StencilGroup([Stencil([(Slice.from_dim(root, 0),)])])
+    iterset = ((Slice.from_dim(root, 0), ()),)
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 3 }",
         "y[i] = x[i] + 1",
@@ -486,10 +486,10 @@ def test_compute_double_loop_permuted_mixed():
     root = Dim((4, 3), permutation=(3, 6, 2, 5, 0, 4, 1))
     subdims = [Dim(1), Dim(2)]
     dims = Tree.from_nest([root, subdims])
-    dat1 = Tensor(dims, name="dat1", data=np.arange(10, dtype=np.float64), dtype=np.float64)
-    dat2 = Tensor(dims, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
+    dat1 = Tensor.new(dims, name="dat1", data=np.arange(10, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor.new(dims, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
 
-    iterset = StencilGroup([Stencil([(Slice.from_dim(root, 1),)])])
+    iterset = ((Slice.from_dim(root, 1), ()),)
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 2 }",
         "y[i] = x[i] + 1",
@@ -546,17 +546,17 @@ def test_compute_double_loop_permuted_mixed():
 def test_compute_double_loop_ragged():
     root = Dim(5)
     steps = np.array([3, 2, 1, 3, 2], dtype=np.int32)
-    nnz = Tensor(Tree(root), data=steps, name="nnz", dtype=np.int32)
+    nnz = Tensor.new(Tree(root), data=steps, name="nnz", dtype=np.int32)
     subdim = Dim(nnz)
     dims = Tree.from_nest([
         root,
         [subdim]
     ])
-    dat1 = Tensor(dims, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
-    dat2 = Tensor(dims, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
+    dat1 = Tensor.new(dims, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor.new(dims, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
 
     i_ = Slice.from_dim(root, 0, within=True)
-    iterset =  StencilGroup([Stencil([(i_, Slice.from_dim(subdim, 0, parent_indices=(i_,)))])])
+    iterset = [(i_, [(Slice.from_dim(subdim, 0, parent_indices=(i_,)), ())])]
 
     # import pdb; pdb.set_trace()
 
@@ -616,16 +616,16 @@ def test_compute_double_loop_ragged():
 def test_compute_double_loop_ragged_inner():
     root = Dim(5)
     steps = np.array([3, 2, 1, 3, 2], dtype=np.int32)
-    nnz = Tensor(Tree(root), data=steps, name="nnz", dtype=np.int32, max_value=max(steps))
+    nnz = Tensor.new(Tree(root), data=steps, name="nnz", dtype=np.int32, max_value=max(steps))
     subdim = Dim(nnz)
     dims = Tree.from_nest([
         root,
         [subdim]
     ])
-    dat1 = Tensor(dims, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
-    dat2 = Tensor(dims, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
+    dat1 = Tensor.new(dims, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor.new(dims, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
 
-    iterset = StencilGroup([Stencil([(Slice.from_dim(root, 0),)])])
+    iterset = [(Slice.from_dim(root, 0), [])]
     # import pdb; pdb.set_trace()
     # this is the problem
     # dat1[pyop3.index(iterset)]
@@ -694,15 +694,15 @@ def test_compute_double_loop_ragged_mixed():
     root = Dim((4, 5, 4))
     nnz_data = np.array([3, 2, 0, 0, 1], dtype=np.int32)
     # nnz = Tensor(Tree(root.copy(offset=4, sizes=(5,))), data=nnz_data, name="nnz", dtype=np.int32)
-    nnz = Tensor(Tree(root.copy(sizes=(5,), labels=(root.labels[1],))), data=nnz_data, name="nnz", dtype=np.int32)
+    nnz = Tensor.new(Tree(root.copy(sizes=(5,), labels=(root.labels[1],))), data=nnz_data, name="nnz", dtype=np.int32)
     subdims = [Dim(1), Dim(nnz), Dim(2)]
     dims = Tree.from_nest([root, subdims])
 
-    dat1 = Tensor(dims, name="dat1", data=np.arange(4+6+8, dtype=np.float64), dtype=np.float64)
-    dat2 = Tensor(dims, name="dat2", data=np.zeros(4+6+8, dtype=np.float64), dtype=np.float64)
+    dat1 = Tensor.new(dims, name="dat1", data=np.arange(4+6+8, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor.new(dims, name="dat2", data=np.zeros(4+6+8, dtype=np.float64), dtype=np.float64)
 
     i0 = Slice.from_dim(root, 1)
-    iterset = StencilGroup([Stencil([(i0, Slice.from_dim(subdims[1], 0, parent_indices=[i0]))])])
+    iterset = [(i0, [(Slice.from_dim(subdims[1], 0, parent_indices=[i0]), [])])]
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
         "y[i] = x[i] + 1",
@@ -768,15 +768,15 @@ def test_compute_ragged_permuted():
     root = Dim(6, permutation=(3, 2, 5, 0, 4, 1))
     # the nnz array doesn't need to be permuted
     nnz_ = np.array([3, 2, 0, 1, 3, 2], dtype=np.int32)
-    nnz = Tensor(Tree(root.copy(permutation=None)), data=nnz_, name="nnz", dtype=np.int32)
+    nnz = Tensor.new(Tree(root.copy(permutation=None)), data=nnz_, name="nnz", dtype=np.int32)
     subdim = Dim(nnz)
     dims = Tree.from_nest([root, [subdim]])
 
-    dat1 = Tensor(dims, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
-    dat2 = Tensor(dims, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
+    dat1 = Tensor.new(dims, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor.new(dims, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
 
     i0 = Slice.from_dim(root, 0)
-    iterset = StencilGroup([Stencil([(i0, Slice.from_dim(subdim, 0, parent_indices=[i0]))])])
+    iterset = [(i0, [(Slice.from_dim(subdim, 0, parent_indices=[i0]), [])])]
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
         "y[i] = x[i] + 1",
@@ -842,17 +842,17 @@ def test_subset():
     root = Dim(6)
     dims = Tree(root)
 
-    dat1 = Tensor(dims, name="dat1", data=np.arange(6, dtype=np.float64), dtype=np.float64)
-    dat2 = Tensor(dims, name="dat2", data=np.zeros(6, dtype=np.float64), dtype=np.float64)
+    dat1 = Tensor.new(dims, name="dat1", data=np.arange(6, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor.new(dims, name="dat2", data=np.zeros(6, dtype=np.float64), dtype=np.float64)
 
     subset_dim = Dim(4, labels=(root.labels[0],))
-    subset_tensor = Tensor(Tree(subset_dim),
+    subset_tensor = Tensor.new(Tree(subset_dim),
             data=np.array([2, 3, 5, 0], dtype=np.int32), dtype=np.int32, prefix="subset")
 
-    i1 = pyop3.index(StencilGroup([Stencil([(Slice.from_dim(subset_dim, 0),)])]))
+    i1 = pyop3.index([(Slice.from_dim(subset_dim, 0), [])])
     subset = NonAffineMap(subset_tensor[i1])
 
-    iterset = StencilGroup([Stencil([(subset,)])])
+    iterset = [(subset, [])]
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
         "y[i] = x[i] + 1",
@@ -907,10 +907,10 @@ def test_map():
     root = Dim(5)
     dims = Tree(root)
 
-    dat1 = Tensor(dims, name="dat1", data=np.arange(5, dtype=np.float64), dtype=np.float64)
-    dat2 = Tensor(dims, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
+    dat1 = Tensor.new(dims, name="dat1", data=np.arange(5, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor.new(dims, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
 
-    map_tensor = Tensor(Tree.from_nest([root, [Dim(2, labels=(root.labels[0],))]]),
+    map_tensor = Tensor.new(Tree.from_nest([root, [Dim(2, labels=(root.labels[0],))]]),
             data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32), dtype=np.int32, prefix="map")
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 2 }",
@@ -923,9 +923,9 @@ def test_map():
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
-    i1 = pyop3.index(StencilGroup([Stencil([(Slice(root.sizes[0], label=root.labels[0]),)])]))
+    i1 = pyop3.index([(Slice.from_dim(root, 0), [])])
     map = NonAffineMap(map_tensor[i1])
-    i2 = StencilGroup([Stencil([(map,)])])
+    i2 = [(map, [])]
     expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
@@ -975,13 +975,13 @@ def test_map_composition():
     root = Dim(5)
     dims = Tree(root)
 
-    dat1 = Tensor(dims, name="dat1", data=np.arange(5, dtype=np.float64), dtype=np.float64)
-    dat2 = Tensor(dims, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
+    dat1 = Tensor.new(dims, name="dat1", data=np.arange(5, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor.new(dims, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
 
-    map0_tensor = Tensor(Tree.from_nest([root, [Dim(2, labels=(root.labels[0],))]]),
+    map0_tensor = Tensor.new(Tree.from_nest([root, [Dim(2, labels=(root.labels[0],))]]),
                          data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32),
                          dtype=np.int32, prefix="map")
-    map1_tensor = Tensor(Tree.from_nest([root, [Dim(2, labels=(root.labels[0],))]]),
+    map1_tensor = Tensor.new(Tree.from_nest([root, [Dim(2, labels=(root.labels[0],))]]),
                          data=np.array([3, 2, 4, 1, 0, 2, 4, 2, 1, 3], dtype=np.int32),
                          dtype=np.int32, prefix="map")
 
@@ -996,11 +996,11 @@ def test_map_composition():
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
-    i1 = pyop3.index(StencilGroup([Stencil([(Slice.from_dim(root, 0),)])]))
+    i1 = pyop3.index([(Slice.from_dim(root, 0), [])])
     map0 = NonAffineMap(map0_tensor[i1])
-    i2 = StencilGroup([Stencil([(map0,)])])
+    i2 = [(map0, [])]
     map1 = NonAffineMap(map1_tensor[i2])
-    i3 = StencilGroup([Stencil([(map1,)])])
+    i3 = [(map1, [])]
     expr = pyop3.Loop(i1, kernel(dat1[i3], dat2[i1]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
@@ -1040,14 +1040,14 @@ def test_mixed_arity_map():
     root = Dim(3)
     dims = Tree(root)
 
-    dat1 = Tensor(dims, name="dat1", data=np.arange(1, 4, dtype=np.float64), dtype=np.float64)
-    dat2 = Tensor(dims, name="dat2", data=np.zeros(3, dtype=np.float64), dtype=np.float64)
+    dat1 = Tensor.new(dims, name="dat1", data=np.arange(1, 4, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor.new(dims, name="dat2", data=np.zeros(3, dtype=np.float64), dtype=np.float64)
 
     nnz_ = np.array([3, 2, 1], dtype=np.int32)
-    nnz = Tensor(Tree(root), data=nnz_, name="nnz", dtype=np.int32, max_value=3)
+    nnz = Tensor.new(Tree(root), data=nnz_, name="nnz", dtype=np.int32, max_value=3)
 
     map_data = np.array([2, 1, 0, 2, 1, 2], dtype=np.int32)
-    map_tensor = Tensor(Tree.from_nest([root, [Dim(nnz, labels=(root.labels[0],))]]),
+    map_tensor = Tensor.new(Tree.from_nest([root, [Dim(nnz, labels=(root.labels[0],))]]),
             data=map_data, dtype=np.int32, prefix="map")
 
 
@@ -1063,9 +1063,9 @@ def test_mixed_arity_map():
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
-    i1 = pyop3.index(StencilGroup([Stencil([(Slice.from_dim(root, 0),)])]))
+    i1 = pyop3.index([(Slice.from_dim(root, 0), [])])
     map = NonAffineMap(map_tensor[i1])
-    i2 = StencilGroup([Stencil([(map,)])])
+    i2 = [(map, [])]
     expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
@@ -1114,13 +1114,13 @@ def test_iter_map_composition():
     root = Dim(5)
     dims = Tree(root)
 
-    dat1 = Tensor(dims, name="dat1", data=np.arange(5, dtype=np.float64), dtype=np.float64)
-    dat2 = Tensor(dims, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
+    dat1 = Tensor.new(dims, name="dat1", data=np.arange(5, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor.new(dims, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
 
-    map0_tensor = Tensor(Tree.from_nest([root, [Dim(2, labels=(root.labels[0],))]]),
+    map0_tensor = Tensor.new(Tree.from_nest([root, [Dim(2, labels=(root.labels[0],))]]),
                          data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32),
                          dtype=np.int32, prefix="map")
-    map1_tensor = Tensor(Tree.from_nest([root, [Dim(2, labels=(root.labels[0],))]]),
+    map1_tensor = Tensor.new(Tree.from_nest([root, [Dim(2, labels=(root.labels[0],))]]),
                          data=np.array([3, 2, 2, 3, 0, 2, 1, 2, 1, 3], dtype=np.int32),
                          dtype=np.int32, prefix="map")
 
@@ -1135,11 +1135,11 @@ def test_iter_map_composition():
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
-    i1 = pyop3.index(StencilGroup([Stencil([(Slice.from_dim(root, 0),)])]))
+    i1 = pyop3.index([(Slice.from_dim(root, 0), [])])
     map0 = NonAffineMap(map0_tensor[i1])
-    i2 = StencilGroup([Stencil([(map0,)])])
+    i2 = [(map0, [])]
     map1 = NonAffineMap(map1_tensor[i2])
-    i3 = StencilGroup([Stencil([(map1,)])])
+    i3 = [(map1, [])]
     expr = pyop3.Loop(p := pyop3.index(i3), kernel(dat1[p], dat2[p]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
@@ -1192,7 +1192,7 @@ if __name__ == "__main__":
     # test_double_mixed_loop()
     # test_permuted_loop()
     # test_ragged_loop()
-    # test_read_single_dim()
+    test_read_single_dim()
     # test_compute_double_loop()
     # test_compute_double_loop_mixed()
     # import gc; gc.collect()
@@ -1206,4 +1206,4 @@ if __name__ == "__main__":
     # test_map_composition()
     # test_iter_map_composition()
     # test_compute_double_loop_ragged_inner()
-    test_mixed_arity_map()
+    # test_mixed_arity_map()

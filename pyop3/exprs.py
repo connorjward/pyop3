@@ -31,6 +31,14 @@ class Loop(pytools.ImmutableRecord, Operator):
         self.statements = as_tuple(statements)
         super().__init__()
 
+    @property
+    def flat_indices(self):
+        def flatten(item):
+            value, children = item
+            return (value,) + tuple(val for child in children for val in flatten(child))
+
+        return tuple(v for it in self.index for v in flatten(it))
+
     def __str__(self):
         return f"for {self.index} ∊ {self.index.point_set}"
 

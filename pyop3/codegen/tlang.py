@@ -61,7 +61,7 @@ class TensorLangKernelBuilder:
         for arg in args:
             dims = self.construct_temp_dims(arg.tensor)
             # import pdb; pdb.set_trace()
-            temporaries[arg] = tensors.Tensor(dims, name=self._temp_name_generator(), dtype=arg.tensor.dtype)["fill"]
+            temporaries[arg] = tensors.Tensor.new(dims, name=self._temp_name_generator(), dtype=arg.tensor.dtype)
 
         gathers = self.make_gathers(temporaries)
         call = self.make_function_call(
@@ -99,18 +99,40 @@ class TensorLangKernelBuilder:
 
         return new_tree
 
+    def _construct_temp_dims(self, items):
+        if any(idx.within for idx, _ in items):
+            if len(items) > 1:
+                raise NotImplementedError("needs more thought")
+
+            item, = items
+            _, children = item
+            return self._construct_temp_dims(children)
+
+        labels = tuple(idx.label for idx, _ in items)
+        # FIXME this fails for maps!
+        sizes = tuple(idx.size if not idx.within else 1 for idx, _ in items)
+        # wont work - need clever recursion
+        # sizes = tuple(tensors.index_shape(idx) for idx, _ in items)
+        # import pdb; pdb.set_trace()
+
+        return tensors.Dim(sizes=sizes, labels=labels), tuple(self._construct_temp_dims(children) for _, children in items if children)
+
     def construct_temp_dims(self, tensor):
         # FIXME This will fail if we start doing mixed (and hence need to think harder
         # about temp dims)
+        # shape, = tensor.indexed_shapes
+        # nest = None
+        # for extent in reversed(shape):
+        #     if nest:
+        #         nest = tensors.Dim(extent), [nest]
+        #     else:
+        #         nest = [tensors.Dim(extent), []]
+        # entries = []
+        # for item in tensor.indices:
+        #     entries.append(self._construct_temp_dims(item))
+        dims = self._construct_temp_dims(tensor.indices)
         # import pdb; pdb.set_trace()
-        shape, = tensor.indexed_shapes
-        nest = None
-        for extent in reversed(shape):
-            if nest:
-                nest = tensors.Dim(extent), [nest]
-            else:
-                nest = [tensors.Dim(extent), []]
-        return pyop3.utils.Tree.from_nest(nest)
+        return pyop3.utils.Tree.from_nest(dims)
         # new_dims = None
         # dim = tensor.dim.root
         # for subdim_id, index in tensor.indices:

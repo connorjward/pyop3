@@ -19,8 +19,8 @@ import pyop3.utils
 from pyop3 import utils
 from pyop3.utils import MultiNameGenerator, NameGenerator
 from pyop3.utils import CustomTuple, checked_zip, NameGenerator, rzip
-from pyop3.tensors import Tensor, Index, Map, Dim, NonAffineMap, _compute_indexed_shape
-from pyop3.tensors import Slice, AffineMap, Stencil, StencilGroup, index
+from pyop3.tensors import Tensor, Index, Map, Dim, NonAffineMap, _compute_indexed_shape, _compute_indexed_shape2
+from pyop3.tensors import Slice, AffineMap, index
 from pyop3.codegen.tlang import to_tlang
 
 
@@ -102,14 +102,10 @@ class LoopyKernelBuilder:
 
     @_build.register
     def _(self, expr: exprs.Loop, within_loops):
-        # be assertive
-        stencil, = expr.index
-        indices, = stencil
-
         def collect_within_loops(idx):
             if isinstance(idx, NonAffineMap):
                 within_loops = {}
-                for i in idx.tensor.indices:
+                for i in idx.tensor.linear_indices:
                     within_loops |= collect_within_loops(i)
                 return within_loops
             else:
@@ -117,7 +113,7 @@ class LoopyKernelBuilder:
                 return {idx: iname}
 
         within_loops = {}
-        for idx in indices:
+        for idx in expr.flat_indices:
             within_loops |= collect_within_loops(idx)
 
         # import pdb; pdb.set_trace()
@@ -187,53 +183,55 @@ class LoopyKernelBuilder:
 
     @_make_instruction_context.register
     def _(self, assignment: tlang.Assignment, within_loops, scalar=False, domain_stack=None):
+        # import pdb; pdb.set_trace()
         within_loops = within_loops.copy()
-        assert len(assignment.lhs.stencils) == len(assignment.rhs.stencils)
-        for lstencil, rstencil in zip(assignment.lhs.stencils, assignment.rhs.stencils):
-            assert len(lstencil) == len(rstencil)
-            for lidxs, ridxs in zip(lstencil, rstencil):
-                # 1. Create a domain stack if not provided - this means that we can have consistent inames for the LHS and RHS
-                if not domain_stack:
-                    domain_stack = self.create_domain_stack(assignment.lhs, assignment.rhs, lidxs, ridxs)
+        # assert len(assignment.lhs.stencils) == len(assignment.rhs.stencils)
+        # for lstencil, rstencil in zip(assignment.lhs.stencils, assignment.rhs.stencils):
+        #     assert len(lstencil) == len(rstencil)
+        #     for lidxs, ridxs in zip(lstencil, rstencil):
+        for lidxs, ridxs in zip(assignment.lhs.linear_indicess, assignment.rhs.linear_indicess):
+            # 1. Create a domain stack if not provided - this means that we can have consistent inames for the LHS and RHS
+            if not domain_stack:
+                domain_stack = self.create_domain_stack(assignment.lhs, assignment.rhs, lidxs, ridxs)
 
-                # import pdb; pdb.set_trace()
-                ldstack = domain_stack.copy()
-                lwithin_loops = self.register_domains(assignment.lhs, lidxs, ldstack, within_loops)
-                lexpr = self.handle_assignment(assignment.lhs, lidxs, lwithin_loops)
+            # import pdb; pdb.set_trace()
+            ldstack = domain_stack.copy()
+            lwithin_loops = self.register_domains(assignment.lhs, lidxs, ldstack, within_loops)
+            lexpr = self.handle_assignment(assignment.lhs, lidxs, lwithin_loops)
 
-                rdstack = domain_stack.copy()
-                rwithin_loops = self.register_domains(assignment.rhs, ridxs, rdstack, within_loops)
-                rexpr = self.handle_assignment(assignment.rhs, ridxs, rwithin_loops)
+            rdstack = domain_stack.copy()
+            rwithin_loops = self.register_domains(assignment.rhs, ridxs, rdstack, within_loops)
+            rexpr = self.handle_assignment(assignment.rhs, ridxs, rwithin_loops)
 
-                assert not ldstack and not rdstack
-                domain_stack = ldstack
+            assert not ldstack and not rdstack
+            domain_stack = ldstack
 
-                lname = pym.var(assignment.lhs.name)
-                if assignment.lhs.dim.root or not scalar:
-                    lhs = pym.subscript(lname, lexpr)
+            lname = pym.var(assignment.lhs.name)
+            if assignment.lhs.dim.root or not scalar:
+                lhs = pym.subscript(lname, lexpr)
+            else:
+                lhs = lname
+
+            if isinstance(assignment, tlang.Zero):
+                rhs = 0
+            else:
+                rname = pym.var(assignment.rhs.name)
+                if assignment.rhs.dim.root or not scalar:
+                    rhs = pym.subscript(rname, rexpr)
                 else:
-                    lhs = lname
+                    rhs = rname
 
-                if isinstance(assignment, tlang.Zero):
-                    rhs = 0
-                else:
-                    rname = pym.var(assignment.rhs.name)
-                    if assignment.rhs.dim.root or not scalar:
-                        rhs = pym.subscript(rname, rexpr)
-                    else:
-                        rhs = rname
-
-                within_inames = frozenset(list(within_loops.values()) + [iname for iname in domain_stack])
-                # import pdb; pdb.set_trace()
-                assign_insn = lp.Assignment(
-                        lhs, rhs,
-                        id=self._namer.next(f"{assignment.id}_"),
-                        within_inames=within_inames,
-                        depends_on=frozenset({f"{dep}*" for dep in assignment.depends_on}))
-                self.instructions.append(assign_insn)
+            within_inames = frozenset(list(within_loops.values()) + [iname for iname in domain_stack])
+            # import pdb; pdb.set_trace()
+            assign_insn = lp.Assignment(
+                    lhs, rhs,
+                    id=self._namer.next(f"{assignment.id}_"),
+                    within_inames=within_inames,
+                    depends_on=frozenset({f"{dep}*" for dep in assignment.depends_on}))
+            self.instructions.append(assign_insn)
 
         # register kernel arguments
-        if assignment.temporary.shape or not scalar:
+        if assignment.temporary.dim.root.sizes or not scalar:
             size = 1
             for extent in assignment.temporary.shape:
                 if isinstance(extent, Tensor):
@@ -268,7 +266,8 @@ class LoopyKernelBuilder:
         return iname
 
     def create_domain_stack(self, lhs, rhs, lidxs, ridxs):
-        shapes = {_compute_indexed_shape(lidxs), _compute_indexed_shape(ridxs)}
+        # import pdb; pdb.set_trace()
+        shapes = {_compute_indexed_shape2(lidxs), _compute_indexed_shape2(ridxs)}
         try:
             shape, = shapes
         except ValueError:
@@ -283,10 +282,10 @@ class LoopyKernelBuilder:
             except KeyError:
                 # import pdb; pdb.set_trace()
                 temp_name = self._namer.next("n")
-                temp = Tensor(pyop3.utils.Tree(None), name=temp_name, dtype=np.int32)["fill"]
+                temp = Tensor(pyop3.utils.Tree(Dim(sizes=(),labels=())), name=temp_name, dtype=np.int32)
 
-                new_stencils = index(extent.stencils)
-                extent = extent.copy(stencils=new_stencils)
+                new_stencils = index(extent.indices)
+                extent = extent.copy(indices=new_stencils)
                 insn = tlang.Read(extent, temp)
                 self._make_instruction_context(insn, within_loops, scalar=True)
 
@@ -329,7 +328,7 @@ class LoopyKernelBuilder:
                 within_loops[index] = iname
 
             elif isinstance(index, NonAffineMap):
-                within_loops |= self.register_domains(index.tensor, index.tensor.indices, dstack, within_loops)
+                within_loops |= self.register_domains(index.tensor, index.tensor.linear_indices, dstack, within_loops)
                 self.kernel_data.append(lp.GlobalArg(index.tensor.name, shape=None, dtype=index.tensor.dtype))
             else:
                 raise TypeError
@@ -364,7 +363,7 @@ class LoopyKernelBuilder:
 
     @_as_expr.register
     def _(self, index: NonAffineMap, within_loops):
-        myexpr = self.handle_assignment(index.tensor, index.tensor.indices, within_loops)
+        myexpr = self.handle_assignment(index.tensor, index.tensor.linear_indices, within_loops)
         return pym.subscript(pym.var(index.tensor.name), myexpr)
 
 
