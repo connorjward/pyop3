@@ -253,22 +253,10 @@ class LoopyKernelBuilder:
         return domain_stack
 
     def register_new_domain(self, iname, index, within_loops, parent_indices):
-        # iname = within_loops[index]
-
-        # and try to register/check
-        # start = self.register_extent(index.start or 0, within_loops, parent_indices)
-        # dimsize = dim.sizes[subdim_id] if dim else None
-        # stop = self.register_extent(index.stop or dimsize, within_loops, parent_indices)
-        # step = self.register_extent(index.step or 1, within_loops, parent_indices)
-        #
-        # # import pdb; pdb.set_trace()
-        # size = (stop - start) // step
         if isinstance(index.size, pym.primitives.Expression):
             if not isinstance(index.size, Tensor):
                 raise NotImplementedError("need to think hard about more complicated expressions"
                                           "esp. sharing inames")
-            # import pdb; pdb.set_trace()
-            # size = VariableReplacer()(index.size)
             size = self.register_extent(index.size, within_loops, parent_indices)
         else:
             size = index.size
