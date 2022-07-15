@@ -137,6 +137,8 @@ class LoopyKernelBuilder:
         extents = []
         # import pdb; pdb.set_trace()
         for temp in utils.unique(itertools.chain(call.reads, call.writes)):
+            # determine the right size of temporary - since loopy thinks everything
+            # is flat just find the total size.
             temp_size = 1
             for extent in temp.shape:
                 if isinstance(extent, Tensor):
@@ -146,6 +148,8 @@ class LoopyKernelBuilder:
                     extent = extent.max_value
                 temp_size *= extent
 
+            # if a dimension is ragged then take the maximum size of it (and only
+            # allocate once)
             temp_isize = 1
             for extent in temp.indexed_shape:
                 if isinstance(extent, Tensor):
@@ -159,7 +163,7 @@ class LoopyKernelBuilder:
             subarrayrefs[temp] = as_subarrayref(temp, iname)
             # import pdb; pdb.set_trace()
             self.domains[iname] = (0, temp_size, 1)
-            self.kernel_data.append(lp.TemporaryVariable(temp.name, shape=(temp_size,))) 
+            self.kernel_data.append(lp.TemporaryVariable(temp.name, shape=(temp_size,)))
 
         assignees = tuple(subarrayrefs[var] for var in call.writes)
         expression = pym.primitives.Call(
@@ -183,17 +187,18 @@ class LoopyKernelBuilder:
 
     @_make_instruction_context.register
     def _(self, assignment: tlang.Assignment, within_loops, scalar=False, domain_stack=None):
-        # import pdb; pdb.set_trace()
         within_loops = within_loops.copy()
-        # assert len(assignment.lhs.stencils) == len(assignment.rhs.stencils)
-        # for lstencil, rstencil in zip(assignment.lhs.stencils, assignment.rhs.stencils):
-        #     assert len(lstencil) == len(rstencil)
-        #     for lidxs, ridxs in zip(lstencil, rstencil):
+        # use linear_indicess here because Tensor.indices is now a tree and here we want to break
+        # them apart s.t. we can have separate packing routines for each distinct path.
         for lidxs, ridxs in zip(assignment.lhs.linear_indicess, assignment.rhs.linear_indicess):
             # 1. Create a domain stack if not provided - this means that we can have consistent inames for the LHS and RHS
             if not domain_stack:
                 domain_stack = self.create_domain_stack(assignment.lhs, assignment.rhs, lidxs, ridxs)
 
+            # 2. generate LHS and RHS expressions (registering domains etc as you go)
+            # The idea is that we are given a consistent stack of domains to share that are consumed
+            # as the indices are traversed. We can then build a map between indices and inames which
+            # we finally process to generate an expression.
             # import pdb; pdb.set_trace()
             ldstack = domain_stack.copy()
             lwithin_loops = self.register_domains(assignment.lhs, lidxs, ldstack, within_loops)
@@ -231,6 +236,8 @@ class LoopyKernelBuilder:
             self.instructions.append(assign_insn)
 
         # register kernel arguments
+        # TODO should really use assignment.{lhs,rhs} here...
+        # TODO this is sorta repeated in FunctionCall handler.
         if assignment.temporary.dim.root.sizes or not scalar:
             size = 1
             for extent in assignment.temporary.shape:
@@ -266,6 +273,11 @@ class LoopyKernelBuilder:
         return iname
 
     def create_domain_stack(self, lhs, rhs, lidxs, ridxs):
+        """Create a consistent set of inames for lhs and rhs to use.
+
+        We ignore any 'within' indices here as these will already exist and do
+        not contribute to the shape.
+        """
         # import pdb; pdb.set_trace()
         shapes = {_compute_indexed_shape2(lidxs), _compute_indexed_shape2(ridxs)}
         try:
@@ -277,13 +289,20 @@ class LoopyKernelBuilder:
 
     def register_extent(self, extent, within_loops, parent_indices):
         if isinstance(extent, Tensor):
+            # If we have a ragged thing then we need to create a scalar temporary
+            # to hold its value.
             try:
+                # TODO here we assume that we only index an extent tensor once. This
+                # is a simplification.
                 return self.extents[extent.name]
             except KeyError:
                 # import pdb; pdb.set_trace()
                 temp_name = self._namer.next("n")
-                temp = Tensor(pyop3.utils.Tree(Dim(sizes=(),labels=())), name=temp_name, dtype=np.int32)
+                temp = Tensor(pyop3.utils.Tree(Dim(sizes=())), name=temp_name, dtype=np.int32)
 
+                # make sure that the RHS reduces down to a scalar
+                # TODO this should really be handled when extent.indices are set up
+                # (in Tensor._parse_indices).
                 new_stencils = index(extent.indices)
                 extent = extent.copy(indices=new_stencils)
                 insn = tlang.Read(extent, temp)
@@ -304,6 +323,10 @@ class LoopyKernelBuilder:
             subdim_id = dim.labels.index(index.label)
 
             # import pdb; pdb.set_trace()
+            # Every dim uses a section to map the dim index (from the slice/map + iname)
+            # onto a location in the data structure. For nice regular data this can just be
+            # the index multiplied by the size of the inner dims (e.g. dat[4*i + j]), but for
+            # ragged things we need to always have a map for the outer dims.
             section_name = self._namer.next("sec")
             index_expr += pym.subscript(pym.var(section_name), dim_expr + dim.offsets[subdim_id])
             self.kernel_data.append(lp.GlobalArg(section_name, shape=None, dtype=np.int32))

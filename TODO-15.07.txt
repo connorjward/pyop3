@@ -1,0 +1,29 @@
+The current reason tests are failing is because we have just shifted to using
+a tree of indices and when we hit a map we need to pass control over to it.
+
+We have switched to a nest of indices because:
+- It should make creating mixed temporaries more 'right'
+- It allows us to prepopulate tensors with slices (this was why I began with it)
+- *maybe* it will make indexing DSL logic (e.g. slices of slices) easier to process?
+
+
+Other notes:
+
+- We should be able to evaluate tensor expressions (by packing to scalar temporaries
+  and evaluating). This is important for us to be able to have fully robust slices
+  over ragged things, where currently we assume that it is always a full slice over
+  a ragged dimension.
+
+New abstraction:
+
+I want a cleaner abstraction for maps and indices s.t. we can have `IndexFunction`s
+(e.g. for maps up extruded columns). My current idea is to have a defaultdict where
+the keys are the dim labels and the values are a list of inames. The index will
+advertise what dims it wants to access and the appropriate inames will be popped
+from the stack. Currently we assume that the dim ordering will be the same between
+the map tensor and the outer indices. I can imagine that this isn't necessarily the
+case and so we should have a way to look things up.
+
+Clean up __getitem__:
+
+When indexing we still need to be able to parse standard notation and to compose slices.
