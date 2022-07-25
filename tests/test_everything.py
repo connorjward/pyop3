@@ -11,7 +11,6 @@ import numpy as np
 import pyop3
 import pyop3.codegen
 from pyop3.tensors import *
-from pyop3.utils import Tree
 
 
 def compilemythings(jitmodule):
@@ -75,7 +74,7 @@ Compile errors in %s""" % (e.cmd, e.returncode, logfile, errfile))
             return ctypes.CDLL(soname)
 
 
-def make_offset_map(dim, dtree, imap=None):
+def make_offset_map(dim, imap=None):
     # import pdb; pdb.set_trace()
     if imap is None:
         imap = {}
@@ -94,7 +93,7 @@ def make_offset_map(dim, dtree, imap=None):
 
         offsets[point] = ptr
 
-        subdim, label, i = get_subdim(dim, dtree, point)
+        subdim, label, i = get_subdim(dim, point)
 
         # label = dim.labels[i]
         # if subdims := dtree.get_children(dim):
@@ -103,7 +102,7 @@ def make_offset_map(dim, dtree, imap=None):
         #     subdim = None
 
         if subdim:
-            ptr += make_offset_map(subdim, dtree, imap=imap|{label: point - dim.offsets[i]})[1]
+            ptr += make_offset_map(subdim, imap=imap|{label: point - dim.offsets[i]})[1]
         else:
             ptr += 1
 
@@ -111,8 +110,8 @@ def make_offset_map(dim, dtree, imap=None):
     return offsets, ptr
 
 
-def get_subdim(dim, dtree, point):
-    subdims = dtree.get_children(dim)
+def get_subdim(dim, point):
+    subdims = dim.subdims
 
     if not subdims:
         return None, None, None
@@ -128,32 +127,29 @@ def get_subdim(dim, dtree, point):
 def read_tensor(tensor, imap):
     # breakpoint()
     # assume a flat tensor for now
-    assert not tensor.dim.get_children(tensor.dim.root)
+    assert not tensor.dim.subdims
 
     # FIXME
     # the tensor needs to be indexed by all of the appropriate indices
-    ptr = imap[tensor.dim.root.labels[0]]# - tensor.dim.root.offset
+    ptr = imap[tensor.dim.labels[0]]# - tensor.dim.root.offset
     return tensor.data[ptr]
 
 
 def test_single_loop():
-    dims = Tree(Dim(10))
-    offsets = make_offset_map(dims.root, dims)
+    dims = Dim(10)
+    offsets = make_offset_map(dims)
     # assert False
 
 
 def test_double_loop():
-    dims = Tree.from_nest([Dim(10), [Dim(3)]])
-    offsets = make_offset_map(dims.root, dims)
+    dims = Dim(10, subdims=(Dim(3),))
+    offsets = make_offset_map(dims)
     # assert False
 
 
 def test_double_mixed_loop():
-    dims = Tree.from_nest([
-        Dim((10, 6)),
-        [Dim(2), Dim(3)]
-    ])
-    offsets = make_offset_map(dims.root, dims)[0]
+    dims = Dim((10, 6), subdims=(Dim(2), Dim(3)))
+    offsets = make_offset_map(dims)[0]
     assert all(offsets == np.array([0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 23, 26, 29, 32, 35]))
 
 def test_permuted_loop():
@@ -161,11 +157,8 @@ def test_permuted_loop():
     # start = [a1, a2, a3, a4, a5]
     # resulting data layout: [a2, a5, a1, a4, a3]
     # so the offsets must be [5, 0, 10, 7, 2]
-    dims = Tree.from_nest([
-        Dim((3, 2), permutation=perm),
-        [Dim(2), Dim(3)]
-    ])
-    offsets, size = make_offset_map(dims.root, dims)
+    dims = Dim((3, 2), permutation=perm, subdims=(Dim(2), Dim(3)))
+    offsets, size = make_offset_map(dims)
     ans = np.array([5, 0, 10, 7, 2])
     assert all(offsets == ans)
 
@@ -173,19 +166,16 @@ def test_permuted_loop():
 def test_ragged_loop():
     root = Dim(5)
     steps = np.array([3, 2, 1, 3, 2])
-    nnz = Tensor.new(Tree(root), data=steps, dtype=np.int32)
-    dims = Tree.from_nest([
-        root,
-        [Dim(nnz)]
-    ])
-    offsets = make_offset_map(dims.root, dims)[0]
+    nnz = Tensor.new(root, data=steps, dtype=np.int32)
+    dims = root.copy(subdims=(Dim(nnz),))
+    offsets = make_offset_map(dims)[0]
     ans = [0, 3, 5, 6, 9]
     assert all(offsets == ans)
 
 
 def test_read_single_dim():
     root = Dim(10)
-    dims = Tree(root)
+    dims = root
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(10, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
 
@@ -226,13 +216,11 @@ def test_read_single_dim():
 
 def test_compute_double_loop():
     print("compute_double_loop START", flush=True)
-    root = Dim(10)
-    subdim = Dim(3)
-    dims = Tree.from_nest([root, [subdim]])
+    dims = Dim(10, subdims=(Dim(3),))
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(30, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(30, dtype=np.float64), dtype=np.float64)
 
-    iterset = [[Slice.from_dim(root, 0)]]
+    iterset = [[Slice.from_dim(dims, 0)]]
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 3 }",
         "y[i] = x[i] + 1",
@@ -268,8 +256,8 @@ def test_compute_double_loop():
     # import pdb; pdb.set_trace()
 
     sec0 = np.arange(3, dtype=np.int32)
-    sec1 = make_offset_map(root, dims)[0]
-    sec2 = make_offset_map(subdim, dims)[0]
+    sec1 = make_offset_map(dims)[0]
+    sec2 = make_offset_map(dims.subdims[0])[0]
     sec3 = sec0.copy()
     sec4 = sec0.copy()  # skipped
     sec5 = sec0.copy()  # skipped
@@ -288,9 +276,8 @@ def test_compute_double_loop():
 
 def test_compute_double_loop_mixed():
     print("compute_double_loop_mixed START", flush=True)
-    root = Dim((10, 12))
-    subdims = [Dim(3), Dim(2)]
-    dims = Tree.from_nest([root, subdims])
+    root = Dim((10, 12), subdims=(Dim(3), Dim(2)))
+    dims = root
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(54, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(54, dtype=np.float64), dtype=np.float64)
 
@@ -340,8 +327,8 @@ def test_compute_double_loop_mixed():
 
     # import pdb; pdb.set_trace()
     sec0 = np.arange(2, dtype=np.int32)
-    sec1 = make_offset_map(root, dims)[0]
-    sec2 = make_offset_map(subdims[1], dims)[0]
+    sec1 = make_offset_map(root)[0]
+    sec2 = make_offset_map(root.subdims[1])[0]
     sec3 = sec0.copy()
     sec4 = np.empty(1)  # missing
     sec5 = np.empty(1)  # missing
@@ -364,13 +351,12 @@ def test_compute_double_loop_mixed():
 def test_compute_double_loop_scalar():
     print("compute_double_loop_scalar START", flush=True)
     """As in the temporary lives within both of the loops"""
-    root = Dim((6, 4))
-    subdims = [Dim(3), Dim(2)]
-    dims = Tree.from_nest([root, subdims])
+    root = Dim((6, 4), subdims=(Dim(3), Dim(2)))
+    dims = root
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(18+8, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(18+8, dtype=np.float64), dtype=np.float64)
 
-    iterset = [[Slice.from_dim(root, 1), Slice.from_dim(subdims[1], 0)]]
+    iterset = [[Slice.from_dim(root, 1), Slice.from_dim(root.subdims[1], 0)]]
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
         "y[i] = x[i] + 1",
@@ -403,8 +389,8 @@ def test_compute_double_loop_scalar():
     """
 
     # import pdb; pdb.set_trace()
-    sec0 = make_offset_map(root, dims)[0]
-    sec1 = make_offset_map(subdims[1], dims)[0]
+    sec0 = make_offset_map(root)[0]
+    sec1 = make_offset_map(root.subdims[1])[0]
     sec2 = np.empty(1)  # missing
     sec3 = np.empty(1)  # missing
     sec4 = sec0.copy()
@@ -423,9 +409,8 @@ def test_compute_double_loop_scalar():
 
 def test_compute_double_loop_permuted():
     print("test_compute_double_loop_permuted START", flush=True)
-    root = Dim(6, permutation=(3, 2, 5, 0, 4, 1))
-    subdim = Dim(3)
-    dims = Tree.from_nest([root, [subdim]])
+    root = Dim(6, permutation=(3, 2, 5, 0, 4, 1), subdims=(Dim(3),))
+    dims = root
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(18, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(18, dtype=np.float64), dtype=np.float64)
 
@@ -464,8 +449,8 @@ def test_compute_double_loop_permuted():
 
     # import pdb; pdb.set_trace()
     sec0 = np.arange(3, dtype=np.int32)
-    sec1 = make_offset_map(root, dims)[0]
-    sec2 = make_offset_map(subdim, dims)[0]
+    sec1 = make_offset_map(root)[0]
+    sec2 = make_offset_map(root.subdims[0])[0]
     sec3 = sec0.copy()
     sec4 = np.empty(1)  # missing
     sec5 = np.empty(1)  # missing
@@ -483,9 +468,8 @@ def test_compute_double_loop_permuted():
 
 def test_compute_double_loop_permuted_mixed():
     print("test_compute_double_loop_permuted_mixed START", flush=True)
-    root = Dim((4, 3), permutation=(3, 6, 2, 5, 0, 4, 1))
-    subdims = [Dim(1), Dim(2)]
-    dims = Tree.from_nest([root, subdims])
+    root = Dim((4, 3), permutation=(3, 6, 2, 5, 0, 4, 1), subdims=(Dim(1), Dim(2)))
+    dims = root
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(10, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
 
@@ -525,8 +509,8 @@ def test_compute_double_loop_permuted_mixed():
 
     # import pdb; pdb.set_trace()
     sec0 = np.arange(3, dtype=np.int32)
-    sec1 = make_offset_map(root, dims)[0]
-    sec2 = make_offset_map(subdims[1], dims)[0]
+    sec1 = make_offset_map(root)[0]
+    sec2 = make_offset_map(root.subdims[1])[0]
     sec3 = sec0.copy()
     sec4 = np.empty(1)  # missing
     sec5 = np.empty(1)  # missing
@@ -546,12 +530,9 @@ def test_compute_double_loop_permuted_mixed():
 def test_compute_double_loop_ragged():
     root = Dim(5)
     steps = np.array([3, 2, 1, 3, 2], dtype=np.int32)
-    nnz = Tensor.new(Tree(root), data=steps, name="nnz", dtype=np.int32)
+    nnz = Tensor.new(root, data=steps, name="nnz", dtype=np.int32)
     subdim = Dim(nnz)
-    dims = Tree.from_nest([
-        root,
-        [subdim]
-    ])
+    dims = root.copy(subdims=(subdim,))
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
 
@@ -594,8 +575,8 @@ def test_compute_double_loop_ragged():
   }
     """
 
-    sec0 = make_offset_map(nnz.dim.root, nnz.dim)[0]
-    sec1 = make_offset_map(dims.root, dims)[0]
+    sec0 = make_offset_map(nnz.dim)[0]
+    sec1 = make_offset_map(dims)[0]
     # sec2 = make_offset_map(subdim, dims)[0]
     sec2 = np.arange(3, dtype=np.int32)
     sec3 = np.empty(1, dtype=np.int32)  # missing
@@ -616,12 +597,10 @@ def test_compute_double_loop_ragged():
 def test_compute_double_loop_ragged_inner():
     root = Dim(5)
     steps = np.array([3, 2, 1, 3, 2], dtype=np.int32)
-    nnz = Tensor.new(Tree(root), data=steps, name="nnz", dtype=np.int32, max_value=max(steps))
+    nnz = Tensor.new(root, data=steps, name="nnz", dtype=np.int32, max_value=max(steps))
     subdim = Dim(nnz)
-    dims = Tree.from_nest([
-        root,
-        [subdim]
-    ])
+    dims = root.copy(subdims=(subdim,))
+
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
 
@@ -665,9 +644,9 @@ def test_compute_double_loop_ragged_inner():
   }
     """
 
-    sec0 = make_offset_map(nnz.dim.root, nnz.dim)[0]
+    sec0 = make_offset_map(nnz.dim)[0]
     sec1 = np.arange(3, dtype=np.int32)
-    sec2 = make_offset_map(dims.root, dims)[0]
+    sec2 = make_offset_map(dims)[0]
     # FIXME
     # sec3 = make_offset_map(subdim, dims)[0]
     sec3 = sec1.copy()
@@ -693,10 +672,9 @@ def test_compute_double_loop_ragged_mixed():
     # import pdb; pdb.set_trace()
     root = Dim((4, 5, 4))
     nnz_data = np.array([3, 2, 0, 0, 1], dtype=np.int32)
-    # nnz = Tensor(Tree(root.copy(offset=4, sizes=(5,))), data=nnz_data, name="nnz", dtype=np.int32)
-    nnz = Tensor.new(Tree(root.copy(sizes=(5,), labels=(root.labels[1],))), data=nnz_data, name="nnz", dtype=np.int32)
+    nnz = Tensor.new(root.copy(sizes=(5,), labels=(root.labels[1],)), data=nnz_data, name="nnz", dtype=np.int32)
     subdims = [Dim(1), Dim(nnz), Dim(2)]
-    dims = Tree.from_nest([root, subdims])
+    dims = root.copy(subdims=tuple(subdims))
 
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(4+6+8, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(4+6+8, dtype=np.float64), dtype=np.float64)
@@ -739,7 +717,7 @@ def test_compute_double_loop_ragged_mixed():
 
     # sec0 = make_offset_map(nnz.dim.root, nnz.dim)[0]
     sec0 = np.arange(10, dtype=np.int32)
-    sec1 = make_offset_map(dims.root, dims)[0]
+    sec1 = make_offset_map(dims)[0]
     # FIXME
     # sec2 = make_offset_map(subdims[0], dims)[0]
     sec2 = np.arange(3, dtype=np.int32)
@@ -768,9 +746,9 @@ def test_compute_ragged_permuted():
     root = Dim(6, permutation=(3, 2, 5, 0, 4, 1))
     # the nnz array doesn't need to be permuted
     nnz_ = np.array([3, 2, 0, 1, 3, 2], dtype=np.int32)
-    nnz = Tensor.new(Tree(root.copy(permutation=None)), data=nnz_, name="nnz", dtype=np.int32)
+    nnz = Tensor.new(root.copy(permutation=None), data=nnz_, name="nnz", dtype=np.int32)
     subdim = Dim(nnz)
-    dims = Tree.from_nest([root, [subdim]])
+    dims = root.copy(subdims=(subdim,))
 
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
@@ -811,8 +789,8 @@ def test_compute_ragged_permuted():
   }
     """
 
-    sec0 = make_offset_map(nnz.dim.root, nnz.dim)[0]
-    sec1 = make_offset_map(dims.root, dims)[0]
+    sec0 = make_offset_map(nnz.dim)[0]
+    sec1 = make_offset_map(dims)[0]
     # FIXME
     # map2 = make_offset_map(subdim, dims)[0]
     sec2 = np.arange(11, dtype=np.int32)
@@ -840,13 +818,13 @@ def test_compute_ragged_permuted():
 
 def test_subset():
     root = Dim(6)
-    dims = Tree(root)
+    dims = root
 
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(6, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(6, dtype=np.float64), dtype=np.float64)
 
     subset_dim = Dim(4, labels=(root.labels[0],))
-    subset_tensor = Tensor.new(Tree(subset_dim),
+    subset_tensor = Tensor.new(subset_dim,
             data=np.array([2, 3, 5, 0], dtype=np.int32), dtype=np.int32, prefix="subset")
 
     i1 = pyop3.index([[Slice.from_dim(subset_dim, 0)]])
@@ -885,8 +863,8 @@ def test_subset():
     """
 
 
-    sec0 = make_offset_map(subset_tensor.dim.root, subset.tensor.dim)[0]
-    sec1 = make_offset_map(root, dims)[0]
+    sec0 = make_offset_map(subset_tensor.dim)[0]
+    sec1 = make_offset_map(dims)[0]
     sec2 = np.empty(1, dtype=np.int32)  # missing
     sec3 = sec2.copy()  # missing
     sec4 = sec0.copy()
@@ -905,12 +883,12 @@ def test_subset():
 
 def test_map():
     root = Dim(5)
-    dims = Tree(root)
+    dims = root
 
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(5, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
 
-    map_tensor = Tensor.new(Tree.from_nest([root, [Dim(2, labels=(root.labels[0],))]]),
+    map_tensor = Tensor.new(root.copy(subdims=(Dim(2, labels=(root.labels[0],)),)),
             data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32), dtype=np.int32, prefix="map")
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 2 }",
@@ -954,8 +932,8 @@ def test_map():
     """
 
     sec0 = np.arange(2, dtype=np.int32)
-    sec1 = make_offset_map(map_tensor.dim.root, map_tensor.dim)[0]
-    sec2 = make_offset_map(map_tensor.dim.get_child(map_tensor.dim.root), map_tensor.dim)[0]
+    sec1 = make_offset_map(map_tensor.dim)[0]
+    sec2 = make_offset_map(map_tensor.dim.subdims[0])[0]
     sec3 = make_offset_map(root, dims)[0]
     sec4 = np.empty(1, dtype=np.int32)
     sec5 = sec3.copy()
@@ -973,15 +951,15 @@ def test_map():
 
 def test_map_composition():
     root = Dim(5)
-    dims = Tree(root)
+    dims = root
 
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(5, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
 
-    map0_tensor = Tensor.new(Tree.from_nest([root, [Dim(2, labels=(root.labels[0],))]]),
+    map0_tensor = Tensor.new(root.copy(subdims=(Dim(2, labels=(root.labels[0],)),)),
                          data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32),
                          dtype=np.int32, prefix="map")
-    map1_tensor = Tensor.new(Tree.from_nest([root, [Dim(2, labels=(root.labels[0],))]]),
+    map1_tensor = Tensor.new(root.copy(subdims=(Dim(2, labels=(root.labels[0],)),)),
                          data=np.array([3, 2, 4, 1, 0, 2, 4, 2, 1, 3], dtype=np.int32),
                          dtype=np.int32, prefix="map")
 
@@ -1013,11 +991,11 @@ def test_map_composition():
     sec0 = np.arange(0, 4, 2, dtype=np.int32)
     sec1 = np.arange(2, dtype=np.int32)
 
-    sec2 = make_offset_map(map0_tensor.dim.root, map0_tensor.dim)[0]
-    sec3 = make_offset_map(map0_tensor.dim.get_child(map0_tensor.dim.root), map0_tensor.dim)[0]
+    sec2 = make_offset_map(map0_tensor.dim)[0]
+    sec3 = make_offset_map(map0_tensor.dim.subdims[0], map0_tensor.dim)[0]
 
-    sec4 = make_offset_map(map1_tensor.dim.root, map1_tensor.dim)[0]
-    sec5 = make_offset_map(map1_tensor.dim.get_child(map1_tensor.dim.root), map1_tensor.dim)[0]
+    sec4 = make_offset_map(map1_tensor.dim)[0]
+    sec5 = make_offset_map(map1_tensor.dim.subdims[0])[0]
 
     sec6 = make_offset_map(root, dims)[0]
 
@@ -1038,16 +1016,16 @@ def test_map_composition():
 
 def test_mixed_arity_map():
     root = Dim(3)
-    dims = Tree(root)
+    dims = root
 
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(1, 4, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(3, dtype=np.float64), dtype=np.float64)
 
     nnz_ = np.array([3, 2, 1], dtype=np.int32)
-    nnz = Tensor.new(Tree(root), data=nnz_, name="nnz", dtype=np.int32, max_value=3)
+    nnz = Tensor.new(root, data=nnz_, name="nnz", dtype=np.int32, max_value=3)
 
     map_data = np.array([2, 1, 0, 2, 1, 2], dtype=np.int32)
-    map_tensor = Tensor.new(Tree.from_nest([root, [Dim(nnz, labels=(root.labels[0],))]]),
+    map_tensor = Tensor.new(root.copy(subdims=(Dim(nnz, labels=(root.labels[0],)),)),
             data=map_data, dtype=np.int32, prefix="map")
 
 
@@ -1095,7 +1073,7 @@ def test_mixed_arity_map():
 
     sec0 = np.arange(3, dtype=np.int32)
     sec1 = sec0.copy()
-    sec2 = make_offset_map(map_tensor.dim.root, map_tensor.dim)[0]
+    sec2 = make_offset_map(map_tensor.dim)[0]
     # sec3 = make_offset_map(map_tensor.dim.get_child(map_tensor.dim.root), map_tensor.dim)[0]
     sec3 = sec0.copy()
     sec4 = make_offset_map(root, dims)[0]
@@ -1112,15 +1090,15 @@ def test_mixed_arity_map():
 
 def test_iter_map_composition():
     root = Dim(5)
-    dims = Tree(root)
+    dims = root
 
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(5, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
 
-    map0_tensor = Tensor.new(Tree.from_nest([root, [Dim(2, labels=(root.labels[0],))]]),
+    map0_tensor = Tensor.new(root.copy(subdims=(Dim(2, labels=(root.labels[0],)),)),
                          data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32),
                          dtype=np.int32, prefix="map")
-    map1_tensor = Tensor.new(Tree.from_nest([root, [Dim(2, labels=(root.labels[0],))]]),
+    map1_tensor = Tensor.new(root.copy(subdims=(Dim(2, labels=(root.labels[0],)),)),
                          data=np.array([3, 2, 2, 3, 0, 2, 1, 2, 1, 3], dtype=np.int32),
                          dtype=np.int32, prefix="map")
 
@@ -1149,11 +1127,11 @@ def test_iter_map_composition():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    sec0 = make_offset_map(map0_tensor.dim.root, map0_tensor.dim)[0]
-    sec1 = make_offset_map(map0_tensor.dim.get_child(map0_tensor.dim.root), map0_tensor.dim)[0]
-    sec2 = make_offset_map(map1_tensor.dim.root, map1_tensor.dim)[0]
-    sec3 = make_offset_map(map1_tensor.dim.get_child(map1_tensor.dim.root), map1_tensor.dim)[0]
-    sec4 = make_offset_map(root, dims)[0]
+    sec0 = make_offset_map(map0_tensor.dim)[0]
+    sec1 = make_offset_map(map0_tensor.dim.subdims[0])[0]
+    sec2 = make_offset_map(map1_tensor.dim)[0]
+    sec3 = make_offset_map(map1_tensor.dim.subdims[0])[0]
+    sec4 = make_offset_map(dims)[0]
     sec5 = np.empty(1, dtype=np.int32)  # missing
     sec6 = np.empty(1, dtype=np.int32)  # missing
     sec7 = np.empty(1, dtype=np.int32)  # missing

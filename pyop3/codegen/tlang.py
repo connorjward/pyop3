@@ -110,47 +110,53 @@ class TensorLangKernelBuilder:
                 return None
 
         if isinstance(idx, tensors.NonAffineMap):
-            dims = self._construct_temp_dims(idx.tensor.indices)
+            dim = self._construct_temp_dims(idx.tensor.indices)
         else:
             sizes = (idx.size,)
             labels = (idx.label,)
-            dims = [tensors.Dim(sizes=sizes, labels=labels)]
+            dim = tensors.Dim(sizes=sizes, labels=labels)
 
         if subidxs:
-            return dims + self._construct_temp_dims(subidxs)
+            return dim.copy(subdims=(self._construct_temp_dims(subidxs),))
         else:
-            return dims
+            return dim
 
     def construct_temp_dims(self, tensor):
         subdims = [self._construct_temp_dims(idxs) for idxs in tensor.indicess]
 
-        # catch single-scalar case
-        if len(subdims) == 1 and subdims[0] is None:
-            return None
+        if len(subdims) == 1:
+            # catch single-scalar case
+            if subdims == [None]:
+                return None
+            # else non-mixed
+            else:
+                return subdims[0]
 
         # import pdb; pdb.set_trace()
-        subdims_ = [self._as_nest(subdim) for subdim in subdims]
-
+        # subdims_ = [self._as_nest(subdim) for subdim in subdims]
+        #
         # import pdb; pdb.set_trace()
 
 
         # import pdb; pdb.set_trace()
-        sizes = []
-        for nest in subdims_:
-            if nest[0].sizes:
-                sizes.append(nest[0].size)
-        sizes = tuple(sizes)
+        sizes = tuple(subdim.size for subdim in subdims)
+        # for subdim in subdims:
+        #     if nest[0].sizes:
+        #         sizes.append(nest[0].size)
+        # sizes = tuple(sizes)
         # sizes = tuple(nest[0].size for nest in subdims)
-        labels = []
-        for nest in subdims_:
-            if nest[0].labels:
-                labels.append(nest[0].label)
-        labels = tuple(labels)
+        labels = tuple(subdim.label for subdim in subdims)
+        # labels = []
+        # for nest in subdims_:
+        #     if nest[0].labels:
+        #         labels.append(nest[0].label)
+        # labels = tuple(labels)
         # labels = tuple(nest[0].label for nest in subdims)
 
-        root = tensors.Dim(sizes=sizes, labels=labels)
+        root = tensors.Dim(sizes=sizes, labels=labels, subdims=subdims)
+        return root
         # import pdb; pdb.set_trace()
-        return pyop3.utils.Tree.from_nest([root, subdims_])
+        # return pyop3.utils.Tree.from_nest([root, subdims_])
         # new_dims = None
         # dim = tensor.dim.root
         # for subdim_id, index in tensor.indices:

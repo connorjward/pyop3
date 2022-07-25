@@ -23,13 +23,12 @@ class Node:
     children: Sequence = ()
 
 
-# TODO expunge pyop3.utils.Tree in favour of subdims here
 class Dim(pytools.ImmutableRecord):
-    fields = {"sizes", "permutation", "labels"}
+    fields = {"sizes", "permutation", "labels", "subdims"}
 
     _label_generator = NameGenerator("dim")
 
-    def __init__(self, sizes=(), *, permutation=None, labels=None):
+    def __init__(self, sizes=(), *, permutation=None, labels=None, subdims=()):
         if not isinstance(sizes, collections.abc.Sequence):
             sizes = (sizes,)
         if not labels:
@@ -37,9 +36,13 @@ class Dim(pytools.ImmutableRecord):
 
         assert len(labels) == len(sizes)
 
+        if subdims:
+            assert len(sizes) == len(subdims)
+
         self.sizes = sizes
         self.permutation = permutation
         self.labels = labels
+        self.subdims = subdims
         super().__init__()
 
     def __bool__(self):
@@ -226,7 +229,7 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
         self.dim = dim
         # if not self._is_valid_indices(indices, dim.root):
         if dim:
-            assert all(self._is_valid_indices(idxs, dim.root, dim) for idxs in indicess)
+            assert all(self._is_valid_indices(idxs, dim) for idxs in indicess)
         else:
             assert indicess is None
             indicess = [[]]
@@ -245,10 +248,10 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
 
         if dim:
             if not indicess:
-                indicess = cls._fill_with_slices(dim.root, dim)
+                indicess = cls._fill_with_slices(dim)
                 # import pdb; pdb.set_trace()
             else:
-                indicess = [cls._parse_indices(dim.root, dim, idxs) for idxs in indicess]
+                indicess = [cls._parse_indices(dim, idxs) for idxs in indicess]
         else:
             assert indicess is None
         return cls(dim, indicess, *args, **kwargs)
@@ -285,11 +288,11 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
         #     raise NotImplementedError("Needs more thought")
 
         # import pdb; pdb.set_trace()
-        indicess = [self._parse_indices(self.dim.root, self.dim, idxs) for idxs in indicess]
+        indicess = [self._parse_indices(self.dim, idxs) for idxs in indicess]
         return self.copy(indicess=indicess)
 
     @classmethod
-    def _fill_with_slices(cls, dim, dtree, parent_indices=None):
+    def _fill_with_slices(cls, dim, parent_indices=None):
         # import pdb; pdb.set_trace()
         if not parent_indices:
             parent_indices = []
@@ -297,15 +300,15 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
         idxs = []
         for i, _ in enumerate(dim.sizes):
             idx = Slice.from_dim(dim, i, parent_indices=parent_indices)
-            if subdims := dtree.get_children(dim):
+            if dim.subdims:
                 idxs += [[idx, *subidxs]
-                    for subidxs in cls._fill_with_slices(subdims[i], dtree, parent_indices+[idx])]
+                    for subidxs in cls._fill_with_slices(dim.subdims[i], parent_indices+[idx])]
             else:
                 idxs += [[idx]]
         return idxs
 
     @classmethod
-    def _is_valid_indices(cls, indices, dim, dtree):
+    def _is_valid_indices(cls, indices, dim):
         if dim.sizes and not indices:
             return False
 
@@ -317,21 +320,21 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
         assert idx.label in dim.labels
 
         if isinstance(idx, NonAffineMap):
-            mapvalid = cls._is_valid_indices(idx.tensor.indices, idx.tensor.dim.root, idx.tensor.dim)
+            mapvalid = cls._is_valid_indices(idx.tensor.indices, idx.tensor.dim)
             if not mapvalid:
                 return False
             # import pdb; pdb.set_trace()
             subdim_id = dim.labels.index(idx.label)
-            if subdims := dtree.get_children(dim):
+            if subdims := dim.subdims:
                 subdim = subdims[subdim_id]
-                if not cls._is_valid_indices(subidxs, subdim, dtree):
+                if not cls._is_valid_indices(subidxs, subdim):
                     return False
             return True
         else:
             subdim_id = dim.labels.index(idx.label)
-            if subdims := dtree.get_children(dim):
+            if subdims := dim.subdims:
                 subdim = subdims[subdim_id]
-                if not cls._is_valid_indices(subidxs, subdim, dtree):
+                if not cls._is_valid_indices(subidxs, subdim):
                     return False
             return True
 
@@ -340,7 +343,7 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
 
     @property
     def is_indexed(self):
-        return all(self._check_indexed(self.dim.root, idxs) for idxs in self.indicess)
+        return all(self._check_indexed(self.dim, idxs) for idxs in self.indicess)
 
     def _check_indexed(self, dim, indices):
         for label, size in zip(dim.labels, dim.sizes):
@@ -358,7 +361,7 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
                 return True
 
     @classmethod
-    def _parse_indices(cls, dim, dtree, indices, parent_indices=None):
+    def _parse_indices(cls, dim, indices, parent_indices=None):
         # import pdb; pdb.set_trace()
         if not parent_indices:
             parent_indices = []
@@ -374,9 +377,9 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
 
         if isinstance(idx, NonAffineMap):
             subdim_id = dim.labels.index(idx.label)
-            if subdims := dtree.get_children(dim):
+            if subdims := dim.subdims:
                 subdim = subdims[subdim_id]
-                return [idx] + cls._parse_indices(subdim, dtree, subidxs, parent_indices+[idx])
+                return [idx] + cls._parse_indices(subdim, subidxs, parent_indices+[idx])
             else:
                 return [idx]
         else:
@@ -389,9 +392,9 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
                 idx = idx.copy(size=idx.size[[myidxs]])
 
             subdim_id = dim.labels.index(idx.label)
-            if subdims := dtree.get_children(dim):
+            if subdims := dim.subdims:
                 subdim = subdims[subdim_id]
-                return [idx] + cls._parse_indices(subdim, dtree, subidxs, parent_indices+[idx])
+                return [idx] + cls._parse_indices(subdim, subidxs, parent_indices+[idx])
             else:
                 return [idx]
 
@@ -450,7 +453,7 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
         if not self.dim:
             return ((),)
         else:
-            return self._compute_shapes(self.dim.root)
+            return self._compute_shapes(self.dim)
 
     @property
     def size(self):
@@ -458,7 +461,7 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
 
     @property
     def order(self):
-        return self._compute_order(self.dim.root)
+        return self._compute_order(self.dim)
 
     def _parametrise_if_needed(self, value):
         if isinstance(value, Tensor):
@@ -471,7 +474,7 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
             return value
 
     def _compute_order(self, dim):
-        subdims = self.dim.get_children(dim)
+        subdims = dim.subdims
         ords = {self._compute_order(subdim) for subdim in subdims}
 
         if len(ords) == 0:
@@ -489,9 +492,9 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
         if not dim:
             return ((),)
 
-        if subdims := self.dim.get_children(dim):
+        if subdims := dim.subdims:
             return tuple(
-                (dim.size, *sh) for subdim in subdims for sh in self._compute_shape(subdim)
+                (dim.size, *sh) for subdim in subdims for sh in self._compute_shapes(subdim)
             )
         else:
             return ((dim.size,),)

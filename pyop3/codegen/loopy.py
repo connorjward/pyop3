@@ -319,7 +319,7 @@ class LoopyKernelBuilder:
         index_expr = 0
         if not tensor.dim:
             return index_expr
-        dim = tensor.dim.root
+        dim = tensor.dim
         for i, index in enumerate(indices):
             assert dim is not None
 
@@ -336,7 +336,7 @@ class LoopyKernelBuilder:
             index_expr += pym.subscript(pym.var(section_name), dim_expr + dim.offsets[subdim_id])
             self.kernel_data.append(lp.GlobalArg(section_name, shape=None, dtype=np.int32))
 
-            if subdims := tensor.dim.get_children(dim):
+            if subdims := tensor.dim.subdims:
                 dim = subdims[subdim_id]
 
         return index_expr

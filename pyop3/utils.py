@@ -68,61 +68,6 @@ def pad(iterable, length, after=True, padding_value=None):
         return itertools.chain(missing, iterable)
 
 
-class Tree(pytools.ImmutableRecord):
-    fields = {"root", "children"}
-
-    def __init__(self, root, children=None):
-        self.root = root
-        self.children = pyrsistent.pmap(children or {root: ()})
-        super().__init__()
-
-    def add_child(self, parent, child):
-        new_children = dict(self.children)
-        new_children[parent] += (child,)
-        new_children[child] = ()
-        return self.copy(children=new_children)
-
-    def get_child(self, item):
-        if children := self.get_children(item):
-            return pytools.one(children)
-        else:
-            return None
-
-    def get_children(self, item):
-        return self.children.get(item)
-
-
-    def is_leaf(self, item):
-        return not self.get_children(item)
-
-    @classmethod
-    def from_nest(cls, nest):
-        if not nest:
-            root = None
-            children = {}
-        else:
-            root, _ = nest
-            children = cls._collect_children(nest)
-        return cls(root, children)
-
-    @classmethod
-    def _collect_children(cls, nest):
-        try:
-            from_edge, subnests = nest
-        except TypeError:
-            from_edge, subnests = nest, ()
-
-        to_edges = tuple(
-            subnest if not is_sequence(subnest) else subnest[0]
-            for subnest in subnests
-        )
-
-        subchildren = dict(
-            ch for subnest in subnests for ch in cls._collect_children(subnest).items()
-        )
-        return {from_edge: to_edges} | subchildren
-
-
 def unique(iterable):
     unique_items = []
     for item in iterable:
