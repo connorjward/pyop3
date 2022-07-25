@@ -99,40 +99,58 @@ class TensorLangKernelBuilder:
 
         return new_tree
 
-    def _construct_temp_dims(self, items):
-        if any(idx.within for idx, _ in items):
-            if len(items) > 1:
-                raise NotImplementedError("needs more thought")
-
-            item, = items
-            _, children = item
-            return self._construct_temp_dims(children)
-
-        labels = tuple(idx.label for idx, _ in items)
-        # FIXME this fails for maps!
-        sizes = tuple(idx.size if not idx.within else 1 for idx, _ in items)
-        # wont work - need clever recursion
-        # sizes = tuple(tensors.index_shape(idx) for idx, _ in items)
+    def _construct_temp_dims(self, indices):
         # import pdb; pdb.set_trace()
+        idx, *subidxs = indices
 
-        return tensors.Dim(sizes=sizes, labels=labels), tuple(self._construct_temp_dims(children) for _, children in items if children)
+        if idx.within:
+            if subidxs:
+                return self._construct_temp_dims(subidxs)
+            else:
+                return None
+
+        if isinstance(idx, tensors.NonAffineMap):
+            dims = self._construct_temp_dims(idx.tensor.indices)
+        else:
+            sizes = (idx.size,)
+            labels = (idx.label,)
+            dims = [tensors.Dim(sizes=sizes, labels=labels)]
+
+        if subidxs:
+            return dims + self._construct_temp_dims(subidxs)
+        else:
+            return dims
 
     def construct_temp_dims(self, tensor):
-        # FIXME This will fail if we start doing mixed (and hence need to think harder
-        # about temp dims)
-        # shape, = tensor.indexed_shapes
-        # nest = None
-        # for extent in reversed(shape):
-        #     if nest:
-        #         nest = tensors.Dim(extent), [nest]
-        #     else:
-        #         nest = [tensors.Dim(extent), []]
-        # entries = []
-        # for item in tensor.indices:
-        #     entries.append(self._construct_temp_dims(item))
-        dims = self._construct_temp_dims(tensor.indices)
+        subdims = [self._construct_temp_dims(idxs) for idxs in tensor.indicess]
+
+        # catch single-scalar case
+        if len(subdims) == 1 and subdims[0] is None:
+            return None
+
         # import pdb; pdb.set_trace()
-        return pyop3.utils.Tree.from_nest(dims)
+        subdims_ = [self._as_nest(subdim) for subdim in subdims]
+
+        # import pdb; pdb.set_trace()
+
+
+        # import pdb; pdb.set_trace()
+        sizes = []
+        for nest in subdims_:
+            if nest[0].sizes:
+                sizes.append(nest[0].size)
+        sizes = tuple(sizes)
+        # sizes = tuple(nest[0].size for nest in subdims)
+        labels = []
+        for nest in subdims_:
+            if nest[0].labels:
+                labels.append(nest[0].label)
+        labels = tuple(labels)
+        # labels = tuple(nest[0].label for nest in subdims)
+
+        root = tensors.Dim(sizes=sizes, labels=labels)
+        # import pdb; pdb.set_trace()
+        return pyop3.utils.Tree.from_nest([root, subdims_])
         # new_dims = None
         # dim = tensor.dim.root
         # for subdim_id, index in tensor.indices:
@@ -157,6 +175,13 @@ class TensorLangKernelBuilder:
         #         dim = subdims[subdim_id]
         #
         # return new_dims or pyop3.utils.Tree(None)
+
+    def _as_nest(self, it):
+        item, *rest = it
+        if rest:
+             return [item, self._as_nest(rest)]
+        else:
+            return [item]
 
     def _getindexsize(self, index, subdim_id, dim):
         if isinstance(index, tensors.NonAffineMap):

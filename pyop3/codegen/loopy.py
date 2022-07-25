@@ -104,17 +104,18 @@ class LoopyKernelBuilder:
     def _(self, expr: exprs.Loop, within_loops):
         def collect_within_loops(idx):
             if isinstance(idx, NonAffineMap):
-                within_loops = {}
-                for i in idx.tensor.linear_indices:
-                    within_loops |= collect_within_loops(i)
-                return within_loops
+                within = {}
+                for i in idx.tensor.indices:
+                    within |= collect_within_loops(i)
+                return within
             else:
                 iname = self._namer.next("i")
                 return {idx: iname}
 
         within_loops = {}
-        for idx in expr.flat_indices:
-            within_loops |= collect_within_loops(idx)
+        for idxs in expr.index:
+            for idx in idxs:
+                within_loops |= collect_within_loops(idx)
 
         # import pdb; pdb.set_trace()
 
@@ -188,9 +189,8 @@ class LoopyKernelBuilder:
     @_make_instruction_context.register
     def _(self, assignment: tlang.Assignment, within_loops, scalar=False, domain_stack=None):
         within_loops = within_loops.copy()
-        # use linear_indicess here because Tensor.indices is now a tree and here we want to break
-        # them apart s.t. we can have separate packing routines for each distinct path.
-        for lidxs, ridxs in zip(assignment.lhs.linear_indicess, assignment.rhs.linear_indicess):
+        # import pdb; pdb.set_trace()
+        for lidxs, ridxs in zip(assignment.lhs.indicess, assignment.rhs.indicess):
             # 1. Create a domain stack if not provided - this means that we can have consistent inames for the LHS and RHS
             if not domain_stack:
                 domain_stack = self.create_domain_stack(assignment.lhs, assignment.rhs, lidxs, ridxs)
@@ -212,7 +212,7 @@ class LoopyKernelBuilder:
             domain_stack = ldstack
 
             lname = pym.var(assignment.lhs.name)
-            if assignment.lhs.dim.root or not scalar:
+            if assignment.lhs.dim or not scalar:
                 lhs = pym.subscript(lname, lexpr)
             else:
                 lhs = lname
@@ -221,7 +221,7 @@ class LoopyKernelBuilder:
                 rhs = 0
             else:
                 rname = pym.var(assignment.rhs.name)
-                if assignment.rhs.dim.root or not scalar:
+                if assignment.rhs.dim or not scalar:
                     rhs = pym.subscript(rname, rexpr)
                 else:
                     rhs = rname
@@ -238,7 +238,8 @@ class LoopyKernelBuilder:
         # register kernel arguments
         # TODO should really use assignment.{lhs,rhs} here...
         # TODO this is sorta repeated in FunctionCall handler.
-        if assignment.temporary.dim.root.sizes or not scalar:
+        if assignment.temporary.dim:
+            assert not scalar
             size = 1
             for extent in assignment.temporary.shape:
                 if isinstance(extent, Tensor):
@@ -246,6 +247,8 @@ class LoopyKernelBuilder:
                 size *= extent
             # temp_shape = (assignment.temporary.size,)
             temp_shape = (size,)  # must be 1D for loopy to be OK with ragged things
+        elif not scalar:
+            temp_shape = (1,)
         else:
             temp_shape = ()
 
@@ -257,12 +260,12 @@ class LoopyKernelBuilder:
 
         return domain_stack
 
-    def register_new_domain(self, iname, index, within_loops, parent_indices):
+    def register_new_domain(self, iname, index, within_loops):
         if isinstance(index.size, pym.primitives.Expression):
             if not isinstance(index.size, Tensor):
                 raise NotImplementedError("need to think hard about more complicated expressions"
                                           "esp. sharing inames")
-            size = self.register_extent(index.size, within_loops, parent_indices)
+            size = self.register_extent(index.size, within_loops)
         else:
             size = index.size
         if iname in self.domains:
@@ -287,7 +290,7 @@ class LoopyKernelBuilder:
         inames = [self._namer.next("i") for _ in shape]
         return inames
 
-    def register_extent(self, extent, within_loops, parent_indices):
+    def register_extent(self, extent, within_loops):
         if isinstance(extent, Tensor):
             # If we have a ragged thing then we need to create a scalar temporary
             # to hold its value.
@@ -298,13 +301,13 @@ class LoopyKernelBuilder:
             except KeyError:
                 # import pdb; pdb.set_trace()
                 temp_name = self._namer.next("n")
-                temp = Tensor(pyop3.utils.Tree(Dim(sizes=())), name=temp_name, dtype=np.int32)
+                temp = Tensor.new(name=temp_name, dtype=np.int32)
 
                 # make sure that the RHS reduces down to a scalar
                 # TODO this should really be handled when extent.indices are set up
                 # (in Tensor._parse_indices).
-                new_stencils = index(extent.indices)
-                extent = extent.copy(indices=new_stencils)
+                # new_stencils = index(extent.indices)
+                # extent = extent.copy(indices=new_stencils)
                 insn = tlang.Read(extent, temp)
                 self._make_instruction_context(insn, within_loops, scalar=True)
 
@@ -314,6 +317,8 @@ class LoopyKernelBuilder:
 
     def handle_assignment(self, tensor, indices, within_loops):
         index_expr = 0
+        if not tensor.dim:
+            return index_expr
         dim = tensor.dim.root
         for i, index in enumerate(indices):
             assert dim is not None
@@ -347,11 +352,11 @@ class LoopyKernelBuilder:
                     iname = dstack.pop(0)
                 else:
                     iname = within_loops.pop(index)
-                self.register_new_domain(iname, index, within_loops, indices[:i])
+                self.register_new_domain(iname, index, within_loops)
                 within_loops[index] = iname
 
             elif isinstance(index, NonAffineMap):
-                within_loops |= self.register_domains(index.tensor, index.tensor.linear_indices, dstack, within_loops)
+                within_loops |= self.register_domains(index.tensor, index.tensor.indices, dstack, within_loops)
                 self.kernel_data.append(lp.GlobalArg(index.tensor.name, shape=None, dtype=index.tensor.dtype))
             else:
                 raise TypeError
@@ -386,7 +391,7 @@ class LoopyKernelBuilder:
 
     @_as_expr.register
     def _(self, index: NonAffineMap, within_loops):
-        myexpr = self.handle_assignment(index.tensor, index.tensor.linear_indices, within_loops)
+        myexpr = self.handle_assignment(index.tensor, index.tensor.indices, within_loops)
         return pym.subscript(pym.var(index.tensor.name), myexpr)
 
 

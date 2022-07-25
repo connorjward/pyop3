@@ -189,7 +189,7 @@ def test_read_single_dim():
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(10, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
 
-    iterset = [(Slice.from_dim(root, 0), [])]
+    iterset = [[Slice.from_dim(root, 0)]]
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
         "y[i] = x[i] + 1",
@@ -232,7 +232,7 @@ def test_compute_double_loop():
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(30, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(30, dtype=np.float64), dtype=np.float64)
 
-    iterset = ((Slice.from_dim(root, 0), ()),)
+    iterset = [[Slice.from_dim(root, 0)]]
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 3 }",
         "y[i] = x[i] + 1",
@@ -295,7 +295,7 @@ def test_compute_double_loop_mixed():
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(54, dtype=np.float64), dtype=np.float64)
 
     # import pdb; pdb.set_trace()
-    iterset = ((Slice.from_dim(root, 1), ()),)
+    iterset = [[Slice.from_dim(root, 1)]]
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 2 }",
         "y[i] = x[i] + 1",
@@ -370,7 +370,7 @@ def test_compute_double_loop_scalar():
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(18+8, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(18+8, dtype=np.float64), dtype=np.float64)
 
-    iterset = ((Slice.from_dim(root, 1), ((Slice.from_dim(subdims[1], 0), ()),)),)
+    iterset = [[Slice.from_dim(root, 1), Slice.from_dim(subdims[1], 0)]]
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
         "y[i] = x[i] + 1",
@@ -429,7 +429,7 @@ def test_compute_double_loop_permuted():
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(18, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(18, dtype=np.float64), dtype=np.float64)
 
-    iterset = ((Slice.from_dim(root, 0), ()),)
+    iterset = [[Slice.from_dim(root, 0)]]
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 3 }",
         "y[i] = x[i] + 1",
@@ -489,7 +489,7 @@ def test_compute_double_loop_permuted_mixed():
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(10, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
 
-    iterset = ((Slice.from_dim(root, 1), ()),)
+    iterset = [[Slice.from_dim(root, 1)]]
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 2 }",
         "y[i] = x[i] + 1",
@@ -556,7 +556,7 @@ def test_compute_double_loop_ragged():
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
 
     i_ = Slice.from_dim(root, 0, within=True)
-    iterset = [(i_, [(Slice.from_dim(subdim, 0, parent_indices=(i_,)), ())])]
+    iterset = [[i_, Slice.from_dim(subdim, 0, parent_indices=(i_,))]]
 
     # import pdb; pdb.set_trace()
 
@@ -625,7 +625,7 @@ def test_compute_double_loop_ragged_inner():
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
 
-    iterset = [(Slice.from_dim(root, 0), [])]
+    iterset = [[Slice.from_dim(root, 0)]]
     # import pdb; pdb.set_trace()
     # this is the problem
     # dat1[pyop3.index(iterset)]
@@ -702,7 +702,7 @@ def test_compute_double_loop_ragged_mixed():
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(4+6+8, dtype=np.float64), dtype=np.float64)
 
     i0 = Slice.from_dim(root, 1)
-    iterset = [(i0, [(Slice.from_dim(subdims[1], 0, parent_indices=[i0]), [])])]
+    iterset = [[i0, Slice.from_dim(subdims[1], 0, parent_indices=[i0])]]
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
         "y[i] = x[i] + 1",
@@ -776,7 +776,7 @@ def test_compute_ragged_permuted():
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
 
     i0 = Slice.from_dim(root, 0)
-    iterset = [(i0, [(Slice.from_dim(subdim, 0, parent_indices=[i0]), [])])]
+    iterset = [[i0, Slice.from_dim(subdim, 0, parent_indices=[i0])]]
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
         "y[i] = x[i] + 1",
@@ -849,10 +849,10 @@ def test_subset():
     subset_tensor = Tensor.new(Tree(subset_dim),
             data=np.array([2, 3, 5, 0], dtype=np.int32), dtype=np.int32, prefix="subset")
 
-    i1 = pyop3.index([(Slice.from_dim(subset_dim, 0), [])])
+    i1 = pyop3.index([[Slice.from_dim(subset_dim, 0)]])
     subset = NonAffineMap(subset_tensor[i1])
 
-    iterset = [(subset, [])]
+    iterset = [[subset]]
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
         "y[i] = x[i] + 1",
@@ -923,9 +923,9 @@ def test_map():
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
-    i1 = pyop3.index([(Slice.from_dim(root, 0), [])])
+    i1 = pyop3.index([[Slice.from_dim(root, 0)]])
     map = NonAffineMap(map_tensor[i1])
-    i2 = [(map, [])]
+    i2 = [[map]]
     expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
@@ -988,19 +988,19 @@ def test_map_composition():
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 4 }",
         "y[0] = y[0] + x[i]",
-        [lp.GlobalArg("x", np.float64, (4,), is_input=True, is_output=False),
-        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
+        [lp.GlobalArg("x", np.float64, shape=(4,), is_input=True, is_output=False),
+        lp.GlobalArg("y", np.float64, shape=(1,), is_input=False, is_output=True),],
         target=lp.CTarget(),
         name="mylocalkernel",
         lang_version=(2018, 2),
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
-    i1 = pyop3.index([(Slice.from_dim(root, 0), [])])
+    i1 = pyop3.index([[Slice.from_dim(root, 0)]])
     map0 = NonAffineMap(map0_tensor[i1])
-    i2 = [(map0, [])]
+    i2 = [[map0]]
     map1 = NonAffineMap(map1_tensor[i2])
-    i3 = [(map1, [])]
+    i3 = [[map1]]
     expr = pyop3.Loop(i1, kernel(dat1[i3], dat2[i1]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
@@ -1063,9 +1063,9 @@ def test_mixed_arity_map():
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
-    i1 = pyop3.index([(Slice.from_dim(root, 0), [])])
+    i1 = pyop3.index([[Slice.from_dim(root, 0)]])
     map = NonAffineMap(map_tensor[i1])
-    i2 = [(map, [])]
+    i2 = [[map]]
     expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
@@ -1135,11 +1135,11 @@ def test_iter_map_composition():
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
-    i1 = pyop3.index([(Slice.from_dim(root, 0), [])])
+    i1 = pyop3.index([[Slice.from_dim(root, 0)]])
     map0 = NonAffineMap(map0_tensor[i1])
-    i2 = [(map0, [])]
+    i2 = [[map0]]
     map1 = NonAffineMap(map1_tensor[i2])
-    i3 = [(map1, [])]
+    i3 = [[map1]]
     expr = pyop3.Loop(p := pyop3.index(i3), kernel(dat1[p], dat2[p]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
