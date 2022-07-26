@@ -81,7 +81,9 @@ class Dim(pytools.ImmutableRecord):
 
     @property
     def offsets(self):
-        return tuple(sum(self.sizes[:i]) for i in range(len(self.sizes)))
+        # size can be `None` if scalar
+        sizes = [size or 1 for size in self.sizes]
+        return tuple(sum(sizes[:i]) for i, _ in enumerate(sizes))
 
 
 # TODO replace `within` with `LoopIndex`
@@ -314,7 +316,10 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
             parent_indices = []
 
         idxs = []
-        for i, _ in enumerate(dim.sizes):
+        for i, size in enumerate(dim.sizes):
+            if size is None:
+                idxs.append([])
+                continue
             idx = Slice.from_dim(dim, i, parent_indices=parent_indices)
             if dim.subdims:
                 idxs += [[idx, *subidxs]
@@ -325,6 +330,9 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
 
     @classmethod
     def _is_valid_indices(cls, indices, dim):
+        if not indices and dim.sizes and None in dim.sizes:
+            return True
+
         if dim.sizes and not indices:
             return False
 
@@ -514,7 +522,7 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
                 (dim.size, *sh) for subdim in subdims for sh in self._compute_shapes(subdim)
             )
         else:
-            return tuple((size,) for size in dim.sizes)
+            return tuple((size or 1,) for size in dim.sizes)
 
 
 def indexed_shapes(tensor):

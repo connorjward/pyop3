@@ -931,7 +931,7 @@ def test_map():
     print("test_map PASSED", flush=True)
 
 
-def test_mixed_map():
+def test_closure_ish():
     raise NotImplementedError
     root = Dim((4, 5))
 
@@ -1045,6 +1045,61 @@ def test_multimap():
     assert all(dat2.data == np.array([1+2+1+1, 0+2+3+0, 0+1+2+1, 3+4+4+3, 2+1+0+1],
                                      dtype=np.int32))
 
+
+def test_multimap_with_scalar():
+    root = Dim(5)
+
+    dat1 = Tensor.new(
+        root, name="dat1", data=np.arange(5, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor.new(
+        root, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
+
+    map0 = Tensor.new(
+        root.copy(subdims=(Dim(2, labels=(root.labels[0],)),)),
+        data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32),
+        dtype=np.int32, prefix="map")
+
+    code = lp.make_kernel(
+        "{ [i]: 0 <= i < 3 }",
+        "y[0] = y[0] + x[i]",
+        [lp.GlobalArg("x", np.float64, (3,), is_input=True, is_output=False),
+        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
+        target=lp.CTarget(),
+        name="mylocalkernel",
+        lang_version=(2018, 2),
+    )
+    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+
+    i1 = pyop3.index([[Slice.from_dim(root, 0)]])
+    i2 = [[i1[0][0]], [NonAffineMap(map0[i1])]]
+    expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
+
+    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+
+    cache_key = str(time.time())
+    jitmodule = JITModule(exe, cache_key)
+    dll = compilemythings(jitmodule)
+    fn = getattr(dll, "mykernel")
+
+    sec0 = make_offset_map(root)[0]
+
+    sec1 = np.arange(3, dtype=np.int32)
+    sec2 = make_offset_map(map0.dim)[0]
+    sec3 = make_offset_map(map0.dim.subdim)[0]
+    sec4 = make_offset_map(root)[0]
+
+    sec5 = np.empty(1, dtype=np.int32)
+
+    sec6 = make_offset_map(root)[0]
+
+    args = [sec0, sec1, map0.data, sec2, sec3, sec4, dat1.data, sec5, dat2.data, sec6]
+    fn.argtypes = (ctypes.c_voidp,) * len(args)
+
+    fn(*(d.ctypes.data for d in args))
+
+    # from [1, 2, 0, 2, 0, 1, 3, 4, 2, 1] and [0, 1, 2, 3, 4]
+    assert all(dat2.data == np.array([1+2+0, 0+2+1, 0+1+2, 3+4+3, 2+1+4],
+                                     dtype=np.int32))
 
 def test_map_composition():
     root = Dim(5)

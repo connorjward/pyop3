@@ -140,24 +140,28 @@ class LoopyKernelBuilder:
         for temp in utils.unique(itertools.chain(call.reads, call.writes)):
             # determine the right size of temporary - since loopy thinks everything
             # is flat just find the total size.
-            temp_size = 1
+            temp_size = 0
             for shape in temp.shapes:
+                temp_size_ = 1
                 for extent in shape:
                     if isinstance(extent, Tensor):
                         if (var := self.extents[extent.name]) not in extents:
                             extents.append(var)
                             self.assumptions.append(f"{var} <= {extent.max_value}")
                         extent = extent.max_value
-                    temp_size *= extent
+                    temp_size_ *= extent
+                temp_size += temp_size_
 
             # if a dimension is ragged then take the maximum size of it (and only
             # allocate once)
-            temp_isize = 1
+            temp_isize = 0
             for shape in temp.indexed_shapes:
+                temp_isize_ = 1
                 for extent in shape:
                     if isinstance(extent, Tensor):
                         extent = extent.max_value
-                    temp_isize *= extent
+                    temp_isize_ *= extent
+                temp_isize += temp_isize_
 
             # assert temp.size == temp.indexed_size
             assert temp_size == temp_isize
@@ -251,12 +255,14 @@ class LoopyKernelBuilder:
         # TODO this is sorta repeated in FunctionCall handler.
         if assignment.temporary.dim:
             assert not scalar
-            size = 1
+            size = 0
             for shape in assignment.temporary.shapes:
+                size_ = 1
                 for extent in shape:
                     if isinstance(extent, Tensor):
                         extent = extent.max_value
-                    size *= extent
+                    size_ *= extent
+                size += size_
             # temp_shape = (assignment.temporary.size,)
             temp_shape = (size,)  # must be 1D for loopy to be OK with ragged things
         elif not scalar:

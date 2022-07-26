@@ -111,11 +111,14 @@ class TensorLangKernelBuilder:
         labels = []
         new_subdims = []
         for subdim in subdims:
-            sizes.append(subdim.size)
-            labels.append(subdim.label)
-            if subdim.subdims:
-                assert len(subdim.subdims) == 1
-                new_subdims.extend(subdim.subdims)
+            if subdim is not None:
+                sizes.append(subdim.size)
+                labels.append(subdim.label)
+                if subdim.subdims:
+                    new_subdims.append(subdim.subdim)
+            else:
+                sizes.append(None)
+                labels.append(None)
 
         return tensors.Dim(sizes=sizes, labels=labels, subdims=new_subdims)
 
