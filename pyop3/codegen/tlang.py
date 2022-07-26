@@ -57,8 +57,7 @@ class TensorLangKernelBuilder:
     @_inspect.register
     def _(self, expr: exprs.FunctionCall):
         temporaries = {}
-        args = [dataclasses.replace(arg, tensor=self.preprocess_tensor(arg.tensor)) for arg in expr.arguments]
-        for arg in args:
+        for arg in expr.arguments:
             dims = self.construct_temp_dims(arg.tensor)
             # import pdb; pdb.set_trace()
             temporaries[arg] = tensors.Tensor.new(dims, name=self._temp_name_generator(), dtype=arg.tensor.dtype)
@@ -71,33 +70,6 @@ class TensorLangKernelBuilder:
         scatters = self.make_scatters(temporaries, depends_on=frozenset({call.id}))
 
         return (*gathers, call, *scatters)
-
-    def preprocess_tensor(self, tensor):
-        # index tensor sizes!
-        return tensor
-        dims = self._preprocess_tensor(tensor, tensor.dim.root)
-        # import pdb; pdb.set_trace()
-        return tensor.copy(dim=dims)
-
-    def _preprocess_tensor(self, dim, dims):
-        new_tree = None
-        for subdim, size in zip(dims.get_children(dim), dim.sizes):
-            if isinstance(size, pym.primitives.Expression):
-                if not isinstance(size, tensors.Tensor):
-                    raise NotImplementedError
-
-                idxs = tensor.indices[-dim.size.order-i:-i]
-                new_size = dim.size[tensors.StencilGroup([tensors.Stencil([idxs])])]
-                new_dim = dim.copy(sizes=(new_size,))
-            else:
-                new_dim = dim
-
-            if not new_tree:
-                new_tree = pyop3.utils.Tree(new_dim)
-            else:
-                new_tree = new_tree.add_child(curr_dim, new_dim)
-
-        return new_tree
 
     def _construct_temp_dims(self, indices):
         # import pdb; pdb.set_trace()
@@ -132,55 +104,10 @@ class TensorLangKernelBuilder:
             else:
                 return subdims[0]
 
-        # import pdb; pdb.set_trace()
-        # subdims_ = [self._as_nest(subdim) for subdim in subdims]
-        #
-        # import pdb; pdb.set_trace()
-
-
-        # import pdb; pdb.set_trace()
         sizes = tuple(subdim.size for subdim in subdims)
-        # for subdim in subdims:
-        #     if nest[0].sizes:
-        #         sizes.append(nest[0].size)
-        # sizes = tuple(sizes)
-        # sizes = tuple(nest[0].size for nest in subdims)
         labels = tuple(subdim.label for subdim in subdims)
-        # labels = []
-        # for nest in subdims_:
-        #     if nest[0].labels:
-        #         labels.append(nest[0].label)
-        # labels = tuple(labels)
-        # labels = tuple(nest[0].label for nest in subdims)
-
         root = tensors.Dim(sizes=sizes, labels=labels, subdims=subdims)
         return root
-        # import pdb; pdb.set_trace()
-        # return pyop3.utils.Tree.from_nest([root, subdims_])
-        # new_dims = None
-        # dim = tensor.dim.root
-        # for subdim_id, index in tensor.indices:
-        #     assert dim is not None
-        #
-        #     if index.within:
-        #         if subdims := tensor.dim.get_children(dim):
-        #             dim = subdims[subdim_id]
-        #         continue
-        #
-        #     curr_dim = None
-        #     for dim_, size in self._getindexsize(index, subdim_id, dim):
-        #
-        #         new_dim = tensors.Dim(size, name=dim_.name)
-        #         if not new_dims:
-        #             new_dims = pyop3.utils.Tree(new_dim)
-        #         else:
-        #             new_dims.add_child(curr_dim, new_dim)
-        #         curr_dim = new_dim
-        #
-        #     if subdims := tensor.dim.get_children(dim):
-        #         dim = subdims[subdim_id]
-        #
-        # return new_dims or pyop3.utils.Tree(None)
 
     def _as_nest(self, it):
         item, *rest = it

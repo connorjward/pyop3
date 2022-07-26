@@ -1,7 +1,6 @@
 import dataclasses
 
 from pyop3.tensors import *
-from pyop3.utils import Tree
 
 
 

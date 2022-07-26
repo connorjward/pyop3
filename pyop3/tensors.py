@@ -14,7 +14,7 @@ import pymbolic as pym
 import pytools
 import pyop3.exprs
 import pyop3.utils
-from pyop3.utils import as_tuple, checked_zip, Tree, NameGenerator
+from pyop3.utils import as_tuple, checked_zip, NameGenerator
 
 
 @dataclasses.dataclass(frozen=True)
