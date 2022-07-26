@@ -57,11 +57,27 @@ class Dim(pytools.ImmutableRecord):
 
     @property
     def size(self):
-        return pytools.single_valued(self.sizes)
+        try:
+            s, = self.sizes
+            return s
+        except ValueError:
+            raise RuntimeError
 
     @property
     def label(self):
-        return pytools.single_valued(self.labels)
+        try:
+            l, = self.labels
+            return l
+        except ValueError:
+            raise RuntimeError
+
+    @property
+    def subdim(self):
+        try:
+            sdim, = self.subdims
+            return sdim
+        except ValueError:
+            raise RuntimeError
 
     @property
     def offsets(self):
@@ -493,11 +509,12 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
             return ((),)
 
         if subdims := dim.subdims:
+            # FIXME (see below)
             return tuple(
                 (dim.size, *sh) for subdim in subdims for sh in self._compute_shapes(subdim)
             )
         else:
-            return ((dim.size,),)
+            return tuple((size,) for size in dim.sizes)
 
 
 def indexed_shapes(tensor):

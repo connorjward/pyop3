@@ -141,21 +141,23 @@ class LoopyKernelBuilder:
             # determine the right size of temporary - since loopy thinks everything
             # is flat just find the total size.
             temp_size = 1
-            for extent in temp.shape:
-                if isinstance(extent, Tensor):
-                    if (var := self.extents[extent.name]) not in extents:
-                        extents.append(var)
-                        self.assumptions.append(f"{var} <= {extent.max_value}")
-                    extent = extent.max_value
-                temp_size *= extent
+            for shape in temp.shapes:
+                for extent in shape:
+                    if isinstance(extent, Tensor):
+                        if (var := self.extents[extent.name]) not in extents:
+                            extents.append(var)
+                            self.assumptions.append(f"{var} <= {extent.max_value}")
+                        extent = extent.max_value
+                    temp_size *= extent
 
             # if a dimension is ragged then take the maximum size of it (and only
             # allocate once)
             temp_isize = 1
-            for extent in temp.indexed_shape:
-                if isinstance(extent, Tensor):
-                    extent = extent.max_value
-                temp_isize *= extent
+            for shape in temp.indexed_shapes:
+                for extent in shape:
+                    if isinstance(extent, Tensor):
+                        extent = extent.max_value
+                    temp_isize *= extent
 
             # assert temp.size == temp.indexed_size
             assert temp_size == temp_isize
@@ -199,7 +201,6 @@ class LoopyKernelBuilder:
             # The idea is that we are given a consistent stack of domains to share that are consumed
             # as the indices are traversed. We can then build a map between indices and inames which
             # we finally process to generate an expression.
-            # import pdb; pdb.set_trace()
             ldstack = domain_stack.copy()
             lwithin_loops = self.register_domains(assignment.lhs, lidxs, ldstack, within_loops)
             lexpr = self.handle_assignment(assignment.lhs, lidxs, lwithin_loops)
@@ -226,13 +227,23 @@ class LoopyKernelBuilder:
                 else:
                     rhs = rname
 
+            # there are no ordering restrictions between assignments to the
+            # same temporary - but this is only valid to declare if multiple insns are used
+            if len(assignment.lhs.indicess) > 1:
+                assert len(assignment.rhs.indicess) > 1
+                no_sync_with = frozenset({(f"{assignment.id}*", "any")})
+            else:
+                no_sync_with = frozenset()
+
             within_inames = frozenset(list(within_loops.values()) + [iname for iname in domain_stack])
             # import pdb; pdb.set_trace()
             assign_insn = lp.Assignment(
-                    lhs, rhs,
-                    id=self._namer.next(f"{assignment.id}_"),
-                    within_inames=within_inames,
-                    depends_on=frozenset({f"{dep}*" for dep in assignment.depends_on}))
+                lhs, rhs,
+                id=self._namer.next(f"{assignment.id}_"),
+                within_inames=within_inames,
+                depends_on=frozenset({f"{dep}*" for dep in assignment.depends_on}),
+                no_sync_with=no_sync_with,
+            )
             self.instructions.append(assign_insn)
 
         # register kernel arguments
@@ -241,10 +252,11 @@ class LoopyKernelBuilder:
         if assignment.temporary.dim:
             assert not scalar
             size = 1
-            for extent in assignment.temporary.shape:
-                if isinstance(extent, Tensor):
-                    extent = extent.max_value
-                size *= extent
+            for shape in assignment.temporary.shapes:
+                for extent in shape:
+                    if isinstance(extent, Tensor):
+                        extent = extent.max_value
+                    size *= extent
             # temp_shape = (assignment.temporary.size,)
             temp_shape = (size,)  # must be 1D for loopy to be OK with ragged things
         elif not scalar:

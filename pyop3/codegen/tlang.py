@@ -80,8 +80,11 @@ class TensorLangKernelBuilder:
                 return self._construct_temp_dims(subidxs)
             else:
                 return None
+                # return tensors.Dim(sizes=(1,), labels=(idx.label,))
 
         if isinstance(idx, tensors.NonAffineMap):
+            # I think that this might be incorrect. subidxs need to be
+            # added to the *last* dim in whatever nest we get here, not the first.
             dim = self._construct_temp_dims(idx.tensor.indices)
         else:
             sizes = (idx.size,)
@@ -104,40 +107,17 @@ class TensorLangKernelBuilder:
             else:
                 return subdims[0]
 
-        sizes = tuple(subdim.size for subdim in subdims)
-        labels = tuple(subdim.label for subdim in subdims)
-        root = tensors.Dim(sizes=sizes, labels=labels, subdims=subdims)
-        return root
+        sizes = []
+        labels = []
+        new_subdims = []
+        for subdim in subdims:
+            sizes.append(subdim.size)
+            labels.append(subdim.label)
+            if subdim.subdims:
+                assert len(subdim.subdims) == 1
+                new_subdims.extend(subdim.subdims)
 
-    def _as_nest(self, it):
-        item, *rest = it
-        if rest:
-             return [item, self._as_nest(rest)]
-        else:
-            return [item]
-
-    def _getindexsize(self, index, subdim_id, dim):
-        if isinstance(index, tensors.NonAffineMap):
-            ans = []
-            dim = index.tensor.dim.root
-            for subdim_id, idx in index.tensor.indices:
-                assert dim is not None
-
-                ans.extend(self._getindexsize(idx, subdim_id, dim))
-
-                if subdims := index.tensor.dim.get_children(dim):
-                    dim = subdims[subdim_id]
-            return ans
-        else:
-            # FIXME index_size returns an expression so this would break. Need dim.size
-            # to also be an expression (IndexFunction?)
-            # if isinstance(index.stop, tensors.Tensor):
-            #     size = index.stop
-            # else:
-            #     size = tensor.index_shape(index, subdim_id, dim)
-            size = index.stop or dim.sizes[subdim_id]
-            return (dim, size),
-
+        return tensors.Dim(sizes=sizes, labels=labels, subdims=new_subdims)
 
     def make_gathers(self, temporaries, **kwargs):
         return tuple(self.make_gather(arg, temp, **kwargs) for arg, temp in temporaries.items())

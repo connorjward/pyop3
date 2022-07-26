@@ -913,23 +913,55 @@ def test_map():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    """
-  for (int32_t i0 = 0; i0 <= 4; ++i0)
-  {
-    t1[0] = 0.0;
-    j0 = i0;
-    for (int32_t i1 = 0; i1 <= 1; ++i1)
-    {
-      j2 = i1;
-      j0 = i0;
-      j1 = imap0[map0[j0] + map1[j2]];
-      t0[map2[i1]] = dat1[map3[j1]];
-    }
-    mylocalkernel(&(t0[0]), &(t1[0]));
-    j0 = i0;
-    dat2[map4[j0]] = t1[0];
-  }
-    """
+    sec0 = np.arange(2, dtype=np.int32)
+    sec1 = make_offset_map(map_tensor.dim)[0]
+    sec2 = make_offset_map(map_tensor.dim.subdims[0])[0]
+    sec3 = make_offset_map(root, dims)[0]
+    sec4 = np.empty(1, dtype=np.int32)
+    sec5 = sec3.copy()
+
+    # import pdb; pdb.set_trace()
+    args = [sec0, map_tensor.data, sec1, sec2, sec3, dat1.data, sec4, dat2.data, sec5]
+    fn.argtypes = (ctypes.c_voidp,) * len(args)
+
+    fn(*(d.ctypes.data for d in args))
+
+    # from [1, 2, 0, 2, 0, 1, 3, 4, 2, 1]
+    assert all(dat2.data == np.array([1+2, 0+2, 0+1, 3+4, 2+1], dtype=np.int32))
+    print("test_map PASSED", flush=True)
+
+
+def test_mixed_map():
+    raise NotImplementedError
+    root = Dim((4, 5))
+
+    dat1 = Tensor.new(root, name="dat1", data=np.arange(9, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor.new(root, name="dat2", data=np.zeros(9, dtype=np.float64), dtype=np.float64)
+
+    map_tensor = Tensor.new(root.copy(subdims=(Dim(2, labels=(root.labels[0],)),)),
+            data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32), dtype=np.int32, prefix="map")
+    code = lp.make_kernel(
+        "{ [i]: 0 <= i < 2 }",
+        "y[0] = y[0] + x[i]",
+        [lp.GlobalArg("x", np.float64, (2,), is_input=True, is_output=False),
+        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
+        target=lp.CTarget(),
+        name="mylocalkernel",
+        lang_version=(2018, 2),
+    )
+    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+
+    i1 = pyop3.index([[Slice.from_dim(root, 0)]])
+    map = NonAffineMap(map_tensor[i1])
+    i2 = [[map]]
+    expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
+
+    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+
+    cache_key = str(time.time())
+    jitmodule = JITModule(exe, cache_key)
+    dll = compilemythings(jitmodule)
+    fn = getattr(dll, "mykernel")
 
     sec0 = np.arange(2, dtype=np.int32)
     sec1 = make_offset_map(map_tensor.dim)[0]
@@ -947,6 +979,71 @@ def test_map():
     # from [1, 2, 0, 2, 0, 1, 3, 4, 2, 1]
     assert all(dat2.data == np.array([1+2, 0+2, 0+1, 3+4, 2+1], dtype=np.int32))
     print("test_map PASSED", flush=True)
+
+
+def test_multimap():
+    root = Dim(5)
+
+    dat1 = Tensor.new(
+        root, name="dat1", data=np.arange(5, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor.new(
+        root, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
+
+    map0 = Tensor.new(
+        root.copy(subdims=(Dim(2, labels=(root.labels[0],)),)),
+        data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32),
+        dtype=np.int32, prefix="map")
+
+    map1 = Tensor.new(
+        root.copy(subdims=(Dim(2, labels=(root.labels[0],)),)),
+        data=np.array([1, 1, 3, 0, 2, 1, 4, 3, 0, 1], dtype=np.int32),
+        dtype=np.int32, prefix="map")
+
+    code = lp.make_kernel(
+        "{ [i]: 0 <= i < 4 }",
+        "y[0] = y[0] + x[i]",
+        [lp.GlobalArg("x", np.float64, (4,), is_input=True, is_output=False),
+        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
+        target=lp.CTarget(),
+        name="mylocalkernel",
+        lang_version=(2018, 2),
+    )
+    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+
+    i1 = pyop3.index([[Slice.from_dim(root, 0)]])
+    i2 = [[NonAffineMap(map0[i1])], [NonAffineMap(map1[i1])]]
+    expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
+
+    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+
+    cache_key = str(time.time())
+    jitmodule = JITModule(exe, cache_key)
+    dll = compilemythings(jitmodule)
+    fn = getattr(dll, "mykernel")
+
+    sec0 = np.arange(2, dtype=np.int32)
+    sec1 = make_offset_map(map0.dim)[0]
+    sec2 = make_offset_map(map0.dim.subdim)[0]
+    sec3 = make_offset_map(root)[0]
+
+    sec4 = sec0 + 2  # apply an offset
+    sec5 = make_offset_map(map1.dim)[0]
+    sec6 = make_offset_map(map1.dim.subdim)[0]
+    sec7 = make_offset_map(root)[0]
+
+    sec8 = np.empty(1, dtype=np.int32)
+
+    sec9 = make_offset_map(root)[0]
+
+    args = [sec0, map0.data, sec1, sec2, sec3, sec4, map1.data, sec5, sec6, sec7, dat1.data, sec8, dat2.data, sec9]
+    fn.argtypes = (ctypes.c_voidp,) * len(args)
+
+    fn(*(d.ctypes.data for d in args))
+
+    # from [1, 2, 0, 2, 0, 1, 3, 4, 2, 1]
+    # and [1, 1, 3, 0, 2, 1, 4, 3, 0, 1]
+    assert all(dat2.data == np.array([1+2+1+1, 0+2+3+0, 0+1+2+1, 3+4+4+3, 2+1+0+1],
+                                     dtype=np.int32))
 
 
 def test_map_composition():
