@@ -1,5 +1,6 @@
 import abc
 import collections
+import copy
 import dataclasses
 import numbers
 import enum
@@ -27,6 +28,38 @@ from pyop3.codegen.tlang import to_tlang
 class VariableCollector(pym.mapper.Collector):
     def map_variable(self, expr, *args, **kwargs):
         return {expr}
+
+
+def merge_bins(bin1, bin2):
+    new_bin = bin1.copy()
+    for k, v in bin2.items():
+        if k in bin1:
+            new_bin[k].extend(v)
+        else:
+            new_bin[k] = v
+    return new_bin
+
+
+def collect_labels(index):
+    # import pdb; pdb.set_trace()
+    if isinstance(index, NonAffineMap):
+        return [label for idx in index.input_indices for label in collect_labels(idx)] + [index.label]
+    else:
+        return [index.label]
+
+
+def truncate_within_loops(within_loops, indices):
+    """Truncate within loops s.t. only the last n entries are included
+    where n is the number of times a certain dim label appears in the indices.
+    """
+    # import pdb; pdb.set_trace()
+    labels = [label for idx in indices for label in collect_labels(idx)]
+    dim_counts = collections.Counter(labels)
+
+    new_within_loops = {}
+    for k, v in within_loops.items():
+        new_within_loops[k] = v[-dim_counts[k]:]
+    return new_within_loops
 
 
 LOOPY_TARGET = lp.CTarget()
@@ -94,24 +127,22 @@ class LoopyKernelBuilder:
     @_build.register
     def _(self, expr: exprs.Loop, within_loops):
         def collect_within_loops(idx):
-            if isinstance(idx, Map):
-                within = {}
-                for i in idx.tensor.indices:
-                    within |= collect_within_loops(i)
-                return within
-            else:
-                iname = self._namer.next("i")
-                return {idx: iname}
+            within = {}
+            if isinstance(idx, NonAffineMap):
+                for i in idx.input_indices:
+                    within = merge_bins(within, collect_within_loops(i))
+
+            iname = self._namer.next("i")
+            self.register_new_domain(iname, idx, within_loops)
+            return merge_bins(within, {idx.label: [iname]})
 
         within_loops = {}
         for idxs in expr.index:
             for idx in idxs:
-                within_loops |= collect_within_loops(idx)
-
-        # import pdb; pdb.set_trace()
+                within_loops = merge_bins(within_loops, collect_within_loops(idx))
 
         for stmt in expr.statements:
-            self._build(stmt, within_loops.copy())
+            self._build(stmt, copy.deepcopy(within_loops))
 
     @_build.register
     def _(self, insn: tlang.Instruction, within_loops):
@@ -127,7 +158,6 @@ class LoopyKernelBuilder:
     def _(self, call: tlang.FunctionCall, within_loops, **kwargs):
         subarrayrefs = {}
         extents = []
-        # import pdb; pdb.set_trace()
         for temp in utils.unique(itertools.chain(call.reads, call.writes)):
             # determine the right size of temporary - since loopy thinks everything
             # is flat just find the total size.
@@ -159,7 +189,6 @@ class LoopyKernelBuilder:
 
             iname = self._namer.next("i")
             subarrayrefs[temp] = as_subarrayref(temp, iname)
-            # import pdb; pdb.set_trace()
             self.domains[iname] = (0, temp_size, 1)
             self.kernel_data.append(lp.TemporaryVariable(temp.name, shape=(temp_size,)))
 
@@ -169,13 +198,14 @@ class LoopyKernelBuilder:
             tuple(subarrayrefs[var] for var in call.reads) + tuple(extents),
         )
 
-        within_inames = frozenset(within_loops.values())
+        within_inames = frozenset([iname for inames in within_loops.values() for iname in inames])
         depends_on = frozenset({f"{insn}*" for insn in call.depends_on})
         call_insn = lp.CallInstruction(
             assignees,
             expression,
             id=call.id,
             within_inames=frozenset(within_inames),
+            within_inames_is_final=True,
             depends_on=depends_on
         )
 
@@ -185,8 +215,7 @@ class LoopyKernelBuilder:
 
     @_make_instruction_context.register
     def _(self, assignment: tlang.Assignment, within_loops, scalar=False, domain_stack=None):
-        within_loops = within_loops.copy()
-        # import pdb; pdb.set_trace()
+        within_loops = copy.deepcopy(within_loops)
         for lidxs, ridxs in zip(assignment.lhs.indicess, assignment.rhs.indicess):
             # 1. Create a domain stack if not provided - this means that we can have consistent inames for the LHS and RHS
             if not domain_stack:
@@ -196,12 +225,15 @@ class LoopyKernelBuilder:
             # The idea is that we are given a consistent stack of domains to share that are consumed
             # as the indices are traversed. We can then build a map between indices and inames which
             # we finally process to generate an expression.
+            # import pdb; pdb.set_trace()
             ldstack = domain_stack.copy()
-            lwithin_loops = self.register_domains(assignment.lhs, lidxs, ldstack, within_loops)
+            lwithin_loops = self.register_domains(lidxs, ldstack, within_loops)
+            lwithin_loops = truncate_within_loops(lwithin_loops, lidxs)
             lexpr = self.handle_assignment(assignment.lhs, lidxs, lwithin_loops)
 
             rdstack = domain_stack.copy()
-            rwithin_loops = self.register_domains(assignment.rhs, ridxs, rdstack, within_loops)
+            rwithin_loops = self.register_domains(ridxs, rdstack, within_loops)
+            rwithin_loops = truncate_within_loops(rwithin_loops, ridxs)
             rexpr = self.handle_assignment(assignment.rhs, ridxs, rwithin_loops)
 
             assert not ldstack and not rdstack
@@ -230,8 +262,7 @@ class LoopyKernelBuilder:
             else:
                 no_sync_with = frozenset()
 
-            within_inames = frozenset(list(within_loops.values()) + [iname for iname in domain_stack])
-            # import pdb; pdb.set_trace()
+            within_inames = frozenset([iname for inames in within_loops.values() for iname in inames] + list(domain_stack))
             assign_insn = lp.Assignment(
                 lhs, rhs,
                 id=self._namer.next(f"{assignment.id}_"),
@@ -290,7 +321,6 @@ class LoopyKernelBuilder:
         We ignore any 'within' indices here as these will already exist and do
         not contribute to the shape.
         """
-        # import pdb; pdb.set_trace()
         shapes = {_compute_indexed_shape2(lidxs), _compute_indexed_shape2(ridxs)}
         try:
             shape, = shapes
@@ -308,7 +338,6 @@ class LoopyKernelBuilder:
                 # is a simplification.
                 return self.extents[extent.name]
             except KeyError:
-                # import pdb; pdb.set_trace()
                 temp_name = self._namer.next("n")
                 temp = Tensor.new(name=temp_name, dtype=np.int32)
 
@@ -324,19 +353,24 @@ class LoopyKernelBuilder:
         else:
             return extent
 
+    # I don't like needing the tensor here..  maybe I could attach the offset to the index?
+    # using from_dim
     def handle_assignment(self, tensor, indices, within_loops):
+        # do not copy - modify!
+        # within_loops = copy.deepcopy(within_loops)
         index_expr = 0
         if not tensor.dim:
             return index_expr
         dim = tensor.dim
-        for i, index in enumerate(indices):
+
+        # import pdb; pdb.set_trace()
+        for idx in indices:
             assert dim is not None
 
-            dim_expr = self._as_expr(index, within_loops)
+            dim_expr = self._as_expr(idx, within_loops)
 
-            subdim_id = dim.labels.index(index.label)
+            subdim_id = dim.labels.index(idx.label)
 
-            # import pdb; pdb.set_trace()
             # Every dim uses a section to map the dim index (from the slice/map + iname)
             # onto a location in the data structure. For nice regular data this can just be
             # the index multiplied by the size of the inner dims (e.g. dat[4*i + j]), but for
@@ -345,31 +379,71 @@ class LoopyKernelBuilder:
             index_expr += pym.subscript(pym.var(section_name), dim_expr + dim.offsets[subdim_id])
             self.kernel_data.append(lp.GlobalArg(section_name, shape=None, dtype=np.int32))
 
-            if subdims := tensor.dim.subdims:
+            if subdims := dim.subdims:
                 dim = subdims[subdim_id]
 
         return index_expr
 
-    def register_domains(self, tensor, indices, dstack, within_loops):
-        within_loops = within_loops.copy()
+    def register_domains(self, indices, dstack, within_loops):
+        # import pdb; pdb.set_trace()
+        within_loops = copy.deepcopy(within_loops)
 
-        # dim = tensor.dim.root
+        # I think ultimately all I need to do here is stick the things from dstack
+        # onto the right dim labels in within_loops, and register all of the domains
 
-        for i, index in enumerate(indices):
-            if isinstance(index, (Slice, IndexFunction)):
-                if index not in within_loops:
-                    iname = dstack.pop(0)
-                else:
-                    iname = within_loops.pop(index)
-                self.register_new_domain(iname, index, within_loops)
-                within_loops[index] = iname
+        # first we stick any new inames into the right places
+        # mywithin_loops = copy.deepcopy(within_loops)
+        for idx in indices:
+            if isinstance(idx, NonAffineMap):
+                within_loops = self.register_domains(idx.input_indices, dstack, within_loops)
+                self.kernel_data.append(lp.GlobalArg(idx.tensor.name, shape=None, dtype=idx.tensor.dtype))
 
-            elif isinstance(index, NonAffineMap):
-                within_loops |= self.register_domains(index.tensor, index.tensor.indices, dstack, within_loops)
-                self.kernel_data.append(lp.GlobalArg(index.tensor.name, shape=None, dtype=index.tensor.dtype))
+            if idx.is_loop_index:
+                # should do this earlier (hard to do now due to ordering confusion)
+                continue
+                # iname = within_loops[idx.label].pop(0)
             else:
-                raise TypeError
+                iname = dstack.pop(0)
 
+                # TODO could simplify with defaultdict
+                if idx.label in within_loops:
+                    within_loops[idx.label].append(iname)
+                else:
+                    within_loops[idx.label] = [iname]
+                self.register_new_domain(iname, idx, within_loops)
+
+        # import pdb; pdb.set_trace()
+
+        # for i, index in enumerate(indices):
+            # if isinstance(index, (Slice, IndexFunction)):
+                # if index.label not in within_loops:
+                #     iname = dstack.pop(0)
+                # else:
+                #     iname = within_loops[index.label].pop()
+                # self.register_new_domain(iname, index, within_loops)
+                #
+                # # TODO tidy up
+                # if index.label not in within_loops:
+                #     within_loops[index.label] = [iname]
+                # else:
+                #     within_loops[index.label].append(iname)
+                # iname = within_loops[index.label].pop(0)
+                # if index.is_loop_index:
+                #     iname = within_loops[index.label][-1]
+                # else:
+                #     iname = dstack.pop(0)
+                #     if index.label in within_loops:
+                #         within_loops[index.label].append(iname)
+                #     else:
+                #         within_loops[index.label] = [iname]
+                #
+                # self.register_new_domain(iname, index, within_loops)
+                # ...
+
+            # else:
+            #     raise TypeError
+
+        # within_loops = truncate_within_loops(within_loops, indices)
         return within_loops
 
     @staticmethod
@@ -395,11 +469,12 @@ class LoopyKernelBuilder:
         start = index.start or 0
         step = index.step or 1
 
-        iname = within_loops[index]
+        iname = within_loops[index.label].pop(0)
         return pym.var(iname)*step + start
 
     @_as_expr.register
     def _(self, index: IndexFunction, within_loops):
+        raise NotImplementedError
         # import pdb; pdb.set_trace()
         vars = VariableCollector()(index.expr)
 
@@ -415,7 +490,9 @@ class LoopyKernelBuilder:
 
     @_as_expr.register
     def _(self, index: NonAffineMap, within_loops):
+        # import pdb; pdb.set_trace()
         myexpr = self.handle_assignment(index.tensor, index.tensor.indices, within_loops)
+        # iname = within_loops[index.label].pop(0)
         return pym.subscript(pym.var(index.tensor.name), myexpr)
 
 

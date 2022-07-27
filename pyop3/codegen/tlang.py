@@ -85,19 +85,30 @@ class TensorLangKernelBuilder:
             else:
                 return None
 
+        # if isinstance(idx, tensors.NonAffineMap):
+        #     dims = self._construct_temp_dims(idx.tensor.indices)
+        # elif isinstance(idx, (tensors.Slice, tensors.IndexFunction)):
+        #     sizes = (idx.size,)
+        #     labels = (idx.label,)
+        #     dims = [tensors.Dim(sizes=sizes, labels=labels)]
+        # else:
+        #     raise TypeError
+
+        # import pdb; pdb.set_trace()
+
         if isinstance(idx, tensors.NonAffineMap):
-            dims = self._construct_temp_dims(idx.tensor.indices)
-        elif isinstance(idx, (tensors.Slice, tensors.IndexFunction)):
-            sizes = (idx.size,)
-            labels = (idx.label,)
-            dims = [tensors.Dim(sizes=sizes, labels=labels)]
+            extra_dims = self._construct_temp_dims(idx.input_indices) or []
         else:
-            raise TypeError
+            extra_dims = []
+
+        sizes = (idx.size,)
+        labels = (idx.label,)
+        dims = [tensors.Dim(sizes=sizes, labels=labels)]
 
         if subidxs:
-            return dims + self._construct_temp_dims(subidxs)
+            return extra_dims + dims + self._construct_temp_dims(subidxs)
         else:
-            return dims
+            return extra_dims + dims
 
     def construct_temp_dims(self, tensor):
         flat_subdimss = [self._construct_temp_dims(idxs) for idxs in tensor.indicess]

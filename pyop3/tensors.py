@@ -136,9 +136,7 @@ class Slice(FancyIndex):
         if isinstance(size := dim.sizes[subdim_id], pym.primitives.Expression):
             if not isinstance(size, Tensor):
                 raise NotImplementedError
-            if size.indices is None:
-                raise NotImplementedError
-                size = size[StencilGroup([Stencil([parent_indices[-size.order:]])])]
+            # size = size[[parent_indices[-size.order:]]]
         label = dim.labels[subdim_id]
         offset = dim.offsets[subdim_id]
         return cls(size=size, label=label, offset=offset, **kwargs)
@@ -177,9 +175,9 @@ class Map(FancyIndex, abc.ABC):
     # def index(self):
     #     return LoopIndex(self)
 
-    # @property
-    # def size(self):
-    #     return self.arity
+    @property
+    def size(self):
+        return self.arity
 
 
 class IndexFunction(Map):
@@ -220,16 +218,20 @@ class NonAffineMap(Map):
         super().__init__(**kwargs)
 
     @property
+    def input_indices(self):
+        return self.tensor.indices[:-1]
+
+    @property
     def map(self):
         return self.tensor
 
-    # @property
-    # def arity(self):
-    #     dims = self.tensor.dim
-    #     dim = dims.root
-    #     while subdim := dims.get_child(dim):
-    #         dim = subdim
-    #     return dim.size
+    @property
+    def arity(self):
+        return self.tensor.indices[-1].size
+        # dim = self.tensor.dim
+        # while dim.subdims:
+        #     dim = dim.subdim
+        # return dim.size
 
     # @property
     # def start(self):
@@ -328,7 +330,8 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
         # if self.is_indexed:
         #     raise NotImplementedError("Needs more thought")
 
-        # import pdb; pdb.set_trace()
+        # if self.name ==  "nnz":
+        #     import pdb; pdb.set_trace()
         indicess = [self._parse_indices(self.dim, idxs) for idxs in indicess]
         return self.copy(indicess=indicess)
 
@@ -419,7 +422,7 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
             if len(dim.sizes) > 1:
                 raise ValueError
             else:
-                indices = [Slice.from_dim(dim, 0)]
+                indices = [Slice.from_dim(dim, 0, parent_indices=parent_indices)]
 
         # import pdb; pdb.set_trace()
         idx, *subidxs = indices
@@ -436,9 +439,9 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
             if isinstance(idx.size, pym.primitives.Expression):
                 if not isinstance(idx.size, Tensor):
                     raise NotImplementedError
-                myidxs = parent_indices[-idx.size.order:]
+                # myidxs = parent_indices[-idx.size.order:]
                 # import pdb; pdb.set_trace()
-                idx = idx.copy(size=idx.size[[myidxs]])
+                # idx = idx.copy(size=idx.size[[myidxs]])
 
             subdim_id = dim.labels.index(idx.label)
             if subdims := dim.subdims:

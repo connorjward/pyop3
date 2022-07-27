@@ -533,11 +533,14 @@ def test_compute_double_loop_ragged():
     nnz = Tensor.new(root, data=steps, name="nnz", dtype=np.int32)
     subdim = Dim(nnz)
     dims = root.copy(subdims=(subdim,))
-    dat1 = Tensor.new(dims, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
-    dat2 = Tensor.new(dims, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
 
     i_ = Slice.from_dim(root, 0, is_loop_index=True)
-    iterset = [[i_, Slice.from_dim(subdim, 0, parent_indices=(i_,))]]
+    iterset = [[i_, Slice.from_dim(subdim, 0, parent_indices=(i_,), is_loop_index=True)]]
+
+    # TODO this is super unpleasant - clean up the ordering of the indexing stuff
+    dat1 = Tensor.new(dims, indicess=iterset, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor.new(dims, indicess=iterset, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
+
 
     # import pdb; pdb.set_trace()
 
@@ -551,7 +554,7 @@ def test_compute_double_loop_ragged():
         lang_version=(2018, 2),
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-    expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
+    expr = pyop3.Loop(iterset, kernel(dat1, dat2))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
 
@@ -596,15 +599,17 @@ def test_compute_double_loop_ragged():
 
 def test_compute_double_loop_ragged_inner():
     root = Dim(5)
+    iterset = [[Slice.from_dim(root, 0, is_loop_index=True)]]
+
     steps = np.array([3, 2, 1, 3, 2], dtype=np.int32)
-    nnz = Tensor.new(root, data=steps, name="nnz", dtype=np.int32, max_value=max(steps))
+    nnz = Tensor.new(root, indicess=iterset, data=steps, name="nnz", dtype=np.int32, max_value=max(steps))
     subdim = Dim(nnz)
     dims = root.copy(subdims=(subdim,))
 
-    dat1 = Tensor.new(dims, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
-    dat2 = Tensor.new(dims, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
 
-    iterset = [[Slice.from_dim(root, 0)]]
+    dat1 = Tensor.new(dims, indicess=iterset, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor.new(dims, indicess=iterset, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
+
     # import pdb; pdb.set_trace()
     # this is the problem
     # dat1[pyop3.index(iterset)]
@@ -620,7 +625,7 @@ def test_compute_double_loop_ragged_inner():
         lang_version=(2018, 2),
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-    expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
+    expr = pyop3.Loop(iterset, kernel(dat1, dat2))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
 
@@ -915,8 +920,8 @@ def test_map():
 
     sec0 = np.arange(2, dtype=np.int32)
     sec1 = make_offset_map(map_tensor.dim)[0]
-    sec2 = make_offset_map(map_tensor.dim.subdims[0])[0]
-    sec3 = make_offset_map(root, dims)[0]
+    sec2 = make_offset_map(map_tensor.dim.subdim)[0]
+    sec3 = make_offset_map(root)[0]
     sec4 = np.empty(1, dtype=np.int32)
     sec5 = sec3.copy()
 
