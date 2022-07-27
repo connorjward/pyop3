@@ -72,7 +72,11 @@ class TensorLangKernelBuilder:
         return (*gathers, call, *scatters)
 
     def _construct_temp_dims(self, indices):
-        # import pdb; pdb.set_trace()
+        """Return a flattened list of dims that correspond to the provided indices.
+
+        The result needs to be flattened (rather than nested) as it makes composing
+        things easier.
+        """
         idx, *subidxs = indices
 
         if idx.within:
@@ -80,32 +84,27 @@ class TensorLangKernelBuilder:
                 return self._construct_temp_dims(subidxs)
             else:
                 return None
-                # return tensors.Dim(sizes=(1,), labels=(idx.label,))
 
         if isinstance(idx, tensors.NonAffineMap):
-            # I think that this might be incorrect. subidxs need to be
-            # added to the *last* dim in whatever nest we get here, not the first.
-            dim = self._construct_temp_dims(idx.tensor.indices)
+            dims = self._construct_temp_dims(idx.tensor.indices)
         else:
             sizes = (idx.size,)
             labels = (idx.label,)
-            dim = tensors.Dim(sizes=sizes, labels=labels)
+            dims = [tensors.Dim(sizes=sizes, labels=labels)]
 
         if subidxs:
-            return dim.copy(subdims=(self._construct_temp_dims(subidxs),))
+            return dims + self._construct_temp_dims(subidxs)
         else:
-            return dim
+            return dims
 
     def construct_temp_dims(self, tensor):
-        subdims = [self._construct_temp_dims(idxs) for idxs in tensor.indicess]
+        flat_subdimss = [self._construct_temp_dims(idxs) for idxs in tensor.indicess]
 
-        if len(subdims) == 1:
-            # catch single-scalar case
-            if subdims == [None]:
-                return None
-            # else non-mixed
-            else:
-                return subdims[0]
+        # catch single-scalar case
+        if flat_subdimss == [None]:
+            return None
+
+        subdims = [self._nest_dims(sdims) for sdims in flat_subdimss]
 
         sizes = []
         labels = []
@@ -121,6 +120,17 @@ class TensorLangKernelBuilder:
                 labels.append(None)
 
         return tensors.Dim(sizes=sizes, labels=labels, subdims=new_subdims)
+
+    def _nest_dims(self, flat_dims):
+        if flat_dims is None:
+            return None
+        if len(flat_dims) == 0:
+            return ()
+        d1, *rest = flat_dims
+        if rest := self._nest_dims(rest):
+            return d1.copy(subdims=(rest,))
+        else:
+            return d1.copy(subdims=())
 
     def make_gathers(self, temporaries, **kwargs):
         return tuple(self.make_gather(arg, temp, **kwargs) for arg, temp in temporaries.items())
