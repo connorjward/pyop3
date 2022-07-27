@@ -679,7 +679,14 @@ def _construct_indices(input_indices, dims, current_dim, parent_indices=None):
 
 def index(indicess):
     """wrap all slices and maps in loop index objs."""
-    return tuple(tuple(idx.copy(is_loop_index=True) for idx in idxs) for idxs in indicess)
+    return tuple(tuple(_index(idx) for idx in idxs) for idxs in indicess)
+
+
+def _index(idx):
+    if isinstance(idx, NonAffineMap):
+        return idx.copy(is_loop_index=True, tensor=idx.tensor.copy(indicess=index(idx.tensor.indicess)))
+    else:
+        return idx.copy(is_loop_index=True)
 
 
 def _break_mixed_slices(stencils, dtree):
