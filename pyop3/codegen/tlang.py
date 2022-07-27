@@ -87,10 +87,12 @@ class TensorLangKernelBuilder:
 
         if isinstance(idx, tensors.NonAffineMap):
             dims = self._construct_temp_dims(idx.tensor.indices)
-        else:
+        elif isinstance(idx, (tensors.Slice, tensors.IndexFunction)):
             sizes = (idx.size,)
             labels = (idx.label,)
             dims = [tensors.Dim(sizes=sizes, labels=labels)]
+        else:
+            raise TypeError
 
         if subidxs:
             return dims + self._construct_temp_dims(subidxs)

@@ -981,6 +981,60 @@ def test_closure_ish():
     assert all(dat2.data == np.array([4+5+0, 3+4+1, 6+5+2], dtype=np.int32))
 
 
+def test_index_function():
+    """Imagine an interval mesh:
+
+        3 0 4 1 5 2 6
+        x---x---x---x
+    """
+    root = Dim((3, 4))
+
+    dat1 = Tensor.new(root, name="dat1", data=np.arange(7, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor.new(Dim(3, labels=(root.labels[0],)), name="dat2", data=np.zeros(3, dtype=np.float64), dtype=np.float64)
+
+    code = lp.make_kernel(
+        "{ [i]: 0 <= i < 3 }",
+        "y[0] = y[0] + x[i]",
+        [lp.GlobalArg("x", np.float64, (3,), is_input=True, is_output=False),
+        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
+        target=lp.CTarget(),
+        name="mylocalkernel",
+        lang_version=(2018, 2),
+    )
+    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+
+    # an IndexFunction contains an expression and the corresponding dim labels
+    map = IndexFunction(pym.parse("x0 + x1"), in_labels=(root.labels[0],), label=root.labels[1], arity=2)
+
+    i1 = pyop3.index([[Slice.from_dim(root, 0)]]) # loop over 'cells'
+    i2 = [[i1[0][0]], [map]]  # access 'cell' and 'edge' data
+    expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
+
+    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+
+    cache_key = str(time.time())
+    jitmodule = JITModule(exe, cache_key)
+    dll = compilemythings(jitmodule)
+    fn = getattr(dll, "mykernel")
+
+    sec0 = make_offset_map(root)[0]
+
+    sec1 = np.arange(3, dtype=np.int32)
+    sec2 = make_offset_map(root)[0]
+
+    sec3 = np.empty(1, dtype=np.int32)
+
+    sec4 = make_offset_map(root)[0]
+
+    args = [sec0, sec1, sec2, dat1.data, sec3, dat2.data, sec4]
+    fn.argtypes = (ctypes.c_voidp,) * len(args)
+
+    fn(*(d.ctypes.data for d in args))
+
+    # [0, 1, 2] + [3+4, 4+5, 5+6]
+    assert all(dat2.data == np.array([0+3+4, 1+4+5, 2+5+6], dtype=np.int32))
+
+
 def test_multimap():
     root = Dim(5)
 

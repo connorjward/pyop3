@@ -20,22 +20,13 @@ from pyop3 import utils
 from pyop3.utils import MultiNameGenerator, NameGenerator
 from pyop3.utils import CustomTuple, checked_zip, NameGenerator, rzip
 from pyop3.tensors import Tensor, Index, Map, Dim, NonAffineMap, _compute_indexed_shape, _compute_indexed_shape2
-from pyop3.tensors import Slice, AffineMap, index
+from pyop3.tensors import Slice, AffineMap, index, IndexFunction
 from pyop3.codegen.tlang import to_tlang
 
 
 class VariableCollector(pym.mapper.Collector):
     def map_variable(self, expr, *args, **kwargs):
         return {expr}
-
-
-class VariableReplacer(pym.mapper.IdentityMapper):
-    def __init__(self, handler, *args, **kwargs):
-        self.handler = handler
-        super().__init__(*args, **kwargs)
-
-    def map_variable(self, expr):
-        return self.handler(expr)
 
 
 LOOPY_TARGET = lp.CTarget()
@@ -103,7 +94,7 @@ class LoopyKernelBuilder:
     @_build.register
     def _(self, expr: exprs.Loop, within_loops):
         def collect_within_loops(idx):
-            if isinstance(idx, NonAffineMap):
+            if isinstance(idx, Map):
                 within = {}
                 for i in idx.tensor.indices:
                     within |= collect_within_loops(i)
@@ -365,7 +356,7 @@ class LoopyKernelBuilder:
         # dim = tensor.dim.root
 
         for i, index in enumerate(indices):
-            if isinstance(index, Slice):
+            if isinstance(index, (Slice, IndexFunction)):
                 if index not in within_loops:
                     iname = dstack.pop(0)
                 else:
@@ -406,6 +397,21 @@ class LoopyKernelBuilder:
 
         iname = within_loops[index]
         return pym.var(iname)*step + start
+
+    @_as_expr.register
+    def _(self, index: IndexFunction, within_loops):
+        import pdb; pdb.set_trace()
+        vars = VariableCollector()(index.expr)
+
+        # be assertive (and wrong) for now
+        # FIXME expression should add the final one too...
+        var1, var2 = sorted(vars)
+        i1, i2 = map(pym.var, sorted(within_loops.values()))
+        varmap = {
+            var1: i1,
+            var2: i2,
+        }
+        return pym.substitute(index.expr, varmap)
 
     @_as_expr.register
     def _(self, index: NonAffineMap, within_loops):

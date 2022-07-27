@@ -160,29 +160,54 @@ class Slice(FancyIndex):
     #     return pym.var(param.name)
 
 
-# class Stencil(tuple):
-#     pass
-#
-#
-# class StencilGroup(tuple):
-#     def __mul__(self, other):
-#         """Do some interleaving magic - needed for matrices."""
-#         if isinstance(other, StencilGroup):
-#             return StencilGroup(
-#                 Stencil(
-#                     tuple(
-#                         idx for pair in itertools.zip_longest(idxs1, idxs2)
-#                         for idx in pair if idx is not None
-#                     )
-#                     for idxs1, idxs2 in itertools.product(stcl1, stcl2)
-#                 )
-#                 for stcl1, stcl2 in itertools.product(self, other)
-#             )
-#         else:
-#             return super().__mul__(other)
+class Map(FancyIndex, abc.ABC):
+    ...
+    # fields = FancyIndex.fields | {"from_index", "arity", "name"}
+    #
+    # _name_generator = NameGenerator("map")
+    #
+    # def __init__(self, from_index, dim, arity, *, name=None, **kwargs):
+    #     if not name:
+    #         name = self._name_generator.next()
+    #
+    #     self.from_index = from_index
+    #     # self.arity = arity
+    #     self.name = name
+    #     super().__init__(dim=dim, **kwargs)
+    #
+    # @property
+    # def index(self):
+    #     return LoopIndex(self)
+
+    # @property
+    # def size(self):
+    #     return self.arity
 
 
-class NonAffineMap(Index):
+class IndexFunction(Map):
+    """The idea here is that we provide an expression, say, "2*x0 + x1 - 3"
+    and then use pymbolic maps to replace the xN with the correct inames for the
+    outer domains. We could also possibly use pN (or pym.var subclass called Parameter)
+    to describe parameters."""
+    def __init__(self, expr, arity, label, in_labels=(), **kwargs):
+        """
+        out_label:
+            The target dim label
+        in_labels:
+            Dim labels where the index is substituted in the expression. This
+            may be empty if the expression contains no Variables.
+        """
+        self.expr = expr
+        self.arity = arity
+        self.in_labels = in_labels
+        super().__init__(label, **kwargs)
+
+    @property
+    def size(self):
+        return self.arity
+
+
+class NonAffineMap(Map):
     fields = Index.fields | {"tensor"}
 
     # TODO is this ever not valid?
@@ -354,13 +379,15 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
                 if not cls._is_valid_indices(subidxs, subdim):
                     return False
             return True
-        else:
+        elif isinstance(idx, (Slice, IndexFunction)):
             subdim_id = dim.labels.index(idx.label)
             if subdims := dim.subdims:
                 subdim = subdims[subdim_id]
                 if not cls._is_valid_indices(subidxs, subdim):
                     return False
             return True
+        else:
+            raise TypeError
 
     def __str__(self):
         return self.name
@@ -399,14 +426,14 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
         # import pdb; pdb.set_trace()
         idx, *subidxs = indices
 
-        if isinstance(idx, NonAffineMap):
+        if isinstance(idx, Map):
             subdim_id = dim.labels.index(idx.label)
             if subdims := dim.subdims:
                 subdim = subdims[subdim_id]
                 return [idx] + cls._parse_indices(subdim, subidxs, parent_indices+[idx])
             else:
                 return [idx]
-        else:
+        elif isinstance(idx, Slice):
             # reindex dim.size s.t. it references the correct parent indices
             if isinstance(idx.size, pym.primitives.Expression):
                 if not isinstance(idx.size, Tensor):
@@ -421,6 +448,8 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
                 return [idx] + cls._parse_indices(subdim, subidxs, parent_indices+[idx])
             else:
                 return [idx]
+        else:
+            raise TypeError
 
     @property
     def indices(self):
@@ -554,6 +583,7 @@ def index_shape(index):
     raise TypeError
 
 @index_shape.register(Slice)
+@index_shape.register(IndexFunction)
 def _(index):
     # import pdb; pdb.set_trace()
     if index.within:
@@ -710,38 +740,6 @@ def _partition_slice(slice_, dtree):
             ptr += dsize
     else:
         yield 0, slice_
-
-
-class Map(FancyIndex, abc.ABC):
-    fields = FancyIndex.fields | {"from_index", "arity", "name"}
-
-    _name_generator = NameGenerator("map")
-
-    def __init__(self, from_index, dim, arity, *, name=None, **kwargs):
-        if not name:
-            name = self._name_generator.next()
-
-        self.from_index = from_index
-        # self.arity = arity
-        self.name = name
-        super().__init__(dim=dim, **kwargs)
-
-    @property
-    def index(self):
-        return LoopIndex(self)
-
-    # @property
-    # def size(self):
-    #     return self.arity
-
-
-class IndexFunction(Map):
-    """The idea here is that we provide an expression, say, "2*x0 + x1 - 3"
-    and then use pymbolic maps to replace the xN with the correct inames for the
-    outer domains. We could also possibly use pN (or pym.var subclass called Parameter)
-    to describe parameters."""
-    def __init__(self, expr):
-        self.expr = expr
 
 
 class AffineMap(Map):
