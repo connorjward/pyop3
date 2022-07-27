@@ -20,7 +20,7 @@ from pyop3 import utils
 from pyop3.utils import MultiNameGenerator, NameGenerator
 from pyop3.utils import CustomTuple, checked_zip, NameGenerator, rzip
 from pyop3.tensors import Tensor, Index, Map, Dim, NonAffineMap, _compute_indexed_shape, _compute_indexed_shape2
-from pyop3.tensors import Slice, AffineMap, index, IndexFunction
+from pyop3.tensors import Slice, IndexFunction
 from pyop3.codegen.tlang import to_tlang
 
 
@@ -400,7 +400,7 @@ class LoopyKernelBuilder:
 
     @_as_expr.register
     def _(self, index: IndexFunction, within_loops):
-        import pdb; pdb.set_trace()
+        # import pdb; pdb.set_trace()
         vars = VariableCollector()(index.expr)
 
         # be assertive (and wrong) for now

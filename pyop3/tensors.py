@@ -86,27 +86,25 @@ class Dim(pytools.ImmutableRecord):
         return tuple(sum(sizes[:i]) for i, _ in enumerate(sizes))
 
 
-# TODO replace `within` with `LoopIndex`
 # TODO delete `id`
 class Index(pytools.ImmutableRecord, abc.ABC):
     """Does it make sense to index a tensor with this object?"""
-    fields = {"label", "within", "id"}
+    fields = {"label", "is_loop_index", "id"}
 
     _id_generator = NameGenerator("idx")
 
-    def __init__(self, label, within=False, *, id=None):
+    def __init__(self, label, is_loop_index=False, *, id=None):
         # self.size = size
         self.label = label
-        self.within = within
+        self.is_loop_index = is_loop_index
         self.id = id or self._id_generator.next()
-        # if id == "idx3":
-        #     import pdb; pdb.set_trace()
         super().__init__()
 
-    # @property
-    # @abc.abstractmethod
-    # def size(self):
-    #     ...
+    @property
+    def within(self):
+        import warnings
+        warnings.warn("dontuse", DeprecationWarning)
+        return self.is_loop_index
 
 
 class ScalarIndex(Index):
@@ -586,13 +584,13 @@ def index_shape(index):
 @index_shape.register(IndexFunction)
 def _(index):
     # import pdb; pdb.set_trace()
-    if index.within:
+    if index.is_loop_index:
         return ()
     return (index.size,)
 
 @index_shape.register(NonAffineMap)
 def _(index):
-    if index.within:
+    if index.is_loop_index:
         return ()
     else:
         return index.tensor.indexed_shape
@@ -672,13 +670,13 @@ def _construct_indices(input_indices, dims, current_dim, parent_indices=None):
     else:
         subdim = None
 
-    return (index,) + _construct_indices(subindices, dims, subdim, parent_indices + [index.copy(within=True)])
+    return (index,) + _construct_indices(subindices, dims, subdim, parent_indices + [index.copy(is_loop_index=True)])
 
 
 
 def index(indicess):
     """wrap all slices and maps in loop index objs."""
-    return tuple(tuple(idx.copy(within=True) for idx in idxs) for idxs in indicess)
+    return tuple(tuple(idx.copy(is_loop_index=True) for idx in idxs) for idxs in indicess)
 
 
 def _break_mixed_slices(stencils, dtree):

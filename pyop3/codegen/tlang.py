@@ -79,7 +79,7 @@ class TensorLangKernelBuilder:
         """
         idx, *subidxs = indices
 
-        if idx.within:
+        if idx.is_loop_index:
             if subidxs:
                 return self._construct_temp_dims(subidxs)
             else:

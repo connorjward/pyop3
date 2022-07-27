@@ -536,7 +536,7 @@ def test_compute_double_loop_ragged():
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
 
-    i_ = Slice.from_dim(root, 0, within=True)
+    i_ = Slice.from_dim(root, 0, is_loop_index=True)
     iterset = [[i_, Slice.from_dim(subdim, 0, parent_indices=(i_,))]]
 
     # import pdb; pdb.set_trace()
