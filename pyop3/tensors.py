@@ -130,13 +130,7 @@ class Slice(FancyIndex):
 
     @classmethod
     def from_dim(cls, dim, subdim_id, *, parent_indices=None, **kwargs):
-        # import pdb; pdb.set_trace()
-        # size = cls._as_pym_var(dim.sizes[subdim_id])
-        # index size with the right indices
-        if isinstance(size := dim.sizes[subdim_id], pym.primitives.Expression):
-            if not isinstance(size, Tensor):
-                raise NotImplementedError
-            # size = size[[parent_indices[-size.order:]]]
+        size = dim.sizes[subdim_id]
         label = dim.labels[subdim_id]
         offset = dim.offsets[subdim_id]
         return cls(size=size, label=label, offset=offset, **kwargs)

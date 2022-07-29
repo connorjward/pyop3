@@ -21,7 +21,7 @@ from pyop3 import utils
 from pyop3.utils import MultiNameGenerator, NameGenerator
 from pyop3.utils import CustomTuple, checked_zip, NameGenerator, rzip
 from pyop3.tensors import Tensor, Index, Map, Dim, NonAffineMap, _compute_indexed_shape, _compute_indexed_shape2
-from pyop3.tensors import Slice, IndexFunction
+from pyop3.tensors import Slice, IndexFunction, index
 from pyop3.codegen.tlang import to_tlang
 
 
@@ -38,6 +38,17 @@ def merge_bins(bin1, bin2):
         else:
             new_bin[k] = v
     return new_bin
+
+
+def index_tensor_with_within_loops(tensor, within_loops):
+    within_loops = copy.deepcopy(within_loops)
+
+    new_indicess = [[]]
+
+
+    # within_loops should now be empty
+    assert all(len(v) == 0 for v in within_loops.values())
+    return tensor.copy(indicess=new_indicess)
 
 
 def collect_labels(index):
@@ -124,22 +135,25 @@ class LoopyKernelBuilder:
     def _build(self, expr, within_loops):
         raise TypeError
 
+    def collect_within_loops(self, idx, within_loops):
+        within_loops = copy.deepcopy(within_loops)
+
+        if isinstance(idx, NonAffineMap):
+            for i in idx.input_indices:
+                within_loops = merge_bins(within_loops, self.collect_within_loops(i, within_loops))
+
+        iname = self._namer.next("i")
+        within_loops = merge_bins(within_loops, {idx.label: [iname]})
+        self.register_new_domain(iname, idx, within_loops)
+        return within_loops
+
     @_build.register
     def _(self, expr: exprs.Loop, within_loops):
-        def collect_within_loops(idx):
-            within = {}
-            if isinstance(idx, NonAffineMap):
-                for i in idx.input_indices:
-                    within = merge_bins(within, collect_within_loops(i))
-
-            iname = self._namer.next("i")
-            self.register_new_domain(iname, idx, within_loops)
-            return merge_bins(within, {idx.label: [iname]})
 
         within_loops = {}
         for idxs in expr.index:
             for idx in idxs:
-                within_loops = merge_bins(within_loops, collect_within_loops(idx))
+                within_loops = merge_bins(within_loops, self.collect_within_loops(idx, within_loops))
 
         for stmt in expr.statements:
             self._build(stmt, copy.deepcopy(within_loops))
@@ -267,6 +281,7 @@ class LoopyKernelBuilder:
                 lhs, rhs,
                 id=self._namer.next(f"{assignment.id}_"),
                 within_inames=within_inames,
+                within_inames_is_final=True,
                 depends_on=frozenset({f"{dep}*" for dep in assignment.depends_on}),
                 no_sync_with=no_sync_with,
             )
@@ -305,7 +320,11 @@ class LoopyKernelBuilder:
             if not isinstance(index.size, Tensor):
                 raise NotImplementedError("need to think hard about more complicated expressions"
                                           "esp. sharing inames")
-            size = self.register_extent(index.size, within_loops)
+            # remove the final iname matching index from within_loops as the index.size will
+            # not see this/be outside of it
+            exwithin_loops = copy.deepcopy(within_loops)
+            exwithin_loops[index.label].pop()
+            size = self.register_extent(index.size, exwithin_loops)
         else:
             size = index.size
         if iname in self.domains:
@@ -342,11 +361,10 @@ class LoopyKernelBuilder:
                 temp = Tensor.new(name=temp_name, dtype=np.int32)
 
                 # make sure that the RHS reduces down to a scalar
-                # TODO this should really be handled when extent.indices are set up
-                # (in Tensor._parse_indices).
-                # new_stencils = index(extent.indices)
-                # extent = extent.copy(indices=new_stencils)
-                insn = tlang.Read(extent, temp)
+                # new_extent = index_tensor_with_within_loops(extent, truncated)
+                new_extent = extent.copy(indicess=index(extent.indicess))
+
+                insn = tlang.Read(new_extent, temp)
                 self._make_instruction_context(insn, within_loops, scalar=True)
 
                 return self.extents.setdefault(extent.name, pym.var(temp_name))
