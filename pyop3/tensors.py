@@ -179,17 +179,19 @@ class IndexFunction(Map):
     and then use pymbolic maps to replace the xN with the correct inames for the
     outer domains. We could also possibly use pN (or pym.var subclass called Parameter)
     to describe parameters."""
-    def __init__(self, expr, arity, label, in_labels=(), **kwargs):
+    def __init__(self, expr, arity, vardims, **kwargs):
         """
-        out_label:
-            The target dim label
-        in_labels:
-            Dim labels where the index is substituted in the expression. This
-            may be empty if the expression contains no Variables.
+        vardims:
+            iterable of 2-tuples of the form (var, label) where var is the
+            pymbolic Variable in expr and label is the dim label associated with
+            it (needed to select the right iname) - note, this is ordered
         """
         self.expr = expr
         self.arity = arity
-        self.in_labels = in_labels
+        self.vardims = vardims
+
+        # the dim label associated with the map is the final entry in vardims
+        label = vardims[-1][1]
         super().__init__(label, **kwargs)
 
     @property

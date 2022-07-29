@@ -1009,7 +1009,8 @@ def test_index_function():
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
     # an IndexFunction contains an expression and the corresponding dim labels
-    map = IndexFunction(pym.parse("x0 + x1"), in_labels=(root.labels[0],), label=root.labels[1], arity=2)
+    x0, x1 = pym.variables("x0 x1")
+    map = IndexFunction(x0 + x1, arity=2, vardims=[(x0, root.labels[0]), (x1, root.labels[1])])
 
     i1 = pyop3.index([[Slice.from_dim(root, 0)]]) # loop over 'cells'
     i2 = [[i1[0][0]], [map]]  # access 'cell' and 'edge' data

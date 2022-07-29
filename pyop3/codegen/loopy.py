@@ -492,19 +492,14 @@ class LoopyKernelBuilder:
 
     @_as_expr.register
     def _(self, index: IndexFunction, within_loops):
-        raise NotImplementedError
-        # import pdb; pdb.set_trace()
-        vars = VariableCollector()(index.expr)
+        # use the innermost matching dims as the right inames
+        varmap = {}
+        for var, label in reversed(index.vardims):
+            iname = within_loops[label].pop()
+            varmap[var] = pym.var(iname)
 
-        # be assertive (and wrong) for now
-        # FIXME expression should add the final one too...
-        var1, var2 = sorted(vars)
-        i1, i2 = map(pym.var, sorted(within_loops.values()))
-        varmap = {
-            var1: i1,
-            var2: i2,
-        }
-        return pym.substitute(index.expr, varmap)
+        res = pym.substitute(index.expr, varmap)
+        return res
 
     @_as_expr.register
     def _(self, index: NonAffineMap, within_loops):
