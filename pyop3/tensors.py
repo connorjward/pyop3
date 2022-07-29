@@ -250,14 +250,6 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
     name_generator = pyop3.utils.MultiNameGenerator()
     prefix = "ten"
 
-    # def __new__(cls, dim=None, stencils=frozenset(), **kwargs):
-    #     # FIXME what is the right way to think about this now?
-    #     # if (len(dims) == 2 and isinstance(dims[0], IndexedDimension) and not isinstance(dims[1], IndexedDimension)
-    #     if False:
-    #         return NonAffineMap(dims, **kwargs)
-    #     else:
-    #         return super().__new__(cls)
-
     def __init__(self, dim=None, indicess=None, dtype=None, *, mesh = None, name: str = None, prefix: str=None, data=None, max_value=32):
         name = name or self.name_generator.next(prefix or self.prefix)
         self.data = data

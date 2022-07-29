@@ -403,14 +403,12 @@ class LoopyKernelBuilder:
         return index_expr
 
     def register_domains(self, indices, dstack, within_loops):
-        # import pdb; pdb.set_trace()
         within_loops = copy.deepcopy(within_loops)
 
         # I think ultimately all I need to do here is stick the things from dstack
         # onto the right dim labels in within_loops, and register all of the domains
 
         # first we stick any new inames into the right places
-        # mywithin_loops = copy.deepcopy(within_loops)
         for idx in indices:
             if isinstance(idx, NonAffineMap):
                 within_loops = self.register_domains(idx.input_indices, dstack, within_loops)
@@ -430,38 +428,6 @@ class LoopyKernelBuilder:
                     within_loops[idx.label] = [iname]
                 self.register_new_domain(iname, idx, within_loops)
 
-        # import pdb; pdb.set_trace()
-
-        # for i, index in enumerate(indices):
-            # if isinstance(index, (Slice, IndexFunction)):
-                # if index.label not in within_loops:
-                #     iname = dstack.pop(0)
-                # else:
-                #     iname = within_loops[index.label].pop()
-                # self.register_new_domain(iname, index, within_loops)
-                #
-                # # TODO tidy up
-                # if index.label not in within_loops:
-                #     within_loops[index.label] = [iname]
-                # else:
-                #     within_loops[index.label].append(iname)
-                # iname = within_loops[index.label].pop(0)
-                # if index.is_loop_index:
-                #     iname = within_loops[index.label][-1]
-                # else:
-                #     iname = dstack.pop(0)
-                #     if index.label in within_loops:
-                #         within_loops[index.label].append(iname)
-                #     else:
-                #         within_loops[index.label] = [iname]
-                #
-                # self.register_new_domain(iname, index, within_loops)
-                # ...
-
-            # else:
-            #     raise TypeError
-
-        # within_loops = truncate_within_loops(within_loops, indices)
         return within_loops
 
     @staticmethod
