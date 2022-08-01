@@ -362,9 +362,6 @@ def test_compute_double_loop_ragged():
     dat1 = Tensor.new(dims, indicess=iterset, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, indicess=iterset, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
 
-
-    # import pdb; pdb.set_trace()
-
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
         "y[i] = x[i] + 1",
@@ -385,37 +382,12 @@ def test_compute_double_loop_ragged():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    """
-  for (int32_t i0 = 0; i0 <= 4; ++i0)
-  {
-    p0[0] = nnz[map0[i0]];
-    for (int32_t i1 = 0; i1 <= -1 + p0; ++i1)
-    {
-      t1[0] = 0.0;
-      t0[0] = dat1[map1[i0] + map2[i1]];
-      mylocalkernel(&(t0[0]), &(t1[0]));
-      dat2[map3[i0] + map4[i1]] = t1[0];
-    }
-  }
-    """
-
-    sec0 = make_offset_map(nnz.dim)[0]
-    sec1 = make_offset_map(dims)[0]
-    # sec2 = make_offset_map(subdim, dims)[0]
-    sec2 = np.arange(3, dtype=np.int32)
-    sec3 = np.empty(1, dtype=np.int32)  # missing
-    sec4 = np.empty(1, dtype=np.int32)  # missing
-    sec5 = sec1.copy()
-    sec6 = sec2.copy()
-
-    # import pdb; pdb.set_trace()
-    args = [sec0, nnz.data, sec1, sec2, dat1.data, sec3, sec4, dat2.data, sec5, sec6]
+    args = [nnz.data, dat1.data, dat2.data, dat1.sections["dim0"].data, dat2.sections["dim0"].data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
 
     assert all(dat2.data == dat1.data + 1)
-    print("compute_double_loop_ragged PASSED", flush=True)
 
 
 def test_compute_double_loop_ragged_inner():
@@ -470,6 +442,7 @@ def test_compute_double_loop_ragged_inner():
   }
     """
 
+    import pdb; pdb.set_trace()
     sec0 = make_offset_map(nnz.dim)[0]
     sec1 = np.arange(3, dtype=np.int32)
     sec2 = make_offset_map(dims)[0]
@@ -541,17 +514,7 @@ def test_compute_double_loop_ragged_mixed():
   }
     """
 
-    # sec0 = make_offset_map(nnz.dim.root, nnz.dim)[0]
-    sec0 = np.arange(10, dtype=np.int32)
-    sec1 = make_offset_map(dims)[0]
-    # FIXME
-    # sec2 = make_offset_map(subdims[0], dims)[0]
-    sec2 = np.arange(3, dtype=np.int32)
-    sec3 = np.empty(1, dtype=np.int32)  # missing
-    sec4 = np.empty(1, dtype=np.int32)  # missing
-    sec5 = sec1.copy()
-    sec6 = sec2.copy()
-    # import pdb; pdb.set_trace()
+    import pdb; pdb.set_trace()
 
     args = [sec0, nnz.data, sec1, sec2, dat1.data, sec3, sec4, dat2.data, sec5, sec6]
     fn.argtypes = (ctypes.c_voidp,) * len(args)

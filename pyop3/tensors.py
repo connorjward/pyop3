@@ -24,6 +24,10 @@ class Dim(pytools.ImmutableRecord):
     _label_generator = NameGenerator("dim")
 
     def __init__(self, sizes=(), *, permutation=None, labels=None, subdims=()):
+        if permutation and not all(isinstance(s, numbers.Integral) for s in sizes):
+            raise NotImplementedError("This turns out to be very complicated")
+            
+
         if not isinstance(sizes, collections.abc.Sequence):
             sizes = (sizes,)
         if not labels:
@@ -287,7 +291,7 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
         else:
             assert indicess is None
 
-        # import pdb; pdb.set_trace()
+        # iport pdb; pdb.set_trace()
         sections = cls.collect_sections(dim)
 
         return cls(dim, indicess, sections=sections, *args, name=name, **kwargs)
@@ -298,43 +302,188 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
         if not dim:
             return None
 
-        sections = {}
-        if not dim.subdims:
-            for label in dim.labels:
-                if cls._requires_nonaffine(dim, label):
-                    sections[label] = cls._make_offset_map(dim)[0]
-                else:
-                    x0 = pym.var("x0")
-                    sections[label] = IndexFunction(x0, 1, [(x0, label)])
+        # this is a map from dim label (should be unique for each tensor) to a tensor
+        # or index function
+        if dim.permutation:
+            secs = cls._collect_sections_permuted(dim)
         else:
-            offset = 0
-            for i, (label, subdim) in enumerate(zip(dim.labels, dim.subdims)):
-                if cls._requires_nonaffine(dim, label):
-                    vals, _ = cls._make_offset_map(dim)
-                    for label, ten in vals.items():
-                        sections[label] = ten
-                else:
-                    x0 = pym.var("x0")
-                    sections[label] = IndexFunction(x0, 1, [(x0, label)])
-                    size = cls._get_full_dim_size(subdim)
-                    x0 = pym.var("x0")
-                    expr = x0 * size + offset
-                    sec = IndexFunction(expr, 1, [(x0, label)])
-                    sections[label] = sec
+            secs = cls._collect_sections_unpermuted(dim)
 
-                    # FIXME how does this related to maps?
-                    offset += dim.sizes[i] * size
-
-            for subdim in dim.subdims:
-                sections |= cls.collect_sections(subdim)
-        return sections
+        for subdim in dim.subdims:
+            secs |= cls.collect_sections(subdim)
+        # import pdb; pdb.set_trace()
+        return secs
 
     @classmethod
-    def _get_full_dim_size(cls, dim):
-        if not dim.subdims:
-            return sum(dim.sizes)
+    def _collect_sections_permuted(cls, dim, *, imap=None):
+        assert dim.permutation
+        if not all(isinstance(s, numbers.Integral) for s in dim.sizes):
+            raise NotImplementedError
+
+        if not imap:
+            imap = {}
+
+        sections = collections.defaultdict(dict)
+        offset = 0
+        npoints = sum(dim.sizes)
+        for pt in range(npoints):
+            pt = dim.permutation[pt]
+
+            subdim, label, i = cls._get_subdim(dim, pt)
+            sections[label][pt] = offset
+
+            # increment the pointer by the size of the step for this subdim
+            if dim.subdims:
+                offset += cls._get_full_dim_size(subdim, imap | {label: pt})
+            else:
+                offset += 1
+
+        return sections, offset
+
+    @classmethod
+    def _collect_sections_unpermuted(cls, dim):
+        assert not dim.permutation
+
+        sections = collections.defaultdict(list)
+        # used to create a tensor at the end
+        # parent_label_size_tracker = collections.defaultdict(list)
+        offset = 0
+        for subdim_id, label in enumerate(dim.labels):
+            dsize = dim.sizes[subdim_id]
+            if isinstance(dsize, Tensor):
+                for idx_map in cls._generate_indices(dsize):
+                    # parent_label_size_tracker[label].append((mylabel, mysize))
+                    sections[label].append(offset)
+                    if dim.subdims:
+                        offset += cls._get_full_dim_size(dim.subdims[subdim_id], idx_map)
+                    else:
+                        offset += 1
+            else:
+                for i in range(dsize):
+                    sections[label].append(offset)
+                    if dim.subdims:
+                        offset += cls._get_full_dim_size(dim.subdims[subdim_id], {label: i})
+                    else:
+                        offset += 1
+
+        # convert to a nice index-type representation
+        new_sections = {}
+        for label, idxs in sections.items():
+            subdim_id = dim.labels.index(label)
+
+            idxs = np.array(idxs, dtype=np.int32)
+
+            # this is hard
+            steps = set(idxs[1:] - idxs[:-1])
+            if len(steps) == 1:
+                step, = steps
+                x0 = pym.var("x0")
+                expr = x0 * step  # + offset
+                new_section = IndexFunction(expr, 1, [(x0, label)])
+            else:
+                new_section = Tensor.new(Dim(len(idxs), labels=(label,)), data=idxs, prefix="sec", dtype=np.int32)
+
+            new_sections[label] = new_section
+        return new_sections
+
+    @classmethod
+    def _generate_indices(cls, tensor, dim=None):
+        # start from root
+        if dim is None:
+            dim = tensor.dim
+
+        assert len(dim.sizes) == 1
+        assert isinstance(dim.size, numbers.Integral)
+
+        if dim.subdims:
+            inner = cls._generate_indices(tensor, dim.subdim)
+            result = []
+            for i in range(dim.size):
+                result.append({dim.label: i} | inner)
+            return result
         else:
-            return sum(size * cls._get_full_dim_size(subdim) for size, subdim in zip(dim.sizes, dim.subdims))
+            return [{dim.label: i} for i in range(dim.size)]
+
+    # @classmethod
+    # def _collect_sections_permuted(cls, dim):
+    #     ...
+    #     sections = {}
+    #
+    #     # we can create some IndexFunction sections provided that
+    #     # we are not permuted
+    #     easy_sections = {}
+    #     if not dim.permutation:
+    #         offset = 0
+    #         for i, label in enumerate(dim.labels):
+    #             if dim.subdims:
+    #                 subdim_size = cls._get_full_dim_size(dim.subdims[i])
+    #             else:
+    #                 subdim_size = 1
+    #
+    #             if not cls._requires_nonaffine(dim, label):
+    #                 x0 = pym.var("x0")
+    #                 expr = x0 * subdim_size + offset
+    #                 sec = IndexFunction(expr, 1, [(x0, label)])
+    #                 easy_sections[label] = sec
+    #             else:
+    #                 size = ...
+    #
+    #             offset += dim.sizes[i] * size
+    #
+    #
+    #
+    #     if not dim.subdims:
+    #         for label in dim.labels:
+    #             if cls._requires_nonaffine(dim, label):
+    #                 vals, _ = cls._make_offset_map(dim)
+    #                 for label, ten in vals.items():
+    #                     sections[label] = ten
+    #             else:
+    #                 x0 = pym.var("x0")
+    #                 sections[label] = IndexFunction(x0, 1, [(x0, label)])
+    #     else:
+    #         offset = 0
+    #         for i, (label, subdim) in enumerate(zip(dim.labels, dim.subdims)):
+    #             if cls._requires_nonaffine(dim, label):
+    #                 vals, _ = cls._make_offset_map(dim)
+    #                 for label, ten in vals.items():
+    #                     sections[label] = ten
+    #             else:
+    #                 x0 = pym.var("x0")
+    #                 sections[label] = IndexFunction(x0, 1, [(x0, label)])
+    #                 size = cls._get_full_dim_size(subdim)
+    #                 x0 = pym.var("x0")
+    #                 expr = x0 * size + offset
+    #                 sec = IndexFunction(expr, 1, [(x0, label)])
+    #                 sections[label] = sec
+    #
+    #                 # FIXME how does this related to maps?
+    #                 offset += dim.sizes[i] * size
+    #     return sections
+
+    @classmethod
+    def _get_full_dim_size(cls, dim, idx_map=None):
+        if not idx_map:
+            idx_map = {}
+
+        total_size = 0
+        for subdim_id, (size, label) in enumerate(zip(dim.sizes, dim.labels)):
+            if isinstance(size, Tensor):
+                for i in range(cls._read_tensor(size, idx_map)):
+                    if dim.subdims:
+                         total_size += cls._get_full_dim_size(
+                            dim.subdims[subdim_id], idx_map | {label: i})
+                    else:
+                        total_size += 1
+            else:
+                for i in range(size):
+                    if dim.subdims:
+                         total_size += cls._get_full_dim_size(
+                            dim.subdims[subdim_id], idx_map | {label: i})
+                    else:
+                        total_size += 1
+
+        return total_size
 
     @classmethod
     def _make_offset_map(cls, dim, *, imap=None):
@@ -372,7 +521,7 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
 
             # increment the pointer by the size of the step for this subdim
             if dim.subdims:
-                ptr += cls._get_full_dim_size(subdim)
+                ptr += cls._get_full_dim_size(subdim, imap | {label: point})
             else:
                 ptr += 1
 
@@ -416,14 +565,19 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
         return subdims[stratum], dim.labels[stratum], stratum
 
     @classmethod
-    def _read_tensor(cls, tensor, imap):
-        # breakpoint()
-        # assume a flat tensor for now
-        assert not tensor.dim.subdims
+    def _read_tensor(cls, tensor, idx_map):
+        ptr = 0
+        for label, idx in idx_map.items():
+            section = tensor.sections[label]
 
-        # FIXME
-        # the tensor needs to be indexed by all of the appropriate indices
-        ptr = imap[tensor.dim.labels[0]]# - tensor.dim.root.offset
+            if isinstance(section, Tensor):
+                ptr += section.data[idx]
+            elif isinstance(section, IndexFunction):
+                context = {str(var): idx_map[label] for var, label in section.vardims}
+                ptr += pym.evaluate(section.expr, context)
+            else:
+                raise AssertionError
+
         return tensor.data[ptr]
 
     def __getitem__(self, indicess):
