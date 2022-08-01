@@ -106,11 +106,17 @@ class LoopyKernelBuilder:
         self._namer = MultiNameGenerator()
         self.domains = {}
         self.instructions = []
-        self.kernel_data = []
+        self._tensor_data = []
+        self._section_data = []
+        self._temp_kernel_data = []
         self.subkernels = []
         # self._within_inames = {}
         self.extents = {}
         self.assumptions = []
+
+    @property
+    def kernel_data(self):
+        return self._tensor_data + self._section_data + self._temp_kernel_data
 
     def build(self, tlang_expr):
         self._namer.reset()
@@ -204,7 +210,7 @@ class LoopyKernelBuilder:
             iname = self._namer.next("i")
             subarrayrefs[temp] = as_subarrayref(temp, iname)
             self.domains[iname] = (0, temp_size, 1)
-            self.kernel_data.append(lp.TemporaryVariable(temp.name, shape=(temp_size,)))
+            self._temp_kernel_data.append(lp.TemporaryVariable(temp.name, shape=(temp_size,)))
 
         assignees = tuple(subarrayrefs[var] for var in call.writes)
         expression = pym.primitives.Call(
@@ -307,11 +313,12 @@ class LoopyKernelBuilder:
         else:
             temp_shape = ()
 
-        self.kernel_data += [
+        self._tensor_data.append(
             lp.GlobalArg(assignment.tensor.name, dtype=assignment.tensor.dtype, shape=None),
-
+        )
+        self._temp_kernel_data.append(
             lp.TemporaryVariable(assignment.temporary.name, shape=temp_shape)
-        ]
+        )
 
         return domain_stack
 
@@ -375,7 +382,8 @@ class LoopyKernelBuilder:
     # using from_dim
     def handle_assignment(self, tensor, indices, within_loops):
         # do not copy - modify!
-        # within_loops = copy.deepcopy(within_loops)
+        saved_within_loops = copy.deepcopy(within_loops)
+
         index_expr = 0
         if not tensor.dim:
             return index_expr
@@ -385,6 +393,9 @@ class LoopyKernelBuilder:
         for idx in indices:
             assert dim is not None
 
+            # so we have a map from dim label -> iname
+            # now we need to be able to pass dim_expr into a map/index function (e.g. *4)
+
             dim_expr = self._as_expr(idx, within_loops)
 
             subdim_id = dim.labels.index(idx.label)
@@ -393,9 +404,23 @@ class LoopyKernelBuilder:
             # onto a location in the data structure. For nice regular data this can just be
             # the index multiplied by the size of the inner dims (e.g. dat[4*i + j]), but for
             # ragged things we need to always have a map for the outer dims.
-            section_name = self._namer.next("sec")
-            index_expr += pym.subscript(pym.var(section_name), dim_expr + dim.offsets[subdim_id])
-            self.kernel_data.append(lp.GlobalArg(section_name, shape=None, dtype=np.int32))
+            # section_name = self._namer.next("sec")
+            # index_expr += pym.subscript(pym.var(section_name), dim_expr + dim.offsets[subdim_id])
+            # self.kernel_data.append(lp.GlobalArg(section_name, shape=None, dtype=np.int32))
+            # import pdb; pdb.set_trace()
+            sec = tensor.sections[dim.labels[subdim_id]]
+
+            if isinstance(sec, IndexFunction):
+                (from_var, label), = sec.vardims
+                assert label == dim.labels[subdim_id]
+                index_expr += pym.substitute(sec.expr, {from_var: dim_expr})
+            elif isinstance(sec, Tensor):
+                # import pdb; pdb.set_trace()
+                myexpr = self.handle_assignment(sec, sec.indices, copy.deepcopy(saved_within_loops))
+                index_expr += pym.subscript(pym.var(sec.name), myexpr)
+                self._section_data.append(lp.GlobalArg(sec.name, shape=None, dtype=np.int32))
+            else:
+                raise TypeError
 
             if subdims := dim.subdims:
                 dim = subdims[subdim_id]
@@ -412,7 +437,7 @@ class LoopyKernelBuilder:
         for idx in indices:
             if isinstance(idx, NonAffineMap):
                 within_loops = self.register_domains(idx.input_indices, dstack, within_loops)
-                self.kernel_data.append(lp.GlobalArg(idx.tensor.name, shape=None, dtype=idx.tensor.dtype))
+                self._tensor_data.append(lp.GlobalArg(idx.tensor.name, shape=None, dtype=idx.tensor.dtype))
 
             if idx.is_loop_index:
                 # should do this earlier (hard to do now due to ordering confusion)
@@ -453,6 +478,7 @@ class LoopyKernelBuilder:
         start = index.start or 0
         step = index.step or 1
 
+        # TODO I would prefer to go from the end here. Maybe use a deque?
         iname = within_loops[index.label].pop(0)
         return pym.var(iname)*step + start
 
@@ -461,7 +487,7 @@ class LoopyKernelBuilder:
         # use the innermost matching dims as the right inames
         varmap = {}
         for var, label in reversed(index.vardims):
-            iname = within_loops[label].pop()
+            iname = within_loops[label].pop(0)
             varmap[var] = pym.var(iname)
 
         res = pym.substitute(index.expr, varmap)

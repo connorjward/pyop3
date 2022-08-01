@@ -1,4 +1,5 @@
 import copy
+import pytest
 import time
 import subprocess
 import os
@@ -74,103 +75,50 @@ Compile errors in %s""" % (e.cmd, e.returncode, logfile, errfile))
             return ctypes.CDLL(soname)
 
 
-def make_offset_map(dim, imap=None):
-    # import pdb; pdb.set_trace()
-    if imap is None:
-        imap = {}
-
-    if len(dim.sizes) == 1 and isinstance(dim.size, Tensor):
-        points = list(range(read_tensor(dim.size, imap)))
-    else:
-        points = list(range(sum(dim.sizes)))
-
-    ptr = 0
-    offsets = {}
-    # breakpoint()
-    for point in points:
-        if dim.permutation:
-            point = dim.permutation[point]
-
-        offsets[point] = ptr
-
-        subdim, label, i = get_subdim(dim, point)
-
-        # label = dim.labels[i]
-        # if subdims := dtree.get_children(dim):
-        #     subdim = subdims[i]
-        # else:
-        #     subdim = None
-
-        if subdim:
-            ptr += make_offset_map(subdim, imap=imap|{label: point - dim.offsets[i]})[1]
-        else:
-            ptr += 1
-
-    offsets = np.array([offsets[i] for i in range(len(offsets))], dtype=np.int32)
-    return offsets, ptr
-
-
-def get_subdim(dim, point):
-    subdims = dim.subdims
-
-    if not subdims:
-        return None, None, None
-
-    bounds = list(np.cumsum(dim.sizes))
-    for i, (start, stop) in enumerate(zip([0]+bounds, bounds)):
-        if start <= point < stop:
-            stratum = i
-            break
-    return subdims[stratum], dim.labels[stratum], stratum
-
-
-def read_tensor(tensor, imap):
-    # breakpoint()
-    # assume a flat tensor for now
-    assert not tensor.dim.subdims
-
-    # FIXME
-    # the tensor needs to be indexed by all of the appropriate indices
-    ptr = imap[tensor.dim.labels[0]]# - tensor.dim.root.offset
-    return tensor.data[ptr]
-
-
+@pytest.mark.skip
 def test_single_loop():
     dims = Dim(10)
-    offsets = make_offset_map(dims)
+    offsets = Tensor._make_offset_map(dims, dims.label)
     # assert False
 
 
+@pytest.mark.skip
 def test_double_loop():
     dims = Dim(10, subdims=(Dim(3),))
-    offsets = make_offset_map(dims)
+    offsets = Tensor._make_offset_map(dims, dims.label)
     # assert False
 
 
+@pytest.mark.skip
 def test_double_mixed_loop():
     dims = Dim((10, 6), subdims=(Dim(2), Dim(3)))
-    offsets = make_offset_map(dims)[0]
-    assert all(offsets == np.array([0, 2, 4, 6, 8, 10, 12, 14, 16, 18, 20, 23, 26, 29, 32, 35]))
+    o1 = Tensor._make_offset_map(dims, dims.labels[0])[0]
+    o2 = Tensor._make_offset_map(dims, dims.labels[1])[0]
+    assert all(o1.data == np.array([0, 2, 4, 6, 8, 10, 12, 14, 16, 18]))
+    assert all(o2.data == np.array([20, 23, 26, 29, 32, 35]))
 
+
+@pytest.mark.skip
 def test_permuted_loop():
     perm = (1, 4, 0, 3, 2)  # i.e. first elem 1, then elem 4, then elem 0...
     # start = [a1, a2, a3, a4, a5]
     # resulting data layout: [a2, a5, a1, a4, a3]
     # so the offsets must be [5, 0, 10, 7, 2]
     dims = Dim((3, 2), permutation=perm, subdims=(Dim(2), Dim(3)))
-    offsets, size = make_offset_map(dims)
+    offsets, size = Tensor._make_offset_map(dims, "myname")
     ans = np.array([5, 0, 10, 7, 2])
-    assert all(offsets == ans)
+    assert all(offsets.data == ans)
 
 
+@pytest.mark.skip
 def test_ragged_loop():
     root = Dim(5)
     steps = np.array([3, 2, 1, 3, 2])
     nnz = Tensor.new(root, data=steps, dtype=np.int32)
     dims = root.copy(subdims=(Dim(nnz),))
-    offsets = make_offset_map(dims)[0]
+    offsets = Tensor._make_offset_map(dims, "myname")[0]
     ans = [0, 3, 5, 6, 9]
-    assert all(offsets == ans)
+    assert all(offsets.data == ans)
 
 
 def test_read_single_dim():
@@ -199,13 +147,8 @@ def test_read_single_dim():
     jitmodule = JITModule(exe, cache_key)
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
-    # import pdb; pdb.set_trace()
 
-    sec0 = make_offset_map(root, dims)[0]
-    sec2 = make_offset_map(root, dims)[0]
-    # breakpoint()
-
-    args = [sec0, dat1.data, sec0, dat2.data, sec2]
+    args = [dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
@@ -215,7 +158,6 @@ def test_read_single_dim():
 
 
 def test_compute_double_loop():
-    print("compute_double_loop START", flush=True)
     dims = Dim(10, subdims=(Dim(3),))
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(30, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(30, dtype=np.float64), dtype=np.float64)
@@ -255,33 +197,20 @@ def test_compute_double_loop():
     """
     # import pdb; pdb.set_trace()
 
-    sec0 = np.arange(3, dtype=np.int32)
-    sec1 = make_offset_map(dims)[0]
-    sec2 = make_offset_map(dims.subdims[0])[0]
-    sec3 = sec0.copy()
-    sec4 = sec0.copy()  # skipped
-    sec5 = sec0.copy()  # skipped
-    sec6 = sec1.copy()
-    sec7 = sec2.copy()
-    sec8 = sec0.copy()
-
-    args = [sec0, sec1, sec2, dat1.data, sec3, sec4, sec5, dat2.data, sec6, sec7, sec8]
+    args = [dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
 
     assert all(dat2.data == dat1.data + 1)
-    print("compute_double_loop PASSED", flush=True)
 
 
 def test_compute_double_loop_mixed():
-    print("compute_double_loop_mixed START", flush=True)
     root = Dim((10, 12), subdims=(Dim(3), Dim(2)))
     dims = root
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(54, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(54, dtype=np.float64), dtype=np.float64)
 
-    # import pdb; pdb.set_trace()
     iterset = [[Slice.from_dim(root, 1)]]
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 2 }",
@@ -296,47 +225,13 @@ def test_compute_double_loop_mixed():
     expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-    # breakpoint()
 
     cache_key = str(time.time())
     jitmodule = JITModule(exe, cache_key)
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    """
-  for (int32_t i0 = 0; i0 <= 11; ++i0)
-  {
-    j0 = i0 + 10l;
-    for (int32_t i2 = 0; i2 <= 1; ++i2)
-    {
-      t1[map3[i2]] = 0.0;
-    }
-    for (int32_t i1 = 0; i1 <= 1; ++i1)
-    {
-      j1 = i1;
-      t0[map1[i1]] = dat1[map0[j0] + map2[j1]];
-    }
-    mylocalkernel(&(t0[0]), &(t1[0]));
-    for (int32_t i5 = 0; i5 <= 1; ++i5)
-    {
-      j3 = i5;
-      dat2[map4[j0] + map6[j3]] = t1[map5[i5]];
-    }
-  }
-    """
-
-    # import pdb; pdb.set_trace()
-    sec0 = np.arange(2, dtype=np.int32)
-    sec1 = make_offset_map(root)[0]
-    sec2 = make_offset_map(root.subdims[1])[0]
-    sec3 = sec0.copy()
-    sec4 = np.empty(1)  # missing
-    sec5 = np.empty(1)  # missing
-    sec6 = sec1.copy()
-    sec7 = sec2.copy()
-    sec8 = sec0.copy()
-
-    args = [sec0, sec1, sec2, dat1.data, sec3, sec4, sec5, dat2.data, sec6, sec7, sec8]
+    args = [dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
     fn.restype = ctypes.c_int
 
@@ -345,11 +240,9 @@ def test_compute_double_loop_mixed():
 
     assert all(dat2.data[:30] == 0)
     assert all(dat2.data[30:] == dat1.data[30:] + 1)
-    print("compute_double_loop_mixed PASSED", flush=True)
 
 
 def test_compute_double_loop_scalar():
-    print("compute_double_loop_scalar START", flush=True)
     """As in the temporary lives within both of the loops"""
     root = Dim((6, 4), subdims=(Dim(3), Dim(2)))
     dims = root
@@ -377,38 +270,17 @@ def test_compute_double_loop_scalar():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    """
-  for (int32_t i1 = 0; i1 <= 1; ++i1)
-    for (int32_t i0 = 6; i0 <= 9; ++i0)
-    {
-      t1[0] = 0.0;
-      t0[0] = dat1[map0[i0] + map1[i1]];
-      mylocalkernel(&(t0[0]), &(t1[0]));
-      dat2[map2[i0] + map3[i1]] = t1[0];
-    }
-    """
-
-    # import pdb; pdb.set_trace()
-    sec0 = make_offset_map(root)[0]
-    sec1 = make_offset_map(root.subdims[1])[0]
-    sec2 = np.empty(1)  # missing
-    sec3 = np.empty(1)  # missing
-    sec4 = sec0.copy()
-    sec5 = sec1.copy()
-
-    args = [sec0, sec1, dat1.data, sec2, sec3, dat2.data, sec4, sec5]
+    args = [dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
 
     assert all(dat2.data[:18] == 0)
     assert all(dat2.data[18:] == dat1.data[18:] + 1)
-    print("compute_double_loop_scalar PASSED", flush=True)
 
 
 
 def test_compute_double_loop_permuted():
-    print("test_compute_double_loop_permuted START", flush=True)
     root = Dim(6, permutation=(3, 2, 5, 0, 4, 1), subdims=(Dim(3),))
     dims = root
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(18, dtype=np.float64), dtype=np.float64)
@@ -434,40 +306,14 @@ def test_compute_double_loop_permuted():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    """
-  for (int32_t i0 = 0; i0 <= 5; ++i0)
-  {
-    for (int32_t i2 = 0; i2 <= 2; ++i2)
-      t1[map3[i2]] = 0.0;
-    for (int32_t i1 = 0; i1 <= 2; ++i1)
-      t0[map1[i1]] = dat1[map0[i0] + map2[i1]];
-    mylocalkernel(&(t0[0]), &(t1[0]));
-    for (int32_t i5 = 0; i5 <= 2; ++i5)
-      dat2[map4[i0] + map6[i5]] = t1[map5[i5]];
-  }
-    """
-
-    # import pdb; pdb.set_trace()
-    sec0 = np.arange(3, dtype=np.int32)
-    sec1 = make_offset_map(root)[0]
-    sec2 = make_offset_map(root.subdims[0])[0]
-    sec3 = sec0.copy()
-    sec4 = np.empty(1)  # missing
-    sec5 = np.empty(1)  # missing
-    sec6 = sec1.copy()
-    sec7 = sec2.copy()
-    sec8 = sec0.copy()
-
-    args = [sec0, sec1, sec2, dat1.data, sec3, sec4, sec5, dat2.data, sec6, sec7, sec8]
+    args = [dat1.data, dat2.data, dat1.sections[dat1.dim.label].data, dat2.sections[dat2.dim.label].data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
     fn(*(d.ctypes.data for d in args))
 
     assert all(dat2.data == dat1.data + 1)
-    print("test_compute_double_loop_permuted SUCCESS", flush=True)
 
 
 def test_compute_double_loop_permuted_mixed():
-    print("test_compute_double_loop_permuted_mixed START", flush=True)
     root = Dim((4, 3), permutation=(3, 6, 2, 5, 0, 4, 1), subdims=(Dim(1), Dim(2)))
     dims = root
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(10, dtype=np.float64), dtype=np.float64)
@@ -494,37 +340,12 @@ def test_compute_double_loop_permuted_mixed():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    """
-  for (int32_t i0 = 4; i0 <= 6; ++i0)
-  {
-    for (int32_t i2 = 0; i2 <= 1; ++i2)
-      t1[map3[i2]] = 0.0;
-    for (int32_t i1 = 0; i1 <= 1; ++i1)
-      t0[map1[i1]] = dat1[map0[i0] + map2[i1]];
-    mylocalkernel(&(t0[0]), &(t1[0]));
-    for (int32_t i5 = 0; i5 <= 1; ++i5)
-      dat2[map4[i0] + map6[i5]] = t1[map5[i5]];
-  }
-    """
-
-    # import pdb; pdb.set_trace()
-    sec0 = np.arange(3, dtype=np.int32)
-    sec1 = make_offset_map(root)[0]
-    sec2 = make_offset_map(root.subdims[1])[0]
-    sec3 = sec0.copy()
-    sec4 = np.empty(1)  # missing
-    sec5 = np.empty(1)  # missing
-    sec6 = sec1.copy()
-    sec7 = sec2.copy()
-    sec8 = sec0.copy()
-
-    args = [sec0, sec1, sec2, dat1.data, sec3, sec4, sec5, dat2.data, sec6, sec7, sec8]
+    args = [dat1.data, dat2.data, dat1.sections[dat1.dim.labels[1]].data, dat2.sections[dat2.dim.labels[1]].data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
 
     assert all(dat2.data == [0., 2., 3., 0., 5., 6., 0., 8., 9., 0.])
-    print("compute_double_loop_permuted_mixed PASSED", flush=True)
 
 
 def test_compute_double_loop_ragged():

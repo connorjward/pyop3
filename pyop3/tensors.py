@@ -17,11 +17,6 @@ import pyop3.utils
 from pyop3.utils import as_tuple, checked_zip, NameGenerator
 
 
-@dataclasses.dataclass(frozen=True)
-class Node:
-    value: Any
-    children: Sequence = ()
-
 
 class Dim(pytools.ImmutableRecord):
     fields = {"sizes", "permutation", "labels", "subdims"}
@@ -151,6 +146,7 @@ class Slice(FancyIndex):
 
 
 class Map(FancyIndex, abc.ABC):
+    fields = FancyIndex.fields | {"arity"}
     ...
     # fields = FancyIndex.fields | {"from_index", "arity", "name"}
     #
@@ -179,6 +175,7 @@ class IndexFunction(Map):
     and then use pymbolic maps to replace the xN with the correct inames for the
     outer domains. We could also possibly use pN (or pym.var subclass called Parameter)
     to describe parameters."""
+    fields = Map.fields | {"expr", "vardims"}
     def __init__(self, expr, arity, vardims, **kwargs):
         """
         vardims:
@@ -245,13 +242,12 @@ class NonAffineMap(Map):
 
 class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
 
-    fields = {"dim", "indicess", "dtype", "mesh", "name", "data", "max_value"}
+    fields = {"dim", "indicess", "dtype", "sections", "mesh", "name", "data", "max_value"}
 
     name_generator = pyop3.utils.MultiNameGenerator()
     prefix = "ten"
 
-    def __init__(self, dim=None, indicess=None, dtype=None, *, mesh = None, name: str = None, prefix: str=None, data=None, max_value=32):
-        name = name or self.name_generator.next(prefix or self.prefix)
+    def __init__(self, dim=None, indicess=None, dtype=None, sections=None, *, mesh = None, name: str = None, prefix: str=None, data=None, max_value=32):
         self.data = data
         self.params = {}
         self._param_namer = NameGenerator(f"{name}_p")
@@ -265,6 +261,10 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
             assert indicess is None
             indicess = [[]]
         self.indicess = indicess # self._parse_indices(dim.root, indices)
+
+        # this is a map from dim label to a data layout map (could be an index function
+        # or non-affine)
+        self.sections = sections
         # self.linear_indices
         # import pdb; pdb.set_trace()
 
@@ -274,8 +274,9 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
         super().__init__(name)
 
     @classmethod
-    def new(cls, dim=None, indicess=None, *args, **kwargs):
+    def new(cls, dim=None, indicess=None, *args, prefix=None, name=None, **kwargs):
         # import pdb; pdb.set_trace()
+        name = name or cls.name_generator.next(prefix or cls.prefix)
 
         if dim:
             if not indicess:
@@ -285,7 +286,145 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
                 indicess = [cls._parse_indices(dim, idxs) for idxs in indicess]
         else:
             assert indicess is None
-        return cls(dim, indicess, *args, **kwargs)
+
+        # import pdb; pdb.set_trace()
+        sections = cls.collect_sections(dim)
+
+        return cls(dim, indicess, sections=sections, *args, name=name, **kwargs)
+
+    @classmethod
+    def collect_sections(cls, dim):
+        # FIXME not happy with this, hopefully DimSection (with zero size) will resolve
+        if not dim:
+            return None
+
+        sections = {}
+        if not dim.subdims:
+            for label in dim.labels:
+                if cls._requires_nonaffine(dim, label):
+                    sections[label] = cls._make_offset_map(dim)[0]
+                else:
+                    x0 = pym.var("x0")
+                    sections[label] = IndexFunction(x0, 1, [(x0, label)])
+        else:
+            offset = 0
+            for i, (label, subdim) in enumerate(zip(dim.labels, dim.subdims)):
+                if cls._requires_nonaffine(dim, label):
+                    vals, _ = cls._make_offset_map(dim)
+                    for label, ten in vals.items():
+                        sections[label] = ten
+                else:
+                    x0 = pym.var("x0")
+                    sections[label] = IndexFunction(x0, 1, [(x0, label)])
+                    size = cls._get_full_dim_size(subdim)
+                    x0 = pym.var("x0")
+                    expr = x0 * size + offset
+                    sec = IndexFunction(expr, 1, [(x0, label)])
+                    sections[label] = sec
+
+                    # FIXME how does this related to maps?
+                    offset += dim.sizes[i] * size
+
+            for subdim in dim.subdims:
+                sections |= cls.collect_sections(subdim)
+        return sections
+
+    @classmethod
+    def _get_full_dim_size(cls, dim):
+        if not dim.subdims:
+            return sum(dim.sizes)
+        else:
+            return sum(size * cls._get_full_dim_size(subdim) for size, subdim in zip(dim.sizes, dim.subdims))
+
+    @classmethod
+    def _make_offset_map(cls, dim, *, imap=None):
+        # import pdb; pdb.set_trace()
+        if imap is None:
+            imap = {}
+
+        # build the thing over the entire dim (inc. multi parts) as it's easier to keep
+        # track of things
+
+        # how big does the overall map need to be?
+        npoints = 0
+        for size in dim.sizes:
+            # read the entry from the tensor if needed
+            if isinstance(size, Tensor):
+                size = cls._read_tensor(size, imap)
+            npoints += size
+
+        # construct the offset map by increasing a pointer along its length and then
+        # reshuffling/splitting at the end
+        ptr = 0
+        offsets = {}
+        for point in range(npoints):
+
+            # e.g. the 2nd point may actually be the 6th, so we need to include the right step
+            if dim.permutation:
+                point = dim.permutation[point]
+
+            subdim, label, i = cls._get_subdim(dim, point)
+
+            if label in offsets:
+                offsets[label][point] = ptr
+            else:
+                offsets[label] = {point: ptr}
+
+            # increment the pointer by the size of the step for this subdim
+            if dim.subdims:
+                ptr += cls._get_full_dim_size(subdim)
+            else:
+                ptr += 1
+
+        final = {}
+        for label, values in offsets.items():
+            subdim_id = dim.labels.index(label)
+            myvals = np.array([values[i] for i in sorted(offsets[label].keys())], dtype=np.int32)
+            assert len(myvals) == dim.sizes[subdim_id]
+            map_dim = Dim(dim.sizes[subdim_id], labels=(label,))
+            final[label] = Tensor.new(map_dim, data=myvals, dtype=myvals.dtype, prefix="sec")
+
+        return final, ptr
+
+    @classmethod
+    def _requires_nonaffine(cls, dim, label):
+        subdim_id = dim.labels.index(label)
+        check1 = isinstance(dim.sizes[subdim_id], pym.primitives.Expression) or dim.permutation
+
+        if dim.subdims:
+            check2 = False
+            for label in dim.subdims[subdim_id].labels:
+                if cls._requires_nonaffine(dim.subdims[subdim_id], label):
+                    check2 = True
+                    break
+            return check1 or check2
+        else:
+            return check1
+
+    @classmethod
+    def _get_subdim(cls, dim, point):
+        subdims = dim.subdims
+
+        if not subdims:
+            return None, None, None
+
+        bounds = list(np.cumsum(dim.sizes))
+        for i, (start, stop) in enumerate(zip([0]+bounds, bounds)):
+            if start <= point < stop:
+                stratum = i
+                break
+        return subdims[stratum], dim.labels[stratum], stratum
+
+    @classmethod
+    def _read_tensor(cls, tensor, imap):
+        # breakpoint()
+        # assume a flat tensor for now
+        assert not tensor.dim.subdims
+
+        # FIXME
+        # the tensor needs to be indexed by all of the appropriate indices
+        ptr = imap[tensor.dim.labels[0]]# - tensor.dim.root.offset
+        return tensor.data[ptr]
 
     def __getitem__(self, indicess):
         """The plan of action here is as follows:
