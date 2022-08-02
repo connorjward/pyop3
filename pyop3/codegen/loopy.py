@@ -389,24 +389,18 @@ class LoopyKernelBuilder:
             return index_expr
         dim = tensor.dim
 
-        # do a semi-deep copy (don't want to copy any Tensor stuff if that's included)
-        sections_copy = {}
-        for label, sections in tensor.sections.items():
-            sections_copy[label] = sections.copy()
-
         for idx in indices:
             assert dim is not None
 
             dim_expr = self._as_expr(idx, within_loops)
 
-            subdim_id = dim.labels.index(idx.label)
+            subdim_id = idx.subdim_id
 
             # Every dim uses a section to map the dim index (from the slice/map + iname)
             # onto a location in the data structure. For nice regular data this can just be
             # the index multiplied by the size of the inner dims (e.g. dat[4*i + j]), but for
             # ragged things we need to always have a map for the outer dims.
-            import pdb; pdb.set_trace()
-            sec = sections_copy[dim.labels[subdim_id]].pop(0)
+            sec = dim.sections[subdim_id]
 
             if isinstance(sec, IndexFunction):
                 (from_var, label), = sec.vardims

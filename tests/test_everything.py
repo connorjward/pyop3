@@ -306,7 +306,7 @@ def test_compute_double_loop_permuted():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    args = [dat1.data, dat2.data, dat1.sections[dat1.dim.label][0].data, dat2.sections[dat2.dim.label][0].data]
+    args = [dat1.data, dat2.data, dat1.dim.sections[0].data, dat2.dim.sections[0].data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
     fn(*(d.ctypes.data for d in args))
 
@@ -542,7 +542,7 @@ def test_subset():
             data=np.array([2, 3, 5, 0], dtype=np.int32), dtype=np.int32, prefix="subset")
 
     i1 = pyop3.index([[Slice.from_dim(subset_dim, 0)]])
-    subset = NonAffineMap(subset_tensor[i1])
+    subset = NonAffineMap(subset_tensor[i1], subdim_id=0)
 
     iterset = [[subset]]
     code = lp.make_kernel(
@@ -595,7 +595,7 @@ def test_map():
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
     i1 = pyop3.index([[Slice.from_dim(root, 0)]])
-    map = NonAffineMap(map_tensor[i1])
+    map = NonAffineMap(map_tensor[i1], subdim_id=0)
     i2 = [[map]]
     expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
 
@@ -636,7 +636,7 @@ def test_closure_ish():
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
     i1 = pyop3.index([[Slice.from_dim(root, 0)]]) # loop over 'cells'
-    i2 = [[i1[0][0]], [NonAffineMap(map0[i1])]]  # access 'cell' and 'edge' data
+    i2 = [[i1[0][0]], [NonAffineMap(map0[i1], subdim_id=1)]]  # access 'cell' and 'edge' data
     expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
@@ -731,7 +731,7 @@ def test_multimap():
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
     i1 = pyop3.index([[Slice.from_dim(root, 0)]])
-    i2 = [[NonAffineMap(map0[i1])], [NonAffineMap(map1[i1])]]
+    i2 = [[NonAffineMap(map0[i1], subdim_id=0)], [NonAffineMap(map1[i1], subdim_id=0)]]
     expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
@@ -741,8 +741,7 @@ def test_multimap():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    import pdb; pdb.set_trace()
-    args = [sec0, map0.data, sec1, sec2, sec3, sec4, map1.data, sec5, sec6, sec7, dat1.data, sec8, dat2.data, sec9]
+    args = [map0.data, map1.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
@@ -778,7 +777,7 @@ def test_multimap_with_scalar():
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
     i1 = pyop3.index([[Slice.from_dim(root, 0)]])
-    i2 = [[i1[0][0]], [NonAffineMap(map0[i1])]]
+    i2 = [[i1[0][0]], [NonAffineMap(map0[i1], subdim_id=0)]]
     expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
@@ -788,8 +787,7 @@ def test_multimap_with_scalar():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    import pdb; pdb.set_trace()
-    args = [sec0, sec1, map0.data, sec2, sec3, sec4, dat1.data, sec5, dat2.data, sec6]
+    args = [map0.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
@@ -824,9 +822,9 @@ def test_map_composition():
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
     i1 = pyop3.index([[Slice.from_dim(root, 0)]])
-    map0 = NonAffineMap(map0_tensor[i1])
+    map0 = NonAffineMap(map0_tensor[i1], subdim_id=0)
     i2 = [[map0]]
-    map1 = NonAffineMap(map1_tensor[i2])
+    map1 = NonAffineMap(map1_tensor[i2], subdim_id=0)
     i3 = [[map1]]
     expr = pyop3.Loop(i1, kernel(dat1[i3], dat2[i1]))
 
@@ -874,7 +872,7 @@ def test_mixed_arity_map():
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
     i1 = pyop3.index([[Slice.from_dim(root, 0)]])
-    map = NonAffineMap(map_tensor[i1])
+    map = NonAffineMap(map_tensor[i1], subdim_id=0)
     i2 = [[map]]
     expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
 
@@ -885,8 +883,7 @@ def test_mixed_arity_map():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    import pdb; pdb.set_trace()
-    args = [sec0, nnz.data, sec1, map_tensor.data, sec2, sec3, sec4, dat1.data, sec5, dat2.data, sec6]
+    args = [nnz.data, map_tensor.data, dat1.data, dat2.data, map_tensor.dim.sections[0].data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
@@ -920,9 +917,9 @@ def test_iter_map_composition():
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
     i1 = pyop3.index([[Slice.from_dim(root, 0)]])
-    map0 = NonAffineMap(map0_tensor[i1])
+    map0 = NonAffineMap(map0_tensor[i1], subdim_id=0)
     i2 = [[map0]]
-    map1 = NonAffineMap(map1_tensor[i2])
+    map1 = NonAffineMap(map1_tensor[i2], subdim_id=0)
     i3 = [[map1]]
     expr = pyop3.Loop(p := pyop3.index(i3), kernel(dat1[p], dat2[p]))
 
