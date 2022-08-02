@@ -340,7 +340,7 @@ def test_compute_double_loop_permuted_mixed():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    args = [dat1.data, dat2.data, dat1.sections[dat1.dim.labels[1]].data, dat2.sections[dat2.dim.labels[1]].data]
+    args = [dat1.data, dat2.data, dat1.sections[dat1.dim.labels[1]][0].data, dat2.sections[dat2.dim.labels[1]][0].data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
@@ -382,7 +382,7 @@ def test_compute_double_loop_ragged():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    args = [nnz.data, dat1.data, dat2.data, dat1.sections["dim0"].data, dat2.sections["dim0"].data]
+    args = [nnz.data, dat1.data, dat2.data, dat1.sections["dim0"][0].data, dat2.sections["dim0"][0].data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
@@ -424,8 +424,8 @@ def test_compute_double_loop_ragged_inner():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    sec0 = dat1.sections["dim0"].data
-    sec1 = dat2.sections["dim0"].data
+    sec0 = dat1.sections["dim0"][0].data
+    sec1 = dat2.sections["dim0"][0].data
 
     args = [nnz.data, dat1.data, dat2.data, sec0, sec1]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
@@ -468,23 +468,10 @@ def test_compute_double_loop_ragged_mixed():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    """
-  for (int32_t i0 = 4; i0 <= 8; ++i0)
-  {
-    p0 = nnz[map0[i0] + -4];
-    for (int32_t i1 = 0; i1 <= -1 + p0; ++i1)
-    {
-      t1[0] = 0.0;
-      t0[0] = dat1[map1[i0] + map2[i1]];
-      mylocalkernel(&(t0[0]), &(t1[0]));
-      dat2[map3[i0] + map4[i1]] = t1[0];
-    }
-  }
-    """
+    sec0 = dat1.sections[dat1.dim.labels[1]][0]
+    sec1 = dat2.sections[dat2.dim.labels[1]][0]
 
-    import pdb; pdb.set_trace()
-
-    args = [sec0, nnz.data, sec1, sec2, dat1.data, sec3, sec4, dat2.data, sec5, sec6]
+    args = [nnz.data, dat1.data, dat2.data, sec0.data, sec1.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
@@ -532,21 +519,15 @@ def test_compute_ragged_permuted():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    import pdb; pdb.set_trace()
+    sec0 = dat1.sections[dat1.dim.labels[0]][0]
+    sec1 = dat2.sections[dat2.dim.labels[0]][0]
 
-    args = [sec0, nnz.data, sec1, sec2, dat1.data, sec3, sec4, dat2.data, sec5, sec6]
+    args = [nnz.data, dat1.data, dat2.data, sec0.data, sec1.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
 
-    # root = Dim(6, permutation=(3, 2, 5, 0, 4, 1))
-    # nnz_ = np.array([3, 2, 0, 1, 3, 2], dtype=np.int32)
-    # FIXME
-    assert all(sec0 == np.arange(6))
-    assert all(sec1 == np.array([3, 9, 1, 0, 6, 1]))
-
     assert all(dat2.data == dat1.data + 1)
-    print("compute_ragged_permuted PASSED", flush=True)
 
 
 def test_subset():
@@ -665,8 +646,7 @@ def test_closure_ish():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    import pdb; pdb.set_trace()
-    args = [sec0, sec1, map0.data, sec2, sec3, sec4, dat1.data, sec5, dat2.data, sec6]
+    args = [map0.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
@@ -712,8 +692,7 @@ def test_index_function():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    import pdb; pdb.set_trace()
-    args = [sec0, sec1, sec2, dat1.data, sec3, dat2.data, sec4]
+    args = [dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))

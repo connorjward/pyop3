@@ -405,6 +405,7 @@ class LoopyKernelBuilder:
             # onto a location in the data structure. For nice regular data this can just be
             # the index multiplied by the size of the inner dims (e.g. dat[4*i + j]), but for
             # ragged things we need to always have a map for the outer dims.
+            import pdb; pdb.set_trace()
             sec = sections_copy[dim.labels[subdim_id]].pop(0)
 
             if isinstance(sec, IndexFunction):

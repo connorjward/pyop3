@@ -322,47 +322,60 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
         assert not dim.permutation
 
         # it is not possible for dim parts at the same level to have the same label
-        assert len(unique(dim.labels)) == len(dim.labels)
+        # assert len(unique(dim.labels)) == len(dim.labels)
+        # actually it may be the case for temporaries
 
         sections = collections.defaultdict(list)
         offset = 0
         for subdim_id, label in enumerate(dim.labels):
+
+            idxs = []
+
             dsize = dim.sizes[subdim_id]
             if isinstance(dsize, Tensor):
                 for idx_map in cls._generate_indices(dsize):
-                    # parent_label_size_tracker[label].append((mylabel, mysize))
-                    sections[label].append(offset)
+                    idxs.append(offset)
                     if dim.subdims:
                         offset += cls._get_full_dim_size(dim.subdims[subdim_id], idx_map)
                     else:
                         offset += 1
+            elif dsize is None:
+                # TODO I hate this bit - fix empty dims
+                idxs.append(offset)
+                offset += 1
             else:
                 for i in range(dsize):
-                    sections[label].append(offset)
+                    idxs.append(offset)
                     if dim.subdims:
                         offset += cls._get_full_dim_size(dim.subdims[subdim_id], {label: i})
                     else:
                         offset += 1
 
+            sections[label].append(np.array(idxs, dtype=np.int32))
+
+        # import pdb; pdb.set_trace()
+
         # convert to a nice index-type representation
-        new_sections = {}
-        for label, idxs in sections.items():
-            subdim_id = dim.labels.index(label)
+        new_sections = collections.defaultdict(list)
+        for label, idxss in sections.items():
+            for idxs in idxss:
+                # see if we can represent this as an affine transformation or not
+                steps = set(idxs[1:] - idxs[:-1])
+                if len(steps) == 0:
+                    start = idxs[0]
+                    x0 = pym.var("x0")
+                    expr = x0 + start
+                    new_section = IndexFunction(expr, 1, [(x0, label)])
+                elif len(steps) == 1:
+                    start = idxs[0]
+                    step, = steps
+                    x0 = pym.var("x0")
+                    expr = x0 * step  + start
+                    new_section = IndexFunction(expr, 1, [(x0, label)])
+                else:
+                    new_section = Tensor.new(Dim(len(idxs), labels=(label,)), data=idxs, prefix="sec", dtype=np.int32)
 
-            idxs = np.array(idxs, dtype=np.int32)
-
-            # this is hard
-            steps = set(idxs[1:] - idxs[:-1])
-            start = idxs[0]
-            if len(steps) == 1:
-                step, = steps
-                x0 = pym.var("x0")
-                expr = x0 * step  + start
-                new_section = IndexFunction(expr, 1, [(x0, label)])
-            else:
-                new_section = Tensor.new(Dim(len(idxs), labels=(label,)), data=idxs, prefix="sec", dtype=np.int32)
-
-            new_sections[label] = [new_section]
+                new_sections[label].append(new_section)
         return new_sections
 
     @classmethod
@@ -545,9 +558,14 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
 
     @classmethod
     def _read_tensor(cls, tensor, idx_map):
+        # semi-deep copy
+        sections_copy = {}
+        for label, vals in tensor.sections.items():
+            sections_copy[label] = vals.copy()
+
         ptr = 0
         for label, idx in idx_map.items():
-            section = tensor.sections[label]
+            section = sections_copy[label].pop(0)
 
             if isinstance(section, Tensor):
                 ptr += section.data[idx]
