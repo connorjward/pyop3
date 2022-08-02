@@ -14,7 +14,7 @@ import pymbolic as pym
 import pytools
 import pyop3.exprs
 import pyop3.utils
-from pyop3.utils import as_tuple, checked_zip, NameGenerator
+from pyop3.utils import as_tuple, checked_zip, NameGenerator, unique
 
 
 
@@ -24,12 +24,12 @@ class Dim(pytools.ImmutableRecord):
     _label_generator = NameGenerator("dim")
 
     def __init__(self, sizes=(), *, permutation=None, labels=None, subdims=()):
-        if permutation and not all(isinstance(s, numbers.Integral) for s in sizes):
-            raise NotImplementedError("This turns out to be very complicated")
-            
-
         if not isinstance(sizes, collections.abc.Sequence):
             sizes = (sizes,)
+
+        if permutation and not all(isinstance(s, numbers.Integral) for s in sizes):
+            raise NotImplementedError("This turns out to be very complicated")
+
         if not labels:
             labels = tuple(self._label_generator.next() for _ in sizes)
 
@@ -151,23 +151,10 @@ class Slice(FancyIndex):
 
 class Map(FancyIndex, abc.ABC):
     fields = FancyIndex.fields | {"arity"}
-    ...
-    # fields = FancyIndex.fields | {"from_index", "arity", "name"}
-    #
-    # _name_generator = NameGenerator("map")
-    #
-    # def __init__(self, from_index, dim, arity, *, name=None, **kwargs):
-    #     if not name:
-    #         name = self._name_generator.next()
-    #
-    #     self.from_index = from_index
-    #     # self.arity = arity
-    #     self.name = name
-    #     super().__init__(dim=dim, **kwargs)
-    #
-    # @property
-    # def index(self):
-    #     return LoopIndex(self)
+
+    def __init__(self, arity, **kwargs):
+        self.arity = arity
+        super().__init__(**kwargs)
 
     @property
     def size(self):
@@ -188,12 +175,11 @@ class IndexFunction(Map):
             it (needed to select the right iname) - note, this is ordered
         """
         self.expr = expr
-        self.arity = arity
         self.vardims = vardims
 
         # the dim label associated with the map is the final entry in vardims
         label = vardims[-1][1]
-        super().__init__(label, **kwargs)
+        super().__init__(label=label, arity=arity, **kwargs)
 
     @property
     def size(self):
@@ -212,7 +198,8 @@ class NonAffineMap(Map):
             assert kwargs["label"] == self.tensor.indices[-1].label
         else:
             kwargs["label"] = self.tensor.indices[-1].label
-        super().__init__(**kwargs)
+        arity = self.tensor.indices[-1].size
+        super().__init__(arity=arity, **kwargs)
 
     @property
     def input_indices(self):
@@ -221,27 +208,6 @@ class NonAffineMap(Map):
     @property
     def map(self):
         return self.tensor
-
-    @property
-    def arity(self):
-        return self.tensor.indices[-1].size
-        # dim = self.tensor.dim
-        # while dim.subdims:
-        #     dim = dim.subdim
-        # return dim.size
-
-    # @property
-    # def start(self):
-    #     return 0
-    #
-    # @property
-    # def stop(self):
-    #     return self.arity
-    #
-    # @property
-    # def step(self):
-    #     return 1
-
 
 
 class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
@@ -302,16 +268,21 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
         if not dim:
             return None
 
-        # this is a map from dim label (should be unique for each tensor) to a tensor
-        # or index function
+        # this is a map from dim label to a tensor or index function. This is not
+        # unique for each tensor so we need to construct a stack of them.
         if dim.permutation:
             secs = cls._collect_sections_permuted(dim)
         else:
             secs = cls._collect_sections_unpermuted(dim)
 
+        # make a clever stack
         for subdim in dim.subdims:
-            secs |= cls.collect_sections(subdim)
-        # import pdb; pdb.set_trace()
+            for label, val in cls.collect_sections(subdim).items():
+                if label in secs:
+                    secs[label].extend(val)
+                else:
+                    secs[label] = val
+
         return secs
 
     @classmethod
@@ -338,15 +309,22 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
             else:
                 offset += 1
 
-        return sections, offset
+        new_sections = {}
+        for label, vals in sections.items():
+            idxs = np.array([sections[label][i] for i in sorted(sections[label].keys())], dtype=np.int32)
+            new_section = Tensor.new(Dim(len(idxs), labels=(label,)), data=idxs, prefix="sec", dtype=np.int32)
+            new_sections[label] = [new_section]
+
+        return new_sections
 
     @classmethod
     def _collect_sections_unpermuted(cls, dim):
         assert not dim.permutation
 
+        # it is not possible for dim parts at the same level to have the same label
+        assert len(unique(dim.labels)) == len(dim.labels)
+
         sections = collections.defaultdict(list)
-        # used to create a tensor at the end
-        # parent_label_size_tracker = collections.defaultdict(list)
         offset = 0
         for subdim_id, label in enumerate(dim.labels):
             dsize = dim.sizes[subdim_id]
@@ -375,15 +353,16 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
 
             # this is hard
             steps = set(idxs[1:] - idxs[:-1])
+            start = idxs[0]
             if len(steps) == 1:
                 step, = steps
                 x0 = pym.var("x0")
-                expr = x0 * step  # + offset
+                expr = x0 * step  + start
                 new_section = IndexFunction(expr, 1, [(x0, label)])
             else:
                 new_section = Tensor.new(Dim(len(idxs), labels=(label,)), data=idxs, prefix="sec", dtype=np.int32)
 
-            new_sections[label] = new_section
+            new_sections[label] = [new_section]
         return new_sections
 
     @classmethod

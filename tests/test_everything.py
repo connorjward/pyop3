@@ -306,7 +306,7 @@ def test_compute_double_loop_permuted():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    args = [dat1.data, dat2.data, dat1.sections[dat1.dim.label].data, dat2.sections[dat2.dim.label].data]
+    args = [dat1.data, dat2.data, dat1.sections[dat1.dim.label][0].data, dat2.sections[dat2.dim.label][0].data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
     fn(*(d.ctypes.data for d in args))
 
@@ -403,10 +403,6 @@ def test_compute_double_loop_ragged_inner():
     dat1 = Tensor.new(dims, indicess=iterset, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, indicess=iterset, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
 
-    # import pdb; pdb.set_trace()
-    # this is the problem
-    # dat1[pyop3.index(iterset)]
-
     code = lp.make_kernel(
         "{ [i]: 0 <= i < n }",
         "y[i] = x[i] + 1",
@@ -428,43 +424,15 @@ def test_compute_double_loop_ragged_inner():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    """
-  for (int32_t i0 = 0; i0 <= 4; ++i0)
-  {
-    p0[0] = nnz[map0[i0]];
-    for (int32_t i1 = 0; i1 <= -1 + p0; ++i1)
-    {
-      t1[0] = 0.0;
-      t0[0] = dat1[map1[i0] + map2[i1]];
-      mylocalkernel(&(t0[0]), &(t1[0]));
-      dat2[map3[i0] + map4[i1]] = t1[0];
-    }
-  }
-    """
+    sec0 = dat1.sections["dim0"].data
+    sec1 = dat2.sections["dim0"].data
 
-    import pdb; pdb.set_trace()
-    sec0 = make_offset_map(nnz.dim)[0]
-    sec1 = np.arange(3, dtype=np.int32)
-    sec2 = make_offset_map(dims)[0]
-    # FIXME
-    # sec3 = make_offset_map(subdim, dims)[0]
-    sec3 = sec1.copy()
-    sec4 = sec1.copy()
-    sec5 = np.empty(1, dtype=np.int32)  # missing
-    sec6 = np.empty(1, dtype=np.int32)  # missing
-    sec7 = sec2.copy()
-    sec8 = sec3.copy()
-    sec9 = sec1.copy()
-
-    # import pdb; pdb.set_trace()
-
-    args = [sec0, nnz.data, sec1, sec2, sec3, dat1.data, sec4, sec5, sec6, dat2.data, sec7, sec8, sec9]
+    args = [nnz.data, dat1.data, dat2.data, sec0, sec1]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
 
     assert all(dat2.data == dat1.data + 1)
-    print("compute_double_loop_ragged_inner PASSED", flush=True)
 
 
 def test_compute_double_loop_ragged_mixed():
@@ -564,31 +532,7 @@ def test_compute_ragged_permuted():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    """
-  for (int32_t i0 = 0; i0 <= 5; ++i0)
-  {
-    p0 = nnz[map0[i0]];
-    for (int32_t i1 = 0; i1 <= -1 + p0; ++i1)
-    {
-      t1[0] = 0.0;
-      t0[0] = dat1[map1[i0] + map2[i1]];
-      mylocalkernel(&(t0[0]), &(t1[0]));
-      dat2[map3[i0] + map4[i1]] = t1[0];
-    }
-  }
-    """
-
-    sec0 = make_offset_map(nnz.dim)[0]
-    sec1 = make_offset_map(dims)[0]
-    # FIXME
-    # map2 = make_offset_map(subdim, dims)[0]
-    sec2 = np.arange(11, dtype=np.int32)
-    sec3 = np.empty(1, dtype=np.int32)  # missing
-    sec4 = np.empty(1, dtype=np.int32)  # missing
-    sec5 = sec1.copy()
-    sec6 = sec2.copy()
-
-    # import pdb; pdb.set_trace()
+    import pdb; pdb.set_trace()
 
     args = [sec0, nnz.data, sec1, sec2, dat1.data, sec3, sec4, dat2.data, sec5, sec6]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
@@ -640,34 +584,13 @@ def test_subset():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    """
-    for (int32_t i1 = 0; i1 <= 3; ++i1)
-    {
-      t1[0] = 0.0;
-      i0 = subset0[map0[i1] + map1[0]];
-      t0[0] = dat1[map2[i0]];
-      mylocalkernel(&(t0[0]), &(t1[0]));
-      dat2[map3[i0]] = t1[0];
-    }
-    """
-
-
-    sec0 = make_offset_map(subset_tensor.dim)[0]
-    sec1 = make_offset_map(dims)[0]
-    sec2 = np.empty(1, dtype=np.int32)  # missing
-    sec3 = sec2.copy()  # missing
-    sec4 = sec0.copy()
-    sec5 = sec1.copy()
-
-    # import pdb; pdb.set_trace()
-    args = [subset_tensor.data, sec0, sec1, dat1.data, sec2, sec3, dat2.data, sec4, sec5]
+    args = [subset_tensor.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
 
     assert all(dat2.data[[2, 3, 5, 0]] == dat1.data[[2, 3, 5, 0]] + 1)
     assert all(dat2.data[[1, 4]] == 0)
-    print("test_subset PASSED", flush=True)
 
 
 def test_map():
@@ -677,7 +600,7 @@ def test_map():
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(5, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
 
-    map_tensor = Tensor.new(root.copy(subdims=(Dim(2, labels=(root.labels[0],)),)),
+    map_tensor = Tensor.new(root.copy(subdims=(Dim(2, labels=(dims.labels[0],)),)),
             data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32), dtype=np.int32, prefix="map")
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 2 }",
@@ -702,22 +625,13 @@ def test_map():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    sec0 = np.arange(2, dtype=np.int32)
-    sec1 = make_offset_map(map_tensor.dim)[0]
-    sec2 = make_offset_map(map_tensor.dim.subdim)[0]
-    sec3 = make_offset_map(root)[0]
-    sec4 = np.empty(1, dtype=np.int32)
-    sec5 = sec3.copy()
-
-    # import pdb; pdb.set_trace()
-    args = [sec0, map_tensor.data, sec1, sec2, sec3, dat1.data, sec4, dat2.data, sec5]
+    args = [map_tensor.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
 
     # from [1, 2, 0, 2, 0, 1, 3, 4, 2, 1]
     assert all(dat2.data == np.array([1+2, 0+2, 0+1, 3+4, 2+1], dtype=np.int32))
-    print("test_map PASSED", flush=True)
 
 
 def test_closure_ish():
@@ -751,16 +665,7 @@ def test_closure_ish():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    sec0 = make_offset_map(root)[0]
-
-    sec1 = np.arange(3, dtype=np.int32)
-    sec2 = make_offset_map(map0.dim)[0]
-    sec3 = make_offset_map(map0.dim.subdim)[0]
-    sec4 = make_offset_map(root)[0]
-
-    sec5 = np.empty(1, dtype=np.int32)
-    sec6 = make_offset_map(root)[0]
-
+    import pdb; pdb.set_trace()
     args = [sec0, sec1, map0.data, sec2, sec3, sec4, dat1.data, sec5, dat2.data, sec6]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
@@ -807,15 +712,7 @@ def test_index_function():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    sec0 = make_offset_map(root)[0]
-
-    sec1 = np.arange(3, dtype=np.int32)
-    sec2 = make_offset_map(root)[0]
-
-    sec3 = np.empty(1, dtype=np.int32)
-
-    sec4 = make_offset_map(root)[0]
-
+    import pdb; pdb.set_trace()
     args = [sec0, sec1, sec2, dat1.data, sec3, dat2.data, sec4]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
@@ -865,20 +762,7 @@ def test_multimap():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    sec0 = np.arange(2, dtype=np.int32)
-    sec1 = make_offset_map(map0.dim)[0]
-    sec2 = make_offset_map(map0.dim.subdim)[0]
-    sec3 = make_offset_map(root)[0]
-
-    sec4 = sec0 + 2  # apply an offset
-    sec5 = make_offset_map(map1.dim)[0]
-    sec6 = make_offset_map(map1.dim.subdim)[0]
-    sec7 = make_offset_map(root)[0]
-
-    sec8 = np.empty(1, dtype=np.int32)
-
-    sec9 = make_offset_map(root)[0]
-
+    import pdb; pdb.set_trace()
     args = [sec0, map0.data, sec1, sec2, sec3, sec4, map1.data, sec5, sec6, sec7, dat1.data, sec8, dat2.data, sec9]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
@@ -925,17 +809,7 @@ def test_multimap_with_scalar():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    sec0 = make_offset_map(root)[0]
-
-    sec1 = np.arange(3, dtype=np.int32)
-    sec2 = make_offset_map(map0.dim)[0]
-    sec3 = make_offset_map(map0.dim.subdim)[0]
-    sec4 = make_offset_map(root)[0]
-
-    sec5 = np.empty(1, dtype=np.int32)
-
-    sec6 = make_offset_map(root)[0]
-
+    import pdb; pdb.set_trace()
     args = [sec0, sec1, map0.data, sec2, sec3, sec4, dat1.data, sec5, dat2.data, sec6]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
@@ -984,30 +858,13 @@ def test_map_composition():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    sec0 = np.arange(0, 4, 2, dtype=np.int32)
-    sec1 = np.arange(2, dtype=np.int32)
-
-    sec2 = make_offset_map(map0_tensor.dim)[0]
-    sec3 = make_offset_map(map0_tensor.dim.subdims[0], map0_tensor.dim)[0]
-
-    sec4 = make_offset_map(map1_tensor.dim)[0]
-    sec5 = make_offset_map(map1_tensor.dim.subdims[0])[0]
-
-    sec6 = make_offset_map(root, dims)[0]
-
-    sec7 = np.empty(1, dtype=np.int32)  # missing
-
-    sec8 = sec6.copy()
-
-    # import pdb; pdb.set_trace()
-    args = [sec0, sec1, map0_tensor.data, map1_tensor.data, sec2, sec3, sec4, sec5, sec6, dat1.data, sec7, dat2.data, sec8]
+    args = [map0_tensor.data, map1_tensor.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
 
     ans = [4+1+0+2, 3+2+0+2, 3+2+4+1, 4+2+1+3, 0+2+4+1]
     assert all(dat2.data == np.array(ans, dtype=np.int32))
-    print("test_map_composition PASSED", flush=True)
 
 
 def test_mixed_arity_map():
@@ -1049,33 +906,7 @@ def test_mixed_arity_map():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    """
-  for (int32_t i0 = 0; i0 <= 4; ++i0)
-  {
-    t1[0] = 0.0;
-    j0 = i0;
-    for (int32_t i1 = 0; i1 <= 1; ++i1)
-    {
-      j2 = i1;
-      j0 = i0;
-      j1 = imap0[map0[j0] + map1[j2]];
-      t0[map2[i1]] = dat1[map3[j1]];
-    }
-    mylocalkernel(&(t0[0]), &(t1[0]));
-    j0 = i0;
-    dat2[map4[j0]] = t1[0];
-  }
-    """
-
-    sec0 = np.arange(3, dtype=np.int32)
-    sec1 = sec0.copy()
-    sec2 = make_offset_map(map_tensor.dim)[0]
-    # sec3 = make_offset_map(map_tensor.dim.get_child(map_tensor.dim.root), map_tensor.dim)[0]
-    sec3 = sec0.copy()
-    sec4 = make_offset_map(root, dims)[0]
-    sec5 = np.empty(1, dtype=np.int32)
-    sec6 = sec4.copy()
-
+    import pdb; pdb.set_trace()
     args = [sec0, nnz.data, sec1, map_tensor.data, sec2, sec3, sec4, dat1.data, sec5, dat2.data, sec6]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
@@ -1123,24 +954,7 @@ def test_iter_map_composition():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    sec0 = make_offset_map(map0_tensor.dim)[0]
-    sec1 = make_offset_map(map0_tensor.dim.subdims[0])[0]
-    sec2 = make_offset_map(map1_tensor.dim)[0]
-    sec3 = make_offset_map(map1_tensor.dim.subdims[0])[0]
-    sec4 = make_offset_map(dims)[0]
-    sec5 = np.empty(1, dtype=np.int32)  # missing
-    sec6 = np.empty(1, dtype=np.int32)  # missing
-    sec7 = np.empty(1, dtype=np.int32)  # missing
-    sec8 = np.empty(1, dtype=np.int32)  # missing
-    sec9 = np.empty(1, dtype=np.int32)  # missing
-    sec10 = sec0.copy()
-    sec11 = sec1.copy()
-    sec12 = sec2.copy()
-    sec13 = sec3.copy()
-    sec14 = sec4.copy()
-
-    # import pdb; pdb.set_trace()
-    args = [map0_tensor.data, map1_tensor.data, sec0, sec1, sec2, sec3, sec4, dat1.data, sec5, sec6, sec7, sec8, sec9, dat2.data, sec10, sec11, sec12, sec13, sec14]
+    args = [map0_tensor.data, map1_tensor.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))

@@ -389,12 +389,13 @@ class LoopyKernelBuilder:
             return index_expr
         dim = tensor.dim
 
-        # import pdb; pdb.set_trace()
+        # do a semi-deep copy (don't want to copy any Tensor stuff if that's included)
+        sections_copy = {}
+        for label, sections in tensor.sections.items():
+            sections_copy[label] = sections.copy()
+
         for idx in indices:
             assert dim is not None
-
-            # so we have a map from dim label -> iname
-            # now we need to be able to pass dim_expr into a map/index function (e.g. *4)
 
             dim_expr = self._as_expr(idx, within_loops)
 
@@ -404,18 +405,13 @@ class LoopyKernelBuilder:
             # onto a location in the data structure. For nice regular data this can just be
             # the index multiplied by the size of the inner dims (e.g. dat[4*i + j]), but for
             # ragged things we need to always have a map for the outer dims.
-            # section_name = self._namer.next("sec")
-            # index_expr += pym.subscript(pym.var(section_name), dim_expr + dim.offsets[subdim_id])
-            # self.kernel_data.append(lp.GlobalArg(section_name, shape=None, dtype=np.int32))
-            # import pdb; pdb.set_trace()
-            sec = tensor.sections[dim.labels[subdim_id]]
+            sec = sections_copy[dim.labels[subdim_id]].pop(0)
 
             if isinstance(sec, IndexFunction):
                 (from_var, label), = sec.vardims
                 assert label == dim.labels[subdim_id]
                 index_expr += pym.substitute(sec.expr, {from_var: dim_expr})
             elif isinstance(sec, Tensor):
-                # import pdb; pdb.set_trace()
                 myexpr = self.handle_assignment(sec, sec.indices, copy.deepcopy(saved_within_loops))
                 index_expr += pym.subscript(pym.var(sec.name), myexpr)
                 self._section_data.append(lp.GlobalArg(sec.name, shape=None, dtype=np.int32))
