@@ -1,0 +1,49 @@
+#!/usr/bin/env python
+
+import argparse
+import subprocess
+
+import matplotlib as mpl
+import numpy as np
+import pymbolic as pym
+import pyop3
+import svgwrite
+
+
+COLORMAP = mpl.cm.get_cmap("viridis")
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("-o", dest="filename", type=str, default="tensor.svg")
+    return parser.parse_args()
+
+
+def draw_array(drawing, dim):
+    colors = [COLORMAP(val) for val in np.linspace(0, 1, len(dim.sizes))]
+
+    if dim.permutation:
+        raise NotImplementedError
+    else:
+        sections, sizess = pyop3.Tensor._collect_sections_unpermuted_array(dim, include_size=True)
+
+    for dsize, ptrs, steps, color in zip(dim.sizes, sections, sizess, colors):
+
+        color_css = f"rgb({','.join([str(int(c*256)) for c in color[:3]])})"
+
+        # breakpoint()
+
+        for ptr, step in zip(ptrs, steps):
+            pos = (int(ptr)*100, 0)
+            size = (int(step)*100, 5*10)
+            rect = drawing.rect(pos, size, fill=color_css, stroke_width=3, stroke="black")
+            drawing.add(rect)
+
+
+if __name__ == "__main__":
+    args = parse_args()
+    drawing = svgwrite.Drawing(args.filename)
+    tensor = pyop3.Tensor.new(pyop3.Dim((4, 5)), dtype=np.float64)
+    # tensor = pyop3.Tensor.new(pyop3.Dim((3, 2), permutation=(3, 2, 1, 4, 0)), dtype=np.float64)
+    draw_array(drawing, tensor.dim)
+    drawing.save()

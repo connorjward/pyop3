@@ -305,7 +305,7 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
         return new_sections
 
     @classmethod
-    def _collect_sections_unpermuted(cls, dim):
+    def _collect_sections_unpermuted_array(cls, dim, include_size=False):
         assert not dim.permutation
 
         # it is not possible for dim parts at the same level to have the same label
@@ -313,35 +313,49 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
         # actually it may be the case for temporaries
 
         sections = []
+        all_sizes = []
         offset = 0
         for subdim_id, label in enumerate(dim.labels):
 
             idxs = []
+            sizes = []
 
             dsize = dim.sizes[subdim_id]
             if isinstance(dsize, Tensor):
                 for idx_map in cls._generate_indices(dsize):
                     idxs.append(offset)
                     if dim.subdims:
-                        offset += cls._get_full_dim_size(dim.subdims[subdim_id], idx_map=idx_map)
+                        size = cls._get_full_dim_size(dim.subdims[subdim_id], idx_map=idx_map)
                     else:
-                        offset += 1
+                        size = 1
+                    sizes.append(size)
+                    offset += size
             elif dsize is None:
                 # TODO I hate this bit - fix empty dims
                 idxs.append(offset)
+                sizes.append(1)
                 offset += 1
             else:
                 for i in range(dsize):
                     idxs.append(offset)
                     if dim.subdims:
-                        offset += cls._get_full_dim_size(dim.subdims[subdim_id], idx_map={label: [i]})
+                        size = cls._get_full_dim_size(dim.subdims[subdim_id], idx_map={label: [i]})
                     else:
-                        offset += 1
+                        size = 1
+                    sizes.append(size)
+                    offset += size
 
             sections.append(np.array(idxs, dtype=np.int32))
+            all_sizes.append(np.array(sizes, dtype=np.int32))
 
-        # import pdb; pdb.set_trace()
+        if include_size:
+            return sections, all_sizes
+        else:
+            return sections
 
+    @classmethod
+    def _collect_sections_unpermuted(cls, dim):
+        sections = cls._collect_sections_unpermuted_array(dim)
         # convert to a nice index-type representation
         new_sections = []
         for subdim_id, idxs in enumerate(sections):
