@@ -467,8 +467,8 @@ def test_compute_double_loop_ragged_mixed():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    sec0 = dat1.sections[dat1.dim.labels[1]][0]
-    sec1 = dat2.sections[dat2.dim.labels[1]][0]
+    sec0 = dat1.dim.sections[1]
+    sec1 = dat2.dim.sections[1]
 
     args = [nnz.data, dat1.data, dat2.data, sec0.data, sec1.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)

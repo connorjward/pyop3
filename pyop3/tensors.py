@@ -1,3 +1,4 @@
+import copy
 import functools
 import numpy as np
 import operator
@@ -264,13 +265,13 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
 
 
     @classmethod
-    def _collect_sections_permuted(cls, dim, *, imap=None):
+    def _collect_sections_permuted(cls, dim, *, idx_map=None):
         assert dim.permutation
         if not all(isinstance(s, numbers.Integral) for s in dim.sizes):
             raise NotImplementedError
 
-        if not imap:
-            imap = []
+        if not idx_map:
+            idx_map = collections.defaultdict(list)
 
         sections = collections.defaultdict(dict)
         offset = 0
@@ -283,7 +284,9 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
 
             # increment the pointer by the size of the step for this subdim
             if dim.subdims:
-                offset += cls._get_full_dim_size(subdim, idx_map=imap+[(label, subdim_id, pt)])
+                new_idx_map = copy.deepcopy(idx_map)
+                new_idx_map[label].append(pt)
+                offset += cls._get_full_dim_size(subdim, idx_map=new_idx_map)
             else:
                 offset += 1
 
@@ -329,7 +332,7 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
                 for i in range(dsize):
                     idxs.append(offset)
                     if dim.subdims:
-                        offset += cls._get_full_dim_size(dim.subdims[subdim_id], idx_map=[(label, subdim_id, i)])
+                        offset += cls._get_full_dim_size(dim.subdims[subdim_id], idx_map={label: [i]})
                     else:
                         offset += 1
 
@@ -381,22 +384,26 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
     @classmethod
     def _get_full_dim_size(cls, dim, *, idx_map=None):
         if not idx_map:
-            idx_map = []
+            idx_map = collections.defaultdict(list)
 
         total_size = 0
         for subdim_id, (size, label) in enumerate(zip(dim.sizes, dim.labels)):
             if isinstance(size, Tensor):
                 for i in range(cls._read_tensor(size, idx_map=idx_map)):
                     if dim.subdims:
-                         total_size += cls._get_full_dim_size(
-                            dim.subdims[subdim_id], idx_map=idx_map + [(label, subdim_id, i)])
+                        new_idx_map = copy.deepcopy(idx_map)
+                        new_idx_map[label].append(i)
+
+                        total_size += cls._get_full_dim_size(
+                            dim.subdims[subdim_id], idx_map=new_idx_map)
                     else:
                         total_size += 1
             else:
                 for i in range(size):
                     if dim.subdims:
-                         total_size += cls._get_full_dim_size(
-                            dim.subdims[subdim_id], idx_map=idx_map | [(label, subdim_id, i)])
+                        new_idx_map = copy.deepcopy(idx_map)
+                        new_idx_map[label].append(i)
+                        total_size += cls._get_full_dim_size(dim.subdims[subdim_id], idx_map=new_idx_map)
                     else:
                         total_size += 1
 
@@ -433,10 +440,21 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
 
     @classmethod
     def _read_tensor(cls, tensor, idx_map):
+        idx_map_copy = copy.deepcopy(idx_map)
+
+        # for each dim in the tree (must not be nested), find the section offset and accumulate
         current_dim = tensor.dim
         ptr = 0
-        for label, subdim_id, idx in idx_map:
+        while True:
+            # check that current dim does not duplicate dim labels as this creates a lot of ambiguity
+            assert len(unique(current_dim.labels)) == len(current_dim.labels)
+
+            # only one label from the list must be in idx_map
+            label, = set(l for l in idx_map_copy.keys() if l in current_dim.labels)
+            subdim_id = current_dim.labels.index(label)
             section = current_dim.sections[subdim_id]
+
+            idx = idx_map_copy[label].pop(0)
 
             if isinstance(section, Tensor):
                 ptr += section.data[idx]
@@ -445,18 +463,23 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
                 # so here we need to perform the right substitution. I think that dim labels
                 # are right to use here as we could theoretically get duplicates and we want
                 # to go in reverse
-                idx_map_copy = idx_map.copy()
-                context = {}
-                for var, label in reversed(section.vardims):
-                    ilabel, _, iidx = idx_map_copy.pop()
-                    while ilabel != label:
-                        ilabel, _, iidx = idx_map_copy.pop()
-                    context[str(var)] = iidx
+                # idx_map_copy = idx_map.copy()
+                # context = {}
+                # for var, label in reversed(section.vardims):
+                #     ilabel, _, iidx = idx_map_copy.pop()
+                #     while ilabel != label:
+                #         ilabel, _, iidx = idx_map_copy.pop()
+                #     context[str(var)] = iidx
+                # FIXME assumes no duplicates
+                context = {str(var): idx_map[l][0] for var, l in section.vardims}
                 ptr += pym.evaluate(section.expr, context)
             else:
                 raise AssertionError
+
             if current_dim.subdims:
                 current_dim = current_dim.subdims[subdim_id]
+            else:
+                break
 
         return tensor.data[ptr]
 
