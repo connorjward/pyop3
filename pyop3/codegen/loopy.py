@@ -157,9 +157,8 @@ class LoopyKernelBuilder:
     def _(self, expr: exprs.Loop, within_loops):
 
         within_loops = {}
-        for idxs in expr.index:
-            for idx in idxs:
-                within_loops = merge_bins(within_loops, self.collect_within_loops(idx, within_loops))
+        for idx in expr.index:
+            within_loops = merge_bins(within_loops, self.collect_within_loops(idx, within_loops))
 
         for stmt in expr.statements:
             self._build(stmt, copy.deepcopy(within_loops))
@@ -369,7 +368,7 @@ class LoopyKernelBuilder:
 
                 # make sure that the RHS reduces down to a scalar
                 # new_extent = index_tensor_with_within_loops(extent, truncated)
-                new_extent = extent.copy(indicess=index(extent.indicess))
+                new_extent = extent.copy(indicess=(index(extent.indices),))
 
                 insn = tlang.Read(new_extent, temp)
                 self._make_instruction_context(insn, within_loops, scalar=True)

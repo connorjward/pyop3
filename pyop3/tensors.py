@@ -238,6 +238,8 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
                 indicess = cls._fill_with_slices(dim)
                 # import pdb; pdb.set_trace()
             else:
+                if not isinstance(indicess[0], collections.abc.Sequence):
+                    indicess = (indicess,)
                 indicess = [cls._parse_indices(dim, idxs) for idxs in indicess]
         else:
             assert indicess is None
@@ -514,8 +516,8 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
         # if self.is_indexed:
         #     raise NotImplementedError("Needs more thought")
 
-        # if self.name ==  "nnz":
-        #     import pdb; pdb.set_trace()
+        if not isinstance(indicess[0], collections.abc.Sequence):
+            indicess = (indicess,)
         indicess = [self._parse_indices(self.dim, idxs) for idxs in indicess]
         return self.copy(indicess=indicess)
 
@@ -861,14 +863,17 @@ def _construct_indices(input_indices, dims, current_dim, parent_indices=None):
 
 
 
-def index(indicess):
+def index(indices):
     """wrap all slices and maps in loop index objs."""
-    return tuple(tuple(_index(idx) for idx in idxs) for idxs in indicess)
+    # cannot be multiple sets of indices if we are shoving this into a loop
+    if isinstance(indices[0], collections.abc.Sequence):
+        (indices,) = indices
+    return tuple(_index(idx) for idx in indices)
 
 
 def _index(idx):
     if isinstance(idx, NonAffineMap):
-        return idx.copy(is_loop_index=True, tensor=idx.tensor.copy(indicess=index(idx.tensor.indicess)))
+        return idx.copy(is_loop_index=True, tensor=idx.tensor.copy(indicess=(index(idx.tensor.indices),)))
     else:
         return idx.copy(is_loop_index=True)
 
