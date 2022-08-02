@@ -270,7 +270,7 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
             raise NotImplementedError
 
         if not imap:
-            imap = {}
+            imap = []
 
         sections = collections.defaultdict(dict)
         offset = 0
@@ -278,12 +278,12 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
         for pt in range(npoints):
             pt = dim.permutation[pt]
 
-            subdim, label, i = cls._get_subdim(dim, pt)
-            sections[i][pt] = offset
+            subdim, label, subdim_id = cls._get_subdim(dim, pt)
+            sections[subdim_id][pt] = offset
 
             # increment the pointer by the size of the step for this subdim
             if dim.subdims:
-                offset += cls._get_full_dim_size(subdim, imap | {label: pt})
+                offset += cls._get_full_dim_size(subdim, idx_map=imap+[(label, subdim_id, pt)])
             else:
                 offset += 1
 
@@ -295,7 +295,7 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
 
             idxs = np.array([sections[subdim_id][i] for i in sorted(sections[subdim_id])], dtype=np.int32)
             new_section = Tensor.new(Dim(len(idxs), labels=(label,)), data=idxs, prefix="sec", dtype=np.int32)
-            new_sections[i] = new_section
+            new_sections[subdim_id] = new_section
 
         return new_sections
 
@@ -441,6 +441,7 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
             if isinstance(section, Tensor):
                 ptr += section.data[idx]
             elif isinstance(section, IndexFunction):
+                # basically a very complicated way of turning 4*x into 4*n (where n is a number)
                 # so here we need to perform the right substitution. I think that dim labels
                 # are right to use here as we could theoretically get duplicates and we want
                 # to go in reverse

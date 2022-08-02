@@ -340,7 +340,7 @@ def test_compute_double_loop_permuted_mixed():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    args = [dat1.data, dat2.data, dat1.sections[dat1.dim.labels[1]][0].data, dat2.sections[dat2.dim.labels[1]][0].data]
+    args = [dat1.data, dat2.data, dat1.dim.sections[1].data, dat2.dim.sections[1].data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
@@ -382,7 +382,7 @@ def test_compute_double_loop_ragged():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    args = [nnz.data, dat1.data, dat2.data, dat1.sections["dim0"][0].data, dat2.sections["dim0"][0].data]
+    args = [nnz.data, dat1.data, dat2.data, dat1.dim.sections[0].data, dat2.dim.sections[0].data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
@@ -424,8 +424,8 @@ def test_compute_double_loop_ragged_inner():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    sec0 = dat1.sections["dim0"][0].data
-    sec1 = dat2.sections["dim0"][0].data
+    sec0 = dat1.dim.sections[0].data
+    sec1 = dat2.dim.sections[0].data
 
     args = [nnz.data, dat1.data, dat2.data, sec0, sec1]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
@@ -436,7 +436,6 @@ def test_compute_double_loop_ragged_inner():
 
 
 def test_compute_double_loop_ragged_mixed():
-    # import pdb; pdb.set_trace()
     root = Dim((4, 5, 4))
     nnz_data = np.array([3, 2, 0, 0, 1], dtype=np.int32)
     nnz = Tensor.new(root.copy(sizes=(5,), labels=(root.labels[1],)), data=nnz_data, name="nnz", dtype=np.int32)
@@ -519,8 +518,8 @@ def test_compute_ragged_permuted():
     dll = compilemythings(jitmodule)
     fn = getattr(dll, "mykernel")
 
-    sec0 = dat1.sections[dat1.dim.labels[0]][0]
-    sec1 = dat2.sections[dat2.dim.labels[0]][0]
+    sec0 = dat1.dim.sections[0]
+    sec1 = dat2.dim.sections[0]
 
     args = [nnz.data, dat1.data, dat2.data, sec0.data, sec1.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
@@ -679,7 +678,7 @@ def test_index_function():
 
     # an IndexFunction contains an expression and the corresponding dim labels
     x0, x1 = pym.variables("x0 x1")
-    map = IndexFunction(x0 + x1, arity=2, vardims=[(x0, root.labels[0]), (x1, root.labels[1])])
+    map = IndexFunction(x0 + x1, arity=2, vardims=[(x0, root.labels[0]), (x1, root.labels[1])], subdim_id=1)
 
     i1 = pyop3.index([[Slice.from_dim(root, 0)]]) # loop over 'cells'
     i2 = [[i1[0][0]], [map]]  # access 'cell' and 'edge' data
