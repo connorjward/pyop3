@@ -350,17 +350,13 @@ def test_compute_double_loop_permuted_mixed():
 
 def test_compute_double_loop_ragged():
     root = Dim(5)
-    steps = np.array([3, 2, 1, 3, 2], dtype=np.int32)
-    nnz = Tensor.new(root, data=steps, name="nnz", dtype=np.int32)
-    subdim = Dim(nnz)
-    dims = root.copy(subdims=(subdim,))
+    nnz = Tensor.new(
+        root, name="nnz", dtype=np.int32, data=np.array([3, 2, 1, 3, 2], dtype=np.int32)
+    )
+    dims = root.copy(subdims=(Dim(nnz),))
 
-    i_ = Slice.from_dim(root, 0, is_loop_index=True)
-    iterset = [i_, Slice.from_dim(subdim, 0, parent_indices=(i_,), is_loop_index=True)]
-
-    # TODO this is super unpleasant - clean up the ordering of the indexing stuff
-    dat1 = Tensor.new(dims, indicess=iterset, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
-    dat2 = Tensor.new(dims, indicess=iterset, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
+    dat1 = Tensor.new(dims, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor.new(dims, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
 
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
@@ -372,7 +368,9 @@ def test_compute_double_loop_ragged():
         lang_version=(2018, 2),
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-    expr = pyop3.Loop(iterset, kernel(dat1, dat2))
+
+    iterset = [Slice.from_dim(dims, 0), Slice.from_dim(dims.subdim, 0)]
+    expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
 
@@ -390,12 +388,14 @@ def test_compute_double_loop_ragged():
     assert all(dat2.data == dat1.data + 1)
 
 
-def test_compute_double_loop_ragged_inner():
-    root = Dim(5)
+@pytest.mark.skip
+def test_doubly_ragged():
+    nnz1 = Tensor.new(root, indicess=iterset, data=steps, name="nnz", dtype=np.int32, max_value=max(steps))
+
+    root = Dim(3)
     iterset = [Slice.from_dim(root, 0, is_loop_index=True)]
 
     steps = np.array([3, 2, 1, 3, 2], dtype=np.int32)
-    nnz = Tensor.new(root, indicess=iterset, data=steps, name="nnz", dtype=np.int32, max_value=max(steps))
     subdim = Dim(nnz)
     dims = root.copy(subdims=(subdim,))
 
@@ -435,18 +435,61 @@ def test_compute_double_loop_ragged_inner():
     assert all(dat2.data == dat1.data + 1)
 
 
+def test_compute_double_loop_ragged_inner():
+    root = Dim(5)
+    nnz = Tensor.new(
+        root, name="nnz", dtype=np.int32, max_value=3,
+        data=np.array([3, 2, 1, 3, 2], dtype=np.int32)
+    )
+    subdim = Dim(nnz)
+    dims = root.copy(subdims=(subdim,))
+
+    dat1 = Tensor.new(dims, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor.new(dims, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
+
+    code = lp.make_kernel(
+        "{ [i]: 0 <= i < n }",
+        "y[i] = x[i] + 1",
+        [lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
+        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),
+        lp.ValueArg("n", dtype=np.int32)],
+        target=lp.CTarget(),
+        name="mylocalkernel",
+        lang_version=(2018, 2),
+    )
+    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+    iterset = [Slice.from_dim(root, 0)]
+    expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
+
+    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+
+    import time
+    cache_key = str(time.time())
+    jitmodule = JITModule(exe, cache_key)
+    dll = compilemythings(jitmodule)
+    fn = getattr(dll, "mykernel")
+
+    sec0 = dat1.dim.sections[0].data
+    sec1 = dat2.dim.sections[0].data
+
+    args = [nnz.data, dat1.data, dat2.data, sec0, sec1]
+    fn.argtypes = (ctypes.c_voidp,) * len(args)
+
+    fn(*(d.ctypes.data for d in args))
+
+    assert all(dat2.data == dat1.data + 1)
+
+
 def test_compute_double_loop_ragged_mixed():
     root = Dim((4, 5, 4))
     nnz_data = np.array([3, 2, 0, 0, 1], dtype=np.int32)
-    nnz = Tensor.new(root.copy(sizes=(5,), labels=(root.labels[1],)), data=nnz_data, name="nnz", dtype=np.int32)
+    nnz = Tensor.new(Dim(5, labels=(root.labels[1],)), data=nnz_data, name="nnz", dtype=np.int32)
     subdims = [Dim(1), Dim(nnz), Dim(2)]
     dims = root.copy(subdims=tuple(subdims))
 
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(4+6+8, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(4+6+8, dtype=np.float64), dtype=np.float64)
 
-    i0 = Slice.from_dim(root, 1)
-    iterset = [i0, Slice.from_dim(subdims[1], 0, parent_indices=[i0])]
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
         "y[i] = x[i] + 1",
@@ -457,6 +500,7 @@ def test_compute_double_loop_ragged_mixed():
         lang_version=(2018, 2),
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+    iterset = [Slice.from_dim(root, 1), Slice.from_dim(subdims[1], 0)]
     expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
@@ -475,14 +519,9 @@ def test_compute_double_loop_ragged_mixed():
 
     fn(*(d.ctypes.data for d in args))
 
-    # root = Dim((4, 5, 4))
-    # nnz_data = np.array([3, 2, 0, 0, 1], dtype=np.int32)
-    # nnz = Tensor(Tree(root.copy(offset=4)), data=nnz_data, name="nnz", dtype=np.int32)
-    # subdims = [Dim(1), Dim(nnz), Dim(2)]
     assert all(dat2.data[:4] == 0)
     assert all(dat2.data[4:10] == dat1.data[4:10] + 1)
     assert all(dat2.data[10:] == 0)
-    print("compute_double_loop_ragged_mixed PASSED", flush=True)
 
 
 def test_compute_ragged_permuted():
