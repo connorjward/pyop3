@@ -339,7 +339,9 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
                 for i in range(dsize):
                     idxs.append(offset)
                     if dim.subdims:
-                        size = cls._get_full_dim_size(dim.subdims[subdim_id], idx_map={label: [i]})
+                        idx_map = collections.defaultdict(list)
+                        idx_map[label] = [i]
+                        size = cls._get_full_dim_size(dim.subdims[subdim_id], idx_map=idx_map)
                     else:
                         size = 1
                     sizes.append(size)
