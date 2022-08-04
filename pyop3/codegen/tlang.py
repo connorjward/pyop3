@@ -10,15 +10,15 @@ import pymbolic as pym
 
 
 def to_tlang(expr):
-    return TensorLangKernelBuilder(expr).build()
+    return MultiArrayLangKernelBuilder(expr).build()
 
 
 @dataclasses.dataclass
-class TensorLangKernel:
+class MultiArrayLangKernel:
     instructions: Any
 
 
-class TensorLangKernelBuilder:
+class MultiArrayLangKernelBuilder:
     def __init__(self, expr):
         self._expr = expr
         self._instructions = []
@@ -28,7 +28,7 @@ class TensorLangKernelBuilder:
         self._iname_generator = functools.partial(name_generator.next, "i")
         self._temp_name_generator = functools.partial(name_generator.next, "t")
 
-    def build(self) -> TensorLangKernel:
+    def build(self) -> MultiArrayLangKernel:
         new_expr = self._inspect(self._expr)
         return new_expr
 
@@ -59,7 +59,7 @@ class TensorLangKernelBuilder:
         temporaries = {}
         for arg in expr.arguments:
             dims = self.construct_temp_dims(arg.tensor)
-            temporaries[arg] = tensors.Tensor.new(dims, name=self._temp_name_generator(), dtype=arg.tensor.dtype)
+            temporaries[arg] = tensors.MultiArray.new(dims, name=self._temp_name_generator(), dtype=arg.tensor.dtype)
 
         gathers = self.make_gathers(temporaries)
         call = self.make_function_call(

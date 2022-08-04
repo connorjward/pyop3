@@ -20,7 +20,7 @@ import pyop3.utils
 from pyop3 import utils
 from pyop3.utils import MultiNameGenerator, NameGenerator
 from pyop3.utils import CustomTuple, checked_zip, NameGenerator, rzip
-from pyop3.tensors import Tensor, Index, ScalarDimSection, Map, Dim, NonAffineMap, _compute_indexed_shape, _compute_indexed_shape2
+from pyop3.tensors import MultiArray, Index, ScalarDimSection, Map, Dim, NonAffineMap, _compute_indexed_shape, _compute_indexed_shape2
 from pyop3.tensors import Slice, IndexFunction, index
 from pyop3.codegen.tlang import to_tlang
 
@@ -184,7 +184,7 @@ class LoopyKernelBuilder:
             for shape in temp.shapes:
                 temp_size_ = 1
                 for extent in shape:
-                    if isinstance(extent, Tensor):
+                    if isinstance(extent, MultiArray):
                         if (var := self.extents[extent.name]) not in extents:
                             extents.append(var)
                             self.assumptions.append(f"{var} <= {extent.max_value}")
@@ -198,7 +198,7 @@ class LoopyKernelBuilder:
             for shape in temp.indexed_shapes:
                 temp_isize_ = 1
                 for extent in shape:
-                    if isinstance(extent, Tensor):
+                    if isinstance(extent, MultiArray):
                         extent = extent.max_value
                     temp_isize_ *= extent
                 temp_isize += temp_isize_
@@ -301,7 +301,7 @@ class LoopyKernelBuilder:
             for shape in assignment.temporary.shapes:
                 size_ = 1
                 for extent in shape:
-                    if isinstance(extent, Tensor):
+                    if isinstance(extent, MultiArray):
                         extent = extent.max_value
                     size_ *= extent
                 size += size_
@@ -323,7 +323,7 @@ class LoopyKernelBuilder:
 
     def register_new_domain(self, iname, index, within_loops):
         if isinstance(index.size, pym.primitives.Expression):
-            if not isinstance(index.size, Tensor):
+            if not isinstance(index.size, MultiArray):
                 raise NotImplementedError("need to think hard about more complicated expressions"
                                           "esp. sharing inames")
             # remove the final iname matching index from within_loops as the index.size will
@@ -355,7 +355,7 @@ class LoopyKernelBuilder:
         return inames
 
     def register_extent(self, extent, within_loops):
-        if isinstance(extent, Tensor):
+        if isinstance(extent, MultiArray):
             # If we have a ragged thing then we need to create a scalar temporary
             # to hold its value.
             try:
@@ -364,7 +364,7 @@ class LoopyKernelBuilder:
                 return self.extents[extent.name]
             except KeyError:
                 temp_name = self._namer.next("n")
-                temp = Tensor.new(Dim(ScalarDimSection()), name=temp_name, dtype=np.int32)
+                temp = MultiArray.new(Dim(ScalarDimSection()), name=temp_name, dtype=np.int32)
 
                 # make sure that the RHS reduces down to a scalar
                 # new_extent = index_tensor_with_within_loops(extent, truncated)
@@ -406,7 +406,7 @@ class LoopyKernelBuilder:
                 (from_var, label), = layout.vardims
                 assert label == part.label
                 index_expr += pym.substitute(layout.expr, {from_var: dim_expr})
-            elif isinstance(layout, Tensor):
+            elif isinstance(layout, MultiArray):
                 myexpr = self.handle_assignment(layout, layout.indices, copy.deepcopy(saved_within_loops))
                 index_expr += pym.subscript(pym.var(layout.name), myexpr)
                 self._section_data.append(lp.GlobalArg(layout.name, shape=None, dtype=np.int32))

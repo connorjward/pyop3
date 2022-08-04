@@ -133,7 +133,7 @@ class Slice(FancyIndex):
 
     def __init__(self, size, start=0, step=1, **kwargs):
         self.size = size
-        if isinstance(size, Tensor):
+        if isinstance(size, MultiArray):
             assert size.indices is not None
         self.start = start
         self.step = step
@@ -206,8 +206,7 @@ class NonAffineMap(Map):
         return self.tensor
 
 
-# TODO Rename to MultiArray
-class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
+class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
 
     fields = {"dim", "indicess", "dtype", "mesh", "name", "data", "max_value"}
 
@@ -316,7 +315,7 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
             part = dim.parts[subdim_id]
 
             idxs = np.array([sections[subdim_id][i] for i in sorted(sections[subdim_id])], dtype=np.int32)
-            new_section = Tensor.new(Dim(DimSection(len(idxs), label=part.label)), data=idxs, prefix="sec", dtype=np.int32)
+            new_section = MultiArray.new(Dim(DimSection(len(idxs), label=part.label)), data=idxs, prefix="sec", dtype=np.int32)
             new_sections[subdim_id] = new_section
 
         return new_sections
@@ -341,7 +340,7 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
                 idxs = [offset]
                 sizes = [1]
                 offset += 1
-            elif isinstance(dsize := part.size, Tensor):
+            elif isinstance(dsize := part.size, MultiArray):
                 # FIXME this is missing an extra index somehow - requires thought!!
                 for idx_map in cls._generate_indices(dsize):
                     idxs.append(offset)
@@ -395,7 +394,7 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
                     expr = x0 * step  + start
                     new_section = IndexFunction(expr, 1, ((x0, part.label),), subdim_id=subdim_id)
                 else:
-                    new_section = Tensor.new(Dim(DimSection(len(idxs), label=part.label)), data=idxs, prefix="sec", dtype=np.int32)
+                    new_section = MultiArray.new(Dim(DimSection(len(idxs), label=part.label)), data=idxs, prefix="sec", dtype=np.int32)
 
             new_sections.append(new_section)
         return new_sections
@@ -425,7 +424,7 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
 
         total_size = 0
         for subdim_id, part in enumerate(dim.parts):
-            if isinstance(part.size, Tensor):
+            if isinstance(part.size, MultiArray):
                 for i in range(cls._read_tensor(part.size, idx_map=idx_map)):
                     if part.subdim:
                         new_idx_map = copy.deepcopy(idx_map)
@@ -474,7 +473,7 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
 
             idx = idx_map_copy[label].pop(0)
 
-            if isinstance(section, Tensor):
+            if isinstance(section, MultiArray):
                 ptr += section.data[idx]
             elif isinstance(section, IndexFunction):
                 # basically a very complicated way of turning 4*x into 4*n (where n is a number)
@@ -644,7 +643,7 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
                 return [idx]
         elif isinstance(idx, Slice):
             if isinstance(idx.size, pym.primitives.Expression):
-                if not isinstance(idx.size, Tensor):
+                if not isinstance(idx.size, MultiArray):
                     raise NotImplementedError
 
             part, = {pt for pt in dim.parts if pt.label == idx.label}
@@ -721,7 +720,7 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
         return self._compute_order(self.dim)
 
     def _parametrise_if_needed(self, value):
-        if isinstance(value, Tensor):
+        if isinstance(value, MultiArray):
             if (param := pym.var(value.name)) in self.params:
                 assert self.params[param] == value
             else:
@@ -969,14 +968,14 @@ class Section:
 
 
 def Global(*, name: str = None):
-    return Tensor(name=name, prefix="glob")
+    return MultiArray(name=name, prefix="glob")
 
 
-def Dat(mesh, dofs: Section, *, prefix="dat", **kwargs) -> Tensor:
+def Dat(mesh, dofs: Section, *, prefix="dat", **kwargs) -> MultiArray:
     dims = mesh.dim_tree.copy()
     for i, _ in enumerate(dims.root.sizes):
         dims = dims.add_child(dims.root, Dim(dofs.dofs[i]))
-    return Tensor(dims, mesh=mesh, prefix=prefix, **kwargs)
+    return MultiArray(dims, mesh=mesh, prefix=prefix, **kwargs)
 
 
 def VectorDat(mesh, dofs, count, **kwargs):
@@ -990,7 +989,7 @@ def VectorDat(mesh, dofs, count, **kwargs):
             for stratum in range(mesh.tdim)
         )
     )
-    return Tensor(dim, **kwargs)
+    return MultiArray(dim, **kwargs)
 
 
 def ExtrudedDat(mesh, dofs, **kwargs):
@@ -1025,7 +1024,7 @@ def ExtrudedDat(mesh, dofs, **kwargs):
     #     ))
     # ))
     # TODO Actually attach a section to it.
-    return Tensor(mesh.dim_tree, **kwargs)
+    return MultiArray(mesh.dim_tree, **kwargs)
 
 
 def Mat(shape: Tuple[int, ...], *, name: str = None):
