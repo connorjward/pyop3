@@ -83,12 +83,6 @@ class Dim(pytools.ImmutableRecord):
         except ValueError:
             raise RuntimeError
 
-    @property
-    def offsets(self):
-        # size can be `None` if scalar
-        sizes = [size or 1 for size in self.sizes]
-        return tuple(sum(sizes[:i]) for i, _ in enumerate(sizes))
-
 
 class DimSection(pytools.ImmutableRecord):
     fields = {"label", "size", "subdim", "layout"}
@@ -107,25 +101,15 @@ class DimSection(pytools.ImmutableRecord):
         return self.layout
 
 
-# TODO delete `id`
 class Index(pytools.ImmutableRecord, abc.ABC):
     """Does it make sense to index a tensor with this object?"""
-    fields = {"label", "is_loop_index", "id", "subdim_id"}
+    fields = {"label", "is_loop_index", "subdim_id"}
 
-    _id_generator = NameGenerator("idx")
-
-    def __init__(self, label, subdim_id, is_loop_index=False, *, id=None):
+    def __init__(self, label, subdim_id, is_loop_index=False):
         self.subdim_id = subdim_id
         self.label = label
         self.is_loop_index = is_loop_index
-        self.id = id or self._id_generator.next()
         super().__init__()
-
-    @property
-    def within(self):
-        import warnings
-        warnings.warn("dontuse", DeprecationWarning)
-        return self.is_loop_index
 
 
 class ScalarIndex(Index):
