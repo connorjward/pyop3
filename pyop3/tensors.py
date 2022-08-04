@@ -77,6 +77,10 @@ class MultiAxis(pytools.ImmutableRecord):
         except ValueError:
             raise RuntimeError
 
+    @property
+    def subaxis(self):
+        return self.subdim
+
 
 class AbstractAxis(pytools.ImmutableRecord, abc.ABC):
     fields = set()
@@ -99,6 +103,22 @@ class Axis(AbstractAxis):
         import warnings
         warnings.warn("use layout instead", DeprecationWarning)
         return self.layout
+
+    @property
+    def subaxis(self):
+        return self.subdim
+
+    @property
+    def part(self):
+        return self
+
+    @property
+    def parts(self):
+        return self,
+
+    @property
+    def permutation(self):
+        return None
 
 
 class ScalarAxis(AbstractAxis):
@@ -256,10 +276,6 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
     @classmethod
     def collect_sections(cls, dim):
-        # FIXME not happy with this, hopefully Axis (with zero size) will resolve
-        # if not dim:
-        #     return None
-
         # this is a map from dim label to a tensor or index function. This is not
         # unique for each tensor so we need to construct a stack of them.
         if dim.permutation:
@@ -279,7 +295,12 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
                     new_part = part.copy(layout=layout)
             new_parts.append(new_part)
 
-        return dim.copy(sections=tuple(new_parts))
+        # this is a hack
+        if isinstance(dim, MultiAxis):
+            return dim.copy(sections=tuple(new_parts))
+        else:
+            new_part, = new_parts
+            return new_part
 
 
     @classmethod
@@ -537,20 +558,20 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         return self.copy(indicess=indicess)
 
     @classmethod
-    def _fill_with_slices(cls, dim, parent_indices=None):
-        # import pdb; pdb.set_trace()
+    def _fill_with_slices(cls, axis, parent_indices=None):
         if not parent_indices:
             parent_indices = []
 
         idxs = []
-        for i, part in enumerate(dim.parts):
+        parts = axis.parts if isinstance(axis, MultiAxis) else (axis,)
+        for i, part in enumerate(parts):
             if isinstance(part, ScalarAxis):
                 idxs.append([])
                 continue
-            idx = Slice.from_dim(dim, i)
+            idx = Slice.from_dim(axis, i)
             if part.subdim:
                 idxs += [[idx, *subidxs]
-                    for subidxs in cls._fill_with_slices(part.subdim, parent_indices+[idx])]
+                    for subidxs in cls._fill_with_slices(part.subaxis, parent_indices+[idx])]
             else:
                 idxs += [[idx]]
         return idxs

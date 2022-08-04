@@ -124,11 +124,11 @@ def test_ragged_loop():
 
 
 def test_read_single_dim():
-    dims = MultiAxis((Axis(10),))
-    dat1 = MultiArray.new(dims, name="dat1", data=np.arange(10, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(dims, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
+    axes = Axis(10)
+    dat1 = MultiArray.new(axes, name="dat1", data=np.arange(10, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
 
-    iterset = [Slice.from_dim(dims, 0)]
+    iterset = [Slice.from_dim(axes, 0)]
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
         "y[i] = x[i] + 1",
@@ -155,7 +155,7 @@ def test_read_single_dim():
 
 
 def test_compute_double_loop():
-    dims = MultiAxis(Axis(10, subdim=MultiAxis(Axis(3))))
+    dims = Axis(10, subdim=Axis(3))
     dat1 = MultiArray.new(dims, name="dat1", data=np.arange(30, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(dims, name="dat2", data=np.zeros(30, dtype=np.float64), dtype=np.float64)
 
@@ -185,7 +185,7 @@ def test_compute_double_loop():
 
 
 def test_compute_double_loop_mixed():
-    axes = MultiAxis((Axis(10, subdim=MultiAxis(Axis(3))), Axis(12, subdim=MultiAxis(Axis(2)))))
+    axes = MultiAxis((Axis(10, subdim=Axis(3)), Axis(12, subdim=Axis(2))))
     dat1 = MultiArray.new(axes, name="dat1", data=np.arange(54, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(54, dtype=np.float64), dtype=np.float64)
 
@@ -220,7 +220,7 @@ def test_compute_double_loop_mixed():
 
 def test_compute_double_loop_scalar():
     """As in the temporary lives within both of the loops"""
-    axes = MultiAxis((Axis(6, subdim=MultiAxis(Axis(3))), Axis(4, subdim=MultiAxis(Axis(2)))))
+    axes = MultiAxis((Axis(6, subdim=Axis(3)), Axis(4, subdim=Axis(2))))
     dat1 = MultiArray.new(axes, name="dat1", data=np.arange(18+8, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(18+8, dtype=np.float64), dtype=np.float64)
 
@@ -309,11 +309,11 @@ def test_compute_double_loop_permuted_mixed():
 
 
 def test_compute_double_loop_ragged():
-    root = MultiAxis(Axis(5))
+    root = Axis(5)
     nnz = MultiArray.new(
         root, name="nnz", dtype=np.int32, data=np.array([3, 2, 1, 3, 2], dtype=np.int32)
     )
-    dims = root.copy(sections=(root.sections[0].copy(subdim=MultiAxis(Axis(nnz))),))
+    dims = root.copy(subdim=Axis(nnz))
 
     dat1 = MultiArray.new(dims, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(dims, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
