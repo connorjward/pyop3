@@ -19,7 +19,7 @@ from pyop3.utils import as_tuple, checked_zip, NameGenerator, unique
 
 
 
-class Dim(pytools.ImmutableRecord):
+class MultiAxis(pytools.ImmutableRecord):
     fields = {"sections", "permutation"}
 
     def __init__(self, sections, *, permutation=None):
@@ -78,12 +78,12 @@ class Dim(pytools.ImmutableRecord):
             raise RuntimeError
 
 
-class AbstractDimSection(pytools.ImmutableRecord, abc.ABC):
+class AbstractAxis(pytools.ImmutableRecord, abc.ABC):
     fields = set()
 
 
-class DimSection(AbstractDimSection):
-    fields = AbstractDimSection.fields | {"size", "label", "subdim", "layout"}
+class Axis(AbstractAxis):
+    fields = AbstractAxis.fields | {"size", "label", "subdim", "layout"}
 
     _label_generator = NameGenerator("dim")
 
@@ -101,7 +101,7 @@ class DimSection(AbstractDimSection):
         return self.layout
 
 
-class ScalarDimSection(AbstractDimSection):
+class ScalarAxis(AbstractAxis):
 
     @property
     def size(self):
@@ -256,7 +256,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
     @classmethod
     def collect_sections(cls, dim):
-        # FIXME not happy with this, hopefully DimSection (with zero size) will resolve
+        # FIXME not happy with this, hopefully Axis (with zero size) will resolve
         # if not dim:
         #     return None
 
@@ -269,7 +269,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
         new_parts = []
         for part, layout in zip(dim.parts, layouts):
-            if isinstance(part, ScalarDimSection):
+            if isinstance(part, ScalarAxis):
                 assert layout is None
                 new_part = part
             else:
@@ -315,7 +315,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
             part = dim.parts[subdim_id]
 
             idxs = np.array([sections[subdim_id][i] for i in sorted(sections[subdim_id])], dtype=np.int32)
-            new_section = MultiArray.new(Dim(DimSection(len(idxs), label=part.label)), data=idxs, prefix="sec", dtype=np.int32)
+            new_section = MultiArray.new(MultiAxis(Axis(len(idxs), label=part.label)), data=idxs, prefix="sec", dtype=np.int32)
             new_sections[subdim_id] = new_section
 
         return new_sections
@@ -336,7 +336,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
             idxs = []
             sizes = []
 
-            if isinstance(part, ScalarDimSection):
+            if isinstance(part, ScalarAxis):
                 idxs = [offset]
                 sizes = [1]
                 offset += 1
@@ -378,7 +378,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         for subdim_id, idxs in enumerate(sections):
             part = dim.parts[subdim_id]
 
-            if isinstance(part, ScalarDimSection):
+            if isinstance(part, ScalarAxis):
                 new_section = None
             else:
                 # see if we can represent this as an affine transformation or not
@@ -394,7 +394,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
                     expr = x0 * step  + start
                     new_section = IndexFunction(expr, 1, ((x0, part.label),), subdim_id=subdim_id)
                 else:
-                    new_section = MultiArray.new(Dim(DimSection(len(idxs), label=part.label)), data=idxs, prefix="sec", dtype=np.int32)
+                    new_section = MultiArray.new(MultiAxis(Axis(len(idxs), label=part.label)), data=idxs, prefix="sec", dtype=np.int32)
 
             new_sections.append(new_section)
         return new_sections
@@ -544,7 +544,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
         idxs = []
         for i, part in enumerate(dim.parts):
-            if isinstance(part, ScalarDimSection):
+            if isinstance(part, ScalarAxis):
                 idxs.append([])
                 continue
             idx = Slice.from_dim(dim, i)
@@ -746,7 +746,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
     def _compute_shapes(self, dim):
         shapes = []
         for part in dim.parts:
-            if isinstance(part, ScalarDimSection):
+            if isinstance(part, ScalarAxis):
                 shapes.append(())
             elif part.subdim:
                 for shape in self._compute_shapes(part.subdim):
@@ -974,17 +974,17 @@ def Global(*, name: str = None):
 def Dat(mesh, dofs: Section, *, prefix="dat", **kwargs) -> MultiArray:
     dims = mesh.dim_tree.copy()
     for i, _ in enumerate(dims.root.sizes):
-        dims = dims.add_child(dims.root, Dim(dofs.dofs[i]))
+        dims = dims.add_child(dims.root, MultiAxis(dofs.dofs[i]))
     return MultiArray(dims, mesh=mesh, prefix=prefix, **kwargs)
 
 
 def VectorDat(mesh, dofs, count, **kwargs):
-    dim = MixedDim(
+    dim = MixedMultiAxis(
         mesh.tdim,
         tuple(
-            UniformDim(
+            UniformMultiAxis(
                 mesh.strata_sizes[stratum],
-                UniformDim(dofs.dofs[stratum], UniformDim(count))
+                UniformMultiAxis(dofs.dofs[stratum], UniformMultiAxis(count))
             )
             for stratum in range(mesh.tdim)
         )
@@ -993,26 +993,26 @@ def VectorDat(mesh, dofs, count, **kwargs):
 
 
 def ExtrudedDat(mesh, dofs, **kwargs):
-    # dim = MixedDim(
+    # dim = MixedMultiAxis(
     #     2,
     #     (
-    #         UniformDim(  # base edges
+    #         UniformMultiAxis(  # base edges
     #             mesh.strata_sizes[0],
-    #             MixedDim(
+    #             MixedMultiAxis(
     #                 2,
     #                 (
-    #                     UniformDim(mesh.layer_count),  # extr cells
-    #                     UniformDim(mesh.layer_count),  # extr 'inner' edges
+    #                     UniformMultiAxis(mesh.layer_count),  # extr cells
+    #                     UniformMultiAxis(mesh.layer_count),  # extr 'inner' edges
     #                 )
     #             )
     #         ),
-    #         UniformDim(  # base verts
+    #         UniformMultiAxis(  # base verts
     #             mesh.strata_sizes[1],
-    #             MixedDim(
+    #             MixedMultiAxis(
     #                 2,
     #                 (
-    #                     UniformDim(mesh.layer_count),  # extr 'outer' edges
-    #                     UniformDim(mesh.layer_count),  # extr verts
+    #                     UniformMultiAxis(mesh.layer_count),  # extr 'outer' edges
+    #                     UniformMultiAxis(mesh.layer_count),  # extr verts
     #                 )
     #             )
     #         )

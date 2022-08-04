@@ -20,7 +20,7 @@ import pyop3.utils
 from pyop3 import utils
 from pyop3.utils import MultiNameGenerator, NameGenerator
 from pyop3.utils import CustomTuple, checked_zip, NameGenerator, rzip
-from pyop3.tensors import MultiArray, Index, ScalarDimSection, Map, Dim, NonAffineMap, _compute_indexed_shape, _compute_indexed_shape2
+from pyop3.tensors import MultiArray, Index, ScalarAxis, Map, MultiAxis, NonAffineMap, _compute_indexed_shape, _compute_indexed_shape2
 from pyop3.tensors import Slice, IndexFunction, index
 from pyop3.codegen.tlang import to_tlang
 
@@ -364,7 +364,7 @@ class LoopyKernelBuilder:
                 return self.extents[extent.name]
             except KeyError:
                 temp_name = self._namer.next("n")
-                temp = MultiArray.new(Dim(ScalarDimSection()), name=temp_name, dtype=np.int32)
+                temp = MultiArray.new(MultiAxis(ScalarAxis()), name=temp_name, dtype=np.int32)
 
                 # make sure that the RHS reduces down to a scalar
                 # new_extent = index_tensor_with_within_loops(extent, truncated)
