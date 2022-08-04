@@ -14,7 +14,7 @@ import pyop3.codegen
 from pyop3.tensors import *
 
 
-def compilemythings(jitmodule):
+def compilemythings(code):
         """Build a shared library and load it
 
         :arg jitmodule: The JIT Module which can generate the code to compile.
@@ -27,8 +27,11 @@ def compilemythings(jitmodule):
 
         extension="c"
 
+        # to avoid lots of recompilation, just hash the source code and use as the cache key
+        hsh = md5(code.encode())
+
         # Determine cache key
-        hsh = md5(str(jitmodule.cache_key).encode())
+        # hsh = md5(str(jitmodule.cache_key).encode())
 
         basename = hsh.hexdigest()
 
@@ -37,7 +40,6 @@ def compilemythings(jitmodule):
         cachedir = os.path.join(cachedir, dirpart)
         pid = os.getpid()
         cname = os.path.join(cachedir, "%s_p%d.%s" % (basename, pid, extension))
-        oname = os.path.join(cachedir, "%s_p%d.o" % (basename, pid))
         soname = os.path.join(cachedir, "%s.so" % basename)
         # Link into temporary file, then rename to shared library
         # atomically (avoiding races).
@@ -52,7 +54,7 @@ def compilemythings(jitmodule):
             logfile = os.path.join(cachedir, "%s_p%d.log" % (basename, pid))
             errfile = os.path.join(cachedir, "%s_p%d.err" % (basename, pid))
             with open(cname, "w") as f:
-                f.write(jitmodule.code_to_compile)
+                f.write(code)
             # Compiler also links
             cc = (compiler,) \
                 + compiler_flags \
@@ -122,12 +124,11 @@ def test_ragged_loop():
 
 
 def test_read_single_dim():
-    root = Dim(10)
-    dims = root
+    dims = Dim((DimSection(10),))
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(10, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
 
-    iterset = [Slice.from_dim(root, 0)]
+    iterset = [Slice.from_dim(dims, 0)]
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
         "y[i] = x[i] + 1",
@@ -142,10 +143,7 @@ def test_read_single_dim():
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
 
-    import time
-    cache_key = str(time.time())
-    jitmodule = JITModule(exe, cache_key)
-    dll = compilemythings(jitmodule)
+    dll = compilemythings(exe)
     fn = getattr(dll, "mykernel")
 
     args = [dat1.data, dat2.data]
@@ -154,11 +152,10 @@ def test_read_single_dim():
     fn(*(d.ctypes.data for d in args))
 
     assert all(dat2.data == dat1.data + 1)
-    print("read_single_dim PASSED", flush=True)
 
 
 def test_compute_double_loop():
-    dims = Dim(10, subdims=(Dim(3),))
+    dims = Dim(DimSection(10, subdim=Dim(DimSection(3))))
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(30, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(30, dtype=np.float64), dtype=np.float64)
 
@@ -177,41 +174,22 @@ def test_compute_double_loop():
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
 
-    import time
-    cache_key = str(time.time())
-    jitmodule = JITModule(exe, cache_key)
-    dll = compilemythings(jitmodule)
+    dll = compilemythings(exe)
     fn = getattr(dll, "mykernel")
-
-    """
-      for (int32_t i0 = 0; i0 <= 9; ++i0)
-      {
-        for (int32_t i2 = 0; i2 <= 2; ++i2)
-          t1[map3[i2]] = 0.0;
-        for (int32_t i1 = 0; i1 <= 2; ++i1)
-          t0[map1[i1]] = dat1[map0[i0] + map2[i1]];
-        mylocalkernel(&(t0[0]), &(t1[0]));
-        for (int32_t i5 = 0; i5 <= 2; ++i5)
-          dat2[map4[i0] + map6[i5]] = t1[map5[i5]];
-      }
-    """
-    # import pdb; pdb.set_trace()
 
     args = [dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
-
     fn(*(d.ctypes.data for d in args))
 
     assert all(dat2.data == dat1.data + 1)
 
 
 def test_compute_double_loop_mixed():
-    root = Dim((10, 12), subdims=(Dim(3), Dim(2)))
-    dims = root
-    dat1 = Tensor.new(dims, name="dat1", data=np.arange(54, dtype=np.float64), dtype=np.float64)
-    dat2 = Tensor.new(dims, name="dat2", data=np.zeros(54, dtype=np.float64), dtype=np.float64)
+    axes = Dim((DimSection(10, subdim=Dim(DimSection(3))), DimSection(12, subdim=Dim(DimSection(2)))))
+    dat1 = Tensor.new(axes, name="dat1", data=np.arange(54, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor.new(axes, name="dat2", data=np.zeros(54, dtype=np.float64), dtype=np.float64)
 
-    iterset = [Slice.from_dim(root, 1)]
+    iterset = [Slice.from_dim(axes, 1)]
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 2 }",
         "y[i] = x[i] + 1",
@@ -226,9 +204,7 @@ def test_compute_double_loop_mixed():
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
 
-    cache_key = str(time.time())
-    jitmodule = JITModule(exe, cache_key)
-    dll = compilemythings(jitmodule)
+    dll = compilemythings(exe)
     fn = getattr(dll, "mykernel")
 
     args = [dat1.data, dat2.data]
@@ -244,12 +220,11 @@ def test_compute_double_loop_mixed():
 
 def test_compute_double_loop_scalar():
     """As in the temporary lives within both of the loops"""
-    root = Dim((6, 4), subdims=(Dim(3), Dim(2)))
-    dims = root
-    dat1 = Tensor.new(dims, name="dat1", data=np.arange(18+8, dtype=np.float64), dtype=np.float64)
-    dat2 = Tensor.new(dims, name="dat2", data=np.zeros(18+8, dtype=np.float64), dtype=np.float64)
+    axes = Dim((DimSection(6, subdim=Dim(DimSection(3))), DimSection(4, subdim=Dim(DimSection(2)))))
+    dat1 = Tensor.new(axes, name="dat1", data=np.arange(18+8, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor.new(axes, name="dat2", data=np.zeros(18+8, dtype=np.float64), dtype=np.float64)
 
-    iterset = [Slice.from_dim(root, 1), Slice.from_dim(root.subdims[1], 0)]
+    iterset = [Slice.from_dim(axes, 1), Slice.from_dim(axes.parts[1].subdim, 0)]
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
         "y[i] = x[i] + 1",
@@ -263,11 +238,7 @@ def test_compute_double_loop_scalar():
     expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-
-    import time
-    cache_key = str(time.time())
-    jitmodule = JITModule(exe, cache_key)
-    dll = compilemythings(jitmodule)
+    dll = compilemythings(exe)
     fn = getattr(dll, "mykernel")
 
     args = [dat1.data, dat2.data]
@@ -281,12 +252,11 @@ def test_compute_double_loop_scalar():
 
 
 def test_compute_double_loop_permuted():
-    root = Dim(6, permutation=(3, 2, 5, 0, 4, 1), subdims=(Dim(3),))
-    dims = root
-    dat1 = Tensor.new(dims, name="dat1", data=np.arange(18, dtype=np.float64), dtype=np.float64)
-    dat2 = Tensor.new(dims, name="dat2", data=np.zeros(18, dtype=np.float64), dtype=np.float64)
+    axes = Dim(DimSection(6, subdim=Dim(DimSection(3))), permutation=(3, 2, 5, 0, 4, 1))
+    dat1 = Tensor.new(axes, name="dat1", data=np.arange(18, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor.new(axes, name="dat2", data=np.zeros(18, dtype=np.float64), dtype=np.float64)
 
-    iterset = [Slice.from_dim(root, 0)]
+    iterset = [Slice.from_dim(axes, 0)]
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 3 }",
         "y[i] = x[i] + 1",
@@ -300,13 +270,9 @@ def test_compute_double_loop_permuted():
     expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-
-    cache_key = str(time.time())
-    jitmodule = JITModule(exe, cache_key)
-    dll = compilemythings(jitmodule)
+    dll = compilemythings(exe)
     fn = getattr(dll, "mykernel")
-
-    args = [dat1.data, dat2.data, dat1.dim.sections[0].data, dat2.dim.sections[0].data]
+    args = [dat1.data, dat2.data, dat1.dim.parts[0].layout.data, dat2.dim.parts[0].layout.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
     fn(*(d.ctypes.data for d in args))
 
@@ -314,12 +280,10 @@ def test_compute_double_loop_permuted():
 
 
 def test_compute_double_loop_permuted_mixed():
-    root = Dim((4, 3), permutation=(3, 6, 2, 5, 0, 4, 1), subdims=(Dim(1), Dim(2)))
-    dims = root
-    dat1 = Tensor.new(dims, name="dat1", data=np.arange(10, dtype=np.float64), dtype=np.float64)
-    dat2 = Tensor.new(dims, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
+    axes = Dim((DimSection(4, subdim=Dim(DimSection(1))), DimSection(3, subdim=Dim(DimSection(2)))), permutation=(3, 6, 2, 5, 0, 4, 1))
+    dat1 = Tensor.new(axes, name="dat1", data=np.arange(10, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor.new(axes, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
 
-    iterset = [Slice.from_dim(root, 1)]
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 2 }",
         "y[i] = x[i] + 1",
@@ -330,30 +294,26 @@ def test_compute_double_loop_permuted_mixed():
         lang_version=(2018, 2),
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+    iterset = [Slice.from_dim(axes, 1)]
     expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
 
-    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
 
-    import time
-    cache_key = str(time.time())
-    jitmodule = JITModule(exe, cache_key)
-    dll = compilemythings(jitmodule)
+    dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
-
-    args = [dat1.data, dat2.data, dat1.dim.sections[1].data, dat2.dim.sections[1].data]
+    args = [dat1.data, dat2.data, dat1.dim.parts[1].layout.data, dat2.dim.parts[1].layout.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
-
     fn(*(d.ctypes.data for d in args))
 
     assert all(dat2.data == [0., 2., 3., 0., 5., 6., 0., 8., 9., 0.])
 
 
 def test_compute_double_loop_ragged():
-    root = Dim(5)
+    root = Dim(DimSection(5))
     nnz = Tensor.new(
         root, name="nnz", dtype=np.int32, data=np.array([3, 2, 1, 3, 2], dtype=np.int32)
     )
-    dims = root.copy(subdims=(Dim(nnz),))
+    dims = root.copy(sections=(root.sections[0].copy(subdim=Dim(DimSection(nnz))),))
 
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
@@ -369,18 +329,14 @@ def test_compute_double_loop_ragged():
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
-    iterset = [Slice.from_dim(dims, 0), Slice.from_dim(dims.subdim, 0)]
+    iterset = [Slice.from_dim(dims, 0), Slice.from_dim(dims.part.subdim, 0)]
     expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
 
-    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-
-    import time
-    cache_key = str(time.time())
-    jitmodule = JITModule(exe, cache_key)
-    dll = compilemythings(jitmodule)
+    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+    dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    args = [nnz.data, dat1.data, dat2.data, dat1.dim.sections[0].data, dat2.dim.sections[0].data]
+    args = [nnz.data, dat1.data, dat2.data, dat1.dim.parts[0].layout.data, dat2.dim.parts[0].layout.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
@@ -392,7 +348,7 @@ def test_compute_double_loop_ragged():
 def test_doubly_ragged():
     nnz1 = Tensor.new(root, indicess=iterset, data=steps, name="nnz", dtype=np.int32, max_value=max(steps))
 
-    root = Dim(3)
+    root = Dim(DimSection(3))
     iterset = [Slice.from_dim(root, 0, is_loop_index=True)]
 
     steps = np.array([3, 2, 1, 3, 2], dtype=np.int32)
@@ -416,16 +372,12 @@ def test_doubly_ragged():
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
     expr = pyop3.Loop(iterset, kernel(dat1, dat2))
 
-    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-
-    import time
-    cache_key = str(time.time())
-    jitmodule = JITModule(exe, cache_key)
-    dll = compilemythings(jitmodule)
+    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+    dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    sec0 = dat1.dim.sections[0].data
-    sec1 = dat2.dim.sections[0].data
+    sec0 = dat1.dim.parts[0].layout.data
+    sec1 = dat2.dim.parts[0].layout.data
 
     args = [nnz.data, dat1.data, dat2.data, sec0, sec1]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
@@ -436,13 +388,13 @@ def test_doubly_ragged():
 
 
 def test_compute_double_loop_ragged_inner():
-    root = Dim(5)
+    root = Dim(DimSection(5))
     nnz = Tensor.new(
         root, name="nnz", dtype=np.int32, max_value=3,
         data=np.array([3, 2, 1, 3, 2], dtype=np.int32)
     )
-    subdim = Dim(nnz)
-    dims = root.copy(subdims=(subdim,))
+    subdim = Dim(DimSection(nnz))
+    dims = root.copy(sections=root.part.copy(subdim=subdim))
 
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
@@ -461,16 +413,12 @@ def test_compute_double_loop_ragged_inner():
     iterset = [Slice.from_dim(root, 0)]
     expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
 
-    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-
-    import time
-    cache_key = str(time.time())
-    jitmodule = JITModule(exe, cache_key)
-    dll = compilemythings(jitmodule)
+    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+    dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    sec0 = dat1.dim.sections[0].data
-    sec1 = dat2.dim.sections[0].data
+    sec0 = dat1.dim.parts[0].layout.data
+    sec1 = dat2.dim.parts[0].layout.data
 
     args = [nnz.data, dat1.data, dat2.data, sec0, sec1]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
@@ -481,14 +429,18 @@ def test_compute_double_loop_ragged_inner():
 
 
 def test_compute_double_loop_ragged_mixed():
-    root = Dim((4, 5, 4))
+    root = Dim((DimSection(4), DimSection(5), DimSection(4)))
     nnz_data = np.array([3, 2, 0, 0, 1], dtype=np.int32)
-    nnz = Tensor.new(Dim(5, labels=(root.labels[1],)), data=nnz_data, name="nnz", dtype=np.int32)
-    subdims = [Dim(1), Dim(nnz), Dim(2)]
-    dims = root.copy(subdims=tuple(subdims))
+    nnz = Tensor.new(Dim(DimSection(5, label=root.parts[1].label)), data=nnz_data, name="nnz", dtype=np.int32)
 
-    dat1 = Tensor.new(dims, name="dat1", data=np.arange(4+6+8, dtype=np.float64), dtype=np.float64)
-    dat2 = Tensor.new(dims, name="dat2", data=np.zeros(4+6+8, dtype=np.float64), dtype=np.float64)
+    axes = Dim((
+        root.parts[0].copy(subdim=Dim(DimSection(1))),
+        root.parts[1].copy(subdim=Dim(DimSection(nnz))),
+        root.parts[2].copy(subdim=Dim(DimSection(2))),
+    ))
+
+    dat1 = Tensor.new(axes, name="dat1", data=np.arange(4+6+8, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor.new(axes, name="dat2", data=np.zeros(4+6+8, dtype=np.float64), dtype=np.float64)
 
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
@@ -500,19 +452,15 @@ def test_compute_double_loop_ragged_mixed():
         lang_version=(2018, 2),
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-    iterset = [Slice.from_dim(root, 1), Slice.from_dim(subdims[1], 0)]
+    iterset = [Slice.from_dim(axes, 1), Slice.from_dim(axes.parts[1].subdim, 0)]
     expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
 
-    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-
-    import time
-    cache_key = str(time.time())
-    jitmodule = JITModule(exe, cache_key)
-    dll = compilemythings(jitmodule)
+    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+    dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    sec0 = dat1.dim.sections[1]
-    sec1 = dat2.dim.sections[1]
+    sec0 = dat1.dim.parts[1].layout
+    sec1 = dat2.dim.parts[1].layout
 
     args = [nnz.data, dat1.data, dat2.data, sec0.data, sec1.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
@@ -525,15 +473,15 @@ def test_compute_double_loop_ragged_mixed():
 
 
 def test_compute_ragged_permuted():
-    root = Dim(6, permutation=(3, 2, 5, 0, 4, 1))
+    root = Dim(DimSection(6), permutation=(3, 2, 5, 0, 4, 1))
     # the nnz array doesn't need to be permuted
     nnz_ = np.array([3, 2, 0, 1, 3, 2], dtype=np.int32)
     nnz = Tensor.new(root.copy(permutation=None), data=nnz_, name="nnz", dtype=np.int32)
-    subdim = Dim(nnz)
-    dims = root.copy(subdims=(subdim,))
+    subdim = Dim(DimSection(nnz))
+    axes = root.copy(sections=root.part.copy(subdim=subdim))
 
-    dat1 = Tensor.new(dims, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
-    dat2 = Tensor.new(dims, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
+    dat1 = Tensor.new(axes, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor.new(axes, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
 
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
@@ -545,19 +493,15 @@ def test_compute_ragged_permuted():
         lang_version=(2018, 2),
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-    iterset = [Slice.from_dim(root, 0), Slice.from_dim(subdim, 0)]
+    iterset = [Slice.from_dim(axes, 0), Slice.from_dim(axes.part.subdim, 0)]
     expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
 
-    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-
-    import time
-    cache_key = str(time.time())
-    jitmodule = JITModule(exe, cache_key)
-    dll = compilemythings(jitmodule)
+    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+    dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    sec0 = dat1.dim.sections[0]
-    sec1 = dat2.dim.sections[0]
+    sec0 = dat1.dim.parts[0].layout
+    sec1 = dat2.dim.parts[0].layout
 
     args = [nnz.data, dat1.data, dat2.data, sec0.data, sec1.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
@@ -568,13 +512,13 @@ def test_compute_ragged_permuted():
 
 
 def test_subset():
-    root = Dim(6)
+    root = Dim(DimSection(6))
     dims = root
 
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(6, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(6, dtype=np.float64), dtype=np.float64)
 
-    subset_dim = Dim(4, labels=(root.labels[0],))
+    subset_dim = Dim(DimSection(4, label=root.part.label))
     subset_tensor = Tensor.new(subset_dim,
             data=np.array([2, 3, 5, 0], dtype=np.int32), dtype=np.int32, prefix="subset")
 
@@ -596,15 +540,10 @@ def test_subset():
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
 
-    import time
-    cache_key = str(time.time())
-    jitmodule = JITModule(exe, cache_key)
-    dll = compilemythings(jitmodule)
+    dll = compilemythings(exe)
     fn = getattr(dll, "mykernel")
-
     args = [subset_tensor.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
-
     fn(*(d.ctypes.data for d in args))
 
     assert all(dat2.data[[2, 3, 5, 0]] == dat1.data[[2, 3, 5, 0]] + 1)
@@ -612,13 +551,13 @@ def test_subset():
 
 
 def test_map():
-    root = Dim(5)
+    root = Dim(DimSection(5))
     dims = root
 
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(5, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
 
-    map_tensor = Tensor.new(root.copy(subdims=(Dim(2, labels=(dims.labels[0],)),)),
+    map_tensor = Tensor.new(root.copy(sections=root.part.copy(subdim=Dim(DimSection(2, label=root.part.label)))),
             data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32), dtype=np.int32, prefix="map")
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 2 }",
@@ -631,16 +570,13 @@ def test_map():
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
-    i1 = pyop3.index([[Slice.from_dim(root, 0)]])
+    i1 = pyop3.index([Slice.from_dim(root, 0)])
     map = NonAffineMap(map_tensor[i1], subdim_id=0)
     i2 = [[map]]
     expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
 
-    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-
-    cache_key = str(time.time())
-    jitmodule = JITModule(exe, cache_key)
-    dll = compilemythings(jitmodule)
+    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+    dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
     args = [map_tensor.data, dat1.data, dat2.data]
@@ -653,12 +589,12 @@ def test_map():
 
 
 def test_closure_ish():
-    root = Dim((3, 4))
+    root = Dim((DimSection(3), DimSection(4)))
 
     dat1 = Tensor.new(root, name="dat1", data=np.arange(7, dtype=np.float64), dtype=np.float64)
-    dat2 = Tensor.new(Dim(3, labels=(root.labels[0],)), name="dat2", data=np.zeros(3, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor.new(Dim(DimSection(3, label=root.parts[0].label)), name="dat2", data=np.zeros(3, dtype=np.float64), dtype=np.float64)
 
-    map0 = Tensor.new(Dim(3, labels=(root.labels[0],), subdims=(Dim(2, labels=(root.labels[1],)),)),
+    map0 = Tensor.new(Dim(DimSection(3, label=root.parts[0].label, subdim=Dim(DimSection(2, label=root.parts[1].label)))),
             data=np.array([1, 2, 0, 1, 3, 2], dtype=np.int32), dtype=np.int32, prefix="map")
 
     code = lp.make_kernel(
@@ -677,10 +613,7 @@ def test_closure_ish():
     expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-
-    cache_key = str(time.time())
-    jitmodule = JITModule(exe, cache_key)
-    dll = compilemythings(jitmodule)
+    dll = compilemythings(exe)
     fn = getattr(dll, "mykernel")
 
     args = [map0.data, dat1.data, dat2.data]
@@ -698,10 +631,10 @@ def test_index_function():
         3 0 4 1 5 2 6
         x---x---x---x
     """
-    root = Dim((3, 4))
+    root = Dim((DimSection(3), DimSection(4)))
 
     dat1 = Tensor.new(root, name="dat1", data=np.arange(7, dtype=np.float64), dtype=np.float64)
-    dat2 = Tensor.new(Dim(3, labels=(root.labels[0],)), name="dat2", data=np.zeros(3, dtype=np.float64), dtype=np.float64)
+    dat2 = Tensor.new(Dim(DimSection(3, label=root.parts[0].label)), name="dat2", data=np.zeros(3, dtype=np.float64), dtype=np.float64)
 
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 3 }",
@@ -716,17 +649,14 @@ def test_index_function():
 
     # an IndexFunction contains an expression and the corresponding dim labels
     x0, x1 = pym.variables("x0 x1")
-    map = IndexFunction(x0 + x1, arity=2, vardims=[(x0, root.labels[0]), (x1, root.labels[1])], subdim_id=1)
+    map = IndexFunction(x0 + x1, arity=2, vardims=[(x0, root.parts[0].label), (x1, root.parts[1].label)], subdim_id=1)
 
     i1 = pyop3.index([Slice.from_dim(root, 0)]) # loop over 'cells'
     i2 = [i1, [map]]  # access 'cell' and 'edge' data
     expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
 
-    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-
-    cache_key = str(time.time())
-    jitmodule = JITModule(exe, cache_key)
-    dll = compilemythings(jitmodule)
+    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+    dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
     args = [dat1.data, dat2.data]
@@ -739,7 +669,7 @@ def test_index_function():
 
 
 def test_multimap():
-    root = Dim(5)
+    root = Dim(DimSection(5))
 
     dat1 = Tensor.new(
         root, name="dat1", data=np.arange(5, dtype=np.float64), dtype=np.float64)
@@ -747,12 +677,12 @@ def test_multimap():
         root, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
 
     map0 = Tensor.new(
-        root.copy(subdims=(Dim(2, labels=(root.labels[0],)),)),
+        root.copy(sections=root.part.copy(subdim=Dim(DimSection(2, label=root.part.label)))),
         data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32),
         dtype=np.int32, prefix="map")
 
     map1 = Tensor.new(
-        root.copy(subdims=(Dim(2, labels=(root.labels[0],)),)),
+        root.copy(sections=root.part.copy(subdim=Dim(DimSection(2, label=root.part.label)))),
         data=np.array([1, 1, 3, 0, 2, 1, 4, 3, 0, 1], dtype=np.int32),
         dtype=np.int32, prefix="map")
 
@@ -767,15 +697,12 @@ def test_multimap():
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
-    i1 = pyop3.index([[Slice.from_dim(root, 0)]])
+    i1 = pyop3.index([Slice.from_dim(root, 0)])
     i2 = [[NonAffineMap(map0[i1], subdim_id=0)], [NonAffineMap(map1[i1], subdim_id=0)]]
     expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
 
-    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-
-    cache_key = str(time.time())
-    jitmodule = JITModule(exe, cache_key)
-    dll = compilemythings(jitmodule)
+    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+    dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
     args = [map0.data, map1.data, dat1.data, dat2.data]
@@ -790,7 +717,7 @@ def test_multimap():
 
 
 def test_multimap_with_scalar():
-    root = Dim(5)
+    root = Dim(DimSection(5))
 
     dat1 = Tensor.new(
         root, name="dat1", data=np.arange(5, dtype=np.float64), dtype=np.float64)
@@ -798,7 +725,7 @@ def test_multimap_with_scalar():
         root, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
 
     map0 = Tensor.new(
-        root.copy(subdims=(Dim(2, labels=(root.labels[0],)),)),
+        root.copy(sections=root.part.copy(subdim=Dim(DimSection(2, label=root.parts[0].label)))),
         data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32),
         dtype=np.int32, prefix="map")
 
@@ -817,11 +744,8 @@ def test_multimap_with_scalar():
     i2 = [i1, [NonAffineMap(map0[i1], subdim_id=0)]]
     expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
 
-    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-
-    cache_key = str(time.time())
-    jitmodule = JITModule(exe, cache_key)
-    dll = compilemythings(jitmodule)
+    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+    dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
     args = [map0.data, dat1.data, dat2.data]
@@ -834,16 +758,16 @@ def test_multimap_with_scalar():
                                      dtype=np.int32))
 
 def test_map_composition():
-    root = Dim(5)
+    root = Dim(DimSection(5))
     dims = root
 
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(5, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
 
-    map0_tensor = Tensor.new(root.copy(subdims=(Dim(2, labels=(root.labels[0],)),)),
+    map0_tensor = Tensor.new(root.copy(sections=root.part.copy(subdim=Dim(DimSection(2, label=root.part.label)))),
                          data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32),
                          dtype=np.int32, prefix="map")
-    map1_tensor = Tensor.new(root.copy(subdims=(Dim(2, labels=(root.labels[0],)),)),
+    map1_tensor = Tensor.new(root.copy(sections=root.part.copy(subdim=Dim(DimSection(2, label=root.part.label)))),
                          data=np.array([3, 2, 4, 1, 0, 2, 4, 2, 1, 3], dtype=np.int32),
                          dtype=np.int32, prefix="map")
 
@@ -865,11 +789,8 @@ def test_map_composition():
     i3 = [[map1]]
     expr = pyop3.Loop(i1, kernel(dat1[i3], dat2[i1]))
 
-    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-
-    cache_key = str(time.time())
-    jitmodule = JITModule(exe, cache_key)
-    dll = compilemythings(jitmodule)
+    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+    dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
     args = [map0_tensor.data, map1_tensor.data, dat1.data, dat2.data]
@@ -882,7 +803,7 @@ def test_map_composition():
 
 
 def test_mixed_arity_map():
-    root = Dim(3)
+    root = Dim(DimSection(3))
     dims = root
 
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(1, 4, dtype=np.float64), dtype=np.float64)
@@ -892,9 +813,8 @@ def test_mixed_arity_map():
     nnz = Tensor.new(root, data=nnz_, name="nnz", dtype=np.int32, max_value=3)
 
     map_data = np.array([2, 1, 0, 2, 1, 2], dtype=np.int32)
-    map_tensor = Tensor.new(root.copy(subdims=(Dim(nnz, labels=(root.labels[0],)),)),
+    map_tensor = Tensor.new(root.copy(sections=root.part.copy(subdim=Dim(DimSection(nnz, label=root.part.label)))),
             data=map_data, dtype=np.int32, prefix="map")
-
 
     code = lp.make_kernel(
         "{ [i]: 0 <= i < n }",
@@ -913,14 +833,11 @@ def test_mixed_arity_map():
     i2 = [[map]]
     expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
 
-    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-
-    cache_key = str(time.time())
-    jitmodule = JITModule(exe, cache_key)
-    dll = compilemythings(jitmodule)
+    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+    dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    args = [nnz.data, map_tensor.data, dat1.data, dat2.data, map_tensor.dim.sections[0].data]
+    args = [nnz.data, map_tensor.data, dat1.data, dat2.data, map_tensor.dim.parts[0].layout.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
@@ -929,16 +846,16 @@ def test_mixed_arity_map():
     print("test_mixed_arity_map PASSED", flush=True)
 
 def test_iter_map_composition():
-    root = Dim(5)
+    root = Dim(DimSection(5))
     dims = root
 
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(5, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
 
-    map0_tensor = Tensor.new(root.copy(subdims=(Dim(2, labels=(root.labels[0],)),)),
+    map0_tensor = Tensor.new(root.copy(sections=root.part.copy(subdim=Dim(DimSection(2, label=root.part.label)))),
                          data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32),
                          dtype=np.int32, prefix="map")
-    map1_tensor = Tensor.new(root.copy(subdims=(Dim(2, labels=(root.labels[0],)),)),
+    map1_tensor = Tensor.new(root.copy(sections=root.part.copy(subdim=Dim(DimSection(2, label=root.part.label)))),
                          data=np.array([3, 2, 2, 3, 0, 2, 1, 2, 1, 3], dtype=np.int32),
                          dtype=np.int32, prefix="map")
 
@@ -960,11 +877,8 @@ def test_iter_map_composition():
     i3 = [[map1]]
     expr = pyop3.Loop(p := pyop3.index(i3), kernel(dat1[p], dat2[p]))
 
-    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-
-    cache_key = str(time.time())
-    jitmodule = JITModule(exe, cache_key)
-    dll = compilemythings(jitmodule)
+    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+    dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
     args = [map0_tensor.data, map1_tensor.data, dat1.data, dat2.data]
@@ -977,12 +891,6 @@ def test_iter_map_composition():
     ans = [0, 1, 2, 3, 0]
     assert all(dat2.data == np.array(ans, dtype=np.int32))
     print("test_iter_map_composition PASSED", flush=True)
-
-@dataclasses.dataclass
-class JITModule:
-    code_to_compile: str
-    cache_key: str
-
 
 
 if __name__ == "__main__":

@@ -59,7 +59,6 @@ class TensorLangKernelBuilder:
         temporaries = {}
         for arg in expr.arguments:
             dims = self.construct_temp_dims(arg.tensor)
-            # import pdb; pdb.set_trace()
             temporaries[arg] = tensors.Tensor.new(dims, name=self._temp_name_generator(), dtype=arg.tensor.dtype)
 
         gathers = self.make_gathers(temporaries)
@@ -85,25 +84,12 @@ class TensorLangKernelBuilder:
             else:
                 return None
 
-        # if isinstance(idx, tensors.NonAffineMap):
-        #     dims = self._construct_temp_dims(idx.tensor.indices)
-        # elif isinstance(idx, (tensors.Slice, tensors.IndexFunction)):
-        #     sizes = (idx.size,)
-        #     labels = (idx.label,)
-        #     dims = [tensors.Dim(sizes=sizes, labels=labels)]
-        # else:
-        #     raise TypeError
-
-        # import pdb; pdb.set_trace()
-
         if isinstance(idx, tensors.NonAffineMap):
             extra_dims = self._construct_temp_dims(idx.input_indices) or []
         else:
             extra_dims = []
 
-        sizes = (idx.size,)
-        labels = (idx.label,)
-        dims = [tensors.Dim(sizes=sizes, labels=labels)]
+        dims = [tensors.Dim(tensors.DimSection(idx.size, label=idx.label))]
 
         if subidxs:
             return extra_dims + dims + self._construct_temp_dims(subidxs)
@@ -113,37 +99,20 @@ class TensorLangKernelBuilder:
     def construct_temp_dims(self, tensor):
         flat_subdimss = [self._construct_temp_dims(idxs) for idxs in tensor.indicess]
 
-        # catch single-scalar case
-        if flat_subdimss == [None]:
-            return None
-
         subdims = [self._nest_dims(sdims) for sdims in flat_subdimss]
 
-        sizes = []
-        labels = []
-        new_subdims = []
-        for subdim in subdims:
-            if subdim is not None:
-                sizes.append(subdim.size)
-                labels.append(subdim.label)
-                if subdim.subdims:
-                    new_subdims.append(subdim.subdim)
-            else:
-                sizes.append(None)
-                labels.append(None)
-
-        return tensors.Dim(sizes=sizes, labels=labels, subdims=new_subdims)
+        # N.B. each subdim at this point cannot branch (and have multiple parts)
+        new_parts = tuple(sdim.part if sdim else None for sdim in subdims)
+        return tensors.Dim(sections=new_parts)
 
     def _nest_dims(self, flat_dims):
-        if flat_dims is None:
-            return None
-        if len(flat_dims) == 0:
-            return ()
+        if not flat_dims:
+            return tensors.Dim(tensors.ScalarDimSection())
         d1, *rest = flat_dims
-        if rest := self._nest_dims(rest):
-            return d1.copy(subdims=(rest,))
+        if rest:
+            return d1.copy(sections=d1.parts[0].copy(subdim=self._nest_dims(rest)))
         else:
-            return d1.copy(subdims=())
+            return d1
 
     def make_gathers(self, temporaries, **kwargs):
         return tuple(self.make_gather(arg, temp, **kwargs) for arg, temp in temporaries.items())

@@ -20,38 +20,32 @@ from pyop3.utils import as_tuple, checked_zip, NameGenerator, unique
 
 
 class Dim(pytools.ImmutableRecord):
-    fields = {"sizes", "permutation", "labels", "subdims", "sections"}
+    fields = {"sections", "permutation"}
 
-    _label_generator = NameGenerator("dim")
+    def __init__(self, sections, *, permutation=None):
+        sections = as_tuple(sections)
 
-    def __init__(self, sizes=(), *, permutation=None, labels=None, subdims=(), sections=None):
-        if sections is not None and len(sections) != len(sizes):
-            raise ValueError
-
-        if not isinstance(sizes, collections.abc.Sequence):
-            sizes = (sizes,)
-
-        if permutation and not all(isinstance(s, numbers.Integral) for s in sizes):
+        if permutation and not all(isinstance(sec.size, numbers.Integral) for sec in sections):
             raise NotImplementedError("This turns out to be very complicated")
 
-        if not labels:
-            labels = tuple(self._label_generator.next() for _ in sizes)
-
-        assert len(labels) == len(sizes)
-
-        if subdims:
-            assert len(sizes) == len(subdims)
-
-        self.sizes = sizes
-        self.permutation = permutation
-        self.labels = labels
-        self.subdims = subdims
         self.sections = sections
+        self.permutation = permutation
         super().__init__()
 
+    @property
+    def parts(self):
+        return self.sections
+
+    @property
+    def part(self):
+        try:
+            pt, = self.parts
+            return pt
+        except ValueError:
+            raise RuntimeError
+
     def __bool__(self):
-        assert len(self.sizes) == len(self.labels)
-        return bool(self.sizes)
+        return bool(self.sections)
 
     # Could I tie sizes and subdims together?
 
@@ -84,12 +78,18 @@ class Dim(pytools.ImmutableRecord):
             raise RuntimeError
 
 
-class DimSection(pytools.ImmutableRecord):
-    fields = {"label", "size", "subdim", "layout"}
+class AbstractDimSection(pytools.ImmutableRecord, abc.ABC):
+    fields = set()
 
-    def __init__(self, size, label, subdim, layout=None):
+
+class DimSection(AbstractDimSection):
+    fields = AbstractDimSection.fields | {"size", "label", "subdim", "layout"}
+
+    _label_generator = NameGenerator("dim")
+
+    def __init__(self, size, label=None, subdim=None, layout=None):
         self.size = size
-        self.label = label
+        self.label = label or self._label_generator.next()
         self.subdim = subdim
         self.layout = layout
         super().__init__()
@@ -99,6 +99,13 @@ class DimSection(pytools.ImmutableRecord):
         import warnings
         warnings.warn("use layout instead", DeprecationWarning)
         return self.layout
+
+
+class ScalarDimSection(AbstractDimSection):
+
+    @property
+    def size(self):
+        return 1
 
 
 class Index(pytools.ImmutableRecord, abc.ABC):
@@ -134,9 +141,8 @@ class Slice(FancyIndex):
 
     @classmethod
     def from_dim(cls, dim, subdim_id, **kwargs):
-        size = dim.sizes[subdim_id]
-        label = dim.labels[subdim_id]
-        return cls(size=size, label=label, subdim_id=subdim_id, **kwargs)
+        part = dim.parts[subdim_id]
+        return cls(size=part.size, label=part.label, subdim_id=subdim_id, **kwargs)
 
 
 class Map(FancyIndex, abc.ABC):
@@ -200,6 +206,7 @@ class NonAffineMap(Map):
         return self.tensor
 
 
+# TODO Rename to MultiArray
 class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
 
     fields = {"dim", "indicess", "dtype", "mesh", "name", "data", "max_value"}
@@ -251,24 +258,35 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
     @classmethod
     def collect_sections(cls, dim):
         # FIXME not happy with this, hopefully DimSection (with zero size) will resolve
-        if not dim:
-            return None
+        # if not dim:
+        #     return None
 
         # this is a map from dim label to a tensor or index function. This is not
         # unique for each tensor so we need to construct a stack of them.
         if dim.permutation:
-            secs = cls._collect_sections_permuted(dim)
+            layouts = cls._collect_sections_permuted(dim)
         else:
-            secs = cls._collect_sections_unpermuted(dim)
+            layouts = cls._collect_sections_unpermuted(dim)
 
-        new_subdims = tuple(cls.collect_sections(subdim) for subdim in dim.subdims)
-        return dim.copy(sections=secs, subdims=new_subdims)
+        new_parts = []
+        for part, layout in zip(dim.parts, layouts):
+            if isinstance(part, ScalarDimSection):
+                assert layout is None
+                new_part = part
+            else:
+                if part.subdim:
+                    new_part = part.copy(layout=layout, subdim=cls.collect_sections(part.subdim))
+                else:
+                    new_part = part.copy(layout=layout)
+            new_parts.append(new_part)
+
+        return dim.copy(sections=tuple(new_parts))
 
 
     @classmethod
     def _collect_sections_permuted(cls, dim, *, idx_map=None):
         assert dim.permutation
-        if not all(isinstance(s, numbers.Integral) for s in dim.sizes):
+        if not all(isinstance(part.size, numbers.Integral) for part in dim.parts):
             raise NotImplementedError
 
         if not idx_map:
@@ -276,29 +294,29 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
 
         sections = collections.defaultdict(dict)
         offset = 0
-        npoints = sum(dim.sizes)
+        npoints = sum(p.size for p in dim.parts)
         for pt in range(npoints):
             pt = dim.permutation[pt]
 
-            subdim, label, subdim_id = cls._get_subdim(dim, pt)
+            subdim_id, part = cls._get_subdim(dim, pt)
             sections[subdim_id][pt] = offset
 
             # increment the pointer by the size of the step for this subdim
-            if dim.subdims:
+            if part.subdim:
                 new_idx_map = copy.deepcopy(idx_map)
-                new_idx_map[label].append(pt)
-                offset += cls._get_full_dim_size(subdim, idx_map=new_idx_map)
+                new_idx_map[part.label].append(pt)
+                offset += cls._get_full_dim_size(part.subdim, idx_map=new_idx_map)
             else:
                 offset += 1
 
-        new_sections = [None] * len(dim.sizes)
+        new_sections = [None] * len(dim.parts)
         for subdim_id in sections:
             assert isinstance(subdim_id, int)
 
-            label = dim.labels[subdim_id]
+            part = dim.parts[subdim_id]
 
             idxs = np.array([sections[subdim_id][i] for i in sorted(sections[subdim_id])], dtype=np.int32)
-            new_section = Tensor.new(Dim(len(idxs), labels=(label,)), data=idxs, prefix="sec", dtype=np.int32)
+            new_section = Tensor.new(Dim(DimSection(len(idxs), label=part.label)), data=idxs, prefix="sec", dtype=np.int32)
             new_sections[subdim_id] = new_section
 
         return new_sections
@@ -314,34 +332,32 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
         sections = []
         all_sizes = []
         offset = 0
-        for subdim_id, label in enumerate(dim.labels):
+        for subdim_id, part in enumerate(dim.parts):
 
             idxs = []
             sizes = []
 
-            dsize = dim.sizes[subdim_id]
-            if isinstance(dsize, Tensor):
+            if isinstance(part, ScalarDimSection):
+                idxs = [offset]
+                sizes = [1]
+                offset += 1
+            elif isinstance(dsize := part.size, Tensor):
                 # FIXME this is missing an extra index somehow - requires thought!!
                 for idx_map in cls._generate_indices(dsize):
                     idxs.append(offset)
-                    if dim.subdims:
-                        size = cls._get_full_dim_size(dim.subdims[subdim_id], idx_map=idx_map)
+                    if part.subdim:
+                        size = cls._get_full_dim_size(part.subdim, idx_map=idx_map)
                     else:
                         size = 1
                     sizes.append(size)
                     offset += size
-            elif dsize is None:
-                # TODO I hate this bit - fix empty dims
-                idxs.append(offset)
-                sizes.append(1)
-                offset += 1
             else:
                 for i in range(dsize):
                     idxs.append(offset)
-                    if dim.subdims:
+                    if part.subdim:
                         idx_map = collections.defaultdict(list)
-                        idx_map[label] = [i]
-                        size = cls._get_full_dim_size(dim.subdims[subdim_id], idx_map=idx_map)
+                        idx_map[part.label] = [i]
+                        size = cls._get_full_dim_size(part.subdim, idx_map=idx_map)
                     else:
                         size = 1
                     sizes.append(size)
@@ -361,22 +377,25 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
         # convert to a nice index-type representation
         new_sections = []
         for subdim_id, idxs in enumerate(sections):
-            label = dim.labels[subdim_id]
+            part = dim.parts[subdim_id]
 
-            # see if we can represent this as an affine transformation or not
-            steps = set(idxs[1:] - idxs[:-1])
-            if len(steps) == 0:
-                x0 = pym.var("x0")
-                expr = x0
-                new_section = IndexFunction(expr, 1, [(x0, label)], subdim_id=subdim_id)
-            elif len(steps) == 1:
-                start = idxs[0]
-                step, = steps
-                x0 = pym.var("x0")
-                expr = x0 * step  + start
-                new_section = IndexFunction(expr, 1, [(x0, label)], subdim_id=subdim_id)
+            if isinstance(part, ScalarDimSection):
+                new_section = None
             else:
-                new_section = Tensor.new(Dim(len(idxs), labels=(label,)), data=idxs, prefix="sec", dtype=np.int32)
+                # see if we can represent this as an affine transformation or not
+                steps = set(idxs[1:] - idxs[:-1])
+                if not steps:
+                    x0 = pym.var("x0")
+                    expr = x0
+                    new_section = IndexFunction(expr, 1, ((x0, part.label),), subdim_id=subdim_id)
+                elif len(steps) == 1:
+                    start = idxs[0]
+                    step, = steps
+                    x0 = pym.var("x0")
+                    expr = x0 * step  + start
+                    new_section = IndexFunction(expr, 1, ((x0, part.label),), subdim_id=subdim_id)
+                else:
+                    new_section = Tensor.new(Dim(DimSection(len(idxs), label=part.label)), data=idxs, prefix="sec", dtype=np.int32)
 
             new_sections.append(new_section)
         return new_sections
@@ -387,17 +406,17 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
         if dim is None:
             dim = tensor.dim
 
-        assert len(dim.sizes) == 1
-        assert isinstance(dim.size, numbers.Integral)
+        assert len(dim.parts) == 1
+        assert isinstance(dim.part.size, numbers.Integral)
 
-        if dim.subdims:
-            inner = cls._generate_indices(tensor, dim.subdim)
+        if dim.part.subdim:
+            inner = cls._generate_indices(tensor, dim.part.subdim)
             result = []
-            for i in range(dim.size):
-                result.append({dim.label: i} | inner)
+            for i in range(dim.part.size):
+                result.append({dim.part.label: i} | inner)
             return result
         else:
-            return [{dim.label: i} for i in range(dim.size)]
+            return [{dim.part.label: i} for i in range(dim.part.size)]
 
     @classmethod
     def _get_full_dim_size(cls, dim, *, idx_map=None):
@@ -405,56 +424,36 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
             idx_map = collections.defaultdict(list)
 
         total_size = 0
-        for subdim_id, (size, label) in enumerate(zip(dim.sizes, dim.labels)):
-            if isinstance(size, Tensor):
-                for i in range(cls._read_tensor(size, idx_map=idx_map)):
-                    if dim.subdims:
+        for subdim_id, part in enumerate(dim.parts):
+            if isinstance(part.size, Tensor):
+                for i in range(cls._read_tensor(part.size, idx_map=idx_map)):
+                    if part.subdim:
                         new_idx_map = copy.deepcopy(idx_map)
-                        new_idx_map[label].append(i)
+                        new_idx_map[part.label].append(i)
 
                         total_size += cls._get_full_dim_size(
-                            dim.subdims[subdim_id], idx_map=new_idx_map)
+                            part.subdim, idx_map=new_idx_map)
                     else:
                         total_size += 1
             else:
-                for i in range(size):
-                    if dim.subdims:
+                for i in range(part.size):
+                    if part.subdim:
                         new_idx_map = copy.deepcopy(idx_map)
-                        new_idx_map[label].append(i)
-                        total_size += cls._get_full_dim_size(dim.subdims[subdim_id], idx_map=new_idx_map)
+                        new_idx_map[part.label].append(i)
+                        total_size += cls._get_full_dim_size(part.subdim, idx_map=new_idx_map)
                     else:
                         total_size += 1
 
         return total_size
 
     @classmethod
-    def _requires_nonaffine(cls, dim, label):
-        subdim_id = dim.labels.index(label)
-        check1 = isinstance(dim.sizes[subdim_id], pym.primitives.Expression) or dim.permutation
-
-        if dim.subdims:
-            check2 = False
-            for label in dim.subdims[subdim_id].labels:
-                if cls._requires_nonaffine(dim.subdims[subdim_id], label):
-                    check2 = True
-                    break
-            return check1 or check2
-        else:
-            return check1
-
-    @classmethod
     def _get_subdim(cls, dim, point):
-        subdims = dim.subdims
-
-        if not subdims:
-            return None, None, None
-
-        bounds = list(np.cumsum(dim.sizes))
+        bounds = list(np.cumsum([p.size for p in dim.parts]))
         for i, (start, stop) in enumerate(zip([0]+bounds, bounds)):
             if start <= point < stop:
-                stratum = i
+                subdim_id = i
                 break
-        return subdims[stratum], dim.labels[stratum], stratum
+        return subdim_id, dim.parts[subdim_id]
 
     @classmethod
     def _read_tensor(cls, tensor, idx_map):
@@ -465,12 +464,13 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
         ptr = 0
         while True:
             # check that current dim does not duplicate dim labels as this creates a lot of ambiguity
-            assert len(unique(current_dim.labels)) == len(current_dim.labels)
+            labels = [p.label for p in current_dim.parts]
+            assert len(unique(labels)) == len(labels)
 
             # only one label from the list must be in idx_map
-            label, = set(l for l in idx_map_copy.keys() if l in current_dim.labels)
-            subdim_id = current_dim.labels.index(label)
-            section = current_dim.sections[subdim_id]
+            label, = set(l for l in idx_map_copy.keys() if l in labels)
+            subdim_id = labels.index(label)
+            section = current_dim.parts[subdim_id].layout
 
             idx = idx_map_copy[label].pop(0)
 
@@ -494,8 +494,8 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
             else:
                 raise AssertionError
 
-            if current_dim.subdims:
-                current_dim = current_dim.subdims[subdim_id]
+            if current_dim.parts[subdim_id].subdim:
+                current_dim = current_dim.parts[subdim_id].subdim
             else:
                 break
 
@@ -544,20 +544,24 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
             parent_indices = []
 
         idxs = []
-        for i, size in enumerate(dim.sizes):
-            if size is None:
+        for i, part in enumerate(dim.parts):
+            if isinstance(part, ScalarDimSection):
                 idxs.append([])
                 continue
             idx = Slice.from_dim(dim, i)
-            if dim.subdims:
+            if part.subdim:
                 idxs += [[idx, *subidxs]
-                    for subidxs in cls._fill_with_slices(dim.subdims[i], parent_indices+[idx])]
+                    for subidxs in cls._fill_with_slices(part.subdim, parent_indices+[idx])]
             else:
                 idxs += [[idx]]
         return idxs
 
     @classmethod
     def _is_valid_indices(cls, indices, dim):
+        # deal with all of this later - need a good scalar solution before this will make sense I think.
+        return True
+
+        # not sure what I'm trying to do here
         if not indices and dim.sizes and None in dim.sizes:
             return True
 
@@ -620,8 +624,10 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
         if not parent_indices:
             parent_indices = []
 
+        # cannot assume a slice if we are mixed - is this right?
+        # could duplicate parent indices I suppose
         if not indices:
-            if len(dim.sizes) > 1:
+            if len(dim.parts) > 1:
                 raise ValueError
             else:
                 indices = [Slice.from_dim(dim, 0)]
@@ -630,25 +636,20 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
         idx, *subidxs = indices
 
         if isinstance(idx, Map):
-            subdim_id = dim.labels.index(idx.label)
-            if subdims := dim.subdims:
-                subdim = subdims[subdim_id]
-                return [idx] + cls._parse_indices(subdim, subidxs, parent_indices+[idx])
+            subdim_id = [p.label for p in dim.parts].index(idx.label)
+            part = dim.parts[subdim_id]
+            if part.subdim:
+                return [idx] + cls._parse_indices(part.subdim, subidxs, parent_indices+[idx])
             else:
                 return [idx]
         elif isinstance(idx, Slice):
-            # reindex dim.size s.t. it references the correct parent indices
             if isinstance(idx.size, pym.primitives.Expression):
                 if not isinstance(idx.size, Tensor):
                     raise NotImplementedError
-                # myidxs = parent_indices[-idx.size.order:]
-                # import pdb; pdb.set_trace()
-                # idx = idx.copy(size=idx.size[[myidxs]])
 
-            subdim_id = dim.labels.index(idx.label)
-            if subdims := dim.subdims:
-                subdim = subdims[subdim_id]
-                return [idx] + cls._parse_indices(subdim, subidxs, parent_indices+[idx])
+            part, = {pt for pt in dim.parts if pt.label == idx.label}
+            if part.subdim:
+                return [idx] + cls._parse_indices(part.subdim, subidxs, parent_indices+[idx])
             else:
                 return [idx]
         else:
@@ -744,17 +745,16 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
         return _merge_stencils(stencils1, stencils2, self.dim)
 
     def _compute_shapes(self, dim):
-        # import pdb; pdb.set_trace()
-        if not dim:
-            return ((),)
-
-        if subdims := dim.subdims:
-            # FIXME (see below)
-            return tuple(
-                (dim.size, *sh) for subdim in subdims for sh in self._compute_shapes(subdim)
-            )
-        else:
-            return tuple((size or 1,) for size in dim.sizes)
+        shapes = []
+        for part in dim.parts:
+            if isinstance(part, ScalarDimSection):
+                shapes.append(())
+            elif part.subdim:
+                for shape in self._compute_shapes(part.subdim):
+                    shapes.append((part.size, *shape))
+            else:
+                shapes.append((part.size,))
+        return tuple(shapes)
 
 
 def indexed_shapes(tensor):
@@ -774,10 +774,11 @@ def _compute_indexed_shape(indices):
 
 
 def _compute_indexed_shape2(flat_indices):
+    import warnings
+    warnings.warn("need to remove", DeprecationWarning)
     shape = ()
     for index in flat_indices:
         shape += index_shape(index)
-
     return shape
 
 

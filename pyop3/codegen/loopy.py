@@ -20,7 +20,7 @@ import pyop3.utils
 from pyop3 import utils
 from pyop3.utils import MultiNameGenerator, NameGenerator
 from pyop3.utils import CustomTuple, checked_zip, NameGenerator, rzip
-from pyop3.tensors import Tensor, Index, Map, Dim, NonAffineMap, _compute_indexed_shape, _compute_indexed_shape2
+from pyop3.tensors import Tensor, Index, ScalarDimSection, Map, Dim, NonAffineMap, _compute_indexed_shape, _compute_indexed_shape2
 from pyop3.tensors import Slice, IndexFunction, index
 from pyop3.codegen.tlang import to_tlang
 
@@ -259,7 +259,7 @@ class LoopyKernelBuilder:
             domain_stack = ldstack
 
             lname = pym.var(assignment.lhs.name)
-            if assignment.lhs.dim or not scalar:
+            if assignment.lhs.shapes != ((),) or not scalar:
                 lhs = pym.subscript(lname, lexpr)
             else:
                 lhs = lname
@@ -268,7 +268,7 @@ class LoopyKernelBuilder:
                 rhs = 0
             else:
                 rname = pym.var(assignment.rhs.name)
-                if assignment.rhs.dim or not scalar:
+                if assignment.rhs.shapes != ((),) or not scalar:
                     rhs = pym.subscript(rname, rexpr)
                 else:
                     rhs = rname
@@ -295,7 +295,7 @@ class LoopyKernelBuilder:
         # register kernel arguments
         # TODO should really use assignment.{lhs,rhs} here...
         # TODO this is sorta repeated in FunctionCall handler.
-        if assignment.temporary.dim:
+        if assignment.temporary.shapes != ((),):
             assert not scalar
             size = 0
             for shape in assignment.temporary.shapes:
@@ -364,7 +364,7 @@ class LoopyKernelBuilder:
                 return self.extents[extent.name]
             except KeyError:
                 temp_name = self._namer.next("n")
-                temp = Tensor.new(name=temp_name, dtype=np.int32)
+                temp = Tensor.new(Dim(ScalarDimSection()), name=temp_name, dtype=np.int32)
 
                 # make sure that the RHS reduces down to a scalar
                 # new_extent = index_tensor_with_within_loops(extent, truncated)
@@ -399,21 +399,22 @@ class LoopyKernelBuilder:
             # onto a location in the data structure. For nice regular data this can just be
             # the index multiplied by the size of the inner dims (e.g. dat[4*i + j]), but for
             # ragged things we need to always have a map for the outer dims.
-            sec = dim.sections[subdim_id]
+            part = dim.parts[subdim_id]
+            layout = part.layout
 
-            if isinstance(sec, IndexFunction):
-                (from_var, label), = sec.vardims
-                assert label == dim.labels[subdim_id]
-                index_expr += pym.substitute(sec.expr, {from_var: dim_expr})
-            elif isinstance(sec, Tensor):
-                myexpr = self.handle_assignment(sec, sec.indices, copy.deepcopy(saved_within_loops))
-                index_expr += pym.subscript(pym.var(sec.name), myexpr)
-                self._section_data.append(lp.GlobalArg(sec.name, shape=None, dtype=np.int32))
+            if isinstance(layout, IndexFunction):
+                (from_var, label), = layout.vardims
+                assert label == part.label
+                index_expr += pym.substitute(layout.expr, {from_var: dim_expr})
+            elif isinstance(layout, Tensor):
+                myexpr = self.handle_assignment(layout, layout.indices, copy.deepcopy(saved_within_loops))
+                index_expr += pym.subscript(pym.var(layout.name), myexpr)
+                self._section_data.append(lp.GlobalArg(layout.name, shape=None, dtype=np.int32))
             else:
                 raise TypeError
 
-            if subdims := dim.subdims:
-                dim = subdims[subdim_id]
+            if part.subdim:
+                dim = part.subdim
 
         return index_expr
 
