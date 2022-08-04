@@ -535,8 +535,6 @@ def test_compute_ragged_permuted():
     dat1 = Tensor.new(dims, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
     dat2 = Tensor.new(dims, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
 
-    i0 = Slice.from_dim(root, 0)
-    iterset = [i0, Slice.from_dim(subdim, 0, parent_indices=[i0])]
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
         "y[i] = x[i] + 1",
@@ -547,6 +545,7 @@ def test_compute_ragged_permuted():
         lang_version=(2018, 2),
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+    iterset = [Slice.from_dim(root, 0), Slice.from_dim(subdim, 0)]
     expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)

@@ -90,6 +90,23 @@ class Dim(pytools.ImmutableRecord):
         return tuple(sum(sizes[:i]) for i, _ in enumerate(sizes))
 
 
+class DimSection(pytools.ImmutableRecord):
+    fields = {"label", "size", "subdim", "layout"}
+
+    def __init__(self, size, label, subdim, layout=None):
+        self.size = size
+        self.label = label
+        self.subdim = subdim
+        self.layout = layout
+        super().__init__()
+
+    @property
+    def section(self):
+        import warnings
+        warnings.warn("use layout instead", DeprecationWarning)
+        return self.layout
+
+
 # TODO delete `id`
 class Index(pytools.ImmutableRecord, abc.ABC):
     """Does it make sense to index a tensor with this object?"""
@@ -121,23 +138,21 @@ class FancyIndex(Index):
 
 
 class Slice(FancyIndex):
-    fields = FancyIndex.fields | {"size", "start", "step", "offset"}
+    fields = FancyIndex.fields | {"size", "start", "step"}
 
-    def __init__(self, size, start=0, step=1, offset=0, **kwargs):
+    def __init__(self, size, start=0, step=1, **kwargs):
         self.size = size
         if isinstance(size, Tensor):
             assert size.indices is not None
         self.start = start
         self.step = step
-        self.offset = offset
         super().__init__(**kwargs)
 
     @classmethod
-    def from_dim(cls, dim, subdim_id, *, parent_indices=None, **kwargs):
+    def from_dim(cls, dim, subdim_id, **kwargs):
         size = dim.sizes[subdim_id]
         label = dim.labels[subdim_id]
-        offset = dim.offsets[subdim_id]
-        return cls(size=size, label=label, subdim_id=subdim_id, offset=offset, **kwargs)
+        return cls(size=size, label=label, subdim_id=subdim_id, **kwargs)
 
 
 class Map(FancyIndex, abc.ABC):
@@ -322,6 +337,7 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
 
             dsize = dim.sizes[subdim_id]
             if isinstance(dsize, Tensor):
+                # FIXME this is missing an extra index somehow - requires thought!!
                 for idx_map in cls._generate_indices(dsize):
                     idxs.append(offset)
                     if dim.subdims:
@@ -548,7 +564,7 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
             if size is None:
                 idxs.append([])
                 continue
-            idx = Slice.from_dim(dim, i, parent_indices=parent_indices)
+            idx = Slice.from_dim(dim, i)
             if dim.subdims:
                 idxs += [[idx, *subidxs]
                     for subidxs in cls._fill_with_slices(dim.subdims[i], parent_indices+[idx])]
@@ -624,7 +640,7 @@ class Tensor(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
             if len(dim.sizes) > 1:
                 raise ValueError
             else:
-                indices = [Slice.from_dim(dim, 0, parent_indices=parent_indices)]
+                indices = [Slice.from_dim(dim, 0)]
 
         # import pdb; pdb.set_trace()
         idx, *subidxs = indices
@@ -864,7 +880,7 @@ def _construct_indices(input_indices, dims, current_dim, parent_indices=None):
     if not input_indices:
         if len(dims.get_children(current_dim)) > 1:
             raise RuntimeError("Ambiguous subdim_id")
-        input_indices = [Slice.from_dim(current_dim, 0, parent_indices=parent_indices)]
+        input_indices = [Slice.from_dim(current_dim, 0)]
 
     index, *subindices = input_indices
 
