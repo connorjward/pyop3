@@ -18,6 +18,14 @@ import pyop3.utils
 from pyop3.utils import as_tuple, checked_zip, NameGenerator, unique
 
 
+def as_multiaxis(axis):
+    if isinstance(axis, MultiAxis):
+        return axis
+    elif isinstance(axis, Axis):
+        return MultiAxis(axis)
+    else:
+        raise TypeError
+
 
 class MultiAxis(pytools.ImmutableRecord):
     fields = {"sections", "permutation"}
@@ -92,8 +100,12 @@ class Axis(AbstractAxis):
     _label_generator = NameGenerator("dim")
 
     def __init__(self, size, label=None, subdim=None, layout=None):
+        if subdim:
+            subdim = as_multiaxis(subdim)
+        label = label or self._label_generator.next()
+
         self.size = size
-        self.label = label or self._label_generator.next()
+        self.label = label
         self.subdim = subdim
         self.layout = layout
         super().__init__()
@@ -107,18 +119,6 @@ class Axis(AbstractAxis):
     @property
     def subaxis(self):
         return self.subdim
-
-    @property
-    def part(self):
-        return self
-
-    @property
-    def parts(self):
-        return self,
-
-    @property
-    def permutation(self):
-        return None
 
 
 class ScalarAxis(AbstractAxis):
@@ -161,6 +161,7 @@ class Slice(FancyIndex):
 
     @classmethod
     def from_dim(cls, dim, subdim_id, **kwargs):
+        dim = as_multiaxis(dim)
         part = dim.parts[subdim_id]
         return cls(size=part.size, label=part.label, subdim_id=subdim_id, **kwargs)
 
@@ -233,7 +234,9 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
     name_generator = pyop3.utils.MultiNameGenerator()
     prefix = "ten"
 
-    def __init__(self, dim=None, indicess=None, dtype=None, *, mesh = None, name: str = None, prefix: str=None, data=None, max_value=32):
+    def __init__(self, dim, indicess=None, dtype=None, *, mesh = None, name: str = None, prefix: str=None, data=None, max_value=32):
+        dim = as_multiaxis(dim)
+
         self.data = data
         self.params = {}
         self._param_namer = NameGenerator(f"{name}_p")
@@ -254,20 +257,19 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         super().__init__(name)
 
     @classmethod
-    def new(cls, dim=None, indicess=None, *args, prefix=None, name=None, **kwargs):
+    def new(cls, dim, indicess=None, *args, prefix=None, name=None, **kwargs):
         # import pdb; pdb.set_trace()
         name = name or cls.name_generator.next(prefix or cls.prefix)
 
-        if dim:
-            if not indicess:
-                indicess = cls._fill_with_slices(dim)
-                # import pdb; pdb.set_trace()
-            else:
-                if not isinstance(indicess[0], collections.abc.Sequence):
-                    indicess = (indicess,)
-                indicess = [cls._parse_indices(dim, idxs) for idxs in indicess]
+        dim = as_multiaxis(dim)
+
+        if not indicess:
+            indicess = cls._fill_with_slices(dim)
+            # import pdb; pdb.set_trace()
         else:
-            assert indicess is None
+            if not isinstance(indicess[0], collections.abc.Sequence):
+                indicess = (indicess,)
+            indicess = [cls._parse_indices(dim, idxs) for idxs in indicess]
 
         # iport pdb; pdb.set_trace()
         dim = cls.collect_sections(dim)
@@ -294,14 +296,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
                 else:
                     new_part = part.copy(layout=layout)
             new_parts.append(new_part)
-
-        # this is a hack
-        if isinstance(dim, MultiAxis):
-            return dim.copy(sections=tuple(new_parts))
-        else:
-            new_part, = new_parts
-            return new_part
-
+        return dim.copy(sections=tuple(new_parts))
 
     @classmethod
     def _collect_sections_permuted(cls, dim, *, idx_map=None):
@@ -563,8 +558,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
             parent_indices = []
 
         idxs = []
-        parts = axis.parts if isinstance(axis, MultiAxis) else (axis,)
-        for i, part in enumerate(parts):
+        for i, part in enumerate(axis.parts):
             if isinstance(part, ScalarAxis):
                 idxs.append([])
                 continue

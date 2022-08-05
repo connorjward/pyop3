@@ -329,7 +329,7 @@ def test_compute_double_loop_ragged():
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
-    iterset = [Slice.from_dim(dims, 0), Slice.from_dim(dims.part.subdim, 0)]
+    iterset = [Slice.from_dim(dims, 0), Slice.from_dim(dims.subdim, 0)]
     expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
