@@ -21,28 +21,25 @@ from pyop3.utils import as_tuple, checked_zip, NameGenerator, unique
 def as_multiaxis(axis):
     if isinstance(axis, MultiAxis):
         return axis
-    elif isinstance(axis, Axis):
+    elif isinstance(axis, AbstractAxisPart):
         return MultiAxis(axis)
     else:
         raise TypeError
 
 
 class MultiAxis(pytools.ImmutableRecord):
-    fields = {"sections", "permutation"}
+    fields = {"parts", "permutation", "id"}
 
-    def __init__(self, sections, *, permutation=None):
-        sections = as_tuple(sections)
+    def __init__(self, parts, *, permutation=None, id=None):
+        parts = tuple(self._parse_part(pt) for pt in as_tuple(parts))
 
-        if permutation and not all(isinstance(sec.size, numbers.Integral) for sec in sections):
+        if permutation and not all(isinstance(pt.size, numbers.Integral) for pt in parts):
             raise NotImplementedError("This turns out to be very complicated")
 
-        self.sections = sections
+        self.parts = parts
         self.permutation = permutation
+        self.id = id
         super().__init__()
-
-    @property
-    def parts(self):
-        return self.sections
 
     @property
     def part(self):
@@ -53,7 +50,7 @@ class MultiAxis(pytools.ImmutableRecord):
             raise RuntimeError
 
     def __bool__(self):
-        return bool(self.sections)
+        return bool(self.parts)
 
     # Could I tie sizes and subdims together?
 
@@ -81,21 +78,74 @@ class MultiAxis(pytools.ImmutableRecord):
     def subaxis(self):
         return self.subdim
 
+    def add_subaxis(self, part_id, *args):
+        if part_id not in self._all_part_ids:
+            raise ValueError
 
-class AbstractAxis(pytools.ImmutableRecord, abc.ABC):
+        subaxis = self._parse_multiaxis(*args)
+        return self._add_subaxis(part_id, subaxis)
+
+    @functools.cached_property
+    def _all_part_ids(self):
+        all_ids = []
+        for part in self.parts:
+            if part.id is not None:
+                all_ids.append(part.id)
+            if part.subdim:
+                all_ids.extend(part.subdim._all_part_ids)
+
+        if len(unique(all_ids)) != len(all_ids):
+            raise RuntimeError("ids must be unique")
+        return frozenset(all_ids)
+
+    def _add_subaxis(self, part_id, subaxis):
+        if part_id in self._all_part_ids:
+            new_parts = []
+            for part in self.parts:
+                if part.id == part_id:
+                    if part.subaxis:
+                        raise RuntimeError("Already has a subaxis")
+                    new_part = part.copy(subdim=subaxis)
+                else:
+                    new_part = part
+                new_parts.append(new_part)
+            return self.copy(parts=new_parts)
+        else:
+            return self
+
+    @staticmethod
+    def _parse_part(*args):
+        if len(args) == 1 and isinstance(args[0], AbstractAxisPart):
+            return args[0]
+        else:
+            return AxisPart(*args)
+
+    @staticmethod
+    def _parse_multiaxis(*args):
+        if len(args) == 1 and isinstance(args[0], MultiAxis):
+            return args[0]
+        else:
+            return MultiAxis(*args)
+
+
+class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
     fields = set()
 
 
-class Axis(AbstractAxis):
-    fields = AbstractAxis.fields | {"size", "subdim", "layout"}
+class AxisPart(AbstractAxisPart):
+    fields = AbstractAxisPart.fields | {"size", "subdim", "layout", "id"}
 
-    def __init__(self, size, subdim=None, layout=None):
+    def __init__(self, size, subdim=None, layout=None, *, id=None):
         if subdim:
             subdim = as_multiaxis(subdim)
+
+        if not isinstance(size, numbers.Integral):
+            raise TypeError
 
         self.size = size
         self.subdim = subdim
         self.layout = layout
+        self.id = id
         super().__init__()
 
     @property
@@ -109,11 +159,15 @@ class Axis(AbstractAxis):
         return self.subdim
 
 
-class ScalarAxis(AbstractAxis):
+class ScalarAxisPart(AbstractAxisPart):
 
     @property
     def size(self):
         return 1
+
+
+# lazy
+ScalarAxis = ScalarAxisPart
 
 
 class Index(pytools.ImmutableRecord, abc.ABC):
@@ -276,7 +330,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
                 else:
                     new_part = part.copy(layout=layout)
             new_parts.append(new_part)
-        return dim.copy(sections=tuple(new_parts))
+        return dim.copy(parts=tuple(new_parts))
 
     @classmethod
     def _collect_sections_permuted(cls, dim, *, idx_map=None):

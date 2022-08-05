@@ -89,7 +89,7 @@ class MultiArrayLangKernelBuilder:
         else:
             extra_dims = []
 
-        dims = [tensors.MultiAxis(tensors.Axis(idx.size))]
+        dims = [tensors.MultiAxis(tensors.AxisPart(idx.size))]
 
         if subidxs:
             return extra_dims + dims + self._construct_temp_dims(subidxs)
@@ -103,14 +103,14 @@ class MultiArrayLangKernelBuilder:
 
         # N.B. each subdim at this point cannot branch (and have multiple parts)
         new_parts = tuple(sdim.part if sdim else None for sdim in subdims)
-        return tensors.MultiAxis(sections=new_parts)
+        return tensors.MultiAxis(new_parts)
 
     def _nest_dims(self, flat_dims):
         if not flat_dims:
             return tensors.MultiAxis(tensors.ScalarAxis())
         d1, *rest = flat_dims
         if rest:
-            return d1.copy(sections=d1.parts[0].copy(subdim=self._nest_dims(rest)))
+            return d1.copy(parts=d1.parts[0].copy(subdim=self._nest_dims(rest)))
         else:
             return d1
 
