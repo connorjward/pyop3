@@ -169,10 +169,6 @@ class ScalarAxisPart(AbstractAxisPart):
         return 1
 
 
-# lazy
-ScalarAxis = ScalarAxisPart
-
-
 class Index(pytools.ImmutableRecord, abc.ABC):
     fields = {"npart", "is_loop_index"}
 
@@ -308,7 +304,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
         new_parts = []
         for part, layout in zip(dim.parts, layouts):
-            if isinstance(part, ScalarAxis):
+            if isinstance(part, ScalarAxisPart):
                 assert layout is None
                 new_part = part
             else:
@@ -369,7 +365,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
             idxs = []
             sizes = []
 
-            if isinstance(part, ScalarAxis):
+            if isinstance(part, ScalarAxisPart):
                 idxs = [offset]
                 sizes = [1]
                 offset += 1
@@ -410,7 +406,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         for npart, idxs in enumerate(sections):
             part = dim.parts[npart]
 
-            if isinstance(part, ScalarAxis):
+            if isinstance(part, ScalarAxisPart):
                 new_section = None
             else:
                 # see if we can represent this as an affine transformation or not
@@ -572,7 +568,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
         idxs = []
         for i, part in enumerate(axis.parts):
-            if isinstance(part, ScalarAxis):
+            if isinstance(part, ScalarAxisPart):
                 idxs.append([])
                 continue
             idx = Slice(part.size, npart=i)
@@ -769,7 +765,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
     def _compute_shapes(self, dim):
         shapes = []
         for part in dim.parts:
-            if isinstance(part, ScalarAxis):
+            if isinstance(part, ScalarAxisPart):
                 shapes.append(())
             elif part.subdim:
                 for shape in self._compute_shapes(part.subdim):
