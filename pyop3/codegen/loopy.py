@@ -389,8 +389,6 @@ class LoopyKernelBuilder:
         saved_within_loops = copy.deepcopy(within_loops)
 
         index_expr = 0
-        if not tensor.dim:
-            return index_expr
         dim = tensor.dim
 
         for idx in indices:
@@ -404,7 +402,7 @@ class LoopyKernelBuilder:
             # onto a location in the data structure. For nice regular data this can just be
             # the index multiplied by the size of the inner dims (e.g. dat[4*i + j]), but for
             # ragged things we need to always have a map for the outer dims.
-            part = dim.parts[npart]
+            part = dim.get_part(npart)
             layout = part.layout
 
             if isinstance(layout, IndexFunction):

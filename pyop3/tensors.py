@@ -49,14 +49,13 @@ class MultiAxis(pytools.ImmutableRecord):
         except ValueError:
             raise RuntimeError
 
-    def __bool__(self):
-        return bool(self.parts)
-
-    # Could I tie sizes and subdims together?
-
-    @property
-    def strata(self):
-        return tuple(range(len(self.sizes)))
+    def get_part(self, npart):
+        if npart is None:
+            if len(self.parts) != 1:
+                raise RuntimeError
+            return self.parts[0]
+        else:
+            return self.parts[npart]
 
     @property
     def subdims(self):
@@ -177,7 +176,7 @@ ScalarAxis = ScalarAxisPart
 class Index(pytools.ImmutableRecord, abc.ABC):
     fields = {"npart", "is_loop_index"}
 
-    def __init__(self, npart=0, is_loop_index=False):
+    def __init__(self, npart=None, is_loop_index=False):
         self.npart = npart
         self.is_loop_index = is_loop_index
         super().__init__()
@@ -187,8 +186,6 @@ class Slice(Index):
     fields = Index.fields | {"size", "start", "step"}
 
     def __init__(self, size, start=0, step=1, **kwargs):
-        # TODO if npart is not provided it should *only* mean that things are unmixed
-        # so not default to zero
         self.size = size
         self.start = start
         self.step = step
@@ -272,11 +269,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
         self.dim = dim
         # if not self._is_valid_indices(indices, dim.root):
-        if dim:
-            assert all(self._is_valid_indices(idxs, dim) for idxs in indicess)
-        else:
-            assert indicess is None
-            indicess = [[]]
+        assert all(self._is_valid_indices(idxs, dim) for idxs in indicess)
         self.indicess = indicess or [[]] # self._parse_indices(dim.root, indices)
 
         self.mesh = mesh
@@ -671,7 +664,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
         if isinstance(idx, Map):
             npart = idx.npart
-            part = dim.parts[npart]
+            part = dim.get_part(npart)
             if part.subdim:
                 return [idx] + cls._parse_indices(part.subdim, subidxs, parent_indices+[idx])
             else:
@@ -681,7 +674,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
                 if not isinstance(idx.size, MultiArray):
                     raise NotImplementedError
 
-            part = dim.parts[idx.npart]
+            part = dim.get_part(idx.npart)
             if part.subdim:
                 return [idx] + cls._parse_indices(part.subdim, subidxs, parent_indices+[idx])
             else:
@@ -723,8 +716,6 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
     @property
     def indexed_shapes(self):
-        if not self.dim:
-            return ((),)
         return indexed_shapes(self)
 
     @property
@@ -741,10 +732,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
     @property
     def shapes(self):
-        if not self.dim:
-            return ((),)
-        else:
-            return self._compute_shapes(self.dim)
+        return self._compute_shapes(self.dim)
 
     @property
     def size(self):
@@ -792,9 +780,6 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
 
 def indexed_shapes(tensor):
-    if not tensor.dim:
-        assert not tensor.indicess
-        return ((),)
     return tuple(_compute_indexed_shape(idxs) for idxs in tensor.indicess)
 
 

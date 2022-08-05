@@ -102,7 +102,7 @@ class MultiArrayLangKernelBuilder:
         subdims = [self._nest_dims(sdims) for sdims in flat_subdimss]
 
         # N.B. each subdim at this point cannot branch (and have multiple parts)
-        new_parts = tuple(sdim.part if sdim else None for sdim in subdims)
+        new_parts = tuple(sdim.part if sdim is not None else None for sdim in subdims)
         return tensors.MultiAxis(new_parts)
 
     def _nest_dims(self, flat_dims):
