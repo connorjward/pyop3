@@ -110,7 +110,7 @@ class MultiArrayLangKernelBuilder:
             return tensors.MultiAxis(tensors.ScalarAxisPart())
         d1, *rest = flat_dims
         if rest:
-            return d1.copy(parts=d1.parts[0].copy(subdim=self._nest_dims(rest)))
+            return d1.copy(parts=d1.parts[0].copy(subaxis=self._nest_dims(rest)))
         else:
             return d1
 

@@ -415,8 +415,8 @@ class LoopyKernelBuilder:
             else:
                 raise TypeError
 
-            if part.subdim:
-                dim = part.subdim
+            if part.subaxis:
+                dim = part.subaxis
 
         return index_expr
 
