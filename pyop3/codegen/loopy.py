@@ -398,13 +398,13 @@ class LoopyKernelBuilder:
 
             dim_expr = self._as_expr(idx, within_loops)
 
-            subdim_id = idx.subdim_id
+            npart = idx.npart
 
             # Every dim uses a section to map the dim index (from the slice/map + iname)
             # onto a location in the data structure. For nice regular data this can just be
             # the index multiplied by the size of the inner dims (e.g. dat[4*i + j]), but for
             # ragged things we need to always have a map for the outer dims.
-            part = dim.parts[subdim_id]
+            part = dim.parts[npart]
             layout = part.layout
 
             if isinstance(layout, IndexFunction):
