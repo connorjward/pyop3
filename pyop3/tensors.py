@@ -70,14 +70,6 @@ class MultiAxis(pytools.ImmutableRecord):
             raise RuntimeError
 
     @property
-    def label(self):
-        try:
-            l, = self.labels
-            return l
-        except ValueError:
-            raise RuntimeError
-
-    @property
     def subdim(self):
         try:
             sdim, = self.subdims
@@ -95,17 +87,13 @@ class AbstractAxis(pytools.ImmutableRecord, abc.ABC):
 
 
 class Axis(AbstractAxis):
-    fields = AbstractAxis.fields | {"size", "label", "subdim", "layout"}
+    fields = AbstractAxis.fields | {"size", "subdim", "layout"}
 
-    _label_generator = NameGenerator("dim")
-
-    def __init__(self, size, label=None, subdim=None, layout=None):
+    def __init__(self, size, subdim=None, layout=None):
         if subdim:
             subdim = as_multiaxis(subdim)
-        label = label or self._label_generator.next()
 
         self.size = size
-        self.label = label
         self.subdim = subdim
         self.layout = layout
         super().__init__()
@@ -130,11 +118,10 @@ class ScalarAxis(AbstractAxis):
 
 class Index(pytools.ImmutableRecord, abc.ABC):
     """Does it make sense to index a tensor with this object?"""
-    fields = {"label", "is_loop_index", "subdim_id"}
+    fields = {"is_loop_index", "subdim_id"}
 
-    def __init__(self, label, subdim_id, is_loop_index=False):
+    def __init__(self, subdim_id, is_loop_index=False):
         self.subdim_id = subdim_id
-        self.label = label
         self.is_loop_index = is_loop_index
         super().__init__()
 
@@ -163,7 +150,7 @@ class Slice(FancyIndex):
     def from_dim(cls, dim, subdim_id, **kwargs):
         dim = as_multiaxis(dim)
         part = dim.parts[subdim_id]
-        return cls(size=part.size, label=part.label, subdim_id=subdim_id, **kwargs)
+        return cls(size=part.size, subdim_id=subdim_id, **kwargs)
 
 
 class Map(FancyIndex, abc.ABC):
@@ -183,8 +170,8 @@ class IndexFunction(Map):
     and then use pymbolic maps to replace the xN with the correct inames for the
     outer domains. We could also possibly use pN (or pym.var subclass called Parameter)
     to describe parameters."""
-    fields = Map.fields | {"expr", "vardims"}
-    def __init__(self, expr, arity, vardims, **kwargs):
+    fields = Map.fields | {"expr", "vars"}
+    def __init__(self, expr, arity, vars, **kwargs):
         """
         vardims:
             iterable of 2-tuples of the form (var, label) where var is the
@@ -192,11 +179,8 @@ class IndexFunction(Map):
             it (needed to select the right iname) - note, this is ordered
         """
         self.expr = expr
-        self.vardims = vardims
-
-        # the dim label associated with the map is the final entry in vardims
-        label = vardims[-1][1]
-        super().__init__(label=label, arity=arity, **kwargs)
+        self.vars = as_tuple(vars)
+        super().__init__(arity=arity, **kwargs)
 
     @property
     def size(self):
@@ -211,10 +195,6 @@ class NonAffineMap(Map):
 
     def __init__(self, tensor, **kwargs):
         self.tensor = tensor
-        if "label" in kwargs:
-            assert kwargs["label"] == self.tensor.indices[-1].label
-        else:
-            kwargs["label"] = self.tensor.indices[-1].label
         arity = self.tensor.indices[-1].size
         super().__init__(arity=arity, **kwargs)
 
@@ -305,7 +285,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
             raise NotImplementedError
 
         if not idx_map:
-            idx_map = collections.defaultdict(list)
+            idx_map = []
 
         sections = collections.defaultdict(dict)
         offset = 0
@@ -319,7 +299,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
             # increment the pointer by the size of the step for this subdim
             if part.subdim:
                 new_idx_map = copy.deepcopy(idx_map)
-                new_idx_map[part.label].append(pt)
+                new_idx_map.append(pt)
                 offset += cls._get_full_dim_size(part.subdim, idx_map=new_idx_map)
             else:
                 offset += 1
@@ -331,7 +311,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
             part = dim.parts[subdim_id]
 
             idxs = np.array([sections[subdim_id][i] for i in sorted(sections[subdim_id])], dtype=np.int32)
-            new_section = MultiArray.new(MultiAxis(Axis(len(idxs), label=part.label)), data=idxs, prefix="sec", dtype=np.int32)
+            new_section = MultiArray.new(MultiAxis(Axis(len(idxs))), data=idxs, prefix="sec", dtype=np.int32)
             new_sections[subdim_id] = new_section
 
         return new_sections
@@ -339,10 +319,6 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
     @classmethod
     def _collect_sections_unpermuted_array(cls, dim, include_size=False):
         assert not dim.permutation
-
-        # it is not possible for dim parts at the same level to have the same label
-        # assert len(unique(dim.labels)) == len(dim.labels)
-        # actually it may be the case for temporaries
 
         sections = []
         all_sizes = []
@@ -370,8 +346,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
                 for i in range(dsize):
                     idxs.append(offset)
                     if part.subdim:
-                        idx_map = collections.defaultdict(list)
-                        idx_map[part.label] = [i]
+                        idx_map = [i]
                         size = cls._get_full_dim_size(part.subdim, idx_map=idx_map)
                     else:
                         size = 1
@@ -402,15 +377,15 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
                 if not steps:
                     x0 = pym.var("x0")
                     expr = x0
-                    new_section = IndexFunction(expr, 1, ((x0, part.label),), subdim_id=subdim_id)
+                    new_section = IndexFunction(expr, 1, [x0], subdim_id=subdim_id)
                 elif len(steps) == 1:
                     start = idxs[0]
                     step, = steps
                     x0 = pym.var("x0")
                     expr = x0 * step  + start
-                    new_section = IndexFunction(expr, 1, ((x0, part.label),), subdim_id=subdim_id)
+                    new_section = IndexFunction(expr, 1, [x0], subdim_id=subdim_id)
                 else:
-                    new_section = MultiArray.new(MultiAxis(Axis(len(idxs), label=part.label)), data=idxs, prefix="sec", dtype=np.int32)
+                    new_section = MultiArray.new(MultiAxis(Axis(len(idxs))), data=idxs, prefix="sec", dtype=np.int32)
 
             new_sections.append(new_section)
         return new_sections
@@ -425,13 +400,14 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         assert isinstance(dim.part.size, numbers.Integral)
 
         if dim.part.subdim:
+            raise NotImplementedError("I don't think I actually touch this code atm")
             inner = cls._generate_indices(tensor, dim.part.subdim)
             result = []
             for i in range(dim.part.size):
                 result.append({dim.part.label: i} | inner)
             return result
         else:
-            return [{dim.part.label: i} for i in range(dim.part.size)]
+            return [[i] for i in range(dim.part.size)]
 
     @classmethod
     def _get_full_dim_size(cls, dim, *, idx_map=None):
@@ -443,6 +419,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
             if isinstance(part.size, MultiArray):
                 for i in range(cls._read_tensor(part.size, idx_map=idx_map)):
                     if part.subdim:
+                        raise NotImplementedError
                         new_idx_map = copy.deepcopy(idx_map)
                         new_idx_map[part.label].append(i)
 
@@ -453,6 +430,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
             else:
                 for i in range(part.size):
                     if part.subdim:
+                        raise NotImplementedError
                         new_idx_map = copy.deepcopy(idx_map)
                         new_idx_map[part.label].append(i)
                         total_size += cls._get_full_dim_size(part.subdim, idx_map=new_idx_map)
@@ -474,20 +452,14 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
     def _read_tensor(cls, tensor, idx_map):
         idx_map_copy = copy.deepcopy(idx_map)
 
-        # for each dim in the tree (must not be nested), find the section offset and accumulate
+        # for each dim in the tree (must not be mixed), find the section offset and accumulate
         current_dim = tensor.dim
         ptr = 0
         while True:
-            # check that current dim does not duplicate dim labels as this creates a lot of ambiguity
-            labels = [p.label for p in current_dim.parts]
-            assert len(unique(labels)) == len(labels)
-
-            # only one label from the list must be in idx_map
-            label, = set(l for l in idx_map_copy.keys() if l in labels)
-            subdim_id = labels.index(label)
+            subdim_id = 0
             section = current_dim.parts[subdim_id].layout
 
-            idx = idx_map_copy[label].pop(0)
+            idx = idx_map_copy.pop(0)
 
             if isinstance(section, MultiArray):
                 ptr += section.data[idx]
@@ -504,7 +476,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
                 #         ilabel, _, iidx = idx_map_copy.pop()
                 #     context[str(var)] = iidx
                 # FIXME assumes no duplicates
-                context = {str(var): idx_map[l][0] for var, l in section.vardims}
+                context = {str(var): idx_map[0] for var in section.vars}
                 ptr += pym.evaluate(section.expr, context)
             else:
                 raise AssertionError
@@ -650,7 +622,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         idx, *subidxs = indices
 
         if isinstance(idx, Map):
-            subdim_id = [p.label for p in dim.parts].index(idx.label)
+            subdim_id = idx.subdim_id
             part = dim.parts[subdim_id]
             if part.subdim:
                 return [idx] + cls._parse_indices(part.subdim, subidxs, parent_indices+[idx])
@@ -661,7 +633,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
                 if not isinstance(idx.size, MultiArray):
                     raise NotImplementedError
 
-            part, = {pt for pt in dim.parts if pt.label == idx.label}
+            part = dim.parts[idx.subdim_id]
             if part.subdim:
                 return [idx] + cls._parse_indices(part.subdim, subidxs, parent_indices+[idx])
             else:

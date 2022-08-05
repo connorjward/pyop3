@@ -431,7 +431,7 @@ def test_compute_double_loop_ragged_inner():
 def test_compute_double_loop_ragged_mixed():
     root = MultiAxis((Axis(4), Axis(5), Axis(4)))
     nnz_data = np.array([3, 2, 0, 0, 1], dtype=np.int32)
-    nnz = MultiArray.new(MultiAxis(Axis(5, label=root.parts[1].label)), data=nnz_data, name="nnz", dtype=np.int32)
+    nnz = MultiArray.new(MultiAxis(Axis(5)), data=nnz_data, name="nnz", dtype=np.int32)
 
     axes = MultiAxis((
         root.parts[0].copy(subdim=MultiAxis(Axis(1))),
@@ -518,7 +518,7 @@ def test_subset():
     dat1 = MultiArray.new(dims, name="dat1", data=np.arange(6, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(dims, name="dat2", data=np.zeros(6, dtype=np.float64), dtype=np.float64)
 
-    subset_dim = MultiAxis(Axis(4, label=root.part.label))
+    subset_dim = MultiAxis(Axis(4))
     subset_tensor = MultiArray.new(subset_dim,
             data=np.array([2, 3, 5, 0], dtype=np.int32), dtype=np.int32, prefix="subset")
 
@@ -557,7 +557,7 @@ def test_map():
     dat1 = MultiArray.new(dims, name="dat1", data=np.arange(5, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(dims, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
 
-    map_tensor = MultiArray.new(root.copy(sections=root.part.copy(subdim=MultiAxis(Axis(2, label=root.part.label)))),
+    map_tensor = MultiArray.new(root.copy(sections=root.part.copy(subdim=MultiAxis(Axis(2)))),
             data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32), dtype=np.int32, prefix="map")
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 2 }",
@@ -592,9 +592,9 @@ def test_closure_ish():
     root = MultiAxis((Axis(3), Axis(4)))
 
     dat1 = MultiArray.new(root, name="dat1", data=np.arange(7, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(MultiAxis(Axis(3, label=root.parts[0].label)), name="dat2", data=np.zeros(3, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray.new(MultiAxis(Axis(3)), name="dat2", data=np.zeros(3, dtype=np.float64), dtype=np.float64)
 
-    map0 = MultiArray.new(MultiAxis(Axis(3, label=root.parts[0].label, subdim=MultiAxis(Axis(2, label=root.parts[1].label)))),
+    map0 = MultiArray.new(MultiAxis(Axis(3, subdim=MultiAxis(Axis(2)))),
             data=np.array([1, 2, 0, 1, 3, 2], dtype=np.int32), dtype=np.int32, prefix="map")
 
     code = lp.make_kernel(
@@ -634,7 +634,7 @@ def test_index_function():
     root = MultiAxis((Axis(3), Axis(4)))
 
     dat1 = MultiArray.new(root, name="dat1", data=np.arange(7, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(MultiAxis(Axis(3, label=root.parts[0].label)), name="dat2", data=np.zeros(3, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray.new(MultiAxis(Axis(3)), name="dat2", data=np.zeros(3, dtype=np.float64), dtype=np.float64)
 
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 3 }",
@@ -649,7 +649,7 @@ def test_index_function():
 
     # an IndexFunction contains an expression and the corresponding dim labels
     x0, x1 = pym.variables("x0 x1")
-    map = IndexFunction(x0 + x1, arity=2, vardims=[(x0, root.parts[0].label), (x1, root.parts[1].label)], subdim_id=1)
+    map = IndexFunction(x0 + x1, arity=2, vars=[x0, x1], subdim_id=1)
 
     i1 = pyop3.index([Slice.from_dim(root, 0)]) # loop over 'cells'
     i2 = [i1, [map]]  # access 'cell' and 'edge' data
@@ -677,12 +677,12 @@ def test_multimap():
         root, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
 
     map0 = MultiArray.new(
-        root.copy(sections=root.part.copy(subdim=MultiAxis(Axis(2, label=root.part.label)))),
+        root.copy(sections=root.part.copy(subdim=MultiAxis(Axis(2)))),
         data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32),
         dtype=np.int32, prefix="map")
 
     map1 = MultiArray.new(
-        root.copy(sections=root.part.copy(subdim=MultiAxis(Axis(2, label=root.part.label)))),
+        root.copy(sections=root.part.copy(subdim=MultiAxis(Axis(2)))),
         data=np.array([1, 1, 3, 0, 2, 1, 4, 3, 0, 1], dtype=np.int32),
         dtype=np.int32, prefix="map")
 
@@ -725,7 +725,7 @@ def test_multimap_with_scalar():
         root, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
 
     map0 = MultiArray.new(
-        root.copy(sections=root.part.copy(subdim=MultiAxis(Axis(2, label=root.parts[0].label)))),
+        root.copy(sections=root.part.copy(subdim=MultiAxis(Axis(2)))),
         data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32),
         dtype=np.int32, prefix="map")
 
@@ -764,10 +764,10 @@ def test_map_composition():
     dat1 = MultiArray.new(dims, name="dat1", data=np.arange(5, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(dims, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
 
-    map0_tensor = MultiArray.new(root.copy(sections=root.part.copy(subdim=MultiAxis(Axis(2, label=root.part.label)))),
+    map0_tensor = MultiArray.new(root.copy(sections=root.part.copy(subdim=MultiAxis(Axis(2)))),
                          data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32),
                          dtype=np.int32, prefix="map")
-    map1_tensor = MultiArray.new(root.copy(sections=root.part.copy(subdim=MultiAxis(Axis(2, label=root.part.label)))),
+    map1_tensor = MultiArray.new(root.copy(sections=root.part.copy(subdim=MultiAxis(Axis(2)))),
                          data=np.array([3, 2, 4, 1, 0, 2, 4, 2, 1, 3], dtype=np.int32),
                          dtype=np.int32, prefix="map")
 
@@ -813,7 +813,7 @@ def test_mixed_arity_map():
     nnz = MultiArray.new(root, data=nnz_, name="nnz", dtype=np.int32, max_value=3)
 
     map_data = np.array([2, 1, 0, 2, 1, 2], dtype=np.int32)
-    map_tensor = MultiArray.new(root.copy(sections=root.part.copy(subdim=MultiAxis(Axis(nnz, label=root.part.label)))),
+    map_tensor = MultiArray.new(root.copy(sections=root.part.copy(subdim=MultiAxis(Axis(nnz)))),
             data=map_data, dtype=np.int32, prefix="map")
 
     code = lp.make_kernel(
@@ -852,10 +852,10 @@ def test_iter_map_composition():
     dat1 = MultiArray.new(dims, name="dat1", data=np.arange(5, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(dims, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
 
-    map0_tensor = MultiArray.new(root.copy(sections=root.part.copy(subdim=MultiAxis(Axis(2, label=root.part.label)))),
+    map0_tensor = MultiArray.new(root.copy(sections=root.part.copy(subdim=MultiAxis(Axis(2)))),
                          data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32),
                          dtype=np.int32, prefix="map")
-    map1_tensor = MultiArray.new(root.copy(sections=root.part.copy(subdim=MultiAxis(Axis(2, label=root.part.label)))),
+    map1_tensor = MultiArray.new(root.copy(sections=root.part.copy(subdim=MultiAxis(Axis(2)))),
                          data=np.array([3, 2, 2, 3, 0, 2, 1, 2, 1, 3], dtype=np.int32),
                          dtype=np.int32, prefix="map")
 

@@ -59,18 +59,24 @@ def collect_labels(index):
         return [index.label]
 
 
+def compute_needed_size(index):
+    if isinstance(index, NonAffineMap):
+        return sum(compute_needed_size(idx) for idx in index.input_indices) + 1
+    elif isinstance(index, IndexFunction):
+        return len(index.vars)
+    else:
+        return 1
+
+
 def truncate_within_loops(within_loops, indices):
     """Truncate within loops s.t. only the last n entries are included
     where n is the number of times a certain dim label appears in the indices.
     """
-    # import pdb; pdb.set_trace()
-    labels = [label for idx in indices for label in collect_labels(idx)]
-    dim_counts = collections.Counter(labels)
+    # TODO I think it might be better to go through in reverse order somehow
+    # that would require using reversed(indices)
 
-    new_within_loops = {}
-    for k, v in within_loops.items():
-        new_within_loops[k] = v[-dim_counts[k]:]
-    return new_within_loops
+    ninames_needed = sum(compute_needed_size(idx) for idx in indices)
+    return within_loops[-ninames_needed:].copy()
 
 
 LOOPY_TARGET = lp.CTarget()
@@ -146,19 +152,19 @@ class LoopyKernelBuilder:
 
         if isinstance(idx, NonAffineMap):
             for i in idx.input_indices:
-                within_loops = merge_bins(within_loops, self.collect_within_loops(i, within_loops))
+                within_loops = self.collect_within_loops(i, within_loops)
 
         iname = self._namer.next("i")
-        within_loops = merge_bins(within_loops, {idx.label: [iname]})
+        within_loops.append(iname)
         self.register_new_domain(iname, idx, within_loops)
         return within_loops
 
     @_build.register
     def _(self, expr: exprs.Loop, within_loops):
 
-        within_loops = {}
+        within_loops = []
         for idx in expr.index:
-            within_loops = merge_bins(within_loops, self.collect_within_loops(idx, within_loops))
+            within_loops = self.collect_within_loops(idx, within_loops)
 
         for stmt in expr.statements:
             self._build(stmt, copy.deepcopy(within_loops))
@@ -217,7 +223,7 @@ class LoopyKernelBuilder:
             tuple(subarrayrefs[var] for var in call.reads) + tuple(extents),
         )
 
-        within_inames = frozenset([iname for inames in within_loops.values() for iname in inames])
+        within_inames = frozenset(within_loops)
         depends_on = frozenset({f"{insn}*" for insn in call.depends_on})
         call_insn = lp.CallInstruction(
             assignees,
@@ -281,7 +287,7 @@ class LoopyKernelBuilder:
             else:
                 no_sync_with = frozenset()
 
-            within_inames = frozenset([iname for inames in within_loops.values() for iname in inames] + list(domain_stack))
+            within_inames = frozenset(within_loops) | set(domain_stack)
             assign_insn = lp.Assignment(
                 lhs, rhs,
                 id=self._namer.next(f"{assignment.id}_"),
@@ -329,7 +335,7 @@ class LoopyKernelBuilder:
             # remove the final iname matching index from within_loops as the index.size will
             # not see this/be outside of it
             exwithin_loops = copy.deepcopy(within_loops)
-            exwithin_loops[index.label].pop()
+            exwithin_loops.pop()
             size = self.register_extent(index.size, exwithin_loops)
         else:
             size = index.size
@@ -367,7 +373,6 @@ class LoopyKernelBuilder:
                 temp = MultiArray.new(MultiAxis(ScalarAxis()), name=temp_name, dtype=np.int32)
 
                 # make sure that the RHS reduces down to a scalar
-                # new_extent = index_tensor_with_within_loops(extent, truncated)
                 new_extent = extent.copy(indicess=(index(extent.indices),))
 
                 insn = tlang.Read(new_extent, temp)
@@ -403,8 +408,7 @@ class LoopyKernelBuilder:
             layout = part.layout
 
             if isinstance(layout, IndexFunction):
-                (from_var, label), = layout.vardims
-                assert label == part.label
+                from_var, = layout.vars
                 index_expr += pym.substitute(layout.expr, {from_var: dim_expr})
             elif isinstance(layout, MultiArray):
                 myexpr = self.handle_assignment(layout, layout.indices, copy.deepcopy(saved_within_loops))
@@ -433,15 +437,9 @@ class LoopyKernelBuilder:
             if idx.is_loop_index:
                 # should do this earlier (hard to do now due to ordering confusion)
                 continue
-                # iname = within_loops[idx.label].pop(0)
             else:
                 iname = dstack.pop(0)
-
-                # TODO could simplify with defaultdict
-                if idx.label in within_loops:
-                    within_loops[idx.label].append(iname)
-                else:
-                    within_loops[idx.label] = [iname]
+                within_loops.append(iname)
                 self.register_new_domain(iname, idx, within_loops)
 
         return within_loops
@@ -470,15 +468,15 @@ class LoopyKernelBuilder:
         step = index.step or 1
 
         # TODO I would prefer to go from the end here. Maybe use a deque?
-        iname = within_loops[index.label].pop(0)
+        iname = within_loops.pop(0)
         return pym.var(iname)*step + start
 
     @_as_expr.register
     def _(self, index: IndexFunction, within_loops):
         # use the innermost matching dims as the right inames
         varmap = {}
-        for var, label in reversed(index.vardims):
-            iname = within_loops[label].pop(0)
+        for var in reversed(index.vars):
+            iname = within_loops.pop(0)
             varmap[var] = pym.var(iname)
 
         res = pym.substitute(index.expr, varmap)

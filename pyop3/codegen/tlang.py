@@ -89,7 +89,7 @@ class MultiArrayLangKernelBuilder:
         else:
             extra_dims = []
 
-        dims = [tensors.MultiAxis(tensors.Axis(idx.size, label=idx.label))]
+        dims = [tensors.MultiAxis(tensors.Axis(idx.size))]
 
         if subidxs:
             return extra_dims + dims + self._construct_temp_dims(subidxs)
