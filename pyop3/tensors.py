@@ -59,6 +59,10 @@ class MultiAxis(pytools.ImmutableRecord):
         return tuple(range(len(self.sizes)))
 
     @property
+    def subdims(self):
+        return tuple(pt.subdim for pt in self.parts)
+
+    @property
     def size(self):
         try:
             s, = self.sizes
@@ -139,7 +143,7 @@ class AxisPart(AbstractAxisPart):
         if subdim:
             subdim = as_multiaxis(subdim)
 
-        if not isinstance(size, numbers.Integral):
+        if not isinstance(size, (numbers.Integral, pym.primitives.Expression)):
             raise TypeError
 
         self.size = size
@@ -202,7 +206,8 @@ class Slice(FancyIndex):
 
     @classmethod
     def from_dim(cls, dim, subdim_id, **kwargs):
-        dim = as_multiaxis(dim)
+        # import pdb; pdb.set_trace()
+        # dim = as_multiaxis(dim)
         part = dim.parts[subdim_id]
         return cls(size=part.size, subdim_id=subdim_id, **kwargs)
 
@@ -283,7 +288,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         else:
             assert indicess is None
             indicess = [[]]
-        self.indicess = indicess # self._parse_indices(dim.root, indices)
+        self.indicess = indicess or [[]] # self._parse_indices(dim.root, indices)
 
         self.mesh = mesh
         self.dtype = dtype
@@ -365,7 +370,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
             part = dim.parts[subdim_id]
 
             idxs = np.array([sections[subdim_id][i] for i in sorted(sections[subdim_id])], dtype=np.int32)
-            new_section = MultiArray.new(MultiAxis(Axis(len(idxs))), data=idxs, prefix="sec", dtype=np.int32)
+            new_section = MultiArray.new(MultiAxis(len(idxs)), data=idxs, prefix="sec", dtype=np.int32)
             new_sections[subdim_id] = new_section
 
         return new_sections
@@ -439,7 +444,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
                     expr = x0 * step  + start
                     new_section = IndexFunction(expr, 1, [x0], subdim_id=subdim_id)
                 else:
-                    new_section = MultiArray.new(MultiAxis(Axis(len(idxs))), data=idxs, prefix="sec", dtype=np.int32)
+                    new_section = MultiArray.new(MultiAxis(len(idxs)), data=idxs, prefix="sec", dtype=np.int32)
 
             new_sections.append(new_section)
         return new_sections

@@ -188,20 +188,10 @@ def test_compute_double_loop():
 
 
 def test_compute_double_loop_mixed():
-    # axes = MultiAxis((Axis(10, subdi=Axis(3)), Axis(12, subdim=Axis(2))))
-
-    # axes = MultiAxis([AxisPart(10, id="ax1"), AxisPart(12, id="ax2")])
-    # axes = axes.add_subaxis("ax1", 3)
-    # axes = axes.add_subaxis("ax2", 2)
-
-    axes = (MultiAxis([AxisPart(10, id="ax1"), AxisPart(12, id="ax2")])
-                .add_subaxis("ax1", 3)
-                .add_subaxis("ax2", 2))
-
     axes = (
         MultiAxis([AxisPart(10, id="ax1"), AxisPart(12, id="ax2")])
-            .add_subaxis("ax1", 3)
-            .add_subaxis("ax2", 2)
+        .add_subaxis("ax1", 3)
+        .add_subaxis("ax2", 2)
     )
 
     dat1 = MultiArray.new(axes, name="dat1", data=np.arange(54, dtype=np.float64), dtype=np.float64)
@@ -238,7 +228,11 @@ def test_compute_double_loop_mixed():
 
 def test_compute_double_loop_scalar():
     """As in the temporary lives within both of the loops"""
-    axes = MultiAxis((Axis(6, subdim=Axis(3)), Axis(4, subdim=Axis(2))))
+    axes = (
+        MultiAxis([AxisPart(6, id="ax1"), AxisPart(4, id="ax2")])
+        .add_subaxis("ax1", 3)
+        .add_subaxis("ax2", 2)
+    )
     dat1 = MultiArray.new(axes, name="dat1", data=np.arange(18+8, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(18+8, dtype=np.float64), dtype=np.float64)
 
@@ -300,7 +294,12 @@ def test_compute_double_loop_permuted():
 
 
 def test_compute_double_loop_permuted_mixed():
-    axes = MultiAxis((Axis(4, subdim=MultiAxis(Axis(1))), Axis(3, subdim=MultiAxis(Axis(2)))), permutation=(3, 6, 2, 5, 0, 4, 1))
+    axes = (
+        MultiAxis([AxisPart(4, id="ax1"), AxisPart(3, id="ax2")],
+                  permutation=(3, 6, 2, 5, 0, 4, 1))
+        .add_subaxis("ax1", 1)
+        .add_subaxis("ax2", 2)
+    )
     dat1 = MultiArray.new(axes, name="dat1", data=np.arange(10, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
 
@@ -329,14 +328,15 @@ def test_compute_double_loop_permuted_mixed():
 
 
 def test_compute_double_loop_ragged():
-    root = Axis(5)
+    axes1 = MultiAxis(AxisPart(5, id="ax1"))
     nnz = MultiArray.new(
-        root, name="nnz", dtype=np.int32, data=np.array([3, 2, 1, 3, 2], dtype=np.int32)
+        axes1, name="nnz", dtype=np.int32, data=np.array([3, 2, 1, 3, 2], dtype=np.int32)
     )
-    dims = root.copy(subdim=Axis(nnz))
 
-    dat1 = MultiArray.new(dims, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(dims, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
+    axes2 = axes1.add_subaxis("ax1", nnz)
+
+    dat1 = MultiArray.new(axes2, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray.new(axes2, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
 
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
@@ -349,7 +349,7 @@ def test_compute_double_loop_ragged():
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
-    iterset = [Slice.from_dim(dims, 0), Slice.from_dim(dims.subdim, 0)]
+    iterset = [Slice.from_dim(axes2, 0), Slice.from_dim(axes2.subdim, 0)]
     expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
@@ -408,16 +408,17 @@ def test_doubly_ragged():
 
 
 def test_compute_double_loop_ragged_inner():
-    root = MultiAxis(Axis(5))
+    axes1 = MultiAxis(AxisPart(5, id="ax1"))
+
     nnz = MultiArray.new(
-        root, name="nnz", dtype=np.int32, max_value=3,
+        axes1, name="nnz", dtype=np.int32, max_value=3,
         data=np.array([3, 2, 1, 3, 2], dtype=np.int32)
     )
-    subdim = MultiAxis(Axis(nnz))
-    dims = root.copy(sections=root.part.copy(subdim=subdim))
 
-    dat1 = MultiArray.new(dims, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(dims, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
+    axes2 = axes1.add_subaxis("ax1", nnz)
+
+    dat1 = MultiArray.new(axes2, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray.new(axes2, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
 
     code = lp.make_kernel(
         "{ [i]: 0 <= i < n }",
@@ -430,7 +431,7 @@ def test_compute_double_loop_ragged_inner():
         lang_version=(2018, 2),
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-    iterset = [Slice.from_dim(root, 0)]
+    iterset = [Slice.from_dim(axes1, 0)]
     expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
@@ -449,15 +450,19 @@ def test_compute_double_loop_ragged_inner():
 
 
 def test_compute_double_loop_ragged_mixed():
-    root = MultiAxis((Axis(4), Axis(5), Axis(4)))
-    nnz_data = np.array([3, 2, 0, 0, 1], dtype=np.int32)
-    nnz = MultiArray.new(MultiAxis(Axis(5)), data=nnz_data, name="nnz", dtype=np.int32)
+    nnz = MultiArray.new(
+        MultiAxis(5), name="nnz", dtype=np.int32,
+        data=np.array([3, 2, 0, 0, 1], dtype=np.int32)
+    )
 
-    axes = MultiAxis((
-        root.parts[0].copy(subdim=MultiAxis(Axis(1))),
-        root.parts[1].copy(subdim=MultiAxis(Axis(nnz))),
-        root.parts[2].copy(subdim=MultiAxis(Axis(2))),
-    ))
+    axes = (
+        MultiAxis([
+            AxisPart(4, id="ax1"), AxisPart(5, id="ax2"), AxisPart(4, id="ax3")
+        ])
+        .add_subaxis("ax1", 1)
+        .add_subaxis("ax2", nnz)
+        .add_subaxis("ax3", 2)
+    )
 
     dat1 = MultiArray.new(axes, name="dat1", data=np.arange(4+6+8, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(4+6+8, dtype=np.float64), dtype=np.float64)
@@ -493,12 +498,15 @@ def test_compute_double_loop_ragged_mixed():
 
 
 def test_compute_ragged_permuted():
-    root = MultiAxis(Axis(6), permutation=(3, 2, 5, 0, 4, 1))
-    # the nnz array doesn't need to be permuted
-    nnz_ = np.array([3, 2, 0, 1, 3, 2], dtype=np.int32)
-    nnz = MultiArray.new(root.copy(permutation=None), data=nnz_, name="nnz", dtype=np.int32)
-    subdim = MultiAxis(Axis(nnz))
-    axes = root.copy(sections=root.part.copy(subdim=subdim))
+    nnz = MultiArray.new(
+        MultiAxis(6), name="nnz", dtype=np.int32,
+        data=np.array([3, 2, 0, 1, 3, 2], dtype=np.int32)
+    )
+
+    axes = (
+        MultiAxis(AxisPart(6, id="ax1"), permutation=(3, 2, 5, 0, 4, 1))
+        .add_subaxis("ax1", nnz)
+    )
 
     dat1 = MultiArray.new(axes, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
@@ -532,17 +540,17 @@ def test_compute_ragged_permuted():
 
 
 def test_subset():
-    root = MultiAxis(Axis(6))
-    dims = root
+    dat1 = MultiArray.new(
+        MultiAxis(6), name="dat1", data=np.arange(6, dtype=np.float64), dtype=np.float64
+    )
+    dat2 = MultiArray.new(MultiAxis(6), name="dat2", data=np.zeros(6, dtype=np.float64), dtype=np.float64)
 
-    dat1 = MultiArray.new(dims, name="dat1", data=np.arange(6, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(dims, name="dat2", data=np.zeros(6, dtype=np.float64), dtype=np.float64)
+    subset_tensor = MultiArray.new(
+        MultiAxis(4), dtype=np.int32, prefix="subset",
+        data=np.array([2, 3, 5, 0], dtype=np.int32)
+    )
 
-    subset_dim = MultiAxis(Axis(4))
-    subset_tensor = MultiArray.new(subset_dim,
-            data=np.array([2, 3, 5, 0], dtype=np.int32), dtype=np.int32, prefix="subset")
-
-    i1 = pyop3.index([[Slice.from_dim(subset_dim, 0)]])
+    i1 = pyop3.index([Slice.from_dim(MultiAxis(4), 0)])
     subset = NonAffineMap(subset_tensor[i1], subdim_id=0)
 
     iterset = [subset]
@@ -571,13 +579,12 @@ def test_subset():
 
 
 def test_map():
-    root = MultiAxis(Axis(5))
-    dims = root
+    axes = MultiAxis(AxisPart(5, id="ax1"))
 
-    dat1 = MultiArray.new(dims, name="dat1", data=np.arange(5, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(dims, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
+    dat1 = MultiArray.new(axes, name="dat1", data=np.arange(5, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
 
-    map_tensor = MultiArray.new(root.copy(sections=root.part.copy(subdim=MultiAxis(Axis(2)))),
+    map_tensor = MultiArray.new(axes.add_subaxis("ax1", 2),
             data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32), dtype=np.int32, prefix="map")
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 2 }",
@@ -590,7 +597,7 @@ def test_map():
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
-    i1 = pyop3.index([Slice.from_dim(root, 0)])
+    i1 = pyop3.index([Slice.from_dim(axes, 0)])
     map = NonAffineMap(map_tensor[i1], subdim_id=0)
     i2 = [[map]]
     expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
@@ -609,13 +616,18 @@ def test_map():
 
 
 def test_closure_ish():
-    root = MultiAxis((Axis(3), Axis(4)))
+    axes = MultiAxis([3, 4])
+    dat1 = MultiArray.new(axes, name="dat1", data=np.arange(7, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray.new(MultiAxis(3), name="dat2", data=np.zeros(3, dtype=np.float64), dtype=np.float64)
 
-    dat1 = MultiArray.new(root, name="dat1", data=np.arange(7, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(MultiAxis(Axis(3)), name="dat2", data=np.zeros(3, dtype=np.float64), dtype=np.float64)
-
-    map0 = MultiArray.new(MultiAxis(Axis(3, subdim=MultiAxis(Axis(2)))),
-            data=np.array([1, 2, 0, 1, 3, 2], dtype=np.int32), dtype=np.int32, prefix="map")
+    map_axes = (
+        MultiAxis(AxisPart(3, id="ax1"))
+        .add_subaxis("ax1", 2)
+    )
+    map0 = MultiArray.new(
+        map_axes, dtype=np.int32, prefix="map",
+        data=np.array([1, 2, 0, 1, 3, 2], dtype=np.int32)
+    )
 
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 3 }",
@@ -628,7 +640,7 @@ def test_closure_ish():
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
-    i1 = pyop3.index([Slice.from_dim(root, 0)]) # loop over 'cells'
+    i1 = pyop3.index([Slice.from_dim(MultiAxis([3, 4]), 0)]) # loop over 'cells'
     i2 = [i1, [NonAffineMap(map0[i1], subdim_id=1)]]  # access 'cell' and 'edge' data
     expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
 
@@ -651,10 +663,10 @@ def test_index_function():
         3 0 4 1 5 2 6
         x---x---x---x
     """
-    root = MultiAxis((Axis(3), Axis(4)))
+    root = MultiAxis([3, 4])
 
     dat1 = MultiArray.new(root, name="dat1", data=np.arange(7, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(MultiAxis(Axis(3)), name="dat2", data=np.zeros(3, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray.new(MultiAxis(3), name="dat2", data=np.zeros(3, dtype=np.float64), dtype=np.float64)
 
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 3 }",
@@ -689,7 +701,7 @@ def test_index_function():
 
 
 def test_multimap():
-    root = MultiAxis(Axis(5))
+    root = MultiAxis(AxisPart(5, id="ax1"))
 
     dat1 = MultiArray.new(
         root, name="dat1", data=np.arange(5, dtype=np.float64), dtype=np.float64)
@@ -697,12 +709,12 @@ def test_multimap():
         root, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
 
     map0 = MultiArray.new(
-        root.copy(sections=root.part.copy(subdim=MultiAxis(Axis(2)))),
+        root.add_subaxis("ax1", 2),
         data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32),
         dtype=np.int32, prefix="map")
 
     map1 = MultiArray.new(
-        root.copy(sections=root.part.copy(subdim=MultiAxis(Axis(2)))),
+        root.add_subaxis("ax1", 2),
         data=np.array([1, 1, 3, 0, 2, 1, 4, 3, 0, 1], dtype=np.int32),
         dtype=np.int32, prefix="map")
 
@@ -737,7 +749,7 @@ def test_multimap():
 
 
 def test_multimap_with_scalar():
-    root = MultiAxis(Axis(5))
+    root = MultiAxis(AxisPart(5, id="ax1"))
 
     dat1 = MultiArray.new(
         root, name="dat1", data=np.arange(5, dtype=np.float64), dtype=np.float64)
@@ -745,7 +757,7 @@ def test_multimap_with_scalar():
         root, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
 
     map0 = MultiArray.new(
-        root.copy(sections=root.part.copy(subdim=MultiAxis(Axis(2)))),
+        root.add_subaxis("ax1", 2),
         data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32),
         dtype=np.int32, prefix="map")
 
@@ -778,16 +790,14 @@ def test_multimap_with_scalar():
                                      dtype=np.int32))
 
 def test_map_composition():
-    root = MultiAxis(Axis(5))
-    dims = root
+    axes = MultiAxis(AxisPart(5, id="ax1"))
+    dat1 = MultiArray.new(axes, name="dat1", data=np.arange(5, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
 
-    dat1 = MultiArray.new(dims, name="dat1", data=np.arange(5, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(dims, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
-
-    map0_tensor = MultiArray.new(root.copy(sections=root.part.copy(subdim=MultiAxis(Axis(2)))),
+    map0_tensor = MultiArray.new(axes.add_subaxis("ax1", 2),
                          data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32),
                          dtype=np.int32, prefix="map")
-    map1_tensor = MultiArray.new(root.copy(sections=root.part.copy(subdim=MultiAxis(Axis(2)))),
+    map1_tensor = MultiArray.new(axes.add_subaxis("ax1", 2),
                          data=np.array([3, 2, 4, 1, 0, 2, 4, 2, 1, 3], dtype=np.int32),
                          dtype=np.int32, prefix="map")
 
@@ -802,7 +812,7 @@ def test_map_composition():
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
-    i1 = pyop3.index([[Slice.from_dim(root, 0)]])
+    i1 = pyop3.index([[Slice.from_dim(axes, 0)]])
     map0 = NonAffineMap(map0_tensor[i1], subdim_id=0)
     i2 = [[map0]]
     map1 = NonAffineMap(map1_tensor[i2], subdim_id=0)
@@ -823,7 +833,7 @@ def test_map_composition():
 
 
 def test_mixed_arity_map():
-    root = MultiAxis(Axis(3))
+    root = MultiAxis(AxisPart(3, id="ax1"))
     dims = root
 
     dat1 = MultiArray.new(dims, name="dat1", data=np.arange(1, 4, dtype=np.float64), dtype=np.float64)
@@ -833,7 +843,7 @@ def test_mixed_arity_map():
     nnz = MultiArray.new(root, data=nnz_, name="nnz", dtype=np.int32, max_value=3)
 
     map_data = np.array([2, 1, 0, 2, 1, 2], dtype=np.int32)
-    map_tensor = MultiArray.new(root.copy(sections=root.part.copy(subdim=MultiAxis(Axis(nnz)))),
+    map_tensor = MultiArray.new(root.add_subaxis("ax1", nnz),
             data=map_data, dtype=np.int32, prefix="map")
 
     code = lp.make_kernel(
@@ -863,19 +873,18 @@ def test_mixed_arity_map():
     fn(*(d.ctypes.data for d in args))
 
     assert all(dat2.data == np.array([1+2+3, 2+3, 3], dtype=np.int32))
-    print("test_mixed_arity_map PASSED", flush=True)
 
 def test_iter_map_composition():
-    root = MultiAxis(Axis(5))
+    root = MultiAxis(AxisPart(5, id="ax1"))
     dims = root
 
     dat1 = MultiArray.new(dims, name="dat1", data=np.arange(5, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(dims, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
 
-    map0_tensor = MultiArray.new(root.copy(sections=root.part.copy(subdim=MultiAxis(Axis(2)))),
+    map0_tensor = MultiArray.new(root.add_subaxis("ax1", 2),
                          data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32),
                          dtype=np.int32, prefix="map")
-    map1_tensor = MultiArray.new(root.copy(sections=root.part.copy(subdim=MultiAxis(Axis(2)))),
+    map1_tensor = MultiArray.new(root.add_subaxis("ax1", 2),
                          data=np.array([3, 2, 2, 3, 0, 2, 1, 2, 1, 3], dtype=np.int32),
                          dtype=np.int32, prefix="map")
 
@@ -890,7 +899,7 @@ def test_iter_map_composition():
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
-    i1 = pyop3.index([[Slice.from_dim(root, 0)]])
+    i1 = pyop3.index([Slice.from_dim(root, 0)])
     map0 = NonAffineMap(map0_tensor[i1], subdim_id=0)
     i2 = [[map0]]
     map1 = NonAffineMap(map1_tensor[i2], subdim_id=0)
@@ -910,7 +919,6 @@ def test_iter_map_composition():
     # data is just written to itself (but not the final one because it's not in map1)
     ans = [0, 1, 2, 3, 0]
     assert all(dat2.data == np.array(ans, dtype=np.int32))
-    print("test_iter_map_composition PASSED", flush=True)
 
 
 if __name__ == "__main__":
