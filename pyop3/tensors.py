@@ -86,6 +86,7 @@ class MultiAxis(pytools.ImmutableRecord):
         return frozenset(all_ids)
 
     def _add_subaxis(self, part_id, subaxis):
+        # TODO clean this up
         if part_id in self._all_part_ids:
             new_parts = []
             for part in self.parts:
@@ -94,7 +95,10 @@ class MultiAxis(pytools.ImmutableRecord):
                         raise RuntimeError("Already has a subaxis")
                     new_part = part.copy(subaxis=subaxis)
                 else:
-                    new_part = part
+                    if part.subaxis:
+                        new_part = part.copy(subaxis=part.subaxis._add_subaxis(part_id, subaxis))
+                    else:
+                        new_part = part
                 new_parts.append(new_part)
             return self.copy(parts=new_parts)
         else:
@@ -249,26 +253,27 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
     @classmethod
     def new(cls, dim, indicess=None, *args, prefix=None, name=None, **kwargs):
-        # import pdb; pdb.set_trace()
         name = name or cls.name_generator.next(prefix or cls.prefix)
 
         dim = as_multiaxis(dim)
 
         if not indicess:
             indicess = cls._fill_with_slices(dim)
-            # import pdb; pdb.set_trace()
         else:
             if not isinstance(indicess[0], collections.abc.Sequence):
                 indicess = (indicess,)
             indicess = [cls._parse_indices(dim, idxs) for idxs in indicess]
 
-        # iport pdb; pdb.set_trace()
+        # dim = cls.compute_layouts(dim)
+
         dim = cls.collect_sections(dim)
+        # import pdb; pdb.set_trace()
 
         return cls(dim, indicess, *args, name=name, **kwargs)
 
     @classmethod
     def collect_sections(cls, dim):
+        # import pdb; pdb.set_trace()
         # this is a map from dim label to a tensor or index function. This is not
         # unique for each tensor so we need to construct a stack of them.
         if dim.permutation:
@@ -290,7 +295,40 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         return dim.copy(parts=tuple(new_parts))
 
     @classmethod
-    def _collect_sections_permuted(cls, dim, *, idx_map=None):
+    def compute_layouts(cls, axis, parent_indices=None):
+        if not parent_indices:
+            parent_indices = []
+
+        # FIXME ignore parts and permuted for now...
+
+        steps = []
+        for i in range(cls._get_size(axis, parent_indices)):
+            if axis.part.subaxis:
+                step = cls._get_full_dim_size(axis.part.subaxis, parent_indices+[i])
+            else:
+                step = 1
+            steps.append(step)
+
+        # this is some REALLY heavy recursion
+        for i in range(cls._get_size(axis, parent_indices)):
+            new_subaxis = cls.compute_layouts(axis.part.subaxis, parent_indices+[i])
+            new_part = axis.part.copy(subaxis=new_subaxis)
+
+        offsets = np.cumsum([0] + steps[:-1])
+        return axis.copy(layout=offsets, parts=new_part)
+
+    @classmethod
+    def _get_size(cls, axis, parent_indices):
+        size = axis.part.size
+        if isinstance(size, numbers.Integral):
+            return size
+        elif isinstance(size, MultiArray):
+            return cls._read_tensor(size, parent_indices)
+        else:
+            raise TypeError
+
+    @classmethod
+    def _collect_sections_permuted(cls, dim, idx_map=None):
         assert dim.permutation
         if not all(isinstance(part.size, numbers.Integral) for part in dim.parts):
             raise NotImplementedError
@@ -311,7 +349,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
             if part.subaxis:
                 new_idx_map = copy.deepcopy(idx_map)
                 new_idx_map.append(pt)
-                offset += cls._get_full_dim_size(part.subaxis, idx_map=new_idx_map)
+                offset += cls._get_full_dim_size(part.subaxis, new_idx_map)
             else:
                 offset += 1
 
@@ -343,26 +381,17 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
                 idxs = [offset]
                 sizes = [1]
                 offset += 1
-            elif isinstance(dsize := part.size, MultiArray):
-                # FIXME this is missing an extra index somehow - requires thought!!
-                for idx_map in cls._generate_indices(dsize):
-                    idxs.append(offset)
-                    if part.subaxis:
-                        size = cls._get_full_dim_size(part.subaxis, idx_map=idx_map)
-                    else:
-                        size = 1
-                    sizes.append(size)
-                    offset += size
             else:
-                for i in range(dsize):
-                    idxs.append(offset)
-                    if part.subaxis:
-                        idx_map = [i]
-                        size = cls._get_full_dim_size(part.subaxis, idx_map=idx_map)
-                    else:
-                        size = 1
-                    sizes.append(size)
-                    offset += size
+                for idxs_, rng in cls._generate_looping_indices(part):
+                    offset = 0  # since outer dimensions also track this
+                    for i in rng:
+                        idxs.append(offset)
+                        if part.subaxis:
+                            size = cls._get_full_dim_size(part.subaxis, idxs_+[i])
+                        else:
+                            size = 1
+                        sizes.append(size)
+                        offset += size
 
             sections.append(np.array(idxs, dtype=np.int32))
             all_sizes.append(np.array(sizes, dtype=np.int32))
@@ -396,48 +425,128 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
                     expr = x0 * step  + start
                     new_section = IndexFunction(expr, 1, [x0], npart=npart)
                 else:
-                    new_section = MultiArray.new(MultiAxis(len(idxs)), data=idxs, prefix="sec", dtype=np.int32)
+                    if isinstance(part.size, numbers.Integral):
+                        assert part.size == len(idxs)
+                        new_section = MultiArray.new(MultiAxis(part.size), data=idxs, prefix="sec", dtype=np.int32)
+                    elif not part.subaxis:
+                        # hack because the final one must be an IndexFunction
+                        x0 = pym.var("x0")
+                        expr = x0
+                        new_section = IndexFunction(expr, 1, [x0], npart=npart)
+                    else:
+                        # try to be clever and use the same thing because
+                        # I think it's the same
+                        # this is creating a recursion even though it may well be right...
+
+                        # do a compression from the zeros. e.g.
+                        # [0, 1, 1, 0, 2, 3] -> [0, 1]
+                        # import pdb; pdb.set_trace()
+                        # mynewcopy = list(idxs.copy())
+                        # new_idxs = []
+                        # for _, rng in cls._generate_looping_indices(part):
+                        #     for _ in rng:
+                        #         myval = mynewcopy.pop(0)
+                        #     new_idxs.append(myval)
+                        #     
+
+                        # for myidx in idxs:
+                        #     if myidx == 0:
+                        #         new_idxs.append(myidx)
+                        #     else:
+                        #         new_idxs[-1] = myidx
+                        # assert len(new_idxs) == part.size.dim.part.size
+                        # import pdb; pdb.set_trace()
+                        new_section = MultiArray.new(MultiAxis(part.size), data=idxs, prefix="sec", dtype=np.int32)
 
             new_sections.append(new_section)
         return new_sections
 
     @classmethod
-    def _generate_indices(cls, tensor, dim=None):
-        # start from root
-        if dim is None:
-            dim = tensor.dim
-
-        assert len(dim.parts) == 1
-        assert isinstance(dim.part.size, numbers.Integral)
-
-        if dim.part.subaxis:
-            raise NotImplementedError("I don't think I actually touch this code atm")
-            inner = cls._generate_indices(tensor, dim.part.subaxis)
-            result = []
-            for i in range(dim.part.size):
-                result.append({dim.part.label: i} | inner)
-            return result
+    def _generate_looping_indices(cls, part):
+        if isinstance(part.size, numbers.Integral):
+            return [([], range(part.size))]
         else:
-            return [[i] for i in range(dim.part.size)]
+            result = []
+            for parent_indices in part.size.mygenerateindices():
+                result.append([parent_indices, range(cls._read_tensor(part.size, parent_indices))])
+            return result
 
     @classmethod
-    def _get_full_dim_size(cls, dim, *, idx_map=None):
-        if not idx_map:
-            idx_map = collections.defaultdict(list)
+    def _generate_indices(cls, part, parent_indices=None):
+        if not parent_indices:
+            parent_indices = []
 
-        total_size = 0
+        if isinstance(part.size, MultiArray):
+            # there must already be an outer dim or this makes no sense
+            assert parent_indices
+            idxs = [i for i in range(cls._read_tensor(part.size, parent_indices))]
+        else:
+            idxs = [i for i in range(part.size)]
+
+        if part.subaxis:
+            idxs = [
+                [i, *subidxs]
+                for i in idxs
+                for subidxs in cls._generate_indices(part.subaxis, parent_indices=parent_indices+[i])
+            ]
+        else:
+            idxs = [[i] for i in idxs]
+
+        return idxs
+
+    def mygenerateindices(self):
+        return self._mygenindices(self.dim)
+
+    @classmethod
+    def _mygenindices(cls, axis, parent_indices=None):
+        if not parent_indices:
+            parent_indices = []
+
+        idxs = []
+        for i in range(cls._get_size(axis, parent_indices)):
+            if axis.part.subaxis:
+                for subidxs in cls._mygenindices(axis.part.subaxis, parent_indices+[i]): 
+                    idxs.append([i] + subidxs)
+            else:
+                idxs.append([i])
+        return idxs
+
+    @classmethod
+    def _get_full_dim_size(cls, axis, parent_indices):
+        # import pdb; pdb.set_trace()
+
+        # FIXME broken for mixed
+        size = 0
+        for i in range(cls._get_size(axis, parent_indices)):
+            if axis.part.subaxis:
+                size += cls._get_full_dim_size(axis.part.subaxis, parent_indices+[i])
+            else:
+                size += 1
+
+        return size
+
+
         for npart, part in enumerate(dim.parts):
             if isinstance(part.size, MultiArray):
-                for i in range(cls._read_tensor(part.size, idx_map=idx_map)):
+                for i in range(cls._read_tensor(part.size, idx_map)):
                     if part.subaxis:
-                        raise NotImplementedError
-                        new_idx_map = copy.deepcopy(idx_map)
-                        new_idx_map[part.label].append(i)
-
                         total_size += cls._get_full_dim_size(
-                            part.subaxis, idx_map=new_idx_map)
+                            part.subaxis, idx_map+[i])
                     else:
                         total_size += 1
+                # for idx_map2 in cls._generate_indices(part.size.dim):
+                #     # must use declared prefix
+                #     if idx_map2[:nexisting_idxs] == idx_map:
+                #         new_idxs = idx_map + idx_map2[nexisting_idxs:]
+                #
+                #         for i in range(cls._read_tensor(part.size, idx_map=new_idxs)):
+                #             if part.subaxis:
+                #                 new_idx_map = copy.deepcopy(new_idxs)
+                #                 new_idx_map.append(i)
+                #                 total_size += cls._get_full_dim_size(
+                #                     part.subaxis, idx_map=new_idx_map)
+                #             else:
+                #                 total_size += 1
             else:
                 for i in range(part.size):
                     if part.subaxis:
@@ -461,6 +570,8 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
     @classmethod
     def _read_tensor(cls, tensor, idx_map):
+        # TODO we don't do any truncation here... access in reverse?
+
         idx_map_copy = copy.deepcopy(idx_map)
 
         # for each dim in the tree (must not be mixed), find the section offset and accumulate
@@ -476,18 +587,8 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
                 ptr += section.data[idx]
             elif isinstance(section, IndexFunction):
                 # basically a very complicated way of turning 4*x into 4*n (where n is a number)
-                # so here we need to perform the right substitution. I think that dim labels
-                # are right to use here as we could theoretically get duplicates and we want
-                # to go in reverse
-                # idx_map_copy = idx_map.copy()
-                # context = {}
-                # for var, label in reversed(section.vardims):
-                #     ilabel, _, iidx = idx_map_copy.pop()
-                #     while ilabel != label:
-                #         ilabel, _, iidx = idx_map_copy.pop()
-                #     context[str(var)] = iidx
-                # FIXME assumes no duplicates
-                context = {str(var): idx_map[0] for var in section.vars}
+                # so here we need to perform the right substitution.
+                context = {str(var): list(reversed(idx_map))[i] for i, var in enumerate(section.vars)}
                 ptr += pym.evaluate(section.expr, context)
             else:
                 raise AssertionError

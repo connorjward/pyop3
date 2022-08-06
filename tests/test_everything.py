@@ -364,40 +364,53 @@ def test_compute_double_loop_ragged():
     assert all(dat2.data == dat1.data + 1)
 
 
-@pytest.mark.skip
 def test_doubly_ragged():
-    nnz1 = MultiArray.new(root, indicess=iterset, data=steps, name="nnz", dtype=np.int32, max_value=max(steps))
+    ax1 = MultiAxis(AxisPart(3, id="ax1"))
+    nnz1 = MultiArray.new(
+        ax1, name="nnz1", dtype=np.int32, max_value=3,
+        data = np.array([3, 0, 2], dtype=np.int32)
+    )
 
-    root = MultiAxis(Axis(3))
-    iterset = [Slice.from_dim(root, 0, is_loop_index=True)]
+    ax2 = ax1.add_subaxis("ax1", MultiAxis(AxisPart(nnz1, id="ax2")))
+    # import pdb; pdb.set_trace()
+    # res = MultiArray.collect_sections(ax2)
 
-    steps = np.array([3, 2, 1, 3, 2], dtype=np.int32)
-    subdim = MultiAxis(nnz)
-    dims = root.copy(subdims=(subdim,))
+    nnz2 = MultiArray.new(
+        ax2, name="nnz2", dtype=np.int32, max_value=5,
+        data = np.array([1, 0, 5, 2, 3], dtype=np.int32)
+    )
 
 
-    dat1 = MultiArray.new(dims, indicess=iterset, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(dims, indicess=iterset, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
+    ax3 = ax2.add_subaxis("ax2", nnz2)
+    dat1 = MultiArray.new(
+        ax3, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64
+    )
+    dat2 = MultiArray.new(
+        ax3, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64
+    )
 
     code = lp.make_kernel(
-        "{ [i]: 0 <= i < n }",
+        "{ [i]: 0 <= i < 1 }",
         "y[i] = x[i] + 1",
         [lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
-        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),
-        lp.ValueArg("n", dtype=np.int32)],
+        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True)],
         target=lp.CTarget(),
         name="mylocalkernel",
         lang_version=(2018, 2),
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-    expr = pyop3.Loop(iterset, kernel(dat1, dat2))
+    iterset = [Slice(3), Slice(nnz1), Slice(nnz2)]
+
+    expr = pyop3.Loop(p := index(iterset), kernel(dat1[p], dat2[p]))
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    sec0 = dat1.dim.parts[0].layout.data
-    sec1 = dat2.dim.parts[0].layout.data
+    # sec0 = dat1.dim.parts[0].layout.data
+    # sec1 = dat2.dim.parts[0].layout.data
+
+    import pdb; pdb.set_trace()
 
     args = [nnz.data, dat1.data, dat2.data, sec0, sec1]
     fn.argtypes = (ctypes.c_voidp,) * len(args)

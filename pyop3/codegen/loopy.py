@@ -51,14 +51,6 @@ def index_tensor_with_within_loops(tensor, within_loops):
     return tensor.copy(indicess=new_indicess)
 
 
-def collect_labels(index):
-    # import pdb; pdb.set_trace()
-    if isinstance(index, NonAffineMap):
-        return [label for idx in index.input_indices for label in collect_labels(idx)] + [index.label]
-    else:
-        return [index.label]
-
-
 def compute_needed_size(index):
     if isinstance(index, NonAffineMap):
         return sum(compute_needed_size(idx) for idx in index.input_indices) + 1
@@ -74,6 +66,7 @@ def truncate_within_loops(within_loops, indices):
     """
     # TODO I think it might be better to go through in reverse order somehow
     # that would require using reversed(indices)
+    # import pdb; pdb.set_trace()
 
     ninames_needed = sum(compute_needed_size(idx) for idx in indices)
     return within_loops[-ninames_needed:].copy()
@@ -409,8 +402,7 @@ class LoopyKernelBuilder:
                 from_var, = layout.vars
                 index_expr += pym.substitute(layout.expr, {from_var: dim_expr})
             elif isinstance(layout, MultiArray):
-                myexpr = self.handle_assignment(layout, layout.indices, copy.deepcopy(saved_within_loops))
-                index_expr += pym.subscript(pym.var(layout.name), myexpr)
+                index_expr += pym.subscript(pym.var(layout.name), dim_expr)
                 self._section_data.append(lp.GlobalArg(layout.name, shape=None, dtype=np.int32))
             else:
                 raise TypeError
