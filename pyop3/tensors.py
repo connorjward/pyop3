@@ -261,7 +261,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         super().__init__(name)
 
     @classmethod
-    def new(cls, dim, indicess=None, *args, prefix=None, name=None, compute_layout=True, **kwargs):
+    def new(cls, dim, indicess=None, *args, prefix=None, name=None, **kwargs):
         name = name or cls.name_generator.next(prefix or cls.prefix)
 
         dim = as_multiaxis(dim)
@@ -275,34 +275,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
         dim = cls.compute_layouts(dim)
 
-        # if compute_layout:
-        #     dim = cls.collect_sections(dim)
-        # import pdb; pdb.set_trace()
-
         return cls(dim, indicess, *args, name=name, **kwargs)
-
-    @classmethod
-    def collect_sections(cls, dim):
-        # import pdb; pdb.set_trace()
-        # this is a map from dim label to a tensor or index function. This is not
-        # unique for each tensor so we need to construct a stack of them.
-        if dim.permutation:
-            layouts = cls._collect_sections_permuted(dim)
-        else:
-            layouts = cls._collect_sections_unpermuted(dim)
-
-        new_parts = []
-        for part, layout in zip(dim.parts, layouts):
-            if isinstance(part, ScalarAxisPart):
-                assert layout is None
-                new_part = part
-            else:
-                if part.subaxis:
-                    new_part = part.copy(layout=layout, subaxis=cls.collect_sections(part.subaxis))
-                else:
-                    new_part = part.copy(layout=layout)
-            new_parts.append(new_part)
-        return dim.copy(parts=tuple(new_parts))
 
     @classmethod
     def compute_part_size(cls, part):
@@ -379,106 +352,6 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
             layouts.append(new_section)
 
         return layouts
-
-    @classmethod
-    def _collect_sections_unpermuted_array(cls, dim, include_size=False):
-        assert not dim.permutation
-
-        sections = []
-        all_sizes = []
-        offset = 0
-        for npart, part in enumerate(dim.parts):
-
-            idxs = []
-            sizes = []
-
-            if isinstance(part, ScalarAxisPart):
-                idxs = [offset]
-                sizes = [1]
-                offset += 1
-            else:
-                for idxs_, rng in cls._generate_looping_indices(part):
-                    offset = 0  # since outer dimensions also track this
-                    for i in rng:
-                        idxs.append(offset)
-                        if part.subaxis:
-                            size = cls._get_full_dim_size(part.subaxis, idxs_+[i])
-                        else:
-                            size = 1
-                        sizes.append(size)
-                        offset += size
-
-            sections.append(np.array(idxs, dtype=np.int32))
-            all_sizes.append(np.array(sizes, dtype=np.int32))
-
-        if include_size:
-            return sections, all_sizes
-        else:
-            return sections
-
-    @classmethod
-    def _collect_sections_unpermuted(cls, dim):
-        sections = cls._collect_sections_unpermuted_array(dim)
-        # convert to a nice index-type representation
-        new_sections = []
-        for npart, idxs in enumerate(sections):
-            part = dim.parts[npart]
-
-            if isinstance(part, ScalarAxisPart):
-                new_section = None
-            else:
-                # see if we can represent this as an affine transformation or not
-                steps = set(idxs[1:] - idxs[:-1])
-                if not steps:
-                    x0 = pym.var("x0")
-                    expr = x0
-                    new_section = IndexFunction(expr, 1, [x0], npart=npart)
-                elif len(steps) == 1:
-                    start = idxs[0]
-                    step, = steps
-                    x0 = pym.var("x0")
-                    expr = x0 * step  + start
-                    new_section = IndexFunction(expr, 1, [x0], npart=npart)
-                else:
-                    if isinstance(part.size, numbers.Integral):
-                        # probably wrong
-                        assert part.size == len(idxs)
-                        new_section = MultiArray.new(MultiAxis(part.size), data=idxs, prefix="sec", dtype=np.int32)
-                    # elif not part.subaxis:
-                    #     # hack because the final one must be an IndexFunction
-                    #     # this stops an ugly recursion bug...
-                    #     x0 = pym.var("x0")
-                    #     expr = x0
-                    #     new_section = IndexFunction(expr, 1, [x0], npart=npart)
-                    else:
-                        # try to be clever and use the same thing because
-                        # I think it's the same
-                        # this is creating a recursion even though it may well be right...
-
-                        # do a compression from the zeros. e.g.
-                        # [0, 1, 1, 0, 2, 3] -> [0, 1]
-                        # import pdb; pdb.set_trace()
-                        # mynewcopy = list(idxs.copy())
-                        # new_idxs = []
-                        # for _, rng in cls._generate_looping_indices(part):
-                        #     for _ in rng:
-                        #         myval = mynewcopy.pop(0)
-                        #     new_idxs.append(myval)
-                        #     
-
-                        # for myidx in idxs:
-                        #     if myidx == 0:
-                        #         new_idxs.append(myidx)
-                        #     else:
-                        #         new_idxs[-1] = myidx
-                        # assert len(new_idxs) == part.size.dim.part.size
-                        # import pdb; pdb.set_trace()
-                        # new_section = MultiArray.new(part.size.dim, data=idxs, prefix="sec", dtype=np.int32)
-                        # FIXME recursion hell - WHY
-                        new_section = MultiArray.new(MultiAxis(part), data=idxs, prefix="sec", dtype=np.int32, compute_layout=False)
-
-            new_sections.append(new_section)
-        return new_sections
 
     @classmethod
     def _generate_looping_indices(cls, part):
