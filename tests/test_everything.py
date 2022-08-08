@@ -312,6 +312,45 @@ def test_compute_double_loop_permuted():
     assert all(dat2.data == dat1.data + 1)
 
 
+def test_permuted_twice():
+    axes = (
+        MultiAxis(AxisPart(3, id="ax1"), permutation=(2, 1, 0))
+        .add_subaxis("ax1", MultiAxis(AxisPart(3, id="ax2"), permutation=(2, 0, 1)))
+        .add_subaxis("ax2", 2)
+    )
+
+    dat1 = MultiArray.new(axes, name="dat1", data=np.arange(18, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(18, dtype=np.float64), dtype=np.float64)
+
+    code = lp.make_kernel(
+        "{ [i]: 0 <= i < 2 }",
+        "y[i] = x[i]",
+        [lp.GlobalArg("x", np.float64, (3,), is_input=True, is_output=False),
+        lp.GlobalArg("y", np.float64, (3,), is_input=False, is_output=True),],
+        target=lp.CTarget(),
+        name="mylocalkernel",
+        lang_version=(2018, 2),
+    )
+    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+    iterset = [Slice(3), Slice(3)]
+    expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
+
+    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+    dll = compilemythings(exe)
+    fn = getattr(dll, "mykernel")
+
+    sec0 = dat1.dim.part.layout[0]
+    sec1 = dat1.dim.part.subaxis.part.layout[0]
+    sec2 = sec0.copy()
+    sec3 = sec1.copy()
+
+    args = [dat1.data, dat2.data, sec0.data, sec1.data, sec2.data, sec3.data]
+    fn.argtypes = (ctypes.c_voidp,) * len(args)
+    fn(*(d.ctypes.data for d in args))
+
+    assert all(dat2.data == dat1.data)
+
+
 def test_somewhat_permuted():
     axes = (
         MultiAxis(AxisPart(2, id="ax1"))
