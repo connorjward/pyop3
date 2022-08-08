@@ -27,6 +27,10 @@ def as_multiaxis(axis):
         raise TypeError
 
 
+def compute_offsets(sizes):
+    return np.concatenate([[0], np.cumsum(sizes)[:-1]], dtype=np.int32)
+
+
 class MultiAxis(pytools.ImmutableRecord):
     fields = {"parts", "permutation", "id"}
 
@@ -132,6 +136,11 @@ class AxisPart(AbstractAxisPart):
 
         if not isinstance(size, (numbers.Integral, pym.primitives.Expression)):
             raise TypeError
+
+        # hack
+        if layout is None:
+            x0 = pym.var("x0")
+            layout = IndexFunction(x0, 1, [x0], npart=None)
 
         self.size = size
         self.subaxis = subaxis
@@ -252,7 +261,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         super().__init__(name)
 
     @classmethod
-    def new(cls, dim, indicess=None, *args, prefix=None, name=None, **kwargs):
+    def new(cls, dim, indicess=None, *args, prefix=None, name=None, compute_layout=True, **kwargs):
         name = name or cls.name_generator.next(prefix or cls.prefix)
 
         dim = as_multiaxis(dim)
@@ -264,9 +273,10 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
                 indicess = (indicess,)
             indicess = [cls._parse_indices(dim, idxs) for idxs in indicess]
 
-        # dim = cls.compute_layouts(dim)
+        dim = cls.compute_layouts(dim)
 
-        dim = cls.collect_sections(dim)
+        # if compute_layout:
+        #     dim = cls.collect_sections(dim)
         # import pdb; pdb.set_trace()
 
         return cls(dim, indicess, *args, name=name, **kwargs)
@@ -295,9 +305,24 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         return dim.copy(parts=tuple(new_parts))
 
     @classmethod
-    def compute_layouts(cls, axis, parent_indices=None):
-        if not parent_indices:
-            parent_indices = []
+    def compute_layouts(cls, axis):
+        new_parts = []
+        for part in axis.parts:
+            if isinstance(part, ScalarAxisPart):
+                new_part = part
+            else:
+                subaxis = cls.compute_layouts(part.subaxis) if part.subaxis else None
+
+                if isinstance(part.size, pym.primitives.Expression):
+                    offsets = compute_offsets(part.size.data)
+                    layout = part.size.copy(name=part.size.name+"c", data=offsets)
+                else:
+                    layout = part.size
+                new_part = part.copy(layout=layout, subaxis=subaxis)
+
+            new_parts.append(new_part)
+
+        return axis.copy(parts=new_parts)
 
         # FIXME ignore parts and permuted for now...
 
@@ -426,13 +451,15 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
                     new_section = IndexFunction(expr, 1, [x0], npart=npart)
                 else:
                     if isinstance(part.size, numbers.Integral):
+                        # probably wrong
                         assert part.size == len(idxs)
                         new_section = MultiArray.new(MultiAxis(part.size), data=idxs, prefix="sec", dtype=np.int32)
-                    elif not part.subaxis:
-                        # hack because the final one must be an IndexFunction
-                        x0 = pym.var("x0")
-                        expr = x0
-                        new_section = IndexFunction(expr, 1, [x0], npart=npart)
+                    # elif not part.subaxis:
+                    #     # hack because the final one must be an IndexFunction
+                    #     # this stops an ugly recursion bug...
+                    #     x0 = pym.var("x0")
+                    #     expr = x0
+                    #     new_section = IndexFunction(expr, 1, [x0], npart=npart)
                     else:
                         # try to be clever and use the same thing because
                         # I think it's the same
@@ -456,7 +483,9 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
                         #         new_idxs[-1] = myidx
                         # assert len(new_idxs) == part.size.dim.part.size
                         # import pdb; pdb.set_trace()
-                        new_section = MultiArray.new(MultiAxis(part.size), data=idxs, prefix="sec", dtype=np.int32)
+                        # new_section = MultiArray.new(part.size.dim, data=idxs, prefix="sec", dtype=np.int32)
+                        # FIXME recursion hell - WHY
+                        new_section = MultiArray.new(MultiAxis(part), data=idxs, prefix="sec", dtype=np.int32, compute_layout=False)
 
             new_sections.append(new_section)
         return new_sections

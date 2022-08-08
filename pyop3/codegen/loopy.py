@@ -378,38 +378,51 @@ class LoopyKernelBuilder:
     # I don't like needing the tensor here..  maybe I could attach the offset to the index?
     # using from_dim
     def handle_assignment(self, tensor, indices, within_loops):
-        # do not copy - modify!
-        saved_within_loops = copy.deepcopy(within_loops)
+        if not indices:
+            return 0
 
-        index_expr = 0
-        dim = tensor.dim
+        if len(indices) == 1:
+            return pym.var(within_loops.pop(0))
 
-        for idx in indices:
-            assert dim is not None
+        index_expr = pym.var(within_loops.pop(0))
+        dim1 = tensor.dim
+        dim2 = dim1.get_part(indices[0].npart).subaxis
 
-            dim_expr = self._as_expr(idx, within_loops)
-
-            npart = idx.npart
+        for idx1, idx2 in zip(indices, indices[1:]):
+            assert dim1 is not None
 
             # Every dim uses a section to map the dim index (from the slice/map + iname)
             # onto a location in the data structure. For nice regular data this can just be
             # the index multiplied by the size of the inner dims (e.g. dat[4*i + j]), but for
             # ragged things we need to always have a map for the outer dims.
-            part = dim.get_part(npart)
+            part = dim2.get_part(idx2.npart)
             layout = part.layout
 
+
             if isinstance(layout, IndexFunction):
-                from_var, = layout.vars
-                index_expr += pym.substitute(layout.expr, {from_var: dim_expr})
+                pass
+                raise NotImplementedError
+                # dim_expr = self._as_expr(idx1, within_loops)
+                # from_var, = layout.vars
+                # index_expr += pym.substitute(layout.expr, {from_var: dim_expr})
             elif isinstance(layout, MultiArray):
-                index_expr += pym.subscript(pym.var(layout.name), dim_expr)
+                # if layout.name == "nnz2c":
+                #     import pdb; pdb.set_trace()
+                # FIXME I think this is wrong if we have nesting
+                # dim_expr = self.handle_assignment(layout, layout.indices, within_loops)
+                iname = within_loops.pop(0)
+                # index_expr += pym.subscript(pym.var(layout.name), dim_expr)
+                index_expr = pym.subscript(pym.var(layout.name), index_expr) + pym.var(iname)
                 self._section_data.append(lp.GlobalArg(layout.name, shape=None, dtype=np.int32))
             else:
                 raise TypeError
 
-            if part.subaxis:
-                dim = part.subaxis
+            dim1 = dim2
+            dim2 = part.subaxis
 
+        assert dim2 is None
+        assert not within_loops
+        # return index_expr + pym.var(within_loops[0])
         return index_expr
 
     def register_domains(self, indices, dstack, within_loops):
@@ -474,9 +487,7 @@ class LoopyKernelBuilder:
 
     @_as_expr.register
     def _(self, index: NonAffineMap, within_loops):
-        # import pdb; pdb.set_trace()
         myexpr = self.handle_assignment(index.tensor, index.tensor.indices, within_loops)
-        # iname = within_loops[index.label].pop(0)
         return pym.subscript(pym.var(index.tensor.name), myexpr)
 
 

@@ -356,7 +356,7 @@ def test_compute_double_loop_ragged():
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    args = [nnz.data, dat1.data, dat2.data, dat1.dim.parts[0].layout.data, dat2.dim.parts[0].layout.data]
+    args = [nnz.data, dat1.data, dat2.data, dat1.dim.part.subaxis.part.layout.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
@@ -372,9 +372,6 @@ def test_doubly_ragged():
     )
 
     ax2 = ax1.add_subaxis("ax1", MultiAxis(AxisPart(nnz1, id="ax2")))
-    # import pdb; pdb.set_trace()
-    # res = MultiArray.collect_sections(ax2)
-
     nnz2 = MultiArray.new(
         ax2, name="nnz2", dtype=np.int32, max_value=5,
         data = np.array([1, 0, 5, 2, 3], dtype=np.int32)
@@ -407,12 +404,12 @@ def test_doubly_ragged():
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    # sec0 = dat1.dim.parts[0].layout.data
-    # sec1 = dat2.dim.parts[0].layout.data
+    nnz1c = dat1.dim.part.subaxis.part.layout
+    nnz2c = dat1.dim.part.subaxis.part.subaxis.part.layout
 
-    import pdb; pdb.set_trace()
+    # import pdb; pdb.set_trace()
 
-    args = [nnz.data, dat1.data, dat2.data, sec0, sec1]
+    args = [nnz1.data, nnz2.data, dat1.data, dat2.data, nnz1c.data, nnz2c.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
