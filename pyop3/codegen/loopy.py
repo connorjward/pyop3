@@ -378,6 +378,7 @@ class LoopyKernelBuilder:
     # I don't like needing the tensor here..  maybe I could attach the offset to the index?
     # using from_dim
     def handle_assignment(self, tensor, indices, within_loops):
+        # import pdb; pdb.set_trace()
         if not indices:
             return 0
 

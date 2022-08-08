@@ -324,6 +324,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
             if isinstance(part, ScalarAxisPart):
                 # FIXME may not work with mixed
                 new_part = part
+                offset += 1
             else:
                 subaxis = cls.compute_layouts(part.subaxis) if part.subaxis else None
 
@@ -552,14 +553,14 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
     @classmethod
     def _slice_marray(cls, marray, parent_indices):
-        # not doubly-nested for now
-        if marray.dim.part.subaxis:
-            raise NotImplementedError
         if not parent_indices:
             return marray.data
-        else:
+        elif not marray.dim.part.subaxis:
             idx, = parent_indices
             return marray.data[idx],
+        else:
+            # not doubly-nested for now
+            raise NotImplementedError
 
     @classmethod
     def _compute_full_axis_size(cls, axis, parent_indices=None):
