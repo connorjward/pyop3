@@ -398,20 +398,11 @@ class LoopyKernelBuilder:
             part = dim2.get_part(idx2.npart)
             layout = part.layout
 
+            iname = within_loops.pop(0)
 
-            if isinstance(layout, IndexFunction):
-                pass
-                raise NotImplementedError
-                # dim_expr = self._as_expr(idx1, within_loops)
-                # from_var, = layout.vars
-                # index_expr += pym.substitute(layout.expr, {from_var: dim_expr})
+            if isinstance(layout, numbers.Integral):
+                index_expr = index_expr * layout + pym.var(iname)
             elif isinstance(layout, MultiArray):
-                # if layout.name == "nnz2c":
-                #     import pdb; pdb.set_trace()
-                # FIXME I think this is wrong if we have nesting
-                # dim_expr = self.handle_assignment(layout, layout.indices, within_loops)
-                iname = within_loops.pop(0)
-                # index_expr += pym.subscript(pym.var(layout.name), dim_expr)
                 index_expr = pym.subscript(pym.var(layout.name), index_expr) + pym.var(iname)
                 self._section_data.append(lp.GlobalArg(layout.name, shape=None, dtype=np.int32))
             else:

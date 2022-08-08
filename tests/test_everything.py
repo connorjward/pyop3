@@ -14,6 +14,21 @@ import pyop3.codegen
 from pyop3.tensors import *
 
 
+"""
+COMMON ERRORS
+-------------
+
+If you see the message:
+
+corrupted size vs. prev_size
+Aborted (core dumped)
+
+then this usually means that the arrays you are passing in are too small.
+
+This happens usually when you copy and paste things and forget.
+"""
+
+
 def compilemythings(code):
         """Build a shared library and load it
 
@@ -411,6 +426,53 @@ def test_doubly_ragged():
 
     args = [nnz1.data, nnz2.data, dat1.data, dat2.data, nnz1c.data, nnz2c.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
+
+    fn(*(d.ctypes.data for d in args))
+
+    assert all(dat2.data == dat1.data + 1)
+
+
+def test_ragged_inside_two_standard_loops():
+    ax1 = MultiAxis(AxisPart(2, id="ax1"))
+    ax2 = ax1.add_subaxis("ax1", AxisPart(2, id="ax2"))
+
+    nnz = MultiArray.new(
+        ax2, name="nnz", dtype=np.int32, max_value=2,
+        data=np.array([1, 2, 1, 2], dtype=np.int32)
+    )
+
+    ax3 = ax2.add_subaxis("ax2", nnz)
+    dat1 = MultiArray.new(
+        ax3, name="dat1", data=np.arange(6, dtype=np.float64), dtype=np.float64
+    )
+    dat2 = MultiArray.new(
+        ax3, name="dat2", data=np.zeros(6, dtype=np.float64), dtype=np.float64
+    )
+
+    code = lp.make_kernel(
+        "{ [i]: 0 <= i < 1 }",
+        "y[i] = x[i] + 1",
+        [lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
+        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True)],
+        target=lp.CTarget(),
+        name="mylocalkernel",
+        lang_version=(2018, 2),
+    )
+    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+    iterset = [Slice(2), Slice(2), Slice(nnz)]
+
+    expr = pyop3.Loop(p := index(iterset), kernel(dat1[p], dat2[p]))
+
+    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+    dll = compilemythings(code)
+    fn = getattr(dll, "mykernel")
+
+    nnzc = dat1.dim.part.subaxis.part.subaxis.part.layout
+
+    args = [nnz.data, dat1.data, dat2.data, nnzc.data]
+    fn.argtypes = (ctypes.c_voidp,) * len(args)
+
+    # import pdb; pdb.set_trace()
 
     fn(*(d.ctypes.data for d in args))
 
@@ -939,7 +1001,8 @@ if __name__ == "__main__":
     # test_double_mixed_loop()
     # test_permuted_loop()
     # test_ragged_loop()
-    test_read_single_dim()
+    # test_read_single_dim()
+    test_ragged_inside_two_standard_loops()
     # test_compute_double_loop()
     # test_compute_double_loop_mixed()
     # import gc; gc.collect()
