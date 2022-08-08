@@ -381,40 +381,59 @@ class LoopyKernelBuilder:
         if not indices:
             return 0
 
-        if len(indices) == 1:
-            return pym.var(within_loops.pop(0))
+        iname = within_loops.pop(0)
+        index_expr = self._as_expr(indices[0], iname, within_loops)
 
-        index_expr = pym.var(within_loops.pop(0))
+        if len(indices) == 1:
+            _, myoffset = tensor.dim.get_part(indices[0].npart).layout
+            return index_expr+myoffset
+
         dim1 = tensor.dim
         dim2 = dim1.get_part(indices[0].npart).subaxis
+
+        mainoffset = 0
 
         for idx1, idx2 in zip(indices, indices[1:]):
             assert dim1 is not None
 
-            # Every dim uses a section to map the dim index (from the slice/map + iname)
-            # onto a location in the data structure. For nice regular data this can just be
-            # the index multiplied by the size of the inner dims (e.g. dat[4*i + j]), but for
-            # ragged things we need to always have a map for the outer dims.
+            part1 = dim1.get_part(idx1.npart)
             part = dim2.get_part(idx2.npart)
-            layout = part.layout
-
             iname = within_loops.pop(0)
 
-            if isinstance(layout, numbers.Integral):
-                index_expr = index_expr * layout + pym.var(iname)
-            elif isinstance(layout, MultiArray):
-                index_expr = pym.subscript(pym.var(layout.name), index_expr) + pym.var(iname)
-                self._section_data.append(lp.GlobalArg(layout.name, shape=None, dtype=np.int32))
+
+            myexpr = self._as_expr(idx2, iname, within_loops)
+
+
+            if dim1.permutation:
+                raise NotImplementedError
+                offsets = part.layout
+                mainoffset += pym.subscript(pym.var(offsets.name), pym.var(iname))
+                self._section_data.append(lp.GlobalArg(offsets.name, shape=None, dtype=np.int32))
             else:
-                raise TypeError
+                # Every dim uses a section to map the dim index (from the slice/map + iname)
+                # onto a location in the data structure. For nice regular data this can just be
+                # the index multiplied by the size of the inner dims (e.g. dat[4*i + j]), but for
+                # ragged things we need to always have a map for the outer dims.
+                # import pdb; pdb.set_trace()
+                _, offset = part1.layout
+                layout, _ = part.layout
+
+                mainoffset += offset
+
+                if isinstance(layout, numbers.Integral):
+                    index_expr = index_expr * layout + myexpr
+                elif isinstance(layout, MultiArray):
+                    index_expr = pym.subscript(pym.var(layout.name), index_expr) + myexpr
+                    self._section_data.append(lp.GlobalArg(layout.name, shape=None, dtype=np.int32))
+                else:
+                    raise TypeError
 
             dim1 = dim2
             dim2 = part.subaxis
 
         assert dim2 is None
-        assert not within_loops
-        # return index_expr + pym.var(within_loops[0])
-        return index_expr
+        # assert not within_loops
+        return index_expr + mainoffset
 
     def register_domains(self, indices, dstack, within_loops):
         within_loops = copy.deepcopy(within_loops)
@@ -457,18 +476,18 @@ class LoopyKernelBuilder:
         raise TypeError
 
     @_as_expr.register
-    def _(self, index: Slice, within_loops):
+    def _(self, index: Slice, iname, within_loops):
         start = index.start or 0
         step = index.step or 1
-
-        # TODO I would prefer to go from the end here. Maybe use a deque?
-        iname = within_loops.pop(0)
         return pym.var(iname)*step + start
 
     @_as_expr.register
-    def _(self, index: IndexFunction, within_loops):
+    def _(self, index: IndexFunction, iname, within_loops):
         # use the innermost matching dims as the right inames
         varmap = {}
+
+        # hack to reinsert iname
+        within_loops.insert(0, iname)
         for var in reversed(index.vars):
             iname = within_loops.pop(0)
             varmap[var] = pym.var(iname)
@@ -477,7 +496,9 @@ class LoopyKernelBuilder:
         return res
 
     @_as_expr.register
-    def _(self, index: NonAffineMap, within_loops):
+    def _(self, index: NonAffineMap, iname, within_loops):
+        # hack to reinsert iname
+        within_loops.insert(0, iname)
         myexpr = self.handle_assignment(index.tensor, index.tensor.indices, within_loops)
         return pym.subscript(pym.var(index.tensor.name), myexpr)
 

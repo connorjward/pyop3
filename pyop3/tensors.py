@@ -305,46 +305,40 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         return dim.copy(parts=tuple(new_parts))
 
     @classmethod
+    def compute_part_size(cls, part):
+        size = 0
+        if isinstance(part.size, numbers.Integral):
+            return part.size
+        return size
+
+    @classmethod
     def compute_layouts(cls, axis):
         new_parts = []
+        offset = 0  # for mixed
         for part in axis.parts:
             if isinstance(part, ScalarAxisPart):
+                # FIXME may not work with mixed
                 new_part = part
             else:
                 subaxis = cls.compute_layouts(part.subaxis) if part.subaxis else None
 
                 if isinstance(part.size, pym.primitives.Expression):
                     offsets = compute_offsets(part.size.data)
-                    layout = part.size.copy(name=part.size.name+"c", data=offsets)
+                    layout = part.size.copy(name=part.size.name+"c", data=offsets), offset
                 else:
-                    layout = part.size
+                    layout = part.size, offset
                 new_part = part.copy(layout=layout, subaxis=subaxis)
 
             new_parts.append(new_part)
 
+            # import pdb; pdb.set_trace()
+            offset += cls._compute_full_part_size(part)
+
         return axis.copy(parts=new_parts)
 
-        # FIXME ignore parts and permuted for now...
-
-        steps = []
-        for i in range(cls._get_size(axis, parent_indices)):
-            if axis.part.subaxis:
-                step = cls._get_full_dim_size(axis.part.subaxis, parent_indices+[i])
-            else:
-                step = 1
-            steps.append(step)
-
-        # this is some REALLY heavy recursion
-        for i in range(cls._get_size(axis, parent_indices)):
-            new_subaxis = cls.compute_layouts(axis.part.subaxis, parent_indices+[i])
-            new_part = axis.part.copy(subaxis=new_subaxis)
-
-        offsets = np.cumsum([0] + steps[:-1])
-        return axis.copy(layout=offsets, parts=new_part)
-
     @classmethod
-    def _get_size(cls, axis, parent_indices):
-        size = axis.part.size
+    def _get_part_size(cls, part, parent_indices):
+        size = part.size
         if isinstance(size, numbers.Integral):
             return size
         elif isinstance(size, MultiArray):
@@ -541,52 +535,28 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         return idxs
 
     @classmethod
-    def _get_full_dim_size(cls, axis, parent_indices):
-        # import pdb; pdb.set_trace()
+    def _compute_full_part_size(cls, part, current_size=1):
+        if isinstance(part, ScalarAxisPart):
+            return 1
 
-        # FIXME broken for mixed
-        size = 0
-        for i in range(cls._get_size(axis, parent_indices)):
-            if axis.part.subaxis:
-                size += cls._get_full_dim_size(axis.part.subaxis, parent_indices+[i])
-            else:
-                size += 1
+        # if we encounter an array then discard everything before and make this the new size
+        # e.g. if we have 2 * 2 * [1, 2, 3, 4] then the actual size is 1+2+3+4 = 10
+        if isinstance(part.size, MultiArray):
+            current_size = sum(part.size.data)
+        else:
+            current_size *= part.size
 
-        return size
+        if part.subaxis:
+            return sum(cls._compute_full_part_size(pt, current_size) for pt in part.subaxis.parts)
+        else:
+            return current_size
 
+    @classmethod
+    def _compute_full_axis_size(cls, axis, parent_indices=None):
+        if not parent_indices:
+            parent_indices = []
 
-        for npart, part in enumerate(dim.parts):
-            if isinstance(part.size, MultiArray):
-                for i in range(cls._read_tensor(part.size, idx_map)):
-                    if part.subaxis:
-                        total_size += cls._get_full_dim_size(
-                            part.subaxis, idx_map+[i])
-                    else:
-                        total_size += 1
-                # for idx_map2 in cls._generate_indices(part.size.dim):
-                #     # must use declared prefix
-                #     if idx_map2[:nexisting_idxs] == idx_map:
-                #         new_idxs = idx_map + idx_map2[nexisting_idxs:]
-                #
-                #         for i in range(cls._read_tensor(part.size, idx_map=new_idxs)):
-                #             if part.subaxis:
-                #                 new_idx_map = copy.deepcopy(new_idxs)
-                #                 new_idx_map.append(i)
-                #                 total_size += cls._get_full_dim_size(
-                #                     part.subaxis, idx_map=new_idx_map)
-                #             else:
-                #                 total_size += 1
-            else:
-                for i in range(part.size):
-                    if part.subaxis:
-                        raise NotImplementedError
-                        new_idx_map = copy.deepcopy(idx_map)
-                        new_idx_map[part.label].append(i)
-                        total_size += cls._get_full_dim_size(part.subaxis, idx_map=new_idx_map)
-                    else:
-                        total_size += 1
-
-        return total_size
+        return sum(cls._compute_full_part_size(pt, parent_indices) for pt in axis.parts)
 
     @classmethod
     def _get_subdim(cls, dim, point):

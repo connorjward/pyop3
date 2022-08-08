@@ -371,7 +371,9 @@ def test_compute_double_loop_ragged():
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    args = [nnz.data, dat1.data, dat2.data, dat1.dim.part.subaxis.part.layout.data]
+    # import pdb; pdb.set_trace()
+
+    args = [nnz.data, dat1.data, dat2.data, dat1.dim.part.subaxis.part.layout[0].data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
@@ -419,8 +421,8 @@ def test_doubly_ragged():
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    nnz1c = dat1.dim.part.subaxis.part.layout
-    nnz2c = dat1.dim.part.subaxis.part.subaxis.part.layout
+    nnz1c, _ = dat1.dim.part.subaxis.part.layout
+    nnz2c, _ = dat1.dim.part.subaxis.part.subaxis.part.layout
 
     # import pdb; pdb.set_trace()
 
@@ -467,7 +469,7 @@ def test_ragged_inside_two_standard_loops():
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    nnzc = dat1.dim.part.subaxis.part.subaxis.part.layout
+    nnzc, _ = dat1.dim.part.subaxis.part.subaxis.part.layout
 
     args = [nnz.data, dat1.data, dat2.data, nnzc.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
@@ -510,10 +512,9 @@ def test_compute_double_loop_ragged_inner():
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    sec0 = dat1.dim.parts[0].layout.data
-    sec1 = dat2.dim.parts[0].layout.data
+    nnzc, _ = dat1.dim.part.subaxis.part.layout
 
-    args = [nnz.data, dat1.data, dat2.data, sec0, sec1]
+    args = [nnz.data, dat1.data, dat2.data, nnzc.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
@@ -556,10 +557,9 @@ def test_compute_double_loop_ragged_mixed():
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    sec0 = dat1.dim.parts[1].layout
-    sec1 = dat2.dim.parts[1].layout
+    nnzc, _ = dat1.dim.parts[1].subaxis.part.layout
 
-    args = [nnz.data, dat1.data, dat2.data, sec0.data, sec1.data]
+    args = [nnz.data, dat1.data, dat2.data, nnzc.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
@@ -783,12 +783,12 @@ def test_multimap():
     map0 = MultiArray.new(
         root.add_subaxis("ax1", 2),
         data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32),
-        dtype=np.int32, prefix="map")
+        dtype=np.int32, name="map0")
 
     map1 = MultiArray.new(
         root.add_subaxis("ax1", 2),
         data=np.array([1, 1, 3, 0, 2, 1, 4, 3, 0, 1], dtype=np.int32),
-        dtype=np.int32, prefix="map")
+        dtype=np.int32, name="map1")
 
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 4 }",
@@ -939,7 +939,9 @@ def test_mixed_arity_map():
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    args = [nnz.data, map_tensor.data, dat1.data, dat2.data, map_tensor.dim.parts[0].layout.data]
+    nnzc, _ = map_tensor.dim.part.subaxis.part.layout
+
+    args = [nnz.data, map_tensor.data, dat1.data, dat2.data, nnzc.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
