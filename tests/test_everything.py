@@ -301,11 +301,52 @@ def test_compute_double_loop_permuted():
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(exe)
     fn = getattr(dll, "mykernel")
-    args = [dat1.data, dat2.data, dat1.dim.parts[0].layout.data, dat2.dim.parts[0].layout.data]
+
+    sec0 = dat1.dim.part.layout[0]
+    sec1 = dat2.dim.part.layout[0]
+
+    args = [dat1.data, dat2.data, sec0.data, sec1.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
     fn(*(d.ctypes.data for d in args))
 
     assert all(dat2.data == dat1.data + 1)
+
+
+def test_somewhat_permuted():
+    axes = (
+        MultiAxis(AxisPart(2, id="ax1"))
+        .add_subaxis("ax1", MultiAxis(AxisPart(3, id="ax2"), permutation=(2, 0, 1)))
+        .add_subaxis("ax2", 2)
+    )
+
+    dat1 = MultiArray.new(axes, name="dat1", data=np.arange(12, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(12, dtype=np.float64), dtype=np.float64)
+
+    iterset = [Slice(2), Slice(3)]
+    code = lp.make_kernel(
+        "{ [i]: 0 <= i < 2 }",
+        "y[i] = x[i]",
+        [lp.GlobalArg("x", np.float64, (2,), is_input=True, is_output=False),
+        lp.GlobalArg("y", np.float64, (2,), is_input=False, is_output=True),],
+        target=lp.CTarget(),
+        name="mylocalkernel",
+        lang_version=(2018, 2),
+    )
+    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+    expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
+
+    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+    dll = compilemythings(exe)
+    fn = getattr(dll, "mykernel")
+
+    sec2 = dat1.dim.part.subaxis.part.layout[0]
+    sec3 = dat2.dim.part.subaxis.part.layout[0]
+
+    args = [dat1.data, dat2.data, sec2.data, sec3.data]
+    fn.argtypes = (ctypes.c_voidp,) * len(args)
+    fn(*(d.ctypes.data for d in args))
+
+    assert all(dat2.data == dat1.data)
 
 
 def test_compute_double_loop_permuted_mixed():
@@ -335,7 +376,11 @@ def test_compute_double_loop_permuted_mixed():
 
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
-    args = [dat1.data, dat2.data, dat1.dim.parts[1].layout.data, dat2.dim.parts[1].layout.data]
+
+    sec5 = dat1.dim.parts[1].layout[0]
+    sec7 = dat2.dim.parts[1].layout[0]
+
+    args = [dat1.data, dat2.data, sec5.data, sec7.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
     fn(*(d.ctypes.data for d in args))
 
@@ -600,8 +645,8 @@ def test_compute_ragged_permuted():
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    sec0 = dat1.dim.parts[0].layout
-    sec1 = dat2.dim.parts[0].layout
+    sec0 = dat1.dim.parts[0].layout[0]
+    sec1 = dat2.dim.parts[0].layout[0]
 
     args = [nnz.data, dat1.data, dat2.data, sec0.data, sec1.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)

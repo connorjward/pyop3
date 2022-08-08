@@ -393,6 +393,12 @@ class LoopyKernelBuilder:
 
         mainoffset = 0
 
+        if dim1.permutation:
+            index_expr = 0
+            offsets, _ = dim1.get_part(indices[0].npart).layout
+            mainoffset += pym.subscript(pym.var(offsets.name), pym.var(iname))
+            self._section_data.append(lp.GlobalArg(offsets.name, shape=None, dtype=np.int32))
+
         for idx1, idx2 in zip(indices, indices[1:]):
             assert dim1 is not None
 
@@ -403,12 +409,14 @@ class LoopyKernelBuilder:
 
             myexpr = self._as_expr(idx2, iname, within_loops)
 
+            # import pdb; pdb.set_trace()
 
-            if dim1.permutation:
-                raise NotImplementedError
-                offsets = part.layout
+
+            if dim2.permutation:
+                offsets, _ = part.layout
                 mainoffset += pym.subscript(pym.var(offsets.name), pym.var(iname))
                 self._section_data.append(lp.GlobalArg(offsets.name, shape=None, dtype=np.int32))
+                index_expr *= part.size
             else:
                 # Every dim uses a section to map the dim index (from the slice/map + iname)
                 # onto a location in the data structure. For nice regular data this can just be
@@ -423,8 +431,13 @@ class LoopyKernelBuilder:
                 if isinstance(layout, numbers.Integral):
                     index_expr = index_expr * layout + myexpr
                 elif isinstance(layout, MultiArray):
-                    index_expr = pym.subscript(pym.var(layout.name), index_expr) + myexpr
-                    self._section_data.append(lp.GlobalArg(layout.name, shape=None, dtype=np.int32))
+                    # TODO hack to avoid inserting nnzc[0] in places, refactor
+                    if index_expr != 0:
+                    # if True:
+                        index_expr = pym.subscript(pym.var(layout.name), index_expr) + myexpr
+                        self._section_data.append(lp.GlobalArg(layout.name, shape=None, dtype=np.int32))
+                    else:
+                        index_expr = myexpr
                 else:
                     raise TypeError
 

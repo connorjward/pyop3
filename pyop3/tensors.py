@@ -38,7 +38,7 @@ class MultiAxis(pytools.ImmutableRecord):
         parts = tuple(self._parse_part(pt) for pt in as_tuple(parts))
 
         if permutation and not all(isinstance(pt.size, numbers.Integral) for pt in parts):
-            raise NotImplementedError("This turns out to be very complicated")
+            raise NotImplementedError
 
         self.parts = parts
         self.permutation = permutation
@@ -313,27 +313,34 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
     @classmethod
     def compute_layouts(cls, axis):
+        if axis.permutation:
+            layouts = cls.make_offset_map(axis)
+        else:
+            layouts = [None] * len(axis.parts)
+
         new_parts = []
         offset = 0  # for mixed
-        for part in axis.parts:
+        for part, mylayout in zip(axis.parts, layouts):
             if isinstance(part, ScalarAxisPart):
                 # FIXME may not work with mixed
                 new_part = part
             else:
                 subaxis = cls.compute_layouts(part.subaxis) if part.subaxis else None
 
-                if isinstance(part.size, pym.primitives.Expression):
-                    offsets = compute_offsets(part.size.data)
-                    layout = part.size.copy(name=part.size.name+"c", data=offsets), offset
+                if axis.permutation:
+                    layout = mylayout, 0  # offset here is always 0 as accounted for in map
+                    # import pdb; pdb.set_trace()
                 else:
-                    layout = part.size, offset
+                    if isinstance(part.size, pym.primitives.Expression):
+                        offsets = compute_offsets(part.size.data)
+                        layout = part.size.copy(name=part.size.name+"c", data=offsets), offset
+                    else:
+                        layout = part.size, offset
                 new_part = part.copy(layout=layout, subaxis=subaxis)
+                # import pdb; pdb.set_trace()
+                offset += cls._compute_full_part_size(part)
 
             new_parts.append(new_part)
-
-            # import pdb; pdb.set_trace()
-            offset += cls._compute_full_part_size(part)
-
         return axis.copy(parts=new_parts)
 
     @classmethod
@@ -347,42 +354,30 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
             raise TypeError
 
     @classmethod
-    def _collect_sections_permuted(cls, dim, idx_map=None):
-        assert dim.permutation
-        if not all(isinstance(part.size, numbers.Integral) for part in dim.parts):
-            raise NotImplementedError
-
-        if not idx_map:
-            idx_map = []
-
-        sections = collections.defaultdict(dict)
+    def make_offset_map(cls, axis):
+        offsets = collections.defaultdict(dict)
         offset = 0
-        npoints = sum(p.size for p in dim.parts)
+        npoints = sum(p.size for p in axis.parts)
         for pt in range(npoints):
-            pt = dim.permutation[pt]
+            pt = axis.permutation[pt]
 
-            npart, part = cls._get_subdim(dim, pt)
-            sections[npart][pt] = offset
+            npart, part = cls._get_subdim(axis, pt)
+            offsets[npart][pt] = offset
 
             # increment the pointer by the size of the step for this subdim
+            # FIXME This does not work for ragged as the wrong result is returned here...
             if part.subaxis:
-                new_idx_map = copy.deepcopy(idx_map)
-                new_idx_map.append(pt)
-                offset += cls._get_full_dim_size(part.subaxis, new_idx_map)
+                offset += cls._compute_full_axis_size(part.subaxis, [pt])
             else:
                 offset += 1
 
-        new_sections = [None] * len(dim.parts)
-        for npart in sections:
-            assert isinstance(npart, int)
-
-            part = dim.parts[npart]
-
-            idxs = np.array([sections[npart][i] for i in sorted(sections[npart])], dtype=np.int32)
+        layouts = []
+        for npart in sorted(offsets):
+            idxs = np.array([offsets[npart][i] for i in sorted(offsets[npart])], dtype=np.int32)
             new_section = MultiArray.new(MultiAxis(len(idxs)), data=idxs, prefix="sec", dtype=np.int32)
-            new_sections[npart] = new_section
+            layouts.append(new_section)
 
-        return new_sections
+        return layouts
 
     @classmethod
     def _collect_sections_unpermuted_array(cls, dim, include_size=False):
@@ -535,21 +530,36 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         return idxs
 
     @classmethod
-    def _compute_full_part_size(cls, part, current_size=1):
+    def _compute_full_part_size(cls, part, parent_indices=None, current_size=1):
+        if not parent_indices:
+            parent_indices = []
+
         if isinstance(part, ScalarAxisPart):
             return 1
 
         # if we encounter an array then discard everything before and make this the new size
         # e.g. if we have 2 * 2 * [1, 2, 3, 4] then the actual size is 1+2+3+4 = 10
         if isinstance(part.size, MultiArray):
-            current_size = sum(part.size.data)
+            d = cls._slice_marray(part.size, parent_indices)
+            current_size = sum(d)
         else:
             current_size *= part.size
 
         if part.subaxis:
-            return sum(cls._compute_full_part_size(pt, current_size) for pt in part.subaxis.parts)
+            return sum(cls._compute_full_part_size(pt, parent_indices, current_size) for pt in part.subaxis.parts)
         else:
             return current_size
+
+    @classmethod
+    def _slice_marray(cls, marray, parent_indices):
+        # not doubly-nested for now
+        if marray.dim.part.subaxis:
+            raise NotImplementedError
+        if not parent_indices:
+            return marray.data
+        else:
+            idx, = parent_indices
+            return marray.data[idx],
 
     @classmethod
     def _compute_full_axis_size(cls, axis, parent_indices=None):
