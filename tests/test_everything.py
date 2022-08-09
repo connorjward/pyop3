@@ -695,6 +695,136 @@ def test_compute_ragged_permuted():
     assert all(dat2.data == dat1.data + 1)
 
 
+def test_permuted_ragged_permuted():
+    nnz = MultiArray.new(
+        MultiAxis(6), name="nnz", dtype=np.int32,
+        data=np.array([3, 2, 0, 1, 3, 2], dtype=np.int32)
+    )
+
+    axes = (
+        MultiAxis(AxisPart(6, id="ax1"), permutation=(3, 2, 5, 0, 4, 1))
+        .add_subaxis("ax1", AxisPart(nnz, id="ax2"))
+        .add_subaxis("ax2", MultiAxis(2, permutation=(1, 0)))
+    )
+
+    dat1 = MultiArray.new(axes, name="dat1", data=np.arange(22, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(22, dtype=np.float64), dtype=np.float64)
+
+    code = lp.make_kernel(
+        "{ [i]: 0 <= i < 1 }",
+        "y[i] = x[i] + 1",
+        [lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
+        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
+        target=lp.CTarget(),
+        name="mylocalkernel",
+        lang_version=(2018, 2),
+    )
+    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+    iterset = [Slice(6), Slice(nnz), Slice(2)]
+    expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
+
+    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+    dll = compilemythings(code)
+    fn = getattr(dll, "mykernel")
+
+    sec0 = dat1.dim.part.layout[0]
+    sec1 = dat2.dim.part.subaxis.part.subaxis.part.layout[0]
+    sec2 = sec0.copy()
+    sec3 = sec1.copy()
+
+    args = [nnz.data, dat1.data, dat2.data, sec0.data, sec1.data, sec2.data, sec3.data]
+    fn.argtypes = (ctypes.c_voidp,) * len(args)
+
+    fn(*(d.ctypes.data for d in args))
+
+    assert all(dat2.data == dat1.data + 1)
+
+
+@pytest.mark.xfail
+def test_permuted_inner_and_ragged():
+    axes = (
+        MultiAxis(AxisPart(3, id="ax1"))
+        .add_subaxis("ax1", MultiAxis(AxisPart(2, id="ax2"), permutation=(1, 0)))
+    )
+
+    nnz = MultiArray.new(
+        axes, name="nnz", dtype=np.int32,
+        data=np.array([3, 2, 0, 1, 3, 2], dtype=np.int32)
+    )
+
+    axes = axes.add_subaxis("ax2", nnz)
+
+    dat1 = MultiArray.new(axes, name="dat1", data=np.arange(6, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(6, dtype=np.float64), dtype=np.float64)
+
+    code = lp.make_kernel(
+        "{ [i]: 0 <= i < 1 }",
+        "y[i] = x[i] + 1",
+        [lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
+        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
+        target=lp.CTarget(),
+        name="mylocalkernel",
+        lang_version=(2018, 2),
+    )
+    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+    iterset = [Slice(3), Slice(2), Slice(nnz)]
+    expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
+
+    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+    dll = compilemythings(code)
+    fn = getattr(dll, "mykernel")
+
+    import pdb; pdb.set_trace()
+
+    sec0 = dat1.dim.part.subaxis.part.layout[0]
+    sec1 = sec0.copy()
+
+    args = [dat1.data, dat2.data, sec0.data, sec1.data]
+    fn.argtypes = (ctypes.c_voidp,) * len(args)
+
+    fn(*(d.ctypes.data for d in args))
+
+    assert all(dat2.data == dat1.data + 1)
+
+
+
+def test_permuted_inner():
+    axes = (
+        MultiAxis(AxisPart(4, id="ax1"))
+        .add_subaxis("ax1", MultiAxis(3, permutation=(2, 0, 1)))
+    )
+
+    dat1 = MultiArray.new(axes, name="dat1", data=np.arange(12, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(12, dtype=np.float64), dtype=np.float64)
+
+    code = lp.make_kernel(
+        "{ [i]: 0 <= i < 1 }",
+        "y[i] = x[i] + 1",
+        [lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
+        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
+        target=lp.CTarget(),
+        name="mylocalkernel",
+        lang_version=(2018, 2),
+    )
+    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+    iterset = [Slice(4), Slice(3)]
+    expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
+
+    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+    dll = compilemythings(code)
+    fn = getattr(dll, "mykernel")
+
+    sec0 = dat1.dim.part.subaxis.part.layout[0]
+    sec1 = sec0.copy()
+
+    args = [dat1.data, dat2.data, sec0.data, sec1.data]
+    fn.argtypes = (ctypes.c_voidp,) * len(args)
+
+    fn(*(d.ctypes.data for d in args))
+
+    assert all(dat2.data == dat1.data + 1)
+
+
 def test_subset():
     dat1 = MultiArray.new(
         MultiAxis(6), name="dat1", data=np.arange(6, dtype=np.float64), dtype=np.float64
