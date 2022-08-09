@@ -399,11 +399,15 @@ class LoopyKernelBuilder:
             offsets, _ = dim1.get_part(indices[0].npart).layout
             mainoffset += pym.subscript(pym.var(offsets.name), pym.var(iname))
             self._section_data.append(lp.GlobalArg(offsets.name, shape=None, dtype=np.int32))
+        else:
+            _, offset = dim1.get_part(indices[0].npart).layout
+            mainoffset += offset
 
-        for idx1, idx2 in zip(indices, indices[1:]):
+        # for idx1, idx2 in zip(indices, indices[1:]):
+        for idx2 in indices[1:]:
             assert dim1 is not None
 
-            part1 = dim1.get_part(idx1.npart)
+            # part1 = dim1.get_part(idx1.npart)
             part = dim2.get_part(idx2.npart)
             iname = within_loops.pop(0)
 
@@ -424,8 +428,8 @@ class LoopyKernelBuilder:
                 # the index multiplied by the size of the inner dims (e.g. dat[4*i + j]), but for
                 # ragged things we need to always have a map for the outer dims.
                 # import pdb; pdb.set_trace()
-                _, offset = part1.layout
-                layout, _ = part.layout
+                # _, offset = part1.layout
+                layout, offset = part.layout
 
                 mainoffset += offset
 
