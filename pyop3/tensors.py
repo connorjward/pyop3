@@ -483,6 +483,10 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
         return tensor.data[ptr]
 
+    @property
+    def axes(self):
+        return self.dim
+
     def __getitem__(self, indicess):
         """The plan of action here is as follows:
 
@@ -518,6 +522,14 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
             indicess = (indicess,)
         indicess = [self._parse_indices(self.dim, idxs) for idxs in indicess]
         return self.copy(indicess=indicess)
+
+    def select_axes(self, indices):
+        selected = []
+        current_axis = self.axes
+        for idx in indices:
+            selected.append(current_axis)
+            current_axis = current_axis.get_part(idx.npart).subaxis
+        return tuple(selected)
 
     @classmethod
     def _fill_with_slices(cls, axis, parent_indices=None):
