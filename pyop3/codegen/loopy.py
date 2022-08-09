@@ -378,44 +378,15 @@ class LoopyKernelBuilder:
     # I don't like needing the tensor here..  maybe I could attach the offset to the index?
     # using from_dim
     def handle_assignment(self, tensor, indices, within_loops):
-        # import pdb; pdb.set_trace()
-        if not indices:
-            return 0
-
-        iname = within_loops.pop(0)
-        index_expr = self._as_expr(indices[0], iname, within_loops)
-
-        if len(indices) == 1:
-            _, myoffset = tensor.dim.get_part(indices[0].npart).layout
-            return index_expr+myoffset
-
-        dim1 = tensor.dim
-        dim2 = dim1.get_part(indices[0].npart).subaxis
-
+        index_expr = 0
         mainoffset = 0
 
-        if dim1.permutation:
-            index_expr = 0
-            offsets, _ = dim1.get_part(indices[0].npart).layout
-            mainoffset += pym.subscript(pym.var(offsets.name), pym.var(iname))
-            self._section_data.append(lp.GlobalArg(offsets.name, shape=None, dtype=np.int32))
-        else:
-            _, offset = dim1.get_part(indices[0].npart).layout
-            mainoffset += offset
-
-        # for idx1, idx2 in zip(indices, indices[1:]):
-        for idx2 in indices[1:]:
-            assert dim1 is not None
-
-            # part1 = dim1.get_part(idx1.npart)
+        dim2 = tensor.dim
+        for idx2 in indices:
             part = dim2.get_part(idx2.npart)
             iname = within_loops.pop(0)
 
-
             myexpr = self._as_expr(idx2, iname, within_loops)
-
-            # import pdb; pdb.set_trace()
-
 
             if dim2.permutation:
                 offsets, _ = part.layout
@@ -428,7 +399,6 @@ class LoopyKernelBuilder:
                 # the index multiplied by the size of the inner dims (e.g. dat[4*i + j]), but for
                 # ragged things we need to always have a map for the outer dims.
                 # import pdb; pdb.set_trace()
-                # _, offset = part1.layout
                 layout, offset = part.layout
 
                 mainoffset += offset
@@ -446,11 +416,8 @@ class LoopyKernelBuilder:
                 else:
                     raise TypeError
 
-            dim1 = dim2
             dim2 = part.subaxis
 
-        assert dim2 is None
-        # assert not within_loops
         return index_expr + mainoffset
 
     def register_domains(self, indices, dstack, within_loops):
