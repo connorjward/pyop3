@@ -325,8 +325,8 @@ def test_permuted_twice():
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 2 }",
         "y[i] = x[i]",
-        [lp.GlobalArg("x", np.float64, (3,), is_input=True, is_output=False),
-        lp.GlobalArg("y", np.float64, (3,), is_input=False, is_output=True),],
+        [lp.GlobalArg("x", np.float64, (2,), is_input=True, is_output=False),
+        lp.GlobalArg("y", np.float64, (2,), is_input=False, is_output=True),],
         target=lp.CTarget(),
         name="mylocalkernel",
         lang_version=(2018, 2),
@@ -454,8 +454,6 @@ def test_compute_double_loop_ragged():
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
-
-    # import pdb; pdb.set_trace()
 
     args = [nnz.data, dat1.data, dat2.data, dat1.dim.part.subaxis.part.layout[0].data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
@@ -773,8 +771,6 @@ def test_permuted_inner_and_ragged():
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
-
-    import pdb; pdb.set_trace()
 
     sec0 = dat1.dim.part.subaxis.part.layout[0]
     sec1 = sec0.copy()
