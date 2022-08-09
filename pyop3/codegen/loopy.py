@@ -381,14 +381,13 @@ class LoopyKernelBuilder:
         index_expr = 0
         mainoffset = 0
 
-        dim2 = tensor.dim
-        for idx2 in indices:
-            part = dim2.get_part(idx2.npart)
+        for axis, idx in zip(tensor.select_axes(indices), indices):
+            part = axis.get_part(idx.npart)
             iname = within_loops.pop(0)
 
-            myexpr = self._as_expr(idx2, iname, within_loops)
+            myexpr = self._as_expr(idx, iname, within_loops)
 
-            if dim2.permutation:
+            if axis.permutation:
                 offsets, _ = part.layout
                 mainoffset += pym.subscript(pym.var(offsets.name), pym.var(iname))
                 self._section_data.append(lp.GlobalArg(offsets.name, shape=None, dtype=np.int32))
@@ -406,17 +405,16 @@ class LoopyKernelBuilder:
                 if isinstance(layout, numbers.Integral):
                     index_expr = index_expr * layout + myexpr
                 elif isinstance(layout, MultiArray):
-                    # TODO hack to avoid inserting nnzc[0] in places, refactor
+                    # TODO hack to avoid inserting nnzc[0] in places
+                    # I think to resolve this I need to think about how to do
+                    # permuted_inner_and_ragged which currently fails for another reason
                     if index_expr != 0:
-                    # if True:
                         index_expr = pym.subscript(pym.var(layout.name), index_expr) + myexpr
                         self._section_data.append(lp.GlobalArg(layout.name, shape=None, dtype=np.int32))
                     else:
                         index_expr = myexpr
                 else:
                     raise TypeError
-
-            dim2 = part.subaxis
 
         return index_expr + mainoffset
 
