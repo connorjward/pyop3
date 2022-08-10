@@ -16,6 +16,19 @@ class Mesh:
         self.dm = dm
         self.name = name or self._name_generator.next()
 
+    def __getitem__(self, indices):
+        """Return the correct set of indices..."""
+        indices = as_tuple(indices)
+
+        if len(indices) != 1:
+            raise ValueError
+
+        # We do all this tuple nonsense because the actual mesh part ID is a tuple
+        # but we can pass a scalar in here for some reason (code smell!)
+        index, = indices
+        npart = [pt.id for pt in self.axis.parts].index(as_tuple(index))
+        return Slice(self.axis.parts[npart].size, npart=npart, mesh=self),
+
     def __mul__(self, other):
         if isinstance(other, Mesh):
             return ProductMesh(self, other)
@@ -27,7 +40,7 @@ class Mesh:
         ax = MultiAxis(id=self.name)
         for i in range(self.height+1):
             start, stop = self.dm.getHeightStratum(i)
-            ax = ax.add_part(self.name, AxisPart(stop-start, id=i))
+            ax = ax.add_part(self.name, AxisPart(stop-start, id=(i,)))
         return ax
 
     @property
@@ -57,6 +70,7 @@ class Mesh:
     # TODO I need to create a better index type for this sort of thing
     @property
     def cells(self):
+        return self[0]
         return [Slice(self.ncells, npart=0, mesh=self)]
 
     @property
@@ -85,7 +99,9 @@ class Mesh:
     def height(self):
         return self.depth
 
+    @functools.lru_cache
     def cone(self, index):
+        index, = as_tuple(index)
         from_stratum = index.npart
         to_stratum = from_stratum + 1
 
@@ -103,7 +119,38 @@ class Mesh:
 
         axes = MultiAxis(AxisPart(stop-start, id="myid")).add_subaxis("myid", arity)
         tensor = MultiArray.new(axes, prefix="map", data=data, dtype=np.int32)
-        return NonAffineMap(tensor[[index]], arity=arity, npart=from_stratum+1, mesh=self),
+        return NonAffineMap(tensor[[index]], arity=arity, npart=from_stratum+1, mesh=self)
+
+    @classmethod
+    def create_interval(cls, ncells, length_or_left, right=None):
+        """
+        Generate a uniform mesh of an interval.
+
+        :arg ncells: The number of the cells over the interval.
+        :arg length_or_left: The length of the interval (if ``right``
+             is not provided) or else the left hand boundary point.
+        :arg right: (optional) position of the right
+             boundary point (in which case ``length_or_left`` should
+             be the left boundary point).
+        """
+        if right is None:
+            left = 0
+            right = length_or_left
+        else:
+            left = length_or_left
+
+        if ncells <= 0 or ncells % 1:
+            raise ValueError("Number of cells must be a positive integer")
+        length = right - left
+        if length < 0:
+            raise ValueError("Requested mesh has negative length")
+        dx = length / ncells
+        # This ensures the rightmost point is actually present.
+        coords = np.arange(left, right + 0.01 * dx, dx, dtype=np.double).reshape(-1, 1)
+        cells = np.dstack((np.arange(0, len(coords) - 1, dtype=np.int32),
+                           np.arange(1, len(coords), dtype=np.int32))).reshape(-1, 2)
+        dm = PETSc.DMPlex().createFromCellList(1, cells, coords)
+        return cls(dm)
 
     @classmethod
     def create_square(cls, nx, ny, L, **kwargs):
@@ -211,8 +258,37 @@ class Mesh:
 
 class ProductMesh:
     def __init__(self, *meshes):
-        raise NotImplementedError
         self.meshes = meshes
+
+    def __getitem__(self, indices):
+        """Return the correct set of indices..."""
+        if len(indices) != len(self.meshes):
+            raise ValueError
+
+        slices = []
+        for mesh, idx in zip(self.meshes, indices):
+            slices.extend(mesh[idx])
+        return slices
+
+    @functools.cached_property
+    def axis(self):
+        return self._productify_mesh_axes(self.meshes)
+
+    def find_axis_part(self, strata):
+        return self.axis.find_part(strata)
+
+    def _productify_mesh_axes(self, meshes, parent_ids=()):
+        if not meshes:
+            return None
+
+        mesh, *rest = meshes
+
+        new_parts = []
+        for part in mesh.axis.parts:
+            new_subaxis = self._productify_mesh_axes(rest, parent_ids+part.id)
+            new_part = part.copy(subaxis=new_subaxis, id=parent_ids+part.id)
+            new_parts.append(new_part)
+        return mesh.axis.copy(parts=new_parts)
 
 
 def closure(index):
@@ -220,9 +296,10 @@ def closure(index):
 
 
 def cone(index):
-    # FIXME Clever index type should not need to do this
-    index, = index
-    return index.mesh.cone(index)
+    maps = []
+    for idx in as_tuple(index):
+        maps.append(idx.mesh.cone(idx))
+    return tuple(maps)
 
 
 def star(index):

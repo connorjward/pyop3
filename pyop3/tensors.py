@@ -53,6 +53,18 @@ class MultiAxis(pytools.ImmutableRecord):
         except ValueError:
             raise RuntimeError
 
+    def find_part(self, part_id):
+        if part_id not in self._all_part_ids:
+            raise ValueError
+
+        for pt in self.parts:
+            if pt.id == part_id:
+                return pt
+
+        for pt in self.parts:
+            if pt.subaxis and part_id in pt.subaxis._all_part_ids:
+                return pt.subaxis.find_part(part_id)
+
     # TODO I think I would prefer to subclass tuple here s.t. indexing with
     # None works iff len(self.parts) == 1
     def get_part(self, npart):

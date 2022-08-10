@@ -1163,9 +1163,14 @@ def test_iter_map_composition():
 def test_cone():
     mesh = Mesh.create_square(2, 2, 1)
 
-    dat1 = Dat(
-        mesh, {0: 1, 1: 2, 2: 0}, name="dat1",
-        data=np.ones(mesh.ncells*1+mesh.nedges*2, dtype=np.float64),
+    dofs = {(0,): 1, (1,): 2, (2,): 0}
+    axes = mesh.axis
+    for part_id, subaxis in dofs.items():
+        axes = axes.add_subaxis(part_id, subaxis)
+
+    dat1 = MultiArray.new(
+        axes, name="dat1",
+        data=np.ones(MultiArray._compute_full_axis_size(axes), dtype=np.float64),
         dtype=np.float64
     )
     dat2 = MultiArray.new(
@@ -1195,10 +1200,74 @@ def test_cone():
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    # TODO this sucks...
-    map0, = mesh.cone(p[0])
+    map0 = mesh.cone(p[0])
 
     args = [map0.tensor.data, dat1.data, dat2.data]
+    fn.argtypes = (ctypes.c_voidp,) * len(args)
+
+    fn(*(d.ctypes.data for d in args))
+
+    assert (dat2.data == 6).all()
+
+
+def test_extruded_mesh():
+    # create an extruded hexahedral mesh of size (2*2)*3
+    base_mesh = Mesh.create_square(2, 2, 2, quadrilateral=True)
+    interval = Mesh.create_interval(3, 1)
+    mesh = base_mesh * interval
+
+    dofs = {
+        (0, 0): 2,  # cells
+        (0, 1): 1,  # horiz facets
+        (1, 0): 0,  # vert facets
+        (1, 1): 2,  # horiz edges
+        (2, 0): 1,  # vert edges
+        (2, 1): 3,  # vertices
+    }
+
+    axes = mesh.axis
+    for part_id, subaxis in dofs.items():
+        axes = axes.add_subaxis(part_id, subaxis)
+
+    dat1 = MultiArray.new(
+        axes, name="dat1",
+        data=np.ones(MultiArray._compute_full_axis_size(axes), dtype=np.float64),
+        dtype=np.float64
+    )
+    # import pdb; pdb.set_trace()
+
+    cells = mesh.axis.parts[0].subaxis.parts[0]
+    dat2 = MultiArray.new(
+        MultiAxis(cells), name="dat2", dtype=np.float64,
+        data=np.zeros(MultiArray._compute_full_part_size(cells), dtype=np.float64)
+    )
+
+    loopy_knl = lp.make_kernel(
+        "{ [i]: 0 <= i < 6 }",
+        "y[0] = y[0] + x[i]",
+        [lp.GlobalArg("x", np.float64, (6,), is_input=True, is_output=False),
+        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
+        target=lp.CTarget(),
+        name="mylocalkernel",
+        lang_version=(2018, 2),
+    )
+    kernel = pyop3.LoopyKernel(loopy_knl, [pyop3.READ, pyop3.WRITE])
+
+    expr = pyop3.Loop(
+        p := pyop3.index([Slice(mesh.axis.parts[0].size, npart=0, mesh=base_mesh), Slice(mesh.axis.parts[0].subaxis.parts[0].size, npart=0, mesh=interval)]),
+        [
+            kernel(dat1[cone(p)], dat2[p])
+        ]
+    )
+
+    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+    dll = compilemythings(code)
+    fn = getattr(dll, "mykernel")
+
+    map0 = base_mesh.cone(p[0])
+    map1 = interval.cone(p[1])
+
+    args = [map0.tensor.data, map1.tensor.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
