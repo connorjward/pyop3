@@ -1,263 +1,278 @@
 import dataclasses
 
+from petsc4py import PETSc
+
 from pyop3.tensors import *
+from pyop3.utils import NameGenerator, as_tuple
 
 
 
 class Mesh:
     map_cache = {}
 
-    @property
-    def tdim(self):
-        return len(self.strata_sizes)
+    _name_generator = NameGenerator(prefix="mesh")
+
+    def __init__(self, dm, *, name=None):
+        self.dm = dm
+        self.name = name or self._name_generator.next()
+
+    def __mul__(self, other):
+        if isinstance(other, Mesh):
+            return ProductMesh(self, other)
+        else:
+            return NotImplemented
+
+    @functools.cached_property
+    def axis(self):
+        ax = MultiAxis(id=self.name)
+        for i in range(self.height+1):
+            start, stop = self.dm.getHeightStratum(i)
+            ax = ax.add_part(self.name, AxisPart(stop-start, id=i))
+        return ax
 
     @property
-    def has_substructure(self) -> bool:
-        """Does the mesh have some kind of substructure?"""
-
-    # TODO decorate with some sort of cache
-    def cone(self, point_set):
-        """Return a map."""
-
-
-
-class UnstructuredMesh(Mesh):
-    # just for now
-    NCELLS_IN_CELL_CLOSURE = 1
-    NEDGES_IN_CELL_CLOSURE = 3
-    NVERTS_IN_CELL_CLOSURE = 3
-    CLOSURE_SIZE = NCELLS_IN_CELL_CLOSURE + NEDGES_IN_CELL_CLOSURE + NVERTS_IN_CELL_CLOSURE
-    CELL_CONE_SIZE = 3
-    EDGE_CONE_SIZE = 2
-
-    def __init__(self, strata_sizes):
-        self.strata_sizes = strata_sizes
-        self.dims = Tree(Dim(strata_sizes))
-        self.dim_tree = self.dims  # deprecated
-
-        ncells, nedges, nverts = self.dims.root.sizes
-
-        cone_map0_dim = Tree.from_nest([Dim(ncells), [Dim(self.CELL_CONE_SIZE)]])
-        cone_map0_tensor = Tensor(cone_map0_dim, mesh=self, name="cone0")
-        cone_map0 = NonAffineMap(self.dims.root, 0, 1, cone_map0_tensor)
-
-        cone_map1_dim = Tree.from_nest([Dim(nedges), [Dim(self.EDGE_CONE_SIZE)]])
-        cone_map1_tensor = Tensor(cone_map1_dim, mesh=self, name="cone1")
-        cone_map1 = NonAffineMap(self.dims.root, 1, 2, cone_map1_tensor)
-
-        closure02_dim = Tree.from_nest([Dim(ncells), [Dim(self.NVERTS_IN_CELL_CLOSURE)]])
-        closure02_tensor = Tensor(closure02_dim, mesh=self, name="closure02")
-        closure02 = NonAffineMap(self.dims.root, 0, 2, closure02_tensor)
-
-        self.maps = {
-            self.cone.__name__: {
-                0: cone_map0,
-                1: cone_map1,
-            },
-            self.closure.__name__: {
-                (0, 0): Slice(self.dims.root, 0),
-                (0, 1): cone_map0,
-                (0, 2): closure02,
-                (1, 1): Slice(self.dims.root, 1),
-                (1, 2): cone_map1,
-            }
-        }
-
-    @property
-    def cells(self):
-        return StencilGroup([Stencil([
-            (Slice(self.dims.root, 0),)
-        ])])
+    def dim(self):
+        return self.dm.getDimension()
 
     @property
     def ncells(self):
-        return self.strata_sizes[0]
-
-    def closure(self, stencils):
-        new_stencils = []
-        for stencil in stencils:
-            new_stencil = []
-            for indices in stencil:
-                idx, = indices
-                for stratum in range(idx.stratum, self.tdim):
-                    new_stencil.append((self.maps[self.closure.__name__][(idx.stratum, stratum)],))
-            new_stencils.append(Stencil(new_stencil))
-        return StencilGroup(new_stencils)
-
-    def cone(self, stencils):
-        return StencilGroup([
-            Stencil([
-                tuple(
-                    self.maps[self.cone.__name__][(idx.stratum, idx.stratum+1)]
-                    for idx in idxs
-                )
-                for idxs in stencil
-            ])
-            for stencil in as_stencil_group(stencils, self.dims)
-        ])
-
-
-class StructuredMesh(Mesh):
-    ...
-
-
-class ExtrudedMesh(Mesh):
-    # just for now
-    NCELLS_IN_CELL_CLOSURE = 1
-    NEDGES_IN_CELL_CLOSURE = 4
-    NVERTS_IN_CELL_CLOSURE = 4
-    CLOSURE_SIZE = NCELLS_IN_CELL_CLOSURE + NEDGES_IN_CELL_CLOSURE + NVERTS_IN_CELL_CLOSURE
-
-    NBASE_VERTS_IN_CELL_CLOSURE = 2
-
-    def __init__(self, strata_sizes):
-        self.strata_sizes = strata_sizes
-        nbase_edges, nbase_verts = self.strata_sizes
-
-        layer_count00 = Tensor(Tree(UniformDim(strata_sizes[0])), name="layer_count00")
-        layer_count01 = Tensor(Tree(UniformDim(strata_sizes[0])), name="layer_count01")
-        layer_count10 = Tensor(Tree(UniformDim(strata_sizes[1])), name="layer_count10")
-        layer_count11 = Tensor(Tree(UniformDim(strata_sizes[1])), name="layer_count11")
-
-        self.dim_tree = Tree(
-            MixedDim(2),
-            (
-                # base edges
-                Tree(
-                    UniformDim(strata_sizes[0]),
-                    (
-                        Tree(
-                            MixedDim(2),
-                            (
-                                Tree(UniformDim(layer_count00)),
-                                Tree(UniformDim(layer_count01))
-                            )
-                        )
-                    )
-                ),
-                # base verts
-                Tree(
-                    UniformDim(strata_sizes[1]),
-                    (
-                        Tree(
-                            MixedDim(2),
-                            (
-                                Tree(UniformDim(layer_count10)),
-                                Tree(UniformDim(layer_count11)),
-                            )
-                        )
-                    )
-                ),
-            )
-        )
-
-
-    def closure(self, stencils):
-        """
-        For semi-structured meshes we return a tuple of slices for plex ops. The
-        first index is for the base mesh entities touched by the stencil. This can have variable arity depending
-        on the number of incident base entities (for example a cubed-sphere mesh can touch
-        just faces, faces and edges or vertices). The inner map is simply an affine start and offset
-        such that the correct memory address can be retrieved given an input point. Like the map, this can have
-        non-unity arity (e.g. if there are 5 DoFs in the cell (edge of base mesh) column but only 2 in the facet column
-        (vertex in base mesh)). The initial start point of the map can also depend on the outer dimension. This
-        is needed for variable layers in extrusion.
-
-        For this example, let's assume that we have a cell that looks like this (+'s are DoFs):
-
-        +----+----+
-        |         |
-        +   +++   +
-        |         |
-        +----+----+
-
-        If we take the closure of the cell then we touch 3 base entities - 2 vertices and 1 edge - so the base map
-        has arity 3. Due to the differing DoF counts for each entity, the arities of the column maps is different
-        for each: 3, 5 and 3 respectively with offsets (0, 1, 2), (0, 1, 2, 3, 4) and (0, 1, 2).
-
-        The base map points to the first entity in each column from which the data is recovered by applying a fixed offset and stride.
-        This resolves problems with variable layers in extruded meshes where we might have a mesh that looks something like:
-
-        +---+
-        | 4 |
-        +---+---+
-        | 3 | 2 |
-        z-a-y---+
-            | 1 |
-            x---+
-
-        We can get around any problems by having base_map(3) return (a, y, z) rather than (a, x, z). If we do that
-        then we can forget about it as an issue later on during code generation.
-
-        Something like:
-        for cell
-            for layer
-                for i
-                    dat[map[i], offset[i]+layer*layersize]
-        """
-        key = (self.closure.__name__, stencils)
-        try:
-            return self.map_cache[key]
-        except KeyError:
-            # be very assertive
-            # this will only work for cells at the moment
-            stencil, = stencils
-            indices, = stencil
-            base_index, extr_index = indices
-
-            base_vert_map = pyop3.NonAffineMap(
-                base_index, self.dim_tree.children[1].value, self.NBASE_VERTS_IN_CELL_CLOSURE, name="base_vert_map"
-            )
-
-            inner_edge_map = pyop3.AffineMap(
-                extr_index,
-                self.dim_tree.children[0].child.children[1].value,
-                arity=2,
-                name="inner_edge_map",
-            )
-            outer_edge_map = pyop3.AffineMap(
-                extr_index,
-                self.dim_tree.children[1].child.children[0].value,
-                arity=1,
-                name="outer_edge_map",
-            )
-            outer_vert_map = pyop3.AffineMap(
-                extr_index,
-                self.dim_tree.children[1].child.children[1].value,
-                arity=2,
-                name="outer_vert_map",
-            )
-
-            mapped_stencils = frozenset({  # stencils (i.e. partitions)
-                (  # stencil (i.e. temporary)
-                    # indices (i.e. loopy instructions)
-                    # cell data
-                    (base_index, extr_index),
-                    # in-cell edges
-                    (base_index, inner_edge_map),
-                    # out-cell edges
-                    (base_vert_map, outer_edge_map),
-                    # out-cell verts
-                    (base_vert_map, outer_vert_map),
-                )
-            })
-            return self.map_cache.setdefault(key, mapped_stencils)
+        start, stop = self.dm.getHeightStratum(0)
+        return stop-start
 
     @property
+    def nedges(self):
+        start, stop = self.dm.getHeightStratum(1)
+        return stop-start
+
+    @property
+    def nfacets(self):
+        start, stop = self.dm.getDepthStratum(1)
+        return stop-start
+
+    @property
+    def nvertices(self):
+        start, stop = self.dm.getDepthStratum(0)
+        return stop-start
+
+    # TODO I need to create a better index type for this sort of thing
+    @property
     def cells(self):
-        dtree = self.dim_tree
+        return [Slice(self.ncells, npart=0, mesh=self)]
 
-        # being very verbose
-        base_cells = pyop3.Range(dtree.children[0].value, dtree.children[0].value.size)
-        extr_cells = pyop3.Range(dtree.children[0].child.children[1].value, dtree.children[0].child.children[1].value.size)
-        indices = (base_cells, extr_cells)
-        stencil = (indices,)
-        return (stencil,)
+    @property
+    def edges(self):
+        if self.dim < 2:
+            raise RuntimeError
+        return [Slice(self.nedges, npart=1, mesh=self)]
+
+    @property
+    def facets(self):
+        if self.dim < 3:
+            raise RuntimeError
+        return [Slice(self.nfacets, npart=self.dim-2, mesh=self)]
+
+    @property
+    def vertices(self):
+        if self.dim < 1:
+            raise RuntimeError
+        return [Slice(self.nvertices, npart=self.dim-1, mesh=self)]
+
+    @property
+    def depth(self):
+        return self.dm.getDepth()
+
+    @property
+    def height(self):
+        return self.depth
+
+    def cone(self, index):
+        from_stratum = index.npart
+        to_stratum = from_stratum + 1
+
+        start, stop = self.dm.getHeightStratum(from_stratum)
+        offset, _ = self.dm.getHeightStratum(to_stratum)
+
+        # We assume a constant cone size
+        arity = self.dm.getConeSize(start)
+        data = np.zeros(((stop-start), arity), dtype=np.int32) - 1
+
+        for i, pt in enumerate(range(start, stop)):
+            data[i] = self.dm.getCone(pt) - offset
+
+        assert (data >= 0).all()
+
+        axes = MultiAxis(AxisPart(stop-start, id="myid")).add_subaxis("myid", arity)
+        tensor = MultiArray.new(axes, prefix="map", data=data, dtype=np.int32)
+        return NonAffineMap(tensor[[index]], arity=arity, npart=from_stratum+1, mesh=self),
+
+    @classmethod
+    def create_square(cls, nx, ny, L, **kwargs):
+        """Generate a square mesh
+
+        :arg nx: The number of cells in the x direction
+        :arg ny: The number of cells in the y direction
+        :arg L: The extent in the x and y directions
+        """
+        return cls.create_rectangle(nx, ny, L, L, **kwargs)
+
+    @classmethod
+    def create_rectangle(cls, nx, ny, Lx, Ly, **kwargs):
+        """Generate a rectangular mesh
+
+        :arg nx: The number of cells in the x direction
+        :arg ny: The number of cells in the y direction
+        :arg Lx: The extent in the x direction
+        :arg Ly: The extent in the y direction
+        """
+
+        for n in (nx, ny):
+            if n <= 0 or n % 1:
+                raise ValueError("Number of cells must be a positive integer")
+
+        xcoords = np.linspace(0.0, Lx, nx + 1, dtype=np.double)
+        ycoords = np.linspace(0.0, Ly, ny + 1, dtype=np.double)
+        return cls.create_tensor_rectangle(xcoords, ycoords, **kwargs)
+
+    @classmethod
+    def create_tensor_rectangle(cls, xcoords, ycoords, quadrilateral=False):
+        """Generate a rectangular mesh
+
+        :arg xcoords: mesh points for the x direction
+        :arg ycoords: mesh points for the y direction
+        :kwarg quadrilateral: (optional), creates quadrilateral mesh, defaults to False
+        """
+        xcoords = np.unique(xcoords)
+        ycoords = np.unique(ycoords)
+        nx = np.size(xcoords)-1
+        ny = np.size(ycoords)-1
+
+        for n in (nx, ny):
+            if n <= 0:
+                raise ValueError("Number of cells must be a postive integer")
+
+        coords = np.asarray(np.meshgrid(xcoords, ycoords)).swapaxes(0, 2).reshape(-1, 2)
+        # cell vertices
+        i, j = np.meshgrid(np.arange(nx, dtype=np.int32), np.arange(ny, dtype=np.int32))
+
+        cells = [i*(ny+1) + j, i*(ny+1) + j+1, (i+1)*(ny+1) + j+1, (i+1)*(ny+1) + j]
+        cells = np.asarray(cells).swapaxes(0, 2).reshape(-1, 4)
+
+        if not quadrilateral:
+            idx = [0, 1, 3, 1, 2, 3]
+            cells = cells[:, idx].reshape(-1, 3)
+
+        dm = PETSc.DMPlex().createFromCellList(2, cells, coords)
+        return cls(dm)
+
+    @classmethod
+    def create_box(cls, nx, ny, nz, Lx, Ly, Lz):
+        """Generate a mesh of a 3D box.
+
+        :arg nx: The number of cells in the x direction
+        :arg ny: The number of cells in the y direction
+        :arg nz: The number of cells in the z direction
+        :arg Lx: The extent in the x direction
+        :arg Ly: The extent in the y direction
+        :arg Lz: The extent in the z direction
+        """
+        for n in (nx, ny, nz):
+            if n <= 0 or n % 1:
+                raise ValueError("Number of cells must be a positive integer")
+
+        xcoords = np.linspace(0, Lx, nx + 1, dtype=np.double)
+        ycoords = np.linspace(0, Ly, ny + 1, dtype=np.double)
+        zcoords = np.linspace(0, Lz, nz + 1, dtype=np.double)
+        # X moves fastest, then Y, then Z
+        coords = np.asarray(np.meshgrid(xcoords, ycoords, zcoords)).swapaxes(0, 3).reshape(-1, 3)
+        i, j, k = np.meshgrid(np.arange(nx, dtype=np.int32),
+                              np.arange(ny, dtype=np.int32),
+                              np.arange(nz, dtype=np.int32))
+
+        v0 = k*(nx + 1)*(ny + 1) + j*(nx + 1) + i
+        v1 = v0 + 1
+        v2 = v0 + (nx + 1)
+        v3 = v1 + (nx + 1)
+        v4 = v0 + (nx + 1)*(ny + 1)
+        v5 = v1 + (nx + 1)*(ny + 1)
+        v6 = v2 + (nx + 1)*(ny + 1)
+        v7 = v3 + (nx + 1)*(ny + 1)
+
+        cells = [v0, v1, v3, v7,
+                 v0, v1, v7, v5,
+                 v0, v5, v7, v4,
+                 v0, v3, v2, v7,
+                 v0, v6, v4, v7,
+                 v0, v2, v6, v7]
+        cells = np.asarray(cells).swapaxes(0, 3).reshape(-1, 4)
+
+        dm = PETSc.DMPlex().createFromCellList(dim, cells, coords)
+        return cls(dm)
 
 
-class CubeSphereMesh(Mesh):
-    ...
+class ProductMesh:
+    def __init__(self, *meshes):
+        raise NotImplementedError
+        self.meshes = meshes
 
+
+def closure(index):
+    raise NotImplementedError
+
+
+def cone(index):
+    # FIXME Clever index type should not need to do this
+    index, = index
+    return index.mesh.cone(index)
+
+
+def star(index):
+    raise NotImplementedError
+
+
+# Old notes below:
+
+"""
+For semi-structured meshes we return a tuple of slices for plex ops. The
+first index is for the base mesh entities touched by the stencil. This can have variable arity depending
+on the number of incident base entities (for example a cubed-sphere mesh can touch
+just faces, faces and edges or vertices). The inner map is simply an affine start and offset
+such that the correct memory address can be retrieved given an input point. Like the map, this can have
+non-unity arity (e.g. if there are 5 DoFs in the cell (edge of base mesh) column but only 2 in the facet column
+(vertex in base mesh)). The initial start point of the map can also depend on the outer dimension. This
+is needed for variable layers in extrusion.
+
+For this example, let's assume that we have a cell that looks like this (+'s are DoFs):
+
++----+----+
+|         |
++   +++   +
+|         |
++----+----+
+
+If we take the closure of the cell then we touch 3 base entities - 2 vertices and 1 edge - so the base map
+has arity 3. Due to the differing DoF counts for each entity, the arities of the column maps is different
+for each: 3, 5 and 3 respectively with offsets (0, 1, 2), (0, 1, 2, 3, 4) and (0, 1, 2).
+
+The base map points to the first entity in each column from which the data is recovered by applying a fixed offset and stride.
+This resolves problems with variable layers in extruded meshes where we might have a mesh that looks something like:
+
++---+
+| 4 |
++---+---+
+| 3 | 2 |
+z-a-y---+
+    | 1 |
+    x---+
+
+We can get around any problems by having base_map(3) return (a, y, z) rather than (a, x, z). If we do that
+then we can forget about it as an issue later on during code generation.
+
+Something like:
+for cell
+    for layer
+        for i
+            dat[map[i], offset[i]+layer*layersize]
+"""
 
 """
 Looping over meshes with substructure
@@ -312,32 +327,3 @@ My proposed solution looks something like as follows:
 2.
     Generate code s.t. the partitions are iterated over in turn.
 """
-
-
-@dataclasses.dataclass(frozen=True)
-class PlexOp:
-    index: Any
-
-
-class Closure(PlexOp):
-    pass
-
-
-class Cone(PlexOp):
-    pass
-
-
-class Star(PlexOp):
-    pass
-
-
-def closure(index):
-    return Closure(index)
-
-
-def cone(index):
-    return Cone(index)
-
-
-def star(index):
-    return Star(index)

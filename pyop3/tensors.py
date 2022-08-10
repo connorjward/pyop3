@@ -34,7 +34,7 @@ def compute_offsets(sizes):
 class MultiAxis(pytools.ImmutableRecord):
     fields = {"parts", "permutation", "id"}
 
-    def __init__(self, parts, *, permutation=None, id=None):
+    def __init__(self, parts=(), *, permutation=None, id=None):
         parts = tuple(self._parse_part(pt) for pt in as_tuple(parts))
 
         if permutation and not all(isinstance(pt.size, numbers.Integral) for pt in parts):
@@ -53,6 +53,8 @@ class MultiAxis(pytools.ImmutableRecord):
         except ValueError:
             raise RuntimeError
 
+    # TODO I think I would prefer to subclass tuple here s.t. indexing with
+    # None works iff len(self.parts) == 1
     def get_part(self, npart):
         if npart is None:
             if len(self.parts) != 1:
@@ -69,12 +71,30 @@ class MultiAxis(pytools.ImmutableRecord):
         except ValueError:
             raise RuntimeError
 
+    def add_part(self, axis_id, *args):
+        if axis_id not in self._all_axis_ids:
+            raise ValueError
+
+        part = self._parse_part(*args)
+        return self._add_part(axis_id, part)
+
     def add_subaxis(self, part_id, *args):
         if part_id not in self._all_part_ids:
             raise ValueError
 
         subaxis = self._parse_multiaxis(*args)
         return self._add_subaxis(part_id, subaxis)
+
+    @functools.cached_property
+    def _all_axis_ids(self):
+        all_ids = [self.id]
+        for part in self.parts:
+            if part.subaxis:
+                all_ids.extend(part.subaxis._all_axis_ids)
+
+        if len(unique(all_ids)) != len(all_ids):
+            raise RuntimeError("Axis IDs must be unique")
+        return frozenset(all_ids)
 
     @functools.cached_property
     def _all_part_ids(self):
@@ -88,6 +108,21 @@ class MultiAxis(pytools.ImmutableRecord):
         if len(unique(all_ids)) != len(all_ids):
             raise RuntimeError("ids must be unique")
         return frozenset(all_ids)
+
+    def _add_part(self, axis_id, part):
+        if axis_id == self.id:
+            return self.copy(parts=self.parts+(part,))
+        elif axis_id not in self._all_axis_ids:
+            return self
+        else:
+            new_parts = []
+            for pt in self.parts:
+                if pt.subaxis:
+                    new_subaxis = pt.subaxis._add_part(axis_id, part)
+                    new_parts.append(pt.copy(subaxis=new_subaxis))
+                else:
+                    new_parts.append(pt)
+            return self.copy(parts=new_parts)
 
     def _add_subaxis(self, part_id, subaxis):
         # TODO clean this up
@@ -157,11 +192,12 @@ class ScalarAxisPart(AbstractAxisPart):
 
 
 class Index(pytools.ImmutableRecord, abc.ABC):
-    fields = {"npart", "is_loop_index"}
+    fields = {"npart", "is_loop_index", "mesh"}
 
-    def __init__(self, npart=None, is_loop_index=False):
+    def __init__(self, npart=None, is_loop_index=False, mesh=None):
         self.npart = npart
         self.is_loop_index = is_loop_index
+        self.mesh = mesh
         super().__init__()
 
 
@@ -260,6 +296,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         self.max_value = max_value
         super().__init__(name)
 
+    # TODO delete this and just use constructor
     @classmethod
     def new(cls, dim, indicess=None, *args, prefix=None, name=None, **kwargs):
         name = name or cls.name_generator.next(prefix or cls.prefix)
@@ -426,13 +463,25 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
     @classmethod
     def _slice_marray(cls, marray, parent_indices):
+        def compute_subaxis_size(subaxis, idxs):
+            if subaxis:
+                return cls._compute_full_axis_size(subaxis, idxs)
+            else:
+                return 1
+
         if not parent_indices:
             return marray.data
-        elif not marray.dim.part.subaxis:
-            idx, = parent_indices
-            return marray.data[idx],
+        elif len(parent_indices) == 1:
+            if marray.dim.part.subaxis:
+                ptr = 0
+                parent_idx, = parent_indices
+                for i in range(parent_idx):
+                    ptr += compute_subaxis_size(marray.dim.part.subaxis, parent_indices+[i])
+                return marray.data[ptr:ptr+compute_subaxis_size(marray.dim.part.subaxis, parent_indices+[parent_idx])]
+            else:
+                idx, = parent_indices
+                return marray.data[idx],
         else:
-            # not doubly-nested for now
             raise NotImplementedError
 
     @classmethod
@@ -941,76 +990,21 @@ def _partition_slice(slice_, dtree):
         yield 0, slice_
 
 
-class AffineMap(Map):
-    pass
-
-
-
-
-class Section:
-    def __init__(self, dofs):
-        # dofs is a list of dofs per stratum in the mesh (for now)
-        self.dofs = dofs
-
-
 def Global(*, name: str = None):
-    return MultiArray(name=name, prefix="glob")
+    raise NotImplementedError
+    # return MultiArray(name=name, prefix="glob")
 
 
-def Dat(mesh, dofs: Section, *, prefix="dat", **kwargs) -> MultiArray:
-    dims = mesh.dim_tree.copy()
-    for i, _ in enumerate(dims.root.sizes):
-        dims = dims.add_child(dims.root, MultiAxis(dofs.dofs[i]))
-    return MultiArray(dims, mesh=mesh, prefix=prefix, **kwargs)
-
-
-def VectorDat(mesh, dofs, count, **kwargs):
-    dim = MixedMultiAxis(
-        mesh.tdim,
-        tuple(
-            UniformMultiAxis(
-                mesh.strata_sizes[stratum],
-                UniformMultiAxis(dofs.dofs[stratum], UniformMultiAxis(count))
-            )
-            for stratum in range(mesh.tdim)
-        )
-    )
-    return MultiArray(dim, **kwargs)
-
-
-def ExtrudedDat(mesh, dofs, **kwargs):
-    # dim = MixedMultiAxis(
-    #     2,
-    #     (
-    #         UniformMultiAxis(  # base edges
-    #             mesh.strata_sizes[0],
-    #             MixedMultiAxis(
-    #                 2,
-    #                 (
-    #                     UniformMultiAxis(mesh.layer_count),  # extr cells
-    #                     UniformMultiAxis(mesh.layer_count),  # extr 'inner' edges
-    #                 )
-    #             )
-    #         ),
-    #         UniformMultiAxis(  # base verts
-    #             mesh.strata_sizes[1],
-    #             MixedMultiAxis(
-    #                 2,
-    #                 (
-    #                     UniformMultiAxis(mesh.layer_count),  # extr 'outer' edges
-    #                     UniformMultiAxis(mesh.layer_count),  # extr verts
-    #                 )
-    #             )
-    #         )
-    #     )
-    # )
-    # dim = mesh.dim.copy(children=(
-    #     mesh.dim.children[0].copy(children=(
-    #         
-    #     ))
-    # ))
-    # TODO Actually attach a section to it.
-    return MultiArray(mesh.dim_tree, **kwargs)
+def Dat(mesh, dofs, **kwargs):
+    """
+    dofs:
+        A dict mapping part IDs (usually topological dims) to a new
+        subaxis.
+    """
+    axes = mesh.axis
+    for id, subaxis in dofs.items():
+        axes = axes.add_subaxis(id, subaxis)
+    return MultiArray.new(axes, prefix="dat", **kwargs)
 
 
 def Mat(shape: Tuple[int, ...], *, name: str = None):

@@ -11,6 +11,7 @@ import numpy as np
 
 import pyop3
 import pyop3.codegen
+from pyop3.mesh import *
 from pyop3.tensors import *
 
 
@@ -90,52 +91,6 @@ Compile errors in %s""" % (e.cmd, e.returncode, logfile, errfile))
             os.rename(tmpname, soname)
             # Load resulting library
             return ctypes.CDLL(soname)
-
-
-@pytest.mark.skip
-def test_single_loop():
-    dims = MultiAxis(10)
-    offsets = MultiArray._make_offset_map(dims, dims.label)
-    # assert False
-
-
-@pytest.mark.skip
-def test_double_loop():
-    dims = MultiAxis(10, subdims=(MultiAxis(3),))
-    offsets = MultiArray._make_offset_map(dims, dims.label)
-    # assert False
-
-
-@pytest.mark.skip
-def test_double_mixed_loop():
-    dims = MultiAxis((10, 6), subdims=(MultiAxis(2), MultiAxis(3)))
-    o1 = MultiArray._make_offset_map(dims, dims.labels[0])[0]
-    o2 = MultiArray._make_offset_map(dims, dims.labels[1])[0]
-    assert all(o1.data == np.array([0, 2, 4, 6, 8, 10, 12, 14, 16, 18]))
-    assert all(o2.data == np.array([20, 23, 26, 29, 32, 35]))
-
-
-@pytest.mark.skip
-def test_permuted_loop():
-    perm = (1, 4, 0, 3, 2)  # i.e. first elem 1, then elem 4, then elem 0...
-    # start = [a1, a2, a3, a4, a5]
-    # resulting data layout: [a2, a5, a1, a4, a3]
-    # so the offsets must be [5, 0, 10, 7, 2]
-    dims = MultiAxis((3, 2), permutation=perm, subdims=(MultiAxis(2), MultiAxis(3)))
-    offsets, size = MultiArray._make_offset_map(dims, "myname")
-    ans = np.array([5, 0, 10, 7, 2])
-    assert all(offsets.data == ans)
-
-
-@pytest.mark.skip
-def test_ragged_loop():
-    root = MultiAxis(5)
-    steps = np.array([3, 2, 1, 3, 2])
-    nnz = MultiArray.new(root, data=steps, dtype=np.int32)
-    dims = root.copy(subdims=(MultiAxis(nnz),))
-    offsets = MultiArray._make_offset_map(dims, "myname")[0]
-    ans = [0, 3, 5, 6, 9]
-    assert all(offsets.data == ans)
 
 
 def test_read_single_dim():
@@ -738,16 +693,16 @@ def test_permuted_ragged_permuted():
     assert all(dat2.data == dat1.data + 1)
 
 
-@pytest.mark.xfail
+@pytest.mark.skip
 def test_permuted_inner_and_ragged():
     axes = (
-        MultiAxis(AxisPart(3, id="ax1"))
+        MultiAxis(AxisPart(2, id="ax1"))
         .add_subaxis("ax1", MultiAxis(AxisPart(2, id="ax2"), permutation=(1, 0)))
     )
 
     nnz = MultiArray.new(
         axes, name="nnz", dtype=np.int32,
-        data=np.array([3, 2, 0, 1, 3, 2], dtype=np.int32)
+        data=np.array([3, 2, 0, 1], dtype=np.int32)
     )
 
     axes = axes.add_subaxis("ax2", nnz)
@@ -1205,27 +1160,51 @@ def test_iter_map_composition():
     assert all(dat2.data == np.array(ans, dtype=np.int32))
 
 
+def test_cone():
+    mesh = Mesh.create_square(2, 2, 1)
+
+    dat1 = Dat(
+        mesh, {0: 1, 1: 2, 2: 0}, name="dat1",
+        data=np.ones(mesh.ncells*1+mesh.nedges*2, dtype=np.float64),
+        dtype=np.float64
+    )
+    dat2 = MultiArray.new(
+        MultiAxis(mesh.ncells), name="dat2", dtype=np.float64,
+        data=np.zeros(mesh.ncells, dtype=np.float64)
+    )
+
+    loopy_knl = lp.make_kernel(
+        "{ [i]: 0 <= i < 6 }",
+        "y[0] = y[0] + x[i]",
+        [lp.GlobalArg("x", np.float64, (6,), is_input=True, is_output=False),
+        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
+        target=lp.CTarget(),
+        name="mylocalkernel",
+        lang_version=(2018, 2),
+    )
+    kernel = pyop3.LoopyKernel(loopy_knl, [pyop3.READ, pyop3.WRITE])
+
+    expr = pyop3.Loop(
+        p := pyop3.index(mesh.cells),
+        [
+            kernel(dat1[cone(p)], dat2[p])
+        ]
+    )
+
+    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+    dll = compilemythings(code)
+    fn = getattr(dll, "mykernel")
+
+    # TODO this sucks...
+    map0, = mesh.cone(p[0])
+
+    args = [map0.tensor.data, dat1.data, dat2.data]
+    fn.argtypes = (ctypes.c_voidp,) * len(args)
+
+    fn(*(d.ctypes.data for d in args))
+
+    assert (dat2.data == 6).all()
+
+
 if __name__ == "__main__":
-    # test_subset()
-    # test_map()
-    # test_single_loop()
-    # test_double_loop()
-    # test_double_mixed_loop()
-    # test_permuted_loop()
-    # test_ragged_loop()
-    # test_read_single_dim()
-    test_ragged_inside_two_standard_loops()
-    # test_compute_double_loop()
-    # test_compute_double_loop_mixed()
-    # import gc; gc.collect()
-    # test_compute_double_loop_permuted()
-    # test_compute_double_loop_permuted_mixed()
-    # test_compute_double_loop_scalar()
-    # test_compute_double_loop_ragged()
-    # test_compute_ragged_permuted()
-    # test_compute_double_loop_ragged_mixed()
-    # mfe()
-    # test_map_composition()
-    # test_iter_map_composition()
-    # test_compute_double_loop_ragged_inner()
-    # test_mixed_arity_map()
+    test_subset()
