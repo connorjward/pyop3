@@ -1265,6 +1265,9 @@ def test_extruded_mesh():
     fn = getattr(dll, "mykernel")
 
     map0 = base_mesh.cone(p[0])
+
+    # TODO Note that we use an indirection map for the interval mesh even though
+    # we could use a functional alternative.
     map1 = interval.cone(p[1])
 
     args = [map0.tensor.data, map1.tensor.data, dat1.data, dat2.data]
