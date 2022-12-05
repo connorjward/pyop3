@@ -93,13 +93,13 @@ Compile errors in %s""" % (e.cmd, e.returncode, logfile, errfile))
             return ctypes.CDLL(soname)
 
 
+# TODO: Try to get this to work first... need emit_offset_insns and a tree structure to exist.
 def test_read_single_dim():
     axes = MultiAxis(10)
 
     dat1 = MultiArray.new(axes, name="dat1", data=np.arange(10, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
 
-    iterset = [Slice(10)]
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
         "y[i] = x[i] + 1",
@@ -110,7 +110,9 @@ def test_read_single_dim():
         lang_version=(2018, 2),
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-    expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
+    p = [Slice((0,), (10,))]  # this is a multi-index
+
+    expr = pyop3.Loop(p, kernel(dat1[p], dat2[p]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
 
@@ -132,7 +134,6 @@ def test_compute_double_loop():
     dat1 = MultiArray.new(axes, name="dat1", data=np.arange(30, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(30, dtype=np.float64), dtype=np.float64)
 
-    iterset = [Slice(10)]
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 3 }",
         "y[i] = x[i] + 1",
@@ -143,6 +144,8 @@ def test_compute_double_loop():
         lang_version=(2018, 2),
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+
+    iterset = [Slice(1, (10,))]
     expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
@@ -821,8 +824,12 @@ def test_map():
     dat1 = MultiArray.new(axes, name="dat1", data=np.arange(5, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
 
-    map_tensor = MultiArray.new(axes.add_subaxis("ax1", 2),
-            data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32), dtype=np.int32, prefix="map")
+    map_array = MultiArray.new(
+        axes.add_subaxis("ax1", 2),
+        data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32),
+        dtype=np.int32, prefix="map"
+    )
+
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 2 }",
         "y[0] = y[0] + x[i]",
@@ -834,9 +841,24 @@ def test_map():
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
-    i1 = pyop3.index([Slice(5)])
-    map = NonAffineMap(map_tensor[i1], npart=0)
-    i2 = [[map]]
+    def to_func(inames, types_str, idxs_str, off_str):
+        iname = inames[-1]
+        return [
+            # read the map array entry
+            *pyop3.codegen.emit_offset_insns(map_array, types_str, idxs_str, off_str),
+            f"{types_str}[{iname}] = 0",
+            f"{idxs_str}[{iname}] = {map_array.name}[{off_str}]",
+        ]
+
+    i1 = Slice(5)  # or axes.index
+    i2 = Map(
+        i1,
+        size=1,  # consumes one index
+        arity=lambda _: 2,  # function returning arity of 2
+        to=to_func,
+        # N.B. arity returns an expression whereas to_func returns a set of instructions.
+    )
+
     expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)

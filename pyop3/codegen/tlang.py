@@ -28,6 +28,9 @@ class MultiArrayLangKernelBuilder:
         self._iname_generator = functools.partial(name_generator.next, "i")
         self._temp_name_generator = functools.partial(name_generator.next, "t")
 
+        # new thing - track stack of indices so arguments know their shape
+        self._within_indices = []
+
     def build(self) -> MultiArrayLangKernel:
         new_expr = self._inspect(self._expr)
         return new_expr
@@ -37,29 +40,44 @@ class MultiArrayLangKernelBuilder:
         raise AssertionError
 
     @_inspect.register
-    def _(self, expr: exprs.Loop):
+    def _(self, loop: exprs.Loop):
         # assert isinstance(expr.index, tensors.Indexed)
 
-        if not len(expr.statements) == 1:
+        # push index to stack
+        self._within_indices.extend(loop.indices)
+
+        if not len(loop.statements) == 1:
             raise NotImplementedError
 
-        for stmt in expr.statements:
-            if not isinstance(stmt, exprs.FunctionCall):
-                # no support yet for nested loops as determining the
-                # interleaving of the stencils is quite complicated.
-                # It can maybe be resolved by inspecting Indexed nodes
-                # but I think a better solution is to defer stencils until later.
-                raise NotImplementedError
+        # only 1 statement currently supported
+        stmt, = loop.statements
+        if not isinstance(stmt, exprs.FunctionCall):
+            # no support yet for nested loops as determining the
+            # interleaving of the stencils is quite complicated.
+            # It can maybe be resolved by inspecting Indexed nodes
+            # but I think a better solution is to defer stencils until later.
+            raise NotImplementedError
 
-            stmts = self._inspect(stmt)
-            return expr.copy(statements=stmts)
+        stmts = self._inspect(stmt)
+        new_expr = loop.copy(statements=stmts)
+
+        # pop from stack (nasty! - use set?)
+        for _ in loop.indices:
+            self._within_indices.pop()
+        return new_expr
+
 
     @_inspect.register
     def _(self, expr: exprs.FunctionCall):
+        # Important: we only need to construct temporaries if the tensor is indexed
+        # (i.e. tensor.indices is not None)
+        # therefore temporaries should not have any indices
         temporaries = {}
         for arg in expr.arguments:
-            dims = self.construct_temp_dims(arg.tensor)
-            temporaries[arg] = tensors.MultiArray.new(dims, name=self._temp_name_generator(), dtype=arg.tensor.dtype)
+            dims = self._construct_temp_dims(arg.tensor.axes, arg.tensor.indices)
+            temporaries[arg] = tensors.MultiArray.new(dims, name=self._temp_name_generator(), dtype=arg.tensor.dtype,
+                indices=None  # this must be the case for function arguments
+            )
 
         gathers = self.make_gathers(temporaries)
         call = self.make_function_call(
@@ -70,15 +88,76 @@ class MultiArrayLangKernelBuilder:
 
         return (*gathers, call, *scatters)
 
-    def _construct_temp_dims(self, indices):
-        """Return a flattened list of dims that correspond to the provided indices.
+    def prepend_map(self, map_, after_axis):
+        parts = []
+        # 1. stick after_axis onto each map output part
+        for i, pt in enumerate(map_.parts):
+            new_part = tensors.AxisPart(map_.sizes[i])
+            new_part.add_subaxis(after_axis)
+            parts.append(new_part)
 
-        The result needs to be flattened (rather than nested) as it makes composing
-        things easier.
+        new_axis = tensors.MultiAxis(parts)
+
+        if map_.from_ in self._within_indices:
+            return self.prepend_map(map_.from_, new_axis)
+        else:
+            return new_axis
+            
+
+    def _construct_temp_dims(self, axis, indices):
+        """Return a multi-axis describing the temporary shape."""
+        """
+        Can have something like [:5, map2(map1(c))] which should return a temporary
+        with shape (5, |map1|, |map2|, ...) where ... is whatever the bottom part of
+        the tensor is.
+
+        To do this we start with the first index (the slice) to generate the root axis.
+        Then we encounter map2 so we first handle map1. Since c is a within_index we
+        disregard it.
         """
         idx, *subidxs = indices
 
-        if idx.is_loop_index:
+        # this bit is generic across maps and slices
+        new_axis_parts = []
+        for i, p in enumerate(idx.parts):
+            new_axis_part = tensors.AxisPart(idx.sizes[i])
+            # recurse if needed
+            if axis.parts[p].subaxis:
+                subaxis = self._construct_temp_dims(axis.parts[p].subaxis, subidxs)
+                new_axis_part.add_subaxis(subaxis)
+            new_axis_parts.append(new_axis_part)
+
+            new_axis = tensors.MultiAxis(new_axis_parts)
+
+        if isinstance(idx, tensors.Map):
+            new_axis = self.prepend_map(idx, new_axis)
+
+        return new_axis
+
+        # if it's a map then this needs to get stuck onto the bottom
+
+        # if I encounter a map I should really create the remaining bottom of the tree and
+        # then stick it onto something
+
+        # if it's a map then do the map.from first to get tree above...
+        # this gets super complicated if the maps above branch into multiple parts...
+        # build a stack?
+        if isinstance(idx, tensors.Map):
+            new_axis = self._construct_temp_dims(axis, idx.from_index)
+            new_axis.add_subaxis(tensors.MultiAxis(new_axis_parts))
+
+        # how does calling recursively construct the right thing? multiaxis vs axispart
+
+
+        # indices that are looped over do not contribute to the temporary's shape
+        if idx in self._within_indices:
+            self._construct_temp_dims(axis, subidxs)
+
+
+
+        raise Exception("old code below")
+
+        if idx in self._within_indices:
             if subidxs:
                 return self._construct_temp_dims(subidxs)
             else:

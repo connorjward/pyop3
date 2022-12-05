@@ -65,6 +65,18 @@ class MultiAxis(pytools.ImmutableRecord):
             if pt.subaxis and part_id in pt.subaxis._all_part_ids:
                 return pt.subaxis.find_part(part_id)
 
+    def find_part_from_indices(self, indices):
+        """Traverse axis to find things
+
+        indices is a list of integers"""
+        index, *rest = indices
+
+        if not rest:
+            return self.parts[index]
+        else:
+            return self.parts[index].subaxis.find_part_from_indices(rest)
+
+
     # TODO I think I would prefer to subclass tuple here s.t. indexing with
     # None works iff len(self.parts) == 1
     def get_part(self, npart):
@@ -74,6 +86,10 @@ class MultiAxis(pytools.ImmutableRecord):
             return self.parts[0]
         else:
             return self.parts[npart]
+
+    @property
+    def nparts(self):
+        return len(self.parts)
 
     @property
     def size(self):
@@ -185,9 +201,12 @@ class AxisPart(AbstractAxisPart):
             raise TypeError
 
         # hack
-        if layout is None:
-            x0 = pym.var("x0")
-            layout = IndexFunction(x0, 1, [x0], npart=None)
+        # but WHY
+        # I think that the layout thing here needs to be a callable that takes types, idxs and inames
+        # and returns a collection of instructions that generate an offset.
+        # if layout is None:
+        #     x0 = pym.var("x0")
+        #     layout = IndexFunction(x0, 1, [x0], npart=None)
 
         self.size = size
         self.subaxis = subaxis
@@ -203,36 +222,69 @@ class ScalarAxisPart(AbstractAxisPart):
         return 1
 
 
-class Index(pytools.ImmutableRecord, abc.ABC):
-    fields = {"npart", "is_loop_index", "mesh"}
+# not used
+class ExpressionTemplate:
+    """A thing that evaluates to some collection of loopy instructions when
+    provided with the right inames.
 
-    def __init__(self, npart=None, is_loop_index=False, mesh=None):
-        self.npart = npart
-        self.is_loop_index = is_loop_index
-        self.mesh = mesh
+    Useful for (e.g.) map0_getSize() since function calls are not allowed for GPUs.
+    """
+
+    def __init__(self, fn):
+        self._fn = fn
+        """Callable taking indices that evaluates to a pymbolic expression"""
+
+    def generate(self, _):
+        pass
+
+
+class Index(pytools.ImmutableRecord, abc.ABC):
+    fields = {"nparts", "sizes"}
+
+    def __init__(self, parts, sizes, depth: int=1):
+        self.parts = parts
+        """List of integers selecting the parts produced by this index."""
+        self.sizes = sizes
+        """Function returning an integer given a part number describing the size of the loop."""
+
+        self.depth = depth
+        """The multi-index size"""
         super().__init__()
 
 
 class Slice(Index):
-    fields = Index.fields | {"size", "start", "step"}
+    """
+    A slice will default to all of the parts of the axis unless specified (which requires
+    actual instantiation of a Slice rather than using slice notation.
+    """
+    fields = Index.fields | {"start", "step"}
 
-    def __init__(self, size, start=0, step=1, **kwargs):
-        self.size = size
-        self.start = start
-        self.step = step
-        super().__init__(**kwargs)
+    def __init__(self, parts, sizes, start=None, step=None):
+        # FIXME need to think about how slices with starts and steps work
+        # with multi-part axes
+        if start or step:
+            raise NotImplementedError
+
+        super().__init__(parts, sizes)
 
 
-class Map(Index, abc.ABC):
-    fields = Index.fields | {"arity"}
+# TODO need to specify the output types I reckon - parents can vary but base outputs
+# are absolutely needed.
+class Map(Index):
+    fields = Index.fields | {"from_index", "to"}
 
-    def __init__(self, arity, **kwargs):
-        self.arity = arity
-        super().__init__(**kwargs)
+    def __init__(self, from_, depth: int, parts, sizes, to):
+        if depth != from_.depth:
+            raise ValueError("Can only map between multi-indices of the same size")
 
-    @property
-    def size(self):
-        return self.arity
+        super().__init__(parts=parts,sizes=sizes, depth=depth)
+        """The number of indices 'consumed' by this map"""
+
+        self.from_index = from_
+        """The input multi-index mapped from"""
+
+        self.to = to
+        """A function mapping between multi-indices"""
 
 
 class IndexFunction(Map):
@@ -285,12 +337,12 @@ class NonAffineMap(Map):
 
 class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
 
-    fields = {"dim", "indicess", "dtype", "mesh", "name", "data", "max_value"}
+    fields = {"dim", "indices", "dtype", "mesh", "name", "data", "max_value"}
 
     name_generator = pyop3.utils.MultiNameGenerator()
     prefix = "ten"
 
-    def __init__(self, dim, indicess=None, dtype=None, *, mesh = None, name: str = None, prefix: str=None, data=None, max_value=32):
+    def __init__(self, dim, indices=None, dtype=None, *, mesh = None, name: str = None, prefix: str=None, data=None, max_value=32):
         dim = as_multiaxis(dim)
 
         self.data = data
@@ -300,8 +352,8 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
         self.dim = dim
         # if not self._is_valid_indices(indices, dim.root):
-        assert all(self._is_valid_indices(idxs, dim) for idxs in indicess)
-        self.indicess = indicess or [[]] # self._parse_indices(dim.root, indices)
+        # assert all(self._is_valid_indices(idxs, dim) for idxs in indicess)
+        self.indices = indices or [] # self._parse_indices(dim.root, indices)
 
         self.mesh = mesh
         self.dtype = dtype
@@ -310,21 +362,21 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
     # TODO delete this and just use constructor
     @classmethod
-    def new(cls, dim, indicess=None, *args, prefix=None, name=None, **kwargs):
+    def new(cls, dim, indices=None, *args, prefix=None, name=None, **kwargs):
         name = name or cls.name_generator.next(prefix or cls.prefix)
 
         dim = as_multiaxis(dim)
 
-        if not indicess:
-            indicess = cls._fill_with_slices(dim)
-        else:
-            if not isinstance(indicess[0], collections.abc.Sequence):
-                indicess = (indicess,)
-            indicess = [cls._parse_indices(dim, idxs) for idxs in indicess]
+        # if not indicess:
+        #     indicess = cls._fill_with_slices(dim)
+        # else:
+        #     if not isinstance(indicess[0], collections.abc.Sequence):
+        #         indicess = (indicess,)
+        #     indicess = [cls._parse_indices(dim, idxs) for idxs in indicess]
 
         dim = cls.compute_layouts(dim)
 
-        return cls(dim, indicess, *args, name=name, **kwargs)
+        return cls(dim, indices, *args, name=name, **kwargs)
 
     @classmethod
     def compute_part_size(cls, part):
@@ -548,7 +600,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
     def axes(self):
         return self.dim
 
-    def __getitem__(self, indicess):
+    def __getitem__(self, indices):
         """The plan of action here is as follows:
 
         - if a tensor is indexed by a set of stencils then that's great.
@@ -579,10 +631,10 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         # if self.is_indexed:
         #     raise NotImplementedError("Needs more thought")
 
-        if not isinstance(indicess[0], collections.abc.Sequence):
-            indicess = (indicess,)
-        indicess = [self._parse_indices(self.dim, idxs) for idxs in indicess]
-        return self.copy(indicess=indicess)
+        # if not isinstance(indicess[0], collections.abc.Sequence):
+        #     indicess = (indicess,)
+        # indicess = [self._parse_indices(self.dim, idxs) for idxs in indicess]
+        return self.copy(indices=indices)
 
     def select_axes(self, indices):
         selected = []
@@ -709,13 +761,13 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         else:
             raise TypeError
 
-    @property
-    def indices(self):
-        try:
-            idxs, = self.indicess
-            return idxs
-        except ValueError:
-            raise RuntimeError
+    # @property
+    # def indices(self):
+    #     try:
+    #         idxs, = self.indicess
+    #         return idxs
+    #     except ValueError:
+    #         raise RuntimeError
 
     # @property
     # def linear_indicess(self):

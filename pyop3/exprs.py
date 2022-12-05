@@ -21,15 +21,20 @@ class Operator(Expr):
 
 
 class Loop(pytools.ImmutableRecord, Operator):
-    fields = {"index", "statements"}
+    fields = {"indices", "statements"}
 
-    def __init__(self, index, statements):
+    def __init__(self, indices, statements):
         # FIXME
         # assert isinstance(index, pyop3.tensors.Indexed)
 
-        self.index = index
+        self.indices = indices
         self.statements = as_tuple(statements)
         super().__init__()
+
+    @property
+    def index(self):
+        # deprecated alias for indices
+        return self.indices
 
     # @property
     # def flat_indices(self):

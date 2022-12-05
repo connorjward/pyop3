@@ -25,6 +25,57 @@ from pyop3.tensors import Slice, IndexFunction, index
 from pyop3.codegen.tlang import to_tlang
 
 
+def emit_offset_insns(array, types_str, idxs_str, off_str, depth=0):
+    """Return a sequence of instructions that traverse the layout and determine the right
+    offset of the array for a particular multi-index.
+
+    array:
+        The MultiArray to be indexed
+    types_str:
+        The name of the types array
+    idxs_str:
+        The name of the indices array
+    off_str:
+        The name of the output offset
+    depth:
+        Integer indicating the current depth in the array, might require a step inside
+        types and idxs
+
+    Needs to return something like:
+
+        offset = 0;
+        offset += array_0_layout_expr if types[0+depth] == 0 else array_1_layout_expr if ...
+        offset += array_00_layout_expr (if types[0+depth] == 0 and types[1+depth] == 0) else array_1_layout_expr if ...
+    """
+    insns = ["offset = 0"]
+
+    # do a recursive thing
+    # TODO remember to `end` if statements
+    insns += _emit_offset_insns(array, types_str, idxs_str, off_str, depth, array.root)
+
+
+    return tuple(insns)
+
+
+def _emit_offset_insns(array, types_str, idxs_str, off_str, depth, current_axis, existing_indices=()):
+    insns = []
+
+    if not current_axis:
+        return []
+
+    for p in range(current_axis.nparts):
+        insns.append(f"{off_str} += {generate_offset_expr(array, existing_indices+(p,))}")
+        # now recurse
+        insns.extend(_emit_offset_insns(array, types_str, idxs_str, off_str, depth, current_axis.parts[p].subaxis, existing_indices+(p,)))
+
+    return insns
+
+
+
+def generate_offset_expr(array, idxs):
+    return f"{array.name}_{''.join(map(str, idxs))}_layout"
+
+
 class VariableCollector(pym.mapper.Collector):
     def map_variable(self, expr, *args, **kwargs):
         return {expr}
@@ -113,6 +164,8 @@ class LoopyKernelBuilder:
         self.extents = {}
         self.assumptions = []
 
+        self._within_indices = []  # a stack
+
     @property
     def kernel_data(self):
         return self._tensor_data + self._section_data + self._temp_kernel_data
@@ -133,7 +186,7 @@ class LoopyKernelBuilder:
             name="mykernel",
         )
         tu = lp.merge((translation_unit, *self.subkernels))
-        # import pdb; pdb.set_trace()
+        import pdb; pdb.set_trace()
         return tu.with_entrypoints("mykernel")
 
     @functools.singledispatchmethod
@@ -155,12 +208,19 @@ class LoopyKernelBuilder:
     @_build.register
     def _(self, expr: exprs.Loop, within_loops):
 
-        within_loops = []
-        for idx in expr.index:
-            within_loops = self.collect_within_loops(idx, within_loops)
+        # within_loops = []
+        # for idx in expr.index:
+        #     within_loops = self.collect_within_loops(idx, within_loops)
+        # this might break with composition - need to track which indices (not multiindices) are in use.
+        # we don't want multi-indices here because...
+        within_loops = expr.index
+        # or
+        self._within_indices.append(expr.index)
 
         for stmt in expr.statements:
             self._build(stmt, copy.deepcopy(within_loops))
+
+        self._within_indices.pop()
 
     @_build.register
     def _(self, insn: tlang.Instruction, within_loops):
@@ -179,31 +239,34 @@ class LoopyKernelBuilder:
         for temp in utils.unique(itertools.chain(call.reads, call.writes)):
             # determine the right size of temporary - since loopy thinks everything
             # is flat just find the total size.
-            temp_size = 0
-            for shape in temp.shapes:
-                temp_size_ = 1
-                for extent in shape:
-                    if isinstance(extent, MultiArray):
-                        if (var := self.extents[extent.name]) not in extents:
-                            extents.append(var)
-                            self.assumptions.append(f"{var} <= {extent.max_value}")
-                        extent = extent.max_value
-                    temp_size_ *= extent
-                temp_size += temp_size_
-
-            # if a dimension is ragged then take the maximum size of it (and only
-            # allocate once)
-            temp_isize = 0
-            for shape in temp.indexed_shapes:
-                temp_isize_ = 1
-                for extent in shape:
-                    if isinstance(extent, MultiArray):
-                        extent = extent.max_value
-                    temp_isize_ *= extent
-                temp_isize += temp_isize_
+            # temp_size = 0
+            # for shape in temp.shapes:
+            #     temp_size_ = 1
+            #     for extent in shape:
+            #         if isinstance(extent, MultiArray):
+            #             if (var := self.extents[extent.name]) not in extents:
+            #                 extents.append(var)
+            #                 self.assumptions.append(f"{var} <= {extent.max_value}")
+            #             extent = extent.max_value
+            #         temp_size_ *= extent
+            #     temp_size += temp_size_
+            #
+            # # if a dimension is ragged then take the maximum size of it (and only
+            # # allocate once)
+            # temp_isize = 0
+            # for shape in temp.indexed_shapes:
+            #     temp_isize_ = 1
+            #     for extent in shape:
+            #         if isinstance(extent, MultiArray):
+            #             extent = extent.max_value
+            #         temp_isize_ *= extent
+            #     temp_isize += temp_isize_
 
             # assert temp.size == temp.indexed_size
-            assert temp_size == temp_isize
+            # assert temp_size == temp_isize
+
+            # FIXME
+            temp_size = 1
 
             iname = self._namer.next("i")
             subarrayrefs[temp] = as_subarrayref(temp, iname)
@@ -216,23 +279,123 @@ class LoopyKernelBuilder:
             tuple(subarrayrefs[var] for var in call.reads) + tuple(extents),
         )
 
-        within_inames = frozenset(within_loops)
+        # within_inames = frozenset(within_loops)
         depends_on = frozenset({f"{insn}*" for insn in call.depends_on})
         call_insn = lp.CallInstruction(
             assignees,
             expression,
             id=call.id,
-            within_inames=frozenset(within_inames),
-            within_inames_is_final=True,
-            depends_on=depends_on
+            # FIXME
+            # within_inames=frozenset(within_inames),
+            # within_inames_is_final=True,
+            # depends_on=depends_on
         )
 
         self.instructions.append(call_insn)
         self.subkernels.append(call.function.code)
 
 
+    def generate_insn(self, lhs, loffset, rhs, roffset):
+        lexpr = pym.subscript(pym.var(lhs.name), loffset)
+        rexpr = pym.subscript(pym.var(rhs.name), roffset)
+
+        # there are no ordering restrictions between assignments to the
+        # same temporary - but this is only valid to declare if multiple insns are used
+        # if len(assignment.lhs.indicess) > 1:
+        #     assert len(assignment.rhs.indicess) > 1
+        #     no_sync_with = frozenset({(f"{assignment.id}*", "any")})
+        # else:
+        #     no_sync_with = frozenset()
+
+        # within_inames = frozenset(within_loops) | set(domain_stack)
+        assign_insn = lp.Assignment(
+            lexpr, rexpr,
+            # id=self._namer.next(f"{assignment.id}_"),
+            id=self._namer.next(f"TODO_id_"),
+            # within_inames=within_inames,
+            # within_inames_is_final=True,
+            # depends_on=frozenset({f"{dep}*" for dep in assignment.depends_on}),
+            # no_sync_with=no_sync_with,
+        )
+        self.instructions.append(assign_insn)
+
+
+    def make_offset_expr(self, array, parts, within_inames):
+        assert len(parts) == len(within_inames)
+        offset = 0
+        for pt, iname in zip(parts, within_inames):
+            offset += pym.var("mylayoutexpr")
+        return offset
+
+
+    def cleverly_recurse(self, indexed, indexed_axis, indexed_parts, indexed_within, unindexed, unindexed_axis, unindexed_parts, unindexed_within, indices):
+        """
+        For an assignment collect the inames associated with the indexed and unindexed (temp)
+        bits. These will then be used to derive the correct offset expression.
+
+        I think this will break if we need to index any maps or ragged things - would need to
+        maintain some iname registry
+
+        indexed_within: inames associated with the indexed bit
+        """
+        # if at the bottom of the tree generate instructions and terminate
+        if not (indexed_axis or unindexed_axis):
+            assert not (indexed_axis and unindexed_axis), "must both be false"
+
+            indexed_offset = self.make_offset_expr(indexed, indexed_parts, indexed_within)
+            unindexed_offset = self.make_offset_expr(unindexed, unindexed_parts, unindexed_within)
+
+            # FIXME
+            lhs = indexed
+            loffset = indexed_offset
+            rhs = unindexed
+            roffset = unindexed_offset
+
+            self.generate_insn(lhs, loffset, rhs, roffset)
+            return
+
+        idx, *subidxs = indices
+
+        # a map replaces some of the 'indexed_within' inames!
+        if isinstance(idx, Map):
+            raise NotImplementedError
+
+        if idx in self._within_indices:  # this is a multi-index...
+            # no need to register a domain
+            for p in idx.parts:
+                iname = "INAME_TODO"
+                subaxis = indexed_axis.parts[p].subaxis
+                self.cleverly_recurse(
+                    indexed, subaxis, indexed_parts+[p], indexed_within+[iname],
+                    unindexed, unindexed_axis, subidxs)
+        else:
+            for i, p in enumerate(idx.parts):
+                subaxis = indexed_axis.parts[p].subaxis
+                unindexed_subaxis = unindexed_axis.parts[i].subaxis
+                iname = self._namer.next("i")
+                self.cleverly_recurse(
+                    indexed, subaxis, indexed_parts+[p], indexed_within+[iname],
+                    unindexed, unindexed_subaxis, unindexed_parts+[i], unindexed_within+[iname], subidxs)
+
+
+
+
     @_make_instruction_context.register
     def _(self, assignment: tlang.Assignment, within_loops, scalar=False, domain_stack=None):
+        # so basically one of the LHS or RHS should not have any indices. We can therefore
+        # use the one that does to generate the domains
+
+        # now for some clever recursion
+        self.cleverly_recurse(
+            assignment.tensor, assignment.tensor.axes, [], [],
+            assignment.temporary, assignment.temporary.axes, [], [],
+            assignment.tensor.indices
+        )
+
+        return
+
+        # everything below shouldn't work now...
+        raise Exception("shouldn't touch below code")
         within_loops = copy.deepcopy(within_loops)
         for lidxs, ridxs in zip(assignment.lhs.indicess, assignment.rhs.indicess):
             # 1. Create a domain stack if not provided - this means that we can have consistent inames for the LHS and RHS
@@ -388,6 +551,7 @@ class LoopyKernelBuilder:
             myexpr = self._as_expr(idx, iname, within_loops)
 
             if axis.permutation:
+                raise AssertionError("should be old code")
                 offsets, _ = part.layout
                 mainoffset += pym.subscript(pym.var(offsets.name), pym.var(iname))
                 self._section_data.append(lp.GlobalArg(offsets.name, shape=None, dtype=np.int32))
