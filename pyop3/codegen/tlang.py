@@ -102,7 +102,6 @@ class MultiArrayLangKernelBuilder:
             return self.prepend_map(map_.from_, new_axis)
         else:
             return new_axis
-            
 
     def _construct_temp_dims(self, axis, indices):
         """Return a multi-axis describing the temporary shape."""
@@ -120,7 +119,7 @@ class MultiArrayLangKernelBuilder:
         # this bit is generic across maps and slices
         new_axis_parts = []
         for i, p in enumerate(idx.parts):
-            new_axis_part = tensors.AxisPart(idx.sizes[i])
+            new_axis_part = tensors.AxisPart(idx.sizes[i], layout=pyop3.codegen.AffineLayoutFunction(1))
             # recurse if needed
             if axis.parts[p].subaxis:
                 subaxis = self._construct_temp_dims(axis.parts[p].subaxis, subidxs)

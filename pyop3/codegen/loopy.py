@@ -322,9 +322,17 @@ class LoopyKernelBuilder:
 
     def make_offset_expr(self, array, parts, within_inames):
         assert len(parts) == len(within_inames)
+
         offset = 0
+        axis = array.axes
         for pt, iname in zip(parts, within_inames):
-            offset += pym.var("mylayoutexpr")
+            layout_fn = axis.parts[pt].layout
+
+            if not isinstance(layout_fn, AffineLayoutFunction):
+                raise NotImplementedError
+
+            offset += pym.var(iname)*layout_fn.step + layout_fn.start
+            axis = axis.parts[pt].subaxis
         return offset
 
 
@@ -352,6 +360,13 @@ class LoopyKernelBuilder:
             roffset = unindexed_offset
 
             self.generate_insn(lhs, loffset, rhs, roffset)
+
+            self._tensor_data.append(
+                lp.GlobalArg(indexed.name, dtype=indexed.dtype, shape=None),
+            )
+            self._temp_kernel_data.append(
+                lp.TemporaryVariable(unindexed.name, shape=(1,))
+            )
             return
 
         idx, *subidxs = indices
@@ -667,6 +682,10 @@ def _(assignment: tlang.Assignment):
     return data, maps, parameters
 
 
+class AffineLayoutFunction:
+    def __init__(self, step, start=0):
+        self.step = step
+        self.start = start
 
 
 def as_subarrayref(temporary, iname):

@@ -374,7 +374,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         #         indicess = (indicess,)
         #     indicess = [cls._parse_indices(dim, idxs) for idxs in indicess]
 
-        dim = cls.compute_layouts(dim)
+        # dim = cls.compute_layouts(dim)
 
         return cls(dim, indices, *args, name=name, **kwargs)
 

@@ -95,7 +95,7 @@ Compile errors in %s""" % (e.cmd, e.returncode, logfile, errfile))
 
 # TODO: Try to get this to work first... need emit_offset_insns and a tree structure to exist.
 def test_read_single_dim():
-    axes = MultiAxis(10)
+    axes = MultiAxis(AxisPart(size=10, layout=pyop3.codegen.AffineLayoutFunction(1)))
 
     dat1 = MultiArray.new(axes, name="dat1", data=np.arange(10, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
