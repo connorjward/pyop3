@@ -238,53 +238,131 @@ class ExpressionTemplate:
         pass
 
 
-class Index(pytools.ImmutableRecord, abc.ABC):
-    fields = {"nparts", "sizes"}
-
-    def __init__(self, parts, sizes, depth: int=1):
-        self.parts = parts
-        """List of integers selecting the parts produced by this index."""
-        self.sizes = sizes
-        """Function returning an integer given a part number describing the size of the loop."""
-
-        self.depth = depth
-        """The multi-index size"""
-        super().__init__()
+class Index:
+    def __init__(self, *args):
+        raise NotImplementedError("deprecated")
 
 
-class Slice(Index):
-    """
-    A slice will default to all of the parts of the axis unless specified (which requires
-    actual instantiation of a Slice rather than using slice notation.
-    """
-    fields = Index.fields | {"start", "step"}
+class IndexSet(pytools.ImmutableRecord):
+    """A set of entries to iterate over."""
+    fields = {"size", "subset_indices"}
 
-    def __init__(self, parts, sizes, start=None, step=None):
+    def __init__(self, size, subset_indices=None):
+        self.size = size
+        self.subset_indices = subset_indices
+        """indices is not None if we are dealing with a subset (e.g. mesh.interior_facets)"""
+
+
+class TypedIndex(pytools.ImmutableRecord):
+    fields = {"part", "iset"}
+
+    def __init__(self, part: int, iset: IndexSet):
+        self.part = part
+        self.iset = iset
+
+
+class MultiIndex(pytools.ImmutableRecord):
+    fields = {"typed_indices"}
+
+    def __init__(self, typed_indices):
+        if any(not isinstance(idx, TypedIndex) for idx in typed_indices):
+            raise TypeError
+        self.typed_indices = tuple(typed_indices)
+
+    def __iter__(self):
+        return iter(self.typed_indices)
+
+    @property
+    def depth(self):
+        return len(self.indices)
+
+
+class MultiIndexCollection(pytools.ImmutableRecord, abc.ABC):
+    fields = {"multi_indices"}
+
+    def __init__(self, multi_indices):
+        if not all(isinstance(idx, MultiIndex) for idx in multi_indices):
+            raise ValueError
+
+        self.multi_indices = tuple(multi_indices)
+
+    def __iter__(self):
+        return iter(self.multi_indices)
+
+
+# class Index(pytools.ImmutableRecord, abc.ABC):
+#     fields = {"nparts", "sizes"}
+#
+#     def __init__(self, parts, sizes, depth: int=1):
+#         self.parts = parts
+#         """List of integers selecting the parts produced by this index."""
+#         self.sizes = sizes
+#         """Function returning an integer given a part number describing the size of the loop."""
+#
+#         self.depth = depth
+#         """The multi-index size"""
+#         super().__init__()
+
+
+class Map(MultiIndexCollection):
+    fields = MultiIndexCollection.fields | {"from_multi_indices"}
+
+    def __init__(self, multi_indices, from_multi_indices):
+        super().__init__(multi_indices=multi_indices)
+        self.from_multi_indices = from_multi_indices
+
+
+class Slice(Map):
+    fields = Map.fields | {"start", "step"}
+
+    def __init__(self, indices, from_indices, start=None, step=None):
         # FIXME need to think about how slices with starts and steps work
         # with multi-part axes
         if start or step:
             raise NotImplementedError
 
-        super().__init__(parts, sizes)
+        super().__init__(indices, from_indices)
+        self.start = start
+        self.step = step
+
+
+class IndirectMap(Map):
+    fields = Map.fields | {"data"}
+
+    def __init__(self, indices, from_indices, data):
+        super().__init__(indices, from_indices)
+        self.data = data
 
 
 # TODO need to specify the output types I reckon - parents can vary but base outputs
 # are absolutely needed.
-class Map(Index):
-    fields = Index.fields | {"from_index", "to"}
+# class Map(Index):
+#     fields = Index.fields | {"from_index", "to"}
+#
+#     def __init__(self, from_, depth: int, parts, sizes, to):
+#         if depth != from_.depth:
+#             raise ValueError("Can only map between multi-indices of the same size")
+#
+#         super().__init__(parts=parts,sizes=sizes, depth=depth)
+#         """The number of indices 'consumed' by this map"""
+#
+#         self.from_index = from_
+#         """The input multi-index mapped from"""
+#
+#         self.to = to
+#         """A function mapping between multi-indices"""
 
-    def __init__(self, from_, depth: int, parts, sizes, to):
-        if depth != from_.depth:
-            raise ValueError("Can only map between multi-indices of the same size")
 
-        super().__init__(parts=parts,sizes=sizes, depth=depth)
-        """The number of indices 'consumed' by this map"""
+class LayoutFunction(pytools.ImmutableRecord, abc.ABC):
+    fields = set()
 
-        self.from_index = from_
-        """The input multi-index mapped from"""
 
-        self.to = to
-        """A function mapping between multi-indices"""
+class AffineLayoutFunction(LayoutFunction):
+    fields = LayoutFunction.fields | {"step", "start"}
+
+    def __init__(self, step, start=0):
+        self.step = step
+        self.start = start
 
 
 class IndexFunction(Map):

@@ -21,59 +21,8 @@ from pyop3 import utils
 from pyop3.utils import MultiNameGenerator, NameGenerator
 from pyop3.utils import CustomTuple, checked_zip, NameGenerator, rzip
 from pyop3.tensors import MultiArray, Index, ScalarAxisPart, Map, MultiAxis, NonAffineMap, _compute_indexed_shape, _compute_indexed_shape2
-from pyop3.tensors import Slice, IndexFunction, index
+from pyop3.tensors import Slice, IndexFunction, index, MultiIndexCollection, MultiIndex, AffineLayoutFunction
 from pyop3.codegen.tlang import to_tlang
-
-
-def emit_offset_insns(array, types_str, idxs_str, off_str, depth=0):
-    """Return a sequence of instructions that traverse the layout and determine the right
-    offset of the array for a particular multi-index.
-
-    array:
-        The MultiArray to be indexed
-    types_str:
-        The name of the types array
-    idxs_str:
-        The name of the indices array
-    off_str:
-        The name of the output offset
-    depth:
-        Integer indicating the current depth in the array, might require a step inside
-        types and idxs
-
-    Needs to return something like:
-
-        offset = 0;
-        offset += array_0_layout_expr if types[0+depth] == 0 else array_1_layout_expr if ...
-        offset += array_00_layout_expr (if types[0+depth] == 0 and types[1+depth] == 0) else array_1_layout_expr if ...
-    """
-    insns = ["offset = 0"]
-
-    # do a recursive thing
-    # TODO remember to `end` if statements
-    insns += _emit_offset_insns(array, types_str, idxs_str, off_str, depth, array.root)
-
-
-    return tuple(insns)
-
-
-def _emit_offset_insns(array, types_str, idxs_str, off_str, depth, current_axis, existing_indices=()):
-    insns = []
-
-    if not current_axis:
-        return []
-
-    for p in range(current_axis.nparts):
-        insns.append(f"{off_str} += {generate_offset_expr(array, existing_indices+(p,))}")
-        # now recurse
-        insns.extend(_emit_offset_insns(array, types_str, idxs_str, off_str, depth, current_axis.parts[p].subaxis, existing_indices+(p,)))
-
-    return insns
-
-
-
-def generate_offset_expr(array, idxs):
-    return f"{array.name}_{''.join(map(str, idxs))}_layout"
 
 
 class VariableCollector(pym.mapper.Collector):
@@ -154,9 +103,9 @@ def to_c(expr):
 class LoopyKernelBuilder:
     def __init__(self):
         self._namer = MultiNameGenerator()
-        self.domains = {}
+        self.domains = []
         self.instructions = []
-        self._tensor_data = []
+        self._tensor_data = {}
         self._section_data = []
         self._temp_kernel_data = []
         self.subkernels = []
@@ -164,22 +113,26 @@ class LoopyKernelBuilder:
         self.extents = {}
         self.assumptions = []
 
-        self._within_indices = []  # a stack
+        self._within_multi_indices = []  # a stack
+        self._within_loop_index_names = []  # a stack
+
+        self._part_id_namer = NameGenerator("mypartid")
+        self._loop_index_names = {}
 
     @property
     def kernel_data(self):
-        return self._tensor_data + self._section_data + self._temp_kernel_data
+        return list(self._tensor_data.values()) + self._section_data + self._temp_kernel_data
 
     def build(self, tlang_expr):
         self._namer.reset()
         self._build(tlang_expr, {})
 
         # breakpoint()
-        domains = [self._make_domain(iname, start, stop, step) for iname, (start, stop, step) in self.domains.items()]
+        # domains = [self._make_domain(iname, start, stop, step) for iname, (start, stop, step) in self.domains.items()]
         translation_unit = lp.make_kernel(
-            utils.unique(domains),
-            utils.unique(self.instructions),
-            utils.unique(self.kernel_data),
+            self.domains,
+            self.instructions,
+            self.kernel_data,
             assumptions=",".join(self.assumptions),
             target=LOOPY_TARGET,
             lang_version=LOOPY_LANG_VERSION,
@@ -212,15 +165,41 @@ class LoopyKernelBuilder:
         # for idx in expr.index:
         #     within_loops = self.collect_within_loops(idx, within_loops)
         # this might break with composition - need to track which indices (not multiindices) are in use.
-        # we don't want multi-indices here because...
-        within_loops = expr.index
-        # or
-        self._within_indices.append(expr.index)
+        multi_idx_collection = expr.index
+        assert isinstance(multi_idx_collection, MultiIndexCollection)
 
-        for stmt in expr.statements:
-            self._build(stmt, copy.deepcopy(within_loops))
 
-        self._within_indices.pop()
+        # register inames (also needs to be done for packing loops)
+        for multi_idx in multi_idx_collection:
+            self._within_multi_indices.append(multi_idx)
+
+            new_loop_index_names = []
+            for typed_idx in multi_idx:
+                loop_index_name = self._namer.next("i")
+                self._loop_index_names[typed_idx] = loop_index_name
+                domain_str = f"{{ [{loop_index_name}]: 0 <= {loop_index_name} < {typed_idx.iset.size} }}"
+                self.domains.append(domain_str)
+                new_loop_index_names.append(loop_index_name)
+
+            self._within_loop_index_names.append(new_loop_index_names)
+
+            # we need to build a separate set of instructions for each multi-index
+            # in the collection.
+            # e.g. if we are looping over interior facets of an extruded mesh - the
+            # iterset is two multi-indices: edges+hfacets and verts+vfacets
+            for stmt in expr.statements:
+                # self._build(stmt, copy.deepcopy(within_loops))
+                self._build(stmt, None)
+
+            self._within_multi_indices.pop()
+
+    def _get_within_inames(self):
+        # since we want to pop we need a list of lists
+        return frozenset({
+            iname
+            for loop_index_names in self._within_loop_index_names
+            for iname in loop_index_names
+        })
 
     @_build.register
     def _(self, insn: tlang.Instruction, within_loops):
@@ -270,8 +249,8 @@ class LoopyKernelBuilder:
 
             iname = self._namer.next("i")
             subarrayrefs[temp] = as_subarrayref(temp, iname)
-            self.domains[iname] = (0, temp_size, 1)
-            self._temp_kernel_data.append(lp.TemporaryVariable(temp.name, shape=(temp_size,)))
+            self.domains.append(f"{{ [{iname}]: 0 <= {iname} < {temp_size} }}")
+            self._temp_kernel_data.append(lp.TemporaryVariable(temp.name, shape=(temp_size,), dtype=temp.dtype))
 
         assignees = tuple(subarrayrefs[var] for var in call.writes)
         expression = pym.primitives.Call(
@@ -279,25 +258,28 @@ class LoopyKernelBuilder:
             tuple(subarrayrefs[var] for var in call.reads) + tuple(extents),
         )
 
-        # within_inames = frozenset(within_loops)
         depends_on = frozenset({f"{insn}*" for insn in call.depends_on})
         call_insn = lp.CallInstruction(
             assignees,
             expression,
             id=call.id,
-            # FIXME
-            # within_inames=frozenset(within_inames),
-            # within_inames_is_final=True,
-            # depends_on=depends_on
+            within_inames=self._get_within_inames(),
+            within_inames_is_final=True,
+            depends_on=depends_on
         )
 
         self.instructions.append(call_insn)
         self.subkernels.append(call.function.code)
 
 
-    def generate_insn(self, lhs, loffset, rhs, roffset):
+    def generate_insn(self, assignment, lhs, loffset, rhs, roffset, depends_on):
         lexpr = pym.subscript(pym.var(lhs.name), loffset)
         rexpr = pym.subscript(pym.var(rhs.name), roffset)
+
+        if isinstance(assignment, tlang.Zero):
+            rexpr = 0
+        elif isinstance(assignment, tlang.Increment):
+            rexpr = lexpr + rexpr
 
         # there are no ordering restrictions between assignments to the
         # same temporary - but this is only valid to declare if multiple insns are used
@@ -307,36 +289,134 @@ class LoopyKernelBuilder:
         # else:
         #     no_sync_with = frozenset()
 
-        # within_inames = frozenset(within_loops) | set(domain_stack)
         assign_insn = lp.Assignment(
             lexpr, rexpr,
-            # id=self._namer.next(f"{assignment.id}_"),
-            id=self._namer.next(f"TODO_id_"),
-            # within_inames=within_inames,
-            # within_inames_is_final=True,
-            # depends_on=frozenset({f"{dep}*" for dep in assignment.depends_on}),
+            id=self._namer.next(f"{assignment.id}_"),
+            within_inames=self._get_within_inames(),
+            within_inames_is_final=True,
+            depends_on=depends_on|frozenset({f"{dep}*" for dep in assignment.depends_on}),
             # no_sync_with=no_sync_with,
         )
         self.instructions.append(assign_insn)
 
 
-    def make_offset_expr(self, array, parts, within_inames):
-        assert len(parts) == len(within_inames)
+    def make_offset_expr(self, array, part_names, loop_index_names, insn_prefix, depends_on):
+        """create an instruction of the form
 
-        offset = 0
+        off = 0
+        if p1 == 0:
+            off += f(i1)
+            if p2 == 0:
+                off += g(i1, i2)
+            else:
+                off += h(i1, i2)
+        else:
+            off += k(i1)
+
+        returning the name of 'off'
+        """
+        assert len(part_names) == len(loop_index_names)
+
+
+        # start at the root
         axis = array.axes
-        for pt, iname in zip(parts, within_inames):
-            layout_fn = axis.parts[pt].layout
+        offset_var_name = f"{array.name}_off"
 
-            if not isinstance(layout_fn, AffineLayoutFunction):
-                raise NotImplementedError
+        # need to create and pass within_inames
+        inames_attr = f"inames={':'.join(self._get_within_inames())}"
 
-            offset += pym.var(iname)*layout_fn.step + layout_fn.start
-            axis = axis.parts[pt].subaxis
-        return offset
+        init_insn_id = self._namer.next(insn_prefix)
+        depends_on = {f"{dep}*" for dep in depends_on} | {init_insn_id}
 
+        stmts = [f"{offset_var_name} = 0 {{{inames_attr},id={init_insn_id}}}"]
+        new_stmts, subdeps = self.make_offset_expr_inner(offset_var_name, axis, part_names, loop_index_names, inames_attr, depends_on, insn_prefix)
+        stmts.extend(new_stmts)
+        depends_on |= subdeps
+        self.instructions.append("\n".join(stmts))
+        return offset_var_name, frozenset(depends_on)
 
-    def cleverly_recurse(self, indexed, indexed_axis, indexed_parts, indexed_within, unindexed, unindexed_axis, unindexed_parts, unindexed_within, indices):
+    def make_offset_expr_inner(self, offset_var_name, axis, part_names,
+            loop_index_names, inames_attr, depends_on, insn_prefix):
+        assert axis.nparts > 0
+
+        if not depends_on:
+            depends_on = set()
+
+        stmts = []
+        if axis.nparts == 1:
+            # if statement not needed
+
+            # handle layout function here
+            new_stmts, subdeps = self.emit_layout_insns(axis.parts[0].layout,
+                offset_var_name, loop_index_names, inames_attr, depends_on.copy(), insn_prefix)
+            stmts += new_stmts
+            depends_on |= subdeps
+            # recurse (and indent?)
+            subaxis = axis.parts[0].subaxis
+            if subaxis:
+                substmts = self.make_offset_expr_inner(offset_var_name,
+                        subaxis, part_names[1:], loop_index_names[1:], inames_attr, depends_on, insn_prefix)
+                stmts.extend(substmts)
+        else:
+            for i, axis_part in axis.parts:
+                # decide whether to use if, else if, or else
+                if i == 0:
+                    stmts.append(f"if {part_names[0]} == {i}")
+                elif i == axis.nparts - 1:
+                    stmts.append("else")
+                else:
+                    stmts.append(f"else if {part_names[0]} == {i}")
+
+                newstmts, subdeps = self.emit_layout_insns(axis_part.layout,
+                    offset_var_name, loop_index_names, inames_attr, depends_on, insn_prefix)
+                stmts += newstmts
+                depends_on |= subdeps
+
+                # recurse (and indent?)
+                subaxis = axis_part.subaxis
+                if subaxis:
+                    newstmts = self.make_offset_expr_inner(offset_var_name,
+                            subaxis, part_names[1:], loop_index_names[1:], inames_attr, depends_on, insn_prefix)
+                    stmts.extend(newstmts)
+            stmts.append("end")
+
+        return stmts, frozenset(depends_on)
+
+    def emit_layout_insns(self, layout_fn, offset_var, inames, inames_attr, depends_on, insn_prefix):
+        """
+        TODO
+        """
+        # if layout_fn is None then we skip this part (used for temporaries eg)
+        if not layout_fn:
+            return [], set()
+
+        if len(inames) != 1:
+            raise NotImplementedError
+
+        iname, = inames
+        insn_id = self._namer.next(insn_prefix)
+
+        # assume layout function is an affine layout for now
+        if not isinstance(layout_fn, AffineLayoutFunction):
+            raise NotImplementedError
+
+        stmts = [f"{offset_var} = {offset_var} + {iname}*{layout_fn.step} + {layout_fn.start} {{{inames_attr},dep={':'.join(dep for dep in depends_on)},id={insn_id}}}"]
+        return stmts, {insn_id}
+
+    # NEXT: temporaries are using the wrong indices - should be scalar...
+    def cleverly_recurse(
+            self,
+            assignment,
+            indexed,
+            indexed_axis,
+            indexed_part_id_names,
+            indexed_loop_index_names,
+            unindexed,
+            unindexed_axis,
+            unindexed_part_id_names,
+            unindexed_loop_index_names,
+            multi_index_collections,
+        ):
         """
         For an assignment collect the inames associated with the indexed and unindexed (temp)
         bits. These will then be used to derive the correct offset expression.
@@ -346,54 +426,116 @@ class LoopyKernelBuilder:
 
         indexed_within: inames associated with the indexed bit
         """
+        # because I'm lazy elsewhere... (make tuples!)
+        indexed_part_id_names = indexed_part_id_names.copy()
+        indexed_loop_index_names = indexed_loop_index_names.copy()
+        unindexed_part_id_names = unindexed_part_id_names.copy()
+        unindexed_loop_index_names = unindexed_loop_index_names.copy()
+
         # if at the bottom of the tree generate instructions and terminate
         if not (indexed_axis or unindexed_axis):
             assert not (indexed_axis and unindexed_axis), "must both be false"
+            assert not multi_index_collections
 
-            indexed_offset = self.make_offset_expr(indexed, indexed_parts, indexed_within)
-            unindexed_offset = self.make_offset_expr(unindexed, unindexed_parts, unindexed_within)
+            indexed_offset, indexed_depends_on = self.make_offset_expr(
+                indexed, indexed_part_id_names, indexed_loop_index_names, assignment.id, assignment.depends_on,
+            )
+            unindexed_offset, unindexed_depends_on = self.make_offset_expr(
+                unindexed, unindexed_part_id_names, unindexed_loop_index_names, assignment.id, assignment.depends_on,
+            )
+
+            # the final instruction needs to come after all offset-determining instructions
+            depends_on = indexed_depends_on | unindexed_depends_on
+
+            self._temp_kernel_data.append(
+                lp.TemporaryVariable(indexed_offset, shape=(), dtype=np.uintp)
+            )
+            self._temp_kernel_data.append(
+                lp.TemporaryVariable(unindexed_offset, shape=(), dtype=np.uintp)
+            )
 
             # FIXME
-            lhs = indexed
-            loffset = indexed_offset
-            rhs = unindexed
-            roffset = unindexed_offset
+            if isinstance(assignment, (tlang.Read, tlang.Zero)):
+                lhs = unindexed
+                loffset = unindexed_offset
+                rhs = indexed
+                roffset = indexed_offset
+            elif isinstance(assignment, (tlang.Write, tlang.Increment)):
+                lhs = indexed
+                loffset = indexed_offset
+                rhs = unindexed
+                roffset = unindexed_offset
+            else:
+                raise TypeError
 
-            self.generate_insn(lhs, loffset, rhs, roffset)
+            self.generate_insn(assignment, lhs, pym.var(loffset), rhs, pym.var(roffset), depends_on)
 
-            self._tensor_data.append(
-                lp.GlobalArg(indexed.name, dtype=indexed.dtype, shape=None),
-            )
+            if indexed.name not in self._tensor_data:
+                self._tensor_data[indexed.name] = lp.GlobalArg(
+                    indexed.name, dtype=indexed.dtype, shape=None
+                )
             self._temp_kernel_data.append(
                 lp.TemporaryVariable(unindexed.name, shape=(1,))
             )
             return
 
-        idx, *subidxs = indices
+        ###
 
-        # a map replaces some of the 'indexed_within' inames!
-        if isinstance(idx, Map):
+        multi_idx_collection, *subidx_collections = multi_index_collections
+        assert isinstance(multi_idx_collection, MultiIndexCollection)
+
+        if isinstance(multi_idx_collection, Map):
             raise NotImplementedError
 
-        if idx in self._within_indices:  # this is a multi-index...
-            # no need to register a domain
-            for p in idx.parts:
-                iname = "INAME_TODO"
-                subaxis = indexed_axis.parts[p].subaxis
-                self.cleverly_recurse(
-                    indexed, subaxis, indexed_parts+[p], indexed_within+[iname],
-                    unindexed, unindexed_axis, subidxs)
-        else:
-            for i, p in enumerate(idx.parts):
-                subaxis = indexed_axis.parts[p].subaxis
-                unindexed_subaxis = unindexed_axis.parts[i].subaxis
-                iname = self._namer.next("i")
-                self.cleverly_recurse(
-                    indexed, subaxis, indexed_parts+[p], indexed_within+[iname],
-                    unindexed, unindexed_subaxis, unindexed_parts+[i], unindexed_within+[iname], subidxs)
 
+        # need to collect loop index names (inames) and part names
+        # each multi-index is a different branch for generating code (as the inner
+        # dimensions can be different)
+        for multi_idx in multi_idx_collection:
+            is_loop_index = multi_idx in self._within_multi_indices
+            new_inames = []
+            for i, typed_idx in enumerate(multi_idx):
+                if is_loop_index:
+                    indexed_loop_index_name = self._loop_index_names[typed_idx]
+                    unindexed_loop_index_name = self._loop_index_names[typed_idx]
+                else:
+                    # register a new domain
+                    loop_index_name = self._namer.next("i")
+                    self._loop_index_names[typed_idx] = loop_index_name
+                    domain_str = f"{{ [{loop_index_name}]: 0 <= {loop_index_name} < {typed_idx.iset.size} }}"
+                    self.domains.append(domain_str)
+                    indexed_loop_index_name = loop_index_name
+                    unindexed_loop_index_name = loop_index_name
+                    new_inames.append(loop_index_name)
 
+                # note that the names must be different for indexed and unindexed as
+                # these variables get transformed by the map etc.
+                indexed_axis = indexed_axis.parts[typed_idx.part].subaxis
+                indexed_part_id_name = self._part_id_namer.next()
+                indexed_part_id_names.append(indexed_part_id_name)
+                indexed_loop_index_names.append(indexed_loop_index_name)
 
+                unindexed_axis = unindexed_axis.parts[i].subaxis
+                unindexed_part_id_name = self._part_id_namer.next()
+                unindexed_part_id_names.append(unindexed_part_id_name)
+                unindexed_loop_index_names.append(unindexed_loop_index_name)
+
+            # add new inames to the stack
+            self._within_loop_index_names.append(new_inames)
+
+            # doesn't return anything
+            self.cleverly_recurse(
+                assignment,
+                indexed, indexed_axis,
+                indexed_part_id_names,
+                indexed_loop_index_names,
+                unindexed, unindexed_axis,
+                unindexed_part_id_names,
+                unindexed_loop_index_names,
+                subidx_collections,
+            )
+
+            self._within_loop_index_names.pop()
 
     @_make_instruction_context.register
     def _(self, assignment: tlang.Assignment, within_loops, scalar=False, domain_stack=None):
@@ -402,6 +544,7 @@ class LoopyKernelBuilder:
 
         # now for some clever recursion
         self.cleverly_recurse(
+            assignment,
             assignment.tensor, assignment.tensor.axes, [], [],
             assignment.temporary, assignment.temporary.axes, [], [],
             assignment.tensor.indices
@@ -489,9 +632,10 @@ class LoopyKernelBuilder:
         else:
             temp_shape = ()
 
-        self._tensor_data.append(
-            lp.GlobalArg(assignment.tensor.name, dtype=assignment.tensor.dtype, shape=None),
-        )
+        if assignment.tensor.name not in self._tensor_data:
+            self._tensor_data[assignment.tensor.name] = lp.GlobalArg(
+                assignment.tensor.name, dtype=assignment.tensor.dtype, shape=None
+            )
         self._temp_kernel_data.append(
             lp.TemporaryVariable(assignment.temporary.name, shape=temp_shape)
         )
@@ -598,6 +742,7 @@ class LoopyKernelBuilder:
         return index_expr + mainoffset
 
     def register_domains(self, indices, dstack, within_loops):
+        raise Exception("shouldnt touch")
         within_loops = copy.deepcopy(within_loops)
 
         # I think ultimately all I need to do here is stick the things from dstack
@@ -680,12 +825,6 @@ def _get_arguments_per_instruction(instruction):
 def _(assignment: tlang.Assignment):
     raise NotImplementedError
     return data, maps, parameters
-
-
-class AffineLayoutFunction:
-    def __init__(self, step, start=0):
-        self.step = step
-        self.start = start
 
 
 def as_subarrayref(temporary, iname):

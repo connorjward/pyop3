@@ -93,9 +93,8 @@ Compile errors in %s""" % (e.cmd, e.returncode, logfile, errfile))
             return ctypes.CDLL(soname)
 
 
-# TODO: Try to get this to work first... need emit_offset_insns and a tree structure to exist.
 def test_read_single_dim():
-    axes = MultiAxis(AxisPart(size=10, layout=pyop3.codegen.AffineLayoutFunction(1)))
+    axes = MultiAxis(AxisPart(size=10, layout=AffineLayoutFunction(1)))
 
     dat1 = MultiArray.new(axes, name="dat1", data=np.arange(10, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
@@ -103,18 +102,29 @@ def test_read_single_dim():
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
         "y[i] = x[i] + 1",
-        [lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
-        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
+        [
+            lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
+            lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),
+        ],
         target=lp.CTarget(),
         name="mylocalkernel",
         lang_version=(2018, 2),
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-    p = [Slice((0,), (10,))]  # this is a multi-index
+    p = MultiIndexCollection([
+        MultiIndex([
+            TypedIndex(0, IndexSet(10))
+        ])
+    ])
 
-    expr = pyop3.Loop(p, kernel(dat1[p], dat2[p]))
+    # use [p] instead of p to have a list of multi-index collections. this is
+    # needed if we have dat[cone(p0), cone(p1)] for example (i.e. each cone(...)
+    # produces a multi-index collection).
+    expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+
+    import pdb; pdb.set_trace()
 
     dll = compilemythings(exe)
     fn = getattr(dll, "mykernel")

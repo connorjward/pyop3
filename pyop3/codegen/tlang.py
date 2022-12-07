@@ -5,6 +5,7 @@ import functools
 import pytools
 import pyop3.utils
 from pyop3 import exprs, tensors, tlang
+from pyop3.tensors import *
 from typing import Any
 import pymbolic as pym
 
@@ -29,7 +30,8 @@ class MultiArrayLangKernelBuilder:
         self._temp_name_generator = functools.partial(name_generator.next, "t")
 
         # new thing - track stack of indices so arguments know their shape
-        self._within_indices = []
+        # TODO this can probably be merged with the stuff in pyop3.codegen.loopy
+        self._within_multi_index_collections = []
 
     def build(self) -> MultiArrayLangKernel:
         new_expr = self._inspect(self._expr)
@@ -44,7 +46,7 @@ class MultiArrayLangKernelBuilder:
         # assert isinstance(expr.index, tensors.Indexed)
 
         # push index to stack
-        self._within_indices.extend(loop.indices)
+        self._within_multi_index_collections.append(loop.index)
 
         if not len(loop.statements) == 1:
             raise NotImplementedError
@@ -62,8 +64,7 @@ class MultiArrayLangKernelBuilder:
         new_expr = loop.copy(statements=stmts)
 
         # pop from stack (nasty! - use set?)
-        for _ in loop.indices:
-            self._within_indices.pop()
+        self._within_multi_index_collections.pop()
         return new_expr
 
 
@@ -75,8 +76,8 @@ class MultiArrayLangKernelBuilder:
         temporaries = {}
         for arg in expr.arguments:
             dims = self._construct_temp_dims(arg.tensor.axes, arg.tensor.indices)
-            temporaries[arg] = tensors.MultiArray.new(dims, name=self._temp_name_generator(), dtype=arg.tensor.dtype,
-                indices=None  # this must be the case for function arguments
+            temporaries[arg] = tensors.MultiArray.new(
+                dims, name=self._temp_name_generator(), dtype=arg.tensor.dtype,
             )
 
         gathers = self.make_gathers(temporaries)
@@ -98,12 +99,12 @@ class MultiArrayLangKernelBuilder:
 
         new_axis = tensors.MultiAxis(parts)
 
-        if map_.from_ in self._within_indices:
+        if map_.from_ in self._within_multi_index_collections:
             return self.prepend_map(map_.from_, new_axis)
         else:
             return new_axis
 
-    def _construct_temp_dims(self, axis, indices):
+    def _construct_temp_dims(self, axis, multi_index_collections):
         """Return a multi-axis describing the temporary shape."""
         """
         Can have something like [:5, map2(map1(c))] which should return a temporary
@@ -114,22 +115,102 @@ class MultiArrayLangKernelBuilder:
         Then we encounter map2 so we first handle map1. Since c is a within_index we
         disregard it.
         """
-        idx, *subidxs = indices
+        # remember that indices is a list of multi-indices
+        # e.g. [closure(c0), closure(c1)]
+        multi_idx_collection, *subidx_collections = multi_index_collections
+        assert isinstance(multi_idx_collection, tensors.MultiIndexCollection)
 
-        # this bit is generic across maps and slices
-        new_axis_parts = []
-        for i, p in enumerate(idx.parts):
-            new_axis_part = tensors.AxisPart(idx.sizes[i], layout=pyop3.codegen.AffineLayoutFunction(1))
-            # recurse if needed
-            if axis.parts[p].subaxis:
-                subaxis = self._construct_temp_dims(axis.parts[p].subaxis, subidxs)
-                new_axis_part.add_subaxis(subaxis)
-            new_axis_parts.append(new_axis_part)
+        ###
 
-            new_axis = tensors.MultiAxis(new_axis_parts)
+        is_loop_index = multi_idx_collection in self._within_multi_index_collections
 
-        if isinstance(idx, tensors.Map):
-            new_axis = self.prepend_map(idx, new_axis)
+        # each multi-index yields an adjacent axis part
+        temp_axis_parts = []
+        for multi_idx in multi_idx_collection:
+            # if the index exists then the temporary has a single entry per part
+            temp_axis_part_size = 1 if is_loop_index else multi_idx.typed_indices[0].iset.size
+            # FIXME: What about nesting?
+            # for not included axes use None for the layout
+            layout_fn = AffineLayoutFunction(step=1) if not is_loop_index else None
+            temp_axis_part_id = self.name_generator.next("mypart")
+            temp_axis_part  = tensors.AxisPart(
+                temp_axis_part_size,
+                id=temp_axis_part_id,
+                layout=layout_fn,
+            )
+            old_temp_axis_part_id = temp_axis_part_id
+
+            # track the position in the array as this tells us whether or not we
+            # need to recurse.
+            # we need to track this throughout because the types of the typed_idx
+            # tells us which bits of the hierarchy are 'below'.
+            current_axis = axis.parts[multi_idx.typed_indices[0].part].subaxis
+
+            # each typed index is a subaxis of the original
+            for typed_idx in multi_idx.typed_indices[1:]:
+                temp_axis_part_id = self.name_generator.next("mypart")
+                temp_subaxis  = tensors.MultiAxis(
+                    tensors.AxisPart(
+                        typed_idx.iset.size,
+                        id=temp_axis_part_id
+                    )
+                )
+                temp_axis_part = temp_axis_part.add_subaxis(old_temp_axis_part_id, temp_subaxis)
+                old_temp_axis_part_id = temp_axis_part_id
+
+                current_axis = current_axis.parts[typed_idx.part].subaxis
+
+            # if we still have a current axis then we haven't hit the bottom of the
+            # tree and more shape is needed
+            if current_axis:
+                subaxis = self._construct_temp_dims(current_axis, subidx_collections)
+                temp_axis_part.add_subaxis(temp_axis_part_id, subaxis)
+
+            temp_axis_parts.append(temp_axis_part)
+
+        temp_axis = tensors.MultiAxis(temp_axis_parts)
+
+        # if we are using a map then we need to stick this axis onto the bottom of
+        # whatever the map throws out
+        if isinstance(multi_idx_collection, tensors.Map):
+            temp_axis = self.prepend_map(multi_idx_collection, temp_axis)
+
+        return temp_axis
+
+        ### STOP HERE ###
+
+        root_parts = []
+        # loop over multi-indices
+        # collect them all into a single root axis
+        counter = counter or pyop3.utils.NameGenerator("myaxis")
+        for i, multi_idx in enumerate(multi_idx_collection.multi_indices):
+            partid = counter.next()
+            oldpartid = partid
+            root_part = tensors.AxisPart(multi_idx.typed_indices[0].iset.size, id=partid)
+            current_axis = axis.parts[multi_idx.typed_indices[0].part].subaxis
+            for typed_idx in multi_idx.typed_indices[1:]:
+                partid = counter.next()
+                new_part = tensors.AxisPart(typed_idx.iset.size, id=partid)
+                root_part = root_part.add_subaxis(oldpartid, new_part)
+                current_axis = axis.parts[typed_idx.part].subaxis
+
+                oldpartid = partid
+                # need to stick additional axes on here if not fully indexed
+
+                # but what if the multi-index has multiple entries? this won't work
+                # root_part = tensors.AxisPart(mi.iset.size, layout=pyop3.codegen.AffineLayoutFunction(1))
+
+                # recurse if needed
+                # if axis.parts[p].subaxis:
+                if current_axis:
+                    subaxis = self._construct_temp_dims(current_axis, subidx_collections, counter)
+                    root_part = root_part.add_subaxis(partid, subaxis)
+
+            root_parts.append(root_part)
+            new_axis = tensors.MultiAxis(root_parts)
+
+        if isinstance(multi_idx_collection, tensors.Map):
+            new_axis = self.prepend_map(multi_idx_collection, new_axis)
 
         return new_axis
 
@@ -151,46 +232,6 @@ class MultiArrayLangKernelBuilder:
         # indices that are looped over do not contribute to the temporary's shape
         if idx in self._within_indices:
             self._construct_temp_dims(axis, subidxs)
-
-
-
-        raise Exception("old code below")
-
-        if idx in self._within_indices:
-            if subidxs:
-                return self._construct_temp_dims(subidxs)
-            else:
-                return None
-
-        if isinstance(idx, tensors.NonAffineMap):
-            extra_dims = self._construct_temp_dims(idx.input_indices) or []
-        else:
-            extra_dims = []
-
-        dims = [tensors.MultiAxis(tensors.AxisPart(idx.size))]
-
-        if subidxs:
-            return extra_dims + dims + self._construct_temp_dims(subidxs)
-        else:
-            return extra_dims + dims
-
-    def construct_temp_dims(self, tensor):
-        flat_subdimss = [self._construct_temp_dims(idxs) for idxs in tensor.indicess]
-
-        subdims = [self._nest_dims(sdims) for sdims in flat_subdimss]
-
-        # N.B. each subdim at this point cannot branch (and have multiple parts)
-        new_parts = tuple(sdim.part if sdim is not None else None for sdim in subdims)
-        return tensors.MultiAxis(new_parts)
-
-    def _nest_dims(self, flat_dims):
-        if not flat_dims:
-            return tensors.MultiAxis(tensors.ScalarAxisPart())
-        d1, *rest = flat_dims
-        if rest:
-            return d1.copy(parts=d1.parts[0].copy(subaxis=self._nest_dims(rest)))
-        else:
-            return d1
 
     def make_gathers(self, temporaries, **kwargs):
         return tuple(self.make_gather(arg, temp, **kwargs) for arg, temp in temporaries.items())
