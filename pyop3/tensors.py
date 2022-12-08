@@ -31,20 +31,7 @@ def compute_offsets(sizes):
     return np.concatenate([[0], np.cumsum(sizes)[:-1]], dtype=np.int32)
 
 
-class MultiAxis(pytools.ImmutableRecord):
-    fields = {"parts", "permutation", "id"}
-
-    def __init__(self, parts=(), *, permutation=None, id=None):
-        parts = tuple(self._parse_part(pt) for pt in as_tuple(parts))
-
-        if permutation and not all(isinstance(pt.size, numbers.Integral) for pt in parts):
-            raise NotImplementedError
-
-        self.parts = parts
-        self.permutation = permutation
-        self.id = id
-        super().__init__()
-
+class AbstractMultiAxis(pytools.ImmutableRecord):
     @property
     def part(self):
         try:
@@ -76,7 +63,6 @@ class MultiAxis(pytools.ImmutableRecord):
         else:
             return self.parts[index].subaxis.find_part_from_indices(rest)
 
-
     # TODO I think I would prefer to subclass tuple here s.t. indexing with
     # None works iff len(self.parts) == 1
     def get_part(self, npart):
@@ -98,6 +84,35 @@ class MultiAxis(pytools.ImmutableRecord):
             return s
         except ValueError:
             raise RuntimeError
+
+
+# TODO: I think it's terribly inefficient to enforce immutability - stick to mutable then
+# 'prepared' abstraction.
+# But what about reusing axes? not sure that that is really a thing, and if so would most
+# likely only be for IDs.
+class MultiAxis(AbstractMultiAxis):
+    fields = {"parts", "permutation", "id"}
+
+    def __init__(self, parts=(), *, permutation=None, id=None):
+        parts = tuple(self._parse_part(pt) for pt in as_tuple(parts))
+
+        if permutation and not all(isinstance(pt.size, numbers.Integral) for pt in parts):
+            raise NotImplementedError
+
+        self.parts = parts
+        self.permutation = permutation
+        self.id = id
+        super().__init__()
+
+    def set_up(self):
+        """Initialise the multi-axis by computing the layout functions."""
+        # TODO I need a clever algorithm here that starts at the bottom of the
+        # tree and builds the right layout functions.
+        # things get complicated if we are multi-part and interleaved
+        # should allow each axis to specify a numbering/permutation which can
+        # be converted to a layout
+        # TODO also need PreparedAxisPart for the same reason
+        return PreparedMultiAxis(...)
 
     def add_part(self, axis_id, *args):
         if axis_id not in self._all_axis_ids:
@@ -186,6 +201,12 @@ class MultiAxis(pytools.ImmutableRecord):
             return MultiAxis(*args)
 
 
+class PreparedMultiAxis(AbstractMultiAxis):
+    """This class exists so we can enforce valid state by design. Layout functions do not
+    exist for MultiAxis objects and equally PreparedMultiAxis objects prohibit modification.
+    """
+
+
 class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
     fields = set()
 
@@ -193,7 +214,7 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
 class AxisPart(AbstractAxisPart):
     fields = AbstractAxisPart.fields | {"size", "subaxis", "layout", "id"}
 
-    def __init__(self, size, subaxis=None, *, layout=None, id=None):
+    def __init__(self, size, subaxis=None, *, layout="notinitialised", id=None):
         if subaxis:
             subaxis = as_multiaxis(subaxis)
 
@@ -213,6 +234,15 @@ class AxisPart(AbstractAxisPart):
         self.layout = layout
         self.id = id
         super().__init__()
+
+    def add_subaxis(self, part_id, subaxis):
+        if part_id == self.id and self.subaxis:
+            raise RuntimeError
+
+        if part_id == self.id:
+            return self.copy(subaxis=subaxis)
+        else:
+            return self.copy(subaxis=subaxis.add_subaxis(part_id, subaxis))
 
 
 class ScalarAxisPart(AbstractAxisPart):

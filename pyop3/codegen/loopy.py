@@ -21,7 +21,7 @@ from pyop3 import utils
 from pyop3.utils import MultiNameGenerator, NameGenerator
 from pyop3.utils import CustomTuple, checked_zip, NameGenerator, rzip
 from pyop3.tensors import MultiArray, Index, ScalarAxisPart, Map, MultiAxis, NonAffineMap, _compute_indexed_shape, _compute_indexed_shape2
-from pyop3.tensors import Slice, IndexFunction, index, MultiIndexCollection, MultiIndex, AffineLayoutFunction
+from pyop3.tensors import Slice, IndexFunction, index, MultiIndexCollection, MultiIndex, AffineLayoutFunction, TypedIndex, IndexSet
 from pyop3.codegen.tlang import to_tlang
 
 
@@ -315,6 +315,7 @@ class LoopyKernelBuilder:
 
         returning the name of 'off'
         """
+        # import pdb; pdb.set_trace()
         assert len(part_names) == len(loop_index_names)
 
 
@@ -336,7 +337,7 @@ class LoopyKernelBuilder:
         return offset_var_name, frozenset(depends_on)
 
     def make_offset_expr_inner(self, offset_var_name, axis, part_names,
-            loop_index_names, inames_attr, depends_on, insn_prefix):
+            loop_index_names, inames_attr, depends_on, insn_prefix, depth=1):
         assert axis.nparts > 0
 
         if not depends_on:
@@ -348,14 +349,15 @@ class LoopyKernelBuilder:
 
             # handle layout function here
             new_stmts, subdeps = self.emit_layout_insns(axis.parts[0].layout,
-                offset_var_name, loop_index_names, inames_attr, depends_on.copy(), insn_prefix)
+                offset_var_name, loop_index_names, inames_attr, depends_on.copy(), insn_prefix, depth)
             stmts += new_stmts
             depends_on |= subdeps
             # recurse (and indent?)
             subaxis = axis.parts[0].subaxis
             if subaxis:
-                substmts = self.make_offset_expr_inner(offset_var_name,
-                        subaxis, part_names[1:], loop_index_names[1:], inames_attr, depends_on, insn_prefix)
+                substmts, moredeps = self.make_offset_expr_inner(offset_var_name,
+                        subaxis, part_names, loop_index_names, inames_attr, depends_on, insn_prefix, depth+1)
+                depends_on |= moredeps
                 stmts.extend(substmts)
         else:
             for i, axis_part in axis.parts:
@@ -368,21 +370,22 @@ class LoopyKernelBuilder:
                     stmts.append(f"else if {part_names[0]} == {i}")
 
                 newstmts, subdeps = self.emit_layout_insns(axis_part.layout,
-                    offset_var_name, loop_index_names, inames_attr, depends_on, insn_prefix)
+                    offset_var_name, loop_index_names, inames_attr, depends_on, insn_prefix, depth)
                 stmts += newstmts
                 depends_on |= subdeps
 
                 # recurse (and indent?)
                 subaxis = axis_part.subaxis
                 if subaxis:
-                    newstmts = self.make_offset_expr_inner(offset_var_name,
-                            subaxis, part_names[1:], loop_index_names[1:], inames_attr, depends_on, insn_prefix)
+                    newstmts, moredeps = self.make_offset_expr_inner(offset_var_name,
+                            subaxis, part_names, loop_index_names, inames_attr, depends_on, insn_prefix, depth+1)
+                    depends_on |= moredeps
                     stmts.extend(newstmts)
             stmts.append("end")
 
         return stmts, frozenset(depends_on)
 
-    def emit_layout_insns(self, layout_fn, offset_var, inames, inames_attr, depends_on, insn_prefix):
+    def emit_layout_insns(self, layout_fn, offset_var, inames, inames_attr, depends_on, insn_prefix, depth):
         """
         TODO
         """
@@ -390,15 +393,16 @@ class LoopyKernelBuilder:
         if not layout_fn:
             return [], set()
 
-        if len(inames) != 1:
-            raise NotImplementedError
+        # the layout can depend on the inames *outside* of the current axis - not inside
+        useable_inames = inames[:depth]
 
-        iname, = inames
         insn_id = self._namer.next(insn_prefix)
 
         # assume layout function is an affine layout for now
+        # this means we don't need to, for example, use multiple inames
         if not isinstance(layout_fn, AffineLayoutFunction):
             raise NotImplementedError
+        iname = useable_inames[-1]
 
         stmts = [f"{offset_var} = {offset_var} + {iname}*{layout_fn.step} + {layout_fn.start} {{{inames_attr},dep={':'.join(dep for dep in depends_on)},id={insn_id}}}"]
         return stmts, {insn_id}
@@ -481,7 +485,18 @@ class LoopyKernelBuilder:
 
         ###
 
-        multi_idx_collection, *subidx_collections = multi_index_collections
+        if multi_index_collections:
+            multi_idx_collection, *subidx_collections = multi_index_collections
+        else:
+            # then take all of the rest of the shape
+            multi_idx_collection = MultiIndexCollection([
+                MultiIndex([
+                    TypedIndex(p, IndexSet(indexed_axis.parts[p].size))
+                    for p in range(indexed_axis.nparts)
+                ])
+            ])
+            subidx_collections = []
+
         assert isinstance(multi_idx_collection, MultiIndexCollection)
 
         if isinstance(multi_idx_collection, Map):

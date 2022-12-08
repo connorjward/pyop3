@@ -115,9 +115,19 @@ class MultiArrayLangKernelBuilder:
         Then we encounter map2 so we first handle map1. Since c is a within_index we
         disregard it.
         """
-        # remember that indices is a list of multi-indices
-        # e.g. [closure(c0), closure(c1)]
-        multi_idx_collection, *subidx_collections = multi_index_collections
+        # multi-index collections example: [closure(c0), closure(c1)]
+        if multi_index_collections:
+            multi_idx_collection, *subidx_collections = multi_index_collections
+        else:
+            # then take all of the rest of the shape
+            multi_idx_collection = MultiIndexCollection([
+                MultiIndex([
+                    TypedIndex(p, IndexSet(axis.parts[p].size))
+                    for p in range(axis.nparts)
+                ])
+            ])
+            subidx_collections = []
+
         assert isinstance(multi_idx_collection, tensors.MultiIndexCollection)
 
         ###
@@ -155,7 +165,7 @@ class MultiArrayLangKernelBuilder:
                         id=temp_axis_part_id
                     )
                 )
-                temp_axis_part = temp_axis_part.add_subaxis(old_temp_axis_part_id, temp_subaxis)
+                temp_axis_part = temp_axis_part.add_subaxis0(old_temp_axis_part_id, temp_subaxis)
                 old_temp_axis_part_id = temp_axis_part_id
 
                 current_axis = current_axis.parts[typed_idx.part].subaxis
@@ -164,7 +174,7 @@ class MultiArrayLangKernelBuilder:
             # tree and more shape is needed
             if current_axis:
                 subaxis = self._construct_temp_dims(current_axis, subidx_collections)
-                temp_axis_part.add_subaxis(temp_axis_part_id, subaxis)
+                temp_axis_part = temp_axis_part.add_subaxis(temp_axis_part_id, subaxis)
 
             temp_axis_parts.append(temp_axis_part)
 
@@ -176,62 +186,6 @@ class MultiArrayLangKernelBuilder:
             temp_axis = self.prepend_map(multi_idx_collection, temp_axis)
 
         return temp_axis
-
-        ### STOP HERE ###
-
-        root_parts = []
-        # loop over multi-indices
-        # collect them all into a single root axis
-        counter = counter or pyop3.utils.NameGenerator("myaxis")
-        for i, multi_idx in enumerate(multi_idx_collection.multi_indices):
-            partid = counter.next()
-            oldpartid = partid
-            root_part = tensors.AxisPart(multi_idx.typed_indices[0].iset.size, id=partid)
-            current_axis = axis.parts[multi_idx.typed_indices[0].part].subaxis
-            for typed_idx in multi_idx.typed_indices[1:]:
-                partid = counter.next()
-                new_part = tensors.AxisPart(typed_idx.iset.size, id=partid)
-                root_part = root_part.add_subaxis(oldpartid, new_part)
-                current_axis = axis.parts[typed_idx.part].subaxis
-
-                oldpartid = partid
-                # need to stick additional axes on here if not fully indexed
-
-                # but what if the multi-index has multiple entries? this won't work
-                # root_part = tensors.AxisPart(mi.iset.size, layout=pyop3.codegen.AffineLayoutFunction(1))
-
-                # recurse if needed
-                # if axis.parts[p].subaxis:
-                if current_axis:
-                    subaxis = self._construct_temp_dims(current_axis, subidx_collections, counter)
-                    root_part = root_part.add_subaxis(partid, subaxis)
-
-            root_parts.append(root_part)
-            new_axis = tensors.MultiAxis(root_parts)
-
-        if isinstance(multi_idx_collection, tensors.Map):
-            new_axis = self.prepend_map(multi_idx_collection, new_axis)
-
-        return new_axis
-
-        # if it's a map then this needs to get stuck onto the bottom
-
-        # if I encounter a map I should really create the remaining bottom of the tree and
-        # then stick it onto something
-
-        # if it's a map then do the map.from first to get tree above...
-        # this gets super complicated if the maps above branch into multiple parts...
-        # build a stack?
-        if isinstance(idx, tensors.Map):
-            new_axis = self._construct_temp_dims(axis, idx.from_index)
-            new_axis.add_subaxis(tensors.MultiAxis(new_axis_parts))
-
-        # how does calling recursively construct the right thing? multiaxis vs axispart
-
-
-        # indices that are looped over do not contribute to the temporary's shape
-        if idx in self._within_indices:
-            self._construct_temp_dims(axis, subidxs)
 
     def make_gathers(self, temporaries, **kwargs):
         return tuple(self.make_gather(arg, temp, **kwargs) for arg, temp in temporaries.items())

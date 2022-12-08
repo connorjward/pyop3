@@ -138,25 +138,35 @@ def test_read_single_dim():
 
 
 def test_compute_double_loop():
-    axes = MultiAxis(AxisPart(10, id="ax1"))
-    axes = axes.add_subaxis("ax1", 3)
+    axes = MultiAxis(AxisPart(10, id="ax1", layout=AffineLayoutFunction(3)))
+    axes = axes.add_subaxis("ax1", MultiAxis(AxisPart(3, layout=AffineLayoutFunction(1))))
 
-    dat1 = MultiArray.new(axes, name="dat1", data=np.arange(30, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(30, dtype=np.float64), dtype=np.float64)
+    dat1 = MultiArray.new(
+        axes, name="dat1", data=np.arange(30, dtype=np.float64), dtype=np.float64
+    )
+    dat2 = MultiArray.new(
+            axes, name="dat2", data=np.zeros(30, dtype=np.float64),
+            dtype=np.float64)
 
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 3 }",
         "y[i] = x[i] + 1",
-        [lp.GlobalArg("x", np.float64, (3,), is_input=True, is_output=False),
-        lp.GlobalArg("y", np.float64, (3,), is_input=False, is_output=True),],
+        [
+            lp.GlobalArg("x", np.float64, (3,), is_input=True, is_output=False),
+            lp.GlobalArg("y", np.float64, (3,), is_input=False, is_output=True),
+        ],
         target=lp.CTarget(),
         name="mylocalkernel",
         lang_version=(2018, 2),
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
-    iterset = [Slice(1, (10,))]
-    expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
+    p = MultiIndexCollection([
+        MultiIndex([
+            TypedIndex(0, IndexSet(10))
+        ])
+    ])
+    expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
 
