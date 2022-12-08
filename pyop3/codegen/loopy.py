@@ -19,8 +19,8 @@ from pyop3 import exprs, tlang
 import pyop3.utils
 from pyop3 import utils
 from pyop3.utils import MultiNameGenerator, NameGenerator
-from pyop3.utils import CustomTuple, checked_zip, NameGenerator, rzip
-from pyop3.tensors import MultiArray, Index, ScalarAxisPart, Map, MultiAxis, NonAffineMap, _compute_indexed_shape, _compute_indexed_shape2
+from pyop3.utils import PrettyTuple, checked_zip, NameGenerator, rzip
+from pyop3.tensors import MultiArray, Map, MultiAxis, NonAffineMap, _compute_indexed_shape, _compute_indexed_shape2
 from pyop3.tensors import Slice, IndexFunction, index, MultiIndexCollection, MultiIndex, AffineLayoutFunction, TypedIndex, IndexSet
 from pyop3.codegen.tlang import to_tlang
 
@@ -348,7 +348,7 @@ class LoopyKernelBuilder:
             # if statement not needed
 
             # handle layout function here
-            new_stmts, subdeps = self.emit_layout_insns(axis.parts[0].layout,
+            new_stmts, subdeps = self.emit_layout_insns(axis.parts[0].layout_fn,
                 offset_var_name, loop_index_names, inames_attr, depends_on.copy(), insn_prefix, depth)
             stmts += new_stmts
             depends_on |= subdeps
@@ -401,10 +401,23 @@ class LoopyKernelBuilder:
         # assume layout function is an affine layout for now
         # this means we don't need to, for example, use multiple inames
         if not isinstance(layout_fn, AffineLayoutFunction):
-            raise NotImplementedError
+            try:
+                start = layout_fn.data[0]
+                step, = set(layout_fn.data[1:] - layout_fn.data[:-1])
+            except ValueError:
+                if len(layout_fn.data) == 1:
+                    start = layout_fn.data[0]
+                    step = 1
+                else:
+                    raise NotImplementedError("non-const stride in layout not handled - need"
+                        "to register data structure etc")
+        else:
+            start = layout_fn.start
+            step = layout_fn.step
+
         iname = useable_inames[-1]
 
-        stmts = [f"{offset_var} = {offset_var} + {iname}*{layout_fn.step} + {layout_fn.start} {{{inames_attr},dep={':'.join(dep for dep in depends_on)},id={insn_id}}}"]
+        stmts = [f"{offset_var} = {offset_var} + {iname}*{step} + {start} {{{inames_attr},dep={':'.join(dep for dep in depends_on)},id={insn_id}}}"]
         return stmts, {insn_id}
 
     # NEXT: temporaries are using the wrong indices - should be scalar...

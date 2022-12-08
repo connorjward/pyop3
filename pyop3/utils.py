@@ -40,7 +40,7 @@ def as_tuple(item):
         return (item,)
 
 
-class CustomTuple(tuple):
+class PrettyTuple(tuple):
     """Implement a tuple with nice syntax for recursive functions. Like set notation."""
 
     def __or__(self, other):

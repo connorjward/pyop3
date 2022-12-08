@@ -76,6 +76,7 @@ class MultiArrayLangKernelBuilder:
         temporaries = {}
         for arg in expr.arguments:
             dims = self._construct_temp_dims(arg.tensor.axes, arg.tensor.indices)
+            dims = dims.set_up()
             temporaries[arg] = tensors.MultiArray.new(
                 dims, name=self._temp_name_generator(), dtype=arg.tensor.dtype,
             )
@@ -139,14 +140,11 @@ class MultiArrayLangKernelBuilder:
         for multi_idx in multi_idx_collection:
             # if the index exists then the temporary has a single entry per part
             temp_axis_part_size = 1 if is_loop_index else multi_idx.typed_indices[0].iset.size
-            # FIXME: What about nesting?
-            # for not included axes use None for the layout
-            layout_fn = AffineLayoutFunction(step=1) if not is_loop_index else None
+            # TODO we should have a more graceful way to include an axis if loop index or not.
             temp_axis_part_id = self.name_generator.next("mypart")
             temp_axis_part  = tensors.AxisPart(
                 temp_axis_part_size,
                 id=temp_axis_part_id,
-                layout=layout_fn,
             )
             old_temp_axis_part_id = temp_axis_part_id
 

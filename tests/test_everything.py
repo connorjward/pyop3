@@ -94,8 +94,7 @@ Compile errors in %s""" % (e.cmd, e.returncode, logfile, errfile))
 
 
 def test_read_single_dim():
-    axes = MultiAxis(AxisPart(size=10, layout=AffineLayoutFunction(1)))
-
+    axes = MultiAxis(AxisPart(size=10)).set_up()
     dat1 = MultiArray.new(axes, name="dat1", data=np.arange(10, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
 

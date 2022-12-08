@@ -15,14 +15,14 @@ import pymbolic as pym
 import pytools
 import pyop3.exprs
 import pyop3.utils
-from pyop3.utils import as_tuple, checked_zip, NameGenerator, unique
+from pyop3.utils import as_tuple, checked_zip, NameGenerator, unique, PrettyTuple
 
 
 def as_multiaxis(axis):
-    if isinstance(axis, MultiAxis):
+    if isinstance(axis, PreparedMultiAxis):
         return axis
-    elif isinstance(axis, AbstractAxisPart):
-        return MultiAxis(axis)
+    elif isinstance(axis, PreparedAxisPart):
+        return PreparedMultiAxis(axis)
     else:
         raise TypeError
 
@@ -32,6 +32,14 @@ def compute_offsets(sizes):
 
 
 class AbstractMultiAxis(pytools.ImmutableRecord):
+    id_generator = NameGenerator("ax")
+
+    def __init__(self, parts=(), *, id=None):
+        parts = tuple(self._parse_part(pt) for pt in as_tuple(parts))
+        self.parts = parts
+        self.id = id or self.id_generator.next()
+        super().__init__()
+
     @property
     def part(self):
         try:
@@ -85,6 +93,14 @@ class AbstractMultiAxis(pytools.ImmutableRecord):
         except ValueError:
             raise RuntimeError
 
+    def get_size(self, indices):
+        # NOTE: this works because the size array cannot be multi-part, therefore integer
+        # indices (as opposed to typed ones) are valid.
+        size = 0
+        for pt in self.parts:
+            size += pt.get_size(indices)
+        return size
+
 
 # TODO: I think it's terribly inefficient to enforce immutability - stick to mutable then
 # 'prepared' abstraction.
@@ -93,18 +109,7 @@ class AbstractMultiAxis(pytools.ImmutableRecord):
 class MultiAxis(AbstractMultiAxis):
     fields = {"parts", "permutation", "id"}
 
-    def __init__(self, parts=(), *, permutation=None, id=None):
-        parts = tuple(self._parse_part(pt) for pt in as_tuple(parts))
-
-        if permutation and not all(isinstance(pt.size, numbers.Integral) for pt in parts):
-            raise NotImplementedError
-
-        self.parts = parts
-        self.permutation = permutation
-        self.id = id
-        super().__init__()
-
-    def set_up(self):
+    def set_up(self, is_layout=False, depth=0):
         """Initialise the multi-axis by computing the layout functions."""
         # TODO I need a clever algorithm here that starts at the bottom of the
         # tree and builds the right layout functions.
@@ -112,7 +117,196 @@ class MultiAxis(AbstractMultiAxis):
         # should allow each axis to specify a numbering/permutation which can
         # be converted to a layout
         # TODO also need PreparedAxisPart for the same reason
-        return PreparedMultiAxis(...)
+        # NOTE: hard to do numbering/permutation and ragged... constant permutation?
+
+        # if is_layout then we know that data and layout are the same thing (avoids recursion)
+        if is_layout:
+            return PreparedMultiAxis(self.parts, id=self.id)
+
+        # 1. set up inner axes
+        subaxes = tuple(pt.subaxis.set_up(depth=depth+1) if pt.subaxis else None for pt in self.parts)
+
+        # 2. determine part layouts
+        # FIXME: We need to loop over the ragged parts but this is hard because
+        # the ragged thing could have multiple dimensions and be indexed by everything
+        # above. How to iterate over such a thing? The layout needs to have the same shape
+        # and be indexed in the same way.
+
+        # the solution is going to be some sort of tree traversal that accumulates indices
+        # before building the data.
+        # I need to basically construct a bunch of arrays and stick them together into
+        # a multi-array.
+        # if isinstance(self.size, MultiArray):
+        #     size_axis = self.size.axes
+        # else:
+        #     size_axis = None
+
+        # IMPORTANT: To find the right values we need to traverse the multi-array and
+        # pass indices down. However, to construct the multi-array we need this data to
+        # exist but we want to go top-down to generate the right multi-axis (I think this
+        # will make things less confusing for me)
+
+        # NOTE: For us to be able to permute two things together with at least one
+        # ragged, the permutation also needs to be ragged to make sense. Since the
+        # permutation is the same shape as the data it should have the same axis sizes
+        # for the different parts.
+
+        # At the very least the sizes of the different parts must match for the indices
+        # above since otherwise they wouldn't be adjacent in memory.
+
+        if any(isinstance(pt.size, numbers.Integral) for pt in self.parts):
+            assert all(isinstance(pt.size, numbers.Integral) for pt in self.parts)
+            axis_length = sum(pt.size for pt in self.parts)
+            layout_data_per_part = self.set_up_terminal(subaxes, PrettyTuple(), axis_length)
+
+            # now create layout arrays and attach to new axis parts
+            new_axis_parts = []
+            for pt, subaxis, layout_data in zip(self.parts, subaxes, layout_data_per_part):
+                layout_data = np.array(layout_data, dtype=np.uintp)
+                layout_fn = MultiArray(
+                    PreparedMultiAxis(
+                        PreparedAxisPart(pt.size, is_layout=True),
+                    ),
+                    data=layout_data,
+                    dtype=layout_data.dtype,
+                    name=f"{self.id}_layout{depth}",
+                )
+
+                new_axis_part = PreparedAxisPart(pt.size, subaxis, layout_fn=layout_fn)
+                new_axis_parts.append(new_axis_part)
+            return PreparedMultiAxis(new_axis_parts, id=self.id)
+        else:
+            raise NotImplementedError
+            layout_data_per_part = self.set_up_inner(self.parts, subaxes)
+
+        import pdb; pdb.set_trace()
+        # TODO: create layout multi-arrays that correspond with this data
+
+        ### below not done...
+        layout_fns = ...
+        # flatten and numpify it
+        layout_data = sum(layout_data, [])
+        layout_data = np.array(layout_data, dtype=np.uintp)
+
+        new_axis = MultiAxis([new_parts[i]]).set_up(is_layout=True)
+        layout_fn = MultiArray(new_axis, data=layout_data, dtype=layout_data.dtype,
+            name=f"{self.id}_layout{depth}",
+                )
+
+        ### ^^^
+
+        # 3. return the new thing
+        prepared_parts = []
+        for i, pt in enumerate(self.parts):
+            prepared_part = PreparedAxisPart(pt.size, subaxes[i], layout_fn=layout_fns[i])
+            prepared_parts.append(prepared_part)
+
+        return PreparedMultiAxis(prepared_parts, id=self.id)
+
+    def set_up_inner(self, axis_parts, subaxes, indices=PrettyTuple()):
+        """Should return a list of multiaxes, one per outer part
+
+        The basic idea of this method is to traverse the multi-array
+        that describes the sizes of the data to generate layout functions.
+
+        subaxes are provided because they inform us of the steps to take.
+
+        to get the correct readings we need to keep track of the indices (which can
+        be integer because size multi-arrays can't branch)
+
+        """
+        # NOTE: If we are not terminating then we shouldn't be looping over parts
+
+        # We should dispatch if size is an int or multi-array (which must be the same shape across parts)
+
+        # the axis parts do not need to be the same size, but, if the size is ragged, the
+        # shape of the sizes needs to.
+        extents = []
+        for part in axis_parts:
+            if isinstance(part.size, MultiArray):
+                extent = part.size.get_value(indices)
+            else:
+                assert isinstance(part.size, numbers.Integral)
+                extent = part.size
+            extents.append(extent)
+        try:
+            # The sizes of the different parts for the 'outer' indices must exactly
+            # match for interleaving to be a valid thing to do.
+            extent, = set(extents)
+        except ValueError:
+            raise ValueError(
+                "the sizes of these things MUST agree for interleaving to"
+                    " be valid")
+
+        # at the bottom of the tree - stop here
+        if not size_axis.part.subaxis:
+            layout_data_per_part = self.set_up_terminal(subaxes, indices, extent)
+            return layout_data_per_part
+
+        layout_data_per_part = [[] for _ in self.parts]
+        for i in range(extent):
+            # subdata_per_part here is a list with size matching the number of parts
+            subdata_per_part = self.set_up_inner(
+                size_axis.part.subaxis,
+                subaxes,
+                indices|i,
+                sizes|size_axis.part.size,
+            )
+
+            assert len(subdata_per_part) == self.nparts
+            for j, sd in enumerate(subdata_per_part):
+                layout_data_per_part[j].extend(sd)
+
+        return layout_data_per_part
+
+    @staticmethod
+    def _get_permutation_value(perm, indices):
+        """just being lazy"""
+        if isinstance(perm, MultiArray):
+            return perm.get_value(indices)
+        else:
+            # else we assume no permutation and so the index is just whatever
+            # the final index is
+            return indices[-1]
+
+
+    def set_up_terminal(self, subaxes, indices, axis_length):
+        ptr = 0
+        current_index = 0
+        layouts = tuple([] for _ in self.parts)
+        # not nice but I want to keep both the current entry and the iterator together
+        # counters here are used since we may need to call axis.permutation.get_value(ctr)
+        next_entries = [
+            self._get_permutation_value(pt.permutation, indices|0)
+            for i, pt in enumerate(self.parts)
+        ]
+        counters = [1] * self.nparts
+
+        for _ in range(axis_length):
+            if not pytools.is_single_valued(next_entries):
+                raise RuntimeError(
+                        "two axis parts think they are writing to the same layout entry")
+            try:
+                part_idx = next_entries.index(current_index)
+            except ValueError:
+                raise RuntimeError("no axis parts think they are writing to this index")
+
+            # write ptr to the right layout
+            layouts[part_idx].append(ptr)
+
+            # inc ptr by the size of the inner bit
+            if subaxes[part_idx]:
+                ptr += subaxes[part_idx].get_size(indices)
+            else:
+                ptr += 1
+            current_index += 1
+
+            # also update iterators
+            for i, pt in enumerate(self.parts):
+                next_entries[i] = self._get_permutation_value(pt.permutation, indices|counters[i])
+                counters[i] += 1
+
+        return layouts
 
     def add_part(self, axis_id, *args):
         if axis_id not in self._all_axis_ids:
@@ -205,36 +399,69 @@ class PreparedMultiAxis(AbstractMultiAxis):
     """This class exists so we can enforce valid state by design. Layout functions do not
     exist for MultiAxis objects and equally PreparedMultiAxis objects prohibit modification.
     """
+    @staticmethod
+    def _parse_part(*args, **kwargs):
+        if len(args) == 1 and isinstance(args[0], PreparedAxisPart):
+            return args[0]
+        else:
+            return PreparedAxisPart(*args, **kwargs)
+
+    @staticmethod
+    def _parse_multiaxis(*args):
+        if len(args) == 1 and isinstance(args[0], PreparedMultiAxis):
+            return args[0]
+        else:
+            return PreparedMultiAxis(*args)
 
 
 class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
-    fields = set()
+    fields = {"size", "subaxis", "layout", "id"}
 
-
-class AxisPart(AbstractAxisPart):
-    fields = AbstractAxisPart.fields | {"size", "subaxis", "layout", "id"}
-
-    def __init__(self, size, subaxis=None, *, layout="notinitialised", id=None):
+    def __init__(self, size, subaxis=None, permutation=None, *, id=None):
         if subaxis:
             subaxis = as_multiaxis(subaxis)
 
         if not isinstance(size, (numbers.Integral, pym.primitives.Expression)):
             raise TypeError
 
-        # hack
-        # but WHY
-        # I think that the layout thing here needs to be a callable that takes types, idxs and inames
-        # and returns a collection of instructions that generate an offset.
-        # if layout is None:
-        #     x0 = pym.var("x0")
-        #     layout = IndexFunction(x0, 1, [x0], npart=None)
-
+        super().__init__()
         self.size = size
         self.subaxis = subaxis
-        self.layout = layout
-        self.id = id
-        super().__init__()
 
+        self.permutation = permutation
+        """
+        The permutation is a bit tricky. We need to be able to interleave axis parts
+        so permuting 2 parts might give axis1 the permutation [0, 2, 4] and axis2
+        [1, 3]. We can only know that these permutations are valid or not when we set
+        up the multiaxis and find missing or duplicated entries.
+        Also the permutation should in theory be allowed to be a function instead of a table.
+
+        # FIXME
+        However, if the axis part is ragged, then the permutation needs to be different
+        to match the raggedness. E.g. if the axis size is [2, 3] then the permutation
+        needs to be [[0, 2], [0, 2, 4]].
+        """
+        self.id = id
+
+    def set_up(self):
+        # This won't work as the layout function here needs to be determined at a higher level
+        raise Exception()
+        subaxes = self.subaxis.set_up() if self.subaxis else None
+        return PreparedAxisPart(
+            self.size,
+            subaxis,
+            layout_fn=layout_fn,
+            id=self.id
+        )
+
+    def get_size(self, indices):
+        if isinstance(self.size, MultiArray):
+            return self.size.get_value(indices)
+        else:
+            return self.size
+
+
+class AxisPart(AbstractAxisPart):
     def add_subaxis(self, part_id, subaxis):
         if part_id == self.id and self.subaxis:
             raise RuntimeError
@@ -245,11 +472,16 @@ class AxisPart(AbstractAxisPart):
             return self.copy(subaxis=subaxis.add_subaxis(part_id, subaxis))
 
 
-class ScalarAxisPart(AbstractAxisPart):
+class PreparedAxisPart(AbstractAxisPart):
+    def __init__(self, size, subaxis=None, is_layout=False, layout_fn=None):
+        super().__init__(size, subaxis)
 
-    @property
-    def size(self):
-        return 1
+        if is_layout and layout_fn:
+            raise ValueError("layout_fn should not exist if the axis part itself describes "
+                    "a layout")
+
+        self.is_layout = is_layout
+        self.layout_fn = layout_fn
 
 
 # not used
@@ -453,6 +685,9 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
     def __init__(self, dim, indices=None, dtype=None, *, mesh = None, name: str = None, prefix: str=None, data=None, max_value=32):
         dim = as_multiaxis(dim)
 
+        if not isinstance(dim, PreparedMultiAxis):
+            raise ValueError("dim needs to be prepared. call .set_up()")
+
         self.data = data
         self.params = {}
         self._param_namer = NameGenerator(f"{name}_p")
@@ -493,38 +728,38 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
             return part.size
         return size
 
-    @classmethod
-    def compute_layouts(cls, axis):
-        if axis.permutation:
-            layouts = cls.make_offset_map(axis)
-        else:
-            layouts = [None] * len(axis.parts)
-
-        new_parts = []
-        offset = 0  # for mixed
-        for part, mylayout in zip(axis.parts, layouts):
-            if isinstance(part, ScalarAxisPart):
-                # FIXME may not work with mixed
-                new_part = part
-                offset += 1
-            else:
-                subaxis = cls.compute_layouts(part.subaxis) if part.subaxis else None
-
-                if axis.permutation:
-                    layout = mylayout, 0  # offset here is always 0 as accounted for in map
-                    # import pdb; pdb.set_trace()
-                else:
-                    if isinstance(part.size, pym.primitives.Expression):
-                        offsets = compute_offsets(part.size.data)
-                        layout = part.size.copy(name=part.size.name+"c", data=offsets), offset
-                    else:
-                        layout = part.size, offset
-                new_part = part.copy(layout=layout, subaxis=subaxis)
-                # import pdb; pdb.set_trace()
-                offset += cls._compute_full_part_size(part)
-
-            new_parts.append(new_part)
-        return axis.copy(parts=new_parts)
+    # @classmethod
+    # def compute_layouts(cls, axis):
+    #     if axis.permutation:
+    #         layouts = cls.make_offset_map(axis)
+    #     else:
+    #         layouts = [None] * len(axis.parts)
+    #
+    #     new_parts = []
+    #     offset = 0  # for mixed
+    #     for part, mylayout in zip(axis.parts, layouts):
+    #         if isinstance(part, ScalarAxisPart):
+    #             # FIXME may not work with mixed
+    #             new_part = part
+    #             offset += 1
+    #         else:
+    #             subaxis = cls.compute_layouts(part.subaxis) if part.subaxis else None
+    #
+    #             if axis.permutation:
+    #                 layout = mylayout, 0  # offset here is always 0 as accounted for in map
+    #                 # import pdb; pdb.set_trace()
+    #             else:
+    #                 if isinstance(part.size, pym.primitives.Expression):
+    #                     offsets = compute_offsets(part.size.data)
+    #                     layout = part.size.copy(name=part.size.name+"c", data=offsets), offset
+    #                 else:
+    #                     layout = part.size, offset
+    #             new_part = part.copy(layout=layout, subaxis=subaxis)
+    #             # import pdb; pdb.set_trace()
+    #             offset += cls._compute_full_part_size(part)
+    #
+    #         new_parts.append(new_part)
+    #     return axis.copy(parts=new_parts)
 
     @classmethod
     def _get_part_size(cls, part, parent_indices):
@@ -672,44 +907,45 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
                 break
         return npart, dim.parts[npart]
 
-    @classmethod
-    def _read_tensor(cls, tensor, idx_map):
-        # TODO we don't do any truncation here... access in reverse?
+    def get_value(self, indices):
+        # use layout functions to access the right thing
+        # indices here are integers, so this will only work for multi-arrays that
+        # are not multi-part
+        # if self.is_multi_part:
+        #   raise Exception("cannot index with integers here")
 
-        idx_map_copy = copy.deepcopy(idx_map)
+        # accumulate offsets from the layout functions
+        offset = 0
+        depth = 0
+        axis = self.root
 
-        # for each dim in the tree (must not be mixed), find the section offset and accumulate
-        current_dim = tensor.dim
-        ptr = 0
-        while True:
-            npart = 0
-            section = current_dim.parts[npart].layout
+        # effectively loop over depth
+        while axis:
+            assert axis.nparts == 1
 
-            idx = idx_map_copy.pop(0)
-
-            if isinstance(section, MultiArray):
-                ptr += section.data[idx]
-            elif isinstance(section, IndexFunction):
-                # basically a very complicated way of turning 4*x into 4*n (where n is a number)
-                # so here we need to perform the right substitution.
-                context = {str(var): list(reversed(idx_map))[i] for i, var in enumerate(section.vars)}
-                ptr += pym.evaluate(section.expr, context)
+            layout = axis.part.layout
+            if isinstance(layout, MultiArray):
+                offset += layout.get_value(indices[:depth+1])
             else:
-                raise AssertionError
+                assert isinstance(layout, AffineLayoutFunction)
+                offset += indices[depth] * layout.step + layout.start
 
-            if current_dim.parts[npart].subaxis:
-                current_dim = current_dim.parts[npart].subaxis
-            else:
-                break
+            depth += 1
+            axis = axis.part.subaxis
 
-        return tensor.data[ptr]
+        return self.data[offset]
 
+    # aliases
     @property
     def axes(self):
         return self.dim
 
+    @property
+    def root(self):
+        return self.dim
+
     def __getitem__(self, indices):
-        """The plan of action here is as follows:
+        """The (outdated) plan of action here is as follows:
 
         - if a tensor is indexed by a set of stencils then that's great.
         - if it is indexed by a set of slices and integers then we convert
