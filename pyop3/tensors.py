@@ -170,6 +170,7 @@ class MultiAxis(AbstractMultiAxis):
 
         if any(isinstance(pt.size, numbers.Integral) for pt in self.parts):
             assert all(isinstance(pt.size, numbers.Integral) for pt in self.parts)
+            # import pdb; pdb.set_trace()
             axis_length = sum(pt.size for pt in self.parts)
             layout_data_per_part = self.set_up_terminal(subaxes, PrettyTuple(), axis_length)
 
@@ -281,13 +282,20 @@ class MultiAxis(AbstractMultiAxis):
         """just being lazy"""
         if isinstance(perm, MultiArray):
             return perm.get_value(indices)
+        elif isinstance(perm, np.ndarray):
+            try:
+                return perm[indices[-1]]
+            except IndexError:
+                return None
         else:
             # else we assume no permutation and so the index is just whatever
             # the final index is
+            assert perm is None
             return indices[-1]
 
 
     def set_up_terminal(self, subaxes, indices, axis_length):
+        # import pdb; pdb.set_trace()
         ptr = 0
         current_index = 0
         layouts = tuple([] for _ in self.parts)
@@ -300,7 +308,7 @@ class MultiAxis(AbstractMultiAxis):
         counters = [1] * self.nparts
 
         for _ in range(axis_length):
-            if not pytools.is_single_valued(next_entries):
+            if self.nparts > 1 and pytools.is_single_valued(next_entries):
                 raise RuntimeError(
                         "two axis parts think they are writing to the same layout entry")
             try:
@@ -319,9 +327,10 @@ class MultiAxis(AbstractMultiAxis):
             current_index += 1
 
             # also update iterators
-            for i, pt in enumerate(self.parts):
-                next_entries[i] = self._get_permutation_value(pt.permutation, indices|counters[i])
-                counters[i] += 1
+            next_entries[part_idx] = self._get_permutation_value(
+                self.parts[part_idx].permutation, indices|counters[part_idx]
+            )
+            counters[part_idx] += 1
 
         return layouts
 

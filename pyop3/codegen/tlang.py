@@ -148,9 +148,9 @@ class MultiArrayLangKernelBuilder:
                     multi_idx.typed_indices[0].iset.size,
                     id=temp_axis_part_id,
                 )
-                old_temp_axis_part_id = temp_axis_part_id
             else:
                 temp_axis_part = ScalarAxisPart(id=temp_axis_part_id)
+            old_temp_axis_part_id = temp_axis_part_id
 
             # track the position in the array as this tells us whether or not we
             # need to recurse.

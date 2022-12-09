@@ -139,7 +139,7 @@ class LoopyKernelBuilder:
             name="mykernel",
         )
         tu = lp.merge((translation_unit, *self.subkernels))
-        import pdb; pdb.set_trace()
+        # import pdb; pdb.set_trace()
         return tu.with_entrypoints("mykernel")
 
     @functools.singledispatchmethod
@@ -308,7 +308,7 @@ class LoopyKernelBuilder:
         return offset_var_name, frozenset(depends_on)
 
     def make_offset_expr_inner(self, offset_var_name, axis, part_names,
-            loop_index_names, inames_attr, depends_on, insn_prefix, depth=1):
+            loop_index_names, inames_attr, depends_on, insn_prefix, depth=0):
         assert axis.nparts > 0
 
         if not depends_on:
@@ -331,29 +331,37 @@ class LoopyKernelBuilder:
                 depends_on |= moredeps
                 stmts.extend(substmts)
         else:
-            for i, axis_part in axis.parts:
+            for i, axis_part in enumerate(axis.parts):
                 # decide whether to use if, else if, or else
+                # import pdb; pdb.set_trace()
                 if i == 0:
-                    stmts.append(f"if {part_names[0]} == {i}")
+                    stmts.append(f"if {part_names[depth]} == {i}")
                 elif i == axis.nparts - 1:
                     stmts.append("else")
                 else:
-                    stmts.append(f"else if {part_names[0]} == {i}")
+                    stmts.append(f"else if {part_names[depth]} == {i}")
 
-                newstmts, subdeps = self.emit_layout_insns(axis_part.layout,
-                    offset_var_name, loop_index_names, inames_attr, depends_on, insn_prefix, depth)
+                newstmts, subdeps = self.emit_layout_insns(
+                    axis_part.layout_fn,
+                    offset_var_name, loop_index_names, inames_attr,
+                    depends_on, insn_prefix, depth
+                )
                 stmts += newstmts
                 depends_on |= subdeps
 
                 # recurse (and indent?)
                 subaxis = axis_part.subaxis
                 if subaxis:
-                    newstmts, moredeps = self.make_offset_expr_inner(offset_var_name,
-                            subaxis, part_names, loop_index_names, inames_attr, depends_on, insn_prefix, depth+1)
+                    newstmts, moredeps = self.make_offset_expr_inner(
+                        offset_var_name,
+                        subaxis, part_names, loop_index_names, inames_attr,
+                        depends_on, insn_prefix, depth+1
+                    )
                     depends_on |= moredeps
                     stmts.extend(newstmts)
             stmts.append("end")
 
+        # import pdb; pdb.set_trace()
         return stmts, frozenset(depends_on)
 
     def emit_layout_insns(self, layout_fn, offset_var, inames, inames_attr, depends_on, insn_prefix, depth):
@@ -365,7 +373,7 @@ class LoopyKernelBuilder:
             return [], set()
 
         # the layout can depend on the inames *outside* of the current axis - not inside
-        useable_inames = inames[:depth]
+        useable_inames = inames[:depth+1]
 
         insn_id = self._namer.next(insn_prefix)
 
@@ -501,10 +509,10 @@ class LoopyKernelBuilder:
         # need to collect loop index names (inames) and part names
         # each multi-index is a different branch for generating code (as the inner
         # dimensions can be different)
-        for multi_idx in multi_idx_collection:
+        for i, multi_idx in enumerate(multi_idx_collection):
             is_loop_index = multi_idx in self._within_multi_indices
             new_inames = []
-            for i, typed_idx in enumerate(multi_idx):
+            for typed_idx in multi_idx:
                 if is_loop_index:
                     indexed_loop_index_name = self._loop_index_names[typed_idx]
                     unindexed_loop_index_name = self._loop_index_names[typed_idx]
@@ -526,10 +534,19 @@ class LoopyKernelBuilder:
                 indexed_loop_index_names.append(indexed_loop_index_name)
 
                 unindexed_axis = unindexed_axis.parts[i].subaxis
-                if not is_loop_index:
-                    unindexed_part_id_name = self._part_id_namer.next()
-                    unindexed_part_id_names.append(unindexed_part_id_name)
-                    unindexed_loop_index_names.append(unindexed_loop_index_name)
+                unindexed_part_id_name = self._part_id_namer.next()
+                unindexed_part_id_names.append(unindexed_part_id_name)
+                unindexed_loop_index_names.append(unindexed_loop_index_name)
+
+                # TODO indices should probably not be the indices directly as maps
+                # need to transform them
+
+                # Register parts
+                # TODO also loop_index_names
+                self._temp_kernel_data.extend([
+                    lp.TemporaryVariable(name, shape=(), dtype=np.uintp)
+                    for name in [indexed_part_id_name, unindexed_part_id_name]
+                ])
 
             # add new inames to the stack
             self._within_loop_index_names.append(new_inames)

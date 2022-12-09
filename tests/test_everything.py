@@ -123,7 +123,7 @@ def test_read_single_dim():
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
 
-    import pdb; pdb.set_trace()
+    # import pdb; pdb.set_trace()
 
     dll = compilemythings(exe)
     fn = getattr(dll, "mykernel")
@@ -181,15 +181,17 @@ def test_compute_double_loop():
 
 def test_compute_double_loop_mixed():
     axes = (
-        MultiAxis([AxisPart(10, id="ax1"), AxisPart(12, id="ax2")])
-        .add_subaxis("ax1", 3)
-        .add_subaxis("ax2", 2)
-    )
+        MultiAxis([
+            AxisPart(10, id="ax1", permutation=np.arange(0, 10, dtype=np.uintp)),
+            AxisPart(12, id="ax2", permutation=np.arange(10, 22, dtype=np.uintp)),
+        ])
+        .add_subaxis("ax1", MultiAxis([AxisPart(3)]))
+        .add_subaxis("ax2", MultiAxis([AxisPart(2)]))
+    ).set_up()
 
     dat1 = MultiArray.new(axes, name="dat1", data=np.arange(54, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(54, dtype=np.float64), dtype=np.float64)
 
-    iterset = [Slice(12, npart=1)]
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 2 }",
         "y[i] = x[i] + 1",
@@ -200,7 +202,12 @@ def test_compute_double_loop_mixed():
         lang_version=(2018, 2),
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-    expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
+    p = MultiIndexCollection([
+        MultiIndex([
+            TypedIndex(1, IndexSet(12))
+        ])
+    ])
+    expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
 
@@ -221,14 +228,16 @@ def test_compute_double_loop_mixed():
 def test_compute_double_loop_scalar():
     """As in the temporary lives within both of the loops"""
     axes = (
-        MultiAxis([AxisPart(6, id="ax1"), AxisPart(4, id="ax2")])
-        .add_subaxis("ax1", 3)
-        .add_subaxis("ax2", 2)
-    )
+        MultiAxis([
+            AxisPart(6, id="ax1", permutation=np.arange(0, 6, dtype=np.uintp)),
+            AxisPart(4, id="ax2", permutation=np.arange(6, 10, dtype=np.uintp)),
+        ])
+        .add_subaxis("ax1", MultiAxis([AxisPart(3)]))
+        .add_subaxis("ax2", MultiAxis([AxisPart(2)]))
+    ).set_up()
     dat1 = MultiArray.new(axes, name="dat1", data=np.arange(18+8, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(18+8, dtype=np.float64), dtype=np.float64)
 
-    iterset = [Slice(4, npart=1), Slice(2)]
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
         "y[i] = x[i] + 1",
@@ -239,7 +248,13 @@ def test_compute_double_loop_scalar():
         lang_version=(2018, 2),
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-    expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
+    p = MultiIndexCollection([
+        MultiIndex([
+            TypedIndex(1, IndexSet(4)),
+            TypedIndex(0, IndexSet(2)),
+        ])
+    ])
+    expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(exe)
@@ -256,13 +271,15 @@ def test_compute_double_loop_scalar():
 
 
 def test_compute_double_loop_permuted():
-    axes = MultiAxis(AxisPart(6, id="sax1"), permutation=(3, 2, 5, 0, 4, 1))
-    axes = axes.add_subaxis("sax1", 3)
+    axes = MultiAxis(AxisPart(6, id="sax1", permutation=np.array([3, 2, 5, 0, 4, 1])))
+    axes = axes.add_subaxis("sax1", MultiAxis([AxisPart(3)]))
+    axes = axes.set_up()
 
-    dat1 = MultiArray.new(axes, name="dat1", data=np.arange(18, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(18, dtype=np.float64), dtype=np.float64)
+    dat1 = MultiArray.new(
+            axes, name="dat1", data=np.arange(18, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray.new(
+            axes, name="dat2", data=np.zeros(18, dtype=np.float64), dtype=np.float64)
 
-    iterset = [Slice(6)]
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 3 }",
         "y[i] = x[i] + 1",
@@ -273,7 +290,12 @@ def test_compute_double_loop_permuted():
         lang_version=(2018, 2),
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-    expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
+    p = MultiIndexCollection([
+        MultiIndex([
+            TypedIndex(0, IndexSet(6)),
+        ])
+    ])
+    expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(exe)
