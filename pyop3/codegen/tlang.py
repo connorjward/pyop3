@@ -136,17 +136,21 @@ class MultiArrayLangKernelBuilder:
         is_loop_index = multi_idx_collection in self._within_multi_index_collections
 
         # each multi-index yields an adjacent axis part
+        # e.g. for mixed (with 2 spaces) you would have a temporary with 2 parts
+        # similarly this would be the expected behaviour for interior facets of extruded
+        # meshes - the outer axis would be split in two parts because the DoFs come from
+        # both the vertical and horizontal facets and these require separate multi-indices
         temp_axis_parts = []
         for multi_idx in multi_idx_collection:
-            # if the index exists then the temporary has a single entry per part
-            temp_axis_part_size = 1 if is_loop_index else multi_idx.typed_indices[0].iset.size
-            # TODO we should have a more graceful way to include an axis if loop index or not.
             temp_axis_part_id = self.name_generator.next("mypart")
-            temp_axis_part  = tensors.AxisPart(
-                temp_axis_part_size,
-                id=temp_axis_part_id,
-            )
-            old_temp_axis_part_id = temp_axis_part_id
+            if not is_loop_index:
+                temp_axis_part  = tensors.AxisPart(
+                    multi_idx.typed_indices[0].iset.size,
+                    id=temp_axis_part_id,
+                )
+                old_temp_axis_part_id = temp_axis_part_id
+            else:
+                temp_axis_part = ScalarAxisPart(id=temp_axis_part_id)
 
             # track the position in the array as this tells us whether or not we
             # need to recurse.
@@ -157,24 +161,31 @@ class MultiArrayLangKernelBuilder:
             # each typed index is a subaxis of the original
             for typed_idx in multi_idx.typed_indices[1:]:
                 temp_axis_part_id = self.name_generator.next("mypart")
-                temp_subaxis  = tensors.MultiAxis(
-                    tensors.AxisPart(
-                        typed_idx.iset.size,
-                        id=temp_axis_part_id
+                if not is_loop_index:
+                    temp_subaxis  = tensors.MultiAxis(
+                        tensors.AxisPart(
+                            typed_idx.iset.size,
+                            id=temp_axis_part_id
+                        )
                     )
-                )
-                temp_axis_part = temp_axis_part.add_subaxis0(old_temp_axis_part_id, temp_subaxis)
+                else:
+                    temp_subaxis  = tensors.MultiAxis(ScalarAxisPart(id=temp_axis_part_id))
+
+                temp_axis_part = temp_axis_part.add_subaxis(old_temp_axis_part_id, temp_subaxis)
                 old_temp_axis_part_id = temp_axis_part_id
 
                 current_axis = current_axis.parts[typed_idx.part].subaxis
 
-            # if we still have a current axis then we haven't hit the bottom of the
-            # tree and more shape is needed
-            if current_axis:
-                subaxis = self._construct_temp_dims(current_axis, subidx_collections)
-                temp_axis_part = temp_axis_part.add_subaxis(temp_axis_part_id, subaxis)
-
             temp_axis_parts.append(temp_axis_part)
+
+        # if we still have a current axis then we haven't hit the bottom of the
+        # tree and more shape is needed
+        if current_axis:
+            subaxis = self._construct_temp_dims(current_axis, subidx_collections)
+            # add this subaxis to each part we have so far
+            # recall that the number of parts we have is equal to the number of multi-index
+            # collections that we have
+            temp_axis_parts = [pt.add_subaxis(pt.id, subaxis) for pt in temp_axis_parts]
 
         temp_axis = tensors.MultiAxis(temp_axis_parts)
 

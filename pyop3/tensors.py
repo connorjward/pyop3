@@ -18,11 +18,20 @@ import pyop3.utils
 from pyop3.utils import as_tuple, checked_zip, NameGenerator, unique, PrettyTuple
 
 
-def as_multiaxis(axis):
+def as_prepared_multiaxis(axis):
     if isinstance(axis, PreparedMultiAxis):
         return axis
     elif isinstance(axis, PreparedAxisPart):
         return PreparedMultiAxis(axis)
+    else:
+        raise TypeError
+
+
+def as_multiaxis(axis):
+    if isinstance(axis, MultiAxis):
+        return axis
+    elif isinstance(axis, AxisPart):
+        return MultiAxis(axis)
     else:
         raise TypeError
 
@@ -101,6 +110,11 @@ class AbstractMultiAxis(pytools.ImmutableRecord):
             size += pt.get_size(indices)
         return size
 
+    @property
+    def alloc_size(self):
+        return sum(pt.alloc_size for pt in self.parts)
+
+
 
 # TODO: I think it's terribly inefficient to enforce immutability - stick to mutable then
 # 'prepared' abstraction.
@@ -172,14 +186,17 @@ class MultiAxis(AbstractMultiAxis):
                     name=f"{self.id}_layout{depth}",
                 )
 
-                new_axis_part = PreparedAxisPart(pt.size, subaxis, layout_fn=layout_fn)
+                # catch null layouts (scalars)
+                if pt.is_scalar:
+                    new_axis_part = PreparedAxisPart(pt.size, subaxis, layout_fn=None)
+                else:
+                    new_axis_part = PreparedAxisPart(pt.size, subaxis, layout_fn=layout_fn)
                 new_axis_parts.append(new_axis_part)
             return PreparedMultiAxis(new_axis_parts, id=self.id)
         else:
             raise NotImplementedError
             layout_data_per_part = self.set_up_inner(self.parts, subaxes)
 
-        import pdb; pdb.set_trace()
         # TODO: create layout multi-arrays that correspond with this data
 
         ### below not done...
@@ -382,7 +399,7 @@ class MultiAxis(AbstractMultiAxis):
 
     @staticmethod
     def _parse_part(*args):
-        if len(args) == 1 and isinstance(args[0], AbstractAxisPart):
+        if len(args) == 1 and isinstance(args[0], (AxisPart, ScalarAxisPart)):
             return args[0]
         else:
             return AxisPart(*args)
@@ -415,17 +432,21 @@ class PreparedMultiAxis(AbstractMultiAxis):
 
 
 class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
-    fields = {"size", "subaxis", "layout", "id"}
+    fields = {"size", "subaxis", "permutation", "id", "max_size"}
 
-    def __init__(self, size, subaxis=None, permutation=None, *, id=None):
-        if subaxis:
-            subaxis = as_multiaxis(subaxis)
-
+    def __init__(self, size, subaxis=None, permutation=None, *, id=None, max_size=None):
         if not isinstance(size, (numbers.Integral, pym.primitives.Expression)):
             raise TypeError
 
+        if isinstance(size, numbers.Integral):
+            assert not max_size or max_size == size
+            max_size = size
+        else:
+            assert max_size
+
         super().__init__()
         self.size = size
+        self.max_size = max_size
         self.subaxis = subaxis
 
         self.permutation = permutation
@@ -442,6 +463,13 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
         needs to be [[0, 2], [0, 2, 4]].
         """
         self.id = id
+
+    @property
+    def alloc_size(self):
+        if self.subaxis:
+            return self.max_size * self.subaxis.alloc_size
+        else:
+            return self.max_size
 
     def set_up(self):
         # This won't work as the layout function here needs to be determined at a higher level
@@ -462,6 +490,16 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
 
 
 class AxisPart(AbstractAxisPart):
+    fields = AbstractAxisPart.fields | {"is_scalar"}
+    def __init__(self, size, subaxis=None, *, is_scalar=False, **kwargs):
+        if subaxis:
+            subaxis = as_multiaxis(subaxis)
+        self.is_scalar = is_scalar
+        """
+        if is_scalar is true then we know that the layout function should be somehow null.
+        """
+        super().__init__(size, subaxis, **kwargs)
+
     def add_subaxis(self, part_id, subaxis):
         if part_id == self.id and self.subaxis:
             raise RuntimeError
@@ -473,7 +511,10 @@ class AxisPart(AbstractAxisPart):
 
 
 class PreparedAxisPart(AbstractAxisPart):
+    fields = AbstractAxisPart.fields | {"is_layout", "layout_fn"}
     def __init__(self, size, subaxis=None, is_layout=False, layout_fn=None):
+        if subaxis:
+            subaxis = as_prepared_multiaxis(subaxis)
         super().__init__(size, subaxis)
 
         if is_layout and layout_fn:
@@ -482,6 +523,10 @@ class PreparedAxisPart(AbstractAxisPart):
 
         self.is_layout = is_layout
         self.layout_fn = layout_fn
+
+
+def ScalarAxisPart(*args, **kwargs):
+    return AxisPart(1, *args, is_scalar=True, **kwargs)
 
 
 # not used
@@ -683,7 +728,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
     prefix = "ten"
 
     def __init__(self, dim, indices=None, dtype=None, *, mesh = None, name: str = None, prefix: str=None, data=None, max_value=32):
-        dim = as_multiaxis(dim)
+        dim = as_prepared_multiaxis(dim)
 
         if not isinstance(dim, PreparedMultiAxis):
             raise ValueError("dim needs to be prepared. call .set_up()")
@@ -708,7 +753,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
     def new(cls, dim, indices=None, *args, prefix=None, name=None, **kwargs):
         name = name or cls.name_generator.next(prefix or cls.prefix)
 
-        dim = as_multiaxis(dim)
+        dim = as_prepared_multiaxis(dim)
 
         # if not indicess:
         #     indicess = cls._fill_with_slices(dim)

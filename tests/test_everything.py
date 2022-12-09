@@ -137,8 +137,8 @@ def test_read_single_dim():
 
 
 def test_compute_double_loop():
-    axes = MultiAxis(AxisPart(10, id="ax1", layout=AffineLayoutFunction(3)))
-    axes = axes.add_subaxis("ax1", MultiAxis(AxisPart(3, layout=AffineLayoutFunction(1))))
+    axes = MultiAxis(AxisPart(10, id="ax1"))
+    axes = axes.add_subaxis("ax1", MultiAxis(AxisPart(3))).set_up()
 
     dat1 = MultiArray.new(
         axes, name="dat1", data=np.arange(30, dtype=np.float64), dtype=np.float64

@@ -216,41 +216,11 @@ class LoopyKernelBuilder:
         subarrayrefs = {}
         extents = []
         for temp in utils.unique(itertools.chain(call.reads, call.writes)):
-            # determine the right size of temporary - since loopy thinks everything
-            # is flat just find the total size.
-            # temp_size = 0
-            # for shape in temp.shapes:
-            #     temp_size_ = 1
-            #     for extent in shape:
-            #         if isinstance(extent, MultiArray):
-            #             if (var := self.extents[extent.name]) not in extents:
-            #                 extents.append(var)
-            #                 self.assumptions.append(f"{var} <= {extent.max_value}")
-            #             extent = extent.max_value
-            #         temp_size_ *= extent
-            #     temp_size += temp_size_
-            #
-            # # if a dimension is ragged then take the maximum size of it (and only
-            # # allocate once)
-            # temp_isize = 0
-            # for shape in temp.indexed_shapes:
-            #     temp_isize_ = 1
-            #     for extent in shape:
-            #         if isinstance(extent, MultiArray):
-            #             extent = extent.max_value
-            #         temp_isize_ *= extent
-            #     temp_isize += temp_isize_
-
-            # assert temp.size == temp.indexed_size
-            # assert temp_size == temp_isize
-
-            # FIXME
-            temp_size = 1
-
+            temp_size = temp.axes.alloc_size
             iname = self._namer.next("i")
             subarrayrefs[temp] = as_subarrayref(temp, iname)
             self.domains.append(f"{{ [{iname}]: 0 <= {iname} < {temp_size} }}")
-            self._temp_kernel_data.append(lp.TemporaryVariable(temp.name, shape=(temp_size,), dtype=temp.dtype))
+            assert temp.name in [d.name for d in self._temp_kernel_data]
 
         assignees = tuple(subarrayrefs[var] for var in call.writes)
         expression = pym.primitives.Call(
@@ -330,6 +300,7 @@ class LoopyKernelBuilder:
         depends_on = {f"{dep}*" for dep in depends_on} | {init_insn_id}
 
         stmts = [f"{offset_var_name} = 0 {{{inames_attr},id={init_insn_id}}}"]
+
         new_stmts, subdeps = self.make_offset_expr_inner(offset_var_name, axis, part_names, loop_index_names, inames_attr, depends_on, insn_prefix)
         stmts.extend(new_stmts)
         depends_on |= subdeps
@@ -348,7 +319,7 @@ class LoopyKernelBuilder:
             # if statement not needed
 
             # handle layout function here
-            new_stmts, subdeps = self.emit_layout_insns(axis.parts[0].layout_fn,
+            new_stmts, subdeps = self.emit_layout_insns(axis.part.layout_fn,
                 offset_var_name, loop_index_names, inames_attr, depends_on.copy(), insn_prefix, depth)
             stmts += new_stmts
             depends_on |= subdeps
@@ -449,9 +420,17 @@ class LoopyKernelBuilder:
         unindexed_part_id_names = unindexed_part_id_names.copy()
         unindexed_loop_index_names = unindexed_loop_index_names.copy()
 
+        def is_bottom_of_tree(ax):
+            if not ax:
+                return True
+            elif ax.nparts == 1 and ax.part.size == 1:
+                return True
+            else:
+                return False
+
         # if at the bottom of the tree generate instructions and terminate
-        if not (indexed_axis or unindexed_axis):
-            assert not (indexed_axis and unindexed_axis), "must both be false"
+        if is_bottom_of_tree(indexed_axis):
+            assert is_bottom_of_tree(indexed_axis) and is_bottom_of_tree(unindexed_axis), "must both be false"
             assert not multi_index_collections
 
             indexed_offset, indexed_depends_on = self.make_offset_expr(
@@ -491,9 +470,12 @@ class LoopyKernelBuilder:
                 self._tensor_data[indexed.name] = lp.GlobalArg(
                     indexed.name, dtype=indexed.dtype, shape=None
                 )
-            self._temp_kernel_data.append(
-                lp.TemporaryVariable(unindexed.name, shape=(1,))
-            )
+
+            # import pdb; pdb.set_trace()
+            if unindexed.name not in [d.name for d in self._temp_kernel_data]:
+                self._temp_kernel_data.append(
+                    lp.TemporaryVariable(unindexed.name, shape=(unindexed.axes.alloc_size,))
+                )
             return
 
         ###
@@ -544,9 +526,10 @@ class LoopyKernelBuilder:
                 indexed_loop_index_names.append(indexed_loop_index_name)
 
                 unindexed_axis = unindexed_axis.parts[i].subaxis
-                unindexed_part_id_name = self._part_id_namer.next()
-                unindexed_part_id_names.append(unindexed_part_id_name)
-                unindexed_loop_index_names.append(unindexed_loop_index_name)
+                if not is_loop_index:
+                    unindexed_part_id_name = self._part_id_namer.next()
+                    unindexed_part_id_names.append(unindexed_part_id_name)
+                    unindexed_loop_index_names.append(unindexed_loop_index_name)
 
             # add new inames to the stack
             self._within_loop_index_names.append(new_inames)
