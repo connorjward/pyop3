@@ -78,3 +78,15 @@ def unique(iterable):
 
 def is_sequence(item):
     return isinstance(item, collections.abc.Sequence)
+
+
+def strictly_all(iterable):
+    """Returns ``all(iterable)`` but raises an exception if values are inconsistent."""
+    if not isinstance(iterable, collections.abc.Iterable):
+        raise TypeError("Expecting an iterable")
+
+    # duplicate the iterable in case using any/all consumes it
+    it1, it2 = itertools.tee(iterable)
+    if (result := any(it1)) and not all(it2):
+        raise ValueError("Iterable contains inconsistent values")
+    return result

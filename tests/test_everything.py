@@ -227,10 +227,11 @@ def test_compute_double_loop_mixed():
 
 def test_compute_double_loop_scalar():
     """As in the temporary lives within both of the loops"""
+    # FIXME numbering should not be needed here.
     axes = (
         MultiAxis([
-            AxisPart(6, id="ax1", permutation=np.arange(0, 6, dtype=np.uintp)),
-            AxisPart(4, id="ax2", permutation=np.arange(6, 10, dtype=np.uintp)),
+            AxisPart(6, id="ax1", numbering=np.arange(0, 6, dtype=np.uintp)),
+            AxisPart(4, id="ax2", numbering=np.arange(6, 10, dtype=np.uintp)),
         ])
         .add_subaxis("ax1", MultiAxis([AxisPart(3)]))
         .add_subaxis("ax2", MultiAxis([AxisPart(2)]))
@@ -271,7 +272,7 @@ def test_compute_double_loop_scalar():
 
 
 def test_compute_double_loop_permuted():
-    axes = MultiAxis(AxisPart(6, id="sax1", permutation=np.array([3, 2, 5, 0, 4, 1])))
+    axes = MultiAxis(AxisPart(6, id="sax1", numbering=np.array([3, 2, 5, 0, 4, 1])))
     axes = axes.add_subaxis("sax1", MultiAxis([AxisPart(3)]))
     axes = axes.set_up()
 
@@ -301,10 +302,9 @@ def test_compute_double_loop_permuted():
     dll = compilemythings(exe)
     fn = getattr(dll, "mykernel")
 
-    sec0 = dat1.dim.part.layout[0]
-    sec1 = dat2.dim.part.layout[0]
+    layout0 = dat1.dim.part.layout_fn.data
 
-    args = [dat1.data, dat2.data, sec0.data, sec1.data]
+    args = [layout0.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
     fn(*(d.ctypes.data for d in args))
 
@@ -313,8 +313,8 @@ def test_compute_double_loop_permuted():
 
 def test_permuted_twice():
     axes = (
-        MultiAxis(AxisPart(3, id="ax1"), permutation=(2, 1, 0))
-        .add_subaxis("ax1", MultiAxis(AxisPart(3, id="ax2"), permutation=(2, 0, 1)))
+        MultiAxis(AxisPart(3, id="ax1"), numbering=(2, 1, 0))
+        .add_subaxis("ax1", MultiAxis(AxisPart(3, id="ax2"), numbering=(2, 0, 1)))
         .add_subaxis("ax2", 2)
     )
 

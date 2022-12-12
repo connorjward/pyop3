@@ -18,9 +18,9 @@ import pyop3.exprs
 from pyop3 import exprs, tlang
 import pyop3.utils
 from pyop3 import utils
-from pyop3.utils import MultiNameGenerator, NameGenerator
+from pyop3.utils import MultiNameGenerator, NameGenerator, strictly_all
 from pyop3.utils import PrettyTuple, checked_zip, NameGenerator, rzip
-from pyop3.tensors import MultiArray, Map, MultiAxis, NonAffineMap, _compute_indexed_shape, _compute_indexed_shape2
+from pyop3.tensors import MultiArray, Map, MultiAxis, NonAffineMap, _compute_indexed_shape, _compute_indexed_shape2, IndirectLayoutFunction
 from pyop3.tensors import Slice, IndexFunction, index, MultiIndexCollection, MultiIndex, AffineLayoutFunction, TypedIndex, IndexSet
 from pyop3.codegen.tlang import to_tlang
 
@@ -315,16 +315,23 @@ class LoopyKernelBuilder:
             depends_on = set()
 
         stmts = []
-        if axis.nparts == 1:
-            # if statement not needed
+        if axis.nparts == 1: # if statement not needed
 
-            # handle layout function here
-            new_stmts, subdeps = self.emit_layout_insns(axis.part.layout_fn,
-                offset_var_name, loop_index_names, inames_attr, depends_on.copy(), insn_prefix, depth)
-            stmts += new_stmts
-            depends_on |= subdeps
-            # recurse (and indent?)
-            subaxis = axis.parts[0].subaxis
+            if not axis.part.is_scalar:  # do not emit a statement if the loop isn't needed
+                new_stmts, subdeps = self.emit_layout_insns(
+                    axis.part.layout_fn,
+                    offset_var_name,
+                    loop_index_names,
+                    inames_attr,
+                    depends_on.copy(),
+                    insn_prefix,
+                    depth
+                )
+                stmts += new_stmts
+                depends_on |= subdeps
+
+            # TODO indent statements for readability
+            subaxis = axis.part.subaxis
             if subaxis:
                 substmts, moredeps = self.make_offset_expr_inner(offset_var_name,
                         subaxis, part_names, loop_index_names, inames_attr, depends_on, insn_prefix, depth+1)
@@ -333,21 +340,22 @@ class LoopyKernelBuilder:
         else:
             for i, axis_part in enumerate(axis.parts):
                 # decide whether to use if, else if, or else
-                # import pdb; pdb.set_trace()
-                if i == 0:
-                    stmts.append(f"if {part_names[depth]} == {i}")
-                elif i == axis.nparts - 1:
-                    stmts.append("else")
-                else:
-                    stmts.append(f"else if {part_names[depth]} == {i}")
 
-                newstmts, subdeps = self.emit_layout_insns(
-                    axis_part.layout_fn,
-                    offset_var_name, loop_index_names, inames_attr,
-                    depends_on, insn_prefix, depth
-                )
-                stmts += newstmts
-                depends_on |= subdeps
+                if axis_part.is_scalar:
+                    if i == 0:
+                        stmts.append(f"if {part_names[depth]} == {i}")
+                    elif i == axis.nparts - 1:
+                        stmts.append("else")
+                    else:
+                        stmts.append(f"else if {part_names[depth]} == {i}")
+
+                    newstmts, subdeps = self.emit_layout_insns(
+                        axis_part.layout_fn,
+                        offset_var_name, loop_index_names, inames_attr,
+                        depends_on, insn_prefix, depth
+                    )
+                    stmts += newstmts
+                    depends_on |= subdeps
 
                 # recurse (and indent?)
                 subaxis = axis_part.subaxis
@@ -368,7 +376,8 @@ class LoopyKernelBuilder:
         """
         TODO
         """
-        # if layout_fn is None then we skip this part (used for temporaries eg)
+        # if layout_fn is None then we skip this part
+        # FIXME this probably shouldn't happen
         if not layout_fn:
             return [], set()
 
@@ -377,26 +386,43 @@ class LoopyKernelBuilder:
 
         insn_id = self._namer.next(insn_prefix)
 
-        # assume layout function is an affine layout for now
-        # this means we don't need to, for example, use multiple inames
-        if not isinstance(layout_fn, AffineLayoutFunction):
-            try:
-                start = layout_fn.data[0]
-                step, = set(layout_fn.data[1:] - layout_fn.data[:-1])
-            except ValueError:
-                if len(layout_fn.data) == 1:
-                    start = layout_fn.data[0]
-                    step = 1
-                else:
-                    raise NotImplementedError("non-const stride in layout not handled - need"
-                        "to register data structure etc")
+        # TODO singledispatch!
+        if isinstance(layout_fn, IndirectLayoutFunction):
+            # TODO I want this to be more generic. Provide a list of output arguments
+            # and inputs and return a series of statements plus data to register
+            # TODO This should be much more generic. the layout function should accept all valid indices
+            iname = useable_inames[-1]
+
+            # generate the instructions
+            stmts = [
+                f"{offset_var} = {offset_var} + {layout_fn.data.name}[{iname}] "
+                f"{{{inames_attr},dep={':'.join(dep for dep in depends_on)},id={insn_id}}}"
+            ]
+
+            # register the data
+            layout_arg = lp.GlobalArg(layout_fn.data.name, np.uintp, (None,), is_input=True, is_output=False)
+            self._tensor_data[layout_fn.data.name] = layout_arg
         else:
-            start = layout_fn.start
-            step = layout_fn.step
+            if not isinstance(layout_fn, AffineLayoutFunction):
+                try:
+                    start = layout_fn.data[0]
+                    step, = set(layout_fn.data[1:] - layout_fn.data[:-1])
+                except ValueError:
+                    if len(layout_fn.data) == 1:
+                        start = layout_fn.data[0]
+                        step = 1
+                    else:
+                        raise AssertionError("should hit this")
+            else:
+                start = layout_fn.start
+                step = layout_fn.step
 
-        iname = useable_inames[-1]
+            iname = useable_inames[-1]
 
-        stmts = [f"{offset_var} = {offset_var} + {iname}*{step} + {start} {{{inames_attr},dep={':'.join(dep for dep in depends_on)},id={insn_id}}}"]
+            stmts = [
+                f"{offset_var} = {offset_var} + {iname}*{step} + {start} "
+                f"{{{inames_attr},dep={':'.join(dep for dep in depends_on)},id={insn_id}}}"
+            ]
         return stmts, {insn_id}
 
     # NEXT: temporaries are using the wrong indices - should be scalar...
@@ -429,16 +455,10 @@ class LoopyKernelBuilder:
         unindexed_loop_index_names = unindexed_loop_index_names.copy()
 
         def is_bottom_of_tree(ax):
-            if not ax:
-                return True
-            elif ax.nparts == 1 and ax.part.size == 1:
-                return True
-            else:
-                return False
+            return not bool(ax)
 
         # if at the bottom of the tree generate instructions and terminate
-        if is_bottom_of_tree(indexed_axis):
-            assert is_bottom_of_tree(indexed_axis) and is_bottom_of_tree(unindexed_axis), "must both be false"
+        if strictly_all(is_bottom_of_tree(ax) for ax in [indexed_axis, unindexed_axis]):
             assert not multi_index_collections
 
             indexed_offset, indexed_depends_on = self.make_offset_expr(
@@ -494,7 +514,7 @@ class LoopyKernelBuilder:
             # then take all of the rest of the shape
             multi_idx_collection = MultiIndexCollection([
                 MultiIndex([
-                    TypedIndex(p, IndexSet(indexed_axis.parts[p].size))
+                    TypedIndex(p, IndexSet(indexed_axis.parts[p].count))
                     for p in range(indexed_axis.nparts)
                 ])
             ])

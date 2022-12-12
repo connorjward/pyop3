@@ -15,7 +15,7 @@ import pymbolic as pym
 import pytools
 import pyop3.exprs
 import pyop3.utils
-from pyop3.utils import as_tuple, checked_zip, NameGenerator, unique, PrettyTuple
+from pyop3.utils import as_tuple, checked_zip, NameGenerator, unique, PrettyTuple, strictly_all
 
 
 def as_prepared_multiaxis(axis):
@@ -41,6 +41,8 @@ def compute_offsets(sizes):
 
 
 class AbstractMultiAxis(pytools.ImmutableRecord):
+    fields = {"parts", "id"}
+
     id_generator = NameGenerator("ax")
 
     def __init__(self, parts=(), *, id=None):
@@ -94,25 +96,23 @@ class AbstractMultiAxis(pytools.ImmutableRecord):
     def nparts(self):
         return len(self.parts)
 
-    @property
-    def size(self):
-        try:
-            s, = self.sizes
-            return s
-        except ValueError:
-            raise RuntimeError
-
-    def get_size(self, indices):
+    def calc_size(self, indices=PrettyTuple()):
         # NOTE: this works because the size array cannot be multi-part, therefore integer
         # indices (as opposed to typed ones) are valid.
-        size = 0
-        for pt in self.parts:
-            size += pt.get_size(indices)
-        return size
+        return sum(pt.calc_size(indices) for pt in self.parts)
 
     @property
     def alloc_size(self):
         return sum(pt.alloc_size for pt in self.parts)
+
+    @property
+    def count(self):
+        """Return the total number of entries in the axis across all axis parts.
+        Will fail if axis parts do not have integer counts.
+        """
+        if not all(isinstance(pt.count, numbers.Integral) for pt in self.parts):
+            raise RuntimeError()
+        return sum(pt.count for pt in self.parts)
 
 
 
@@ -121,8 +121,6 @@ class AbstractMultiAxis(pytools.ImmutableRecord):
 # But what about reusing axes? not sure that that is really a thing, and if so would most
 # likely only be for IDs.
 class MultiAxis(AbstractMultiAxis):
-    fields = {"parts", "permutation", "id"}
-
     def set_up(self, is_layout=False, depth=0):
         """Initialise the multi-axis by computing the layout functions."""
         # TODO I need a clever algorithm here that starts at the bottom of the
@@ -168,30 +166,21 @@ class MultiAxis(AbstractMultiAxis):
         # At the very least the sizes of the different parts must match for the indices
         # above since otherwise they wouldn't be adjacent in memory.
 
-        if any(isinstance(pt.size, numbers.Integral) for pt in self.parts):
-            assert all(isinstance(pt.size, numbers.Integral) for pt in self.parts)
+        if strictly_all(isinstance(pt.count, numbers.Integral) for pt in self.parts):
             # import pdb; pdb.set_trace()
-            axis_length = sum(pt.size for pt in self.parts)
-            layout_data_per_part = self.set_up_terminal(subaxes, PrettyTuple(), axis_length)
+            axis_length = sum(pt.count for pt in self.parts)
+            layout_fn_per_part = self.set_up_terminal(subaxes, PrettyTuple(), axis_length, depth)
 
             # now create layout arrays and attach to new axis parts
             new_axis_parts = []
-            for pt, subaxis, layout_data in zip(self.parts, subaxes, layout_data_per_part):
-                layout_data = np.array(layout_data, dtype=np.uintp)
-                layout_fn = MultiArray(
-                    PreparedMultiAxis(
-                        PreparedAxisPart(pt.size, is_layout=True),
-                    ),
-                    data=layout_data,
-                    dtype=layout_data.dtype,
-                    name=f"{self.id}_layout{depth}",
-                )
-
+            for pt, subaxis, layout_fn in checked_zip(self.parts, subaxes, layout_fn_per_part):
+                # TODO shouldnt be needed
                 # catch null layouts (scalars)
-                if pt.is_scalar:
-                    new_axis_part = PreparedAxisPart(pt.size, subaxis, layout_fn=None)
-                else:
-                    new_axis_part = PreparedAxisPart(pt.size, subaxis, layout_fn=layout_fn)
+                # if pt.is_scalar:
+                #     new_axis_part = PreparedAxisPart(pt.size, subaxis, layout_fn=None)
+                # else:
+                #     new_axis_part = PreparedAxisPart(pt.size, subaxis, layout_fn=layout_fn)
+                new_axis_part = PreparedAxisPart(pt.count, subaxis, layout_fn=layout_fn, is_scalar=pt.is_scalar)
                 new_axis_parts.append(new_axis_part)
             return PreparedMultiAxis(new_axis_parts, id=self.id)
         else:
@@ -210,6 +199,7 @@ class MultiAxis(AbstractMultiAxis):
         layout_fn = MultiArray(new_axis, data=layout_data, dtype=layout_data.dtype,
             name=f"{self.id}_layout{depth}",
                 )
+
 
         ### ^^^
 
@@ -277,62 +267,87 @@ class MultiAxis(AbstractMultiAxis):
 
         return layout_data_per_part
 
-    @staticmethod
-    def _get_permutation_value(perm, indices):
-        """just being lazy"""
-        if isinstance(perm, MultiArray):
-            return perm.get_value(indices)
-        elif isinstance(perm, np.ndarray):
-            try:
-                return perm[indices[-1]]
-            except IndexError:
-                return None
-        else:
-            # else we assume no permutation and so the index is just whatever
-            # the final index is
-            assert perm is None
-            return indices[-1]
-
-
-    def set_up_terminal(self, subaxes, indices, axis_length):
-        # import pdb; pdb.set_trace()
-        ptr = 0
-        current_index = 0
-        layouts = tuple([] for _ in self.parts)
-        # not nice but I want to keep both the current entry and the iterator together
-        # counters here are used since we may need to call axis.permutation.get_value(ctr)
-        next_entries = [
-            self._get_permutation_value(pt.permutation, indices|0)
-            for i, pt in enumerate(self.parts)
-        ]
-        counters = [1] * self.nparts
-
-        for _ in range(axis_length):
-            if self.nparts > 1 and pytools.is_single_valued(next_entries):
-                raise RuntimeError(
-                        "two axis parts think they are writing to the same layout entry")
-            try:
-                part_idx = next_entries.index(current_index)
-            except ValueError:
-                raise RuntimeError("no axis parts think they are writing to this index")
-
-            # write ptr to the right layout
-            layouts[part_idx].append(ptr)
-
-            # inc ptr by the size of the inner bit
-            if subaxes[part_idx]:
-                ptr += subaxes[part_idx].get_size(indices)
-            else:
-                ptr += 1
-            current_index += 1
-
-            # also update iterators
-            next_entries[part_idx] = self._get_permutation_value(
-                self.parts[part_idx].permutation, indices|counters[part_idx]
+    def set_up_terminal(self, subaxes, indices, axis_length, depth):
+        if any(pt.permutation is not None for pt in self.parts):
+            assert (
+                sorted(sum(pt.permutation, []) for pt in self.parts)
+                == np.arange(sum(pt.calc_size(indices) for pt in self.parts), dtype=int),
+                "permutations must be exhaustive"
             )
-            counters[part_idx] += 1
 
-        return layouts
+        layout_fn_per_part = []
+
+        # layout functions are not needed if no numbering is specified (i.e. they are just
+        # contiguous)
+        if strictly_all(pt.numbering is None for pt in self.parts):
+            start = 0
+            for part, subaxis in checked_zip(self.parts, subaxes):
+                # TODO This will fail is subaxis is ragged
+                if subaxis:
+                    step = subaxis.count
+                else:
+                    step = 1
+                layout_fn = AffineLayoutFunction(step, start)
+                layout_fn_per_part.append(layout_fn)
+
+                # TODO this will fail if things are ragged - need to store starts as
+                # expressions somehow
+                start += part.count
+            return layout_fn_per_part
+
+        # initialise layout array per axis part
+        # note that this just needs to be a numpy array. the clever indexing into trees
+        # happens outside this function
+        layouts = tuple(
+            np.zeros(pt.find_integer_count(indices), dtype=np.uintp)
+            for pt in self.parts
+        )
+
+        # import pdb; pdb.set_trace()
+        offset = 0
+        for current_idx in range(axis_length):
+            # find the right axis part and index thereof for the current 'global' numbering
+            selected_part_num = None
+            selected_index = None
+            for part_num, axis_part in enumerate(self.parts):
+                try:
+                    # is the current global index found in the numbering of this axis part?
+                    # FIXME this will likely break as numbering is not an array - need to implement this fn
+                    selected_index = list(axis_part.numbering).index(current_idx)
+                    selected_part_num = part_num
+                except ValueError:
+                    continue
+
+            if selected_part_num is None or selected_index is None:
+                assert selected_part_num is None and selected_index is None, "must be both"
+                raise ValueError(f"{current_idx} not found in any numberings")
+
+            # now store the offset in the right place
+            layouts[selected_part_num][selected_index] = offset
+
+            # lastly increment the pointer
+            if subaxes[selected_part_num]:
+                # FIXME but if nested this won't work
+                offset += subaxes[selected_part_num].calc_size(indices)
+            else:
+                offset += 1
+
+        # now create layout arrays
+        for pt, subaxis, layout_data in checked_zip(self.parts, subaxes, layouts):
+            layout_fn = MultiArray(
+                PreparedMultiAxis(
+                    PreparedAxisPart(pt.count, is_layout=True),
+                ),
+                data=layout_data,
+                dtype=layout_data.dtype,
+                name=f"{self.id}_layout{depth}",
+            )
+
+            # wrap it up
+            layout_fn = IndirectLayoutFunction(layout_fn)
+            layout_fn_per_part.append(layout_fn)
+
+        return layout_fn_per_part
 
     def add_part(self, axis_id, *args):
         if axis_id not in self._all_axis_ids:
@@ -441,24 +456,22 @@ class PreparedMultiAxis(AbstractMultiAxis):
 
 
 class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
-    fields = {"size", "subaxis", "permutation", "id", "max_size"}
+    fields = {"count", "subaxis", "numbering", "id", "max_count", "is_scalar"}
 
-    def __init__(self, size, subaxis=None, permutation=None, *, id=None, max_size=None):
-        if not isinstance(size, (numbers.Integral, pym.primitives.Expression)):
-            raise TypeError
-
-        if isinstance(size, numbers.Integral):
-            assert not max_size or max_size == size
-            max_size = size
+    def __init__(self, count, subaxis=None, *, numbering=None, id=None, max_count=None, is_scalar=False):
+        if isinstance(count, numbers.Integral):
+            assert not max_count or max_count == count
+            max_count = count
         else:
-            assert max_size
+            assert max_count is not None
 
         super().__init__()
-        self.size = size
-        self.max_size = max_size
+        self.count = count
         self.subaxis = subaxis
-
-        self.permutation = permutation
+        self.numbering = numbering
+        self.id = id
+        self.max_count = max_count
+        self.is_scalar = is_scalar
         """
         The permutation is a bit tricky. We need to be able to interleave axis parts
         so permuting 2 parts might give axis1 the permutation [0, 2, 4] and axis2
@@ -471,43 +484,43 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
         to match the raggedness. E.g. if the axis size is [2, 3] then the permutation
         needs to be [[0, 2], [0, 2, 4]].
         """
-        self.id = id
+
+    # deprecated alias
+    @property
+    def permutation(self):
+        return self.numbering
 
     @property
     def alloc_size(self):
         if self.subaxis:
-            return self.max_size * self.subaxis.alloc_size
+            return self.max_count * self.subaxis.alloc_size
         else:
-            return self.max_size
+            return self.max_count
 
-    def set_up(self):
-        # This won't work as the layout function here needs to be determined at a higher level
-        raise Exception()
-        subaxes = self.subaxis.set_up() if self.subaxis else None
-        return PreparedAxisPart(
-            self.size,
-            subaxis,
-            layout_fn=layout_fn,
-            id=self.id
-        )
-
-    def get_size(self, indices):
-        if isinstance(self.size, MultiArray):
-            return self.size.get_value(indices)
+    def calc_size(self, indices):
+        extent = self.find_integer_count(indices)
+        if self.subaxis:
+            return sum(self.subaxis.calc_size(indices|i) for i in range(extent))
         else:
-            return self.size
+            return extent
+
+    def find_integer_count(self, indices):
+        if isinstance(self.count, MultiArray):
+            return self.count.get_value(indices)
+        else:
+            assert isinstance(self.count, numbers.Integral)
+            return self.count
 
 
 class AxisPart(AbstractAxisPart):
-    fields = AbstractAxisPart.fields | {"is_scalar"}
-    def __init__(self, size, subaxis=None, *, is_scalar=False, **kwargs):
+    fields = AbstractAxisPart.fields
+    def __init__(self, count, subaxis=None, **kwargs):
         if subaxis:
             subaxis = as_multiaxis(subaxis)
-        self.is_scalar = is_scalar
         """
         if is_scalar is true then we know that the layout function should be somehow null.
         """
-        super().__init__(size, subaxis, **kwargs)
+        super().__init__(count, subaxis, **kwargs)
 
     def add_subaxis(self, part_id, subaxis):
         if part_id == self.id and self.subaxis:
@@ -521,10 +534,10 @@ class AxisPart(AbstractAxisPart):
 
 class PreparedAxisPart(AbstractAxisPart):
     fields = AbstractAxisPart.fields | {"is_layout", "layout_fn"}
-    def __init__(self, size, subaxis=None, is_layout=False, layout_fn=None):
+    def __init__(self, size, subaxis=None, is_layout=False, layout_fn=None, **kwargs):
         if subaxis:
             subaxis = as_prepared_multiaxis(subaxis)
-        super().__init__(size, subaxis)
+        super().__init__(size, subaxis, **kwargs)
 
         if is_layout and layout_fn:
             raise ValueError("layout_fn should not exist if the axis part itself describes "
@@ -669,8 +682,14 @@ class IndirectMap(Map):
 #         """A function mapping between multi-indices"""
 
 
-class LayoutFunction(pytools.ImmutableRecord, abc.ABC):
+# i.e. maps and layouts (that take in indices and write to things)
+class IndexFunction(pytools.ImmutableRecord, abc.ABC):
     fields = set()
+
+
+# from indices to offsets
+class LayoutFunction(IndexFunction, abc.ABC):
+    pass
 
 
 class AffineLayoutFunction(LayoutFunction):
@@ -681,26 +700,33 @@ class AffineLayoutFunction(LayoutFunction):
         self.start = start
 
 
-class IndexFunction(Map):
-    """The idea here is that we provide an expression, say, "2*x0 + x1 - 3"
-    and then use pymbolic maps to replace the xN with the correct inames for the
-    outer domains. We could also possibly use pN (or pym.var subclass called Parameter)
-    to describe parameters."""
-    fields = Map.fields | {"expr", "vars"}
-    def __init__(self, expr, arity, vars, **kwargs):
-        """
-        vardims:
-            iterable of 2-tuples of the form (var, label) where var is the
-            pymbolic Variable in expr and label is the dim label associated with
-            it (needed to select the right iname) - note, this is ordered
-        """
-        self.expr = expr
-        self.vars = as_tuple(vars)
-        super().__init__(arity=arity, **kwargs)
+class IndirectLayoutFunction(LayoutFunction):
+    fields = LayoutFunction.fields | {"data"}
 
-    @property
-    def size(self):
-        return self.arity
+    def __init__(self, data):
+        self.data = data
+
+
+# class IndexFunction(Map):
+#     """The idea here is that we provide an expression, say, "2*x0 + x1 - 3"
+#     and then use pymbolic maps to replace the xN with the correct inames for the
+#     outer domains. We could also possibly use pN (or pym.var subclass called Parameter)
+#     to describe parameters."""
+#     fields = Map.fields | {"expr", "vars"}
+#     def __init__(self, expr, arity, vars, **kwargs):
+#         """
+#         vardims:
+#             iterable of 2-tuples of the form (var, label) where var is the
+#             pymbolic Variable in expr and label is the dim label associated with
+#             it (needed to select the right iname) - note, this is ordered
+#         """
+#         self.expr = expr
+#         self.vars = as_tuple(vars)
+#         super().__init__(arity=arity, **kwargs)
+#
+#     @property
+#     def size(self):
+#         return self.arity
 
 
 class NonAffineMap(Map):

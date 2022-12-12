@@ -123,7 +123,7 @@ class MultiArrayLangKernelBuilder:
             # then take all of the rest of the shape
             multi_idx_collection = MultiIndexCollection([
                 MultiIndex([
-                    TypedIndex(p, IndexSet(axis.parts[p].size))
+                    TypedIndex(p, IndexSet(axis.parts[p].count))
                     for p in range(axis.nparts)
                 ])
             ])
