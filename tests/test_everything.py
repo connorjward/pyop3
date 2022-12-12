@@ -94,7 +94,7 @@ Compile errors in %s""" % (e.cmd, e.returncode, logfile, errfile))
 
 
 def test_read_single_dim():
-    axes = MultiAxis(AxisPart(size=10)).set_up()
+    axes = MultiAxis(AxisPart(10)).set_up()
     dat1 = MultiArray.new(axes, name="dat1", data=np.arange(10, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
 
@@ -182,8 +182,8 @@ def test_compute_double_loop():
 def test_compute_double_loop_mixed():
     axes = (
         MultiAxis([
-            AxisPart(10, id="ax1", permutation=np.arange(0, 10, dtype=np.uintp)),
-            AxisPart(12, id="ax2", permutation=np.arange(10, 22, dtype=np.uintp)),
+            AxisPart(10, id="ax1"),
+            AxisPart(12, id="ax2"),
         ])
         .add_subaxis("ax1", MultiAxis([AxisPart(3)]))
         .add_subaxis("ax2", MultiAxis([AxisPart(2)]))
@@ -227,11 +227,10 @@ def test_compute_double_loop_mixed():
 
 def test_compute_double_loop_scalar():
     """As in the temporary lives within both of the loops"""
-    # FIXME numbering should not be needed here.
     axes = (
         MultiAxis([
-            AxisPart(6, id="ax1", numbering=np.arange(0, 6, dtype=np.uintp)),
-            AxisPart(4, id="ax2", numbering=np.arange(6, 10, dtype=np.uintp)),
+            AxisPart(6, id="ax1"),
+            AxisPart(4, id="ax2"),
         ])
         .add_subaxis("ax1", MultiAxis([AxisPart(3)]))
         .add_subaxis("ax2", MultiAxis([AxisPart(2)]))

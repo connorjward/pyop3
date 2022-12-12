@@ -149,7 +149,7 @@ class MultiArrayLangKernelBuilder:
                     id=temp_axis_part_id,
                 )
             else:
-                temp_axis_part = ScalarAxisPart(id=temp_axis_part_id)
+                temp_axis_part = tensors.AxisPart(1, id=temp_axis_part_id)
             old_temp_axis_part_id = temp_axis_part_id
 
             # track the position in the array as this tells us whether or not we
@@ -169,7 +169,7 @@ class MultiArrayLangKernelBuilder:
                         )
                     )
                 else:
-                    temp_subaxis  = tensors.MultiAxis(ScalarAxisPart(id=temp_axis_part_id))
+                    temp_subaxis  = tensors.MultiAxis(tensors.AxisPart(1, id=temp_axis_part_id))
 
                 temp_axis_part = temp_axis_part.add_subaxis(old_temp_axis_part_id, temp_subaxis)
                 old_temp_axis_part_id = temp_axis_part_id

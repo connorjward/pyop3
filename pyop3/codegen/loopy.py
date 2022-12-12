@@ -317,7 +317,7 @@ class LoopyKernelBuilder:
         stmts = []
         if axis.nparts == 1: # if statement not needed
 
-            if not axis.part.is_scalar:  # do not emit a statement if the loop isn't needed
+            if axis.part.count > 1:  # do not emit a statement if the loop isn't needed
                 new_stmts, subdeps = self.emit_layout_insns(
                     axis.part.layout_fn,
                     offset_var_name,
@@ -341,7 +341,7 @@ class LoopyKernelBuilder:
             for i, axis_part in enumerate(axis.parts):
                 # decide whether to use if, else if, or else
 
-                if axis_part.is_scalar:
+                if axis_part.count > 1:
                     if i == 0:
                         stmts.append(f"if {part_names[depth]} == {i}")
                     elif i == axis.nparts - 1:
@@ -733,7 +733,7 @@ class LoopyKernelBuilder:
                 return self.extents[extent.name]
             except KeyError:
                 temp_name = self._namer.next("n")
-                temp = MultiArray.new(MultiAxis(ScalarAxisPart()), name=temp_name, dtype=np.int32)
+                temp = MultiArray.new(MultiAxis(AxisPart(1)), name=temp_name, dtype=np.int32)
 
                 # make sure that the RHS reduces down to a scalar
                 new_extent = extent.copy(indicess=(index(extent.indices),))

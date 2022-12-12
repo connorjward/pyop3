@@ -174,13 +174,7 @@ class MultiAxis(AbstractMultiAxis):
             # now create layout arrays and attach to new axis parts
             new_axis_parts = []
             for pt, subaxis, layout_fn in checked_zip(self.parts, subaxes, layout_fn_per_part):
-                # TODO shouldnt be needed
-                # catch null layouts (scalars)
-                # if pt.is_scalar:
-                #     new_axis_part = PreparedAxisPart(pt.size, subaxis, layout_fn=None)
-                # else:
-                #     new_axis_part = PreparedAxisPart(pt.size, subaxis, layout_fn=layout_fn)
-                new_axis_part = PreparedAxisPart(pt.count, subaxis, layout_fn=layout_fn, is_scalar=pt.is_scalar)
+                new_axis_part = PreparedAxisPart(pt.count, subaxis, layout_fn=layout_fn)
                 new_axis_parts.append(new_axis_part)
             return PreparedMultiAxis(new_axis_parts, id=self.id)
         else:
@@ -279,12 +273,13 @@ class MultiAxis(AbstractMultiAxis):
 
         # layout functions are not needed if no numbering is specified (i.e. they are just
         # contiguous)
+        # import pdb; pdb.set_trace()
         if strictly_all(pt.numbering is None for pt in self.parts):
             start = 0
             for part, subaxis in checked_zip(self.parts, subaxes):
                 # TODO This will fail is subaxis is ragged
                 if subaxis:
-                    step = subaxis.count
+                    step = subaxis.calc_size(indices)
                 else:
                     step = 1
                 layout_fn = AffineLayoutFunction(step, start)
@@ -292,7 +287,7 @@ class MultiAxis(AbstractMultiAxis):
 
                 # TODO this will fail if things are ragged - need to store starts as
                 # expressions somehow
-                start += part.count
+                start += part.calc_size(indices)
             return layout_fn_per_part
 
         # initialise layout array per axis part
@@ -423,7 +418,7 @@ class MultiAxis(AbstractMultiAxis):
 
     @staticmethod
     def _parse_part(*args):
-        if len(args) == 1 and isinstance(args[0], (AxisPart, ScalarAxisPart)):
+        if len(args) == 1 and isinstance(args[0], AxisPart):
             return args[0]
         else:
             return AxisPart(*args)
@@ -456,9 +451,9 @@ class PreparedMultiAxis(AbstractMultiAxis):
 
 
 class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
-    fields = {"count", "subaxis", "numbering", "id", "max_count", "is_scalar"}
+    fields = {"count", "subaxis", "numbering", "id", "max_count"}
 
-    def __init__(self, count, subaxis=None, *, numbering=None, id=None, max_count=None, is_scalar=False):
+    def __init__(self, count, subaxis=None, *, numbering=None, id=None, max_count=None):
         if isinstance(count, numbers.Integral):
             assert not max_count or max_count == count
             max_count = count
@@ -471,7 +466,6 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
         self.numbering = numbering
         self.id = id
         self.max_count = max_count
-        self.is_scalar = is_scalar
         """
         The permutation is a bit tricky. We need to be able to interleave axis parts
         so permuting 2 parts might give axis1 the permutation [0, 2, 4] and axis2
@@ -517,9 +511,6 @@ class AxisPart(AbstractAxisPart):
     def __init__(self, count, subaxis=None, **kwargs):
         if subaxis:
             subaxis = as_multiaxis(subaxis)
-        """
-        if is_scalar is true then we know that the layout function should be somehow null.
-        """
         super().__init__(count, subaxis, **kwargs)
 
     def add_subaxis(self, part_id, subaxis):
@@ -545,10 +536,6 @@ class PreparedAxisPart(AbstractAxisPart):
 
         self.is_layout = is_layout
         self.layout_fn = layout_fn
-
-
-def ScalarAxisPart(*args, **kwargs):
-    return AxisPart(1, *args, is_scalar=True, **kwargs)
 
 
 # not used
