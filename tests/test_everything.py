@@ -312,10 +312,10 @@ def test_compute_double_loop_permuted():
 
 def test_permuted_twice():
     axes = (
-        MultiAxis(AxisPart(3, id="ax1"), numbering=(2, 1, 0))
-        .add_subaxis("ax1", MultiAxis(AxisPart(3, id="ax2"), numbering=(2, 0, 1)))
-        .add_subaxis("ax2", 2)
-    )
+        MultiAxis(AxisPart(3, id="ax1", numbering=[2, 1, 0]))
+        .add_subaxis("ax1", MultiAxis(AxisPart(3, id="ax2", numbering=[2, 0, 1])))
+        .add_subaxis("ax2", MultiAxis(AxisPart(2)))
+    ).set_up()
 
     dat1 = MultiArray.new(axes, name="dat1", data=np.arange(18, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(18, dtype=np.float64), dtype=np.float64)
@@ -330,19 +330,22 @@ def test_permuted_twice():
         lang_version=(2018, 2),
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-    iterset = [Slice(3), Slice(3)]
-    expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
+    p = MultiIndexCollection([
+        MultiIndex([
+            TypedIndex(0, IndexSet(3)),
+            TypedIndex(0, IndexSet(3)),
+        ])
+    ])
+    expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(exe)
     fn = getattr(dll, "mykernel")
 
-    sec0 = dat1.dim.part.layout[0]
-    sec1 = dat1.dim.part.subaxis.part.layout[0]
-    sec2 = sec0.copy()
-    sec3 = sec1.copy()
+    sec0 = dat1.dim.part.layout_fn.data
+    sec1 = dat1.dim.part.subaxis.part.layout_fn.data
 
-    args = [dat1.data, dat2.data, sec0.data, sec1.data, sec2.data, sec3.data]
+    args = [sec0.data, sec1.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
     fn(*(d.ctypes.data for d in args))
 
@@ -352,14 +355,13 @@ def test_permuted_twice():
 def test_somewhat_permuted():
     axes = (
         MultiAxis(AxisPart(2, id="ax1"))
-        .add_subaxis("ax1", MultiAxis(AxisPart(3, id="ax2"), permutation=(2, 0, 1)))
+        .add_subaxis("ax1", MultiAxis(AxisPart(3, id="ax2", numbering=[2, 0, 1])))
         .add_subaxis("ax2", 2)
-    )
+    ).set_up()
 
     dat1 = MultiArray.new(axes, name="dat1", data=np.arange(12, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(12, dtype=np.float64), dtype=np.float64)
 
-    iterset = [Slice(2), Slice(3)]
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 2 }",
         "y[i] = x[i]",
@@ -370,16 +372,21 @@ def test_somewhat_permuted():
         lang_version=(2018, 2),
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-    expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
+    p = MultiIndexCollection([
+        MultiIndex([
+            TypedIndex(0, IndexSet(2)),
+            TypedIndex(0, IndexSet(3)),
+        ])
+    ])
+    expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(exe)
     fn = getattr(dll, "mykernel")
 
-    sec2 = dat1.dim.part.subaxis.part.layout[0]
-    sec3 = dat2.dim.part.subaxis.part.layout[0]
+    sec0 = dat1.dim.part.subaxis.part.layout_fn.data
 
-    args = [dat1.data, dat2.data, sec2.data, sec3.data]
+    args = [sec0.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
     fn(*(d.ctypes.data for d in args))
 
@@ -388,11 +395,14 @@ def test_somewhat_permuted():
 
 def test_compute_double_loop_permuted_mixed():
     axes = (
-        MultiAxis([AxisPart(4, id="ax1"), AxisPart(3, id="ax2")],
-                  permutation=(3, 6, 2, 5, 0, 4, 1))
+        MultiAxis([
+            AxisPart(4, id="ax1", numbering=[4, 6, 2, 0]),
+            AxisPart(3, id="ax2", numbering=[5, 3, 1]),
+                #=(3, 6, 2, 5, 0, 4, 1)
+        ])
         .add_subaxis("ax1", 1)
         .add_subaxis("ax2", 2)
-    )
+    ).set_up()
     dat1 = MultiArray.new(axes, name="dat1", data=np.arange(10, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
 
@@ -406,18 +416,22 @@ def test_compute_double_loop_permuted_mixed():
         lang_version=(2018, 2),
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-    iterset = [Slice(3, npart=1)]
-    expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
+    p = MultiIndexCollection([
+        MultiIndex([
+            TypedIndex(1, IndexSet(3)),
+        ])
+    ])
+    expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
 
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    sec5 = dat1.dim.parts[1].layout[0]
-    sec7 = dat2.dim.parts[1].layout[0]
+    sec0 = dat1.dim.parts[0].layout_fn.data
+    sec1 = dat1.dim.parts[1].layout_fn.data
 
-    args = [dat1.data, dat2.data, sec5.data, sec7.data]
+    args = [sec0.data, sec1.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
     fn(*(d.ctypes.data for d in args))
 

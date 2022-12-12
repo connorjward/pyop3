@@ -264,7 +264,7 @@ class MultiAxis(AbstractMultiAxis):
     def set_up_terminal(self, subaxes, indices, axis_length, depth):
         if any(pt.permutation is not None for pt in self.parts):
             assert (
-                sorted(sum(pt.permutation, []) for pt in self.parts)
+                sorted(sum([pt.permutation for pt in self.parts], []))
                 == np.arange(sum(pt.calc_size(indices) for pt in self.parts), dtype=int),
                 "permutations must be exhaustive"
             )
@@ -328,14 +328,14 @@ class MultiAxis(AbstractMultiAxis):
                 offset += 1
 
         # now create layout arrays
-        for pt, subaxis, layout_data in checked_zip(self.parts, subaxes, layouts):
+        for i, (pt, subaxis, layout_data) in enumerate(checked_zip(self.parts, subaxes, layouts)):
             layout_fn = MultiArray(
                 PreparedMultiAxis(
                     PreparedAxisPart(pt.count, is_layout=True),
                 ),
                 data=layout_data,
                 dtype=layout_data.dtype,
-                name=f"{self.id}_layout{depth}",
+                name=f"{self.id}_layout{depth}_{i}",
             )
 
             # wrap it up
@@ -520,7 +520,7 @@ class AxisPart(AbstractAxisPart):
         if part_id == self.id:
             return self.copy(subaxis=subaxis)
         else:
-            return self.copy(subaxis=subaxis.add_subaxis(part_id, subaxis))
+            return self.copy(subaxis=self.subaxis.add_subaxis(part_id, subaxis))
 
 
 class PreparedAxisPart(AbstractAxisPart):
@@ -570,11 +570,14 @@ class IndexSet(pytools.ImmutableRecord):
 
 
 class TypedIndex(pytools.ImmutableRecord):
-    fields = {"part", "iset"}
+    fields = {"part", "iset", "id"}
 
-    def __init__(self, part: int, iset: IndexSet):
+    _id_generator = NameGenerator(prefix="typed_idx")
+
+    def __init__(self, part: int, iset: IndexSet, id=None):
         self.part = part
         self.iset = iset
+        self.id = id or self._id_generator.next()
 
 
 class MultiIndex(pytools.ImmutableRecord):

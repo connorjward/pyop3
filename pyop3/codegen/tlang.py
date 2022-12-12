@@ -141,6 +141,7 @@ class MultiArrayLangKernelBuilder:
         # meshes - the outer axis would be split in two parts because the DoFs come from
         # both the vertical and horizontal facets and these require separate multi-indices
         temp_axis_parts = []
+        temp_axis_base_ids = []
         for multi_idx in multi_idx_collection:
             temp_axis_part_id = self.name_generator.next("mypart")
             if not is_loop_index:
@@ -177,6 +178,7 @@ class MultiArrayLangKernelBuilder:
                 current_axis = current_axis.parts[typed_idx.part].subaxis
 
             temp_axis_parts.append(temp_axis_part)
+            temp_axis_base_ids.append(temp_axis_part_id)
 
         # if we still have a current axis then we haven't hit the bottom of the
         # tree and more shape is needed
@@ -185,7 +187,10 @@ class MultiArrayLangKernelBuilder:
             # add this subaxis to each part we have so far
             # recall that the number of parts we have is equal to the number of multi-index
             # collections that we have
-            temp_axis_parts = [pt.add_subaxis(pt.id, subaxis) for pt in temp_axis_parts]
+            temp_axis_parts = [
+                pt.add_subaxis(ptid, subaxis)
+                for pt, ptid in checked_zip(temp_axis_parts, temp_axis_base_ids)
+            ]
 
         temp_axis = tensors.MultiAxis(temp_axis_parts)
 

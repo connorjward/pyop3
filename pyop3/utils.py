@@ -44,7 +44,7 @@ class PrettyTuple(tuple):
     """Implement a tuple with nice syntax for recursive functions. Like set notation."""
 
     def __or__(self, other):
-        return self + (other,)
+        return type(self)(self + (other,))
 
 def checked_zip(*iterables):
     if not pytools.is_single_valued(set(len(it) for it in iterables)):
