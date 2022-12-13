@@ -292,8 +292,8 @@ class MultiAxis(AbstractMultiAxis):
     def set_up_terminal(self, subaxes, indices, axis_length, depth):
         if any(pt.permutation is not None for pt in self.parts):
             assert (
-                sorted(sum([pt.permutation for pt in self.parts], []))
-                == np.arange(sum(pt.calc_size(indices) for pt in self.parts), dtype=int),
+                sorted(sum([list(pt.permutation) for pt in self.parts], []))
+                == np.arange(sum(pt.find_integer_count(indices) for pt in self.parts), dtype=int),
                 "permutations must be exhaustive"
             )
 
@@ -327,17 +327,17 @@ class MultiAxis(AbstractMultiAxis):
         )
 
         # if no numbering is provided create one
-        if not strictly_all(pt.numbering for pt in self.parts):
+        if not strictly_all(pt.numbering is not None for pt in self.parts):
             axis_numbering = []
             start = 0
-            stop = self.parts[0].calc_size(indices)
+            stop = self.parts[0].find_integer_count(indices)
             numb = np.arange(start, stop, dtype=np.uintp)
             axis_numbering.append(numb)
             for i in range(1, self.nparts):
                 numb = np.arange(start, stop, dtype=np.uintp)
                 axis_numbering.append(numb)
                 start = stop
-                stop += self.parts[i].calc_size(indices)
+                stop += self.parts[i].find_integer_count(indices)
         else:
             axis_numbering = [pt.numbering for pt in self.parts]
 
