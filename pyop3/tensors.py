@@ -199,7 +199,7 @@ class MultiAxis(AbstractMultiAxis):
             if all(isinstance(fn, AffineLayoutFunction) for partfn in layout_fn_per_part for fn in partfn):
                 layout_fn_per_part = layout_fn_per_part[0]
 
-            import pdb; pdb.set_trace()
+            # import pdb; pdb.set_trace()
             #
             # # TODO: create layout multi-arrays that correspond with this data
             #
@@ -342,7 +342,7 @@ class MultiAxis(AbstractMultiAxis):
             axis_numbering = [pt.numbering for pt in self.parts]
 
 
-        import pdb; pdb.set_trace()
+        # import pdb; pdb.set_trace()
         offset = 0
         for current_idx in range(axis_length):
             # find the right axis part and index thereof for the current 'global' numbering
@@ -1286,6 +1286,20 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
     @property
     def size(self):
         return functools.reduce(operator.mul, self.shape, 1)
+
+    @property
+    def depth(self):
+        """Will only work if thing is not multi-part"""
+        # TODO should probably still be considered fine if the diverging parts have the same depth
+        # would likely require a tree traversal
+        depth_ = 0
+        axis = self.axes
+        while axis:
+            depth_ += 1
+            if axis.nparts > 1:
+                raise RuntimeError("depth not possible for multi-part layouts")
+            axis = axis.part.subaxis
+        return depth_
 
     @property
     def order(self):

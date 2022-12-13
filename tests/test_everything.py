@@ -471,7 +471,7 @@ def test_compute_double_loop_ragged():
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    args = [nnz.data, dat1.data, dat2.data, dat1.dim.part.subaxis.part.layout[0].data]
+    args = [nnz.data, dat1.axes.part.layout_fn.data.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))

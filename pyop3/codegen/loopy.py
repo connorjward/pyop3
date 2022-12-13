@@ -20,7 +20,7 @@ import pyop3.utils
 from pyop3 import utils
 from pyop3.utils import MultiNameGenerator, NameGenerator, strictly_all
 from pyop3.utils import PrettyTuple, checked_zip, NameGenerator, rzip
-from pyop3.tensors import MultiArray, Map, MultiAxis, NonAffineMap, _compute_indexed_shape, _compute_indexed_shape2, IndirectLayoutFunction
+from pyop3.tensors import MultiArray, Map, MultiAxis, NonAffineMap, _compute_indexed_shape, _compute_indexed_shape2, IndirectLayoutFunction, AxisPart
 from pyop3.tensors import Slice, IndexFunction, index, MultiIndexCollection, MultiIndex, AffineLayoutFunction, TypedIndex, IndexSet
 from pyop3.codegen.tlang import to_tlang
 
@@ -113,7 +113,7 @@ class LoopyKernelBuilder:
         self.extents = {}
         self.assumptions = []
 
-        self._within_multi_indices = []  # a stack
+        self._within_typed_indices = []  # a stack
         self._within_loop_index_names = []  # a stack
 
         self._part_id_namer = NameGenerator("mypartid")
@@ -171,19 +171,16 @@ class LoopyKernelBuilder:
 
         # register inames (also needs to be done for packing loops)
         for multi_idx in multi_idx_collection:
-            self._within_multi_indices.append(multi_idx)
-
-            new_loop_index_names = []
             for typed_idx in multi_idx:
                 loop_index_name = self._namer.next("i")
                 self._loop_index_names[typed_idx] = loop_index_name
 
-                # TODO handle ragged extents
-                domain_str = f"{{ [{loop_index_name}]: 0 <= {loop_index_name} < {typed_idx.iset.size} }}"
+                extent = self.register_extent(typed_idx.iset.size, multi_idx)
+                domain_str = f"{{ [{loop_index_name}]: 0 <= {loop_index_name} < {extent} }}"
                 self.domains.append(domain_str)
-                new_loop_index_names.append(loop_index_name)
 
-            self._within_loop_index_names.append(new_loop_index_names)
+                self._within_typed_indices.append(typed_idx)
+                self._within_loop_index_names.append(loop_index_name)
 
             # we need to build a separate set of instructions for each multi-index
             # in the collection.
@@ -193,14 +190,15 @@ class LoopyKernelBuilder:
                 # self._build(stmt, copy.deepcopy(within_loops))
                 self._build(stmt, None)
 
-            self._within_multi_indices.pop()
+            for typed_idx in multi_idx:
+                self._within_typed_indices.pop()
+                self._within_loop_index_names.pop()
 
     def _get_within_inames(self):
         # since we want to pop we need a list of lists
         return frozenset({
             iname
-            for loop_index_names in self._within_loop_index_names
-            for iname in loop_index_names
+            for iname in self._within_loop_index_names
         })
 
     @_build.register
@@ -244,9 +242,17 @@ class LoopyKernelBuilder:
         self.subkernels.append(call.function.code)
 
 
-    def generate_insn(self, assignment, lhs, loffset, rhs, roffset, depends_on):
-        lexpr = pym.subscript(pym.var(lhs.name), loffset)
-        rexpr = pym.subscript(pym.var(rhs.name), roffset)
+    def generate_insn(self, assignment, lhs, loffset, rhs, roffset, depends_on, scalar: bool):
+        # TODO this is a really hacky and nasty way to track scalar assignment
+        if loffset is None:
+            lexpr = pym.var(lhs.name)
+        else:
+            lexpr = pym.subscript(pym.var(lhs.name), loffset)
+
+        if roffset is None:
+            rexpr = pym.var(rhs.name)
+        else:
+            rexpr = pym.subscript(pym.var(rhs.name), roffset)
 
         if isinstance(assignment, tlang.Zero):
             rexpr = 0
@@ -440,6 +446,7 @@ class LoopyKernelBuilder:
             unindexed_part_id_names,
             unindexed_loop_index_names,
             multi_index_collections,
+            scalar: bool,
         ):
         """
         For an assignment collect the inames associated with the indexed and unindexed (temp)
@@ -480,7 +487,10 @@ class LoopyKernelBuilder:
                 lp.TemporaryVariable(unindexed_offset, shape=(), dtype=np.uintp)
             )
 
-            # FIXME
+            # handle scalar assignment (for loop bounds)
+            if scalar:
+                unindexed_offset = None
+
             if isinstance(assignment, (tlang.Read, tlang.Zero)):
                 lhs = unindexed
                 loffset = unindexed_offset
@@ -494,7 +504,7 @@ class LoopyKernelBuilder:
             else:
                 raise TypeError
 
-            self.generate_insn(assignment, lhs, pym.var(loffset), rhs, pym.var(roffset), depends_on)
+            self.generate_insn(assignment, lhs, pym.var(loffset) if loffset else None, rhs, pym.var(roffset) if roffset else None, depends_on, scalar)
 
             if indexed.name not in self._tensor_data:
                 self._tensor_data[indexed.name] = lp.GlobalArg(
@@ -503,13 +513,18 @@ class LoopyKernelBuilder:
 
             # import pdb; pdb.set_trace()
             if unindexed.name not in [d.name for d in self._temp_kernel_data]:
+                if scalar:
+                    shape = ()
+                else:
+                    shape = (unindexed.axes.alloc_size,)
                 self._temp_kernel_data.append(
-                    lp.TemporaryVariable(unindexed.name, shape=(unindexed.axes.alloc_size,))
+                    lp.TemporaryVariable(unindexed.name, shape=shape)
                 )
             return
 
         ###
 
+        # import pdb; pdb.set_trace()
         if multi_index_collections:
             multi_idx_collection, *subidx_collections = multi_index_collections
         else:
@@ -532,21 +547,21 @@ class LoopyKernelBuilder:
         # each multi-index is a different branch for generating code (as the inner
         # dimensions can be different)
         for i, multi_idx in enumerate(multi_idx_collection):
-            is_loop_index = multi_idx in self._within_multi_indices
-            new_inames = []
             for typed_idx in multi_idx:
+                is_loop_index = typed_idx in self._within_typed_indices
                 if is_loop_index:
                     indexed_loop_index_name = self._loop_index_names[typed_idx]
                     unindexed_loop_index_name = self._loop_index_names[typed_idx]
                 else:
                     # register a new domain
+                    # TODO handle when extent is ragged
                     loop_index_name = self._namer.next("i")
                     self._loop_index_names[typed_idx] = loop_index_name
                     domain_str = f"{{ [{loop_index_name}]: 0 <= {loop_index_name} < {typed_idx.iset.size} }}"
                     self.domains.append(domain_str)
                     indexed_loop_index_name = loop_index_name
                     unindexed_loop_index_name = loop_index_name
-                    new_inames.append(loop_index_name)
+                    self._within_loop_index_names.append(loop_index_name)
 
                 # note that the names must be different for indexed and unindexed as
                 # these variables get transformed by the map etc.
@@ -570,9 +585,6 @@ class LoopyKernelBuilder:
                     for name in [indexed_part_id_name, unindexed_part_id_name]
                 ])
 
-            # add new inames to the stack
-            self._within_loop_index_names.append(new_inames)
-
             # doesn't return anything
             self.cleverly_recurse(
                 assignment,
@@ -583,9 +595,12 @@ class LoopyKernelBuilder:
                 unindexed_part_id_names,
                 unindexed_loop_index_names,
                 subidx_collections,
+                scalar,
             )
 
-            self._within_loop_index_names.pop()
+            for typed_idx in multi_idx:
+                if not typed_idx in self._within_typed_indices:
+                    self._within_loop_index_names.pop()
 
     @_make_instruction_context.register
     def _(self, assignment: tlang.Assignment, within_loops, scalar=False, domain_stack=None):
@@ -597,7 +612,8 @@ class LoopyKernelBuilder:
             assignment,
             assignment.tensor, assignment.tensor.axes, [], [],
             assignment.temporary, assignment.temporary.axes, [], [],
-            assignment.tensor.indices
+            assignment.tensor.indices,
+            scalar=scalar,
         )
 
         return
@@ -711,21 +727,7 @@ class LoopyKernelBuilder:
 
         return iname
 
-    def create_domain_stack(self, lhs, rhs, lidxs, ridxs):
-        """Create a consistent set of inames for lhs and rhs to use.
-
-        We ignore any 'within' indices here as these will already exist and do
-        not contribute to the shape.
-        """
-        shapes = {_compute_indexed_shape2(lidxs), _compute_indexed_shape2(ridxs)}
-        try:
-            shape, = shapes
-        except ValueError:
-            raise ValueError("Shapes do not match")
-        inames = [self._namer.next("i") for _ in shape]
-        return inames
-
-    def register_extent(self, extent, within_loops):
+    def register_extent(self, extent, multi_idx):
         if isinstance(extent, MultiArray):
             # If we have a ragged thing then we need to create a scalar temporary
             # to hold its value.
@@ -735,13 +737,24 @@ class LoopyKernelBuilder:
                 return self.extents[extent.name]
             except KeyError:
                 temp_name = self._namer.next("n")
-                temp = MultiArray.new(MultiAxis(AxisPart(1)), name=temp_name, dtype=np.int32)
+                temp = MultiArray.new(
+                    MultiAxis(AxisPart(1)).set_up(),
+                    name=temp_name,
+                    dtype=np.int32,
+                )
 
-                # make sure that the RHS reduces down to a scalar
-                new_extent = extent.copy(indicess=(index(extent.indices),))
+                # make sure that the RHS reduces down to a scalar (but skip the last entry)
+                newidxs = MultiIndexCollection([
+                    MultiIndex([
+                        *multi_idx.typed_indices[-extent.depth-1:-1]
+                    ])
+                ])
+                extent = extent[[newidxs]]
 
-                insn = tlang.Read(new_extent, temp)
-                self._make_instruction_context(insn, within_loops, scalar=True)
+                # import pdb; pdb.set_trace()
+
+                insn = tlang.Read(extent, temp)
+                self._make_instruction_context(insn, None, scalar=True)
 
                 return self.extents.setdefault(extent.name, pym.var(temp_name))
         else:
