@@ -434,7 +434,6 @@ class LoopyKernelBuilder:
             ]
         return stmts, {insn_id}
 
-    # NEXT: temporaries are using the wrong indices - should be scalar...
     def cleverly_recurse(
             self,
             assignment,
@@ -738,8 +737,18 @@ class LoopyKernelBuilder:
                 return self.extents[extent.name]
             except KeyError:
                 temp_name = self._namer.next("n")
+                # need to create a scalar multi-axis with the same depth
+                tempid = "mytempid" + str(0)
+                tempaxis = MultiAxis(AxisPart(1, id=tempid))
+                oldtempid = tempid
+
+                for d in range(1, extent.depth):
+                    tempid = "mytempid" + str(d)
+                    tempaxis = tempaxis.add_subaxis(oldtempid, MultiAxis(AxisPart(1, id=tempid)))
+                    oldtempid = tempid
+
                 temp = MultiArray.new(
-                    MultiAxis(AxisPart(1)).set_up(),
+                    tempaxis.set_up(),
                     name=temp_name,
                     dtype=np.int32,
                 )
