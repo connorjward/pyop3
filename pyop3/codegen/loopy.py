@@ -325,7 +325,8 @@ class LoopyKernelBuilder:
         stmts = []
         if axis.nparts == 1: # if statement not needed
 
-            if isinstance(axis.part.count, numbers.Integral) and axis.part.count > 1:  # do not emit a statement if the loop isn't needed
+            # do not emit a statement if the loop isn't needed
+            if isinstance(axis.part.count, MultiArray) or (isinstance(axis.part.count, numbers.Integral) and axis.part.count > 1):
                 new_stmts, subdeps = self.emit_layout_insns(
                     axis.part.layout_fn,
                     offset_var_name,
