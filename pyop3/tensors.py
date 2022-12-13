@@ -121,6 +121,9 @@ class AbstractMultiAxis(pytools.ImmutableRecord):
 # But what about reusing axes? not sure that that is really a thing, and if so would most
 # likely only be for IDs.
 class MultiAxis(AbstractMultiAxis):
+    # TODO ultimately remove this as it leads to duplication of data
+    layout_namer = NameGenerator("layout")
+
     def set_up(self, is_layout=False, depth=0):
         """Initialise the multi-axis by computing the layout functions."""
         # TODO I need a clever algorithm here that starts at the bottom of the
@@ -221,7 +224,9 @@ class MultiAxis(AbstractMultiAxis):
                     ),
                     data=layout_fn,
                     dtype=layout_fn.dtype,
-                    name=f"{self.id}_layout{depth}_{i}",
+                    # for now give a totally unique name
+                    # name=f"{self.id}_layout{depth}_{i}",
+                    name=self.layout_namer.next(),
                 ))
 
             new_axis_part = PreparedAxisPart(pt.count, subaxis, layout_fn=layout_fn, max_count=pt.max_count)

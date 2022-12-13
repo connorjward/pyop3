@@ -171,11 +171,12 @@ class LoopyKernelBuilder:
 
         # register inames (also needs to be done for packing loops)
         for multi_idx in multi_idx_collection:
-            for typed_idx in multi_idx:
+            for i, typed_idx in enumerate(multi_idx):
                 loop_index_name = self._namer.next("i")
                 self._loop_index_names[typed_idx] = loop_index_name
 
-                extent = self.register_extent(typed_idx.iset.size, multi_idx)
+                # import pdb; pdb.set_trace()
+                extent = self.register_extent(typed_idx.iset.size, multi_idx, i)
                 domain_str = f"{{ [{loop_index_name}]: 0 <= {loop_index_name} < {extent} }}"
                 self.domains.append(domain_str)
 
@@ -293,7 +294,8 @@ class LoopyKernelBuilder:
 
         returning the name of 'off'
         """
-        # import pdb; pdb.set_trace()
+        # if array.name == "dat1":
+        #     import pdb; pdb.set_trace()
         assert len(part_names) == len(loop_index_names)
 
 
@@ -390,6 +392,8 @@ class LoopyKernelBuilder:
         if not layout_fn:
             return [], set()
 
+        # import pdb; pdb.set_trace()
+
         # the layout can depend on the inames *outside* of the current axis - not inside
         useable_inames = inames[:depth+1]
 
@@ -400,6 +404,8 @@ class LoopyKernelBuilder:
             # TODO I want this to be more generic. Provide a list of output arguments
             # and inputs and return a series of statements plus data to register
             # TODO This should be much more generic. the layout function should accept all valid indices
+
+            # FIXME will not work for ragged layouts! need to index the thing
             iname = useable_inames[-1]
 
             # generate the instructions
@@ -547,6 +553,7 @@ class LoopyKernelBuilder:
         # each multi-index is a different branch for generating code (as the inner
         # dimensions can be different)
         for i, multi_idx in enumerate(multi_idx_collection):
+            # import pdb; pdb.set_trace()
             for typed_idx in multi_idx:
                 is_loop_index = typed_idx in self._within_typed_indices
                 if is_loop_index:
@@ -727,7 +734,7 @@ class LoopyKernelBuilder:
 
         return iname
 
-    def register_extent(self, extent, multi_idx):
+    def register_extent(self, extent, multi_idx, depth):
         if isinstance(extent, MultiArray):
             # If we have a ragged thing then we need to create a scalar temporary
             # to hold its value.
@@ -754,9 +761,11 @@ class LoopyKernelBuilder:
                 )
 
                 # make sure that the RHS reduces down to a scalar (but skip the last entry)
+                # this nasty slice makes sure that I am dropping all indices *below* the
+                # current one and only taking as many as needed
                 newidxs = MultiIndexCollection([
                     MultiIndex([
-                        *multi_idx.typed_indices[-extent.depth-1:-1]
+                        *multi_idx.typed_indices[:depth][-extent.depth:]
                     ])
                 ])
                 extent = extent[[newidxs]]

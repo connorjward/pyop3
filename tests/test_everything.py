@@ -522,15 +522,26 @@ def test_doubly_ragged():
     expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-    dll = compilemythings(code)
+
+    hsh = md5(code.encode())
+    basename = hsh.hexdigest()
+    cachedir = "mycache"
+    dirpart, basename = basename[:2], basename[2:]
+    cachedir = os.path.join(cachedir, dirpart)
+    soname = os.path.join(cachedir, "%s.so" % basename)
+    print(soname)
+    dll = ctypes.CDLL(soname)
+
+    # dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    nnz1c, _ = dat1.dim.part.subaxis.part.layout
-    nnz2c, _ = dat1.dim.part.subaxis.part.subaxis.part.layout
+    layout0 = nnz2.axes.part.layout_fn.data
+    layout1 = dat1.axes.part.subaxis.part.layout_fn.data
+    layout2 = dat1.axes.part.layout_fn.data
 
     # import pdb; pdb.set_trace()
 
-    args = [nnz1.data, nnz2.data, dat1.data, dat2.data, nnz1c.data, nnz2c.data]
+    args = [nnz1.data, layout0.data, nnz2.data, layout2.data, layout1.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
