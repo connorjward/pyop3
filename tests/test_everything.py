@@ -398,7 +398,6 @@ def test_compute_double_loop_permuted_mixed():
         MultiAxis([
             AxisPart(4, id="ax1", numbering=[4, 6, 2, 0]),
             AxisPart(3, id="ax2", numbering=[5, 3, 1]),
-                #=(3, 6, 2, 5, 0, 4, 1)
         ])
         .add_subaxis("ax1", 1)
         .add_subaxis("ax2", 2)
@@ -441,10 +440,10 @@ def test_compute_double_loop_permuted_mixed():
 def test_compute_double_loop_ragged():
     axes1 = MultiAxis(AxisPart(5, id="ax1"))
     nnz = MultiArray.new(
-        axes1, name="nnz", dtype=np.int32, data=np.array([3, 2, 1, 3, 2], dtype=np.int32)
+        axes1.set_up(), name="nnz", dtype=np.int32, data=np.array([3, 2, 1, 3, 2], dtype=np.int32)
     )
 
-    axes2 = axes1.add_subaxis("ax1", nnz)
+    axes2 = axes1.add_subaxis("ax1", AxisPart(nnz, max_count=3)).set_up()
 
     dat1 = MultiArray.new(axes2, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(axes2, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
@@ -460,8 +459,13 @@ def test_compute_double_loop_ragged():
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
-    iterset = [Slice(5), Slice(nnz)]
-    expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
+    p = MultiIndexCollection([
+        MultiIndex([
+            TypedIndex(0, IndexSet(5)),
+            TypedIndex(0, IndexSet(nnz)),
+        ])
+    ])
+    expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(code)

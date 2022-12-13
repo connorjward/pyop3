@@ -166,33 +166,72 @@ class MultiAxis(AbstractMultiAxis):
         # At the very least the sizes of the different parts must match for the indices
         # above since otherwise they wouldn't be adjacent in memory.
 
+        # FIXME not a sufficient test - could probably wrap into set_up_inner
         if strictly_all(isinstance(pt.count, numbers.Integral) for pt in self.parts):
+        # if strictly_all(pt.has_constant_step for pt in self.parts):
             # import pdb; pdb.set_trace()
             axis_length = sum(pt.count for pt in self.parts)
             layout_fn_per_part = self.set_up_terminal(subaxes, PrettyTuple(), axis_length, depth)
 
-            # now create layout arrays and attach to new axis parts
-            new_axis_parts = []
-            for pt, subaxis, layout_fn in checked_zip(self.parts, subaxes, layout_fn_per_part):
-                new_axis_part = PreparedAxisPart(pt.count, subaxis, layout_fn=layout_fn)
-                new_axis_parts.append(new_axis_part)
-            return PreparedMultiAxis(new_axis_parts, id=self.id)
         else:
-            raise NotImplementedError
-            layout_data_per_part = self.set_up_inner(self.parts, subaxes)
+            # i.e. if the part counts are not integer (i.e. ragged) then we need to construct
+            # a layout tree instead.
+            # IMPORTANT: it is quite possible to construct a tree here where the nodes are
+            # affine functions instead of data that needs subscripting. For example, for a 
+            # ragged array with sizes [3, 2] and no children the layout tree should really
+            # contain two affine functions, one for each.
 
-        # TODO: create layout multi-arrays that correspond with this data
+            """
+            # this should return a bunch of numpy arrays
+            # firstly split by part and then split by the raggedness
+            # e.g. if something is multi-part and nested ragged with counts
+            # 2 -> [1, 2] -> [[2], [3, 1]]
+            # then you should get back for the top level:
+            # [0, 2]
+            # for the middle level:
+            # [[0], [0, 3]]
+            # and for the base level get affine layouts
+            """
+            layout_fn_per_part = self.set_up_inner(self.parts, subaxes)
 
-        ### below not done...
-        layout_fns = ...
-        # flatten and numpify it
-        layout_data = sum(layout_data, [])
-        layout_data = np.array(layout_data, dtype=np.uintp)
+            # FIXME this sometimes returns a list of lists of affine functions - shouldn't do
+            # this is just a hack to look at something else
+            if all(isinstance(fn, AffineLayoutFunction) for partfn in layout_fn_per_part for fn in partfn):
+                layout_fn_per_part = layout_fn_per_part[0]
 
-        new_axis = MultiAxis([new_parts[i]]).set_up(is_layout=True)
-        layout_fn = MultiArray(new_axis, data=layout_data, dtype=layout_data.dtype,
-            name=f"{self.id}_layout{depth}",
-                )
+            import pdb; pdb.set_trace()
+            #
+            # # TODO: create layout multi-arrays that correspond with this data
+            #
+            # ### below not done...
+            # layout_fns = ...
+            # # flatten and numpify it
+            # layout_data = sum(layout_data, [])
+            # layout_data = np.array(layout_data, dtype=np.uintp)
+            #
+            # new_axis = MultiAxis([new_parts[i]]).set_up(is_layout=True)
+            # layout_fn = MultiArray(new_axis, data=layout_data, dtype=layout_data.dtype,
+            #     name=f"{self.id}_layout{depth}",
+            #         )
+
+        # now create layout arrays and attach to new axis parts
+        # the layout functions have exactly the same shape as the data they act on so
+        # we can reuse the count axes
+        new_axis_parts = []
+        for i, (pt, subaxis, layout_fn) in enumerate(checked_zip(self.parts, subaxes, layout_fn_per_part)):
+            if isinstance(layout_fn, np.ndarray):
+                layout_fn = IndirectLayoutFunction(MultiArray(
+                    PreparedMultiAxis(
+                        PreparedAxisPart(pt.count, is_layout=True)
+                    ),
+                    data=layout_fn,
+                    dtype=layout_fn.dtype,
+                    name=f"{self.id}_layout{depth}_{i}",
+                ))
+
+            new_axis_part = PreparedAxisPart(pt.count, subaxis, layout_fn=layout_fn, max_count=pt.max_count)
+            new_axis_parts.append(new_axis_part)
+        return PreparedMultiAxis(new_axis_parts, id=self.id)
 
 
         ### ^^^
@@ -206,7 +245,7 @@ class MultiAxis(AbstractMultiAxis):
         return PreparedMultiAxis(prepared_parts, id=self.id)
 
     def set_up_inner(self, axis_parts, subaxes, indices=PrettyTuple()):
-        """Should return a list of multiaxes, one per outer part
+        """Should return a nested list of multiaxes, one per outer part
 
         The basic idea of this method is to traverse the multi-array
         that describes the sizes of the data to generate layout functions.
@@ -217,47 +256,36 @@ class MultiAxis(AbstractMultiAxis):
         be integer because size multi-arrays can't branch)
 
         """
-        # NOTE: If we are not terminating then we shouldn't be looping over parts
-
-        # We should dispatch if size is an int or multi-array (which must be the same shape across parts)
-
         # the axis parts do not need to be the same size, but, if the size is ragged, the
         # shape of the sizes needs to.
         extents = []
-        for part in axis_parts:
-            if isinstance(part.size, MultiArray):
-                extent = part.size.get_value(indices)
-            else:
-                assert isinstance(part.size, numbers.Integral)
-                extent = part.size
-            extents.append(extent)
+        for pt in axis_parts:
+            extents.append(pt.count.axes.part.count)
         try:
-            # The sizes of the different parts for the 'outer' indices must exactly
-            # match for interleaving to be a valid thing to do.
             extent, = set(extents)
         except ValueError:
-            raise ValueError(
-                "the sizes of these things MUST agree for interleaving to"
-                    " be valid")
+            raise ValueError("ragged parent shapes must be the same")
 
         # at the bottom of the tree - stop here
-        if not size_axis.part.subaxis:
-            layout_data_per_part = self.set_up_terminal(subaxes, indices, extent)
-            return layout_data_per_part
+        at_bottom = isinstance(pt.count, numbers.Integral) or strictly_all(not pt.count.axes.part.subaxis for pt in axis_parts)
+        if at_bottom:
+            data = []
+            for i in range(extent):
+                datum = self.set_up_terminal(subaxes, indices|i, extent, 0)
+                data.append(datum)
+            return data
 
         layout_data_per_part = [[] for _ in self.parts]
         for i in range(extent):
             # subdata_per_part here is a list with size matching the number of parts
             subdata_per_part = self.set_up_inner(
-                size_axis.part.subaxis,
                 subaxes,
                 indices|i,
-                sizes|size_axis.part.size,
             )
 
             assert len(subdata_per_part) == self.nparts
             for j, sd in enumerate(subdata_per_part):
-                layout_data_per_part[j].extend(sd)
+                layout_data_per_part[j].append(sd)
 
         return layout_data_per_part
 
@@ -272,9 +300,9 @@ class MultiAxis(AbstractMultiAxis):
         layout_fn_per_part = []
 
         # layout functions are not needed if no numbering is specified (i.e. they are just
-        # contiguous)
+        # contiguous) and if they are not ragged 'below'
         # import pdb; pdb.set_trace()
-        if strictly_all(pt.numbering is None for pt in self.parts):
+        if strictly_all(pt.numbering is None and pt.has_constant_step for pt in self.parts):
             start = 0
             for part, subaxis in checked_zip(self.parts, subaxes):
                 # TODO This will fail is subaxis is ragged
@@ -298,7 +326,23 @@ class MultiAxis(AbstractMultiAxis):
             for pt in self.parts
         )
 
-        # import pdb; pdb.set_trace()
+        # if no numbering is provided create one
+        if not strictly_all(pt.numbering for pt in self.parts):
+            axis_numbering = []
+            start = 0
+            stop = self.parts[0].calc_size(indices)
+            numb = np.arange(start, stop, dtype=np.uintp)
+            axis_numbering.append(numb)
+            for i in range(1, self.nparts):
+                numb = np.arange(start, stop, dtype=np.uintp)
+                axis_numbering.append(numb)
+                start = stop
+                stop += self.parts[i].calc_size(indices)
+        else:
+            axis_numbering = [pt.numbering for pt in self.parts]
+
+
+        import pdb; pdb.set_trace()
         offset = 0
         for current_idx in range(axis_length):
             # find the right axis part and index thereof for the current 'global' numbering
@@ -308,7 +352,7 @@ class MultiAxis(AbstractMultiAxis):
                 try:
                     # is the current global index found in the numbering of this axis part?
                     # FIXME this will likely break as numbering is not an array - need to implement this fn
-                    selected_index = list(axis_part.numbering).index(current_idx)
+                    selected_index = list(axis_numbering[part_num]).index(current_idx)
                     selected_part_num = part_num
                 except ValueError:
                     continue
@@ -323,26 +367,27 @@ class MultiAxis(AbstractMultiAxis):
             # lastly increment the pointer
             if subaxes[selected_part_num]:
                 # FIXME but if nested this won't work
-                offset += subaxes[selected_part_num].calc_size(indices)
+                offset += subaxes[selected_part_num].calc_size(indices|selected_index)
             else:
                 offset += 1
 
-        # now create layout arrays
-        for i, (pt, subaxis, layout_data) in enumerate(checked_zip(self.parts, subaxes, layouts)):
-            layout_fn = MultiArray(
-                PreparedMultiAxis(
-                    PreparedAxisPart(pt.count, is_layout=True),
-                ),
-                data=layout_data,
-                dtype=layout_data.dtype,
-                name=f"{self.id}_layout{depth}_{i}",
-            )
-
-            # wrap it up
-            layout_fn = IndirectLayoutFunction(layout_fn)
-            layout_fn_per_part.append(layout_fn)
-
-        return layout_fn_per_part
+        # # now create layout arrays
+        # for i, (pt, subaxis, layout_data) in enumerate(checked_zip(self.parts, subaxes, layouts)):
+        #     layout_fn = MultiArray(
+        #         PreparedMultiAxis(
+        #             PreparedAxisPart(pt.count, is_layout=True),
+        #         ),
+        #         data=layout_data,
+        #         dtype=layout_data.dtype,
+        #         name=f"{self.id}_layout{depth}_{i}",
+        #     )
+        #
+        #     # wrap it up
+        #     layout_fn = IndirectLayoutFunction(layout_fn)
+        #     layout_fn_per_part.append(layout_fn)
+        #
+        # return layout_fn_per_part
+        return layouts
 
     def add_part(self, axis_id, *args):
         if axis_id not in self._all_axis_ids:
@@ -479,6 +524,17 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
         needs to be [[0, 2], [0, 2, 4]].
         """
 
+    @property
+    def has_constant_step(self):
+        return (
+            self.subaxis is None
+            or all(pt.has_constant_step and not pt.is_ragged for pt in self.subaxis.parts)
+        )
+
+    @property
+    def is_ragged(self):
+        return isinstance(self.count, MultiArray)
+
     # deprecated alias
     @property
     def permutation(self):
@@ -498,7 +554,7 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
         else:
             return extent
 
-    def find_integer_count(self, indices):
+    def find_integer_count(self, indices=PrettyTuple()):
         if isinstance(self.count, MultiArray):
             return self.count.get_value(indices)
         else:
@@ -993,7 +1049,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         while axis:
             assert axis.nparts == 1
 
-            layout = axis.part.layout
+            layout = axis.part.layout_fn
             if isinstance(layout, MultiArray):
                 offset += layout.get_value(indices[:depth+1])
             else:

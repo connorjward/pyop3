@@ -177,6 +177,8 @@ class LoopyKernelBuilder:
             for typed_idx in multi_idx:
                 loop_index_name = self._namer.next("i")
                 self._loop_index_names[typed_idx] = loop_index_name
+
+                # TODO handle ragged extents
                 domain_str = f"{{ [{loop_index_name}]: 0 <= {loop_index_name} < {typed_idx.iset.size} }}"
                 self.domains.append(domain_str)
                 new_loop_index_names.append(loop_index_name)
@@ -317,7 +319,7 @@ class LoopyKernelBuilder:
         stmts = []
         if axis.nparts == 1: # if statement not needed
 
-            if axis.part.count > 1:  # do not emit a statement if the loop isn't needed
+            if isinstance(axis.part.count, numbers.Integral) and axis.part.count > 1:  # do not emit a statement if the loop isn't needed
                 new_stmts, subdeps = self.emit_layout_insns(
                     axis.part.layout_fn,
                     offset_var_name,
