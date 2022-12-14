@@ -139,7 +139,7 @@ class LoopyKernelBuilder:
             name="mykernel",
         )
         tu = lp.merge((translation_unit, *self.subkernels))
-        # import pdb; pdb.set_trace()
+        import pdb; pdb.set_trace()
         return tu.with_entrypoints("mykernel")
 
     @functools.singledispatchmethod
@@ -176,7 +176,7 @@ class LoopyKernelBuilder:
                 self._loop_index_names[typed_idx] = loop_index_name
 
                 # import pdb; pdb.set_trace()
-                extent = self.register_extent(typed_idx.iset.size, multi_idx, i)
+                extent = self.register_extent(typed_idx.iset.size, multi_idx, i-1)
                 domain_str = f"{{ [{loop_index_name}]: 0 <= {loop_index_name} < {extent} }}"
                 self.domains.append(domain_str)
 
@@ -401,22 +401,19 @@ class LoopyKernelBuilder:
 
         # TODO singledispatch!
         if isinstance(layout_fn, IndirectLayoutFunction):
-            # TODO I want this to be more generic. Provide a list of output arguments
-            # and inputs and return a series of statements plus data to register
-            # TODO This should be much more generic. the layout function should accept all valid indices
-
-            # FIXME will not work for ragged layouts! need to index the thing
-            iname = useable_inames[-1]
+            # import pdb; pdb.set_trace()
+            multi_idx = MultiIndex(self._within_typed_indices)
+            layout_var = self.register_scalar_assignment(layout_fn.data, multi_idx, depth)
 
             # generate the instructions
             stmts = [
-                f"{offset_var} = {offset_var} + {layout_fn.data.name}[{iname}] "
+                f"{offset_var} = {offset_var} + {layout_var} "
                 f"{{{inames_attr},dep={':'.join(dep for dep in depends_on)},id={insn_id}}}"
             ]
 
             # register the data
-            layout_arg = lp.GlobalArg(layout_fn.data.name, np.uintp, (None,), is_input=True, is_output=False)
-            self._tensor_data[layout_fn.data.name] = layout_arg
+            # layout_arg = lp.GlobalArg(layout_fn.data.name, np.uintp, (None,), is_input=True, is_output=False)
+            # self._tensor_data[layout_fn.data.name] = layout_arg
         else:
             if not isinstance(layout_fn, AffineLayoutFunction):
                 try:
@@ -560,6 +557,7 @@ class LoopyKernelBuilder:
                     indexed_loop_index_name = self._loop_index_names[typed_idx]
                     unindexed_loop_index_name = self._loop_index_names[typed_idx]
                 else:
+                    import pdb; pdb.set_trace()
                     # register a new domain
                     # TODO handle when extent is ragged
                     loop_index_name = self._namer.next("i")
@@ -743,41 +741,46 @@ class LoopyKernelBuilder:
                 # is a simplification.
                 return self.extents[extent.name]
             except KeyError:
-                temp_name = self._namer.next("n")
-                # need to create a scalar multi-axis with the same depth
-                tempid = "mytempid" + str(0)
-                tempaxis = MultiAxis(AxisPart(1, id=tempid))
-                oldtempid = tempid
-
-                for d in range(1, extent.depth):
-                    tempid = "mytempid" + str(d)
-                    tempaxis = tempaxis.add_subaxis(oldtempid, MultiAxis(AxisPart(1, id=tempid)))
-                    oldtempid = tempid
-
-                temp = MultiArray.new(
-                    tempaxis.set_up(),
-                    name=temp_name,
-                    dtype=np.int32,
-                )
-
-                # make sure that the RHS reduces down to a scalar (but skip the last entry)
-                # this nasty slice makes sure that I am dropping all indices *below* the
-                # current one and only taking as many as needed
-                newidxs = MultiIndexCollection([
-                    MultiIndex([
-                        *multi_idx.typed_indices[:depth][-extent.depth:]
-                    ])
-                ])
-                extent = extent[[newidxs]]
-
-                # import pdb; pdb.set_trace()
-
-                insn = tlang.Read(extent, temp)
-                self._make_instruction_context(insn, None, scalar=True)
-
-                return self.extents.setdefault(extent.name, pym.var(temp_name))
+                temp_var = self.register_scalar_assignment(extent, multi_idx, depth)
+                return self.extents.setdefault(extent.name, temp_var)
         else:
             return extent
+
+    def register_scalar_assignment(self, array, multi_idx, depth):
+        # import pdb; pdb.set_trace()
+        temp_name = self._namer.next("n")
+        # need to create a scalar multi-axis with the same depth
+        tempid = "mytempid" + str(0)
+        tempaxis = MultiAxis([AxisPart(1, id=tempid)])
+        oldtempid = tempid
+
+        for d in range(1, array.depth):
+            tempid = "mytempid" + str(d)
+            tempaxis = tempaxis.add_subaxis(oldtempid, MultiAxis([AxisPart(1, id=tempid)], parent=tempaxis.set_up()))
+            oldtempid = tempid
+
+        temp = MultiArray.new(
+            tempaxis.set_up(),
+            name=temp_name,
+            dtype=np.int32,
+        )
+
+        # make sure that the RHS reduces down to a scalar (but skip the last entry)
+        # this nasty slice makes sure that I am dropping all indices *below* the
+        # current one and only taking as many as needed
+        newidxs = MultiIndexCollection([
+            MultiIndex([
+                *multi_idx.typed_indices[:depth+1][-array.depth:]
+            ])
+        ])
+        array = array[[newidxs]]
+
+        # import pdb; pdb.set_trace()
+
+        insn = tlang.Read(array, temp)
+        self._make_instruction_context(insn, None, scalar=True)
+
+        return pym.var(temp_name)
 
     # I don't like needing the tensor here..  maybe I could attach the offset to the index?
     # using from_dim

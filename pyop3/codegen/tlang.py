@@ -164,13 +164,14 @@ class MultiArrayLangKernelBuilder:
                 temp_axis_part_id = self.name_generator.next("mypart")
                 if not is_loop_index:
                     temp_subaxis  = tensors.MultiAxis(
-                        tensors.AxisPart(
+                        [AxisPart(
                             typed_idx.iset.size,
                             id=temp_axis_part_id
-                        )
+                        )],
+                        # parent=temp
                     )
                 else:
-                    temp_subaxis  = tensors.MultiAxis(tensors.AxisPart(1, id=temp_axis_part_id))
+                    temp_subaxis  = tensors.MultiAxis([AxisPart(1, id=temp_axis_part_id)])
 
                 temp_axis_part = temp_axis_part.add_subaxis(old_temp_axis_part_id, temp_subaxis)
                 old_temp_axis_part_id = temp_axis_part_id

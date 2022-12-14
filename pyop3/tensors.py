@@ -40,15 +40,16 @@ def compute_offsets(sizes):
     return np.concatenate([[0], np.cumsum(sizes)[:-1]], dtype=np.int32)
 
 
-class AbstractMultiAxis(pytools.ImmutableRecord):
-    fields = {"parts", "id"}
+class MultiAxis(pytools.ImmutableRecord):
+    fields = {"parts", "id", "parent", "is_set_up"}
 
     id_generator = NameGenerator("ax")
 
-    def __init__(self, parts=(), *, id=None):
-        parts = tuple(self._parse_part(pt) for pt in as_tuple(parts))
-        self.parts = parts
+    def __init__(self, parts, *, id=None, parent=None, is_set_up=False):
+        self.parts = tuple(parts)
         self.id = id or self.id_generator.next()
+        self.parent = parent
+        self.is_set_up = is_set_up
         super().__init__()
 
     @property
@@ -114,13 +115,6 @@ class AbstractMultiAxis(pytools.ImmutableRecord):
             raise RuntimeError()
         return sum(pt.count for pt in self.parts)
 
-
-
-# TODO: I think it's terribly inefficient to enforce immutability - stick to mutable then
-# 'prepared' abstraction.
-# But what about reusing axes? not sure that that is really a thing, and if so would most
-# likely only be for IDs.
-class MultiAxis(AbstractMultiAxis):
     # TODO ultimately remove this as it leads to duplication of data
     layout_namer = NameGenerator("layout")
 
@@ -136,9 +130,11 @@ class MultiAxis(AbstractMultiAxis):
 
         # if is_layout then we know that data and layout are the same thing (avoids recursion)
         if is_layout:
-            return PreparedMultiAxis(self.parts, id=self.id)
+            raise Exception("shouldnt touch")
+            return PreparedMultiAxis(parts, id=self.id)
 
         # 1. set up inner axes
+        # this shouldn't be a thing any more
         subaxes = tuple(pt.subaxis.set_up(depth=depth+1) if pt.subaxis else None for pt in self.parts)
 
         # 2. determine part layouts
@@ -216,22 +212,33 @@ class MultiAxis(AbstractMultiAxis):
         # the layout functions have exactly the same shape as the data they act on so
         # we can reuse the count axes
         new_axis_parts = []
-        for i, (pt, subaxis, layout_fn) in enumerate(checked_zip(self.parts, subaxes, layout_fn_per_part)):
-            if isinstance(layout_fn, np.ndarray):
+        for i, (pt, subaxis, layout_fn_data) in enumerate(checked_zip(self.parts, subaxes, layout_fn_per_part)):
+            # import pdb; pdb.set_trace()
+            if isinstance(layout_fn_data, np.ndarray):
+                # the trick here is to drop the subaxes as they don't matter to the layout
+                # if isinstance(pt.count, numbers.Integral):
+                #     print("A")
+                #     axis = MultiAxis(AxisPart(pt.count)).as_layout()
+                # else:
+                #     print("B")
+                #     axis = MultiAxis(AxisPart(pt.count, max_count=pt.max_count)).as_layout()
+                    # axis = pt.count.axes.as_layout()
                 layout_fn = IndirectLayoutFunction(MultiArray(
-                    PreparedMultiAxis(
-                        PreparedAxisPart(pt.count, is_layout=True, max_count=pt.max_count)
-                    ),
-                    data=layout_fn,
-                    dtype=layout_fn.dtype,
+                    subaxis.parent,
+                    data=layout_fn_data,
+                    dtype=layout_fn_data.dtype,
                     # for now give a totally unique name
                     # name=f"{self.id}_layout{depth}_{i}",
                     name=self.layout_namer.next(),
                 ))
+                assert subaxis.parent.calc_size() == len(layout_fn_data)
+            else:
+                layout_fn = layout_fn_data
 
-            new_axis_part = PreparedAxisPart(pt.count, subaxis, layout_fn=layout_fn, max_count=pt.max_count)
+            # new_axis_part = PreparedAxisPart(pt.count, subaxis, layout_fn=layout_fn, max_count=pt.max_count)
+            new_axis_part = pt.copy(layout_fn=layout_fn, subaxis=subaxis)
             new_axis_parts.append(new_axis_part)
-        return PreparedMultiAxis(new_axis_parts, id=self.id)
+        return self.copy(parts=new_axis_parts, is_set_up=True)
 
     def set_up_inner(self, count_axis, subaxes, indices=PrettyTuple()):
         """Should return a nested list of multiaxes, one per outer part
@@ -296,6 +303,17 @@ class MultiAxis(AbstractMultiAxis):
             new_layouts.append(new_layout)
 
         return new_layouts
+
+    def drop_last(self):
+        """Remove the last subaxis"""
+        if not self.part.subaxis:
+            return None
+        else:
+            return self.copy(parts=[self.part.copy(subaxis=self.part.subaxis.drop_last())])
+
+    def as_layout(self):
+        new_parts = tuple(pt.as_layout() for pt in self.parts)
+        return self.copy(parts=new_parts)
 
     def set_up_terminal(self, subaxes, indices, depth):
         if any(pt.permutation is not None for pt in self.parts):
@@ -468,10 +486,6 @@ class MultiAxis(AbstractMultiAxis):
             return MultiAxis(*args)
 
 
-class PreparedMultiAxis(AbstractMultiAxis):
-    """This class exists so we can enforce valid state by design. Layout functions do not
-    exist for MultiAxis objects and equally PreparedMultiAxis objects prohibit modification.
-    """
     @staticmethod
     def _parse_part(*args, **kwargs):
         if len(args) == 1 and isinstance(args[0], PreparedAxisPart):
@@ -486,11 +500,13 @@ class PreparedMultiAxis(AbstractMultiAxis):
         else:
             return PreparedMultiAxis(*args)
 
+PreparedMultiAxis = MultiAxis
+
 
 class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
-    fields = {"count", "subaxis", "numbering", "id", "max_count"}
+    fields = {"count", "subaxis", "numbering", "id", "max_count", "is_layout", "layout_fn"}
 
-    def __init__(self, count, subaxis=None, *, numbering=None, id=None, max_count=None):
+    def __init__(self, count, subaxis=None, *, numbering=None, id=None, max_count=None, is_layout=False, layout_fn=None):
         if isinstance(count, numbers.Integral):
             assert not max_count or max_count == count
             max_count = count
@@ -503,6 +519,8 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
         self.numbering = numbering
         self.id = id
         self.max_count = max_count
+        self.is_layout = is_layout
+        self.layout_fn = layout_fn
         """
         The permutation is a bit tricky. We need to be able to interleave axis parts
         so permuting 2 parts might give axis1 the permutation [0, 2, 4] and axis2
@@ -522,6 +540,10 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
             self.subaxis is None
             or all(pt.has_constant_step and not pt.is_ragged for pt in self.subaxis.parts)
         )
+
+    def as_layout(self):
+        new_subaxis = self.subaxis.as_layout() if self.subaxis else None
+        return self.copy(is_layout=True, layout_fn=None, subaxis=new_subaxis)
 
     @property
     def is_ragged(self):
@@ -571,22 +593,9 @@ class AxisPart(AbstractAxisPart):
             return self.copy(subaxis=self.subaxis.add_subaxis(part_id, subaxis))
 
 
-class PreparedAxisPart(AbstractAxisPart):
-    fields = AbstractAxisPart.fields | {"is_layout", "layout_fn"}
-    def __init__(self, size, subaxis=None, is_layout=False, layout_fn=None, **kwargs):
-        if layout_fn and not isinstance(layout_fn, LayoutFunction):
-            raise TypeError
+PreparedAxisPart = AxisPart
 
-        if subaxis:
-            subaxis = as_prepared_multiaxis(subaxis)
-        super().__init__(size, subaxis, **kwargs)
 
-        if is_layout and layout_fn:
-            raise ValueError("layout_fn should not exist if the axis part itself describes "
-                    "a layout")
-
-        self.is_layout = is_layout
-        self.layout_fn = layout_fn
 
 
 # not used

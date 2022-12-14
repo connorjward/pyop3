@@ -480,20 +480,20 @@ def test_compute_double_loop_ragged():
 
 
 def test_doubly_ragged():
-    ax1 = MultiAxis(AxisPart(3, id="ax1"))
+    ax1 = MultiAxis([AxisPart(3, id="ax1")]).set_up()
     nnz1 = MultiArray.new(
-        ax1.set_up(), name="nnz1", dtype=np.int32, max_value=3,
+        ax1, name="nnz1", dtype=np.int32, max_value=3,
         data = np.array([3, 0, 2], dtype=np.int32)
     )
 
-    ax2 = ax1.add_subaxis("ax1", MultiAxis(AxisPart(nnz1, id="ax2", max_count=3)))
+    ax2 = ax1.add_subaxis("ax1", MultiAxis([AxisPart(nnz1, id="ax2", max_count=3)], parent=ax1)).set_up()
     nnz2 = MultiArray.new(
-        ax2.set_up(), name="nnz2", dtype=np.int32, max_value=5,
+        ax2, name="nnz2", dtype=np.int32, max_value=5,
         data = np.array([1, 0, 5, 2, 3], dtype=np.int32)
     )
 
 
-    ax3 = ax2.add_subaxis("ax2", MultiAxis(AxisPart(nnz2, max_count=5))).set_up()
+    ax3 = ax2.add_subaxis("ax2", MultiAxis([AxisPart(nnz2, max_count=5)], parent=ax2)).set_up()
     dat1 = MultiArray.new(
         ax3, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64
     )
@@ -523,16 +523,18 @@ def test_doubly_ragged():
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
 
-    hsh = md5(code.encode())
-    basename = hsh.hexdigest()
-    cachedir = "mycache"
-    dirpart, basename = basename[:2], basename[2:]
-    cachedir = os.path.join(cachedir, dirpart)
-    soname = os.path.join(cachedir, "%s.so" % basename)
-    print(soname)
-    dll = ctypes.CDLL(soname)
+    import pdb; pdb.set_trace()
 
-    # dll = compilemythings(code)
+    # hsh = md5(code.encode())
+    # basename = hsh.hexdigest()
+    # cachedir = "mycache"
+    # dirpart, basename = basename[:2], basename[2:]
+    # cachedir = os.path.join(cachedir, dirpart)
+    # soname = os.path.join(cachedir, "%s.so" % basename)
+    # print(soname)
+    # dll = ctypes.CDLL(soname)
+
+    dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
     layout0 = nnz2.axes.part.layout_fn.data
@@ -771,7 +773,6 @@ def test_permuted_ragged_permuted():
     assert all(dat2.data == dat1.data + 1)
 
 
-@pytest.mark.skip
 def test_permuted_inner_and_ragged():
     axes = (
         MultiAxis(AxisPart(2, id="ax1"))
