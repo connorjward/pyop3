@@ -566,9 +566,25 @@ def test_doubly_ragged():
 ### Assume broken below here
 
 
+def test_interleaved_ragged():
+    """Two data layout types are possible: constant or consistent-ragged.
 
+    The latter means that any ragged bits inside *must* obey all of the shape stuff outside of it.
 
+    For instance it doesn't make sense to have 3 -> [1, 2, 2, 3] so neither does it
+    make sense to have 2 -> [1, 2] -> [2, 3] (instead you want [[2], [3, 1]] or something).
 
+    Therefore this test makes sure that we can have
+    
+    2 -> [1, 2] -> 2 -> [[[a, b]], [[c, d], [e, f]]]
+    """
+    axes = (
+        MultiAxis([AxisPart(3, id="p1")])
+        .add_subaxis("p1", MultiAxis([AxisPart([1, 3, 2], id="p2")))  # ragged
+        .add_subaxis("p2", MultiAxis([AxisPart(2, id="p3")))  # not ragged
+        .add_subaxis("p3", MultiAxis([AxisPart([[[1, 2]], [[2, 1], [1, 0], [0, 1]], [[2, 3], [3, 1]]])))  # ragged
+    )
+    raise NotImplementedError
 
 def test_ragged_inside_two_standard_loops():
     ax1 = MultiAxis(AxisPart(2, id="ax1"))
