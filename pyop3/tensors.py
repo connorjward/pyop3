@@ -166,6 +166,7 @@ class MultiAxis(pytools.ImmutableRecord):
         # above since otherwise they wouldn't be adjacent in memory.
 
         # FIXME not a sufficient test - could probably wrap into set_up_inner
+        # HERE IT IS!!!
         if strictly_all(isinstance(pt.count, numbers.Integral) for pt in self.parts):
         # if strictly_all(pt.has_constant_step for pt in self.parts):
             # import pdb; pdb.set_trace()
@@ -223,15 +224,19 @@ class MultiAxis(pytools.ImmutableRecord):
                 #     print("B")
                 #     axis = MultiAxis(AxisPart(pt.count, max_count=pt.max_count)).as_layout()
                     # axis = pt.count.axes.as_layout()
-                layout_fn = IndirectLayoutFunction(MultiArray(
-                    subaxis.parent,
-                    data=layout_fn_data,
-                    dtype=layout_fn_data.dtype,
-                    # for now give a totally unique name
-                    # name=f"{self.id}_layout{depth}_{i}",
-                    name=self.layout_namer.next(),
-                ))
-                assert subaxis.parent.calc_size() == len(layout_fn_data)
+                if subaxis:
+                    assert subaxis.parent.calc_size() == len(layout_fn_data)
+                    layout_fn = IndirectLayoutFunction(MultiArray(
+                        subaxis.parent,
+                        data=layout_fn_data,
+                        dtype=layout_fn_data.dtype,
+                        # for now give a totally unique name
+                        # name=f"{self.id}_layout{depth}_{i}",
+                        name=self.layout_namer.next(),
+                    ))
+                else:
+                    # this happens if we permute and so there is no parent
+                    layout_fn = AffineLayoutFunction(1)
             else:
                 layout_fn = layout_fn_data
 

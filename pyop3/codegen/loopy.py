@@ -139,7 +139,7 @@ class LoopyKernelBuilder:
             name="mykernel",
         )
         tu = lp.merge((translation_unit, *self.subkernels))
-        import pdb; pdb.set_trace()
+        # import pdb; pdb.set_trace()
         return tu.with_entrypoints("mykernel")
 
     @functools.singledispatchmethod
@@ -557,7 +557,7 @@ class LoopyKernelBuilder:
                     indexed_loop_index_name = self._loop_index_names[typed_idx]
                     unindexed_loop_index_name = self._loop_index_names[typed_idx]
                 else:
-                    import pdb; pdb.set_trace()
+                    # import pdb; pdb.set_trace()
                     # register a new domain
                     # TODO handle when extent is ragged
                     loop_index_name = self._namer.next("i")

@@ -94,7 +94,7 @@ Compile errors in %s""" % (e.cmd, e.returncode, logfile, errfile))
 
 
 def test_read_single_dim():
-    axes = MultiAxis(AxisPart(10)).set_up()
+    axes = MultiAxis([AxisPart(10)]).set_up()
     dat1 = MultiArray.new(axes, name="dat1", data=np.arange(10, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
 
@@ -137,8 +137,8 @@ def test_read_single_dim():
 
 
 def test_compute_double_loop():
-    axes = MultiAxis(AxisPart(10, id="ax1"))
-    axes = axes.add_subaxis("ax1", MultiAxis(AxisPart(3))).set_up()
+    axes = MultiAxis([AxisPart(10, id="ax1")])
+    axes = axes.add_subaxis("ax1", MultiAxis([AxisPart(3)])).set_up()
 
     dat1 = MultiArray.new(
         axes, name="dat1", data=np.arange(30, dtype=np.float64), dtype=np.float64
@@ -271,14 +271,15 @@ def test_compute_double_loop_scalar():
 
 
 def test_compute_double_loop_permuted():
-    axes = MultiAxis(AxisPart(6, id="sax1", numbering=np.array([3, 2, 5, 0, 4, 1])))
-    axes = axes.add_subaxis("sax1", MultiAxis([AxisPart(3)]))
-    axes = axes.set_up()
+    ax1 = MultiAxis([
+        AxisPart(6, id="ax1", numbering=np.array([3, 2, 5, 0, 4, 1]))
+    ]).set_up()
+    ax2 = ax1.add_subaxis("ax1", MultiAxis([AxisPart(3)], parent=ax1)).set_up()
 
     dat1 = MultiArray.new(
-            axes, name="dat1", data=np.arange(18, dtype=np.float64), dtype=np.float64)
+            ax2, name="dat1", data=np.arange(18, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(
-            axes, name="dat2", data=np.zeros(18, dtype=np.float64), dtype=np.float64)
+            ax2, name="dat2", data=np.zeros(18, dtype=np.float64), dtype=np.float64)
 
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 3 }",
@@ -311,14 +312,12 @@ def test_compute_double_loop_permuted():
 
 
 def test_permuted_twice():
-    axes = (
-        MultiAxis(AxisPart(3, id="ax1", numbering=[2, 1, 0]))
-        .add_subaxis("ax1", MultiAxis(AxisPart(3, id="ax2", numbering=[2, 0, 1])))
-        .add_subaxis("ax2", MultiAxis(AxisPart(2)))
-    ).set_up()
+    ax1 = MultiAxis([AxisPart(3, id="ax1", numbering=[2, 1, 0])]).set_up()
+    ax2 = ax1.add_subaxis("ax1", MultiAxis([AxisPart(3, id="ax2", numbering=[2, 0, 1])], parent=ax1)).set_up()
+    ax3 = ax2.add_subaxis("ax2", MultiAxis([AxisPart(2)], parent=ax2)).set_up()
 
-    dat1 = MultiArray.new(axes, name="dat1", data=np.arange(18, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(18, dtype=np.float64), dtype=np.float64)
+    dat1 = MultiArray.new(ax3, name="dat1", data=np.arange(18, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray.new(ax3, name="dat2", data=np.zeros(18, dtype=np.float64), dtype=np.float64)
 
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 2 }",
@@ -353,14 +352,16 @@ def test_permuted_twice():
 
 
 def test_somewhat_permuted():
-    axes = (
-        MultiAxis(AxisPart(2, id="ax1"))
-        .add_subaxis("ax1", MultiAxis(AxisPart(3, id="ax2", numbering=[2, 0, 1])))
-        .add_subaxis("ax2", 2)
+    ax1 = MultiAxis([AxisPart(2, id="ax1")]).set_up()
+    ax2 = ax1.add_subaxis("ax1",
+        MultiAxis([AxisPart(3, id="ax2", numbering=[2, 0, 1])], parent=ax1)
+    ).set_up()
+    ax3 = ax2.add_subaxis("ax2",
+        MultiAxis([AxisPart(2)], parent=ax2)
     ).set_up()
 
-    dat1 = MultiArray.new(axes, name="dat1", data=np.arange(12, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(12, dtype=np.float64), dtype=np.float64)
+    dat1 = MultiArray.new(ax3, name="dat1", data=np.arange(12, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray.new(ax3, name="dat2", data=np.zeros(12, dtype=np.float64), dtype=np.float64)
 
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 2 }",
@@ -394,13 +395,13 @@ def test_somewhat_permuted():
 
 
 def test_compute_double_loop_permuted_mixed():
+    axes = MultiAxis([
+        AxisPart(4, id="ax1", numbering=[4, 6, 2, 0]),
+        AxisPart(3, id="ax2", numbering=[5, 3, 1]),
+    ]).set_up()
     axes = (
-        MultiAxis([
-            AxisPart(4, id="ax1", numbering=[4, 6, 2, 0]),
-            AxisPart(3, id="ax2", numbering=[5, 3, 1]),
-        ])
-        .add_subaxis("ax1", 1)
-        .add_subaxis("ax2", 2)
+        axes.add_subaxis("ax1", MultiAxis([AxisPart(1)], parent=axes))
+        .add_subaxis("ax2", MultiAxis([AxisPart(2)], parent=axes))
     ).set_up()
     dat1 = MultiArray.new(axes, name="dat1", data=np.arange(10, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
@@ -438,15 +439,17 @@ def test_compute_double_loop_permuted_mixed():
 
 
 def test_compute_double_loop_ragged():
-    axes1 = MultiAxis(AxisPart(5, id="ax1"))
+    ax1 = MultiAxis([AxisPart(5, id="ax1")]).set_up()
+
     nnz = MultiArray.new(
-        axes1.set_up(), name="nnz", dtype=np.int32, data=np.array([3, 2, 1, 3, 2], dtype=np.int32)
+        ax1, name="nnz", dtype=np.int32, data=np.array([3, 2, 1, 3, 2], dtype=np.int32)
     )
 
-    axes2 = axes1.add_subaxis("ax1", AxisPart(nnz, max_count=3)).set_up()
+    ax2 = ax1.add_subaxis("ax1", MultiAxis([AxisPart(nnz, max_count=3)], parent=ax1))
+    ax2 = ax2.set_up()
 
-    dat1 = MultiArray.new(axes2, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(axes2, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
+    dat1 = MultiArray.new(ax2, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray.new(ax2, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
 
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
@@ -523,7 +526,7 @@ def test_doubly_ragged():
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
 
-    import pdb; pdb.set_trace()
+    # import pdb; pdb.set_trace()
 
     # hsh = md5(code.encode())
     # basename = hsh.hexdigest()
@@ -549,6 +552,17 @@ def test_doubly_ragged():
     fn(*(d.ctypes.data for d in args))
 
     assert all(dat2.data == dat1.data + 1)
+
+
+
+
+
+
+### Assume broken below here
+
+
+
+
 
 
 def test_ragged_inside_two_standard_loops():
@@ -820,8 +834,8 @@ def test_permuted_inner_and_ragged():
 
 def test_permuted_inner():
     axes = (
-        MultiAxis(AxisPart(4, id="ax1"))
-        .add_subaxis("ax1", MultiAxis(3, permutation=(2, 0, 1)))
+        MultiAxis([AxisPart(4, id="ax1")])
+        .add_subaxis("ax1", MultiAxis([AxisPart(3)], permutation=(2, 0, 1)))
     )
 
     dat1 = MultiArray.new(axes, name="dat1", data=np.arange(12, dtype=np.float64), dtype=np.float64)
