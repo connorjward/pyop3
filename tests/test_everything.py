@@ -274,7 +274,7 @@ def test_compute_double_loop_permuted():
     ax1 = MultiAxis([
         AxisPart(6, id="ax1", numbering=np.array([3, 2, 5, 0, 4, 1]))
     ]).set_up()
-    ax2 = ax1.add_subaxis("ax1", MultiAxis([AxisPart(3)], parent=ax1)).set_up()
+    ax2 = ax1.add_subaxis("ax1", MultiAxis([AxisPart(3)], parent=ax1.without_numbering().set_up())).set_up()
 
     dat1 = MultiArray.new(
             ax2, name="dat1", data=np.arange(18, dtype=np.float64), dtype=np.float64)
@@ -313,8 +313,8 @@ def test_compute_double_loop_permuted():
 
 def test_permuted_twice():
     ax1 = MultiAxis([AxisPart(3, id="ax1", numbering=[2, 1, 0])]).set_up()
-    ax2 = ax1.add_subaxis("ax1", MultiAxis([AxisPart(3, id="ax2", numbering=[2, 0, 1])], parent=ax1)).set_up()
-    ax3 = ax2.add_subaxis("ax2", MultiAxis([AxisPart(2)], parent=ax2)).set_up()
+    ax2 = ax1.add_subaxis("ax1", MultiAxis([AxisPart(3, id="ax2", numbering=[2, 0, 1])], parent=ax1.without_numbering().set_up())).set_up()
+    ax3 = ax2.add_subaxis("ax2", MultiAxis([AxisPart(2)], parent=ax2.without_numbering().set_up())).set_up()
 
     dat1 = MultiArray.new(ax3, name="dat1", data=np.arange(18, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(ax3, name="dat2", data=np.zeros(18, dtype=np.float64), dtype=np.float64)
@@ -342,10 +342,9 @@ def test_permuted_twice():
     fn = getattr(dll, "mykernel")
 
     sec0 = dat1.dim.part.layout_fn.data
-    sec00 = dat1.dim.part.layout_fn.data.dim.part.layout_fn.data
     sec1 = dat1.dim.part.subaxis.part.layout_fn.data
 
-    args = [sec00.data, sec0.data, sec1.data, dat1.data, dat2.data]
+    args = [sec0.data, sec1.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
     fn(*(d.ctypes.data for d in args))
 
@@ -395,14 +394,19 @@ def test_somewhat_permuted():
     assert all(dat2.data == dat1.data)
 
 
+"""This currently fails because we should be identifying indices by an ID, not the index.
+The layout function for the permuted thing doesn't know what index to use because it is not
+mixed itself."""
 def test_compute_double_loop_permuted_mixed():
     axes = MultiAxis([
         AxisPart(4, id="ax1", numbering=[4, 6, 2, 0]),
         AxisPart(3, id="ax2", numbering=[5, 3, 1]),
     ]).set_up()
+
+    notnumbered = axes.without_numbering().set_up()
     axes = (
-        axes.add_subaxis("ax1", MultiAxis([AxisPart(1)], parent=axes))
-        .add_subaxis("ax2", MultiAxis([AxisPart(2)], parent=axes))
+        axes.add_subaxis("ax1", MultiAxis([AxisPart(1)], parent=notnumbered))
+        .add_subaxis("ax2", MultiAxis([AxisPart(2)], parent=notnumbered))
     ).set_up()
     dat1 = MultiArray.new(axes, name="dat1", data=np.arange(10, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)

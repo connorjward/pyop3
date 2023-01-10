@@ -337,6 +337,9 @@ class MultiAxis(pytools.ImmutableRecord):
         else:
             return self.copy(parts=[self.part.copy(subaxis=self.part.subaxis.drop_last())])
 
+    def without_numbering(self):
+        return self.copy(parts=[pt.without_numbering() for pt in self.parts])
+
     def as_layout(self):
         new_parts = tuple(pt.as_layout() for pt in self.parts)
         return self.copy(parts=new_parts)
@@ -566,6 +569,12 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
             self.subaxis is None
             or all(pt.has_constant_step and not pt.is_ragged for pt in self.subaxis.parts)
         )
+
+    def without_numbering(self):
+        if self.subaxis:
+            return self.copy(numbering=None, subaxis=self.subaxis.without_numbering())
+        else:
+            return self.copy(numbering=None)
 
     def as_layout(self):
         new_subaxis = self.subaxis.as_layout() if self.subaxis else None
