@@ -167,6 +167,15 @@ class MultiAxis(pytools.ImmutableRecord):
 
         # FIXME not a sufficient test - could probably wrap into set_up_inner
         # HERE IT IS!!!
+
+        """debug notes
+
+        the problem here is that I currently determine whether or not to construct a
+        layout tree depending on whether or not the counts are also a tree. This breaks
+        for layered permutation since the counts are known constant but we still need to
+        form a layout tree - or do we??? numbering should be distinct...
+        """
+
         if strictly_all(isinstance(pt.count, numbers.Integral) for pt in self.parts):
         # if strictly_all(pt.has_constant_step for pt in self.parts):
             # import pdb; pdb.set_trace()
@@ -223,9 +232,11 @@ class MultiAxis(pytools.ImmutableRecord):
                 # else:
                 #     print("B")
                 #     axis = MultiAxis(AxisPart(pt.count, max_count=pt.max_count)).as_layout()
-                    # axis = pt.count.axes.as_layout()
-                if subaxis:
-                    assert subaxis.parent.calc_size() == len(layout_fn_data)
+                    # axis =??? pt.count.axes.as_layout()
+
+                # subaxis.parent is basically 'what this axis tree would look like if the
+                # subaxis was not added - it gives us the right size for this layout function
+                if subaxis and subaxis.parent.calc_size() == len(layout_fn_data):
                     layout_fn = IndirectLayoutFunction(MultiArray(
                         subaxis.parent,
                         data=layout_fn_data,
@@ -235,8 +246,18 @@ class MultiAxis(pytools.ImmutableRecord):
                         name=self.layout_namer.next(),
                     ))
                 else:
-                    # this happens if we permute and so there is no parent
-                    layout_fn = AffineLayoutFunction(1)
+                    # if we are not ragged then the data simply needs to match the count
+                    # of the axis part since we are not nesting things
+                    assert len(layout_fn_data) == pt.count
+                    newaxis = MultiAxis([AxisPart(pt.count)]).set_up()
+                    layout_fn = IndirectLayoutFunction(MultiArray(
+                        newaxis,
+                        data=layout_fn_data,
+                        dtype=layout_fn_data.dtype,
+                        # for now give a totally unique name
+                        # name=f"{self.id}_layout{depth}_{i}",
+                        name=self.layout_namer.next(),
+                    ))
             else:
                 layout_fn = layout_fn_data
 

@@ -342,9 +342,10 @@ def test_permuted_twice():
     fn = getattr(dll, "mykernel")
 
     sec0 = dat1.dim.part.layout_fn.data
+    sec00 = dat1.dim.part.layout_fn.data.dim.part.layout_fn.data
     sec1 = dat1.dim.part.subaxis.part.layout_fn.data
 
-    args = [sec0.data, sec1.data, dat1.data, dat2.data]
+    args = [sec00.data, sec0.data, sec1.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
     fn(*(d.ctypes.data for d in args))
 
