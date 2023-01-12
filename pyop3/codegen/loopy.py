@@ -570,7 +570,7 @@ class LoopyKernelBuilder:
 
                 # note that the names must be different for indexed and unindexed as
                 # these variables get transformed by the map etc.
-                indexed_axis = indexed_axis.parts[typed_idx.part].subaxis
+                indexed_axis = indexed_axis.find_part(typed_idx.part_label).subaxis
                 indexed_part_id_name = self._part_id_namer.next()
                 indexed_part_id_names.append(indexed_part_id_name)
                 indexed_loop_index_names.append(indexed_loop_index_name)

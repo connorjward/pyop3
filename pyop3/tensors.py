@@ -15,7 +15,7 @@ import pymbolic as pym
 import pytools
 import pyop3.exprs
 import pyop3.utils
-from pyop3.utils import as_tuple, checked_zip, NameGenerator, unique, PrettyTuple, strictly_all
+from pyop3.utils import as_tuple, checked_zip, NameGenerator, unique, PrettyTuple, strictly_all, has_unique_entries
 
 
 def as_prepared_multiaxis(axis):
@@ -46,6 +46,15 @@ class MultiAxis(pytools.ImmutableRecord):
     id_generator = NameGenerator("ax")
 
     def __init__(self, parts, *, id=None, parent=None, is_set_up=False):
+        # make sure all parts have labels, default to integers if necessary
+        # TODO do in factory function
+        if strictly_all(pt.label is None for pt in parts):
+            # set the label to the index
+            parts = tuple(pt.copy(label=i) for i, pt in enumerate(parts))
+
+        if not has_unique_entries(pt.label for pt in parts):
+            raise ValueError("Axis parts in the same multi-axis must have unique labels")
+
         self.parts = tuple(parts)
         self.id = id or self.id_generator.next()
         self.parent = parent
@@ -60,17 +69,12 @@ class MultiAxis(pytools.ImmutableRecord):
         except ValueError:
             raise RuntimeError
 
-    def find_part(self, part_id):
-        if part_id not in self._all_part_ids:
-            raise ValueError
+    def find_part(self, label):
+        return self._parts_by_label[label]
 
-        for pt in self.parts:
-            if pt.id == part_id:
-                return pt
-
-        for pt in self.parts:
-            if pt.subaxis and part_id in pt.subaxis._all_part_ids:
-                return pt.subaxis.find_part(part_id)
+    @functools.cached_property
+    def _parts_by_label(self):
+        return {part.label: part for part in self.parts}
 
     def find_part_from_indices(self, indices):
         """Traverse axis to find things
@@ -249,7 +253,8 @@ class MultiAxis(pytools.ImmutableRecord):
                     # if we are not ragged then the data simply needs to match the count
                     # of the axis part since we are not nesting things
                     assert len(layout_fn_data) == pt.count
-                    newaxis = MultiAxis([AxisPart(pt.count)]).set_up()
+                    # we need to reuse pt here since we want to retain the right labels
+                    newaxis = MultiAxis([AxisPart(pt.count, label=pt.label)]).set_up()
                     layout_fn = IndirectLayoutFunction(MultiArray(
                         newaxis,
                         data=layout_fn_data,
@@ -449,8 +454,18 @@ class MultiAxis(pytools.ImmutableRecord):
             if part.subaxis:
                 all_ids.extend(part.subaxis._all_axis_ids)
 
-        if len(unique(all_ids)) != len(all_ids):
-            raise RuntimeError("Axis IDs must be unique")
+        if not has_unique_entries(all_ids):
+            # TODO if duplicate entries exist
+            raise NotImplementedError(
+"""
+Need to handle the case where axes have duplicated labels.
+
+This can happen for example with matrices where the inner dimension can also be "cells",
+"edges" etc. To get around this we should require that the label 'path' be specified
+by the user as a tuple. E.g. ("cells", "edges"). We should only allow the syntactic sugar
+of a single label value if that label is unique in the whole tree.
+"""
+            )
         return frozenset(all_ids)
 
     @functools.cached_property
@@ -533,35 +548,37 @@ PreparedMultiAxis = MultiAxis
 
 
 class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
-    fields = {"count", "subaxis", "numbering", "id", "max_count", "is_layout", "layout_fn"}
+    fields = {"count", "subaxis", "numbering", "label", "max_count", "is_layout", "layout_fn"}
 
-    def __init__(self, count, subaxis=None, *, numbering=None, id=None, max_count=None, is_layout=False, layout_fn=None):
+    def __init__(self, count, subaxis=None, *, numbering=None, label=None, id=None, max_count=None, is_layout=False, layout_fn=None):
         if isinstance(count, numbers.Integral):
             assert not max_count or max_count == count
             max_count = count
         else:
             assert max_count is not None
 
+        # id is a deprecated alias for label
+        if id:
+            assert not label
+            label = id
+
+        if not isinstance(label, collections.abc.Hashable):
+            raise ValueError("Provided label must be hashable")
+
         super().__init__()
         self.count = count
         self.subaxis = subaxis
         self.numbering = numbering
-        self.id = id
+        self.label = label
         self.max_count = max_count
         self.is_layout = is_layout
         self.layout_fn = layout_fn
-        """
-        The permutation is a bit tricky. We need to be able to interleave axis parts
-        so permuting 2 parts might give axis1 the permutation [0, 2, 4] and axis2
-        [1, 3]. We can only know that these permutations are valid or not when we set
-        up the multiaxis and find missing or duplicated entries.
-        Also the permutation should in theory be allowed to be a function instead of a table.
 
-        # FIXME
-        However, if the axis part is ragged, then the permutation needs to be different
-        to match the raggedness. E.g. if the axis size is [2, 3] then the permutation
-        needs to be [[0, 2], [0, 2, 4]].
-        """
+    @property
+    def id(self):
+        import warnings
+        warnings.warn("id is deprecated for label", DeprecationWarning)
+        return self.label
 
     @property
     def has_constant_step(self):
@@ -665,14 +682,20 @@ class IndexSet(pytools.ImmutableRecord):
 
 
 class TypedIndex(pytools.ImmutableRecord):
-    fields = {"part", "iset", "id"}
+    fields = {"part_label", "iset", "id"}
 
     _id_generator = NameGenerator(prefix="typed_idx")
 
-    def __init__(self, part: int, iset: IndexSet, id=None):
-        self.part = part
+    def __init__(self, part_label: collections.abc.Hashable, iset: IndexSet, id=None):
+        self.part_label = part_label
         self.iset = iset
         self.id = id or self._id_generator.next()
+
+    @property
+    def part(self):
+        import warnings
+        warnings.warn("use part_label now", DeprecationWarning)
+        return self.part_label
 
 
 class MultiIndex(pytools.ImmutableRecord):

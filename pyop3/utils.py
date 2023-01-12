@@ -76,6 +76,12 @@ def unique(iterable):
     return tuple(unique_items)
 
 
+def has_unique_entries(iterable):
+    # duplicate the iterator in case it can only be iterated over once (e.g. a generator)
+    it1, it2 = itertools.tee(iterable, 2)
+    return len(unique(it1)) == len(list(it2))
+
+
 def is_sequence(item):
     return isinstance(item, collections.abc.Sequence)
 

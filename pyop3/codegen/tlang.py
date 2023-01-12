@@ -157,7 +157,7 @@ class MultiArrayLangKernelBuilder:
             # need to recurse.
             # we need to track this throughout because the types of the typed_idx
             # tells us which bits of the hierarchy are 'below'.
-            current_axis = axis.parts[multi_idx.typed_indices[0].part].subaxis
+            current_axis = axis.find_part(multi_idx.typed_indices[0].part_label).subaxis
 
             # each typed index is a subaxis of the original
             for typed_idx in multi_idx.typed_indices[1:]:
@@ -176,7 +176,7 @@ class MultiArrayLangKernelBuilder:
                 temp_axis_part = temp_axis_part.add_subaxis(old_temp_axis_part_id, temp_subaxis)
                 old_temp_axis_part_id = temp_axis_part_id
 
-                current_axis = current_axis.parts[typed_idx.part].subaxis
+                current_axis = current_axis.find_part(typed_idx.part_label).subaxis
 
             temp_axis_parts.append(temp_axis_part)
             temp_axis_base_ids.append(temp_axis_part_id)
