@@ -313,8 +313,8 @@ def test_compute_double_loop_permuted():
 
 
 def test_permuted_twice():
-    ax1 = MultiAxis([AxisPart(3, label="p1", numbering=[2, 1, 0])]).set_up()
-    ax2 = ax1.add_subaxis("p1", MultiAxis([AxisPart(3, label="p2", numbering=[2, 0, 1])], parent=ax1.without_numbering().set_up())).set_up()
+    ax1 = MultiAxis([AxisPart(3, id="p1", numbering=[2, 1, 0])]).set_up()
+    ax2 = ax1.add_subaxis("p1", MultiAxis([AxisPart(3, id="p2", numbering=[2, 0, 1])], parent=ax1.without_numbering().set_up())).set_up()
     ax3 = ax2.add_subaxis("p2", MultiAxis([AxisPart(2)], parent=ax2.without_numbering().set_up())).set_up()
 
     dat1 = MultiArray.new(ax3, name="dat1", data=np.arange(18, dtype=np.float64), dtype=np.float64)
@@ -332,8 +332,8 @@ def test_permuted_twice():
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
     p = MultiIndexCollection([
         MultiIndex([
-            TypedIndex("p1", IndexSet(3)),
-            TypedIndex("p2", IndexSet(3)),
+            TypedIndex(0, IndexSet(3)),
+            TypedIndex(0, IndexSet(3)),
         ])
     ])
     expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
@@ -376,8 +376,8 @@ def test_somewhat_permuted():
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
     p = MultiIndexCollection([
         MultiIndex([
-            TypedIndex("ax1", IndexSet(2)),
-            TypedIndex("ax2", IndexSet(3)),
+            TypedIndex(0, IndexSet(2)),
+            TypedIndex(0, IndexSet(3)),
         ])
     ])
     expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))

@@ -371,25 +371,32 @@ class LoopyKernelBuilder:
 
         # import pdb; pdb.set_trace()
 
+        insn_id = self._namer.next(insn_prefix)
+        within_inames_attr = f"inames={':'.join(within_inames)}"
+
         # the layout can depend on the inames *outside* of the current axis - not inside
         useable_inames = list(within_inames)[:depth+1]
 
-        insn_id = self._namer.next(insn_prefix)
-        within_inames_attr = f"inames={':'.join(within_inames)}"
+        # multi_idx, = layout_fn.indices.multi_indices  # must be only one for linear things
+        # newdepth = len(multi_idx)
+        # useable_inames = list(within_inames)[:newdepth+1]
+
 
 
         # TODO singledispatch!
         if isinstance(layout_fn, IndirectLayoutFunction):
+
             # import pdb; pdb.set_trace()
-            # multi_idx = MultiIndex(self._within_typed_indices)
-            # FIXME need to track domain stack
-            layout_var = self.register_scalar_assignment(layout_fn.data, depth, domain_stack=useable_inames)
+            # skip the last useable iname for some reason...
+            layout_var = self.register_scalar_assignment(layout_fn.data, depth, domain_stack=useable_inames[:-1])
 
             # generate the instructions
             stmts = [
                 f"{offset_var} = {offset_var} + {layout_var} "
                 f"{{{within_inames_attr},dep={':'.join(dep for dep in depends_on)},id={insn_id}}}"
             ]
+
+
 
             # register the data
             # layout_arg = lp.GlobalArg(layout_fn.data.name, np.uintp, (None,), is_input=True, is_output=False)
