@@ -475,16 +475,13 @@ class LoopyKernelBuilder:
         Something like 'if the index is not a map yield something equal to the iname, if
         it is a map then yield something like j0 = map0[i0, i1] (and generate the right
         instructions).
-
-        Probably a good practice to use datN_jM for these
         """
         # import pdb; pdb.set_trace()
-        # popping
+        # since popping (probably not so) - remove this line?
         inames = inames.copy()
 
         idx, *subidxs = multi_index
 
-        # TODO we don't ever read the part number
         pname = self._namer.next(f"{prefix}_p")
         jname = self._namer.next(f"{prefix}_j")
 
@@ -495,7 +492,16 @@ class LoopyKernelBuilder:
         else:
             iname, *subinames = inames
             # TODO handle step sizes etc here
-            assign_insn = lp.Assignment(
+            part_insn = lp.Assignment(
+                pym.var(pname), idx.part_label,
+                id=self._namer.next(f"{context.id}_"),
+                within_inames=self._get_within_inames(),
+                within_inames_is_final=True,
+                # depends_on=depends_on|frozenset({f"{dep}*" for dep in context.depends_on}),
+                depends_on=frozenset({f"{dep}*" for dep in context.depends_on}),
+                # no_sync_with=no_sync_with,
+            )
+            index_insn = lp.Assignment(
                 pym.var(jname), pym.var(iname),
                 id=self._namer.next(f"{context.id}_"),
                 within_inames=self._get_within_inames(),
@@ -504,7 +510,8 @@ class LoopyKernelBuilder:
                 depends_on=frozenset({f"{dep}*" for dep in context.depends_on}),
                 # no_sync_with=no_sync_with,
             )
-        self.instructions.append(assign_insn)
+        self.instructions.append(part_insn)
+        self.instructions.append(index_insn)
 
         self._temp_kernel_data.extend([
             lp.TemporaryVariable(name, shape=(), dtype=np.uintp)

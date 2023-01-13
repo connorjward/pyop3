@@ -538,7 +538,7 @@ PreparedMultiAxis = MultiAxis
 
 
 class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
-    fields = {"count", "subaxis", "numbering", "label", "max_count", "is_layout", "layout_fn"}
+    fields = {"count", "subaxis", "numbering", "label", "id", "max_count", "is_layout", "layout_fn"}
 
     def __init__(self, count, subaxis=None, *, numbering=None, label=None, id=None, max_count=None, is_layout=False, layout_fn=None):
         if isinstance(count, numbers.Integral):
@@ -546,11 +546,6 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
             max_count = count
         else:
             assert max_count is not None
-
-        # id is a deprecated alias for label
-        if id:
-            assert not label
-            label = id
 
         if not isinstance(label, collections.abc.Hashable):
             raise ValueError("Provided label must be hashable")
@@ -560,15 +555,17 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
         self.subaxis = subaxis
         self.numbering = numbering
         self.label = label
+        self.id = id
         self.max_count = max_count
         self.is_layout = is_layout
         self.layout_fn = layout_fn
 
-    @property
-    def id(self):
-        import warnings
-        warnings.warn("id is deprecated for label", DeprecationWarning)
-        return self.label
+    # not so now - want something internal to index parts (integer)
+    # @property
+    # def id(self):
+    #     import warnings
+    #     warnings.warn("id is deprecated for label", DeprecationWarning)
+    #     return self.label
 
     @property
     def has_constant_step(self):

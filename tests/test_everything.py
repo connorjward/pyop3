@@ -162,7 +162,8 @@ def test_compute_double_loop():
 
     p = MultiIndexCollection([
         MultiIndex([
-            TypedIndex("ax1", IndexSet(10))
+            # TypedIndex("ax1", IndexSet(10))
+            TypedIndex(0, IndexSet(10))
         ])
     ])
     expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
