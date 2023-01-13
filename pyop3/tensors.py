@@ -239,6 +239,7 @@ class MultiAxis(pytools.ImmutableRecord):
                         name=self.layout_namer.next(),
                     ))
                 else:
+                    # import pdb; pdb.set_trace()
                     # if we are not ragged then the data simply needs to match the count
                     # of the axis part since we are not nesting things
                     assert len(layout_fn_data) == pt.count

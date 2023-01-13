@@ -279,7 +279,6 @@ class LoopyKernelBuilder:
 
 
         # need to create and pass within_inames
-        # inames_attr = f"inames={':'.join(self._get_within_inames())}"
         inames_attr = f"inames={':'.join(within_inames)}"
         # import pdb; pdb.set_trace()
 
@@ -288,14 +287,14 @@ class LoopyKernelBuilder:
 
         stmts = [f"{offset_var_name} = 0 {{{inames_attr},id={init_insn_id}}}"]
 
-        new_stmts, subdeps = self.make_offset_expr_inner(offset_var_name, axis, part_names, loop_index_names, inames_attr, depends_on, insn_prefix)
+        new_stmts, subdeps = self.make_offset_expr_inner(offset_var_name, axis, part_names, loop_index_names, within_inames, depends_on, insn_prefix)
         stmts.extend(new_stmts)
         depends_on |= subdeps
         self.instructions.append("\n".join(stmts))
         return offset_var_name, frozenset(depends_on)
 
     def make_offset_expr_inner(self, offset_var_name, axis, part_names,
-            loop_index_names, inames_attr, depends_on, insn_prefix, depth=0):
+            loop_index_names, within_inames, depends_on, insn_prefix, depth=0):
         assert axis.nparts > 0
 
         if not depends_on:
@@ -310,7 +309,7 @@ class LoopyKernelBuilder:
                     axis.part.layout_fn,
                     offset_var_name,
                     loop_index_names,
-                    inames_attr,
+                    within_inames,
                     depends_on.copy(),
                     insn_prefix,
                     depth
@@ -322,7 +321,7 @@ class LoopyKernelBuilder:
             subaxis = axis.part.subaxis
             if subaxis:
                 substmts, moredeps = self.make_offset_expr_inner(offset_var_name,
-                        subaxis, part_names, loop_index_names, inames_attr, depends_on, insn_prefix, depth+1)
+                        subaxis, part_names, loop_index_names, within_inames, depends_on, insn_prefix, depth+1)
                 depends_on |= moredeps
                 stmts.extend(substmts)
         else:
@@ -339,7 +338,7 @@ class LoopyKernelBuilder:
 
                     newstmts, subdeps = self.emit_layout_insns(
                         axis_part.layout_fn,
-                        offset_var_name, loop_index_names, inames_attr,
+                        offset_var_name, loop_index_names, within_inames,
                         depends_on, insn_prefix, depth
                     )
                     stmts += newstmts
@@ -350,7 +349,7 @@ class LoopyKernelBuilder:
                 if subaxis:
                     newstmts, moredeps = self.make_offset_expr_inner(
                         offset_var_name,
-                        subaxis, part_names, loop_index_names, inames_attr,
+                        subaxis, part_names, loop_index_names, within_inames,
                         depends_on, insn_prefix, depth+1
                     )
                     depends_on |= moredeps
@@ -360,33 +359,36 @@ class LoopyKernelBuilder:
         # import pdb; pdb.set_trace()
         return stmts, frozenset(depends_on)
 
-    def emit_layout_insns(self, layout_fn, offset_var, inames, inames_attr, depends_on, insn_prefix, depth):
+    def emit_layout_insns(self, layout_fn, offset_var, loop_index_names, within_inames, depends_on, insn_prefix, depth):
         """
         TODO
         """
         # if layout_fn is None then we skip this part
         # FIXME this probably shouldn't happen
         if not layout_fn:
+            raise Exception("shouldnt hit")
             return [], set()
 
         # import pdb; pdb.set_trace()
 
         # the layout can depend on the inames *outside* of the current axis - not inside
-        useable_inames = inames[:depth+1]
+        useable_inames = list(within_inames)[:depth+1]
 
         insn_id = self._namer.next(insn_prefix)
+        within_inames_attr = f"inames={':'.join(within_inames)}"
+
 
         # TODO singledispatch!
         if isinstance(layout_fn, IndirectLayoutFunction):
             # import pdb; pdb.set_trace()
-            multi_idx = MultiIndex(self._within_typed_indices)
+            # multi_idx = MultiIndex(self._within_typed_indices)
             # FIXME need to track domain stack
-            layout_var = self.register_scalar_assignment(layout_fn.data, multi_idx, depth, domain_stack=NotImplemented)
+            layout_var = self.register_scalar_assignment(layout_fn.data, depth, domain_stack=useable_inames)
 
             # generate the instructions
             stmts = [
                 f"{offset_var} = {offset_var} + {layout_var} "
-                f"{{{inames_attr},dep={':'.join(dep for dep in depends_on)},id={insn_id}}}"
+                f"{{{within_inames_attr},dep={':'.join(dep for dep in depends_on)},id={insn_id}}}"
             ]
 
             # register the data
@@ -411,7 +413,7 @@ class LoopyKernelBuilder:
 
             stmts = [
                 f"{offset_var} = {offset_var} + {iname}*{step} + {start} "
-                f"{{{inames_attr},dep={':'.join(dep for dep in depends_on)},id={insn_id}}}"
+                f"{{{within_inames_attr},dep={':'.join(dep for dep in depends_on)},id={insn_id}}}"
             ]
         return stmts, {insn_id}
 
@@ -430,8 +432,11 @@ class LoopyKernelBuilder:
 
         # handle scalar assignment (for loop bounds)
         if scalar:
-            raise NotImplementedError("tracking lhs/rhs vs temp/tensor")
-            unindexed_offset = None
+            if assignment.lhs == assignment.temporary:
+                loffset = None
+            else:
+                assert assignment.rhs == assignment.temporary
+                roffset = None
 
         if loffset is None:
             lexpr = pym.var(lhs.name)
@@ -559,33 +564,24 @@ class LoopyKernelBuilder:
         # 1. Register the loops and inames
         if not inames:
             inames = self.register_loops(assignment.indices, outer_loop_indices)
-
-        # import pdb; pdb.set_trace()
-
-        """
-        When do we know to use externally defined inames? I don't want to inspect indices if possible - but it's required. We don't loop over all cells, edges and vertices in FEM for example.
-
-        There is this awful interplay between indices and axes that doesn't quite match up.
-        I think that loop_indices (including iname lookup) needs to exist as a distinct thing
-        Only loop constructs produce this sort of behaviour.
-
-        Remember that an indexed thing is linear (and I think that I need to traverse similarly here).
-
-        I absolutely HAVE to know the output types of a map as it tells me what goes beneath
-        and the loop extents. Therefore I need bifurcating trees... (which can be flattened early)
-        Is that right? I have this separation of concerns with layout functions...
-
-        But *indices define loop extents*. Layout functions do not introduce loops. Therefore
-        a multi-part map must be able to split into different index paths.
-        """
+        else:
+            # validate that the number of inames specified is the right number for the
+            # indexed structure provided
+            # e.g. self.check_inames()
+            if any(isinstance(idx, Map) for idx in assignment.indices):
+                raise NotImplementedError("""
+not expected.
+we can only hit this situation with something like map composition where the inames are already
+declared. we just need to traverse properly to check that we have the right number of inames.
+                """)
+            # basic check should otherwise be fine
+            assert len(assignment.indices.typed_indices) == len(inames)
 
         # 2. Generate map code
-        # TODO call for lhs, rhs separately
         lpnames, ljnames = self.generate_index_insns(assignment.indices, inames, assignment.lhs.name, assignment)
         rpnames, rjnames = self.generate_index_insns(assignment.indices, inames, assignment.rhs.name, assignment)
 
         # 3. Generate layout code
-
         loffset, ldeps = self.make_offset_expr(
             assignment.lhs, lpnames, ljnames, assignment.id, assignment.depends_on, inames,
         )
@@ -623,95 +619,16 @@ class LoopyKernelBuilder:
 
         # everything below shouldn't work now...
         raise Exception("shouldn't touch below code")
-        within_loops = copy.deepcopy(within_loops)
-        for lidxs, ridxs in zip(assignment.lhs.indicess, assignment.rhs.indicess):
-            # 1. Create a domain stack if not provided - this means that we can have consistent inames for the LHS and RHS
-            if not domain_stack:
-                domain_stack = self.create_domain_stack(assignment.lhs, assignment.rhs, lidxs, ridxs)
-
-            # 2. generate LHS and RHS expressions (registering domains etc as you go)
-            # The idea is that we are given a consistent stack of domains to share that are consumed
-            # as the indices are traversed. We can then build a map between indices and inames which
-            # we finally process to generate an expression.
-            # import pdb; pdb.set_trace()
-            ldstack = domain_stack.copy()
-            lwithin_loops = self.register_domains(lidxs, ldstack, within_loops)
-            lwithin_loops = truncate_within_loops(lwithin_loops, lidxs)
-            lexpr = self.handle_assignment(assignment.lhs, lidxs, lwithin_loops)
-
-            rdstack = domain_stack.copy()
-            rwithin_loops = self.register_domains(ridxs, rdstack, within_loops)
-            rwithin_loops = truncate_within_loops(rwithin_loops, ridxs)
-            rexpr = self.handle_assignment(assignment.rhs, ridxs, rwithin_loops)
-
-            assert not ldstack and not rdstack
-            domain_stack = ldstack
-
-            lname = pym.var(assignment.lhs.name)
-            if assignment.lhs.shapes != ((),) or not scalar:
-                lhs = pym.subscript(lname, lexpr)
-            else:
-                lhs = lname
-
-            if isinstance(assignment, tlang.Zero):
-                rhs = 0
-            else:
-                rname = pym.var(assignment.rhs.name)
-                if assignment.rhs.shapes != ((),) or not scalar:
-                    rhs = pym.subscript(rname, rexpr)
-                else:
-                    rhs = rname
-
-            # there are no ordering restrictions between assignments to the
-            # same temporary - but this is only valid to declare if multiple insns are used
-            if len(assignment.lhs.indicess) > 1:
-                assert len(assignment.rhs.indicess) > 1
-                no_sync_with = frozenset({(f"{assignment.id}*", "any")})
-            else:
-                no_sync_with = frozenset()
-
-            within_inames = frozenset(within_loops) | set(domain_stack)
-            assign_insn = lp.Assignment(
-                lhs, rhs,
-                id=self._namer.next(f"{assignment.id}_"),
-                within_inames=within_inames,
-                within_inames_is_final=True,
-                depends_on=frozenset({f"{dep}*" for dep in assignment.depends_on}),
-                no_sync_with=no_sync_with,
-            )
-            self.instructions.append(assign_insn)
-
-        # register kernel arguments
-        # TODO should really use assignment.{lhs,rhs} here...
-        # TODO this is sorta repeated in FunctionCall handler.
-        if assignment.temporary.shapes != ((),):
-            assert not scalar
-            size = 0
-            for shape in assignment.temporary.shapes:
-                size_ = 1
-                for extent in shape:
-                    if isinstance(extent, MultiArray):
-                        extent = extent.max_value
-                    size_ *= extent
-                size += size_
-            # temp_shape = (assignment.temporary.size,)
-            temp_shape = (size,)  # must be 1D for loopy to be OK with ragged things
-        elif not scalar:
-            temp_shape = (1,)
-        else:
-            temp_shape = ()
-
-        if assignment.tensor.name not in self._tensor_data:
-            self._tensor_data[assignment.tensor.name] = lp.GlobalArg(
-                assignment.tensor.name, dtype=assignment.tensor.dtype, shape=None
-            )
-        self._temp_kernel_data.append(
-            lp.TemporaryVariable(assignment.temporary.name, shape=temp_shape)
-        )
-
-        return domain_stack
+        # there are no ordering restrictions between assignments to the
+        # same temporary - but this is only valid to declare if multiple insns are used
+        # if len(assignment.lhs.indicess) > 1:
+        #     assert len(assignment.rhs.indicess) > 1
+        #     no_sync_with = frozenset({(f"{assignment.id}*", "any")})
+        # else:
+        #     no_sync_with = frozenset()
 
     def register_new_domain(self, iname, index, within_loops):
+        raise Exception("don't think I touch this")
         if isinstance(index.size, pym.primitives.Expression):
             if not isinstance(index.size, MultiArray):
                 raise NotImplementedError("need to think hard about more complicated expressions"
@@ -744,7 +661,7 @@ class LoopyKernelBuilder:
         else:
             return extent
 
-    def register_scalar_assignment(self, array, multi_idx, depth):
+    def register_scalar_assignment(self, array, depth, domain_stack):
         # import pdb; pdb.set_trace()
         temp_name = self._namer.next("n")
         # need to create a scalar multi-axis with the same depth
@@ -766,17 +683,17 @@ class LoopyKernelBuilder:
         # make sure that the RHS reduces down to a scalar (but skip the last entry)
         # this nasty slice makes sure that I am dropping all indices *below* the
         # current one and only taking as many as needed
-        newidxs = MultiIndexCollection([
-            MultiIndex([
-                *multi_idx.typed_indices[:depth+1][-array.depth:]
-            ])
-        ])
-        array = array[[newidxs]]
+        # newidxs = MultiIndexCollection([
+        #     MultiIndex([
+        #         *multi_idx.typed_indices[:depth+1][-array.depth:]
+        #     ])
+        # ])
+        # array = array[[newidxs]]
 
         # import pdb; pdb.set_trace()
 
-        insn = tlang.Read(array, temp)
-        self._make_instruction_context(insn, None, scalar=True)
+        insn = tlang.Read(array, temp, array.indices.multi_indices[0])
+        self._make_instruction_context(insn, None, scalar=True, inames=domain_stack)
 
         return pym.var(temp_name)
 

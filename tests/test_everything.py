@@ -205,7 +205,7 @@ def test_compute_double_loop_mixed():
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
     p = MultiIndexCollection([
         MultiIndex([
-            TypedIndex("ax2", IndexSet(12))
+            TypedIndex(1, IndexSet(12))
         ])
     ])
     expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
@@ -251,7 +251,7 @@ def test_compute_double_loop_scalar():
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
     p = MultiIndexCollection([
         MultiIndex([
-            TypedIndex("ax2", IndexSet(4)),
+            TypedIndex(1, IndexSet(4)),
             TypedIndex(0, IndexSet(2)),
         ])
     ])
@@ -294,7 +294,7 @@ def test_compute_double_loop_permuted():
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
     p = MultiIndexCollection([
         MultiIndex([
-            TypedIndex("ax1", IndexSet(6)),
+            TypedIndex(0, IndexSet(6)),
         ])
     ])
     expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
@@ -421,7 +421,7 @@ def test_compute_double_loop_permuted_mixed():
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
     p = MultiIndexCollection([
         MultiIndex([
-            TypedIndex("p2", IndexSet(3)),
+            TypedIndex(1, IndexSet(3)),
         ])
     ])
     expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
