@@ -46,7 +46,7 @@ class MultiArrayLangKernelBuilder:
         # assert isinstance(expr.index, tensors.Indexed)
 
         # push index to stack
-        self._within_multi_index_collections.append(loop.index)
+        self._within_multi_index_collections.extend(typed_idx for multi_idx in loop.index for typed_idx in multi_idx.typed_indices)
 
         if not len(loop.statements) == 1:
             raise NotImplementedError
@@ -116,24 +116,26 @@ class MultiArrayLangKernelBuilder:
         Then we encounter map2 so we first handle map1. Since c is a within_index we
         disregard it.
         """
+        # deprecated since we compress this in __getitem__
         # multi-index collections example: [closure(c0), closure(c1)]
-        if multi_index_collections:
-            multi_idx_collection, *subidx_collections = multi_index_collections
-        else:
-            # then take all of the rest of the shape
-            multi_idx_collection = MultiIndexCollection([
-                MultiIndex([
-                    TypedIndex(p, IndexSet(axis.parts[p].count))
-                    for p in range(axis.nparts)
-                ])
-            ])
-            subidx_collections = []
+        # if multi_index_collections:
+        #     multi_idx_collection, *subidx_collections = multi_index_collections
+        # else:
+        #     # then take all of the rest of the shape
+        #     multi_idx_collection = MultiIndexCollection([
+        #         MultiIndex([
+        #             TypedIndex(p, IndexSet(axis.parts[p].count))
+        #             for p in range(axis.nparts)
+        #         ])
+        #     ])
+        #     subidx_collections = []
+        #
 
+        multi_idx_collection = multi_index_collections
         assert isinstance(multi_idx_collection, tensors.MultiIndexCollection)
 
         ###
 
-        is_loop_index = multi_idx_collection in self._within_multi_index_collections
 
         # each multi-index yields an adjacent axis part
         # e.g. for mixed (with 2 spaces) you would have a temporary with 2 parts
@@ -143,6 +145,7 @@ class MultiArrayLangKernelBuilder:
         temp_axis_parts = []
         temp_axis_base_ids = []
         for multi_idx in multi_idx_collection:
+            is_loop_index = multi_idx.typed_indices[0] in self._within_multi_index_collections
             temp_axis_part_id = self.name_generator.next("mypart")
             if not is_loop_index:
                 temp_axis_part  = tensors.AxisPart(
@@ -161,6 +164,7 @@ class MultiArrayLangKernelBuilder:
 
             # each typed index is a subaxis of the original
             for typed_idx in multi_idx.typed_indices[1:]:
+                is_loop_index = typed_idx in self._within_multi_index_collections
                 temp_axis_part_id = self.name_generator.next("mypart")
                 if not is_loop_index:
                     temp_subaxis  = tensors.MultiAxis(
@@ -203,14 +207,18 @@ class MultiArrayLangKernelBuilder:
         return temp_axis
 
     def make_gathers(self, temporaries, **kwargs):
-        return tuple(self.make_gather(arg, temp, **kwargs) for arg, temp in temporaries.items())
+        return tuple(
+            self.make_gather(arg, temp, idxs, **kwargs)
+            for arg, temp in temporaries.items()
+            for idxs in arg.tensor.indices.multi_indices
+        )
 
-    def make_gather(self, argument, temporary, **kwargs):
+    def make_gather(self, argument, temporary, indices, **kwargs):
         # TODO cleanup the ids
         if argument.access in {exprs.READ, exprs.RW}:
-            return tlang.Read(argument.tensor, temporary, id=self.name_generator.next("read"), **kwargs)
+            return tlang.Read(argument.tensor, temporary, indices, id=self.name_generator.next("read"), **kwargs)
         elif argument.access in {exprs.WRITE, exprs.INC}:
-            return tlang.Zero(argument.tensor, temporary, id=self.name_generator.next("write"), **kwargs)
+            return tlang.Zero(argument.tensor, temporary, indices, id=self.name_generator.next("write"), **kwargs)
         else:
             raise NotImplementedError
 
@@ -230,16 +238,21 @@ class MultiArrayLangKernelBuilder:
         return tlang.FunctionCall(call.function, reads, writes,id=self.name_generator.next("func"), **kwargs)
 
     def make_scatters(self, temporaries, **kwargs):
-        return tuple(
-            filter(None, (self.make_scatter(arg, temp, **kwargs) for arg, temp in temporaries.items()))
-        )
+        return tuple(filter(
+            None,
+            (
+                self.make_scatter(arg, temp, idxs, **kwargs)
+                for arg, temp in temporaries.items()
+                for idxs in arg.tensor.indices.multi_indices
+            )
+        ))
 
-    def make_scatter(self, argument, temporary, **kwargs):
+    def make_scatter(self, argument, temporary, indices, **kwargs):
         if argument.access == exprs.READ:
             return None
         elif argument.access in {exprs.WRITE, exprs.RW}:
-            return tlang.Write(argument.tensor, temporary, id=self.name_generator.next("write"), **kwargs)
+            return tlang.Write(argument.tensor, temporary, indices, id=self.name_generator.next("write"), **kwargs)
         elif argument.access == exprs.INC:
-            return tlang.Increment(argument.tensor, temporary, id=self.name_generator.next("inc"), **kwargs)
+            return tlang.Increment(argument.tensor, temporary, indices, id=self.name_generator.next("inc"), **kwargs)
         else:
             raise AssertionError

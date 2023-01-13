@@ -169,17 +169,6 @@ class MultiAxis(pytools.ImmutableRecord):
         # At the very least the sizes of the different parts must match for the indices
         # above since otherwise they wouldn't be adjacent in memory.
 
-        # FIXME not a sufficient test - could probably wrap into set_up_inner
-        # HERE IT IS!!!
-
-        """debug notes
-
-        the problem here is that I currently determine whether or not to construct a
-        layout tree depending on whether or not the counts are also a tree. This breaks
-        for layered permutation since the counts are known constant but we still need to
-        form a layout tree - or do we??? numbering should be distinct...
-        """
-
         if strictly_all(isinstance(pt.count, numbers.Integral) for pt in self.parts):
         # if strictly_all(pt.has_constant_step for pt in self.parts):
             # import pdb; pdb.set_trace()
@@ -253,6 +242,7 @@ class MultiAxis(pytools.ImmutableRecord):
                     # if we are not ragged then the data simply needs to match the count
                     # of the axis part since we are not nesting things
                     assert len(layout_fn_data) == pt.count
+                    # import pdb; pdb.set_trace()
                     # we need to reuse pt here since we want to retain the right labels
                     newaxis = MultiAxis([AxisPart(pt.count, label=pt.label)]).set_up()
                     layout_fn = IndirectLayoutFunction(MultiArray(
@@ -884,7 +874,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         self.dim = dim
         # if not self._is_valid_indices(indices, dim.root):
         # assert all(self._is_valid_indices(idxs, dim) for idxs in indicess)
-        self.indices = indices or [] # self._parse_indices(dim.root, indices)
+        self.indices = indices or MultiIndexCollection(self._extend_multi_index(None))
 
         self.mesh = mesh
         self.dtype = dtype
@@ -1144,7 +1134,10 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
     def root(self):
         return self.dim
 
-    def __getitem__(self, indices):
+    def __getitem__(self, multi_indicesss):
+        """
+        pass in an iterable of an iterable of multi-indices (e.g. returned by closure)
+        """
         """The (outdated) plan of action here is as follows:
 
         - if a tensor is indexed by a set of stencils then that's great.
@@ -1168,6 +1161,12 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         to get the correct behaviour.
         """
 
+        # convert an iterable of multi-index collections into a single set of multi-index
+        # collections- - needed for [closure(p), closure(p)] each of which returns
+        # a list of multi-indices that need to be multiplicatively combined.
+        # multi_indicess = self.merge_multiindicesss(multi_indicesss)
+        multi_indicess, = multi_indicesss  # for now assert length one
+
         # TODO Add support for already indexed items
         # This is complicated because additional indices should theoretically index
         # pre-existing slices, rather than get appended/prepended as is currently
@@ -1177,8 +1176,51 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
         # if not isinstance(indicess[0], collections.abc.Sequence):
         #     indicess = (indicess,)
-        # indicess = [self._parse_indices(self.dim, idxs) for idxs in indicess]
-        return self.copy(indices=indices)
+        # import pdb; pdb.set_trace()
+        multi_indicess = MultiIndexCollection(tuple(
+            multi_idx_
+            for multi_idx in multi_indicess
+            for multi_idx_ in self._extend_multi_index(multi_idx)
+        ))
+        # import pdb; pdb.set_trace()
+        return self.copy(indices=multi_indicess)
+
+    def _extend_multi_index(self, multi_index, axis=None):
+        """Apply a multi-index to own axes and return a tuple of 'full' multi-indices.
+
+        This is required in case an inner dimension is multi-part which would require two
+        multi-indices to correctly index both.
+        """
+        # import pdb; pdb.set_trace()
+        if not axis:
+            axis = self.root
+
+        if multi_index:
+            idx, *subidxs = multi_index
+
+            if subaxis := axis.find_part(idx.part_label).subaxis:
+                return tuple(
+                    MultiIndex((idx,) + subidxs_.typed_indices)
+                    for subidxs_ in self._extend_multi_index(subidxs, subaxis)
+                )
+            else:
+                if subidxs:
+                    raise ValueError
+                return (MultiIndex((idx,)),)
+        else:
+            new_idxs = []
+            for pt in axis.parts:
+                idx, subidxs = TypedIndex(pt.label, IndexSet(axis.count)), []
+
+                if subaxis := axis.find_part(idx.part_label).subaxis:
+                    new_idxs.extend(
+                        MultiIndex((idx,) + subidxs_.typed_indices)
+                        for subidxs_ in self._extend_multi_index(subidxs, subaxis)
+                    )
+                else:
+                    new_idxs.append(MultiIndex((idx,)))
+            return tuple(new_idxs)
+
 
     def select_axes(self, indices):
         selected = []

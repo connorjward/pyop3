@@ -30,11 +30,12 @@ class Instruction(pytools.ImmutableRecord):
 
 
 class Assignment(Instruction):
-    fields = Instruction.fields | {"tensor", "temporary"}
+    fields = Instruction.fields | {"tensor", "temporary", "indices"}
 
-    def __init__(self, tensor, temporary, **kwargs):
+    def __init__(self, tensor, temporary, indices, **kwargs):
         self.tensor = tensor
         self.temporary = temporary
+        self.indices = indices
         super().__init__(**kwargs)
 
 

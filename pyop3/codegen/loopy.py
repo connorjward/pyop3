@@ -168,6 +168,14 @@ class LoopyKernelBuilder:
         multi_idx_collection = expr.index
         assert isinstance(multi_idx_collection, MultiIndexCollection)
 
+        if len(multi_idx_collection.multi_indices) > 1:
+            raise NotImplementedError(
+            """In this case we need to follow different codegen pathways internally. I
+               expect this to cause big issues with how we identify the indices of the
+               arrays themselves as dat[p] where p can be one of many things is hard to
+               identify.
+            """)
+
 
         # register inames (also needs to be done for packing loops)
         for multi_idx in multi_idx_collection:
@@ -189,7 +197,7 @@ class LoopyKernelBuilder:
             # iterset is two multi-indices: edges+hfacets and verts+vfacets
             for stmt in expr.statements:
                 # self._build(stmt, copy.deepcopy(within_loops))
-                self._build(stmt, None)
+                self._build(stmt, self._loop_index_names)
 
             for typed_idx in multi_idx:
                 self._within_typed_indices.pop()
@@ -242,44 +250,7 @@ class LoopyKernelBuilder:
         self.instructions.append(call_insn)
         self.subkernels.append(call.function.code)
 
-
-    def generate_insn(self, assignment, lhs, loffset, rhs, roffset, depends_on, scalar: bool):
-        # TODO this is a really hacky and nasty way to track scalar assignment
-        if loffset is None:
-            lexpr = pym.var(lhs.name)
-        else:
-            lexpr = pym.subscript(pym.var(lhs.name), loffset)
-
-        if roffset is None:
-            rexpr = pym.var(rhs.name)
-        else:
-            rexpr = pym.subscript(pym.var(rhs.name), roffset)
-
-        if isinstance(assignment, tlang.Zero):
-            rexpr = 0
-        elif isinstance(assignment, tlang.Increment):
-            rexpr = lexpr + rexpr
-
-        # there are no ordering restrictions between assignments to the
-        # same temporary - but this is only valid to declare if multiple insns are used
-        # if len(assignment.lhs.indicess) > 1:
-        #     assert len(assignment.rhs.indicess) > 1
-        #     no_sync_with = frozenset({(f"{assignment.id}*", "any")})
-        # else:
-        #     no_sync_with = frozenset()
-
-        assign_insn = lp.Assignment(
-            lexpr, rexpr,
-            id=self._namer.next(f"{assignment.id}_"),
-            within_inames=self._get_within_inames(),
-            within_inames_is_final=True,
-            depends_on=depends_on|frozenset({f"{dep}*" for dep in assignment.depends_on}),
-            # no_sync_with=no_sync_with,
-        )
-        self.instructions.append(assign_insn)
-
-
-    def make_offset_expr(self, array, part_names, loop_index_names, insn_prefix, depends_on):
+    def make_offset_expr(self, array, part_names, loop_index_names, insn_prefix, depends_on, within_inames):
         """create an instruction of the form
 
         off = 0
@@ -302,9 +273,15 @@ class LoopyKernelBuilder:
         # start at the root
         axis = array.axes
         offset_var_name = f"{array.name}_off"
+        self._temp_kernel_data.append(
+            lp.TemporaryVariable(offset_var_name, shape=(), dtype=np.uintp)
+        )
+
 
         # need to create and pass within_inames
-        inames_attr = f"inames={':'.join(self._get_within_inames())}"
+        # inames_attr = f"inames={':'.join(self._get_within_inames())}"
+        inames_attr = f"inames={':'.join(within_inames)}"
+        # import pdb; pdb.set_trace()
 
         init_insn_id = self._namer.next(insn_prefix)
         depends_on = {f"{dep}*" for dep in depends_on} | {init_insn_id}
@@ -403,7 +380,8 @@ class LoopyKernelBuilder:
         if isinstance(layout_fn, IndirectLayoutFunction):
             # import pdb; pdb.set_trace()
             multi_idx = MultiIndex(self._within_typed_indices)
-            layout_var = self.register_scalar_assignment(layout_fn.data, multi_idx, depth)
+            # FIXME need to track domain stack
+            layout_var = self.register_scalar_assignment(layout_fn.data, multi_idx, depth, domain_stack=NotImplemented)
 
             # generate the instructions
             stmts = [
@@ -437,189 +415,202 @@ class LoopyKernelBuilder:
             ]
         return stmts, {insn_id}
 
-    def cleverly_recurse(
+    def generate_assignment_insn(
             self,
             assignment,
-            indexed,
-            indexed_axis,
-            indexed_part_id_names,
-            indexed_loop_index_names,
-            unindexed,
-            unindexed_axis,
-            unindexed_part_id_names,
-            unindexed_loop_index_names,
-            multi_index_collections,
-            scalar: bool,
+            lhs,
+            loffset,
+            rhs,
+            roffset,
+            depends_on,
+            scalar,
+            within_inames,
         ):
+        # the final instruction needs to come after all offset-determining instructions
+
+        # handle scalar assignment (for loop bounds)
+        if scalar:
+            raise NotImplementedError("tracking lhs/rhs vs temp/tensor")
+            unindexed_offset = None
+
+        if loffset is None:
+            lexpr = pym.var(lhs.name)
+        else:
+            lexpr = pym.subscript(pym.var(lhs.name), pym.var(loffset))
+
+        if roffset is None:
+            rexpr = pym.var(rhs.name)
+        else:
+            rexpr = pym.subscript(pym.var(rhs.name), pym.var(roffset))
+
+        if isinstance(assignment, tlang.Zero):
+            rexpr = 0
+        elif isinstance(assignment, tlang.Increment):
+            rexpr = lexpr + rexpr
+
+        # there are no ordering restrictions between assignments to the
+        # same temporary - but this is only valid to declare if multiple insns are used
+        # if len(assignment.lhs.indicess) > 1:
+        #     assert len(assignment.rhs.indicess) > 1
+        #     no_sync_with = frozenset({(f"{assignment.id}*", "any")})
+        # else:
+        #     no_sync_with = frozenset()
+
+        assign_insn = lp.Assignment(
+            lexpr, rexpr,
+            id=self._namer.next(f"{assignment.id}_"),
+            # within_inames=self._get_within_inames(),
+            within_inames=frozenset(within_inames),
+            within_inames_is_final=True,
+            depends_on=depends_on|frozenset({f"{dep}*" for dep in assignment.depends_on}),
+            # no_sync_with=no_sync_with,
+        )
+        self.instructions.append(assign_insn)
+
+    def generate_index_insns(self, multi_index, inames, prefix, context):
+        """This instruction needs to somehow traverse the indices and axes and probably
+        return variable representing the parts and index name (NOT inames) for the LHS
+        and RHS. Could possibly be done separately for each as the inames are known.
+
+        Something like 'if the index is not a map yield something equal to the iname, if
+        it is a map then yield something like j0 = map0[i0, i1] (and generate the right
+        instructions).
+
+        Probably a good practice to use datN_jM for these
         """
-        For an assignment collect the inames associated with the indexed and unindexed (temp)
-        bits. These will then be used to derive the correct offset expression.
+        # import pdb; pdb.set_trace()
+        # popping
+        inames = inames.copy()
 
-        I think this will break if we need to index any maps or ragged things - would need to
-        maintain some iname registry
+        idx, *subidxs = multi_index
 
-        indexed_within: inames associated with the indexed bit
+        # TODO we don't ever read the part number
+        pname = self._namer.next(f"{prefix}_p")
+        jname = self._namer.next(f"{prefix}_j")
+
+        if isinstance(idx, Map):
+            map_inames, inames = inames[:idx.depth], inames[idx.depth:]
+            raise NotImplementedError("need to emit some clever code")
+            assign_insn = ...
+        else:
+            iname, *subinames = inames
+            # TODO handle step sizes etc here
+            assign_insn = lp.Assignment(
+                pym.var(jname), pym.var(iname),
+                id=self._namer.next(f"{context.id}_"),
+                within_inames=self._get_within_inames(),
+                within_inames_is_final=True,
+                # depends_on=depends_on|frozenset({f"{dep}*" for dep in context.depends_on}),
+                depends_on=frozenset({f"{dep}*" for dep in context.depends_on}),
+                # no_sync_with=no_sync_with,
+            )
+        self.instructions.append(assign_insn)
+
+        self._temp_kernel_data.extend([
+            lp.TemporaryVariable(name, shape=(), dtype=np.uintp)
+            for name in [jname, pname]
+        ])
+
+        if subidxs:
+            subp, subj = self.generate_index_insns(subidxs, subinames, prefix, context)
+            return (pname,) + subp, (jname,) + subj
+        else:
+            return (pname,), (jname,)
+
+    def register_loops(self, indices, outer_loop_indices):
         """
-        # because I'm lazy elsewhere... (make tuples!)
-        indexed_part_id_names = indexed_part_id_names.copy()
-        indexed_loop_index_names = indexed_loop_index_names.copy()
-        unindexed_part_id_names = unindexed_part_id_names.copy()
-        unindexed_loop_index_names = unindexed_loop_index_names.copy()
+        Returns
+        -------
+        A stack of inames.
+        """
+        inames = collections.deque()
 
-        def is_bottom_of_tree(ax):
-            return not bool(ax)
+        if not indices:
+            return inames
 
-        # if at the bottom of the tree generate instructions and terminate
-        if strictly_all(is_bottom_of_tree(ax) for ax in [indexed_axis, unindexed_axis]):
-            assert not multi_index_collections
+        idx, *subidxs = indices
 
-            indexed_offset, indexed_depends_on = self.make_offset_expr(
-                indexed, indexed_part_id_names, indexed_loop_index_names, assignment.id, assignment.depends_on,
-            )
-            unindexed_offset, unindexed_depends_on = self.make_offset_expr(
-                unindexed, unindexed_part_id_names, unindexed_loop_index_names, assignment.id, assignment.depends_on,
-            )
+        if isinstance(idx, Map):
+            inames.extendleft(self.register_loops([idx.from_], outer_loop_indices))
 
-            # the final instruction needs to come after all offset-determining instructions
-            depends_on = indexed_depends_on | unindexed_depends_on
+        if idx in outer_loop_indices:
+            iname = outer_loop_indices[idx]
+        else:
+            iname = self._namer.next("i")
 
-            self._temp_kernel_data.append(
-                lp.TemporaryVariable(indexed_offset, shape=(), dtype=np.uintp)
-            )
-            self._temp_kernel_data.append(
-                lp.TemporaryVariable(unindexed_offset, shape=(), dtype=np.uintp)
-            )
+            # register the domain
+            domain_str = f"{{ [{iname}]: 0 <= {iname} < {idx.iset.size} }}"
+            self.domains.append(domain_str)
 
-            # handle scalar assignment (for loop bounds)
-            if scalar:
-                unindexed_offset = None
+        inames.append(iname)
 
-            if isinstance(assignment, (tlang.Read, tlang.Zero)):
-                lhs = unindexed
-                loffset = unindexed_offset
-                rhs = indexed
-                roffset = indexed_offset
-            elif isinstance(assignment, (tlang.Write, tlang.Increment)):
-                lhs = indexed
-                loffset = indexed_offset
-                rhs = unindexed
-                roffset = unindexed_offset
-            else:
-                raise TypeError
+        return inames + self.register_loops(subidxs, outer_loop_indices)
 
-            self.generate_insn(assignment, lhs, pym.var(loffset) if loffset else None, rhs, pym.var(roffset) if roffset else None, depends_on, scalar)
-
-            if indexed.name not in self._tensor_data:
-                self._tensor_data[indexed.name] = lp.GlobalArg(
-                    indexed.name, dtype=indexed.dtype, shape=None
-                )
-
-            # import pdb; pdb.set_trace()
-            if unindexed.name not in [d.name for d in self._temp_kernel_data]:
-                if scalar:
-                    shape = ()
-                else:
-                    shape = (unindexed.axes.alloc_size,)
-                self._temp_kernel_data.append(
-                    lp.TemporaryVariable(unindexed.name, shape=shape)
-                )
-            return
-
-        ###
+    # TODO break into function with and without domain stack. This `if not domain_stack` is bad
+    @_make_instruction_context.register
+    def _(self, assignment: tlang.Assignment, outer_loop_indices, scalar=False, inames=None):
+        # 1. Register the loops and inames
+        if not inames:
+            inames = self.register_loops(assignment.indices, outer_loop_indices)
 
         # import pdb; pdb.set_trace()
-        if multi_index_collections:
-            multi_idx_collection, *subidx_collections = multi_index_collections
-        else:
-            # then take all of the rest of the shape
-            multi_idx_collection = MultiIndexCollection([
-                MultiIndex([
-                    TypedIndex(p, IndexSet(indexed_axis.parts[p].count))
-                    for p in range(indexed_axis.nparts)
-                ])
-            ])
-            subidx_collections = []
 
-        assert isinstance(multi_idx_collection, MultiIndexCollection)
+        """
+        When do we know to use externally defined inames? I don't want to inspect indices if possible - but it's required. We don't loop over all cells, edges and vertices in FEM for example.
 
-        if isinstance(multi_idx_collection, Map):
-            raise NotImplementedError
+        There is this awful interplay between indices and axes that doesn't quite match up.
+        I think that loop_indices (including iname lookup) needs to exist as a distinct thing
+        Only loop constructs produce this sort of behaviour.
 
+        Remember that an indexed thing is linear (and I think that I need to traverse similarly here).
 
-        # need to collect loop index names (inames) and part names
-        # each multi-index is a different branch for generating code (as the inner
-        # dimensions can be different)
-        for i, multi_idx in enumerate(multi_idx_collection):
-            # import pdb; pdb.set_trace()
-            for typed_idx in multi_idx:
-                is_loop_index = typed_idx in self._within_typed_indices
-                if is_loop_index:
-                    indexed_loop_index_name = self._loop_index_names[typed_idx]
-                    unindexed_loop_index_name = self._loop_index_names[typed_idx]
-                else:
-                    # import pdb; pdb.set_trace()
-                    # register a new domain
-                    # TODO handle when extent is ragged
-                    loop_index_name = self._namer.next("i")
-                    self._loop_index_names[typed_idx] = loop_index_name
-                    domain_str = f"{{ [{loop_index_name}]: 0 <= {loop_index_name} < {typed_idx.iset.size} }}"
-                    self.domains.append(domain_str)
-                    indexed_loop_index_name = loop_index_name
-                    unindexed_loop_index_name = loop_index_name
-                    self._within_loop_index_names.append(loop_index_name)
+        I absolutely HAVE to know the output types of a map as it tells me what goes beneath
+        and the loop extents. Therefore I need bifurcating trees... (which can be flattened early)
+        Is that right? I have this separation of concerns with layout functions...
 
-                # note that the names must be different for indexed and unindexed as
-                # these variables get transformed by the map etc.
-                indexed_axis = indexed_axis.find_part(typed_idx.part_label).subaxis
-                indexed_part_id_name = self._part_id_namer.next()
-                indexed_part_id_names.append(indexed_part_id_name)
-                indexed_loop_index_names.append(indexed_loop_index_name)
+        But *indices define loop extents*. Layout functions do not introduce loops. Therefore
+        a multi-part map must be able to split into different index paths.
+        """
 
-                unindexed_axis = unindexed_axis.parts[i].subaxis
-                unindexed_part_id_name = self._part_id_namer.next()
-                unindexed_part_id_names.append(unindexed_part_id_name)
-                unindexed_loop_index_names.append(unindexed_loop_index_name)
+        # 2. Generate map code
+        # TODO call for lhs, rhs separately
+        lpnames, ljnames = self.generate_index_insns(assignment.indices, inames, assignment.lhs.name, assignment)
+        rpnames, rjnames = self.generate_index_insns(assignment.indices, inames, assignment.rhs.name, assignment)
 
-                # TODO indices should probably not be the indices directly as maps
-                # need to transform them
+        # 3. Generate layout code
 
-                # Register parts
-                # TODO also loop_index_names
-                self._temp_kernel_data.extend([
-                    lp.TemporaryVariable(name, shape=(), dtype=np.uintp)
-                    for name in [indexed_part_id_name, unindexed_part_id_name]
-                ])
+        loffset, ldeps = self.make_offset_expr(
+            assignment.lhs, lpnames, ljnames, assignment.id, assignment.depends_on, inames,
+        )
+        roffset, rdeps = self.make_offset_expr(
+            assignment.rhs, rpnames, rjnames, assignment.id, assignment.depends_on, inames,
+        )
 
-            # doesn't return anything
-            self.cleverly_recurse(
-                assignment,
-                indexed, indexed_axis,
-                indexed_part_id_names,
-                indexed_loop_index_names,
-                unindexed, unindexed_axis,
-                unindexed_part_id_names,
-                unindexed_loop_index_names,
-                subidx_collections,
-                scalar,
+        # 4. Emit assignment instruction
+        self.generate_assignment_insn(assignment, assignment.lhs, loffset,
+                                      assignment.rhs, roffset,
+                                      depends_on=ldeps|rdeps, scalar=scalar, within_inames=inames)
+
+        # Register data
+        # TODO should only do once at a higher point (merge tlang and loopy stuff)
+        # i.e. make tlang a preprocessing step
+        indexed = assignment.tensor
+        unindexed = assignment.temporary
+        if indexed.name not in self._tensor_data:
+            self._tensor_data[indexed.name] = lp.GlobalArg(
+                indexed.name, dtype=indexed.dtype, shape=None
             )
 
-            for typed_idx in multi_idx:
-                if not typed_idx in self._within_typed_indices:
-                    self._within_loop_index_names.pop()
+        # import pdb; pdb.set_trace()
+        if unindexed.name not in [d.name for d in self._temp_kernel_data]:
+            if scalar:
+                shape = ()
+            else:
+                shape = (unindexed.axes.alloc_size,)
+            self._temp_kernel_data.append(
+                lp.TemporaryVariable(unindexed.name, shape=shape)
+            )
 
-    @_make_instruction_context.register
-    def _(self, assignment: tlang.Assignment, within_loops, scalar=False, domain_stack=None):
-        # so basically one of the LHS or RHS should not have any indices. We can therefore
-        # use the one that does to generate the domains
-
-        # now for some clever recursion
-        self.cleverly_recurse(
-            assignment,
-            assignment.tensor, assignment.tensor.axes, [], [],
-            assignment.temporary, assignment.temporary.axes, [], [],
-            assignment.tensor.indices,
-            scalar=scalar,
-        )
 
         return
 
