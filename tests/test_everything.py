@@ -307,6 +307,7 @@ def test_compute_double_loop_permuted():
 
     args = [layout0.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
+
     fn(*(d.ctypes.data for d in args))
 
     assert all(dat2.data == dat1.data + 1)
