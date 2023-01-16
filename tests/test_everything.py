@@ -402,6 +402,8 @@ def test_compute_double_loop_permuted_mixed():
         AxisPart(3, id="p2", numbering=[5, 3, 1]),
     ]).set_up()
 
+    import pdb; pdb.set_trace()
+
     notnumbered = axes.without_numbering().set_up()
     axes = (
         axes.add_subaxis("p1", MultiAxis([AxisPart(1)], parent=notnumbered))
