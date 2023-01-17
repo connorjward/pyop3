@@ -50,6 +50,18 @@ def compute_offsets(sizes):
     return np.concatenate([[0], np.cumsum(sizes)[:-1]], dtype=np.int32)
 
 
+def is_set_up(axis):
+    """Return ``True`` if all parts (recursively) of the multi-axis have an associated
+    layout function.
+    """
+    for part in axis.parts:
+        if part.subaxis and not is_set_up(part.subaxis):
+            return False
+        if part.layout_fn is None:
+            return False
+    return True
+
+
 def only_linear(func):
     def wrapper(self, *args, **kwargs):
         if not self.is_linear:
@@ -142,7 +154,11 @@ class MultiAxis(pytools.ImmutableRecord):
 
     def set_up(self):
         """Initialise the multi-axis by computing the layout functions."""
-        self._set_up()
+        # return self._set_up()
+        new_axis, layouts = self._set_up()
+        assert is_set_up(new_axis)
+        import pdb; pdb.set_trace()
+        return new_axis
 
 
     def _set_up(self, indices=PrettyTuple(), offset=None):
@@ -181,87 +197,88 @@ class MultiAxis(pytools.ImmutableRecord):
         else:
             saved_offset = 0
 
+        # import pdb; pdb.set_trace()
+
         # loop over all points in all parts of the multi-axis
         # initialise layout array per axis part
-        layouts = [None] * self.nparts
+        layouts = {}
         npoints = 0
-        for part_num, part in enumerate(self.parts):
+        for part in self.parts:
             if part.has_integer_count:
                 count = part.count
             else:
                 count = part.count.root.part.find_integer_count(indices)
 
             if part.subaxis:
-                layouts[part_num] = [None] * part.subaxis.nparts
-                for subpart_num in range(part.subaxis.nparts):
-                    layouts[part_num][subpart_num] = [None] * count
+                layouts[part] = {}
+                for subpart in part.subaxis.parts:
+                    layouts[part][subpart] = [None] * count
             else:
-                layouts[part_num] = [None] * count
+                layouts[part] = [None] * count
             npoints += count
+
+        new_subaxes = {pt: set() for pt in self.parts}
 
         for i in range(npoints):
             # import pdb; pdb.set_trace()
             # find the right axis part and index thereof for the current 'global' numbering
-            selected_part_num = None
+            selected_part = None
             selected_index = None
             for part_num, axis_part in enumerate(self.parts):
                 try:
                     # is the current global index found in the numbering of this axis part?
                     # FIXME this will likely break as numbering is not an array - need to implement this fn
                     selected_index = list(axis_numbering[part_num]).index(i)
-                    selected_part_num = part_num
+                    selected_part = axis_part
                 except ValueError:
                     continue
-            if selected_part_num is None or selected_index is None:
-                assert selected_part_num is None and selected_index is None, "must be both"
+            if selected_part is None or selected_index is None:
+                assert selected_part is None and selected_index is None, "must be both"
                 raise ValueError(f"{i} not found in any numberings")
 
-            if subaxis := axis_part.subaxis:
-                subresult = axis_part.subaxis._set_up(indices|i, offset)
-                for subpart_num, sublayout in enumerate(subresult):
-                    layouts[selected_part_num][subpart_num][selected_index] = sublayout
+            if subaxis := selected_part.subaxis:
+                new_subaxis, subresult = selected_part.subaxis._set_up(indices|i, offset)
+                # note that this will be done lots of times (which is bad, should always be the same)
+                # this set should always only have one thing in it.
+                new_subaxes[selected_part].add(new_subaxis)
+                for subpart, sublayout in subresult.items():
+                    layouts[selected_part][subpart][selected_index] = sublayout
             else:
-                layouts[selected_part_num][selected_index] = offset.value
+                layouts[selected_part][selected_index] = offset.value
                 offset += 1
 
         # should fill up them all
-        assert not any(idx is None for layout in layouts for idx in layout)
-
-        # need to transpose layouts from part -> index -> parts -> indices
-        # to [(part, *parts)] -> index -> indices
-
-        # new_layouts = [None] * self.nparts
-        # for npart, part in enumerate(self.parts):
-        #     if part.subaxis:
-        #         nsubparts = pytools.single_valued(len(sublayouts) for sublayouts in layouts[npart])
-        #
-        #         new_layouts[npart] = [[]] * nsubparts
-        #
-        #         for subpart in range(nsubparts):
-        #             for sublayouts_per_part in layouts[npart]:
-        #                 new_layouts[npart][subpart].append(sublayouts_per_part[subpart])
-        #     else:
-        #         new_layouts[npart] = layouts[npart]
-
+        assert not any(idx is None for layout in layouts.values() for idx in layout)
 
         offset.value += saved_offset
 
+        new_parts = []
         # if a part doesn't need any more indices then save the layout function and return
         # its size
         # should really be recursive
-        # import pdb; pdb.set_trace()
         for part_num, part in enumerate(self.parts):
+            if part.subaxis:
+                new_subaxis, = new_subaxes[part]
+            else:
+                new_subaxis = None
+
             if not requires_external_index(part):
                 # bit of a cheat (already done the hard work)
                 if has_constant_step(part) and not part.numbering:
-                    part.layout_fn = AffineLayoutFunction("some step")
+                    step = part.subaxis.calc_size() if part.subaxis else 1
+                    new_layout = AffineLayoutFunction(step)
                 else:
-                    part.layout_fn = layouts[part_num]
+                    new_layout = layouts[part]
                 # mark as None to indicate that its dealt with
-                layouts[part_num] = None
+                layouts[part] = None
 
-        import pdb; pdb.set_trace()
-        return layouts
+                new_part = part.copy(subaxis=new_subaxis, layout_fn=new_layout)
+            else:
+                # defer to parent
+                new_part = part.copy(subaxis=new_subaxis)
+            new_parts.append(new_part)
+
+        return self.copy(parts=new_parts), layouts
 
 
 
