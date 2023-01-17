@@ -216,9 +216,9 @@ class MultiArrayLangKernelBuilder:
     def make_gather(self, argument, temporary, indices, **kwargs):
         # TODO cleanup the ids
         if argument.access in {exprs.READ, exprs.RW}:
-            return tlang.Read(argument.tensor, temporary, indices, id=self.name_generator.next("read"), **kwargs)
+            return tlang.Read(argument.tensor, temporary, indices, **kwargs)
         elif argument.access in {exprs.WRITE, exprs.INC}:
-            return tlang.Zero(argument.tensor, temporary, indices, id=self.name_generator.next("write"), **kwargs)
+            return tlang.Zero(argument.tensor, temporary, indices, **kwargs)
         else:
             raise NotImplementedError
 
@@ -235,7 +235,7 @@ class MultiArrayLangKernelBuilder:
             # temporaries[arg] for arg in call.arguments
             if arg.access in {exprs.WRITE, exprs.INC, exprs.RW}
         )
-        return tlang.FunctionCall(call.function, reads, writes,id=self.name_generator.next("func"), **kwargs)
+        return tlang.FunctionCall(call.function, reads, writes, **kwargs)
 
     def make_scatters(self, temporaries, **kwargs):
         return tuple(filter(
@@ -251,8 +251,8 @@ class MultiArrayLangKernelBuilder:
         if argument.access == exprs.READ:
             return None
         elif argument.access in {exprs.WRITE, exprs.RW}:
-            return tlang.Write(argument.tensor, temporary, indices, id=self.name_generator.next("write"), **kwargs)
+            return tlang.Write(argument.tensor, temporary, indices, **kwargs)
         elif argument.access == exprs.INC:
-            return tlang.Increment(argument.tensor, temporary, indices, id=self.name_generator.next("inc"), **kwargs)
+            return tlang.Increment(argument.tensor, temporary, indices, **kwargs)
         else:
             raise AssertionError

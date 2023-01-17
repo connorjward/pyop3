@@ -9,7 +9,7 @@ import numpy as np
 import pytools
 
 import pyop3.tensors
-from pyop3.utils import as_tuple
+from pyop3.utils import as_tuple, NameGenerator
 
 
 class Expr:
@@ -21,14 +21,21 @@ class Operator(Expr):
 
 
 class Loop(pytools.ImmutableRecord, Operator):
-    fields = {"indices", "statements"}
+    fields = {"indices", "statements", "id", "depends_on"}
 
-    def __init__(self, indices, statements):
+    id_generator = NameGenerator("loop")
+
+    def __init__(self, indices, statements, id=None, depends_on=frozenset()):
         # FIXME
         # assert isinstance(index, pyop3.tensors.Indexed)
+        if not id:
+            id = self.id_generator.next()
 
         self.indices = indices
         self.statements = as_tuple(statements)
+        self.id = id
+        self.depends_on = depends_on
+
         super().__init__()
 
     @property

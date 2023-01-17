@@ -13,16 +13,16 @@ from typing import Any
 
 import pytools
 
+from pyop3.utils import NameGenerator
+
 
 class Instruction(pytools.ImmutableRecord):
     fields = {"id", "depends_on"}
-    prefix = "insn"
-
-    _count = itertools.count()
 
     def __init__(self, *, id=None, depends_on=frozenset()):
+        # import pdb; pdb.set_trace()
         if not id:
-            id = f"{self.prefix}{next(self._count)}"
+            id = self.id_generator.next()
 
         self.id = id
         self.depends_on = depends_on
@@ -40,7 +40,7 @@ class Assignment(Instruction):
 
 
 class Read(Assignment):
-    prefix = "read"
+    id_generator = NameGenerator("read")
 
     @property
     def lhs(self):
@@ -52,7 +52,7 @@ class Read(Assignment):
 
 
 class Write(Assignment):
-    prefix = "write"
+    id_generator = NameGenerator("write")
 
     @property
     def lhs(self):
@@ -64,11 +64,11 @@ class Write(Assignment):
 
 
 class Increment(Write):
-    prefix = "inc"
+    id_generator = NameGenerator("inc")
 
 
 class Zero(Assignment):
-    prefix = "zero"
+    id_generator = NameGenerator("zero")
 
     @property
     def lhs(self):
@@ -83,7 +83,7 @@ class Zero(Assignment):
 
 class FunctionCall(Instruction):
     fields = Instruction.fields | {"function", "reads", "writes"}
-    prefix = "func"
+    id_generator = NameGenerator("func")
 
     def __init__(self, function, reads, writes, **kwargs):
         self.function = function

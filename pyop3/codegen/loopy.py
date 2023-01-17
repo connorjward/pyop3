@@ -119,6 +119,9 @@ class LoopyKernelBuilder:
         self._part_id_namer = NameGenerator("mypartid")
         self._loop_index_names = {}
 
+        self._latest_insn = {}
+        self._active_insn = None
+
     @property
     def kernel_data(self):
         return list(self._tensor_data.values()) + self._section_data + self._temp_kernel_data
@@ -176,15 +179,19 @@ class LoopyKernelBuilder:
                identify.
             """)
 
-
         # register inames (also needs to be done for packing loops)
         for multi_idx in multi_idx_collection:
             for i, typed_idx in enumerate(multi_idx):
+                # do this before creating the new iname
+                extent = self.register_extent(
+                    typed_idx.iset.size,
+                    list(self._loop_index_names.values()),
+                    list(self._loop_index_names.values()),
+                )
+
                 loop_index_name = self._namer.next("i")
                 self._loop_index_names[typed_idx] = loop_index_name
 
-                # import pdb; pdb.set_trace()
-                extent = self.register_extent(typed_idx.iset.size, multi_idx, i-1)
                 domain_str = f"{{ [{loop_index_name}]: 0 <= {loop_index_name} < {extent} }}"
                 self.domains.append(domain_str)
 
@@ -237,11 +244,13 @@ class LoopyKernelBuilder:
             tuple(subarrayrefs[var] for var in call.reads) + tuple(extents),
         )
 
-        depends_on = frozenset({f"{insn}*" for insn in call.depends_on})
+        insn_id = f"{call.id}_0"
+        depends_on = frozenset({self._latest_insn[id] for id in call.depends_on})
+
         call_insn = lp.CallInstruction(
             assignees,
             expression,
-            id=call.id,
+            id=insn_id,
             within_inames=self._get_within_inames(),
             within_inames_is_final=True,
             depends_on=depends_on
@@ -249,14 +258,19 @@ class LoopyKernelBuilder:
 
         self.instructions.append(call_insn)
         self.subkernels.append(call.function.code)
+        self._latest_insn[call.id] = insn_id
 
     @_make_instruction_context.register
     def _(self, assignment: tlang.Assignment, outer_loop_indices):
         jnames = self.register_loops(assignment.indices, outer_loop_indices)
-        within_inames = frozenset(outer_loop_indices.values()) | frozenset(jnames)
+        within_inames = list(outer_loop_indices.values()) + [j for j in jnames if j not in outer_loop_indices.values()]
+        # import pdb; pdb.set_trace()
         self._generate_assignment_insn(assignment, jnames, within_inames)
 
     def _generate_assignment_insn(self, assignment, jnames, within_inames, scalar=False):
+        # import pdb; pdb.set_trace()
+        self._active_insn = assignment
+
         # validate that the number of inames specified is the right number for the
         # indexed structure provided
         # e.g. self.check_inames()
@@ -266,25 +280,36 @@ not expected.
 we can only hit this situation with something like map composition where the inames are already
 declared. we just need to traverse properly to check that we have the right number of inames.
             """)
-        # basic check should otherwise be fine
-        assert len(assignment.indices.typed_indices) == len(jnames)
+
+        # we don't always need all the indices (e.g. if we permute the inner dimension)
+        # just use the first n outer ones
+        depth = len(assignment.indices.typed_indices)
+        jnames = jnames[-depth:]
+
+        # import pdb; pdb.set_trace()
+        # depends_on = depends_on | {f"{dep}*" for dep in assignment.depends_on}
 
         # 2. Generate map code
-        lpnames, ljnames = self.generate_index_insns(assignment.indices, jnames, assignment.lhs.name, assignment)
-        rpnames, rjnames = self.generate_index_insns(assignment.indices, jnames, assignment.rhs.name, assignment)
+        lpnames, ljnames = self.generate_index_insns(assignment.indices, jnames, assignment.lhs.name, assignment, within_inames)
+
+        # reset here to avoid loop clashes - these don't need to sync
+        self._latest_insn.pop(self._active_insn.id)
+
+        rpnames, rjnames = self.generate_index_insns(assignment.indices, jnames, assignment.rhs.name, assignment, within_inames)
 
         # 3. Generate layout code
-        loffset, ldeps = self.make_offset_expr(
-            assignment.lhs, lpnames, ljnames, assignment.id, assignment.depends_on, within_inames,
+        loffset = self.make_offset_expr(
+            assignment.lhs, lpnames, ljnames, f"{assignment.id}_loffset", within_inames,
         )
-        roffset, rdeps = self.make_offset_expr(
-            assignment.rhs, rpnames, rjnames, assignment.id, assignment.depends_on, within_inames,
+        roffset = self.make_offset_expr(
+            assignment.rhs, rpnames, rjnames, f"{assignment.id}_roffset", within_inames,
         )
 
+        # import pdb; pdb.set_trace()
         # 4. Emit assignment instruction
         self.generate_assignment_insn(assignment, assignment.lhs, loffset,
                                       assignment.rhs, roffset,
-                                      depends_on=ldeps|rdeps, scalar=scalar, within_inames=within_inames)
+                                      scalar=scalar, within_inames=within_inames)
 
         # Register data
         # TODO should only do once at a higher point (merge tlang and loopy stuff)
@@ -306,7 +331,6 @@ declared. we just need to traverse properly to check that we have the right numb
                 lp.TemporaryVariable(unindexed.name, shape=shape)
             )
 
-
         return
 
         # everything below shouldn't work now...
@@ -319,7 +343,7 @@ declared. we just need to traverse properly to check that we have the right numb
         # else:
         #     no_sync_with = frozenset()
 
-    def make_offset_expr(self, array, part_names, jnames, insn_prefix, depends_on, within_inames):
+    def make_offset_expr(self, array, part_names, jnames, insn_prefix, within_inames):
         """create an instruction of the form
 
         off = 0
@@ -349,49 +373,45 @@ declared. we just need to traverse properly to check that we have the right numb
 
         # need to create and pass within_inames
         inames_attr = f"inames={':'.join(within_inames)}"
-        # import pdb; pdb.set_trace()
 
         init_insn_id = self._namer.next(insn_prefix)
-        depends_on = {f"{dep}*" for dep in depends_on} | {init_insn_id}
 
-        stmts = [f"{offset_var_name} = 0 {{{inames_attr},id={init_insn_id}}}"]
+        depends_on = frozenset({self._latest_insn[id] for id in self._active_insn.depends_on})
+        if self._active_insn.id in self._latest_insn:
+            depends_on |= {self._latest_insn[self._active_insn.id]}
 
-        new_stmts, subdeps = self.make_offset_expr_inner(offset_var_name, axis, part_names, jnames, within_inames, depends_on, insn_prefix)
+        stmts = [f"{offset_var_name} = 0 {{{inames_attr},dep={':'.join(depends_on)},id={init_insn_id}}}"]
+        self._latest_insn[self._active_insn.id] = init_insn_id
+
+        new_stmts = self.make_offset_expr_inner(offset_var_name, axis, part_names, jnames, within_inames, insn_prefix)
         stmts.extend(new_stmts)
-        depends_on |= subdeps
         self.instructions.append("\n".join(stmts))
-        return offset_var_name, frozenset(depends_on)
+        return offset_var_name
 
     def make_offset_expr_inner(self, offset_var_name, axis, part_names,
-            jnames, within_inames, depends_on, insn_prefix, depth=0):
+            jnames, within_inames, insn_prefix, depth=0):
         assert axis.nparts > 0
-
-        if not depends_on:
-            depends_on = set()
 
         stmts = []
         if axis.nparts == 1: # if statement not needed
 
             # do not emit a statement if the loop isn't needed
             if isinstance(axis.part.count, MultiArray) or (isinstance(axis.part.count, numbers.Integral) and axis.part.count > 1):
-                new_stmts, subdeps = self.emit_layout_insns(
+                new_stmts = self.emit_layout_insns(
                     axis.part.layout_fn,
                     offset_var_name,
                     jnames[:depth+1],
                     within_inames,
-                    depends_on.copy(),
                     insn_prefix,
                     depth
                 )
                 stmts += new_stmts
-                depends_on |= subdeps
 
             # TODO indent statements for readability
             subaxis = axis.part.subaxis
             if subaxis:
-                substmts, moredeps = self.make_offset_expr_inner(offset_var_name,
-                        subaxis, part_names, jnames, within_inames, depends_on, insn_prefix, depth+1)
-                depends_on |= moredeps
+                substmts = self.make_offset_expr_inner(offset_var_name,
+                        subaxis, part_names, jnames, within_inames, insn_prefix, depth+1)
                 stmts.extend(substmts)
         else:
             for i, axis_part in enumerate(axis.parts):
@@ -405,66 +425,46 @@ declared. we just need to traverse properly to check that we have the right numb
                     else:
                         stmts.append(f"else if {part_names[depth]} == {i}")
 
-                    newstmts, subdeps = self.emit_layout_insns(
+                    newstmts = self.emit_layout_insns(
                         axis_part.layout_fn,
                         offset_var_name, jnames[:depth+1], within_inames,
-                        depends_on, insn_prefix, depth
+                        insn_prefix, depth
                     )
                     stmts += newstmts
-                    depends_on |= subdeps
 
                 # recurse (and indent?)
                 subaxis = axis_part.subaxis
                 if subaxis:
-                    newstmts, moredeps = self.make_offset_expr_inner(
+                    newstmts = self.make_offset_expr_inner(
                         offset_var_name,
                         subaxis, part_names, jnames, within_inames,
-                        depends_on, insn_prefix, depth+1
+                        insn_prefix, depth+1
                     )
-                    depends_on |= moredeps
                     stmts.extend(newstmts)
             stmts.append("end")
+        return stmts
 
-        # import pdb; pdb.set_trace()
-        return stmts, frozenset(depends_on)
-
-    def emit_layout_insns(self, layout_fn, offset_var, jnames, within_inames, depends_on, insn_prefix, depth):
+    def emit_layout_insns(self, layout_fn, offset_var, jnames, within_inames, insn_prefix, depth):
         """
         TODO
         """
-        # if layout_fn is None then we skip this part
-        # FIXME this probably shouldn't happen
-        if not layout_fn:
-            raise Exception("shouldnt hit")
-            return [], set()
-
-        # import pdb; pdb.set_trace()
-
         insn_id = self._namer.next(insn_prefix)
         within_inames_attr = f"inames={':'.join(within_inames)}"
 
-        # the layout can depend on the inames *outside* of the current axis - not inside
-        # useable_inames = list(within_inames)[:depth+1]
-        # useable_inames = list(loop_index_names)[:depth+1]
-
-        # multi_idx, = layout_fn.indices.multi_indices  # must be only one for linear things
-        # newdepth = len(multi_idx)
-        # useable_inames = list(within_inames)[:newdepth+1]
-
+        depends_on = frozenset({self._latest_insn[id] for id in self._active_insn.depends_on})
+        if self._active_insn.id in self._latest_insn:
+            depends_on |= {self._latest_insn[self._active_insn.id]}
 
 
         # TODO singledispatch!
         if isinstance(layout_fn, IndirectLayoutFunction):
-
-            # import pdb; pdb.set_trace()
-            layout_var = self.register_scalar_assignment(layout_fn.data, jnames, within_inames, depth)
+            layout_var = self.register_scalar_assignment(layout_fn.data, jnames, within_inames)
 
             # generate the instructions
             stmts = [
                 f"{offset_var} = {offset_var} + {layout_var} "
-                f"{{{within_inames_attr},dep={':'.join(dep for dep in depends_on)},id={insn_id}}}"
+                f"{{{within_inames_attr},dep={':'.join(depends_on)},id={insn_id}}}"
             ]
-
 
 
             # register the data
@@ -490,9 +490,11 @@ declared. we just need to traverse properly to check that we have the right numb
 
             stmts = [
                 f"{offset_var} = {offset_var} + {iname}*{step} + {start} "
-                f"{{{within_inames_attr},dep={':'.join(dep for dep in depends_on)},id={insn_id}}}"
+                f"{{{within_inames_attr},dep={':'.join(depends_on)},id={insn_id}}}"
             ]
-        return stmts, {insn_id}
+
+        self._latest_insn[self._active_insn.id] = insn_id
+        return stmts
 
     def generate_assignment_insn(
             self,
@@ -501,7 +503,6 @@ declared. we just need to traverse properly to check that we have the right numb
             loffset,
             rhs,
             roffset,
-            depends_on,
             scalar,
             within_inames,
         ):
@@ -526,6 +527,7 @@ declared. we just need to traverse properly to check that we have the right numb
             rexpr = pym.subscript(pym.var(rhs.name), pym.var(roffset))
 
         if isinstance(assignment, tlang.Zero):
+            # import pdb; pdb.set_trace()
             rexpr = 0
         elif isinstance(assignment, tlang.Increment):
             rexpr = lexpr + rexpr
@@ -538,18 +540,23 @@ declared. we just need to traverse properly to check that we have the right numb
         # else:
         #     no_sync_with = frozenset()
 
+        insn_id = self._namer.next(f"{assignment.id}_")
+        depends_on = frozenset({self._latest_insn[id] for id in self._active_insn.depends_on})
+        if self._active_insn.id in self._latest_insn:
+            depends_on |= {self._latest_insn[self._active_insn.id]}
+
         assign_insn = lp.Assignment(
             lexpr, rexpr,
-            id=self._namer.next(f"{assignment.id}_"),
-            # within_inames=self._get_within_inames(),
+            id=insn_id,
             within_inames=frozenset(within_inames),
             within_inames_is_final=True,
-            depends_on=depends_on|frozenset({f"{dep}*" for dep in assignment.depends_on}),
+            depends_on=depends_on,
             # no_sync_with=no_sync_with,
         )
         self.instructions.append(assign_insn)
+        self._latest_insn[self._active_insn.id] = insn_id
 
-    def generate_index_insns(self, multi_index, inames, prefix, context):
+    def generate_index_insns(self, multi_index, inames, prefix, context, within_inames):
         """This instruction needs to somehow traverse the indices and axes and probably
         return variable representing the parts and index name (NOT inames) for the LHS
         and RHS. Could possibly be done separately for each as the inames are known.
@@ -567,33 +574,43 @@ declared. we just need to traverse properly to check that we have the right numb
         pname = self._namer.next(f"{prefix}_p")
         jname = self._namer.next(f"{prefix}_j")
 
+        # not needed as can be done at top of loop
+        # depends_on = frozenset({self._latest_insn[id] for id in self._active_insn.depends_on})
+        if self._active_insn.id in self._latest_insn:
+            depends_on = frozenset({self._latest_insn[self._active_insn.id]})
+        else:
+            depends_on = frozenset()
+
+
         if isinstance(idx, Map):
             map_inames, inames = inames[:idx.depth], inames[idx.depth:]
             raise NotImplementedError("need to emit some clever code")
             assign_insn = ...
         else:
+            if subidxs:
+                myinames = frozenset(within_inames[:-len(subidxs)])
+            else:
+                myinames = frozenset(within_inames)
             iname, *subinames = inames
             # TODO handle step sizes etc here
             part_insn = lp.Assignment(
                 pym.var(pname), idx.part_label,
                 id=self._namer.next(f"{context.id}_"),
-                within_inames=self._get_within_inames(),
-                within_inames_is_final=True,
-                # depends_on=depends_on|frozenset({f"{dep}*" for dep in context.depends_on}),
-                depends_on=frozenset({f"{dep}*" for dep in context.depends_on}),
+                within_inames=myinames,
+                depends_on=depends_on,
                 # no_sync_with=no_sync_with,
             )
             index_insn = lp.Assignment(
                 pym.var(jname), pym.var(iname),
                 id=self._namer.next(f"{context.id}_"),
-                within_inames=self._get_within_inames(),
-                within_inames_is_final=True,
-                # depends_on=depends_on|frozenset({f"{dep}*" for dep in context.depends_on}),
-                depends_on=frozenset({f"{dep}*" for dep in context.depends_on}),
+                within_inames=myinames,
+                depends_on=depends_on,
                 # no_sync_with=no_sync_with,
             )
         self.instructions.append(part_insn)
         self.instructions.append(index_insn)
+
+        self._latest_insn[self._active_insn.id] = index_insn.id
 
         self._temp_kernel_data.extend([
             lp.TemporaryVariable(name, shape=(), dtype=np.uintp)
@@ -601,7 +618,7 @@ declared. we just need to traverse properly to check that we have the right numb
         ])
 
         if subidxs:
-            subp, subj = self.generate_index_insns(subidxs, subinames, prefix, context)
+            subp, subj = self.generate_index_insns(subidxs, subinames, prefix, context, within_inames)
             return (pname,) + subp, (jname,) + subj
         else:
             return (pname,), (jname,)
@@ -615,7 +632,7 @@ declared. we just need to traverse properly to check that we have the right numb
         inames = collections.deque()
 
         if not indices:
-            return inames
+            return list(inames)
 
         idx, *subidxs = indices
 
@@ -633,43 +650,18 @@ declared. we just need to traverse properly to check that we have the right numb
 
         inames.append(iname)
 
-        return inames + self.register_loops(subidxs, outer_loop_indices)
+        return list(inames) + self.register_loops(subidxs, outer_loop_indices)
 
-    def register_new_domain(self, iname, index, within_loops):
-        raise Exception("don't think I touch this")
-        if isinstance(index.size, pym.primitives.Expression):
-            if not isinstance(index.size, MultiArray):
-                raise NotImplementedError("need to think hard about more complicated expressions"
-                                          "esp. sharing inames")
-            # remove the final iname matching index from within_loops as the index.size will
-            # not see this/be outside of it
-            exwithin_loops = copy.deepcopy(within_loops)
-            exwithin_loops.pop()
-            size = self.register_extent(index.size, exwithin_loops)
-        else:
-            size = index.size
-        if iname in self.domains:
-            assert self.domains[iname] == (0, size, 1)
-        else:
-            self.domains[iname] = (0, size, 1)
-
-        return iname
-
-    def register_extent(self, extent, multi_idx, depth):
+    def register_extent(self, extent, jnames, within_inames):
         if isinstance(extent, MultiArray):
             # If we have a ragged thing then we need to create a scalar temporary
             # to hold its value.
-            try:
-                # TODO here we assume that we only index an extent tensor once. This
-                # is a simplification.
-                return self.extents[extent.name]
-            except KeyError:
-                temp_var = self.register_scalar_assignment(extent, multi_idx, depth)
-                return self.extents.setdefault(extent.name, temp_var)
+            temp_var = self.register_scalar_assignment(extent, jnames, within_inames)
+            return str(temp_var)
         else:
             return extent
 
-    def register_scalar_assignment(self, array, jnames, within_inames, depth):
+    def register_scalar_assignment(self, array, jnames, within_inames):
         # import pdb; pdb.set_trace()
         temp_name = self._namer.next("n")
         # need to create a scalar multi-axis with the same depth
@@ -688,20 +680,18 @@ declared. we just need to traverse properly to check that we have the right numb
             dtype=np.int32,
         )
 
-        # make sure that the RHS reduces down to a scalar (but skip the last entry)
-        # this nasty slice makes sure that I am dropping all indices *below* the
-        # current one and only taking as many as needed
-        # newidxs = MultiIndexCollection([
-        #     MultiIndex([
-        #         *multi_idx.typed_indices[:depth+1][-array.depth:]
-        #     ])
-        # ])
-        # array = array[[newidxs]]
+        # track old assignment
+        old_assignment = self._active_insn
 
-        # import pdb; pdb.set_trace()
-
-        insn = tlang.Read(array, temp, array.indices.multi_indices[0])
+        if self._active_insn:
+            depends_on = self._active_insn.depends_on
+        else:
+            depends_on = frozenset()
+        insn = tlang.Read(array, temp, array.indices.multi_indices[0], depends_on=depends_on)
         self._generate_assignment_insn(insn, jnames, within_inames, scalar=True)
+
+        # restore
+        self._active_insn = old_assignment
 
         return pym.var(temp_name)
 

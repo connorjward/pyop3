@@ -157,7 +157,7 @@ class MultiAxis(pytools.ImmutableRecord):
         # return self._set_up()
         new_axis, layouts = self._set_up()
         assert is_set_up(new_axis)
-        import pdb; pdb.set_trace()
+        # import pdb; pdb.set_trace()
         return new_axis
 
 
@@ -169,23 +169,31 @@ class MultiAxis(pytools.ImmutableRecord):
 
         # return a nested list structure or nothing. if the former then haven't set all
         # the layouts (needs) to be end of the loop
-        # import pdb; pdb.set_trace()
 
         # if no numbering is provided create one
         # TODO should probably just set an affine one by default so we can mix these up
+        # import pdb; pdb.set_trace()
         if not strictly_all(pt.numbering is not None for pt in self.parts):
             axis_numbering = []
             start = 0
-            stop = self.parts[0].find_integer_count(indices)
+            stop = start + self.parts[0].find_integer_count(indices)
             numb = np.arange(start, stop, dtype=np.uintp)
+            # don't set up to avoid recursion (should be able to use affine anyway)
+            axis = MultiAxis([AxisPart(len(numb))])
+            numb = MultiArray(dim=axis,name=f"{self.id}_ord0", data=numb, dtype=np.uintp)
             axis_numbering.append(numb)
+            start = stop
             for i in range(1, self.nparts):
+                stop = start + self.parts[i].find_integer_count(indices)
                 numb = np.arange(start, stop, dtype=np.uintp)
+                axis = MultiAxis([AxisPart(len(numb))])
+                numb = MultiArray(dim=axis,name=f"{self.id}_ord{i}", data=numb, dtype=np.uintp)
                 axis_numbering.append(numb)
                 start = stop
-                stop += self.parts[i].find_integer_count(indices)
         else:
             axis_numbering = [pt.numbering for pt in self.parts]
+
+        assert all(isinstance(num, MultiArray) for num in axis_numbering)
 
         # if any of the sub axis parts do not depend on the current index (and therefore
         # have a constant stride) then we need to have our own layout function for this level
@@ -207,9 +215,11 @@ class MultiAxis(pytools.ImmutableRecord):
             if part.has_integer_count:
                 count = part.count
             else:
-                count = part.count.root.part.find_integer_count(indices)
+                count = part.count.get_value(indices)
 
-            if part.subaxis:
+            # if part.subaxis:
+            # expect a partial solution
+            if requires_external_index(part):
                 layouts[part] = {}
                 for subpart in part.subaxis.parts:
                     layouts[part][subpart] = [None] * count
@@ -220,15 +230,15 @@ class MultiAxis(pytools.ImmutableRecord):
         new_subaxes = {pt: set() for pt in self.parts}
 
         for i in range(npoints):
-            # import pdb; pdb.set_trace()
             # find the right axis part and index thereof for the current 'global' numbering
             selected_part = None
             selected_index = None
             for part_num, axis_part in enumerate(self.parts):
                 try:
                     # is the current global index found in the numbering of this axis part?
-                    # FIXME this will likely break as numbering is not an array - need to implement this fn
-                    selected_index = list(axis_numbering[part_num]).index(i)
+                    if axis_numbering[part_num].depth > 1:
+                        raise NotImplementedError("Need better indexing approach")
+                    selected_index = list(axis_numbering[part_num].data).index(i)
                     selected_part = axis_part
                 except ValueError:
                     continue
@@ -236,16 +246,31 @@ class MultiAxis(pytools.ImmutableRecord):
                 assert selected_part is None and selected_index is None, "must be both"
                 raise ValueError(f"{i} not found in any numberings")
 
-            if subaxis := selected_part.subaxis:
-                new_subaxis, subresult = selected_part.subaxis._set_up(indices|i, offset)
-                # note that this will be done lots of times (which is bad, should always be the same)
-                # this set should always only have one thing in it.
+            subaxis = selected_part.subaxis
+            if subaxis:
+                # need to do this before calling _set_up since offset gets changed
+                if not requires_external_index(selected_part):
+                    layouts[selected_part][selected_index] = offset.value
+
+                # remember the line below updates offset
+                new_subaxis, subresult = subaxis._set_up(indices|i, offset)
                 new_subaxes[selected_part].add(new_subaxis)
-                for subpart, sublayout in subresult.items():
-                    layouts[selected_part][subpart][selected_index] = sublayout
+                if requires_external_index(selected_part):
+                    # note that this will be done lots of times (which is bad,
+                    # should always be the same)
+                    # this set should always only have one thing in it.
+                    for subpart, sublayout in subresult.items():
+                        layouts[selected_part][subpart][selected_index] = sublayout
+                else:
+                    # should have layout as None for these as they should be set internally
+                    for sublayout in subresult.values():
+                        assert sublayout is None
+
             else:
                 layouts[selected_part][selected_index] = offset.value
                 offset += 1
+
+        # import pdb; pdb.set_trace()
 
         # should fill up them all
         assert not any(idx is None for layout in layouts.values() for idx in layout)
@@ -263,12 +288,28 @@ class MultiAxis(pytools.ImmutableRecord):
                 new_subaxis = None
 
             if not requires_external_index(part):
-                # bit of a cheat (already done the hard work)
-                if has_constant_step(part) and not part.numbering:
-                    step = part.subaxis.calc_size() if part.subaxis else 1
-                    new_layout = AffineLayoutFunction(step)
+                # first try to convert to something affine if applicable, fallback to lookup
+                # note that layouts[part] will always be a list of numbers
+                assert all(isinstance(item, numbers.Integral) for item in layouts[part])
+
+                assert len(layouts[part]) > 0
+
+                if len(layouts[part]) == 1:
+                    step = 1  # this kinda ick
+                    start = layouts[part][0]
+                    new_layout = AffineLayoutFunction(step, start=start)
                 else:
-                    new_layout = layouts[part]
+                    steps = [
+                        layouts[part][i+1] - layouts[part][i] for i in range(len(layouts[part])-1)
+                    ]
+                    if pytools.is_single_valued(steps):
+                        step = pytools.single_valued(steps)
+                        start = layouts[part][0]
+                        new_layout = AffineLayoutFunction(step, start=start)
+                    else:
+                        new_layout = IndirectLayoutFunction(
+                            MultiArray.from_list(layouts[part], f"{self.id}_ord{part_num}", np.uintp)
+                        )
                 # mark as None to indicate that its dealt with
                 layouts[part] = None
 
@@ -694,6 +735,12 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
         else:
             assert max_count is not None
 
+        if isinstance(numbering, np.ndarray):
+            numbering = list(numbering)
+
+        if isinstance(numbering, collections.abc.Sequence):
+            numbering = MultiArray.from_list(numbering, name=f"{id}_ord", dtype=np.uintp)
+
         if not isinstance(label, collections.abc.Hashable):
             raise ValueError("Provided label must be hashable")
 
@@ -1055,6 +1102,16 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
             return part.size
         return size
 
+    @classmethod
+    def from_list(cls, data, name, dtype):
+        """Return a (linear) multi-array formed from a list of lists."""
+        if not strictly_all(isinstance(item, numbers.Number) for item in data):
+            raise NotImplementedError("Nesting (i.e. raggedness) is not yet supported")
+        # FIXME need to flatten if nested
+        data = np.array(data, dtype=dtype)
+        axis = MultiAxis([AxisPart(len(data))]).set_up()
+        return cls(axis, name=name, data=data, dtype=dtype)
+
     # @classmethod
     # def compute_layouts(cls, axis):
     #     if axis.permutation:
@@ -1359,7 +1416,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         else:
             new_idxs = []
             for pt in axis.parts:
-                idx, subidxs = TypedIndex(pt.label, IndexSet(axis.count)), []
+                idx, subidxs = TypedIndex(pt.label, IndexSet(pt.count)), []
 
                 if subaxis := axis.find_part(idx.part_label).subaxis:
                     new_idxs.extend(

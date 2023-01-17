@@ -183,11 +183,11 @@ def test_compute_double_loop():
 def test_compute_double_loop_mixed():
     axes = (
         MultiAxis([
-            AxisPart(10, id="ax1"),
-            AxisPart(12, id="ax2"),
+            AxisPart(10, id="p1"),
+            AxisPart(12, id="p2"),
         ])
-        .add_subaxis("ax1", MultiAxis([AxisPart(3)]))
-        .add_subaxis("ax2", MultiAxis([AxisPart(2)]))
+        .add_subaxis("p1", MultiAxis([AxisPart(3)]))
+        .add_subaxis("p2", MultiAxis([AxisPart(2)]))
     ).set_up()
 
     dat1 = MultiArray.new(axes, name="dat1", data=np.arange(54, dtype=np.float64), dtype=np.float64)
@@ -314,9 +314,9 @@ def test_compute_double_loop_permuted():
 
 
 def test_permuted_twice():
-    ax1 = MultiAxis([AxisPart(3, id="p1", numbering=[2, 1, 0])]).set_up()
-    ax2 = ax1.add_subaxis("p1", MultiAxis([AxisPart(3, id="p2", numbering=[2, 0, 1])], parent=ax1.without_numbering().set_up())).set_up()
-    ax3 = ax2.add_subaxis("p2", MultiAxis([AxisPart(2)], parent=ax2.without_numbering().set_up())).set_up()
+    ax1 = MultiAxis([AxisPart(3, id="p1", numbering=[1, 0, 2])])
+    ax2 = ax1.add_subaxis("p1", MultiAxis([AxisPart(3, id="p2", numbering=[2, 0, 1])]))
+    ax3 = ax2.add_subaxis("p2", MultiAxis([AxisPart(2)])).set_up()
 
     dat1 = MultiArray.new(ax3, name="dat1", data=np.arange(18, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(ax3, name="dat2", data=np.zeros(18, dtype=np.float64), dtype=np.float64)
@@ -397,18 +397,15 @@ def test_somewhat_permuted():
 
 
 def test_compute_double_loop_permuted_mixed():
-    axes = MultiAxis([
-        AxisPart(4, id="p1", numbering=[4, 6, 2, 0]),
-        AxisPart(3, id="p2", numbering=[5, 3, 1]),
-    ]).set_up()
-
-    import pdb; pdb.set_trace()
-
-    notnumbered = axes.without_numbering().set_up()
     axes = (
-        axes.add_subaxis("p1", MultiAxis([AxisPart(1)], parent=notnumbered))
-        .add_subaxis("p2", MultiAxis([AxisPart(2)], parent=notnumbered))
+        MultiAxis([
+            AxisPart(4, id="p1", numbering=[4, 6, 2, 0]),
+            AxisPart(3, id="p2", numbering=[5, 3, 1]),
+        ])
+        .add_subaxis("p1", MultiAxis([AxisPart(1)]))
+        .add_subaxis("p2", MultiAxis([AxisPart(2)]))
     ).set_up()
+
     dat1 = MultiArray.new(axes, name="dat1", data=np.arange(10, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
 
@@ -435,9 +432,11 @@ def test_compute_double_loop_permuted_mixed():
     fn = getattr(dll, "mykernel")
 
     sec0 = dat1.dim.parts[0].layout_fn.data
-    sec1 = dat1.dim.parts[1].layout_fn.data
+    # this isn't needed because the numbering is regular
+    # sec1 = dat1.dim.parts[1].layout_fn.data
 
-    args = [sec0.data, sec1.data, dat1.data, dat2.data]
+    # args = [sec0.data, sec1.data, dat1.data, dat2.data]
+    args = [sec0.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
     fn(*(d.ctypes.data for d in args))
 
@@ -445,14 +444,13 @@ def test_compute_double_loop_permuted_mixed():
 
 
 def test_compute_double_loop_ragged():
-    ax1 = MultiAxis([AxisPart(5, id="ax1")]).set_up()
+    ax1 = MultiAxis([AxisPart(5, id="p1")])
 
     nnz = MultiArray.new(
-        ax1, name="nnz", dtype=np.int32, data=np.array([3, 2, 1, 3, 2], dtype=np.int32)
+        ax1.set_up(), name="nnz", dtype=np.int32, data=np.array([3, 2, 1, 3, 2], dtype=np.int32)
     )
 
-    ax2 = ax1.add_subaxis("ax1", MultiAxis([AxisPart(nnz, max_count=3)], parent=ax1))
-    ax2 = ax2.set_up()
+    ax2 = ax1.add_subaxis("p1", MultiAxis([AxisPart(nnz, max_count=3)])).set_up()
 
     dat1 = MultiArray.new(ax2, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(ax2, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
@@ -470,7 +468,7 @@ def test_compute_double_loop_ragged():
 
     p = MultiIndexCollection([
         MultiIndex([
-            TypedIndex("ax1", IndexSet(5)),
+            TypedIndex(0, IndexSet(5)),
             TypedIndex(0, IndexSet(nnz)),
         ])
     ])
@@ -479,6 +477,8 @@ def test_compute_double_loop_ragged():
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
+
+    # import pdb; pdb.set_trace()
 
     args = [nnz.data, dat1.axes.part.layout_fn.data.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
@@ -522,8 +522,8 @@ def test_doubly_ragged():
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
     p = MultiIndexCollection([
         MultiIndex([
-            TypedIndex("ax1", IndexSet(3)),
-            TypedIndex("ax2", IndexSet(nnz1)),
+            TypedIndex(0, IndexSet(3)),
+            TypedIndex(0, IndexSet(nnz1)),
             TypedIndex(0, IndexSet(nnz2)),
         ])
     ])
@@ -1434,4 +1434,4 @@ def test_extruded_mesh():
 
 
 if __name__ == "__main__":
-    test_subset()
+    test_compute_double_loop()
