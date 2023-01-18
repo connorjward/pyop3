@@ -137,13 +137,16 @@ def attach_affine_layouts(layouts, part, npart, offset, path=None):
     # we are affine if the step is constant and there is no numbering
     if has_constant_step(part) and part.numbering is None:
         step = part.subaxis.calc_size() if part.subaxis else 1
-        start = offset
+        start = offset.value
         assert layouts[path] is None
         layouts[path] = AffineLayoutFunction(step, start)
 
     # if layout is not null, zero the offset before recursing
     if layouts[path] != "null layout":
-        offset = 0
+        old_offset = offset  # track a reference
+        offset = IntRef(0)
+    else:
+        old_offset = None
 
     if part.subaxis:
         for npt, subpart in enumerate(part.subaxis.parts):
@@ -161,9 +164,13 @@ def attach_affine_layouts(layouts, part, npart, offset, path=None):
                 # for regular ones. The actual start offset can be a lookup.
                 # N.B. This could get even more complicated if we needed to add multiple
                 # multi-arrays.
-                raise NotImplementedError()
+                raise NotImplementedError("see comment")
 
-            offset += part.count
+            offset += part.calc_size()
+
+    # restore the value
+    if old_offset is not None:
+        old_offset += offset.value
 
 
 def attach_blank_data_to_layouts(layouts, part, npart, data, path=None):
@@ -299,14 +306,47 @@ class MultiAxis(pytools.ImmutableRecord):
             new_parts.append(new_part)
         return self.copy(parts=new_parts)
 
-    def _set_up(self, indices=PrettyTuple(), offset=None):
-        # should probably set up constant layouts as a first step
+    def finish_off_layouts(self, layouts, offset, path=PrettyTuple()):
+        # import pdb; pdb.set_trace()
 
-        if not offset:
-            offset = IntRef(0)
+        # since this search loops over all entries in the multi-axis
+        # (not just the axis part) we need to execute the function if *any* axis part
+        # requires tabulation.
+        test1 = any(
+            part.subaxis and any(requires_external_index(pt) for pt in part.subaxis.parts)
+            for part in self.parts
+        )
+        test2 = any(pt.numbering is not None for pt in self.parts)
+        if test1 or test2:
+            data = self.create_layout_lists(path, offset)
+            layouts |= data
 
-        # return a nested list structure or nothing. if the former then haven't set all
-        # the layouts (needs) to be end of the loop
+        for npart, part in enumerate(self.parts):
+            # zero offset if layout exists
+            if layouts[path|npart] != "null layout":
+                saved_offset = offset.value
+                offset.value = 0
+            else:
+                saved_offset = 0
+
+            if part.subaxis:
+                part.subaxis.finish_off_layouts(layouts, offset, path|npart)
+
+            offset.value += saved_offset
+
+    def create_layout_lists(self, path, offset, indices=PrettyTuple()):
+        npoints = 0
+        # data = {}
+        for npart, part in enumerate(self.parts):
+            if part.has_integer_count:
+                count = part.count
+            else:
+                count = part.count.get_value(indices)
+
+            # data[npart] = [None] * count
+            npoints += count
+
+        new_layouts = collections.defaultdict(dict)
 
         # if no numbering is provided create one
         # TODO should probably just set an affine one by default so we can mix these up
@@ -333,33 +373,10 @@ class MultiAxis(pytools.ImmutableRecord):
 
         assert all(isinstance(num, MultiArray) for num in axis_numbering)
 
-        # import pdb; pdb.set_trace()
-
-        # loop over all points in all parts of the multi-axis
-        # initialise layout array per axis part
-        layouts = {}
-        for npart, part in enumerate(self.parts):
-            layouts |= prepare_layouts(part, npart)
-
-        set_null_layouts(layouts, self)
-
-        npoints = 0
-        for npart, part in enumerate(self.parts):
-            if part.has_integer_count:
-                count = part.count
-            else:
-                count = part.count.get_value(indices)
-
-            attach_affine_layouts(layouts, part, npart, npoints)
-
-            data = [None] * count
-
-            attach_blank_data_to_layouts(layouts, part, npart, data)
-            npoints += count
-
-        # import pdb; pdb.set_trace()
-
         for i in range(npoints):
+            # TODO add a shortcut here to catch if i is inside the numbering of an affine
+            # subpart.
+
             # find the right axis part and index thereof for the current 'global' numbering
             selected_part = None
             selected_part_num = None
@@ -377,54 +394,94 @@ class MultiAxis(pytools.ImmutableRecord):
             if selected_part is None or selected_index is None:
                 raise ValueError(f"{i} not found in any numberings")
 
-            path = (selected_part_num,)
-
-            # skip if we have already processed this
-            if layouts[path] is not None:
-                continue
-
             if selected_part.subaxis:
-                sublayouts = selected_part.subaxis._set_up(indices|i, offset)
+                # we don't need to recurse any more
+                if has_independently_indexed_subaxis_parts(selected_part):
+                    new_layouts[path|selected_part_num][selected_index] = offset.value
+                    offset += selected_part.subaxis.calc_size()
+                else:
+                    for npt, subpart in enumerate(selected_part.subaxis.parts):
+                        subdata = subpart.subaxis.create_layout_lists(
+                            subpart, npt, path|selected_part_num, offset, indices|i
+                        )
 
-                for subpath, sublayout in sublayouts.items():
-                    layouts[path+subpath][selected_index] = sublayout
+                        for subpath, subdata in subdata.items():
+                            new_layouts[subpath][selected_index] = subdata
             else:
-                layouts[path][selected_index] = offset.value
+                # import pdb; pdb.set_trace()
+                new_layouts[path|selected_part_num][selected_index] = offset.value
                 offset += 1
+        ret = {path_: self.unpack_index_dict(layout_) for path_, layout_ in new_layouts.items()}
+        return ret
 
-                # if any of the sub axis parts do not depend on the current index (and
-                # therefore have a constant stride) then we need to have our own layout
-                # function for this level
-            #     if has_independently_indexed_subaxis_parts(selected_part):
-            #         saved_offset = offset.value
-            #         offset.value = 0
-            #     else:
-            #         saved_offset = 0
-            #
-            #     current_offset = offset.value
-            #     new_subaxis, layout_by_part = selected_part.subaxis._set_up(indices|i, offset)
-            #     new_subaxes[selected_part].add(new_subaxis)
-            #     for subpart_num, (subpart, sublayout) in enumerate(layout_by_part.items()):
-            #         # if sublayout is None then we must have already set up a layout for
-            #         # the below bits
-            #         if not requires_external_index(subpart):
-            #             assert sublayout is None
-            #             assert part_is_set_up(new_subaxis.parts[subpart_num])
-            #             layouts[selected_part][subpart][selected_index] = current_offset
-            #         else:
-            #             assert sublayout is not None
-            #             layouts[selected_part][subpart][selected_index] = sublayout
-            #
-            #     # now reset
-            #     offset.value += saved_offset
-            # else:
-            #     layouts[selected_part][selected_index] = offset.value
-            #     offset += 1
+    @staticmethod
+    def unpack_index_dict(idict):
+        ret = [None] * len(idict)
+        for i, j in idict.items():
+            ret[i] = j
+
+        assert not any(item is None for item in ret)
+        return ret
+
+    def turn_lists_into_layout_functions(self, layouts):
+        for path, layout in layouts.items():
+            if isinstance(layout, list):
+                data = MultiArray.from_list(layout, f"layout_{'_'.join(str(p) for p in path)}", np.uintp)
+                layouts[path] = IndirectLayoutFunction(data)
+
+    def _set_up(self, indices=PrettyTuple(), offset=None):
+        # should probably set up constant layouts as a first step
+
+        if not offset:
+            offset = IntRef(0)
+
+        # return a nested list structure or nothing. if the former then haven't set all
+        # the layouts (needs) to be end of the loop
 
         # import pdb; pdb.set_trace()
 
+        # loop over all points in all parts of the multi-axis
+        # initialise layout array per axis part
+        layouts = {}
+        for npart, part in enumerate(self.parts):
+            layouts |= prepare_layouts(part, npart)
+
+        set_null_layouts(layouts, self)
+
+        myoff = IntRef(offset.value)
+        npoints = 0
+        for npart, part in enumerate(self.parts):
+            if part.has_integer_count:
+                count = part.count
+            else:
+                count = part.count.get_value(indices)
+
+            attach_affine_layouts(layouts, part, npart, myoff)
+
+            data = [None] * count
+
+            attach_blank_data_to_layouts(layouts, part, npart, data)
+            npoints += count
+
+            # I think I can avoid this as modified in the function - should pass explicitly
+            # myoff += 
+
         if any(layout is None for layout in layouts.values()):
-            raise NotImplementedError
+            raise AssertionError
+
+        # import pdb; pdb.set_trace()
+        assert offset.value == 0
+        self.finish_off_layouts(layouts, offset)
+
+        # import pdb; pdb.set_trace()
+        self.turn_lists_into_layout_functions(layouts)
+
+        # import pdb; pdb.set_trace()
+
+        for layout in layouts.values():
+            if isinstance(layout, list):
+                if any(item is None for item in layout):
+                    raise AssertionError
 
         return layouts
 
@@ -799,7 +856,7 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
         else:
             return self.max_count
 
-    def calc_size(self, indices):
+    def calc_size(self, indices=PrettyTuple()):
         extent = self.find_integer_count(indices)
         if self.subaxis:
             return sum(self.subaxis.calc_size(indices|i) for i in range(extent))
