@@ -400,13 +400,12 @@ class MultiAxis(pytools.ImmutableRecord):
                     new_layouts[path|selected_part_num][selected_index] = offset.value
                     offset += selected_part.subaxis.calc_size()
                 else:
-                    for npt, subpart in enumerate(selected_part.subaxis.parts):
-                        subdata = subpart.subaxis.create_layout_lists(
-                            subpart, npt, path|selected_part_num, offset, indices|i
-                        )
+                    subdata = selected_part.subaxis.create_layout_lists(
+                        path|selected_part_num, offset, indices|i
+                    )
 
-                        for subpath, subdata in subdata.items():
-                            new_layouts[subpath][selected_index] = subdata
+                    for subpath, subdata in subdata.items():
+                        new_layouts[subpath][selected_index] = subdata
             else:
                 # import pdb; pdb.set_trace()
                 new_layouts[path|selected_part_num][selected_index] = offset.value
@@ -469,7 +468,7 @@ class MultiAxis(pytools.ImmutableRecord):
         if any(layout is None for layout in layouts.values()):
             raise AssertionError
 
-        # import pdb; pdb.set_trace()
+        import pdb; pdb.set_trace()
         assert offset.value == 0
         self.finish_off_layouts(layouts, offset)
 
@@ -749,7 +748,7 @@ def requires_external_index(part):
     """
     return size_requires_external_index(part) or numbering_requires_external_index(part)
 
-def size_requires_external_index(part, depth=1):
+def size_requires_external_index(part, depth=0):
     if not part.has_integer_count and part.count.depth > depth:
         return True
     else:
@@ -810,20 +809,6 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
         self.max_count = max_count
         self.is_layout = is_layout
         self.layout_fn = layout_fn
-
-    # not so now - want something internal to index parts (integer)
-    # @property
-    # def id(self):
-    #     import warnings
-    #     warnings.warn("id is deprecated for label", DeprecationWarning)
-    #     return self.label
-
-    @property
-    def has_constant_step(self):
-        return (
-            self.subaxis is None
-            or all(pt.has_constant_step and not pt.is_ragged for pt in self.subaxis.parts)
-        )
 
     @property
     def has_integer_count(self):
