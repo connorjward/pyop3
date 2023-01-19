@@ -491,21 +491,21 @@ def test_doubly_ragged():
     ax1 = MultiAxis([AxisPart(3, id="p1")])
     nnz1 = MultiArray.new(
         ax1.set_up(), name="nnz1", dtype=np.int32, max_value=3,
-        data = np.array([3, 0, 2], dtype=np.int32)
+        data = np.array([3, 1, 2], dtype=np.int32)
     )
 
     ax2 = ax1.add_subaxis("p1", MultiAxis([AxisPart(nnz1, id="p2", max_count=3)]))
     nnz2 = MultiArray.new(
         ax2.set_up(), name="nnz2", dtype=np.int32, max_value=5,
-        data = np.array([1, 0, 5, 2, 3], dtype=np.int32)
+        data = np.array([1, 1, 5, 4, 2, 3], dtype=np.int32)
     )
 
     ax3 = ax2.add_subaxis("p2", MultiAxis([AxisPart(nnz2, max_count=5)])).set_up()
     dat1 = MultiArray.new(
-        ax3, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64
+        ax3, name="dat1", data=np.arange(16, dtype=np.float64), dtype=np.float64
     )
     dat2 = MultiArray.new(
-        ax3, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64
+        ax3, name="dat2", data=np.zeros(16, dtype=np.float64), dtype=np.float64
     )
 
     code = lp.make_kernel(
@@ -533,13 +533,13 @@ def test_doubly_ragged():
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    # layout0 = nnz2.axes.part.layout_fn.data
-    # layout1 = dat1.axes.part.subaxis.part.layout_fn.data
-    # layout2 = dat1.axes.part.layout_fn.data
+    layout0 = nnz2.root.part.subaxis.part.layout_fn.start
+    layout1 = dat1.root.part.subaxis.part.subaxis.part.layout_fn.start
 
     # import pdb; pdb.set_trace()
 
-    args = [nnz1.data, nnz2.data, dat1.data, dat2.data]
+
+    args = [nnz1.data, layout0.data, nnz2.data, layout1.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))

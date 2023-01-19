@@ -27,6 +27,13 @@ class IntRef:
         self.value += other
         return self
 
+def get_bottom_part(axis):
+    # must be linear
+    if axis.part.subaxis:
+        return get_bottom_part(axis.part.subaxis)
+    else:
+        return axis.part
+
 
 def as_prepared_multiaxis(axis):
     if isinstance(axis, PreparedMultiAxis):
@@ -310,8 +317,8 @@ class MultiAxis(pytools.ImmutableRecord):
 
     def set_up(self):
         """Initialise the multi-axis by computing the layout functions."""
-        # return self._set_up()
         layouts = self._set_up()
+        # import pdb; pdb.set_trace()
         new_axis = self.apply_layouts(layouts)
         assert is_set_up(new_axis)
         return new_axis
@@ -358,7 +365,7 @@ class MultiAxis(pytools.ImmutableRecord):
         test2 = any(pt.permutation for pt in self.parts)
 
         # fixme very hard to read - the conditions above aren't quite right
-        test3 = path in layouts and layouts[path] != "null layout"
+        test3 = path not in layouts or layouts[path] != "null layout"
         # import pdb; pdb.set_trace()
         if (test1 or test2) and test3:
             data = self.create_layout_lists(path, offset)
@@ -385,6 +392,8 @@ class MultiAxis(pytools.ImmutableRecord):
                 count = part.count
             else:
                 count = part.count.get_value(indices)
+                assert int(count) == count
+                count = int(count)
 
             # data[npart] = [None] * count
             npoints += count
@@ -473,21 +482,14 @@ class MultiAxis(pytools.ImmutableRecord):
                     new_layouts[subpath][selected_index] = subdata
 
         # catch zero-sized sub-bits
-        for path_ in new_layouts:
-            if isinstance(new_layouts[path_], dict) and len(new_layouts[path_]) != npoints:
-                assert len(new_layouts[path_]) < npoints
-                for i in range(npoints):
-                    if i not in new_layouts[path_]:
-                        new_layouts[path_][i] = []
-
-        # for path_ in new_layouts:
-        #     if isinstance(new_layouts[path_], dict):
-        #         import pdb; pdb.set_trace()
-        #         n = part.count.get_value(indices) if isinstance(part.count, MultiArray) else part.count
-        #         for i in range(n):
-        #             if i not in new_layouts[path|pidx]:
-        #         # if part.calc_size(indices) == 0:
-        #                 raise NotImplementedError
+        # import pdb; pdb.set_trace()
+        # for n in range(self.nparts):
+        #     path_ = path | n
+        #     if isinstance(new_layouts[path_], dict) and len(new_layouts[path_]) != npoints:
+        #         assert len(new_layouts[path_]) < npoints
+        #         for i in range(npoints):
+        #             if i not in new_layouts[path_]:
+        #                 new_layouts[path_][i] = []
 
         # import pdb; pdb.set_trace()
         ret = {path_: self.unpack_index_dict(layout_) for path_, layout_ in new_layouts.items()}
@@ -885,12 +887,15 @@ PreparedMultiAxis = MultiAxis
 class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
     fields = {"count", "subaxis", "numbering", "label", "id", "max_count", "is_layout", "layout_fn"}
 
+    id_generator = NameGenerator("_p")
+
     def __init__(self, count, subaxis=None, *, numbering=None, label=None, id=None, max_count=None, is_layout=False, layout_fn=None):
         if isinstance(count, numbers.Integral):
             assert not max_count or max_count == count
             max_count = count
         else:
-            assert max_count is not None
+            if max_count is not None:
+                max_count = max(count.data)
 
         if isinstance(numbering, np.ndarray):
             numbering = list(numbering)
@@ -900,6 +905,9 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
 
         if not isinstance(label, collections.abc.Hashable):
             raise ValueError("Provided label must be hashable")
+
+        if not id:
+            id = self.id_generator.next()
 
         super().__init__()
         self.count = count
@@ -1246,14 +1254,35 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         return size
 
     @classmethod
-    def from_list(cls, data, name, dtype):
+    def from_list(cls, data, name, dtype, inc=0):
         """Return a (linear) multi-array formed from a list of lists."""
-        if not strictly_all(isinstance(item, numbers.Number) for item in data):
-            raise NotImplementedError("Nesting (i.e. raggedness) is not yet supported")
-        # FIXME need to flatten if nested
-        data = np.array(data, dtype=dtype)
-        axis = MultiAxis([AxisPart(len(data))]).set_up()
-        return cls(axis, name=name, data=data, dtype=dtype)
+        flat, count = cls._get_count_data(data)
+
+        if isinstance(count, list):
+            count = cls.from_list(count, name, dtype, inc+1)
+
+        flat = np.array(flat, dtype=dtype)
+
+        axis = MultiAxis([AxisPart(count)])
+        if isinstance(count, MultiArray):
+            base_part = get_bottom_part(count.root)
+            axis = count.root.add_subaxis(base_part.id, axis)
+        return cls(axis.set_up(), name=f"{name}_{inc}", data=flat, dtype=dtype)
+
+    @classmethod
+    def _get_count_data(cls, data):
+        # recurse if list of lists
+        if not strictly_all(isinstance(d, collections.abc.Iterable) for d in data):
+            return data, len(data)
+        else:
+            flattened = []
+            count = []
+            for d in data:
+                x, y = cls._get_count_data(d)
+                flattened.extend(x)
+                count.append(y)
+            return flattened, count
+
 
     # @classmethod
     # def compute_layouts(cls, axis):
