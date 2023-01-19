@@ -356,8 +356,11 @@ class MultiAxis(pytools.ImmutableRecord):
             for part in self.parts
         )
         test2 = any(pt.permutation for pt in self.parts)
+
+        # fixme very hard to read - the conditions above aren't quite right
+        test3 = path in layouts and layouts[path] != "null layout"
         # import pdb; pdb.set_trace()
-        if test1 or test2:
+        if (test1 or test2) and test3:
             data = self.create_layout_lists(path, offset)
             layouts |= data
 
@@ -468,6 +471,23 @@ class MultiAxis(pytools.ImmutableRecord):
 
                 for subpath, subdata in subdata.items():
                     new_layouts[subpath][selected_index] = subdata
+
+        # catch zero-sized sub-bits
+        for path_ in new_layouts:
+            if isinstance(new_layouts[path_], dict) and len(new_layouts[path_]) != npoints:
+                assert len(new_layouts[path_]) < npoints
+                for i in range(npoints):
+                    if i not in new_layouts[path_]:
+                        new_layouts[path_][i] = []
+
+        # for path_ in new_layouts:
+        #     if isinstance(new_layouts[path_], dict):
+        #         import pdb; pdb.set_trace()
+        #         n = part.count.get_value(indices) if isinstance(part.count, MultiArray) else part.count
+        #         for i in range(n):
+        #             if i not in new_layouts[path|pidx]:
+        #         # if part.calc_size(indices) == 0:
+        #                 raise NotImplementedError
 
         # import pdb; pdb.set_trace()
         ret = {path_: self.unpack_index_dict(layout_) for path_, layout_ in new_layouts.items()}
@@ -1443,9 +1463,15 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
                 layout = axis.part.layout_fn
                 if isinstance(layout, IndirectLayoutFunction):
                     offset += layout.data.get_value(indices[:depth+1])
+                elif layout == "null layout":
+                    pass
                 else:
                     assert isinstance(layout, AffineLayoutFunction)
-                    offset += indices[depth] * layout.step + layout.start
+                    if isinstance(layout.start, MultiArray):
+                        start = layout.start.get_value(indices)
+                    else:
+                        start = layout.start
+                    offset += indices[depth] * layout.step + start
 
             depth += 1
             axis = axis.part.subaxis

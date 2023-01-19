@@ -448,6 +448,9 @@ declared. we just need to traverse properly to check that we have the right numb
         """
         TODO
         """
+        if layout_fn == "null layout":
+            return []
+
         insn_id = self._namer.next(insn_prefix)
         within_inames_attr = f"inames={':'.join(within_inames)}"
 
@@ -470,20 +473,14 @@ declared. we just need to traverse properly to check that we have the right numb
             # register the data
             # layout_arg = lp.GlobalArg(layout_fn.data.name, np.uintp, (None,), is_input=True, is_output=False)
             # self._tensor_data[layout_fn.data.name] = layout_arg
-        else:
-            if not isinstance(layout_fn, AffineLayoutFunction):
-                try:
-                    start = layout_fn.data[0]
-                    step, = set(layout_fn.data[1:] - layout_fn.data[:-1])
-                except ValueError:
-                    if len(layout_fn.data) == 1:
-                        start = layout_fn.data[0]
-                        step = 1
-                    else:
-                        raise AssertionError("should hit this")
-            else:
-                start = layout_fn.start
-                step = layout_fn.step
+        elif isinstance(layout_fn, AffineLayoutFunction):
+            start = layout_fn.start
+            step = layout_fn.step
+
+            if isinstance(start, MultiArray):
+                assert len(jnames) > 1
+                # must drop innermost index here as we don't want to index with it
+                start = self.register_scalar_assignment(layout_fn.start, jnames[:-1], within_inames)
 
             # iname = useable_inames[-1]
             iname = jnames[-1]
@@ -575,11 +572,9 @@ declared. we just need to traverse properly to check that we have the right numb
         jname = self._namer.next(f"{prefix}_j")
 
         # not needed as can be done at top of loop
-        # depends_on = frozenset({self._latest_insn[id] for id in self._active_insn.depends_on})
+        depends_on = frozenset({self._latest_insn[id] for id in self._active_insn.depends_on})
         if self._active_insn.id in self._latest_insn:
-            depends_on = frozenset({self._latest_insn[self._active_insn.id]})
-        else:
-            depends_on = frozenset()
+            depends_on |= frozenset({self._latest_insn[self._active_insn.id]})
 
 
         if isinstance(idx, Map):
@@ -587,7 +582,8 @@ declared. we just need to traverse properly to check that we have the right numb
             raise NotImplementedError("need to emit some clever code")
             assign_insn = ...
         else:
-            if subidxs:
+            # if subidxs:
+            if False:
                 myinames = frozenset(within_inames[:-len(subidxs)])
             else:
                 myinames = frozenset(within_inames)

@@ -30,7 +30,7 @@ This happens usually when you copy and paste things and forget.
 """
 
 
-def compilemythings(code):
+def compilemythings(code, basename=None, recompile_existing_code=False):
         """Build a shared library and load it
 
         :arg jitmodule: The JIT Module which can generate the code to compile.
@@ -43,34 +43,33 @@ def compilemythings(code):
 
         extension="c"
 
-        # to avoid lots of recompilation, just hash the source code and use as the cache key
-        hsh = md5(code.encode())
-
-        # Determine cache key
-        # hsh = md5(str(jitmodule.cache_key).encode())
-
-        basename = hsh.hexdigest()
+        if not basename:
+            hsh = md5(code.encode())
+            basename = hsh.hexdigest()
 
         cachedir = "mycache"
         dirpart, basename = basename[:2], basename[2:]
         cachedir = os.path.join(cachedir, dirpart)
-        pid = os.getpid()
-        cname = os.path.join(cachedir, "%s_p%d.%s" % (basename, pid, extension))
+        cname = os.path.join(cachedir, "%s.%s" % (basename, extension))
         soname = os.path.join(cachedir, "%s.so" % basename)
         # Link into temporary file, then rename to shared library
         # atomically (avoiding races).
-        tmpname = os.path.join(cachedir, "%s_p%d.so.tmp" % (basename, pid))
+        tmpname = os.path.join(cachedir, "%s.so.tmp" % (basename))
 
         try:
+            if recompile_existing_code:
+                raise OSError
             # Are we in the cache?
             return ctypes.CDLL(soname)
         except OSError:
             # No need to do this on all ranks
             os.makedirs(cachedir, exist_ok=True)
-            logfile = os.path.join(cachedir, "%s_p%d.log" % (basename, pid))
-            errfile = os.path.join(cachedir, "%s_p%d.err" % (basename, pid))
-            with open(cname, "w") as f:
-                f.write(code)
+            logfile = os.path.join(cachedir, "%s.log" % (basename))
+            errfile = os.path.join(cachedir, "%s.err" % (basename))
+
+            if not recompile_existing_code or os._exists(cname):
+                with open(cname, "w") as f:
+                    f.write(code)
             # Compiler also links
             cc = (compiler,) \
                 + compiler_flags \
@@ -456,7 +455,7 @@ def test_compute_double_loop_ragged():
 
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
-        "y[i] = x[i] + 1",
+        "y[i] = x[i] + y[i] + 1",
         [lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
         lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
         target=lp.CTarget(),
@@ -474,12 +473,13 @@ def test_compute_double_loop_ragged():
     expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+    # dll = compilemythings(code, "XXtesting", True)
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
     # import pdb; pdb.set_trace()
 
-    args = [nnz.data, dat1.axes.part.layout_fn.data.data, dat1.data, dat2.data]
+    args = [nnz.data, dat1.axes.part.subaxis.part.layout_fn.start.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
@@ -488,20 +488,19 @@ def test_compute_double_loop_ragged():
 
 
 def test_doubly_ragged():
-    ax1 = MultiAxis([AxisPart(3, id="ax1")]).set_up()
+    ax1 = MultiAxis([AxisPart(3, id="p1")])
     nnz1 = MultiArray.new(
-        ax1, name="nnz1", dtype=np.int32, max_value=3,
+        ax1.set_up(), name="nnz1", dtype=np.int32, max_value=3,
         data = np.array([3, 0, 2], dtype=np.int32)
     )
 
-    ax2 = ax1.add_subaxis("ax1", MultiAxis([AxisPart(nnz1, id="ax2", max_count=3)], parent=ax1)).set_up()
+    ax2 = ax1.add_subaxis("p1", MultiAxis([AxisPart(nnz1, id="p2", max_count=3)]))
     nnz2 = MultiArray.new(
-        ax2, name="nnz2", dtype=np.int32, max_value=5,
+        ax2.set_up(), name="nnz2", dtype=np.int32, max_value=5,
         data = np.array([1, 0, 5, 2, 3], dtype=np.int32)
     )
 
-
-    ax3 = ax2.add_subaxis("ax2", MultiAxis([AxisPart(nnz2, max_count=5)], parent=ax2)).set_up()
+    ax3 = ax2.add_subaxis("p2", MultiAxis([AxisPart(nnz2, max_count=5)])).set_up()
     dat1 = MultiArray.new(
         ax3, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64
     )
@@ -531,27 +530,16 @@ def test_doubly_ragged():
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
 
-    # import pdb; pdb.set_trace()
-
-    # hsh = md5(code.encode())
-    # basename = hsh.hexdigest()
-    # cachedir = "mycache"
-    # dirpart, basename = basename[:2], basename[2:]
-    # cachedir = os.path.join(cachedir, dirpart)
-    # soname = os.path.join(cachedir, "%s.so" % basename)
-    # print(soname)
-    # dll = ctypes.CDLL(soname)
-
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    layout0 = nnz2.axes.part.layout_fn.data
-    layout1 = dat1.axes.part.subaxis.part.layout_fn.data
-    layout2 = dat1.axes.part.layout_fn.data
+    # layout0 = nnz2.axes.part.layout_fn.data
+    # layout1 = dat1.axes.part.subaxis.part.layout_fn.data
+    # layout2 = dat1.axes.part.layout_fn.data
 
     # import pdb; pdb.set_trace()
 
-    args = [nnz1.data, layout0.data, nnz2.data, layout2.data, layout1.data, dat1.data, dat2.data]
+    args = [nnz1.data, nnz2.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
@@ -1433,4 +1421,4 @@ def test_extruded_mesh():
 
 
 if __name__ == "__main__":
-    test_compute_double_loop()
+    test_compute_double_loop_ragged()
