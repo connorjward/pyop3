@@ -2,5 +2,11 @@
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
+[project.optional-dependencies]
+tests = [
+  "pytest",
+  "git+https://github.com/connorjward/pytest-mpi",
+]
+
 [tool.isort]
 profile = "black"
