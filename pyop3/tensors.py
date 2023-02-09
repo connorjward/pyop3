@@ -1567,6 +1567,11 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
             for multi_idx_ in self._extend_multi_index(multi_idx)
         ))
         # import pdb; pdb.set_trace()
+
+        # NOTE: indices should not be a property of this data structure. The indices
+        # are only relevant for codegen so I think an IndexedMultiArray or similar would
+        # be better. It would also help if we wanted to swap out the data structure later
+        # on (but naturally retain the same indices).
         return self.copy(indices=multi_indicess)
 
     def _extend_multi_index(self, multi_index, axis=None):
