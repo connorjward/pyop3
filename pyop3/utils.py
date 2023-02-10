@@ -86,6 +86,19 @@ def is_sequence(item):
     return isinstance(item, collections.abc.Sequence)
 
 
+def flatten(iterable):
+    """Recursively flatten a nested iterable."""
+    if not isinstance(iterable, collections.abc.Iterable):
+        return (iterable,)
+    return tuple(item_ for item in iterable for item_ in flatten(item))
+
+
+def some_but_not_all(iterable):
+    # duplicate the iterable in case using any/all consumes it
+    it1, it2 = itertools.tee(iterable)
+    return any(it1) and not all(it2)
+
+
 def strictly_all(iterable):
     """Returns ``all(iterable)`` but raises an exception if values are inconsistent."""
     if not isinstance(iterable, collections.abc.Iterable):

@@ -1,4 +1,5 @@
 import copy
+import enum
 import functools
 import numpy as np
 import operator
@@ -16,6 +17,7 @@ import pytools
 import pyop3.exprs
 import pyop3.utils
 from pyop3.utils import as_tuple, checked_zip, NameGenerator, unique, PrettyTuple, strictly_all, has_unique_entries
+from pyop3 import utils
 
 
 class IntRef:
@@ -233,6 +235,129 @@ def attach_blank_data_to_layouts(layouts, part, npart, data, path=None):
             attach_blank_data_to_layouts(layouts, subpart, npt, data, path+(npt,))
 
 
+class OwnershipType(enum.Enum):
+    OWNED = enum.auto()
+    HALO = enum.auto()
+
+
+# --------------------- \/ lifted from halo.py \/ -------------------------
+
+from mpi4py import MPI
+_MPI_types = {}
+
+
+def get_mpi_dtype(numpy_dtype, cdim=1):
+    """Get an MPI datatype corresponding to a Dat.
+
+    This builds (if necessary a contiguous derived datatype of the
+    correct size).
+
+    Also returns if it is a builtin type.
+    """
+    key = (numpy_dtype, cdim)
+    try:
+        return _MPI_types[key]
+    except KeyError:
+        tdict = MPI._typedict
+        try:
+            btype = tdict[numpy_dtype.char]
+        except KeyError:
+            raise RuntimeError("Unknown base type %r", numpy_dtype)
+        if cdim == 1:
+            typ = btype
+            builtin = True
+        else:
+            typ = btype.Create_contiguous(cdim)
+            typ.Commit()
+            builtin = False
+        return _MPI_types.setdefault(key, (typ, builtin))
+
+
+_numpy_types = {}
+
+
+def get_numpy_dtype(datatype):
+    """Get a numpy datatype corresponding to an MPI datatype.
+
+    Only works for contiguous datatypes."""
+    try:
+        # possibly unsafe if handles are recycled, but OK, because we
+        # hold on to the contig types
+        return _numpy_types[datatype.py2f()]
+    except KeyError:
+        base, combiner, _ = datatype.decode()
+        while combiner == "DUP":
+            base, combiner, _ = base.decode()
+        if combiner != "CONTIGUOUS":
+            raise RuntimeError("Can only handle contiguous types")
+        try:
+            tdict = MPI.__TypeDict__
+        except AttributeError:
+            tdict = MPI._typedict
+
+        tdict = dict((v.py2f(), k) for k, v in tdict.items())
+        try:
+            base = tdict[base.py2f()]
+        except KeyError:
+            raise RuntimeError("Unhandled base datatype %r", base)
+        return _numpy_types.setdefault(datatype.py2f(), base)
+
+
+def reduction_op(op, invec, inoutvec, datatype):
+    dtype = get_numpy_dtype(datatype)
+    invec = np.frombuffer(invec, dtype=dtype)
+    inoutvec = np.frombuffer(inoutvec, dtype=dtype)
+    inoutvec[:] = op(invec, inoutvec)
+
+
+_contig_min_op = MPI.Op.Create(functools.partial(reduction_op, np.minimum), commute=True)
+_contig_max_op = MPI.Op.Create(functools.partial(reduction_op, np.maximum), commute=True)
+
+# --------------------- ^ lifted from halo.py ^ -------------------------
+
+
+class PointLabel(abc.ABC):
+    """Container associating points in an :class:`AxisPart` with a enumerated label."""
+
+
+# TODO: Maybe could make this a little more descriptive a la star forest so we could
+# then automatically generate an SF for the multi-axis.
+class PointOwnershipLabel(PointLabel):
+    """Label indicating parallel point ownership semantics (i.e. owned or halo)."""
+
+    possible_values = {OwnershipType.OWNED, OwnershipType.HALO}
+
+    # TODO: Write a factory function/constructor that takes advantage of the fact that
+    # the majority of the points are OWNED and there are only two options so a set is
+    # an efficient choice of data structure.
+    def __init__(self, owned_points, halo_points):
+        owned_set = set(owned_points)
+        halo_set = set(halo_points)
+
+        if len(owned_set) != len(owned_points) or len(halo_set) != len(halo_points):
+            raise ValueError("Labels cannot contain duplicate values")
+        if owned_set.intersection(halo_set):
+            raise ValueError("Points cannot appear with different values")
+
+        self._owned_points = owned_points
+        self._halo_points = halo_points
+
+    def __len__(self):
+        return len(self._owned_points) + len(self._halo_points)
+
+
+class Sparsity:
+    def __init__(self, maps):
+        if isinstance(maps, collections.abc.Sequence):
+            rmap, cmap = maps
+        else:
+            rmap, cmap = maps, maps
+
+        ...
+
+        raise NotImplementedError
+
+
 class MultiAxis(pytools.ImmutableRecord):
     fields = {"parts", "id", "parent", "is_set_up"}
 
@@ -240,10 +365,12 @@ class MultiAxis(pytools.ImmutableRecord):
 
     def __init__(self, parts, *, id=None, parent=None, is_set_up=False):
         # make sure all parts have labels, default to integers if necessary
-        # TODO do in factory function
         if strictly_all(pt.label is None for pt in parts):
             # set the label to the index
             parts = tuple(pt.copy(label=i) for i, pt in enumerate(parts))
+
+        if utils.some_but_not_all(pt.is_distributed for pt in parts):
+            raise ValueError("Cannot have a multi-axis with some parallel parts and some not")
 
         if not has_unique_entries(pt.label for pt in parts):
             raise ValueError("Axis parts in the same multi-axis must have unique labels")
@@ -253,6 +380,10 @@ class MultiAxis(pytools.ImmutableRecord):
         self.parent = parent
         self.is_set_up = is_set_up
         super().__init__()
+
+    def __mul__(self, other):
+        """Return the (dense) outer product."""
+        return self.mul(other)
 
     @property
     def part(self):
@@ -264,6 +395,35 @@ class MultiAxis(pytools.ImmutableRecord):
 
     def find_part(self, label):
         return self._parts_by_label[label]
+
+    def mul(self, other, sparsity=None):
+        """Compute the outer product with another :class:`MultiAxis`.
+
+        Parameters
+        ----------
+        other : :class:`MultiAxis`
+            The other :class:`MultiAxis` used to compute the product.
+        sparsity : ???
+            The sparsity of the resulting product (produced by combining maps). If
+            ``None`` then the resulting axis will be dense.
+        """
+        # NOTE: As discussed in the message below, composing star forests is really hard.
+        # In particular it is difficult to prescibe the ownership of the points that are
+        # owned in one axis and halo in the other. This effectively corresponds to making
+        # the off-diagonal portions of the matrices stored on a process either share the
+        # row or the column.
+        # Simply making a policy decision here (of distributed along rows) is not enough
+        # because for the Real space we need to distribute the dense column between
+        # processes (so distributed along rows), but the dense row also needs to be
+        # distributed (so distribute along the columns).
+        # Once this works we can start implementing our own matrices in pyop3 which
+        # would be good for things like PCPATCH. We could also play around with COO and
+        # CSC layouts by swapping the axes around.
+        raise NotImplementedError(
+            "Computing the outer product of multi-axes is difficult in parallel "
+            "since we need to compose star forests and decide upon the ownership of the "
+            "off-diagonal components."
+        )
 
     @functools.cached_property
     def _parts_by_label(self):
@@ -885,11 +1045,11 @@ PreparedMultiAxis = MultiAxis
 
 
 class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
-    fields = {"count", "subaxis", "numbering", "label", "id", "max_count", "is_layout", "layout_fn"}
+    fields = {"count", "subaxis", "numbering", "label", "id", "max_count", "is_layout", "layout_fn", "overlap"}
 
     id_generator = NameGenerator("_p")
 
-    def __init__(self, count, subaxis=None, *, numbering=None, label=None, id=None, max_count=None, is_layout=False, layout_fn=None):
+    def __init__(self, count, subaxis=None, *, numbering=None, label=None, id=None, max_count=None, is_layout=False, layout_fn=None, overlap=None):
         if isinstance(count, numbers.Integral):
             assert not max_count or max_count == count
             max_count = count
@@ -909,7 +1069,6 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
         if not id:
             id = self.id_generator.next()
 
-        super().__init__()
         self.count = count
         self.subaxis = subaxis
         self.numbering = numbering
@@ -918,6 +1077,12 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
         self.max_count = max_count
         self.is_layout = is_layout
         self.layout_fn = layout_fn
+        self.overlap = overlap
+        super().__init__()
+
+    @property
+    def is_distributed(self):
+        return self.overlap is not None
 
     @property
     def has_integer_count(self):
@@ -1085,6 +1250,29 @@ class Map(MultiIndexCollection):
         super().__init__(multi_indices=multi_indices)
         self.from_multi_indices = from_multi_indices
 
+    def __mul__(self, other):
+        """The product of two maps produces a sparsity."""
+        if isinstance(other, Map):
+            return self.mul(other)
+        else:
+            return NotImplemented
+
+    def mul(self, other, is_nonzero=None):
+        """is_nonzero is a function letting us exploit additional sparsity.
+
+        Something like:
+
+            for cell in cells:
+                # rdof and cdof are multi-indices
+                for rdof in self.dofs[cell]:
+                    for cdof in other.dofs[cell]:
+                        # maybe have extra loops here if we have multiple DoFs per entity
+                        if is_nonzero(rdof, cdof):
+                            # store the non-zero
+        """
+        ...
+        raise NotImplementedError
+        return Sparsity(...)
 
 class Slice(Map):
     fields = Map.fields | {"start", "step"}
@@ -1201,14 +1389,25 @@ class NonAffineMap(Map):
 
 
 class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
+    """Multi-dimensional, hierarchical array.
 
-    fields = {"dim", "indices", "dtype", "mesh", "name", "data", "max_value"}
+    Parameters
+    ----------
+    sf : ???
+        PETSc star forest connecting values (offsets) in the local array with
+        remote equivalents.
+
+    """
+
+    fields = {"dim", "indices", "dtype", "mesh", "name", "data", "max_value", "sf"}
 
     name_generator = pyop3.utils.MultiNameGenerator()
     prefix = "ten"
 
-    def __init__(self, dim, indices=None, dtype=None, *, mesh = None, name: str = None, prefix: str=None, data=None, max_value=32):
+    def __init__(self, dim, indices=None, dtype=None, *, mesh = None, name: str = None, prefix: str=None, data=None, max_value=32, sf=None):
         dim = as_prepared_multiaxis(dim)
+
+        # TODO raise NotImplementedError if the multi-axis contains multiple parallel axes
 
         if not isinstance(dim, PreparedMultiAxis):
             raise ValueError("dim needs to be prepared. call .set_up()")
@@ -1224,8 +1423,9 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         self.indices = indices or MultiIndexCollection(self._extend_multi_index(None))
 
         self.mesh = mesh
-        self.dtype = dtype
+        self.dtype = np.dtype(dtype)  # since np.float64 is not actually the right thing
         self.max_value = max_value
+        self.sf = sf
         super().__init__(name)
 
     # TODO delete this and just use constructor
