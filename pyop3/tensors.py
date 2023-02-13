@@ -1,4 +1,5 @@
 import copy
+import dataclasses
 import enum
 import functools
 import numpy as np
@@ -11,6 +12,8 @@ from typing import Tuple, Union, Any, Optional, Sequence
 import numbers
 import pyrsistent
 
+from mpi4py import MPI
+from petsc4py import PETSc
 import pymbolic as pym
 
 import pytools
@@ -18,6 +21,12 @@ import pyop3.exprs
 import pyop3.utils
 from pyop3.utils import as_tuple, checked_zip, NameGenerator, unique, PrettyTuple, strictly_all, has_unique_entries
 from pyop3 import utils
+
+
+# just for debugging
+def myprint(*args):
+    print(f"rank {MPI.COMM_WORLD.rank}: ", sep="", flush=True)
+    print(*args, flush=True)
 
 
 class IntRef:
@@ -235,10 +244,121 @@ def attach_blank_data_to_layouts(layouts, part, npart, data, path=None):
             attach_blank_data_to_layouts(layouts, subpart, npt, data, path+(npt,))
 
 
-class OwnershipType(enum.Enum):
-    OWNED = enum.auto()
-    HALO = enum.auto()
+def attach_star_forest(axis):
+    comm = MPI.COMM_WORLD
 
+    # 1. construct the point-to-point SF per axis part
+    if axis.nparts != 1:
+        raise NotImplementedError
+    for part in axis.parts:
+        part_sf = make_star_forest_per_axis_part(part, comm)
+
+    # for now, will want to concat or something
+    point_sf = part_sf
+
+    # 2. broadcast the root offset to all leaves
+    from_buffer = np.zeros(axis.part.count, dtype=np.uintp)
+    to_buffer = np.zeros(axis.part.count, dtype=np.uintp)
+
+    for pt, label in enumerate(axis.part.overlap):
+        # only need to broadcast offsets for roots
+        if isinstance(label, Shared) and not label.root:
+            from_buffer[pt] = axis.get_offset((pt,))
+
+    # TODO: It's quite bad to allocate a massive buffer when not much of it gets
+    # moved. Perhaps good to use some sort of map and create a minimal SF.
+
+    # Actually there are some serious issues with my implementation anyway - I have the
+    # data for ilocal and iremote but I'm putting them together in the same array which
+    # isn't right.
+
+    # myprint(f"pre-bcast: {buffer}")
+
+    cdim = axis.part.subaxis.calc_size() if axis.part.subaxis else 1
+    dtype, _ = get_mpi_dtype(np.dtype(np.uintp), cdim)
+    bcast_args = dtype, from_buffer, to_buffer, MPI.REPLACE
+    point_sf.bcastBegin(*bcast_args)
+    point_sf.bcastEnd(*bcast_args)
+
+    # myprint(f"post-bcast: {buffer}")
+
+    # 3. construct a new SF with these offsets
+    nroots, _local, _remote = part_sf.getGraph()
+
+    local_offsets = np.empty(len(_local), dtype=np.int32)
+    remote_offsets = np.empty(_remote.shape, dtype=np.int32)
+    i = 0
+    for pt, label in enumerate(axis.part.overlap):
+        if isinstance(label, Halo):
+            local_offsets[i] = axis.get_offset((pt,))
+            remote_offsets[i, 0] = _remote[i, 0]  # rank
+            remote_offsets[i, 1] = to_buffer[pt]
+            i += 1
+
+    myprint(f"local_offsets: {local_offsets}")
+    myprint(f"remote_offsets: {remote_offsets}")
+
+    sf = PETSc.SF().create(comm)
+    sf.setGraph(nroots, local_offsets, remote_offsets)
+    return axis.copy(sf=sf)
+
+
+def make_star_forest_per_axis_part(part, comm):
+    if part.is_distributed:
+        # we have a root if a point is shared but doesn't point to another rank
+        nroots = len([pt for pt in part.overlap if isinstance(pt, Shared) and not pt.root])
+
+        # which local points are leaves?
+        local_points = [i for i, pt in enumerate(part.overlap) if not isinstance(pt, Owned) and pt.root]
+
+        # roots of other processes (rank, index)
+        remote_points = utils.flatten([
+            pt.root.as_tuple()
+            for pt in part.overlap
+            if not isinstance(pt, Owned) and pt.root
+        ])
+
+        # import pdb; pdb.set_trace()
+
+        sf = PETSc.SF().create(comm)
+        sf.setGraph(nroots, local_points, remote_points)
+        return sf
+    else:
+        raise NotImplementedError(
+            "Need to think about concatenating star forests. This will happen if mixed.")
+
+
+def attach_owned_star_forest(axis):
+    raise NotImplementedError
+
+
+@dataclasses.dataclass
+class RemotePoint:
+    rank: numbers.Integral
+    index: numbers.Integral
+
+    def as_tuple(self):
+        return (self.rank, self.index)
+
+
+@dataclasses.dataclass
+class PointOverlapLabel(abc.ABC):
+    pass
+
+
+@dataclasses.dataclass
+class Owned(PointOverlapLabel):
+    pass
+
+
+@dataclasses.dataclass
+class Shared(PointOverlapLabel):
+    root: Optional[RemotePoint] = None
+
+
+@dataclasses.dataclass
+class Halo(PointOverlapLabel):
+    root: RemotePoint
 
 # --------------------- \/ lifted from halo.py \/ -------------------------
 
@@ -325,8 +445,6 @@ class PointLabel(abc.ABC):
 class PointOwnershipLabel(PointLabel):
     """Label indicating parallel point ownership semantics (i.e. owned or halo)."""
 
-    possible_values = {OwnershipType.OWNED, OwnershipType.HALO}
-
     # TODO: Write a factory function/constructor that takes advantage of the fact that
     # the majority of the points are OWNED and there are only two options so a set is
     # an efficient choice of data structure.
@@ -359,11 +477,11 @@ class Sparsity:
 
 
 class MultiAxis(pytools.ImmutableRecord):
-    fields = {"parts", "id", "parent", "is_set_up"}
+    fields = {"parts", "id", "parent", "is_set_up", "sf", "owned_sf"}
 
     id_generator = NameGenerator("ax")
 
-    def __init__(self, parts, *, id=None, parent=None, is_set_up=False):
+    def __init__(self, parts, *, id=None, parent=None, is_set_up=False, sf=None, owned_sf=None):
         # make sure all parts have labels, default to integers if necessary
         if strictly_all(pt.label is None for pt in parts):
             # set the label to the index
@@ -379,6 +497,10 @@ class MultiAxis(pytools.ImmutableRecord):
         self.id = id or self.id_generator.next()
         self.parent = parent
         self.is_set_up = is_set_up
+        self.sf = sf
+        if owned_sf:
+            raise NotImplementedError("Haven't dealt with this yet")
+        self.owned_sf = None
         super().__init__()
 
     def __mul__(self, other):
@@ -395,6 +517,53 @@ class MultiAxis(pytools.ImmutableRecord):
 
     def find_part(self, label):
         return self._parts_by_label[label]
+
+    def get_offset(self, indices):
+        # use layout functions to access the right thing
+        # indices here are integers, so this will only work for multi-arrays that
+        # are not multi-part
+        # if self.is_multi_part:
+        #   raise Exception("cannot index with integers here")
+
+        # accumulate offsets from the layout functions
+        offset = 0
+        depth = 0
+        axis = self
+
+        # effectively loop over depth
+        while axis:
+            assert axis.nparts == 1
+
+            # import pdb; pdb.set_trace()
+            if axis.part.is_layout:
+                if indices[depth] > 0:
+                    if axis.part.subaxis:
+                        # add the size of the one before
+                        newidxs = indices[:-1] + (indices[-1]-1,)
+                        offset += axis.part.subaxis.calc_size(newidxs)
+                    else:
+                        offset += 1
+            else:
+                layout = axis.part.layout_fn
+                if isinstance(layout, IndirectLayoutFunction):
+                    offset += layout.data.get_value(indices[:depth+1])
+                elif layout == "null layout":
+                    pass
+                else:
+                    assert isinstance(layout, AffineLayoutFunction)
+                    if isinstance(layout.start, MultiArray):
+                        start = layout.start.get_value(indices)
+                    else:
+                        start = layout.start
+                    offset += indices[depth] * layout.step + start
+
+            depth += 1
+            axis = axis.part.subaxis
+
+        # make sure its an int
+        assert offset - int(offset) == 0
+
+        return offset
 
     def mul(self, other, sparsity=None):
         """Compute the outer product with another :class:`MultiAxis`.
@@ -481,6 +650,10 @@ class MultiAxis(pytools.ImmutableRecord):
         # import pdb; pdb.set_trace()
         new_axis = self.apply_layouts(layouts)
         assert is_set_up(new_axis)
+
+        # set the .sf and .owned_sf properties of new_axis
+        new_axis = attach_star_forest(new_axis)
+        # new_axis = attach_owned_star_forest(new_axis)
         return new_axis
 
     def apply_layouts(self, layouts, path=PrettyTuple()):
@@ -1045,7 +1218,7 @@ PreparedMultiAxis = MultiAxis
 
 
 class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
-    fields = {"count", "subaxis", "numbering", "label", "id", "max_count", "is_layout", "layout_fn", "overlap"}
+    fields = {"count", "subaxis", "numbering", "label", "id", "max_count", "is_layout", "layout_fn", "overlap", "overlap_sf"}
 
     id_generator = NameGenerator("_p")
 
@@ -1664,49 +1837,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         return npart, dim.parts[npart]
 
     def get_value(self, indices):
-        # use layout functions to access the right thing
-        # indices here are integers, so this will only work for multi-arrays that
-        # are not multi-part
-        # if self.is_multi_part:
-        #   raise Exception("cannot index with integers here")
-
-        # accumulate offsets from the layout functions
-        offset = 0
-        depth = 0
-        axis = self.root
-
-        # effectively loop over depth
-        while axis:
-            assert axis.nparts == 1
-
-            # import pdb; pdb.set_trace()
-            if axis.part.is_layout:
-                if indices[depth] > 0:
-                    if axis.part.subaxis:
-                        # add the size of the one before
-                        newidxs = indices[:-1] + (indices[-1]-1,)
-                        offset += axis.part.subaxis.calc_size(newidxs)
-                    else:
-                        offset += 1
-            else:
-                layout = axis.part.layout_fn
-                if isinstance(layout, IndirectLayoutFunction):
-                    offset += layout.data.get_value(indices[:depth+1])
-                elif layout == "null layout":
-                    pass
-                else:
-                    assert isinstance(layout, AffineLayoutFunction)
-                    if isinstance(layout.start, MultiArray):
-                        start = layout.start.get_value(indices)
-                    else:
-                        start = layout.start
-                    offset += indices[depth] * layout.step + start
-
-            depth += 1
-            axis = axis.part.subaxis
-
-        # make sure its an int
-        assert offset - int(offset) == 0
+        offset = self.root.get_offset(indices)
         return self.data[int(offset)]
 
     # aliases
