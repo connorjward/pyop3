@@ -275,20 +275,25 @@ def attach_star_forest(axis, with_halo_points=True):
     # 3. construct a new SF with these offsets
     nroots, _local, _remote = part_sf.getGraph()
 
-    local_offsets = np.empty(len(_local), dtype=np.int32)
-    remote_offsets = np.empty(_remote.shape, dtype=np.int32)
+    local_offsets = []
+    remote_offsets = []
     i = 0
     for pt, label in enumerate(axis.part.overlap):
         # TODO not a nice check (is_leaf?)
-        cond1 = with_halo_points and not isinstance(label, Owned) and label.root
-        cond2 = not with_halo_points and isinstance(label, Shared) and label.root
-        if cond1 or cond2:
-            local_offsets[i] = axis.get_offset((pt,))
-            remote_offsets[i, 0] = _remote[i, 0]  # rank
-            remote_offsets[i, 1] = to_buffer[pt]
+        cond1 = not isinstance(label, Owned) and label.root
+        if cond1:
+            if with_halo_points or (not with_halo_points and isinstance(label, Shared)):
+                local_offsets.append(axis.get_offset((pt,)))
+                remote_offsets.append((_remote[i, 0], to_buffer[pt]))
             i += 1
 
+    local_offsets = np.array(local_offsets, dtype=np.int32)
+    remote_offsets = np.array(remote_offsets, dtype=np.int32)
+
     sf = PETSc.SF().create(comm)
+    if not with_halo_points:
+        utils.print_with_rank(f"local_offsets: {local_offsets}")
+        utils.print_with_rank(f"remote_offsets: {remote_offsets}")
     sf.setGraph(nroots, local_offsets, remote_offsets)
     if with_halo_points:
         return axis.copy(sf=sf)

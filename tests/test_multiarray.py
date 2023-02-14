@@ -160,3 +160,78 @@ def test_global_sync(comm):
     global_._halo_valid = False
     global_.sync()
     assert np.allclose(global_.data, 2)
+
+
+@pytest.mark.parallel(nprocs=2)
+def test_contrived_distribution(comm):
+    # Construct an array with some shared points and some halo points
+    if comm.rank == 0:
+        overlap = [Shared(RemotePoint(1, 2)), Shared(), Shared(), Halo(RemotePoint(1, 0))]
+        npoints = 4
+    else:
+        assert comm.rank == 1
+        overlap = [Shared(), Owned(), Shared(), Halo(RemotePoint(0, 2)), Shared(RemotePoint(0, 1))]
+        npoints = 5
+
+    root = MultiAxis([AxisPart(npoints, overlap=overlap)]).set_up()
+    array = MultiArray(root, data=np.ones(npoints), dtype=np.float64, name="myarray")
+    assert array._halo_valid
+    assert not array._pending_write_op
+
+    # halo_valid and pending_write_op should not be allowed 
+    array._pending_write_op = INC
+    array._halo_modified = False
+    array._halo_valid = True
+    with pytest.raises(AssertionError):
+        array.sync()
+
+    # halo has not been modified and we don't want to read it
+    # this means that all shared points that are pointed to by other shared points should
+    # be set to 2 and all owned or halo stay
+    # at 1
+    array.data[...] = 1
+    array._pending_write_op = INC
+    array._halo_modified = False
+    array._halo_valid = False
+    array.sync(need_halo_values=False)
+
+    if comm.rank == 0:
+        assert np.allclose(array.data, [2, 2, 1, 1])
+    else:
+        assert np.allclose(array.data, [1, 1, 2, 1, 2])
+
+    # halo has not been modified but we do want to read it
+    array.data[...] = 1
+    array._pending_write_op = INC
+    array._halo_modified = False
+    array._halo_valid = False
+    array.sync(need_halo_values=True)
+
+    if comm.rank == 0:
+        assert np.allclose(array.data, [2, 2, 1, 1])
+    else:
+        assert np.allclose(array.data, [1, 1, 2, 1, 2])
+
+    # halo has been modified but we do not want to read it
+    array.data[...] = 1
+    array._pending_write_op = INC
+    array._halo_modified = True
+    array._halo_valid = False
+    array.sync(need_halo_values=False)
+
+    if comm.rank == 0:
+        assert np.allclose(array.data, [2, 2, 2, 1])
+    else:
+        assert np.allclose(array.data, [2, 1, 2, 1, 2])
+
+    # halo has been modified and we do want to read it
+    array.data[...] = 1
+    array._pending_write_op = INC
+    array._halo_modified = True
+    array._halo_valid = False
+    array.sync(need_halo_values=True)
+
+    if comm.rank == 0:
+        assert np.allclose(array.data, [2, 2, 2, 2])
+    else:
+        assert np.allclose(array.data, [2, 1, 2, 2, 2])
