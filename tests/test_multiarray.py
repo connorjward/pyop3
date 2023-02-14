@@ -4,7 +4,7 @@ from petsc4py import PETSc
 import pytest
 
 from pyop3 import utils
-from pyop3 import MultiArray, MultiAxis, AxisPart, PointOwnershipLabel, get_mpi_dtype, Owned, Halo, RemotePoint, Shared
+from pyop3 import MultiArray, MultiAxis, AxisPart, PointOwnershipLabel, get_mpi_dtype, Owned, Halo, RemotePoint, Shared, INC
 
 @pytest.fixture
 def comm():
@@ -86,6 +86,27 @@ def test_sf_exchanges_data(comm):
 
     # assert data == ???
 
+@pytest.mark.parallel(nprocs=2)
+def test_sync(comm):
+    array = make_overlapped_array(comm)
+
+    # pretend like the last thing we did was INC into the arrays
+    array._pending_write_op = INC
+    array._halo_modified = True
+    array._halo_valid = False
+
+    array.sync(need_halo_values=True)
+
+    if comm.rank == 0:
+        assert np.allclose(array.data, [1, 1, 1, 1, 2, 2, 2, 2, 2, 2])
+    else:
+        assert comm.rank == 1
+        assert np.allclose(array.data, [2, 2, 2, 2, 2, 2, 1, 1, 1, 1])
+
+    # assert not array.halo_valid  # or similar
+
+    # assert data == ???
+
 
 """
 # Notes
@@ -97,31 +118,36 @@ I need a number of different star forests:
     - scattering if the above holds and the halo is read
 - all owned points -> single owned point
     - gathering if halo is not modified
+    - scattering if halo is not read
 
 i.e.
 
 Ahhhh, halo_valid is a different thing to "halo has been modified"!
+instead it means "the halo points store the same data as the owned points"
 
-def synchronise(halo_values_needed=False):
-    if self.last_op:  # only need to reduce if values have been modified
-        # halo_valid should definitely be false here
-        assert not self.halo_valid
-        if self.halo_modified:  # have we modified the halo values?
-            all_points_sf.reduce()
+# maybe add "owned_modified" flag? might be clearer
+
+def sync(reading_halo=False):
+    # 1. if modified, reduce leaves to their roots
+    if self.pending_write_op:
+        # the halo should definitely not be considered correct
+        assert not self.halo_valid, msg
+        if self.halo_written_to:
+            self.all_points_sf.reduce()
         else:
-            owned_points_sf.reduce()  # only reduce with values from owned points
+            self.owned_points_sf.reduce()  # only reduce with values from owned points
 
-    # at this point only one of the owned points knows the correct result which
+    # 3. at this point only one of the owned points knows the correct result which
     # now needs to be scattered back to some (but not necessarily all) of the other ranks.
 
     # only send to halos if we want to read them and they are out-of-date
-    if halo_values_needed and not self.halo_valid:
+    if reading_halo and not self.halo_valid:
         # send the root value back to all the points
         all_points_sf.broadcast()
         self.halo_valid = True  # all the halo points are now up-to-date
     else:
         # only need to update owned points if we did a reduction earlier
-        if self.last_op:
+        if self.pending_write_op:
             # send the root value back to just the owned points
             owned_points_sf.broadcast()
             # (the halo is still dirty)
@@ -132,7 +158,7 @@ def synchronise(halo_values_needed=False):
     self.last_op = None
     self.halo_modified = False
 
-Also need to store `last_op` property for `DistributedArray` (default `None`). Possible
+Also need to store `last_write_op` property for `DistributedArray` (default `None`). Possible
 values include: INC, MIN, MAX, WRITE. This indicates what reduction operations are
 required.
 """

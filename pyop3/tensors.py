@@ -1561,6 +1561,14 @@ class NonAffineMap(Map):
         return self.tensor
 
 
+@dataclasses.dataclass
+class SyncStatus:
+    pending_write_op: Optional[Any] = None
+    halo_valid: bool = True
+    halo_modified: bool = False
+
+
+# TODO this shouldn't be an immutable record
 class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
     """Multi-dimensional, hierarchical array.
 
@@ -1600,6 +1608,10 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         self.max_value = max_value
         self.sf = sf
         super().__init__(name)
+
+        self._pending_write_op = None
+        self._halo_modified = False
+        self._halo_valid = True
 
     # TODO delete this and just use constructor
     @classmethod
@@ -1655,6 +1667,77 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
                 flattened.extend(x)
                 count.append(y)
             return flattened, count
+
+    reduction_ops = {
+        pyop3.exprs.INC: MPI.SUM,
+    }
+
+    def reduce_leaves_to_roots(self, sf, pending_write_op):
+        mpi_dtype, _ = get_mpi_dtype(self.data.dtype)
+        mpi_op = self.reduction_ops[pending_write_op]
+        args = (mpi_dtype, self.data, self.data, mpi_op)
+        sf.reduceBegin(*args)
+        sf.reduceEnd(*args)
+
+    def broadcast_roots_to_leaves(self, sf):
+        mpi_dtype, _ = get_mpi_dtype(self.data.dtype)
+        mpi_op = MPI.REPLACE
+        args = (mpi_dtype, self.data, self.data, mpi_op)
+        sf.bcastBegin(*args)
+        sf.bcastEnd(*args)
+
+    # TODO create Synchronizer object for encapsulation?
+    def sync(self, need_halo_values=False):
+        """Perform halo exchanges to ensure that all ranks store up-to-date values.
+
+        Parameters
+        ----------
+        need_halo_values : bool
+            Whether or not halo values also need to be synchronized.
+
+        Note that this method should only be called when one needs to read from
+        the array.
+        """
+        # TODO: We want to do this is a nonblocking fashion but that's tricky because we
+        # need to do all the reductions before we start the scatters. Hopefully python
+        # threading is a solution.
+
+        # 1. Reduce leaf values to roots if they have been written to.
+        # (this is basically local-to-global)
+        if self._pending_write_op:
+            assert not self._halo_valid, "If a write is pending the halo cannot be valid"
+            # If halo entries have also been written to then we need to use the
+            # full SF containing both shared and halo points. If the halo has not
+            # been modified then we only need to reduce with shared points.
+            if self._halo_modified:
+                self.reduce_leaves_to_roots(self.root.sf, self._pending_write_op)
+            else:
+                # only reduce with values from owned points
+                self.reduce_leaves_to_roots(self.root.shared_sf, self._pending_write_op)
+
+        # implicit barrier? can only broadcast reduced values
+
+        # 3. at this point only one of the owned points knows the correct result which
+        # now needs to be scattered back to some (but not necessarily all) of the other ranks.
+        # (this is basically global-to-local)
+
+        # only send to halos if we want to read them and they are out-of-date
+        if need_halo_values and not self._halo_valid:
+            # send the root value back to all the points
+            self.broadcast_roots_to_leaves(self.root.sf)
+            self._halo_valid = True  # all the halo points are now up-to-date
+        else:
+            # only need to update owned points if we did a reduction earlier
+            if self._pending_write_op:
+                # send the root value back to just the owned points
+                self.broadcast_roots_to_leaves(self.root.shared_sf)
+                # (the halo is still dirty)
+
+        # set self.last_op to None here? what if halo is still off?
+        # what if we read owned values and then owned+halo values?
+        # just perform second step
+        self._pending_write_op = None
+        self._halo_modified = False
 
 
     # @classmethod

@@ -8,7 +8,7 @@ from typing import Iterable, Tuple
 import numpy as np
 import pytools
 
-import pyop3.tensors
+# import pyop3.tensors
 from pyop3.utils import as_tuple, NameGenerator
 
 
