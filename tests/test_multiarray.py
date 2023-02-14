@@ -55,9 +55,25 @@ def make_overlapped_array(comm):
 
     root = MultiAxis([AxisPart(10, overlap=overlap)]).set_up()
     array = MultiArray(root, data=np.ones(10), dtype=np.float64, name="myarray")
-    # assert array.halo_valid  # or similar
-    # assert not array.last_op
+    assert not array._pending_write_op
+    assert array._halo_valid
     return array
+
+
+def make_global(comm):
+    assert comm.size == 2
+
+    if comm.rank == 0:
+        overlap = [Shared(), Shared(), Shared(RemotePoint(1, 1))]
+    else:
+        assert comm.rank == 1
+        overlap = [Shared(RemotePoint(0, 1)), Shared(), Shared(RemotePoint(0, 0))]
+    root = MultiAxis([AxisPart(10, overlap=overlap)]).set_up()
+    array = MultiArray(root, data=np.ones(3), dtype=np.float64, name="myarray")
+    assert array._halo_valid
+    assert not array._pending_write_op
+    return array
+
 
 
 @pytest.mark.parallel(nprocs=2)
@@ -132,57 +148,15 @@ def test_sync_with_threads(comm):
 
     # assert data == ???
 
-"""
-# Notes
 
-I need a number of different star forests:
+@pytest.mark.parallel(nprocs=2)
+def test_global_sync(comm):
+    global_ = make_global(comm)
+    assert np.allclose(global_.data, 1)
 
-- all owned and halo points -> single owned point
-    - gathering if halo is modified
-    - scattering if the above holds and the halo is read
-- all owned points -> single owned point
-    - gathering if halo is not modified
-    - scattering if halo is not read
-
-i.e.
-
-Ahhhh, halo_valid is a different thing to "halo has been modified"!
-instead it means "the halo points store the same data as the owned points"
-
-# maybe add "owned_modified" flag? might be clearer
-
-def sync(reading_halo=False):
-    # 1. if modified, reduce leaves to their roots
-    if self.pending_write_op:
-        # the halo should definitely not be considered correct
-        assert not self.halo_valid, msg
-        if self.halo_written_to:
-            self.all_points_sf.reduce()
-        else:
-            self.owned_points_sf.reduce()  # only reduce with values from owned points
-
-    # 3. at this point only one of the owned points knows the correct result which
-    # now needs to be scattered back to some (but not necessarily all) of the other ranks.
-
-    # only send to halos if we want to read them and they are out-of-date
-    if reading_halo and not self.halo_valid:
-        # send the root value back to all the points
-        all_points_sf.broadcast()
-        self.halo_valid = True  # all the halo points are now up-to-date
-    else:
-        # only need to update owned points if we did a reduction earlier
-        if self.pending_write_op:
-            # send the root value back to just the owned points
-            owned_points_sf.broadcast()
-            # (the halo is still dirty)
-
-    # set self.last_op to None here? what if halo is still off?
-    # what if we read owned values and then owned+halo values?
-    # just perform second step
-    self.last_op = None
-    self.halo_modified = False
-
-Also need to store `last_write_op` property for `DistributedArray` (default `None`). Possible
-values include: INC, MIN, MAX, WRITE. This indicates what reduction operations are
-required.
-"""
+    # pretend like the last thing we did was INC into the array
+    global_._pending_write_op = INC
+    global_._halo_modified = True
+    global_._halo_valid = False
+    global_.sync()
+    assert np.allclose(global_.data, 2)

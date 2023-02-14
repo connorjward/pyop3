@@ -241,7 +241,7 @@ def attach_blank_data_to_layouts(layouts, part, npart, data, path=None):
             attach_blank_data_to_layouts(layouts, subpart, npt, data, path+(npt,))
 
 
-def attach_star_forest(axis):
+def attach_star_forest(axis, with_halo_points=True):
     comm = MPI.COMM_WORLD
 
     # 1. construct the point-to-point SF per axis part
@@ -254,6 +254,7 @@ def attach_star_forest(axis):
     point_sf = part_sf
 
     # 2. broadcast the root offset to all leaves
+    # TODO use a single buffer
     from_buffer = np.zeros(axis.part.count, dtype=np.uintp)
     to_buffer = np.zeros(axis.part.count, dtype=np.uintp)
 
@@ -265,19 +266,11 @@ def attach_star_forest(axis):
     # TODO: It's quite bad to allocate a massive buffer when not much of it gets
     # moved. Perhaps good to use some sort of map and create a minimal SF.
 
-    # Actually there are some serious issues with my implementation anyway - I have the
-    # data for ilocal and iremote but I'm putting them together in the same array which
-    # isn't right.
-
-    # myprint(f"pre-bcast: {buffer}")
-
     cdim = axis.part.subaxis.calc_size() if axis.part.subaxis else 1
     dtype, _ = get_mpi_dtype(np.dtype(np.uintp), cdim)
     bcast_args = dtype, from_buffer, to_buffer, MPI.REPLACE
     point_sf.bcastBegin(*bcast_args)
     point_sf.bcastEnd(*bcast_args)
-
-    # myprint(f"post-bcast: {buffer}")
 
     # 3. construct a new SF with these offsets
     nroots, _local, _remote = part_sf.getGraph()
@@ -286,18 +279,21 @@ def attach_star_forest(axis):
     remote_offsets = np.empty(_remote.shape, dtype=np.int32)
     i = 0
     for pt, label in enumerate(axis.part.overlap):
-        if isinstance(label, Halo):
+        # TODO not a nice check (is_leaf?)
+        cond1 = with_halo_points and not isinstance(label, Owned) and label.root
+        cond2 = not with_halo_points and isinstance(label, Shared) and label.root
+        if cond1 or cond2:
             local_offsets[i] = axis.get_offset((pt,))
             remote_offsets[i, 0] = _remote[i, 0]  # rank
             remote_offsets[i, 1] = to_buffer[pt]
             i += 1
 
-    # myprint(f"local_offsets: {local_offsets}")
-    # myprint(f"remote_offsets: {remote_offsets}")
-
     sf = PETSc.SF().create(comm)
     sf.setGraph(nroots, local_offsets, remote_offsets)
-    return axis.copy(sf=sf)
+    if with_halo_points:
+        return axis.copy(sf=sf)
+    else:
+        return axis.copy(shared_sf=sf)
 
 
 def make_star_forest_per_axis_part(part, comm):
@@ -474,11 +470,11 @@ class Sparsity:
 
 
 class MultiAxis(pytools.ImmutableRecord):
-    fields = {"parts", "id", "parent", "is_set_up", "sf", "owned_sf"}
+    fields = {"parts", "id", "parent", "is_set_up", "sf", "shared_sf"}
 
     id_generator = NameGenerator("ax")
 
-    def __init__(self, parts, *, id=None, parent=None, is_set_up=False, sf=None, owned_sf=None):
+    def __init__(self, parts, *, id=None, parent=None, is_set_up=False, sf=None, shared_sf=None):
         # make sure all parts have labels, default to integers if necessary
         if strictly_all(pt.label is None for pt in parts):
             # set the label to the index
@@ -495,9 +491,7 @@ class MultiAxis(pytools.ImmutableRecord):
         self.parent = parent
         self.is_set_up = is_set_up
         self.sf = sf
-        if owned_sf:
-            raise NotImplementedError("Haven't dealt with this yet")
-        self.owned_sf = None
+        self.shared_sf = shared_sf
         super().__init__()
 
     def __mul__(self, other):
@@ -650,6 +644,7 @@ class MultiAxis(pytools.ImmutableRecord):
 
         # set the .sf and .owned_sf properties of new_axis
         new_axis = attach_star_forest(new_axis)
+        new_axis = attach_star_forest(new_axis, with_halo_points=False)
         # new_axis = attach_owned_star_forest(new_axis)
         return new_axis
 
