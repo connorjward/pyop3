@@ -1,3 +1,5 @@
+import threading
+
 from mpi4py import MPI
 import numpy as np
 from petsc4py import PETSc
@@ -107,6 +109,28 @@ def test_sync(comm):
 
     # assert data == ???
 
+
+@pytest.mark.parallel(nprocs=2)
+def test_sync_with_threads(comm):
+    array = make_overlapped_array(comm)
+
+    # pretend like the last thing we did was INC into the arrays
+    array._pending_write_op = INC
+    array._halo_modified = True
+    array._halo_valid = False
+
+    array.sync_begin(need_halo_values=True)
+    array.sync_end()
+
+    if comm.rank == 0:
+        assert np.allclose(array.data, [1, 1, 1, 1, 2, 2, 2, 2, 2, 2])
+    else:
+        assert comm.rank == 1
+        assert np.allclose(array.data, [2, 2, 2, 2, 2, 2, 1, 1, 1, 1])
+
+    # assert not array.halo_valid  # or similar
+
+    # assert data == ???
 
 """
 # Notes

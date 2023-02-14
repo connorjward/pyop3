@@ -1,6 +1,7 @@
 import collections
 import itertools
-import pyrsistent
+
+from mpi4py import MPI
 import pytools
 
 
@@ -109,3 +110,9 @@ def strictly_all(iterable):
     if (result := any(it1)) and not all(it2):
         raise ValueError("Iterable contains inconsistent values")
     return result
+
+
+def print_with_rank(*args):
+    print(f"rank {MPI.COMM_WORLD.rank}: ", sep="", flush=True)
+    print(*args, flush=True)
+

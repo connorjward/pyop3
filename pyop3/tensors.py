@@ -10,7 +10,7 @@ import collections
 import dataclasses
 from typing import Tuple, Union, Any, Optional, Sequence
 import numbers
-import pyrsistent
+import threading
 
 from mpi4py import MPI
 from petsc4py import PETSc
@@ -23,10 +23,7 @@ from pyop3.utils import as_tuple, checked_zip, NameGenerator, unique, PrettyTupl
 from pyop3 import utils
 
 
-# just for debugging
-def myprint(*args):
-    print(f"rank {MPI.COMM_WORLD.rank}: ", sep="", flush=True)
-    print(*args, flush=True)
+myprint = utils.print_with_rank
 
 
 class IntRef:
@@ -295,8 +292,8 @@ def attach_star_forest(axis):
             remote_offsets[i, 1] = to_buffer[pt]
             i += 1
 
-    myprint(f"local_offsets: {local_offsets}")
-    myprint(f"remote_offsets: {remote_offsets}")
+    # myprint(f"local_offsets: {local_offsets}")
+    # myprint(f"remote_offsets: {remote_offsets}")
 
     sf = PETSc.SF().create(comm)
     sf.setGraph(nroots, local_offsets, remote_offsets)
@@ -349,7 +346,7 @@ class PointOverlapLabel(abc.ABC):
 @dataclasses.dataclass
 class Owned(PointOverlapLabel):
     pass
-
+    
 
 @dataclasses.dataclass
 class Shared(PointOverlapLabel):
@@ -1613,6 +1610,8 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         self._halo_modified = False
         self._halo_valid = True
 
+        self._sync_thread = None
+
     # TODO delete this and just use constructor
     @classmethod
     def new(cls, dim, indices=None, *args, prefix=None, name=None, **kwargs):
@@ -1686,6 +1685,23 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         sf.bcastBegin(*args)
         sf.bcastEnd(*args)
 
+    def sync_begin(self, need_halo_values=False):
+        """Begin synchronizing shared data."""
+        self._sync_thread = threading.Thread(
+            target=self.__class__.sync,
+            args=(self,),
+            kwargs={"need_halo_values": need_halo_values},
+        )
+        self._sync_thread.start()
+
+    def sync_end(self):
+        """Finish synchronizing shared data."""
+        if not self._sync_thread:
+            raise RuntimeError(
+                "Cannot call sync_end without a prior call to sync_begin")
+        self._sync_thread.join()
+        self._sync_thread = None
+
     # TODO create Synchronizer object for encapsulation?
     def sync(self, need_halo_values=False):
         """Perform halo exchanges to ensure that all ranks store up-to-date values.
@@ -1695,13 +1711,14 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         need_halo_values : bool
             Whether or not halo values also need to be synchronized.
 
+        Notes
+        -----
+        This is a blocking operation. For the non-blocking alternative use
+        :meth:`sync_begin` and :meth:`sync_end` (FIXME)
+
         Note that this method should only be called when one needs to read from
         the array.
         """
-        # TODO: We want to do this is a nonblocking fashion but that's tricky because we
-        # need to do all the reductions before we start the scatters. Hopefully python
-        # threading is a solution.
-
         # 1. Reduce leaf values to roots if they have been written to.
         # (this is basically local-to-global)
         if self._pending_write_op:
