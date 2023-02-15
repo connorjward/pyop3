@@ -1,12 +1,17 @@
 [build-system]
-requires = ["setuptools"]
+requires = ["setuptools", "cython"]
 build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyop3"
+version = "0.1"
 
 [project.optional-dependencies]
 tests = [
   "pytest",
-  "git+https://github.com/connorjward/pytest-mpi",
+  "pytest-mpi @ git+https://github.com/connorjward/pytest-mpi",
 ]
 
-[tool.isort]
-profile = "black"
+# TODO: Get this implemented along with black
+# [tool.isort]
+# profile = "black"
