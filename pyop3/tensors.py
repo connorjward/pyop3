@@ -26,6 +26,14 @@ from pyop3 import utils
 myprint = utils.print_with_rank
 
 
+def is_distributed(axis):
+    """Return ``True`` if any part of a :class:`MultiAxis` is distributed across ranks."""
+    for part in axis.parts:
+        if part.is_distributed or part.subaxis and is_distributed(part.subaxis):
+            return True
+    return False
+
+
 class IntRef:
     """Pass-by-reference integer."""
     def __init__(self, value):
@@ -648,8 +656,9 @@ class MultiAxis(pytools.ImmutableRecord):
         assert is_set_up(new_axis)
 
         # set the .sf and .owned_sf properties of new_axis
-        new_axis = attach_star_forest(new_axis)
-        new_axis = attach_star_forest(new_axis, with_halo_points=False)
+        if is_distributed(new_axis):
+            new_axis = attach_star_forest(new_axis)
+            new_axis = attach_star_forest(new_axis, with_halo_points=False)
         # new_axis = attach_owned_star_forest(new_axis)
         return new_axis
 
