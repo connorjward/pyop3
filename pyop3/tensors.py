@@ -163,12 +163,16 @@ def can_be_affine(part):
     return has_independently_indexed_subaxis_parts(part) and part.numbering is None
 
 
-def handle_const_starts(axis, layouts, path=PrettyTuple()):
+def handle_const_starts(axis, layouts, path=PrettyTuple(), outer_axes_are_all_indexed=True):
     offset = 0
+    # import pdb; pdb.set_trace()
     for i, part in enumerate(axis.parts):
+        # catch already set null layouts
+        if layouts[path|i] is not None:
+            continue
         # need to track if ragged permuted below
         # check for None here in case we have already set this to a null layout
-        if can_be_affine(part) and layouts[path|i] is None:
+        if can_be_affine(part) and has_constant_start(part, outer_axes_are_all_indexed):
             step = step_size(part)
             layouts[path|i] = AffineLayoutFunction(step, offset)
 
@@ -180,7 +184,18 @@ def handle_const_starts(axis, layouts, path=PrettyTuple()):
 
     for i, part in enumerate(axis.parts):
         if part.subaxis:
-            handle_const_starts(part.subaxis, layouts, path|i)
+            handle_const_starts(part.subaxis, layouts, path|i,
+                                outer_axes_are_all_indexed and part.indexed)
+
+
+def has_constant_start(part, outer_axes_are_all_indexed: bool):
+    """
+    We will have an affine layout with a constant start (usually zero) if either we are not
+    ragged or if we are ragged but everything above is indexed (i.e. a temporary).
+    """
+    assert can_be_affine(part)
+    return isinstance(part.count, numbers.Integral) or outer_axes_are_all_indexed
+
 
 
 def has_fixed_size(part):
@@ -788,7 +803,6 @@ class MultiAxis(pytools.ImmutableRecord):
                     new_layouts[subpath][selected_index] = subdata
 
         # catch zero-sized sub-bits
-        # import pdb; pdb.set_trace()
         # for n in range(self.nparts):
         #     path_ = path | n
         #     if isinstance(new_layouts[path_], dict) and len(new_layouts[path_]) != npoints:
@@ -797,7 +811,6 @@ class MultiAxis(pytools.ImmutableRecord):
         #             if i not in new_layouts[path_]:
         #                 new_layouts[path_][i] = []
 
-        # import pdb; pdb.set_trace()
         ret = {path_: self.unpack_index_dict(layout_) for path_, layout_ in new_layouts.items()}
         return ret
 
@@ -851,14 +864,13 @@ class MultiAxis(pytools.ImmutableRecord):
         # return a nested list structure or nothing. if the former then haven't set all
         # the layouts (needs) to be end of the loop
 
-        # import pdb; pdb.set_trace()
-
         # loop over all points in all parts of the multi-axis
         # initialise layout array per axis part
         layouts = {}
         for npart, part in enumerate(self.parts):
             layouts |= prepare_layouts(part, npart)
 
+        # import pdb; pdb.set_trace()
         set_null_layouts(layouts, self)
         handle_const_starts(self, layouts)
 

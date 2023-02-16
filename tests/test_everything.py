@@ -153,6 +153,8 @@ def test_read_single_dim(scalar_copy_kernel):
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
 
+    # import pdb; pdb.set_trace()
+
     dll = compilemythings(exe)
     fn = getattr(dll, "mykernel")
 
@@ -556,19 +558,15 @@ def test_doubly_ragged():
     ])
 
     expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
-
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    layout0 = nnz2.root.part.subaxis.part.layout_fn.start
-    layout1 = dat1.root.part.subaxis.part.subaxis.part.layout_fn.start
-
-    # import pdb; pdb.set_trace()
-
-
-    args = [nnz1.data, layout0.data, nnz2.data, layout1.data, dat1.data, dat2.data]
+    # void mykernel(nnz1, layout9_0, nnz2, layout11_0, layout10_0, dat1, dat2)
+    layout9_0 = nnz2.root.part.subaxis.part.layout_fn.start
+    layout10_0 = dat1.root.part.subaxis.part.subaxis.part.layout_fn.start
+    layout11_0 = layout10_0.root.part.subaxis.part.layout_fn.start
+    args = [nnz1.data, layout9_0.data, nnz2.data, layout11_0.data, layout10_0.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
