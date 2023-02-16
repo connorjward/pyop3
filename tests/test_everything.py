@@ -716,52 +716,47 @@ def test_compute_double_loop_ragged_inner(ragged_copy_kernel):
     assert np.allclose(dat1.data, dat2.data)
 
 
-@pytest.mark.skip
-def test_compute_double_loop_ragged_mixed():
+def test_compute_double_loop_ragged_mixed(scalar_copy_kernel):
+    ax1 = MultiAxis([AxisPart(5, id="p1")])
     nnz = MultiArray.new(
-        MultiAxis(5), name="nnz", dtype=np.int32,
-        data=np.array([3, 2, 0, 0, 1], dtype=np.int32)
+        ax1.set_up(), name="nnz", dtype=np.int32,
+        data=np.array([3, 2, 1, 2, 1], dtype=np.int32)
     )
 
     axes = (
         MultiAxis([
-            AxisPart(4, id="ax1"), AxisPart(5, id="ax2"), AxisPart(4, id="ax3")
+            AxisPart(4, id="p1"), AxisPart(5, id="p2"), AxisPart(4, id="p3")
         ])
-        .add_subaxis("ax1", 1)
-        .add_subaxis("ax2", nnz)
-        .add_subaxis("ax3", 2)
-    )
+        .add_subaxis("p1", MultiAxis([AxisPart(1)]))
+        .add_subaxis("p2", MultiAxis([AxisPart(nnz)]))
+        .add_subaxis("p3", MultiAxis([AxisPart(2)]))
+    ).set_up()
 
-    dat1 = MultiArray.new(axes, name="dat1", data=np.arange(4+6+8, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(4+6+8, dtype=np.float64), dtype=np.float64)
+    dat1 = MultiArray.new(axes, name="dat1", data=np.ones(4+9+8, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(4+9+8, dtype=np.float64), dtype=np.float64)
 
-    code = lp.make_kernel(
-        "{ [i]: 0 <= i < 1 }",
-        "y[i] = x[i] + 1",
-        [lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
-        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
-        target=lp.CTarget(),
-        name="mylocalkernel",
-        lang_version=(2018, 2),
-    )
-    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-    iterset = [Slice(5, npart=1), Slice(nnz)]
-    expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
-
+    p = MultiIndexCollection([
+        MultiIndex([
+            TypedIndex(1, IndexSet(5)),
+            TypedIndex(0, IndexSet(nnz)),
+        ])
+    ])
+    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[[p]], dat2[[p]]))
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    nnzc, _ = dat1.dim.parts[1].subaxis.part.layout
+    # void mykernel(nnz, layout0_0, dat1, dat2)
+    layout0_0 = dat1.root.parts[1].subaxis.part.layout_fn.start
 
-    args = [nnz.data, dat1.data, dat2.data, nnzc.data]
+    args = [nnz.data, layout0_0.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
 
-    assert all(dat2.data[:4] == 0)
-    assert all(dat2.data[4:10] == dat1.data[4:10] + 1)
-    assert all(dat2.data[10:] == 0)
+    assert np.allclose(dat2.data[:4], 0)
+    assert np.allclose(dat1.data[4:13], dat2.data[4:13])
+    assert np.allclose(dat2.data[13:], 0)
 
 
 @pytest.mark.skip

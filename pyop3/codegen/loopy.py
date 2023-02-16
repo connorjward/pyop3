@@ -458,7 +458,8 @@ declared. we just need to traverse properly to check that we have the right numb
                     elif i == axis.nparts - 1:
                         stmts.append("else")
                     else:
-                        stmts.append(f"else if {part_names[depth]} == {i}")
+                        stmts.append("else")
+                        stmts.append(f"if {part_names[depth]} == {i}")
 
                     newstmts = self.emit_layout_insns(
                         axis_part.layout_fn,
@@ -476,7 +477,11 @@ declared. we just need to traverse properly to check that we have the right numb
                         insn_prefix, depth+1
                     )
                     stmts.extend(newstmts)
-            stmts.append("end")
+
+            # number of "end" statements that need emitting
+            for _ in range(axis.nparts-1):
+                stmts.append("end")
+        # import pdb; pdb.set_trace()
         return stmts
 
     def emit_layout_insns(self, layout_fn, offset_var, jnames, within_inames, insn_prefix, depth):
