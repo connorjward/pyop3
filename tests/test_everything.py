@@ -125,11 +125,12 @@ def ragged_copy_kernel():
     code = lp.make_kernel(
         "{ [i]: 0 <= i < n }",
         "y[i] = x[i]",
-        [lp.GlobalArg("x", np.float64, (3,), is_input=True, is_output=False),
-         lp.GlobalArg("y", np.float64, (3,), is_input=False, is_output=True),
+        [lp.GlobalArg("x", np.float64, shape=None, is_input=True, is_output=False),
+         lp.GlobalArg("y", np.float64, shape=None, is_input=False, is_output=True),
          lp.ValueArg("n", dtype=np.int32)],
+        assumptions="n <= 3",
         target=lp.CTarget(),
-        name="mylocalkernel",
+        name="ragged_copy",
         lang_version=(2018, 2),
     )
     return pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
@@ -712,7 +713,7 @@ def test_compute_double_loop_ragged_inner(ragged_copy_kernel):
     fn.argtypes = (ctypes.c_voidp,) * len(args)
     fn(*(d.ctypes.data for d in args))
 
-    assert all(dat2.data == dat1.data + 1)
+    assert np.allclose(dat1.data, dat2.data)
 
 
 @pytest.mark.skip

@@ -238,18 +238,28 @@ class LoopyKernelBuilder:
             assert temp.name in [d.name for d in self._temp_kernel_data]
 
         # we need to pass sizes through if they are only known at runtime (ragged)
-        extents = []
+        extents = {}
+        # traverse the temporaries
+        for temp in utils.unique(itertools.chain(call.reads, call.writes)):
+            extents |= self.collect_extents(
+                temp.root,
+                # these are likely not right - need to clean up codegen logic for
+                # inames and jnames
+                list(self._loop_index_names.values()),
+                list(self._loop_index_names.values()),
+            )
+
+        # NOTE: If we register an extent to pass through loopy will complain
+        # unless we register it as an assumption of the local kernel (e.g. "n <= 3")
 
         assignees = tuple(subarrayrefs[var] for var in call.writes)
         expression = pym.primitives.Call(
             pym.var(call.function.code.default_entrypoint.name),
-            tuple(subarrayrefs[var] for var in call.reads) + tuple(extents),
+            tuple(subarrayrefs[var] for var in call.reads) + tuple(extents.values()),
         )
 
         insn_id = f"{call.id}_0"
         depends_on = frozenset({self._latest_insn[id] for id in call.depends_on})
-
-        # import pdb; pdb.set_trace()
 
         call_insn = lp.CallInstruction(
             assignees,
@@ -263,6 +273,25 @@ class LoopyKernelBuilder:
         self.instructions.append(call_insn)
         self.subkernels.append(call.function.code)
         self._latest_insn[call.id] = insn_id
+
+    def collect_extents(self, axis, jnames, within_inames, depth=0):
+        extents = {}
+
+        for part in axis.parts:
+            if isinstance(part.count, MultiArray):
+                assert depth >= 1
+                useable_jnames = jnames[:depth]
+                useable_inames = within_inames[:depth]
+                extent = self.register_scalar_assignment(part.count, useable_jnames, useable_inames)
+                extents[part.count] = extent
+
+            if part.subaxis:
+                extents_ = self.collect_extents(part.subaxis, jnames, within_inames, depth+1)
+                if any(array in extents for array in extents_):
+                    raise ValueError("subaxes should not be using the same nnz structures (I think)")
+                extents |= extents_
+
+        return extents
 
     @_make_instruction_context.register
     def _(self, assignment: tlang.Assignment, outer_loop_indices):
