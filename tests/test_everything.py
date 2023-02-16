@@ -759,138 +759,125 @@ def test_compute_double_loop_ragged_mixed(scalar_copy_kernel):
     assert np.allclose(dat2.data[13:], 0)
 
 
-@pytest.mark.skip
-def test_compute_ragged_permuted():
+def test_compute_ragged_permuted(scalar_copy_kernel):
     nnz = MultiArray.new(
-        MultiAxis(6), name="nnz", dtype=np.int32,
+        MultiAxis([AxisPart(6)]).set_up(), name="nnz", dtype=np.int32,
         data=np.array([3, 2, 0, 1, 3, 2], dtype=np.int32)
     )
 
     axes = (
-        MultiAxis(AxisPart(6, id="ax1"), permutation=(3, 2, 5, 0, 4, 1))
-        .add_subaxis("ax1", nnz)
-    )
+        MultiAxis([AxisPart(6, id="p1", numbering=[3, 2, 5, 0, 4, 1])])
+        .add_subaxis("p1", MultiAxis([AxisPart(nnz)]))
+    ).set_up()
 
-    dat1 = MultiArray.new(axes, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
+    dat1 = MultiArray.new(axes, name="dat1",
+                          data=np.ones(11, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray.new(axes, name="dat2",
+                          data=np.zeros(11, dtype=np.float64), dtype=np.float64)
 
-    code = lp.make_kernel(
-        "{ [i]: 0 <= i < 1 }",
-        "y[i] = x[i] + 1",
-        [lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
-        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
-        target=lp.CTarget(),
-        name="mylocalkernel",
-        lang_version=(2018, 2),
-    )
-    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-    iterset = [Slice(6), Slice(nnz)]
-    expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
-
+    p = MultiIndexCollection([
+        MultiIndex([
+            TypedIndex(0, IndexSet(6)),
+            TypedIndex(0, IndexSet(nnz)),
+        ])
+    ])
+    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[[p]], dat2[[p]]))
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    sec0 = dat1.dim.parts[0].layout[0]
-    sec1 = dat2.dim.parts[0].layout[0]
-
-    args = [nnz.data, dat1.data, dat2.data, sec0.data, sec1.data]
+    # void mykernel(nnz, layout0_0, dat1, dat2)
+    layout0_0 = dat1.root.part.subaxis.part.layout_fn.start
+    args = [nnz.data, layout0_0.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
 
-    assert all(dat2.data == dat1.data + 1)
+    assert np.allclose(dat1.data, dat2.data)
 
 
-@pytest.mark.skip
-def test_permuted_ragged_permuted():
+def test_permuted_ragged_permuted(scalar_copy_kernel):
     nnz = MultiArray.new(
-        MultiAxis(6), name="nnz", dtype=np.int32,
+        MultiAxis([AxisPart(6)]).set_up(), name="nnz", dtype=np.int32,
         data=np.array([3, 2, 0, 1, 3, 2], dtype=np.int32)
     )
 
     axes = (
-        MultiAxis(AxisPart(6, id="ax1"), permutation=(3, 2, 5, 0, 4, 1))
-        .add_subaxis("ax1", AxisPart(nnz, id="ax2"))
-        .add_subaxis("ax2", MultiAxis(2, permutation=(1, 0)))
-    )
+        MultiAxis([AxisPart(6, id="p1", numbering=[3, 2, 5, 0, 4, 1])])
+        .add_subaxis("p1", MultiAxis([AxisPart(nnz, id="p2")]))
+        .add_subaxis("p2", MultiAxis([AxisPart(2, numbering=[1, 0])]))
+    ).set_up()
 
-    dat1 = MultiArray.new(axes, name="dat1", data=np.arange(22, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(22, dtype=np.float64), dtype=np.float64)
+    dat1 = MultiArray.new(axes, name="dat1", data=np.ones(22, dtype=np.float64),
+                          dtype=np.float64)
+    dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(22, dtype=np.float64),
+                          dtype=np.float64)
 
-    code = lp.make_kernel(
-        "{ [i]: 0 <= i < 1 }",
-        "y[i] = x[i] + 1",
-        [lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
-        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
-        target=lp.CTarget(),
-        name="mylocalkernel",
-        lang_version=(2018, 2),
-    )
-    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-    iterset = [Slice(6), Slice(nnz), Slice(2)]
-    expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
+    p = MultiIndexCollection([
+        MultiIndex([
+            TypedIndex(0, IndexSet(6)),
+            TypedIndex(0, IndexSet(nnz)),
+            TypedIndex(0, IndexSet(2)),
+        ])
+    ])
+    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[[p]], dat2[[p]]))
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    sec0 = dat1.dim.part.layout[0]
-    sec1 = dat2.dim.part.subaxis.part.subaxis.part.layout[0]
-    sec2 = sec0.copy()
-    sec3 = sec1.copy()
+    # void mykernel(nnz, layout0_0, layout1_0, dat1, dat2)
+    layout0_0 = axes.part.subaxis.part.layout_fn.start
+    layout1_0 = axes.part.subaxis.part.subaxis.part.layout_fn.data
 
-    args = [nnz.data, dat1.data, dat2.data, sec0.data, sec1.data, sec2.data, sec3.data]
+    args = [nnz.data, layout0_0.data, layout1_0.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
-
     fn(*(d.ctypes.data for d in args))
 
-    assert all(dat2.data == dat1.data + 1)
+    assert np.allclose(dat1.data, dat2.data)
 
 
-@pytest.mark.skip
-def test_permuted_inner_and_ragged():
+def test_permuted_inner_and_ragged(scalar_copy_kernel):
+    # NOTE: nnz here is NOT permuted (and I don't think it ever should be)
     axes = (
-        MultiAxis(AxisPart(2, id="ax1"))
-        .add_subaxis("ax1", MultiAxis(AxisPart(2, id="ax2"), permutation=(1, 0)))
+        MultiAxis([AxisPart(2, id="p1")])
+        .add_subaxis("p1", MultiAxis([AxisPart(2, id="p2")]))
     )
-
     nnz = MultiArray.new(
-        axes, name="nnz", dtype=np.int32,
-        data=np.array([3, 2, 0, 1], dtype=np.int32)
+        axes.set_up(), name="nnz", dtype=np.int32,
+        data=np.array([3, 2, 1, 1], dtype=np.int32)
     )
 
-    axes = axes.add_subaxis("ax2", nnz)
-
-    dat1 = MultiArray.new(axes, name="dat1", data=np.arange(6, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(6, dtype=np.float64), dtype=np.float64)
-
-    code = lp.make_kernel(
-        "{ [i]: 0 <= i < 1 }",
-        "y[i] = x[i] + 1",
-        [lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
-        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
-        target=lp.CTarget(),
-        name="mylocalkernel",
-        lang_version=(2018, 2),
+    axes = (
+        MultiAxis([AxisPart(2, id="p1")])
+        .add_subaxis("p1", MultiAxis([AxisPart(2, id="p2", numbering=[1, 0])]))
     )
-    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-    iterset = [Slice(3), Slice(2), Slice(nnz)]
-    expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
+    axes = axes.add_subaxis("p2", MultiAxis([AxisPart(nnz)])).set_up()
+    dat1 = MultiArray.new(axes, name="dat1",
+                          data=np.ones(7, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray.new(axes, name="dat2",
+                          data=np.zeros(7, dtype=np.float64), dtype=np.float64)
+
+    p = MultiIndexCollection([
+        MultiIndex([
+            TypedIndex(0, IndexSet(2)),
+            TypedIndex(0, IndexSet(2)),
+            TypedIndex(0, IndexSet(nnz)),
+        ])
+    ])
+    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[[p]], dat2[[p]]))
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    sec0 = dat1.dim.part.subaxis.part.layout[0]
-    sec1 = sec0.copy()
-
-    args = [dat1.data, dat2.data, sec0.data, sec1.data]
+    layout0_0 = dat1.root.part.subaxis.part.subaxis.part.layout_fn.start
+    layout1_0 = layout0_0.root.part.subaxis.part.layout_fn.start
+    args = [nnz.data, layout1_0.data, layout0_0.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
-
     fn(*(d.ctypes.data for d in args))
 
-    assert all(dat2.data == dat1.data + 1)
+    assert np.allclose(dat1.data, dat2.data)
 
 
 @pytest.mark.skip

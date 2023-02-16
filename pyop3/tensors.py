@@ -741,8 +741,7 @@ class MultiAxis(pytools.ImmutableRecord):
 
         # if no numbering is provided create one
         # TODO should probably just set an affine one by default so we can mix these up
-        # import pdb; pdb.set_trace()
-        if not strictly_all(pt.numbering is not None for pt in self.parts):
+        if not strictly_all(pt.numbering for pt in self.parts):
             axis_numbering = []
             start = 0
             stop = start + self.parts[0].find_integer_count(indices)
@@ -763,6 +762,9 @@ class MultiAxis(pytools.ImmutableRecord):
             axis_numbering = [pt.numbering for pt in self.parts]
 
         assert all(isinstance(num, MultiArray) for num in axis_numbering)
+
+        # if indices:
+        #     import pdb; pdb.set_trace()
 
         for i in range(npoints):
             # TODO add a shortcut here to catch if i is inside the numbering of an affine
