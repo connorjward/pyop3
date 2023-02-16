@@ -92,6 +92,20 @@ Compile errors in %s""" % (e.cmd, e.returncode, logfile, errfile))
             return ctypes.CDLL(soname)
 
 
+@pytest.fixture
+def scalar_inc_kernel():
+    code = lp.make_kernel(
+        "{ [i]: 0 <= i < 1 }",
+        "y[i] = x[i] + 1",
+        [lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
+        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True)],
+        target=lp.CTarget(),
+        name="mylocalkernel",
+        lang_version=(2018, 2),
+    )
+    return pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+
+
 def test_read_single_dim():
     axes = MultiAxis([AxisPart(10)]).set_up()
     dat1 = MultiArray.new(axes, name="dat1", data=np.arange(10, dtype=np.float64), dtype=np.float64)
@@ -547,15 +561,7 @@ def test_doubly_ragged():
     assert all(dat2.data == dat1.data + 1)
 
 
-
-
-
-
-### Assume broken below here
-
-
-@pytest.mark.skip
-def test_interleaved_ragged():
+def test_interleaved_ragged(scalar_inc_kernel):
     """Two data layout types are possible: constant or consistent-ragged.
 
     The latter means that any ragged bits inside *must* obey all of the shape stuff outside of it.
@@ -567,13 +573,58 @@ def test_interleaved_ragged():
     
     2 -> [1, 2] -> 2 -> [[[a, b]], [[c, d], [e, f]]]
     """
-    axes = (
-        MultiAxis([AxisPart(3, id="p1")])
-        .add_subaxis("p1", MultiAxis([AxisPart([1, 3, 2], id="p2")]))  # ragged
-        .add_subaxis("p2", MultiAxis([AxisPart(2, id="p3")]))  # not ragged
-        .add_subaxis("p3", MultiAxis([AxisPart([[[1, 2]], [[2, 1], [1, 0], [0, 1]], [[2, 3], [3, 1]]])]))  # ragged
+    ax1 = MultiAxis([AxisPart(3, id="p1")])
+    nnz1 = MultiArray.new(
+        ax1.set_up(), name="nnz1", dtype=np.int32, max_value=3,
+        data=np.array([1, 3, 2], dtype=np.int32)
     )
-    raise NotImplementedError
+    ax2 = ax1.add_subaxis("p1", MultiAxis([AxisPart(nnz1, id="p2")]))
+    ax3 = ax2.add_subaxis("p2", MultiAxis([AxisPart(2, id="p3")]))
+    nnz2 = MultiArray.new(
+        ax3.set_up(), name="nnz2", dtype=np.int32, max_value=3,
+        data=np.array(utils.flatten([[[1, 2]], [[2, 1], [1, 1], [1, 1]], [[2, 3], [3, 1]]]), dtype=np.int32)
+    )
+    ax4 = ax3.add_subaxis("p3", MultiAxis([AxisPart(nnz2)]))
+
+    root = ax4.set_up()
+
+    dat1 = MultiArray.new(
+        root, name="dat1", data=np.ones(19, dtype=np.float64), dtype=np.float64
+    )
+    dat2 = MultiArray.new(
+        root, name="dat2", data=np.zeros(19, dtype=np.float64), dtype=np.float64
+    )
+
+    p = MultiIndexCollection([
+        MultiIndex([
+            TypedIndex(0, IndexSet(3)),
+            TypedIndex(0, IndexSet(nnz1)),
+            TypedIndex(0, IndexSet(2)),
+            TypedIndex(0, IndexSet(nnz2)),
+        ])
+    ])
+
+    expr = pyop3.Loop(p, scalar_inc_kernel(dat1[[p]], dat2[[p]]))
+
+    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+
+    dll = compilemythings(code)
+    fn = getattr(dll, "mykernel")
+
+    # void mykernel(nnz1, layout0_0, nnz2, layout4_0, layout3_0, layout1_0, dat1, dat2)
+
+    layout0_0 = nnz2.root.part.subaxis.part.layout_fn.start
+    # yes, I'm well aware this is insane
+    layout1_0 = dat1.root.part.subaxis.part.subaxis.part.subaxis.part.layout_fn.start
+    layout3_0 = layout1_0.root.part.subaxis.part.subaxis.part.layout_fn.start
+    layout4_0 = layout3_0.root.part.subaxis.part.layout_fn.start
+
+    args = [nnz1.data, layout0_0.data, nnz2.data, layout4_0.data, layout3_0.data, layout1_0.data, dat1.data, dat2.data]
+    fn.argtypes = (ctypes.c_voidp,) * len(args)
+
+    fn(*(d.ctypes.data for d in args))
+
+    assert all(dat2.data == dat1.data + 1)
 
 
 @pytest.mark.skip

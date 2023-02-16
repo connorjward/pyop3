@@ -470,6 +470,7 @@ class PointOwnershipLabel(PointLabel):
         return len(self._owned_points) + len(self._halo_points)
 
 
+# this isn't really a thing I should be caring about - it's just a multi-axis!
 class Sparsity:
     def __init__(self, maps):
         if isinstance(maps, collections.abc.Sequence):
@@ -856,19 +857,23 @@ class MultiAxis(pytools.ImmutableRecord):
         else:
             return part
 
+    _my_layout_namer = NameGenerator("layout")
+
     def turn_lists_into_layout_functions(self, layouts):
         for path, layout in layouts.items():
             part = self.get_part_from_path(path)
             if can_be_affine(part):
                 if isinstance(layout, list):
-                    starts = MultiArray.from_list(layout, f"layout_{'_'.join(str(p) for p in path)}", np.uintp)
+                    name = self._my_layout_namer.next()
+                    starts = MultiArray.from_list(layout, name, np.uintp)
                     step = step_size(part)
                     layouts[path] = AffineLayoutFunction(step, starts)
             else:
                 if layout == "null layout":
                     continue
                 assert isinstance(layout, list)
-                data = MultiArray.from_list(layout, f"layout_{'_'.join(str(p) for p in path)}", np.uintp)
+                name = self._my_layout_namer.next()
+                data = MultiArray.from_list(layout, name, np.uintp)
                 layouts[path] = IndirectLayoutFunction(data)
 
     def _set_up(self, indices=PrettyTuple(), offset=None):
