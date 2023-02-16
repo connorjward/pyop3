@@ -880,42 +880,35 @@ def test_permuted_inner_and_ragged(scalar_copy_kernel):
     assert np.allclose(dat1.data, dat2.data)
 
 
-@pytest.mark.skip
-def test_permuted_inner():
+def test_permuted_inner(scalar_copy_kernel):
     axes = (
-        MultiAxis([AxisPart(4, id="ax1")])
-        .add_subaxis("ax1", MultiAxis([AxisPart(3)], permutation=(2, 0, 1)))
-    )
+        MultiAxis([AxisPart(4, id="p1")])
+        .add_subaxis("p1", MultiAxis([AxisPart(3, numbering=[2, 0, 1])]))
+    ).set_up()
 
-    dat1 = MultiArray.new(axes, name="dat1", data=np.arange(12, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(12, dtype=np.float64), dtype=np.float64)
+    dat1 = MultiArray.new(axes, name="dat1",
+                          data=np.ones(12, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray.new(axes, name="dat2",
+                          data=np.zeros(12, dtype=np.float64), dtype=np.float64)
 
-    code = lp.make_kernel(
-        "{ [i]: 0 <= i < 1 }",
-        "y[i] = x[i] + 1",
-        [lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
-        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
-        target=lp.CTarget(),
-        name="mylocalkernel",
-        lang_version=(2018, 2),
-    )
-    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-    iterset = [Slice(4), Slice(3)]
-    expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
+    p = MultiIndexCollection([
+        MultiIndex([
+            TypedIndex(0, IndexSet(4)),
+            TypedIndex(0, IndexSet(3)),
+        ])
+    ])
+    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[[p]], dat2[[p]]))
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    sec0 = dat1.dim.part.subaxis.part.layout[0]
-    sec1 = sec0.copy()
-
-    args = [dat1.data, dat2.data, sec0.data, sec1.data]
+    layout0_0 = dat1.root.part.subaxis.part.layout_fn.data
+    args = [layout0_0.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
-
     fn(*(d.ctypes.data for d in args))
 
-    assert all(dat2.data == dat1.data + 1)
+    assert np.allclose(dat1.data, dat2.data)
 
 
 @pytest.mark.skip
