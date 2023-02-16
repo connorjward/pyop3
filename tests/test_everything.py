@@ -96,7 +96,7 @@ Compile errors in %s""" % (e.cmd, e.returncode, logfile, errfile))
 def scalar_inc_kernel():
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
-        "y[i] = x[i] + 1",
+        "y[i] = x[i] + y[i] + 1",
         [lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
         lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True)],
         target=lp.CTarget(),
@@ -106,23 +106,40 @@ def scalar_inc_kernel():
     return pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
 
-def test_read_single_dim():
-    axes = MultiAxis([AxisPart(10)]).set_up()
-    dat1 = MultiArray.new(axes, name="dat1", data=np.arange(10, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
-
+@pytest.fixture
+def scalar_copy_kernel():
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
-        "y[i] = x[i] + 1",
-        [
-            lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
-            lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),
-        ],
+        "y[i] = x[i]",
+        [lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
+        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True)],
         target=lp.CTarget(),
         name="mylocalkernel",
         lang_version=(2018, 2),
     )
-    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+    return pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+
+
+@pytest.fixture
+def ragged_copy_kernel():
+    code = lp.make_kernel(
+        "{ [i]: 0 <= i < n }",
+        "y[i] = x[i]",
+        [lp.GlobalArg("x", np.float64, (3,), is_input=True, is_output=False),
+         lp.GlobalArg("y", np.float64, (3,), is_input=False, is_output=True),
+         lp.ValueArg("n", dtype=np.int32)],
+        target=lp.CTarget(),
+        name="mylocalkernel",
+        lang_version=(2018, 2),
+    )
+    return pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+
+
+def test_read_single_dim(scalar_copy_kernel):
+    axes = MultiAxis([AxisPart(10)]).set_up()
+    dat1 = MultiArray.new(axes, name="dat1", data=np.arange(10, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
+
     p = MultiIndexCollection([
         MultiIndex([
             TypedIndex(0, IndexSet(10))
@@ -132,11 +149,9 @@ def test_read_single_dim():
     # use [p] instead of p to have a list of multi-index collections. this is
     # needed if we have dat[cone(p0), cone(p1)] for example (i.e. each cone(...)
     # produces a multi-index collection).
-    expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
+    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[[p]], dat2[[p]]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-
-    # import pdb; pdb.set_trace()
 
     dll = compilemythings(exe)
     fn = getattr(dll, "mykernel")
@@ -146,7 +161,7 @@ def test_read_single_dim():
 
     fn(*(d.ctypes.data for d in args))
 
-    assert all(dat2.data == dat1.data + 1)
+    assert np.allclose(dat1.data, dat2.data)
 
 
 def test_compute_double_loop():
@@ -464,7 +479,7 @@ def test_compute_double_loop_ragged():
 
     ax2 = ax1.add_subaxis("p1", MultiAxis([AxisPart(nnz, max_count=3)])).set_up()
 
-    dat1 = MultiArray.new(ax2, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
+    dat1 = MultiArray.new(ax2, name="dat1", data=np.ones(11, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(ax2, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
 
     code = lp.make_kernel(
@@ -671,43 +686,32 @@ def test_ragged_inside_two_standard_loops(scalar_inc_kernel):
     assert all(dat2.data == dat1.data + 1)
 
 
-@pytest.mark.skip
-def test_compute_double_loop_ragged_inner():
-    axes1 = MultiAxis(AxisPart(5, id="ax1"))
-
+def test_compute_double_loop_ragged_inner(ragged_copy_kernel):
+    ax1 = MultiAxis([AxisPart(5, id="p1")])
     nnz = MultiArray.new(
-        axes1, name="nnz", dtype=np.int32, max_value=3,
+        ax1.set_up(), name="nnz", dtype=np.int32, max_value=3,
         data=np.array([3, 2, 1, 3, 2], dtype=np.int32)
     )
+    ax2 = ax1.add_subaxis("p1", MultiAxis([AxisPart(nnz)]))
 
-    axes2 = axes1.add_subaxis("ax1", nnz)
+    root = ax2.set_up()
+    dat1 = MultiArray.new(root, name="dat1", data=np.ones(11, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray.new(root, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
 
-    dat1 = MultiArray.new(axes2, name="dat1", data=np.arange(11, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(axes2, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
-
-    code = lp.make_kernel(
-        "{ [i]: 0 <= i < n }",
-        "y[i] = x[i] + 1",
-        [lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
-        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),
-        lp.ValueArg("n", dtype=np.int32)],
-        target=lp.CTarget(),
-        name="mylocalkernel",
-        lang_version=(2018, 2),
-    )
-    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-    iterset = [Slice(5)]
-    expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
-
+    p = MultiIndexCollection([
+        MultiIndex([
+            TypedIndex(0, IndexSet(5)),
+        ])
+    ])
+    expr = pyop3.Loop(p, ragged_copy_kernel(dat1[[p]], dat2[[p]]))
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    nnzc, _ = dat1.dim.part.subaxis.part.layout
-
-    args = [nnz.data, dat1.data, dat2.data, nnzc.data]
+    # void mykernel(nnz, layout0_0, dat1, dat2)
+    layout0_0 = root.part.subaxis.part.layout_fn.start
+    args = [nnz.data, layout0_0.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
-
     fn(*(d.ctypes.data for d in args))
 
     assert all(dat2.data == dat1.data + 1)

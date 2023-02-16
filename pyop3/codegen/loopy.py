@@ -230,13 +230,15 @@ class LoopyKernelBuilder:
     @_make_instruction_context.register
     def _(self, call: tlang.FunctionCall, within_loops, **kwargs):
         subarrayrefs = {}
-        extents = []
         for temp in utils.unique(itertools.chain(call.reads, call.writes)):
             temp_size = temp.axes.alloc_size
             iname = self._namer.next("i")
             subarrayrefs[temp] = as_subarrayref(temp, iname)
             self.domains.append(f"{{ [{iname}]: 0 <= {iname} < {temp_size} }}")
             assert temp.name in [d.name for d in self._temp_kernel_data]
+
+        # we need to pass sizes through if they are only known at runtime (ragged)
+        extents = []
 
         assignees = tuple(subarrayrefs[var] for var in call.writes)
         expression = pym.primitives.Call(
@@ -246,6 +248,8 @@ class LoopyKernelBuilder:
 
         insn_id = f"{call.id}_0"
         depends_on = frozenset({self._latest_insn[id] for id in call.depends_on})
+
+        # import pdb; pdb.set_trace()
 
         call_insn = lp.CallInstruction(
             assignees,
@@ -638,11 +642,22 @@ declared. we just need to traverse properly to check that we have the right numb
         if idx in outer_loop_indices:
             iname = outer_loop_indices[idx]
         else:
+            # register the domain
             iname = self._namer.next("i")
 
-            # register the domain
-            domain_str = f"{{ [{iname}]: 0 <= {iname} < {idx.iset.size} }}"
+            # import pdb; pdb.set_trace()
+
+            extent = self.register_extent(
+                idx.iset.size,
+                # these are likely not right - need to clean up codegen logic for
+                # inames and jnames
+                list(self._loop_index_names.values()),
+                list(self._loop_index_names.values()),
+            )
+
+            domain_str = f"{{ [{iname}]: 0 <= {iname} < {extent} }}"
             self.domains.append(domain_str)
+
 
         inames.append(iname)
 

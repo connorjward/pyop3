@@ -146,10 +146,13 @@ def set_null_layouts(layouts, axis, path=()):
     """
     we have null layouts whenever the step in non-const (the variability is captured by
     the start property of the affine layout below it).
+
+    We also get them when the axis is "indexed", that is, not ever actually used by
+    temporaries.
     """
     for npart, part in enumerate(axis.parts):
         new_path = path + (npart,)
-        if not has_constant_step(part):
+        if not has_constant_step(part) or part.indexed:
             layouts[new_path] = "null layout"
 
         if part.subaxis:
@@ -164,7 +167,8 @@ def handle_const_starts(axis, layouts, path=PrettyTuple()):
     offset = 0
     for i, part in enumerate(axis.parts):
         # need to track if ragged permuted below
-        if can_be_affine(part):
+        # check for None here in case we have already set this to a null layout
+        if can_be_affine(part) and layouts[path|i] is None:
             step = step_size(part)
             layouts[path|i] = AffineLayoutFunction(step, offset)
 
@@ -187,53 +191,6 @@ def step_size(part, indices=PrettyTuple()):
     if not has_constant_step(part) and not indices:
         raise ValueError
     return part.subaxis.calc_size(indices) if part.subaxis else 1
-
-
-def attach_affine_layouts(layouts, part, npart, offset, path=None):
-    """only for const start values"""
-    if not path:
-        path = (npart,)
-
-    # we are affine if the step is constant and there is no numbering
-    if has_constant_step(part) and part.numbering is None:
-        step = step_size(part)
-        start = offset.value
-        assert layouts[path] is None
-        layouts[path] = AffineLayoutFunction(step, start)
-
-    # if layout is not null, zero the offset before recursing
-    if layouts[path] != "null layout":
-        old_offset = offset  # track a reference
-        offset = IntRef(0)
-    else:
-        old_offset = None
-
-    if part.subaxis:
-        for npt, subpart in enumerate(part.subaxis.parts):
-            attach_affine_layouts(layouts, subpart, npt, offset, path+(npt,))
-
-            if isinstance(part.count, MultiArray):
-                # note: this will fail if part.count is not an integer at the moment
-                # but this is actually the behaviour that we want. If we have an array that
-                # looks like
-                # MultiAxis(AxisPart(5)).add_subaxis([AxisPart(nnz), AxisPart(3)])
-                # then the outer axis part will have a lookup table striding by nnz[i]+3 but
-                # the second inner axis will have regular steps of 1 (affine) but each loop
-                # will start at nnz[i].
-                # Remember: we need indirection maps for irregular strides, and affine functions
-                # for regular ones. The actual start offset can be a lookup.
-                # N.B. This could get even more complicated if we needed to add multiple
-                # multi-arrays.
-
-                # in fact, we can have a null layout for the outer axis and just use
-                # a lookup for the nnz affine start part too.
-                raise NotImplementedError("see comment")
-
-            offset += part.calc_size()
-
-    # restore the value
-    if old_offset is not None:
-        old_offset += offset.value
 
 
 def attach_blank_data_to_layouts(layouts, part, npart, data, path=None):
@@ -642,8 +599,10 @@ class MultiAxis(pytools.ImmutableRecord):
         """Return the total number of entries in the axis across all axis parts.
         Will fail if axis parts do not have integer counts.
         """
+        if self.nparts == 1:
+            return self.part.count
         if not all(isinstance(pt.count, numbers.Integral) for pt in self.parts):
-            raise RuntimeError()
+            raise RuntimeError("non-int counts present, cannot sum")
         return sum(pt.count for pt in self.parts)
 
     # TODO ultimately remove this as it leads to duplication of data
@@ -709,11 +668,18 @@ class MultiAxis(pytools.ImmutableRecord):
         # import pdb; pdb.set_trace()
         if (test1 or test2) and test3:
             data = self.create_layout_lists(path, offset)
-            layouts |= data
+
+            # we shouldn't reproduce anything here
+            # if any(layouts[k] is not None for k in data):
+            #     raise AssertionError("shouldn't be doing things twice")
+            # this is nasty hack - sometimes (ragged temporaries) we compute the offset
+            # both as affine and also as a lookup table. We only want the former so drop
+            # the latter here
+            layouts |= {k: v for k, v in data.items() if layouts[k] is None}
 
         for npart, part in enumerate(self.parts):
-            # zero offset if layout exists
-            if layouts[path|npart] != "null layout":
+            # zero offset if layout exists or if we are part of a temporary (and indexed)
+            if layouts[path|npart] != "null layout" or part.indexed:
                 saved_offset = offset.value
                 offset.value = 0
             else:
@@ -931,39 +897,6 @@ class MultiAxis(pytools.ImmutableRecord):
 
         return layouts
 
-        # now convert valid layouts to actual layout functions. skip those who still
-        # need extra indices (handled up the stack)
-        for npart, part in enumerate(self.parts):
-            if not requires_external_index(part):
-                # TODO complicated traversal to build layout functions
-                path = (npart,)
-
-                # sometimes we can have zero-sized arrays (ragged)
-                if len(layouts[path]) == 0:
-                    step = 1  # this kinda ick
-                    start = 0
-                    new_layout = AffineLayoutFunction(step, start=start)
-                elif len(layouts[path]) == 1:
-                    step = 1  # this kinda ick
-                    start = layouts[path][0]
-                    new_layout = AffineLayoutFunction(step, start=start)
-                else:
-                    steps = [
-                        layouts[path][i+1] - layouts[path][i] for i in range(len(layouts[path])-1)
-                    ]
-                    if pytools.is_single_valued(steps):
-                        step = pytools.single_valued(steps)
-                        start = layouts[path][0]
-                        new_layout = AffineLayoutFunction(step, start=start)
-                    else:
-                        new_layout = IndirectLayoutFunction(
-                            MultiArray.from_list(layouts[path], f"{self.id}_ord{part_num}", np.uintp)
-                        )
-
-                layouts[path] = new_layout
-
-        return layouts
-
     def drop_last(self):
         """Remove the last subaxis"""
         if not self.part.subaxis:
@@ -993,90 +926,6 @@ class MultiAxis(pytools.ImmutableRecord):
     def as_layout(self):
         new_parts = tuple(pt.as_layout() for pt in self.parts)
         return self.copy(parts=new_parts)
-
-    def set_up_terminal(self, subaxes, indices, depth):
-        if any(pt.permutation is not None for pt in self.parts):
-            assert (
-                sorted(sum([list(pt.permutation) for pt in self.parts], []))
-                == np.arange(sum(pt.find_integer_count(indices) for pt in self.parts), dtype=int),
-                "permutations must be exhaustive"
-            )
-
-        layout_fn_per_part = []
-
-        # layout functions are not needed if no numbering is specified (i.e. they are just
-        # contiguous) and if they are not ragged 'below'
-        # import pdb; pdb.set_trace()
-        if strictly_all(pt.numbering is None and pt.has_constant_step for pt in self.parts):
-            start = 0
-            for part, subaxis in checked_zip(self.parts, subaxes):
-                # TODO This will fail is subaxis is ragged
-                if subaxis:
-                    step = subaxis.calc_size(indices)
-                else:
-                    step = 1
-                layout_fn = AffineLayoutFunction(step, start)
-                layout_fn_per_part.append(layout_fn)
-
-                # TODO this will fail if things are ragged - need to store starts as
-                # expressions somehow
-                start += part.calc_size(indices)
-            return layout_fn_per_part
-
-        # initialise layout array per axis part
-        # note that this just needs to be a numpy array. the clever indexing into trees
-        # happens outside this function
-        layouts = tuple(
-            np.zeros(pt.find_integer_count(indices), dtype=np.uintp)
-            for pt in self.parts
-        )
-
-        # if no numbering is provided create one
-        if not strictly_all(pt.numbering is not None for pt in self.parts):
-            axis_numbering = []
-            start = 0
-            stop = self.parts[0].find_integer_count(indices)
-            numb = np.arange(start, stop, dtype=np.uintp)
-            axis_numbering.append(numb)
-            for i in range(1, self.nparts):
-                numb = np.arange(start, stop, dtype=np.uintp)
-                axis_numbering.append(numb)
-                start = stop
-                stop += self.parts[i].find_integer_count(indices)
-        else:
-            axis_numbering = [pt.numbering for pt in self.parts]
-
-
-        axis_length = sum(pt.find_integer_count(indices) for pt in self.parts)
-        offset = 0
-        for current_idx in range(axis_length):
-            # find the right axis part and index thereof for the current 'global' numbering
-            selected_part_num = None
-            selected_index = None
-            for part_num, axis_part in enumerate(self.parts):
-                try:
-                    # is the current global index found in the numbering of this axis part?
-                    # FIXME this will likely break as numbering is not an array - need to implement this fn
-                    selected_index = list(axis_numbering[part_num]).index(current_idx)
-                    selected_part_num = part_num
-                except ValueError:
-                    continue
-
-            if selected_part_num is None or selected_index is None:
-                assert selected_part_num is None and selected_index is None, "must be both"
-                raise ValueError(f"{current_idx} not found in any numberings")
-
-            # now store the offset in the right place
-            layouts[selected_part_num][selected_index] = offset
-
-            # lastly increment the pointer
-            if subaxes[selected_part_num]:
-                # FIXME but if nested this won't work
-                offset += subaxes[selected_part_num].calc_size(indices|selected_index)
-            else:
-                offset += 1
-
-        return layouts
 
     def add_part(self, axis_id, *args):
         if axis_id not in self._all_axis_ids:
@@ -1229,16 +1078,22 @@ PreparedMultiAxis = MultiAxis
 
 
 class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
-    fields = {"count", "subaxis", "numbering", "label", "id", "max_count", "is_layout", "layout_fn", "overlap", "overlap_sf"}
+    """
+    Parameters
+    ----------
+    indexed : bool
+        Is this axis indexed (as part of a temporary) - used to generate the right layouts
+
+    """
+    fields = {"count", "subaxis", "numbering", "label", "id", "max_count", "is_layout", "layout_fn", "overlap", "overlap_sf", "indexed"}
 
     id_generator = NameGenerator("_p")
 
-    def __init__(self, count, subaxis=None, *, numbering=None, label=None, id=None, max_count=None, is_layout=False, layout_fn=None, overlap=None):
+    def __init__(self, count, subaxis=None, *, numbering=None, label=None, id=None, max_count=None, is_layout=False, layout_fn=None, overlap=None, indexed=False):
         if isinstance(count, numbers.Integral):
             assert not max_count or max_count == count
             max_count = count
-        else:
-            if max_count is not None:
+        elif not max_count:
                 max_count = max(count.data)
 
         if isinstance(numbering, np.ndarray):
@@ -1262,6 +1117,25 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
         self.is_layout = is_layout
         self.layout_fn = layout_fn
         self.overlap = overlap
+        self.indexed = indexed
+        """
+        this property is required because we can hit situations like the following:
+
+            sizes = 3 -> [2, 1, 2] -> [[2, 1], [1], [3, 2]]
+
+        this yields a layout that looks like
+
+            [[0, 2], [3], [4, 7]]
+
+        however, if we have a temporary where we only want the inner two dimensions
+        then we need a layout that looks like the following:
+
+            [[0, 2], [0], [0, 3]]
+
+        This effectively means that we need to zero the offset as we traverse the
+        tree to produce the layout. This is why we need this ``indexed`` flag.
+        """
+
         super().__init__()
 
     @property
@@ -1294,10 +1168,12 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
     @property
     def alloc_size(self):
         # TODO This should probably raise an exception if we do weird things with maps
+        # (as in fix the layouts for reduced data movement)
+        count = self.max_count if not self.indexed else 1
         if self.subaxis:
-            return self.max_count * self.subaxis.alloc_size
+            return count * self.subaxis.alloc_size
         else:
-            return self.max_count
+            return count
 
     def calc_size(self, indices=PrettyTuple()):
         extent = self.find_integer_count(indices)

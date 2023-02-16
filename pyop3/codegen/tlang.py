@@ -77,6 +77,7 @@ class MultiArrayLangKernelBuilder:
         for arg in expr.arguments:
             dims = self._construct_temp_dims(arg.tensor.axes, arg.tensor.indices)
             dims = dims.set_up()
+            # import pdb; pdb.set_trace()
             temporaries[arg] = tensors.MultiArray.new(
                 dims, name=self._temp_name_generator(), dtype=arg.tensor.dtype,
             )
@@ -147,13 +148,12 @@ class MultiArrayLangKernelBuilder:
         for multi_idx in multi_idx_collection:
             is_loop_index = multi_idx.typed_indices[0] in self._within_multi_index_collections
             temp_axis_part_id = self.name_generator.next("mypart")
-            if not is_loop_index:
-                temp_axis_part  = tensors.AxisPart(
-                    multi_idx.typed_indices[0].iset.size,
-                    id=temp_axis_part_id,
-                )
-            else:
-                temp_axis_part = tensors.AxisPart(1, id=temp_axis_part_id)
+            size = multi_idx.typed_indices[0].iset.size
+            temp_axis_part  = tensors.AxisPart(
+                size,
+                indexed=is_loop_index,
+                id=temp_axis_part_id,
+            )
             old_temp_axis_part_id = temp_axis_part_id
 
             # track the position in the array as this tells us whether or not we
@@ -166,17 +166,14 @@ class MultiArrayLangKernelBuilder:
             for typed_idx in multi_idx.typed_indices[1:]:
                 is_loop_index = typed_idx in self._within_multi_index_collections
                 temp_axis_part_id = self.name_generator.next("mypart")
-                if not is_loop_index:
-                    temp_subaxis  = tensors.MultiAxis(
-                        [AxisPart(
-                            typed_idx.iset.size,
-                            id=temp_axis_part_id
-                        )],
-                        # parent=temp
-                    )
-                else:
-                    temp_subaxis  = tensors.MultiAxis([AxisPart(1, id=temp_axis_part_id)])
-
+                size = typed_idx.iset.size
+                temp_subaxis  = tensors.MultiAxis(
+                    [AxisPart(
+                        size,
+                        indexed=is_loop_index,
+                        id=temp_axis_part_id
+                    )],
+                )
                 temp_axis_part = temp_axis_part.add_subaxis(old_temp_axis_part_id, temp_subaxis)
                 old_temp_axis_part_id = temp_axis_part_id
 
