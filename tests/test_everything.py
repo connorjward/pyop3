@@ -627,48 +627,44 @@ def test_interleaved_ragged(scalar_inc_kernel):
     assert all(dat2.data == dat1.data + 1)
 
 
-@pytest.mark.skip
-def test_ragged_inside_two_standard_loops():
-    ax1 = MultiAxis(AxisPart(2, id="ax1"))
-    ax2 = ax1.add_subaxis("ax1", AxisPart(2, id="ax2"))
-
+def test_ragged_inside_two_standard_loops(scalar_inc_kernel):
+    ax1 = MultiAxis([AxisPart(2, id="p1")])
+    ax2 = ax1.add_subaxis("p1", MultiAxis([AxisPart(2, id="p2")]))
     nnz = MultiArray.new(
-        ax2, name="nnz", dtype=np.int32, max_value=2,
+        ax2.set_up(), name="nnz", dtype=np.int32, max_value=2,
         data=np.array([1, 2, 1, 2], dtype=np.int32)
     )
+    ax3 = ax2.add_subaxis("p2", MultiAxis([AxisPart(nnz)]))
 
-    ax3 = ax2.add_subaxis("ax2", nnz)
+    root = ax3.set_up()
     dat1 = MultiArray.new(
-        ax3, name="dat1", data=np.arange(6, dtype=np.float64), dtype=np.float64
+        root, name="dat1", data=np.ones(6, dtype=np.float64), dtype=np.float64
     )
     dat2 = MultiArray.new(
-        ax3, name="dat2", data=np.zeros(6, dtype=np.float64), dtype=np.float64
+        root, name="dat2", data=np.zeros(6, dtype=np.float64), dtype=np.float64
     )
 
-    code = lp.make_kernel(
-        "{ [i]: 0 <= i < 1 }",
-        "y[i] = x[i] + 1",
-        [lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
-        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True)],
-        target=lp.CTarget(),
-        name="mylocalkernel",
-        lang_version=(2018, 2),
-    )
-    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-    iterset = [Slice(2), Slice(2), Slice(nnz)]
+    p = MultiIndexCollection([
+        MultiIndex([
+            TypedIndex(0, IndexSet(2)),
+            TypedIndex(0, IndexSet(2)),
+            TypedIndex(0, IndexSet(nnz)),
+        ])
+    ])
 
-    expr = pyop3.Loop(p := index(iterset), kernel(dat1[p], dat2[p]))
-
+    expr = pyop3.Loop(p, scalar_inc_kernel(dat1[[p]], dat2[[p]]))
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    nnzc, _ = dat1.dim.part.subaxis.part.subaxis.part.layout
+    # void mykernel(nnz, layout1_0, layout0_0, dat1, dat2)
+    layout0_0 = root.part.subaxis.part.subaxis.part.layout_fn.start
 
-    args = [nnz.data, dat1.data, dat2.data, nnzc.data]
+    # TODO: this is affine here, should it generally be?
+    layout1_0 = layout0_0.root.part.subaxis.part.layout_fn.start
+
+    args = [nnz.data, layout1_0.data, layout0_0.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
-
-    # import pdb; pdb.set_trace()
 
     fn(*(d.ctypes.data for d in args))
 
