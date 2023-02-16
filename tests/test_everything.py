@@ -114,7 +114,7 @@ def scalar_copy_kernel():
         [lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
         lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True)],
         target=lp.CTarget(),
-        name="mylocalkernel",
+        name="scalar_copy",
         lang_version=(2018, 2),
     )
     return pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
@@ -575,7 +575,7 @@ def test_doubly_ragged():
     assert all(dat2.data == dat1.data + 1)
 
 
-def test_interleaved_ragged(scalar_inc_kernel):
+def test_interleaved_ragged(scalar_copy_kernel):
     """Two data layout types are possible: constant or consistent-ragged.
 
     The latter means that any ragged bits inside *must* obey all of the shape stuff outside of it.
@@ -618,7 +618,7 @@ def test_interleaved_ragged(scalar_inc_kernel):
         ])
     ])
 
-    expr = pyop3.Loop(p, scalar_inc_kernel(dat1[[p]], dat2[[p]]))
+    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[[p]], dat2[[p]]))
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
 
@@ -638,7 +638,7 @@ def test_interleaved_ragged(scalar_inc_kernel):
 
     fn(*(d.ctypes.data for d in args))
 
-    assert all(dat2.data == dat1.data + 1)
+    assert np.allclose(dat1.data, dat2.data)
 
 
 def test_ragged_inside_two_standard_loops(scalar_inc_kernel):

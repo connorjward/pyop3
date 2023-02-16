@@ -278,10 +278,12 @@ class LoopyKernelBuilder:
         extents = {}
 
         for part in axis.parts:
-            if isinstance(part.count, MultiArray):
+            if isinstance(part.count, MultiArray) and not part.indexed:
                 assert depth >= 1
-                useable_jnames = jnames[:depth]
-                useable_inames = within_inames[:depth]
+                # useable_jnames = jnames[:depth]
+                # useable_inames = within_inames[:depth]
+                useable_jnames = jnames
+                useable_inames = within_inames
                 extent = self.register_scalar_assignment(part.count, useable_jnames, useable_inames)
                 extents[part.count] = extent
 
