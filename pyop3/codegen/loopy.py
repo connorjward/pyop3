@@ -22,7 +22,6 @@ from pyop3.utils import MultiNameGenerator, NameGenerator, strictly_all
 from pyop3.utils import PrettyTuple, checked_zip, NameGenerator, rzip
 from pyop3.tensors import MultiArray, Map, MultiAxis, _compute_indexed_shape, _compute_indexed_shape2, AxisPart
 from pyop3.tensors import index, MultiIndexCollection, MultiIndex, TypedIndex, AffineLayoutFunction, IndirectLayoutFunction
-from pyop3.codegen.tlang import to_tlang
 
 
 class VariableCollector(pym.mapper.Collector):
@@ -92,7 +91,7 @@ def compile(expr, *, target):
 
 
 def to_loopy(expr):
-    return _make_loopy_kernel(to_tlang(expr))
+    return _make_loopy_kernel(expr)
 
 
 def to_c(expr):
@@ -117,6 +116,7 @@ class LoopyKernelBuilder:
 
         self._latest_insn = {}
         self._active_insn = None
+        self._temp_name_generator = NameGenerator("t")
 
     @property
     def kernel_data(self):
@@ -124,7 +124,7 @@ class LoopyKernelBuilder:
 
     def build(self, tlang_expr):
         self._namer.reset()
-        self._build(tlang_expr, {})
+        self._build(tlang_expr)
 
         # breakpoint()
         # domains = [self._make_domain(iname, start, stop, step) for iname, (start, stop, step) in self.domains.items()]
@@ -142,11 +142,11 @@ class LoopyKernelBuilder:
         return tu.with_entrypoints("mykernel")
 
     @functools.singledispatchmethod
-    def _build(self, expr, within_loops):
+    def _build(self, expr, *args, **kwargs):
         raise TypeError
 
     @_build.register
-    def _(self, expr: exprs.Loop, within_loops):
+    def _(self, expr: exprs.Loop, active_inames=(), within_inames=frozenset()):
         multi_idx_collection = expr.index
         assert isinstance(multi_idx_collection, MultiIndexCollection)
 
@@ -191,9 +191,189 @@ class LoopyKernelBuilder:
                 self._build(stmt, active_inames, within_inames)
 
     @_build.register
-    def _(self, insn: tlang.Instruction, active_inames, within_inames):
-        self._make_instruction_context(insn, active_inames, within_inames)
+    def _(self, call: exprs.FunctionCall, active_inames, within_inames):
+        insns = self.expand_function_call(call, active_inames)
 
+        for insn in insns:
+            self._make_instruction_context(insn, active_inames, within_inames)
+
+    def expand_function_call(self, call, active_inames):
+        """
+        Turn an exprs.FunctionCall into a series of assignment instructions etc.
+        Handles packing/accessor logic.
+        """
+
+        temporaries = {}
+        for arg in call.arguments:
+            # create an appropriate temporary
+            dims = self._construct_temp_dims(arg.tensor.axes, arg.tensor.indices, active_inames)
+            dims = dims.set_up()
+            # import pdb; pdb.set_trace()
+            temporary = MultiArray.new(
+                dims, name=self._temp_name_generator.next(), dtype=arg.tensor.dtype,
+            )
+            temporaries[arg] = temporary
+
+        gathers = self.make_gathers(temporaries)
+        newcall = self.make_function_call(
+            call, temporaries,
+            depends_on=frozenset(gather.id for gather in gathers)
+        )
+        scatters = self.make_scatters(temporaries, depends_on=frozenset({newcall.id}))
+
+        return (*gathers, newcall, *scatters)
+
+    def _construct_temp_dims(self, axis, indices, active_inames):
+        """Return a multi-axis describing the temporary shape."""
+        """
+        Can have something like [:5, map2(map1(c))] which should return a temporary
+        with shape (5, |map1|, |map2|, ...) where ... is whatever the bottom part of
+        the tensor is.
+
+        To do this we start with the first index (the slice) to generate the root axis.
+        Then we encounter map2 so we first handle map1. Since c is a within_index we
+        disregard it.
+        """
+        # deprecated since we compress this in __getitem__
+        # multi-index collections example: [closure(c0), closure(c1)]
+        # if multi_index_collections:
+        #     multi_idx_collection, *subidx_collections = multi_index_collections
+        # else:
+        #     # then take all of the rest of the shape
+        #     multi_idx_collection = MultiIndexCollection([
+        #         MultiIndex([
+        #             TypedIndex(p, IndexSet(axis.parts[p].count))
+        #             for p in range(axis.nparts)
+        #         ])
+        #     ])
+        #     subidx_collections = []
+        #
+
+        multi_idx_collection = indices
+        assert isinstance(multi_idx_collection, MultiIndexCollection)
+
+        ###
+
+
+        # each multi-index yields an adjacent axis part
+        # e.g. for mixed (with 2 spaces) you would have a temporary with 2 parts
+        # similarly this would be the expected behaviour for interior facets of extruded
+        # meshes - the outer axis would be split in two parts because the DoFs come from
+        # both the vertical and horizontal facets and these require separate multi-indices
+        depth = 0
+        temp_axis_parts = []
+        temp_axis_base_ids = []
+        for multi_idx in multi_idx_collection:
+            is_loop_index = depth < len(active_inames)
+            temp_axis_part_id = self._namer.next("mypart")
+            size = multi_idx.typed_indices[0].size
+            temp_axis_part  = AxisPart(
+                size,
+                indexed=is_loop_index,
+                id=temp_axis_part_id,
+            )
+            old_temp_axis_part_id = temp_axis_part_id
+
+            # track the position in the array as this tells us whether or not we
+            # need to recurse.
+            # we need to track this throughout because the types of the typed_idx
+            # tells us which bits of the hierarchy are 'below'.
+            current_axis = axis.find_part(multi_idx.typed_indices[0].part_label).subaxis
+            depth += 1
+
+            # each typed index is a subaxis of the original
+            for typed_idx in multi_idx.typed_indices[1:]:
+                is_loop_index = depth < len(active_inames)
+                temp_axis_part_id = self._namer.next("mypart")
+                size = typed_idx.size
+                temp_subaxis  = MultiAxis(
+                    [AxisPart(
+                        size,
+                        indexed=is_loop_index,
+                        id=temp_axis_part_id
+                    )],
+                )
+                temp_axis_part = temp_axis_part.add_subaxis(old_temp_axis_part_id, temp_subaxis)
+                old_temp_axis_part_id = temp_axis_part_id
+
+                current_axis = current_axis.find_part(typed_idx.part_label).subaxis
+                depth += 1
+
+            temp_axis_parts.append(temp_axis_part)
+            temp_axis_base_ids.append(temp_axis_part_id)
+
+        # if we still have a current axis then we haven't hit the bottom of the
+        # tree and more shape is needed
+        if current_axis:
+            subaxis = self._construct_temp_dims(current_axis, subidx_collections, depth+1)
+            # add this subaxis to each part we have so far
+            # recall that the number of parts we have is equal to the number of multi-index
+            # collections that we have
+            temp_axis_parts = [
+                pt.add_subaxis(ptid, subaxis)
+                for pt, ptid in checked_zip(temp_axis_parts, temp_axis_base_ids)
+            ]
+
+        temp_axis = MultiAxis(temp_axis_parts)
+
+        # if we are using a map then we need to stick this axis onto the bottom of
+        # whatever the map throws out
+        if isinstance(multi_idx_collection, Map):
+            raise NotImplementedError
+            temp_axis = self.prepend_map(multi_idx_collection, temp_axis)
+
+        return temp_axis
+
+    def make_gathers(self, temporaries, **kwargs):
+        return tuple(
+            self.make_gather(arg, temp, idxs, **kwargs)
+            for arg, temp in temporaries.items()
+            for idxs in arg.tensor.indices.multi_indices
+        )
+
+    def make_gather(self, argument, temporary, indices, **kwargs):
+        # TODO cleanup the ids
+        if argument.access in {exprs.READ, exprs.RW}:
+            return tlang.Read(argument.tensor, temporary, indices, **kwargs)
+        elif argument.access in {exprs.WRITE, exprs.INC}:
+            return tlang.Zero(argument.tensor, temporary, indices, **kwargs)
+        else:
+            raise NotImplementedError
+
+    def make_function_call(self, call, temporaries, **kwargs):
+        assert all(arg.access in {exprs.READ, exprs.WRITE, exprs.INC, exprs.RW} for arg in call.arguments)
+
+        reads = tuple(
+            # temporaries[arg] for arg in call.arguments
+            temp for arg, temp in temporaries.items()
+            if arg.access in {exprs.READ, exprs.INC, exprs.RW}
+        )
+        writes = tuple(
+            temp for arg, temp in temporaries.items()
+            # temporaries[arg] for arg in call.arguments
+            if arg.access in {exprs.WRITE, exprs.INC, exprs.RW}
+        )
+        return tlang.FunctionCall(call.function, reads, writes, **kwargs)
+
+    def make_scatters(self, temporaries, **kwargs):
+        return tuple(filter(
+            None,
+            (
+                self.make_scatter(arg, temp, idxs, **kwargs)
+                for arg, temp in temporaries.items()
+                for idxs in arg.tensor.indices.multi_indices
+            )
+        ))
+
+    def make_scatter(self, argument, temporary, indices, **kwargs):
+        if argument.access == exprs.READ:
+            return None
+        elif argument.access in {exprs.WRITE, exprs.RW}:
+            return tlang.Write(argument.tensor, temporary, indices, **kwargs)
+        elif argument.access == exprs.INC:
+            return tlang.Increment(argument.tensor, temporary, indices, **kwargs)
+        else:
+            raise AssertionError
 
     @functools.singledispatchmethod
     def _make_instruction_context(self, instruction: tlang.Instruction, *args, **kwargs):
@@ -272,6 +452,7 @@ class LoopyKernelBuilder:
     @_make_instruction_context.register
     def _(self, assignment: tlang.Assignment, active_inames, within_inames):
         active_inames, within_inames = self.register_loops(assignment.indices, active_inames, within_inames)
+
         # import pdb; pdb.set_trace()
         self._generate_assignment_insn(assignment, active_inames, within_inames)
 
@@ -320,8 +501,7 @@ declared. we just need to traverse properly to check that we have the right numb
                                       scalar=scalar, within_inames=within_inames)
 
         # Register data
-        # TODO should only do once at a higher point (merge tlang and loopy stuff)
-        # i.e. make tlang a preprocessing step
+        # TODO should only do once at a higher point
         indexed = assignment.tensor
         unindexed = assignment.temporary
         if indexed.name not in self._tensor_data:

@@ -910,7 +910,6 @@ def test_permuted_inner(scalar_copy_kernel):
     assert np.allclose(dat1.data, dat2.data)
 
 
-@pytest.mark.skip(reason="need to clean up iname stacking first")
 def test_subset(scalar_copy_kernel):
     axes = MultiAxis([AxisPart(6)]).set_up()
     dat1 = MultiArray.new(
@@ -942,8 +941,8 @@ def test_subset(scalar_copy_kernel):
     fn.argtypes = (ctypes.c_voidp,) * len(args)
     fn(*(d.ctypes.data for d in args))
 
-    assert all(dat2.data[[2, 3, 5, 0]] == dat1.data[[2, 3, 5, 0]] + 1)
-    assert all(dat2.data[[1, 4]] == 0)
+    assert np.allclose(dat2.data[[2, 3, 5, 0]], 1)
+    assert np.allclose(dat2.data[[1, 4]], 0)
 
 
 @pytest.mark.skip
