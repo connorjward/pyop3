@@ -1235,6 +1235,7 @@ class ExpressionTemplate:
     """
 
     def __init__(self, fn):
+        raise AssertionError("dont build this")
         self._fn = fn
         """Callable taking indices that evaluates to a pymbolic expression"""
 
@@ -1247,31 +1248,84 @@ class Index:
         raise NotImplementedError("deprecated")
 
 
-class IndexSet(pytools.ImmutableRecord):
-    """A set of entries to iterate over."""
-    fields = {"size", "subset_indices"}
-
-    def __init__(self, size, subset_indices=None):
-        self.size = size
-        self.subset_indices = subset_indices
-        """indices is not None if we are dealing with a subset (e.g. mesh.interior_facets)"""
-
-
 class TypedIndex(pytools.ImmutableRecord):
-    fields = {"part_label", "iset", "id"}
+    # FIXME: I don't think that we need `id` attribute
+    fields = {"part_label", "depth", "id"}
 
     _id_generator = NameGenerator(prefix="typed_idx")
 
-    def __init__(self, part_label: collections.abc.Hashable, iset: IndexSet, id=None):
+    def __init__(self, part_label, depth=1, id=None):
+        # `depth` is the number of indices yielded by the thing (a map can produce multiple
+        # if transforming "parent" points).
+        if depth > 1:
+            raise NotImplementedError
+
         self.part_label = part_label
-        self.iset = iset
+        self.depth = depth
         self.id = id or self._id_generator.next()
 
-    @property
-    def part(self):
-        import warnings
-        warnings.warn("use part_label now", DeprecationWarning)
-        return self.part_label
+
+class Range(TypedIndex):
+    fields = TypedIndex.fields | {"size"}
+
+    def __init__(self, part_label, size, id=None):
+        self.size = size
+        super().__init__(part_label, id=id)
+
+
+# TODO: need to think about what happens when the map transforms multiple indices
+class Map(TypedIndex):
+    fields = TypedIndex.fields | {"from_multi_index", "arity"}
+
+    def __init__(self, part_label, from_multi_index, arity, *, depth=1, id=None):
+        self.from_multi_index = from_multi_index
+        self.arity = arity
+        super().__init__(part_label, depth=depth, id=id)
+
+    # def __mul__(self, other):
+    #     """The product of two maps produces a sparsity."""
+    #     if isinstance(other, Map):
+    #         return self.mul(other)
+    #     else:
+    #         return NotImplemented
+    #
+    # def mul(self, other, is_nonzero=None):
+    #     """is_nonzero is a function letting us exploit additional sparsity.
+    #
+    #     Something like:
+    #
+    #         for cell in cells:
+    #             # rdof and cdof are multi-indices
+    #             for rdof in self.dofs[cell]:
+    #                 for cdof in other.dofs[cell]:
+    #                     # maybe have extra loops here if we have multiple DoFs per entity
+    #                     if is_nonzero(rdof, cdof):
+    #                         # store the non-zero
+    #     """
+    #     ...
+    #     raise NotImplementedError
+    #     # not a sparsity object - should be some sort of multi-axis I think.
+    #     return Sparsity(...)
+
+
+class TabulatedMap(Map):
+    """Map that uses a :class:`MultiArray` for relating input indices to a single output.
+
+    Produces expressions of the form ``i = map[j, k, ...]``.
+
+    Can only have depth 1.
+    """
+    fields = Map.fields | {"data"}
+    depth = 1
+
+    def __init__(self, part_label, data, from_multi_index, arity, id=None):
+        self.data = data
+        super().__init__(part_label, from_multi_index, arity, depth=self.__class__.depth, id=id)
+
+
+class AffineMap(Map):
+    # TODO
+    pass
 
 
 class MultiIndex(pytools.ImmutableRecord):
@@ -1301,92 +1355,6 @@ class MultiIndexCollection(pytools.ImmutableRecord, abc.ABC):
 
     def __iter__(self):
         return iter(self.multi_indices)
-
-
-# class Index(pytools.ImmutableRecord, abc.ABC):
-#     fields = {"nparts", "sizes"}
-#
-#     def __init__(self, parts, sizes, depth: int=1):
-#         self.parts = parts
-#         """List of integers selecting the parts produced by this index."""
-#         self.sizes = sizes
-#         """Function returning an integer given a part number describing the size of the loop."""
-#
-#         self.depth = depth
-#         """The multi-index size"""
-#         super().__init__()
-
-
-class Map(MultiIndexCollection):
-    fields = MultiIndexCollection.fields | {"from_multi_indices"}
-
-    def __init__(self, multi_indices, from_multi_indices):
-        super().__init__(multi_indices=multi_indices)
-        self.from_multi_indices = from_multi_indices
-
-    def __mul__(self, other):
-        """The product of two maps produces a sparsity."""
-        if isinstance(other, Map):
-            return self.mul(other)
-        else:
-            return NotImplemented
-
-    def mul(self, other, is_nonzero=None):
-        """is_nonzero is a function letting us exploit additional sparsity.
-
-        Something like:
-
-            for cell in cells:
-                # rdof and cdof are multi-indices
-                for rdof in self.dofs[cell]:
-                    for cdof in other.dofs[cell]:
-                        # maybe have extra loops here if we have multiple DoFs per entity
-                        if is_nonzero(rdof, cdof):
-                            # store the non-zero
-        """
-        ...
-        raise NotImplementedError
-        return Sparsity(...)
-
-class Slice(Map):
-    fields = Map.fields | {"start", "step"}
-
-    def __init__(self, indices, from_indices, start=None, step=None):
-        # FIXME need to think about how slices with starts and steps work
-        # with multi-part axes
-        if start or step:
-            raise NotImplementedError
-
-        super().__init__(indices, from_indices)
-        self.start = start
-        self.step = step
-
-
-class IndirectMap(Map):
-    fields = Map.fields | {"data"}
-
-    def __init__(self, indices, from_indices, data):
-        super().__init__(indices, from_indices)
-        self.data = data
-
-
-# TODO need to specify the output types I reckon - parents can vary but base outputs
-# are absolutely needed.
-# class Map(Index):
-#     fields = Index.fields | {"from_index", "to"}
-#
-#     def __init__(self, from_, depth: int, parts, sizes, to):
-#         if depth != from_.depth:
-#             raise ValueError("Can only map between multi-indices of the same size")
-#
-#         super().__init__(parts=parts,sizes=sizes, depth=depth)
-#         """The number of indices 'consumed' by this map"""
-#
-#         self.from_index = from_
-#         """The input multi-index mapped from"""
-#
-#         self.to = to
-#         """A function mapping between multi-indices"""
 
 
 # i.e. maps and layouts (that take in indices and write to things)
@@ -1435,32 +1403,32 @@ class IndirectLayoutFunction(LayoutFunction):
 #     def size(self):
 #         return self.arity
 
-
-class NonAffineMap(Map):
-    fields = Map.fields | {"tensor"}
-
-    # TODO is this ever not valid?
-    offset = 0
-
-    def __init__(self, tensor, **kwargs):
-        self.tensor = tensor
-
-        # TODO this is AWFUL
-        arity_ = self.tensor.indices[-1].size
-        if "arity" in kwargs:
-            assert arity_ == kwargs["arity"] 
-            super().__init__(**kwargs)
-        else:
-            super().__init__(arity=arity_, **kwargs)
-
-    @property
-    def input_indices(self):
-        return self.tensor.indices[:-1]
-
-    @property
-    def map(self):
-        return self.tensor
-
+#
+# class NonAffineMap(Map):
+#     fields = Map.fields | {"tensor"}
+#
+#     # TODO is this ever not valid?
+#     offset = 0
+#
+#     def __init__(self, tensor, **kwargs):
+#         self.tensor = tensor
+#
+#         # TODO this is AWFUL
+#         arity_ = self.tensor.indices[-1].size
+#         if "arity" in kwargs:
+#             assert arity_ == kwargs["arity"] 
+#             super().__init__(**kwargs)
+#         else:
+#             super().__init__(arity=arity_, **kwargs)
+#
+#     @property
+#     def input_indices(self):
+#         return self.tensor.indices[:-1]
+#
+#     @property
+#     def map(self):
+#         return self.tensor
+#
 
 @dataclasses.dataclass
 class SyncStatus:
@@ -1488,6 +1456,14 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
     def __init__(self, dim, indices=None, dtype=None, *, mesh = None, name: str = None, prefix: str=None, data=None, max_value=32, sf=None):
         dim = as_prepared_multiaxis(dim)
+
+        if not dtype:
+            if data is None:
+                raise ValueError("need to specify dtype or provide an array")
+            dtype = data.dtype
+        else:
+            if data is not None and data.dtype != dtype:
+                raise ValueError("dtypes must match")
 
         # TODO raise NotImplementedError if the multi-axis contains multiple parallel axes
 
@@ -1934,7 +1910,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         else:
             new_idxs = []
             for pt in axis.parts:
-                idx, subidxs = TypedIndex(pt.label, IndexSet(pt.count)), []
+                idx, subidxs = Range(pt.label, pt.count), []
 
                 if subaxis := axis.find_part(idx.part_label).subaxis:
                     new_idxs.extend(
@@ -2202,26 +2178,6 @@ def _compute_indexed_shape2(flat_indices):
     for index in flat_indices:
         shape += index_shape(index)
     return shape
-
-
-@functools.singledispatch
-def index_shape(index):
-    raise TypeError
-
-@index_shape.register(Slice)
-@index_shape.register(IndexFunction)
-def _(index):
-    # import pdb; pdb.set_trace()
-    if index.is_loop_index:
-        return ()
-    return (index.size,)
-
-@index_shape.register(NonAffineMap)
-def _(index):
-    if index.is_loop_index:
-        return ()
-    else:
-        return index.tensor.indexed_shape
 
 
 def _merge_stencils(stencils1, stencils2, dims):

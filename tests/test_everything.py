@@ -143,7 +143,7 @@ def test_read_single_dim(scalar_copy_kernel):
 
     p = MultiIndexCollection([
         MultiIndex([
-            TypedIndex(0, IndexSet(10))
+            Range(0, 10)
         ])
     ])
 
@@ -193,8 +193,7 @@ def test_compute_double_loop():
 
     p = MultiIndexCollection([
         MultiIndex([
-            # TypedIndex("ax1", IndexSet(10))
-            TypedIndex(0, IndexSet(10))
+            Range(0, 10)
         ])
     ])
     expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
@@ -236,7 +235,7 @@ def test_compute_double_loop_mixed():
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
     p = MultiIndexCollection([
         MultiIndex([
-            TypedIndex(1, IndexSet(12))
+            Range(1, 12)
         ])
     ])
     expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
@@ -282,8 +281,8 @@ def test_compute_double_loop_scalar():
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
     p = MultiIndexCollection([
         MultiIndex([
-            TypedIndex(1, IndexSet(4)),
-            TypedIndex(0, IndexSet(2)),
+            Range(1, 4),
+            Range(0, 2),
         ])
     ])
     expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
@@ -325,7 +324,7 @@ def test_compute_double_loop_permuted():
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
     p = MultiIndexCollection([
         MultiIndex([
-            TypedIndex(0, IndexSet(6)),
+            Range(0, 6),
         ])
     ])
     expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
@@ -364,8 +363,8 @@ def test_permuted_twice():
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
     p = MultiIndexCollection([
         MultiIndex([
-            TypedIndex(0, IndexSet(3)),
-            TypedIndex(0, IndexSet(3)),
+            Range(0, 3),
+            Range(0, 3),
         ])
     ])
     expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
@@ -408,8 +407,8 @@ def test_somewhat_permuted():
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
     p = MultiIndexCollection([
         MultiIndex([
-            TypedIndex(0, IndexSet(2)),
-            TypedIndex(0, IndexSet(3)),
+            Range(0, 2),
+            Range(0, 3),
         ])
     ])
     expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
@@ -452,7 +451,7 @@ def test_compute_double_loop_permuted_mixed():
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
     p = MultiIndexCollection([
         MultiIndex([
-            TypedIndex(1, IndexSet(3)),
+            Range(1, 3),
         ])
     ])
     expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
@@ -498,8 +497,8 @@ def test_compute_double_loop_ragged():
 
     p = MultiIndexCollection([
         MultiIndex([
-            TypedIndex(0, IndexSet(5)),
-            TypedIndex(0, IndexSet(nnz)),
+            Range(0, 5),
+            Range(0, nnz),
         ])
     ])
     expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
@@ -552,9 +551,9 @@ def test_doubly_ragged():
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
     p = MultiIndexCollection([
         MultiIndex([
-            TypedIndex(0, IndexSet(3)),
-            TypedIndex(0, IndexSet(nnz1)),
-            TypedIndex(0, IndexSet(nnz2)),
+            Range(0, 3),
+            Range(0, nnz1),
+            Range(0, nnz2),
         ])
     ])
 
@@ -611,10 +610,10 @@ def test_interleaved_ragged(scalar_copy_kernel):
 
     p = MultiIndexCollection([
         MultiIndex([
-            TypedIndex(0, IndexSet(3)),
-            TypedIndex(0, IndexSet(nnz1)),
-            TypedIndex(0, IndexSet(2)),
-            TypedIndex(0, IndexSet(nnz2)),
+            Range(0, 3),
+            Range(0, nnz1),
+            Range(0, 2),
+            Range(0, nnz2),
         ])
     ])
 
@@ -660,9 +659,9 @@ def test_ragged_inside_two_standard_loops(scalar_inc_kernel):
 
     p = MultiIndexCollection([
         MultiIndex([
-            TypedIndex(0, IndexSet(2)),
-            TypedIndex(0, IndexSet(2)),
-            TypedIndex(0, IndexSet(nnz)),
+            Range(0, 2),
+            Range(0, 2),
+            Range(0, nnz),
         ])
     ])
 
@@ -699,7 +698,7 @@ def test_compute_double_loop_ragged_inner(ragged_copy_kernel):
 
     p = MultiIndexCollection([
         MultiIndex([
-            TypedIndex(0, IndexSet(5)),
+            Range(0, 5),
         ])
     ])
     expr = pyop3.Loop(p, ragged_copy_kernel(dat1[[p]], dat2[[p]]))
@@ -737,8 +736,8 @@ def test_compute_double_loop_ragged_mixed(scalar_copy_kernel):
 
     p = MultiIndexCollection([
         MultiIndex([
-            TypedIndex(1, IndexSet(5)),
-            TypedIndex(0, IndexSet(nnz)),
+            Range(1, 5),
+            Range(0, nnz),
         ])
     ])
     expr = pyop3.Loop(p, scalar_copy_kernel(dat1[[p]], dat2[[p]]))
@@ -777,8 +776,8 @@ def test_compute_ragged_permuted(scalar_copy_kernel):
 
     p = MultiIndexCollection([
         MultiIndex([
-            TypedIndex(0, IndexSet(6)),
-            TypedIndex(0, IndexSet(nnz)),
+            Range(0, 6),
+            Range(0, nnz),
         ])
     ])
     expr = pyop3.Loop(p, scalar_copy_kernel(dat1[[p]], dat2[[p]]))
@@ -815,9 +814,9 @@ def test_permuted_ragged_permuted(scalar_copy_kernel):
 
     p = MultiIndexCollection([
         MultiIndex([
-            TypedIndex(0, IndexSet(6)),
-            TypedIndex(0, IndexSet(nnz)),
-            TypedIndex(0, IndexSet(2)),
+            Range(0, 6),
+            Range(0, nnz),
+            Range(0, 2),
         ])
     ])
     expr = pyop3.Loop(p, scalar_copy_kernel(dat1[[p]], dat2[[p]]))
@@ -860,9 +859,9 @@ def test_permuted_inner_and_ragged(scalar_copy_kernel):
 
     p = MultiIndexCollection([
         MultiIndex([
-            TypedIndex(0, IndexSet(2)),
-            TypedIndex(0, IndexSet(2)),
-            TypedIndex(0, IndexSet(nnz)),
+            Range(0, 2),
+            Range(0, 2),
+            Range(0, nnz),
         ])
     ])
     expr = pyop3.Loop(p, scalar_copy_kernel(dat1[[p]], dat2[[p]]))
@@ -893,8 +892,8 @@ def test_permuted_inner(scalar_copy_kernel):
 
     p = MultiIndexCollection([
         MultiIndex([
-            TypedIndex(0, IndexSet(4)),
-            TypedIndex(0, IndexSet(3)),
+            Range(0, 4),
+            Range(0, 3),
         ])
     ])
     expr = pyop3.Loop(p, scalar_copy_kernel(dat1[[p]], dat2[[p]]))
@@ -911,16 +910,17 @@ def test_permuted_inner(scalar_copy_kernel):
     assert np.allclose(dat1.data, dat2.data)
 
 
-@pytest.mark.skip
 def test_subset():
+    axes = MultiAxis([AxisPart(6)]).set_up()
     dat1 = MultiArray.new(
-        MultiAxis(6), name="dat1", data=np.arange(6, dtype=np.float64), dtype=np.float64
-    )
-    dat2 = MultiArray.new(MultiAxis(6), name="dat2", data=np.zeros(6, dtype=np.float64), dtype=np.float64)
+        axes, name="dat1", data=np.ones(6, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray.new(
+        axes, name="dat2", data=np.zeros(6, dtype=np.float64), dtype=np.float64)
 
-    subset_tensor = MultiArray.new(
-        MultiAxis(4), dtype=np.int32, prefix="subset",
-        data=np.array([2, 3, 5, 0], dtype=np.int32)
+    # a subset is really a map
+    subset_axes = MultiAxis([AxisPart(4)]).set_up()
+    subset_array = MultiArray.new(
+        subset_axes, prefix="subset", data=np.array([2, 3, 5, 0], dtype=np.int32)
     )
 
     i1 = pyop3.index([Slice(4)])

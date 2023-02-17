@@ -148,7 +148,7 @@ class MultiArrayLangKernelBuilder:
         for multi_idx in multi_idx_collection:
             is_loop_index = multi_idx.typed_indices[0] in self._within_multi_index_collections
             temp_axis_part_id = self.name_generator.next("mypart")
-            size = multi_idx.typed_indices[0].iset.size
+            size = multi_idx.typed_indices[0].size
             temp_axis_part  = tensors.AxisPart(
                 size,
                 indexed=is_loop_index,
@@ -166,7 +166,7 @@ class MultiArrayLangKernelBuilder:
             for typed_idx in multi_idx.typed_indices[1:]:
                 is_loop_index = typed_idx in self._within_multi_index_collections
                 temp_axis_part_id = self.name_generator.next("mypart")
-                size = typed_idx.iset.size
+                size = typed_idx.size
                 temp_subaxis  = tensors.MultiAxis(
                     [AxisPart(
                         size,

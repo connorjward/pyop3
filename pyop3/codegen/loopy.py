@@ -20,8 +20,8 @@ import pyop3.utils
 from pyop3 import utils
 from pyop3.utils import MultiNameGenerator, NameGenerator, strictly_all
 from pyop3.utils import PrettyTuple, checked_zip, NameGenerator, rzip
-from pyop3.tensors import MultiArray, Map, MultiAxis, NonAffineMap, _compute_indexed_shape, _compute_indexed_shape2, IndirectLayoutFunction, AxisPart
-from pyop3.tensors import Slice, IndexFunction, index, MultiIndexCollection, MultiIndex, AffineLayoutFunction, TypedIndex, IndexSet
+from pyop3.tensors import MultiArray, Map, MultiAxis, _compute_indexed_shape, _compute_indexed_shape2, AxisPart
+from pyop3.tensors import index, MultiIndexCollection, MultiIndex, TypedIndex, AffineLayoutFunction, IndirectLayoutFunction
 from pyop3.codegen.tlang import to_tlang
 
 
@@ -184,7 +184,7 @@ class LoopyKernelBuilder:
             for i, typed_idx in enumerate(multi_idx):
                 # do this before creating the new iname
                 extent = self.register_extent(
-                    typed_idx.iset.size,
+                    typed_idx.size,
                     list(self._loop_index_names.values()),
                     list(self._loop_index_names.values()),
                 )
@@ -684,7 +684,7 @@ declared. we just need to traverse properly to check that we have the right numb
             # import pdb; pdb.set_trace()
 
             extent = self.register_extent(
-                idx.iset.size,
+                idx.size,
                 # these are likely not right - need to clean up codegen logic for
                 # inames and jnames
                 list(self._loop_index_names.values()),
@@ -822,37 +822,6 @@ declared. we just need to traverse properly to check that we have the right numb
         assert all(param is not None for param in [start, stop, step])
 
         return f"{{ [{iname}]: {start} <= {iname} < {stop} }}"
-
-    @functools.singledispatchmethod
-    def _as_expr(self, index, *args):
-        raise TypeError
-
-    @_as_expr.register
-    def _(self, index: Slice, iname, within_loops):
-        start = index.start or 0
-        step = index.step or 1
-        return pym.var(iname)*step + start
-
-    @_as_expr.register
-    def _(self, index: IndexFunction, iname, within_loops):
-        # use the innermost matching dims as the right inames
-        varmap = {}
-
-        # hack to reinsert iname
-        within_loops.insert(0, iname)
-        for var in reversed(index.vars):
-            iname = within_loops.pop(0)
-            varmap[var] = pym.var(iname)
-
-        res = pym.substitute(index.expr, varmap)
-        return res
-
-    @_as_expr.register
-    def _(self, index: NonAffineMap, iname, within_loops):
-        # hack to reinsert iname
-        within_loops.insert(0, iname)
-        myexpr = self.handle_assignment(index.tensor, index.tensor.indices, within_loops)
-        return pym.subscript(pym.var(index.tensor.name), myexpr)
 
 
 def _make_loopy_kernel(tlang_kernel):
