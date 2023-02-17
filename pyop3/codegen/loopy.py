@@ -114,7 +114,6 @@ class LoopyKernelBuilder:
         self.assumptions = []
 
         self._part_id_namer = NameGenerator("mypartid")
-        self._loop_index_names = {}
 
         self._latest_insn = {}
         self._active_insn = None
@@ -146,25 +145,8 @@ class LoopyKernelBuilder:
     def _build(self, expr, within_loops):
         raise TypeError
 
-    def collect_within_loops(self, idx, within_loops):
-        within_loops = copy.deepcopy(within_loops)
-
-        if isinstance(idx, NonAffineMap):
-            for i in idx.input_indices:
-                within_loops = self.collect_within_loops(i, within_loops)
-
-        iname = self._namer.next("i")
-        within_loops.append(iname)
-        self.register_new_domain(iname, idx, within_loops)
-        return within_loops
-
     @_build.register
     def _(self, expr: exprs.Loop, within_loops):
-
-        # within_loops = []
-        # for idx in expr.index:
-        #     within_loops = self.collect_within_loops(idx, within_loops)
-        # this might break with composition - need to track which indices (not multiindices) are in use.
         multi_idx_collection = expr.index
         assert isinstance(multi_idx_collection, MultiIndexCollection)
 
@@ -178,18 +160,26 @@ class LoopyKernelBuilder:
 
         for multi_idx in multi_idx_collection:
             # 1. register loops
-            for i, typed_idx in enumerate(multi_idx):
+            active_inames = ()
+            within_inames = frozenset()
+            for typed_idx in multi_idx:
+                if isinstance(typed_idx, Map):
+                    raise NotImplementedError(
+                        "Need to do back recursion and be careful to make sure that "
+                        "active_inames and within_inames are correct.")
+
                 # do this before creating the new iname
                 extent = self.register_extent(
                     typed_idx.size,
-                    list(self._loop_index_names.values()),
-                    list(self._loop_index_names.values()),
+                    active_inames,
+                    within_inames,
                 )
 
-                loop_index_name = self._namer.next("i")
-                self._loop_index_names[typed_idx] = loop_index_name
+                iname = self._namer.next("i")
+                active_inames += (iname,)
+                within_inames |= {iname}
 
-                domain_str = f"{{ [{loop_index_name}]: 0 <= {loop_index_name} < {extent} }}"
+                domain_str = f"{{ [{iname}]: 0 <= {iname} < {extent} }}"
                 self.domains.append(domain_str)
 
             # 2. emit instructions
@@ -198,21 +188,20 @@ class LoopyKernelBuilder:
             # e.g. if we are looping over interior facets of an extruded mesh - the
             # iterset is two multi-indices: edges+hfacets and verts+vfacets
             for stmt in expr.statements:
-                # self._build(stmt, copy.deepcopy(within_loops))
-                self._build(stmt, self._loop_index_names)
+                self._build(stmt, active_inames, within_inames)
 
     @_build.register
-    def _(self, insn: tlang.Instruction, within_loops):
-        self._make_instruction_context(insn, within_loops)
+    def _(self, insn: tlang.Instruction, active_inames, within_inames):
+        self._make_instruction_context(insn, active_inames, within_inames)
 
 
     @functools.singledispatchmethod
-    def _make_instruction_context(self, instruction: tlang.Instruction, within_inames, **kwargs):
+    def _make_instruction_context(self, instruction: tlang.Instruction, *args, **kwargs):
         raise TypeError
 
 
     @_make_instruction_context.register
-    def _(self, call: tlang.FunctionCall, within_loops, **kwargs):
+    def _(self, call: tlang.FunctionCall, active_inames, within_inames):
         subarrayrefs = {}
         for temp in utils.unique(itertools.chain(call.reads, call.writes)):
             temp_size = temp.axes.alloc_size
@@ -227,10 +216,8 @@ class LoopyKernelBuilder:
         for temp in utils.unique(itertools.chain(call.reads, call.writes)):
             extents |= self.collect_extents(
                 temp.root,
-                # these are likely not right - need to clean up codegen logic for
-                # inames and jnames
-                list(self._loop_index_names.values()),
-                list(self._loop_index_names.values()),
+                active_inames,
+                within_inames,
             )
 
         # NOTE: If we register an extent to pass through loopy will complain
@@ -244,7 +231,7 @@ class LoopyKernelBuilder:
 
         insn_id = f"{call.id}_0"
         depends_on = frozenset({self._latest_insn[id] for id in call.depends_on})
-        within_inames = frozenset(within_loops.values())
+        # within_inames = frozenset(within_loops.values())
 
         call_insn = lp.CallInstruction(
             assignees,
@@ -259,21 +246,23 @@ class LoopyKernelBuilder:
         self.subkernels.append(call.function.code)
         self._latest_insn[call.id] = insn_id
 
-    def collect_extents(self, axis, jnames, within_inames, depth=0):
+    def collect_extents(self, axis, active_inames, within_inames, depth=0):
         extents = {}
 
         for part in axis.parts:
             if isinstance(part.count, MultiArray) and not part.indexed:
                 assert depth >= 1
+                # I think we should be truncating here, register_scalar_assignment may be wrong
+                # somehow
                 # useable_jnames = jnames[:depth]
                 # useable_inames = within_inames[:depth]
-                useable_jnames = jnames
+                useable_jnames = active_inames
                 useable_inames = within_inames
                 extent = self.register_scalar_assignment(part.count, useable_jnames, useable_inames)
                 extents[part.count] = extent
 
             if part.subaxis:
-                extents_ = self.collect_extents(part.subaxis, jnames, within_inames, depth+1)
+                extents_ = self.collect_extents(part.subaxis, active_inames, within_inames, depth+1)
                 if any(array in extents for array in extents_):
                     raise ValueError("subaxes should not be using the same nnz structures (I think)")
                 extents |= extents_
@@ -281,11 +270,10 @@ class LoopyKernelBuilder:
         return extents
 
     @_make_instruction_context.register
-    def _(self, assignment: tlang.Assignment, outer_loop_indices):
-        jnames = self.register_loops(assignment.indices, outer_loop_indices)
-        within_inames = list(outer_loop_indices.values()) + [j for j in jnames if j not in outer_loop_indices.values()]
+    def _(self, assignment: tlang.Assignment, active_inames, within_inames):
+        active_inames, within_inames = self.register_loops(assignment.indices, active_inames, within_inames)
         # import pdb; pdb.set_trace()
-        self._generate_assignment_insn(assignment, jnames, within_inames)
+        self._generate_assignment_insn(assignment, active_inames, within_inames)
 
     def _generate_assignment_insn(self, assignment, jnames, within_inames, scalar=False):
         # import pdb; pdb.set_trace()
@@ -644,45 +632,64 @@ declared. we just need to traverse properly to check that we have the right numb
         else:
             return (pname,), (jname,)
 
-    def register_loops(self, indices, outer_loop_indices):
+    def register_loops(self, indices, active_inames, within_inames, depth=0):
         """
         Returns
         -------
-        A stack of inames.
+        active_inames, within_inames
         """
+        assert  len(indices) >= len(active_inames)
+
+        # at bottom
+        if depth == len(indices):
+            return active_inames, within_inames
+
+        if not active_inames:
+            active_inames = ()
+
         inames = collections.deque()
 
-        if not indices:
-            return list(inames)
+        idx = indices.typed_indices[depth]
 
-        idx, *subidxs = indices
+        try:
+            iname = active_inames[depth]
+        except IndexError:
+            iname = None
 
         if isinstance(idx, Map):
-            inames.extendleft(self.register_loops([idx.from_], outer_loop_indices))
+            raise NotImplementedError
+            inames.extendleft(self.register_loops([idx.from_], active_inames, within_inames))
 
-        if idx in outer_loop_indices:
-            iname = outer_loop_indices[idx]
-        else:
+        if not iname:
             # register the domain
             iname = self._namer.next("i")
 
             # import pdb; pdb.set_trace()
 
-            extent = self.register_extent(
-                idx.size,
-                # these are likely not right - need to clean up codegen logic for
-                # inames and jnames
-                list(self._loop_index_names.values()),
-                list(self._loop_index_names.values()),
-            )
+            # TODO: index with depth??
+            if isinstance(idx.size, MultiArray):
+                assert depth > 0
+
+                extent = self.register_extent(
+                    idx.size,
+                    active_inames[:depth],
+                    within_inames,
+                )
+            else:
+                extent = self.register_extent(
+                    idx.size,
+                    None,
+                    within_inames,
+                )
 
             domain_str = f"{{ [{iname}]: 0 <= {iname} < {extent} }}"
             self.domains.append(domain_str)
 
 
-        inames.append(iname)
+            active_inames += (iname,)
+            within_inames |= {iname}
 
-        return list(inames) + self.register_loops(subidxs, outer_loop_indices)
+        return self.register_loops(indices, active_inames, within_inames, depth+1)
 
     def register_extent(self, extent, jnames, within_inames):
         if isinstance(extent, MultiArray):

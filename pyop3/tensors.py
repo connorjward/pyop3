@@ -1339,6 +1339,9 @@ class MultiIndex(pytools.ImmutableRecord):
     def __iter__(self):
         return iter(self.typed_indices)
 
+    def __len__(self):
+        return len(self.typed_indices)
+
     @property
     def depth(self):
         return len(self.indices)
