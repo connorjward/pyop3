@@ -113,9 +113,6 @@ class LoopyKernelBuilder:
         self.extents = {}
         self.assumptions = []
 
-        self._within_typed_indices = []  # a stack
-        self._within_loop_index_names = []  # a stack
-
         self._part_id_namer = NameGenerator("mypartid")
         self._loop_index_names = {}
 
@@ -179,8 +176,8 @@ class LoopyKernelBuilder:
                identify.
             """)
 
-        # register inames (also needs to be done for packing loops)
         for multi_idx in multi_idx_collection:
+            # 1. register loops
             for i, typed_idx in enumerate(multi_idx):
                 # do this before creating the new iname
                 extent = self.register_extent(
@@ -195,9 +192,7 @@ class LoopyKernelBuilder:
                 domain_str = f"{{ [{loop_index_name}]: 0 <= {loop_index_name} < {extent} }}"
                 self.domains.append(domain_str)
 
-                self._within_typed_indices.append(typed_idx)
-                self._within_loop_index_names.append(loop_index_name)
-
+            # 2. emit instructions
             # we need to build a separate set of instructions for each multi-index
             # in the collection.
             # e.g. if we are looping over interior facets of an extruded mesh - the
@@ -205,17 +200,6 @@ class LoopyKernelBuilder:
             for stmt in expr.statements:
                 # self._build(stmt, copy.deepcopy(within_loops))
                 self._build(stmt, self._loop_index_names)
-
-            for typed_idx in multi_idx:
-                self._within_typed_indices.pop()
-                self._within_loop_index_names.pop()
-
-    def _get_within_inames(self):
-        # since we want to pop we need a list of lists
-        return frozenset({
-            iname
-            for iname in self._within_loop_index_names
-        })
 
     @_build.register
     def _(self, insn: tlang.Instruction, within_loops):
@@ -260,12 +244,13 @@ class LoopyKernelBuilder:
 
         insn_id = f"{call.id}_0"
         depends_on = frozenset({self._latest_insn[id] for id in call.depends_on})
+        within_inames = frozenset(within_loops.values())
 
         call_insn = lp.CallInstruction(
             assignees,
             expression,
             id=insn_id,
-            within_inames=self._get_within_inames(),
+            within_inames=within_inames,
             within_inames_is_final=True,
             depends_on=depends_on
         )

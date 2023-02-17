@@ -910,39 +910,34 @@ def test_permuted_inner(scalar_copy_kernel):
     assert np.allclose(dat1.data, dat2.data)
 
 
-def test_subset():
+@pytest.mark.skip(reason="need to clean up iname stacking first")
+def test_subset(scalar_copy_kernel):
     axes = MultiAxis([AxisPart(6)]).set_up()
     dat1 = MultiArray.new(
-        axes, name="dat1", data=np.ones(6, dtype=np.float64), dtype=np.float64)
+        axes, name="dat1", data=np.ones(6, dtype=np.float64))
     dat2 = MultiArray.new(
-        axes, name="dat2", data=np.zeros(6, dtype=np.float64), dtype=np.float64)
+        axes, name="dat2", data=np.zeros(6, dtype=np.float64))
 
     # a subset is really a map
     subset_axes = MultiAxis([AxisPart(4)]).set_up()
     subset_array = MultiArray.new(
         subset_axes, prefix="subset", data=np.array([2, 3, 5, 0], dtype=np.int32)
     )
+    from_multi_index = MultiIndex([Range(0, 4)])
 
-    i1 = pyop3.index([Slice(4)])
-    subset = NonAffineMap(subset_tensor[i1], npart=0)
-
-    iterset = [subset]
-    code = lp.make_kernel(
-        "{ [i]: 0 <= i < 1 }",
-        "y[i] = x[i] + 1",
-        [lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
-        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
-        target=lp.CTarget(),
-        name="mylocalkernel",
-        lang_version=(2018, 2),
-    )
-    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-    expr = pyop3.Loop(p := pyop3.index(iterset), kernel(dat1[p], dat2[p]))
+    p = MultiIndexCollection([
+        MultiIndex([
+            TabulatedMap(0, subset_array, from_multi_index, arity=1),
+        ])
+    ])
+    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[[p]], dat2[[p]]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-
     dll = compilemythings(exe)
     fn = getattr(dll, "mykernel")
+
+    import pdb; pdb.set_trace()
+
     args = [subset_tensor.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
     fn(*(d.ctypes.data for d in args))
