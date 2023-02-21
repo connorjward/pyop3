@@ -1282,6 +1282,10 @@ class Map(TypedIndex):
         self.arity = arity
         super().__init__(part_label, depth=depth, id=id)
 
+    @property
+    def size(self):
+        return self.arity
+
     # def __mul__(self, other):
     #     """The product of two maps produces a sparsity."""
     #     if isinstance(other, Map):

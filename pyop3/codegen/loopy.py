@@ -126,8 +126,6 @@ class LoopyKernelBuilder:
         self._namer.reset()
         self._build(tlang_expr)
 
-        # breakpoint()
-        # domains = [self._make_domain(iname, start, stop, step) for iname, (start, stop, step) in self.domains.items()]
         translation_unit = lp.make_kernel(
             self.domains,
             self.instructions,
@@ -146,11 +144,11 @@ class LoopyKernelBuilder:
         raise TypeError
 
     @_build.register
-    def _(self, expr: exprs.Loop, active_inames=(), within_inames=frozenset()):
-        multi_idx_collection = expr.index
-        assert isinstance(multi_idx_collection, MultiIndexCollection)
+    def _(self, expr: exprs.Loop, active_inames=(), within_inames=frozenset(), loop_indices=frozenset()):
+        multi_indices = expr.index
+        assert isinstance(multi_indices, MultiIndexCollection)
 
-        if len(multi_idx_collection.multi_indices) > 1:
+        if len(multi_indices.multi_indices) > 1:
             raise NotImplementedError(
             """In this case we need to follow different codegen pathways internally. I
                expect this to cause big issues with how we identify the indices of the
@@ -158,29 +156,13 @@ class LoopyKernelBuilder:
                identify.
             """)
 
-        for multi_idx in multi_idx_collection:
+        # save these as they are needed fresh per-loop
+        outer_active_inames = active_inames
+        outer_within_inames = within_inames
+
+        for multi_idx in multi_indices:
             # 1. register loops
-            active_inames = ()
-            within_inames = frozenset()
-            for typed_idx in multi_idx:
-                if isinstance(typed_idx, Map):
-                    raise NotImplementedError(
-                        "Need to do back recursion and be careful to make sure that "
-                        "active_inames and within_inames are correct.")
-
-                # do this before creating the new iname
-                extent = self.register_extent(
-                    typed_idx.size,
-                    active_inames,
-                    within_inames,
-                )
-
-                iname = self._namer.next("i")
-                active_inames += (iname,)
-                within_inames |= {iname}
-
-                domain_str = f"{{ [{iname}]: 0 <= {iname} < {extent} }}"
-                self.domains.append(domain_str)
+            active_inames, within_inames, loop_indices = self.register_loop_indices(multi_idx, outer_active_inames, outer_within_inames, loop_indices)
 
             # 2. emit instructions
             # we need to build a separate set of instructions for each multi-index
@@ -188,16 +170,52 @@ class LoopyKernelBuilder:
             # e.g. if we are looping over interior facets of an extruded mesh - the
             # iterset is two multi-indices: edges+hfacets and verts+vfacets
             for stmt in expr.statements:
-                self._build(stmt, active_inames, within_inames)
+                self._build(stmt, active_inames, within_inames, loop_indices)
+
+
+    def register_loop_indices(self, indices: MultiIndex, active_inames, within_inames, loop_indices):
+        for typed_idx in indices:
+            if isinstance(typed_idx, Map):
+                """
+                if we hit a map we want to handle its from_multi_index first, then
+                deal with it itself.
+
+                it will always yield depth-many active_inames and emit a single loop
+                of size arity.
+                """
+                # FIXME: I think this is in the wrong order here...
+                active_inames, within_inames, new_loop_indices = self.register_loop_indices(typed_idx.from_multi_index, active_inames, within_inames)
+
+                loop_indices |= new_loop_indices
+
+            # do this before creating the new iname
+            extent = self.register_extent(
+                typed_idx.size,
+                active_inames,
+                within_inames,
+            )
+
+            new_inames = tuple(self._namer.next("i") for _ in range(typed_idx.depth))
+            active_inames += new_inames
+
+            # only the last "new iname" actually results in a loop getting made
+            iname_that_actually_yields_a_loop = new_inames[-1]
+            within_inames |= {iname_that_actually_yields_a_loop}
+
+            loop_indices |= {typed_idx}
+
+            domain_str = f"{{ [{iname_that_actually_yields_a_loop}]: 0 <= {iname_that_actually_yields_a_loop} < {extent} }}"
+            self.domains.append(domain_str)
+        return active_inames, within_inames, loop_indices
 
     @_build.register
-    def _(self, call: exprs.FunctionCall, active_inames, within_inames):
-        insns = self.expand_function_call(call, active_inames)
+    def _(self, call: exprs.FunctionCall, active_inames, within_inames, loop_indices):
+        insns = self.expand_function_call(call, loop_indices)
 
         for insn in insns:
             self._make_instruction_context(insn, active_inames, within_inames)
 
-    def expand_function_call(self, call, active_inames):
+    def expand_function_call(self, call, loop_indices):
         """
         Turn an exprs.FunctionCall into a series of assignment instructions etc.
         Handles packing/accessor logic.
@@ -206,9 +224,7 @@ class LoopyKernelBuilder:
         temporaries = {}
         for arg in call.arguments:
             # create an appropriate temporary
-            dims = self._construct_temp_dims(arg.tensor.axes, arg.tensor.indices, active_inames)
-            dims = dims.set_up()
-            # import pdb; pdb.set_trace()
+            dims = self._construct_temp_dims(arg.tensor.axes, arg.tensor.indices, loop_indices)
             temporary = MultiArray.new(
                 dims, name=self._temp_name_generator.next(), dtype=arg.tensor.dtype,
             )
@@ -223,8 +239,14 @@ class LoopyKernelBuilder:
 
         return (*gathers, newcall, *scatters)
 
-    def _construct_temp_dims(self, axis, indices, active_inames):
-        """Return a multi-axis describing the temporary shape."""
+    def _construct_temp_dims(self, axis, multi_indices, loop_indices):
+        """Return a multi-axis describing the temporary shape.
+
+        Parameters
+        ----------
+        multi_indices : ???
+            Iterable of :class:`MultiIndex`.
+        """
         """
         Can have something like [:5, map2(map1(c))] which should return a temporary
         with shape (5, |map1|, |map2|, ...) where ... is whatever the bottom part of
@@ -249,8 +271,7 @@ class LoopyKernelBuilder:
         #     subidx_collections = []
         #
 
-        multi_idx_collection = indices
-        assert isinstance(multi_idx_collection, MultiIndexCollection)
+        assert isinstance(multi_indices, MultiIndexCollection)
 
         ###
 
@@ -260,47 +281,91 @@ class LoopyKernelBuilder:
         # similarly this would be the expected behaviour for interior facets of extruded
         # meshes - the outer axis would be split in two parts because the DoFs come from
         # both the vertical and horizontal facets and these require separate multi-indices
-        depth = 0
-        temp_axis_parts = []
-        temp_axis_base_ids = []
-        for multi_idx in multi_idx_collection:
+        axis_parts = []
+        for multi_idx in multi_indices:
+            axis_part = self.make_temp_axis_part_per_multi_index(multi_idx, loop_indices)
+            axis_parts.append(axis_part)
+
+        return MultiAxis(axis_parts).set_up()
+
+    def make_temp_axis_part_per_multi_index(
+            self, multi_index, loop_indices, return_final_part_id=False):
+        """TODO
+
+        Returns
+        -------
+        An iterable of :class:`AxisPart`.
+
+        Remember that whatever we get here is "linear" - maybe we could make a list of
+        axis parts and glue together at the end?
+        No it's not linear - if we don't index into a multi-part subaxis.
+
+        Wait! We should already have fully indexed the array so multi-index should be
+        the right length.
+        """
+        idx, *subidxs = multi_index
+        has_scalar_shape = idx in loop_indices
+        new_part = AxisPart(idx.size, indexed=has_scalar_shape)
+
+        if subidxs:
+            result = self.make_temp_axis_part_per_multi_index(subidxs, loop_indices, return_final_part_id=return_final_part_id)
+            if return_final_part_id:
+                subpart, bottom_part_id = result
+            else:
+                subpart = result
+            new_part = new_part.copy(subaxis=MultiAxis([subpart]))
+        else:
+            bottom_part_id = new_part.id
+
+        if isinstance(idx, Map):
+            super_part, bottom_part_id = self.make_temp_axis_part_per_multi_index(idx.from_multi_index, return_final_part_id=True)
+            # wont work as need part IDs
+            new_part = super_part.add_subaxis(bottom_part_id, MultiAxis([new_part]))
+
+        if return_final_part_id:
+            return new_part, bottom_part_id
+        else:
+            return new_part
+
+
+        ############################
+        is_loop_index = depth < len(active_inames)
+        temp_axis_part_id = self._namer.next("mypart")
+        size = multi_idx.typed_indices[0].size
+        temp_axis_part  = AxisPart(
+            size,
+            indexed=is_loop_index,
+            id=temp_axis_part_id,
+        )
+        old_temp_axis_part_id = temp_axis_part_id
+
+        # track the position in the array as this tells us whether or not we
+        # need to recurse.
+        # we need to track this throughout because the types of the typed_idx
+        # tells us which bits of the hierarchy are 'below'.
+        current_axis = axis.find_part(multi_idx.typed_indices[0].part_label).subaxis
+        depth += 1
+
+        # each typed index is a subaxis of the original
+        for typed_idx in multi_idx.typed_indices[1:]:
             is_loop_index = depth < len(active_inames)
             temp_axis_part_id = self._namer.next("mypart")
-            size = multi_idx.typed_indices[0].size
-            temp_axis_part  = AxisPart(
-                size,
-                indexed=is_loop_index,
-                id=temp_axis_part_id,
+            size = typed_idx.size
+            temp_subaxis  = MultiAxis(
+                [AxisPart(
+                    size,
+                    indexed=is_loop_index,
+                    id=temp_axis_part_id
+                )],
             )
+            temp_axis_part = temp_axis_part.add_subaxis(old_temp_axis_part_id, temp_subaxis)
             old_temp_axis_part_id = temp_axis_part_id
 
-            # track the position in the array as this tells us whether or not we
-            # need to recurse.
-            # we need to track this throughout because the types of the typed_idx
-            # tells us which bits of the hierarchy are 'below'.
-            current_axis = axis.find_part(multi_idx.typed_indices[0].part_label).subaxis
+            current_axis = current_axis.find_part(typed_idx.part_label).subaxis
             depth += 1
 
-            # each typed index is a subaxis of the original
-            for typed_idx in multi_idx.typed_indices[1:]:
-                is_loop_index = depth < len(active_inames)
-                temp_axis_part_id = self._namer.next("mypart")
-                size = typed_idx.size
-                temp_subaxis  = MultiAxis(
-                    [AxisPart(
-                        size,
-                        indexed=is_loop_index,
-                        id=temp_axis_part_id
-                    )],
-                )
-                temp_axis_part = temp_axis_part.add_subaxis(old_temp_axis_part_id, temp_subaxis)
-                old_temp_axis_part_id = temp_axis_part_id
-
-                current_axis = current_axis.find_part(typed_idx.part_label).subaxis
-                depth += 1
-
-            temp_axis_parts.append(temp_axis_part)
-            temp_axis_base_ids.append(temp_axis_part_id)
+        temp_axis_parts.append(temp_axis_part)
+        temp_axis_base_ids.append(temp_axis_part_id)
 
         # if we still have a current axis then we haven't hit the bottom of the
         # tree and more shape is needed
@@ -314,15 +379,6 @@ class LoopyKernelBuilder:
                 for pt, ptid in checked_zip(temp_axis_parts, temp_axis_base_ids)
             ]
 
-        temp_axis = MultiAxis(temp_axis_parts)
-
-        # if we are using a map then we need to stick this axis onto the bottom of
-        # whatever the map throws out
-        if isinstance(multi_idx_collection, Map):
-            raise NotImplementedError
-            temp_axis = self.prepend_map(multi_idx_collection, temp_axis)
-
-        return temp_axis
 
     def make_gathers(self, temporaries, **kwargs):
         return tuple(
@@ -814,11 +870,17 @@ declared. we just need to traverse properly to check that we have the right numb
 
     def register_loops(self, indices, active_inames, within_inames, depth=0):
         """
+        Take a multi-index and register any extra loops needed to fill "shape" for the
+        array.
+
+        Maybe this could be done when temporaries are registered?
+
         Returns
         -------
         active_inames, within_inames
         """
-        assert  len(indices) >= len(active_inames)
+        # not true if there are maps
+        # assert  len(indices) >= len(active_inames)
 
         # at bottom
         if depth == len(indices):
@@ -957,43 +1019,6 @@ declared. we just need to traverse properly to check that we have the right numb
                     raise TypeError
 
         return index_expr + mainoffset
-
-    def register_domains(self, indices, dstack, within_loops):
-        raise Exception("shouldnt touch")
-        within_loops = copy.deepcopy(within_loops)
-
-        # I think ultimately all I need to do here is stick the things from dstack
-        # onto the right dim labels in within_loops, and register all of the domains
-
-        # first we stick any new inames into the right places
-        for idx in indices:
-            if isinstance(idx, NonAffineMap):
-                within_loops = self.register_domains(idx.input_indices, dstack, within_loops)
-                self._tensor_data.append(lp.GlobalArg(idx.tensor.name, shape=None, dtype=idx.tensor.dtype))
-
-            if idx.is_loop_index:
-                # should do this earlier (hard to do now due to ordering confusion)
-                continue
-            else:
-                iname = dstack.pop(0)
-                within_loops.append(iname)
-                self.register_new_domain(iname, idx, within_loops)
-
-        return within_loops
-
-    @staticmethod
-    def _make_domain(iname, start, stop, step):
-        if start is None:
-            start = 0
-        if step is None:
-            step = 1
-
-        if step != 1:
-            raise NotImplementedError
-
-        assert all(param is not None for param in [start, stop, step])
-
-        return f"{{ [{iname}]: {start} <= {iname} < {stop} }}"
 
 
 def _make_loopy_kernel(tlang_kernel):
