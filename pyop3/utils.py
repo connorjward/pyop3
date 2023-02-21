@@ -120,3 +120,30 @@ def print_with_rank(*args):
 def print_if_rank(rank, *args):
     if rank == MPI.COMM_WORLD.rank:
         print(*args, flush=True)
+
+
+# Maybe just use defaultdict?
+class MultiQueue:
+    """Mash-up between a dictionary and a list."""
+    def __init__(self):
+        self._data = collections.defaultdict(list)
+
+    def append(self, key, value):
+        self._data[key].append(value)
+
+    def pop(self, key, index=-1):
+        return self._data[key].pop(index)
+
+    def popfirst(self, key):
+        return self.pop(key, 0)
+
+
+def popwhen(predicate, iterable):
+    """Pop the first instance from iterable where predicate is ``True``."""
+    if not isinstance(iterable, list):
+        raise TypeError("Expecting iterable to be a list")
+
+    for i, item in enumerate(iterable):
+        if predicate(item):
+            return iterable.pop(i)
+    raise KeyError("Predicate does not hold for any items in iterable")

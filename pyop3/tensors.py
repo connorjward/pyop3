@@ -1272,6 +1272,10 @@ class Range(TypedIndex):
         self.size = size
         super().__init__(part_label, id=id)
 
+    @property
+    def consumed_labels(self):
+        return (self.part_label,)
+
 
 # TODO: need to think about what happens when the map transforms multiple indices
 class Map(TypedIndex):
@@ -1887,7 +1891,6 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
             for multi_idx in multi_indicess
             for multi_idx_ in self._extend_multi_index(multi_idx)
         ))
-        # import pdb; pdb.set_trace()
 
         # NOTE: indices should not be a property of this data structure. The indices
         # are only relevant for codegen so I think an IndexedMultiArray or similar would

@@ -6,7 +6,8 @@ import numbers
 import enum
 import functools
 import itertools
-from typing import Dict, Any, Tuple, FrozenSet
+
+from typing import Dict, Any, Tuple, FrozenSet, Sequence, Optional
 
 import loopy as lp
 import loopy.symbolic
@@ -99,6 +100,17 @@ def to_c(expr):
     return lp.generate_code_v2(program).device_code()
 
 
+@dataclasses.dataclass
+class IndexRegistryItem:
+    index: TypedIndex
+    iname: str
+    jnames: Sequence[str]
+    is_loop_index: bool = False
+    registry: Optional[Sequence["IndexRegistryItem"]] = None
+    """Need this if we have maps."""
+    within_inames: FrozenSet = frozenset()
+
+
 class LoopyKernelBuilder:
     def __init__(self):
         self._namer = MultiNameGenerator()
@@ -144,7 +156,10 @@ class LoopyKernelBuilder:
         raise TypeError
 
     @_build.register
-    def _(self, expr: exprs.Loop, active_inames=(), within_inames=frozenset(), loop_indices=frozenset()):
+    def _(self, expr: exprs.Loop, index_registry=None, loop_indices=frozenset()):
+        if not index_registry:
+            index_registry = []
+
         multi_indices = expr.index
         assert isinstance(multi_indices, MultiIndexCollection)
 
@@ -157,18 +172,15 @@ class LoopyKernelBuilder:
             """)
 
         # save these as they are needed fresh per-loop
-        outer_active_inames = active_inames
-        outer_within_inames = within_inames
         outer_loop_indices = loop_indices
 
         for multi_idx in multi_indices:
             # 1. register loops
-            loop_indices = outer_loop_indices | self.collect_loop_indices(multi_idx)
+            # loop_indices = outer_loop_indices | self.collect_loop_indices(multi_idx)
 
-            # pass mutable things through
-            active_inames = list(outer_active_inames)
-            within_inames = set(outer_within_inames)
-            self.register_loops2(multi_idx, active_inames, within_inames, loop_indices)
+            new_index_registry = self.register_loops2(multi_idx, index_registry, True)
+
+            # import pdb; pdb.set_trace()
 
             # 2. emit instructions
             # we need to build a separate set of instructions for each multi-index
@@ -176,7 +188,7 @@ class LoopyKernelBuilder:
             # e.g. if we are looping over interior facets of an extruded mesh - the
             # iterset is two multi-indices: edges+hfacets and verts+vfacets
             for stmt in expr.statements:
-                self._build(stmt, active_inames, within_inames, loop_indices)
+                self._build(stmt, new_index_registry)
 
 
     def collect_loop_indices(self, multi_index):
@@ -188,13 +200,30 @@ class LoopyKernelBuilder:
         return frozenset(loop_indices)
 
 
-    def register_loops2(self, indices: MultiIndex, active_inames, within_inames, loop_indices):
-        old_active_inames = active_inames.copy()
-        """This is the key issue - how do we know what to consume/keep/pass back?
-        What is the right algorithm approach?
-        """
+    # index registry is just a list of IndexRegistryEntry items
+    def register_loops2(self, multi_index, index_registry, called_by_loop):
+        # import pdb; pdb.set_trace()
+        eaten_registry = index_registry.copy()
+        # 1. partition the existing index registry
+        registry_per_index = {}
+        for typed_idx in multi_index:
+            registry = []
+            for part_label in typed_idx.consumed_labels:
+                try:
+                    item = utils.popwhen(
+                        lambda entry: entry.index.part_label == part_label, eaten_registry)
+                    registry.append(item)
+                except KeyError:
+                    pass
+            registry_per_index[typed_idx] = registry
 
-        for typed_idx in indices:
+        # 2. construct a new index registry
+        new_registry = []
+        for typed_idx in multi_index:
+            if typed_idx in (entry.index for entry in index_registry):
+                new_registry.extend(registry_per_index[typed_idx])
+                continue
+
             if isinstance(typed_idx, Map):
                 """
                 if we hit a map we want to handle its from_multi_index first, then
@@ -210,35 +239,45 @@ class LoopyKernelBuilder:
                 account for the number that are consumed. This is different to depth
                 I think.
                 """
-                active_inames2 = [old_active_inames.pop(0) for _ in range(typed_idx.consumed_inames)]
-                self.register_loops2(typed_idx.from_multi_index, active_inames2, within_inames, loop_indices)
+                sub_registry = self.register_loops2(
+                    typed_idx.from_multi_index, registry_per_index[typed_idx], called_by_loop)
+            else:
+                sub_registry = None
 
             # do this before creating the new iname
+            # FIXME shouldn't this use the stuff from the map if required?
             extent = self.register_extent(
                 typed_idx.size,
-                active_inames,
-                within_inames,
+                new_registry,
+                # within_inames,
             )
 
-            new_inames = tuple(self._namer.next("i") for _ in range(typed_idx.depth))
-            active_inames += new_inames
+            # each index can only emit a single new loop
+            iname = self._namer.next("i")
+            # but can yield depth-many new jnames (which are pretend inames)
+            jnames = tuple(self._namer.next("j") for _ in range(typed_idx.depth))
 
-            # only the last "new iname" actually results in a loop getting made
-            iname_that_actually_yields_a_loop = new_inames[-1]
-            within_inames |= {iname_that_actually_yields_a_loop}
-
-            domain_str = f"{{ [{iname_that_actually_yields_a_loop}]: 0 <= {iname_that_actually_yields_a_loop} < {extent} }}"
+            domain_str = f"{{ [{iname}]: 0 <= {iname} < {extent} }}"
             self.domains.append(domain_str)
-        return active_inames, within_inames, loop_indices
+
+            # import pdb; pdb.set_trace()
+            if sub_registry:
+                within_inames = frozenset({iname}) | {item for entry in sub_registry for item in entry.within_inames}
+            else:
+                within_inames = frozenset({iname})
+
+            registry_item = IndexRegistryItem(typed_idx, iname, jnames, is_loop_index=called_by_loop, registry=sub_registry, within_inames=within_inames)
+            new_registry.append(registry_item)
+        return new_registry
 
     @_build.register
-    def _(self, call: exprs.FunctionCall, active_inames, within_inames, loop_indices):
-        insns = self.expand_function_call(call, loop_indices)
+    def _(self, call: exprs.FunctionCall, index_registry):
+        insns = self.expand_function_call(call, index_registry)
 
         for insn in insns:
-            self._make_instruction_context(insn, active_inames, within_inames)
+            self._make_instruction_context(insn, index_registry)
 
-    def expand_function_call(self, call, loop_indices):
+    def expand_function_call(self, call, index_registry):
         """
         Turn an exprs.FunctionCall into a series of assignment instructions etc.
         Handles packing/accessor logic.
@@ -247,7 +286,7 @@ class LoopyKernelBuilder:
         temporaries = {}
         for arg in call.arguments:
             # create an appropriate temporary
-            dims = self._construct_temp_dims(arg.tensor.axes, arg.tensor.indices, loop_indices)
+            dims = self._construct_temp_dims(arg.tensor.axes, arg.tensor.indices, index_registry)
             temporary = MultiArray.new(
                 dims, name=self._temp_name_generator.next(), dtype=arg.tensor.dtype,
             )
@@ -262,7 +301,7 @@ class LoopyKernelBuilder:
 
         return (*gathers, newcall, *scatters)
 
-    def _construct_temp_dims(self, axis, multi_indices, loop_indices):
+    def _construct_temp_dims(self, axis, multi_indices, index_registry):
         """Return a multi-axis describing the temporary shape.
 
         Parameters
@@ -306,13 +345,13 @@ class LoopyKernelBuilder:
         # both the vertical and horizontal facets and these require separate multi-indices
         axis_parts = []
         for multi_idx in multi_indices:
-            axis_part = self.make_temp_axis_part_per_multi_index(multi_idx, loop_indices)
+            axis_part = self.make_temp_axis_part_per_multi_index(multi_idx, index_registry)
             axis_parts.append(axis_part)
 
         return MultiAxis(axis_parts).set_up()
 
     def make_temp_axis_part_per_multi_index(
-            self, multi_index, loop_indices, return_final_part_id=False):
+            self, multi_index, index_registry, return_final_part_id=False):
         """TODO
 
         Returns
@@ -326,12 +365,17 @@ class LoopyKernelBuilder:
         Wait! We should already have fully indexed the array so multi-index should be
         the right length.
         """
+        index_registry = index_registry.copy()
         idx, *subidxs = multi_index
-        has_scalar_shape = idx in loop_indices
+        try:
+            entry = utils.popwhen(lambda e: e.index == idx, index_registry)
+            has_scalar_shape = entry.is_loop_index
+        except KeyError:
+            has_scalar_shape = False
         new_part = AxisPart(idx.size, indexed=has_scalar_shape)
 
         if subidxs:
-            result = self.make_temp_axis_part_per_multi_index(subidxs, loop_indices, return_final_part_id=return_final_part_id)
+            result = self.make_temp_axis_part_per_multi_index(subidxs, index_registry, return_final_part_id=return_final_part_id)
             if return_final_part_id:
                 subpart, bottom_part_id = result
             else:
@@ -460,7 +504,7 @@ class LoopyKernelBuilder:
 
 
     @_make_instruction_context.register
-    def _(self, call: tlang.FunctionCall, active_inames, within_inames):
+    def _(self, call: tlang.FunctionCall, index_registry):
         subarrayrefs = {}
         for temp in utils.unique(itertools.chain(call.reads, call.writes)):
             temp_size = temp.axes.alloc_size
@@ -475,8 +519,9 @@ class LoopyKernelBuilder:
         for temp in utils.unique(itertools.chain(call.reads, call.writes)):
             extents |= self.collect_extents(
                 temp.root,
-                active_inames,
-                within_inames,
+                index_registry,
+                # active_inames,
+                # within_inames,
             )
 
         # NOTE: If we register an extent to pass through loopy will complain
@@ -492,6 +537,12 @@ class LoopyKernelBuilder:
         depends_on = frozenset({self._latest_insn[id] for id in call.depends_on})
         # within_inames = frozenset(within_loops.values())
 
+        within_inames = functools.reduce(
+            frozenset.__or__,
+            [entry.within_inames for entry in index_registry
+             if entry.is_loop_index]
+        )
+
         call_insn = lp.CallInstruction(
             assignees,
             expression,
@@ -505,23 +556,17 @@ class LoopyKernelBuilder:
         self.subkernels.append(call.function.code)
         self._latest_insn[call.id] = insn_id
 
-    def collect_extents(self, axis, active_inames, within_inames, depth=0):
+    def collect_extents(self, axis, index_registry, depth=0):
         extents = {}
 
         for part in axis.parts:
             if isinstance(part.count, MultiArray) and not part.indexed:
                 assert depth >= 1
-                # I think we should be truncating here, register_scalar_assignment may be wrong
-                # somehow
-                # useable_jnames = jnames[:depth]
-                # useable_inames = within_inames[:depth]
-                useable_jnames = active_inames
-                useable_inames = within_inames
-                extent = self.register_scalar_assignment(part.count, useable_jnames, useable_inames)
+                extent = self.register_scalar_assignment(part.count, index_registry)
                 extents[part.count] = extent
 
             if part.subaxis:
-                extents_ = self.collect_extents(part.subaxis, active_inames, within_inames, depth+1)
+                extents_ = self.collect_extents(part.subaxis, index_registry, depth+1)
                 if any(array in extents for array in extents_):
                     raise ValueError("subaxes should not be using the same nnz structures (I think)")
                 extents |= extents_
@@ -529,13 +574,12 @@ class LoopyKernelBuilder:
         return extents
 
     @_make_instruction_context.register
-    def _(self, assignment: tlang.Assignment, active_inames, within_inames):
-        active_inames, within_inames = self.register_loops(assignment.indices, active_inames, within_inames)
+    def _(self, assignment: tlang.Assignment, index_registry):
+        new_registry = self.register_loops2(assignment.indices, index_registry, False)
 
-        # import pdb; pdb.set_trace()
-        self._generate_assignment_insn(assignment, active_inames, within_inames)
+        self._generate_assignment_insn(assignment, new_registry)
 
-    def _generate_assignment_insn(self, assignment, jnames, within_inames, scalar=False):
+    def _generate_assignment_insn(self, assignment, index_registry, scalar=False):
         # import pdb; pdb.set_trace()
         self._active_insn = assignment
 
@@ -551,21 +595,28 @@ declared. we just need to traverse properly to check that we have the right numb
 
         # we don't always need all the indices (e.g. if we permute the inner dimension)
         # just use the first n outer ones
-        depth = len(assignment.indices.typed_indices)
-        jnames = jnames[-depth:]
+        # depth = len(assignment.indices.typed_indices)
+        # jnames = jnames[-depth:]
 
         # import pdb; pdb.set_trace()
         # depends_on = depends_on | {f"{dep}*" for dep in assignment.depends_on}
 
+        index_registry_copy = index_registry.copy()
+        selected = [utils.popwhen(lambda e: e.index == idx, index_registry_copy)
+                    for idx in assignment.indices]
+
+        within_inames = functools.reduce(frozenset.__or__, [e.within_inames for e in selected])
+
         # 2. Generate map code
-        lpnames, ljnames = self.generate_index_insns(assignment.indices, jnames, assignment.lhs.name, assignment, within_inames)
+        lpnames, ljnames = self.generate_index_insns(assignment.indices, index_registry, assignment.lhs.name, assignment, within_inames)
 
         # reset here to avoid loop clashes - these don't need to sync
         self._latest_insn.pop(self._active_insn.id)
 
-        rpnames, rjnames = self.generate_index_insns(assignment.indices, jnames, assignment.rhs.name, assignment, within_inames)
+        rpnames, rjnames = self.generate_index_insns(assignment.indices, index_registry, assignment.rhs.name, assignment, within_inames)
 
         # 3. Generate layout code
+        # import pdb; pdb.set_trace()
         loffset = self.make_offset_expr(
             assignment.lhs, lpnames, ljnames, f"{assignment.id}_loffset", within_inames,
         )
@@ -573,7 +624,6 @@ declared. we just need to traverse properly to check that we have the right numb
             assignment.rhs, rpnames, rjnames, f"{assignment.id}_roffset", within_inames,
         )
 
-        # import pdb; pdb.set_trace()
         # 4. Emit assignment instruction
         self.generate_assignment_insn(assignment, assignment.lhs, loffset,
                                       assignment.rhs, roffset,
@@ -825,7 +875,7 @@ declared. we just need to traverse properly to check that we have the right numb
         self.instructions.append(assign_insn)
         self._latest_insn[self._active_insn.id] = insn_id
 
-    def generate_index_insns(self, multi_index, inames, prefix, context, within_inames):
+    def generate_index_insns(self, multi_index, index_registry, prefix, context, within_inames):
         """This instruction needs to somehow traverse the indices and axes and probably
         return variable representing the parts and index name (NOT inames) for the LHS
         and RHS. Could possibly be done separately for each as the inames are known.
@@ -834,14 +884,15 @@ declared. we just need to traverse properly to check that we have the right numb
         it is a map then yield something like j0 = map0[i0, i1] (and generate the right
         instructions).
         """
-        # import pdb; pdb.set_trace()
-        # since popping (probably not so) - remove this line?
-        # inames = inames.copy()
+        registry = index_registry.copy()
 
         idx, *subidxs = multi_index
 
+        entry = utils.popwhen(lambda it: it.index == idx, registry)
+
         pname = self._namer.next(f"{prefix}_p")
-        jname = self._namer.next(f"{prefix}_j")
+        # jname = self._namer.next(f"{prefix}_j")
+        jnames = entry.jnames
 
         # not needed as can be done at top of loop
         depends_on = frozenset({self._latest_insn[id] for id in self._active_insn.depends_on})
@@ -854,24 +905,20 @@ declared. we just need to traverse properly to check that we have the right numb
             raise NotImplementedError("need to emit some clever code")
             assign_insn = ...
         else:
-            # if subidxs:
-            if False:
-                myinames = frozenset(within_inames[:-len(subidxs)])
-            else:
-                myinames = frozenset(within_inames)
-            iname, *subinames = inames
+            iname = entry.iname
             # TODO handle step sizes etc here
             part_insn = lp.Assignment(
                 pym.var(pname), idx.part_label,
                 id=self._namer.next(f"{context.id}_"),
-                within_inames=myinames,
+                within_inames=within_inames,
                 depends_on=depends_on,
                 # no_sync_with=no_sync_with,
             )
+            jname, = jnames
             index_insn = lp.Assignment(
                 pym.var(jname), pym.var(iname),
                 id=self._namer.next(f"{context.id}_"),
-                within_inames=myinames,
+                within_inames=within_inames,
                 depends_on=depends_on,
                 # no_sync_with=no_sync_with,
             )
@@ -886,7 +933,7 @@ declared. we just need to traverse properly to check that we have the right numb
         ])
 
         if subidxs:
-            subp, subj = self.generate_index_insns(subidxs, subinames, prefix, context, within_inames)
+            subp, subj = self.generate_index_insns(subidxs, registry, prefix, context, within_inames)
             return (pname,) + subp, (jname,) + subj
         else:
             return (pname,), (jname,)
@@ -956,19 +1003,20 @@ declared. we just need to traverse properly to check that we have the right numb
 
         return self.register_loops(indices, active_inames, within_inames, depth+1)
 
-    def register_extent(self, extent, jnames, within_inames):
+    def register_extent(self, extent, index_registry):
         if isinstance(extent, MultiArray):
             # If we have a ragged thing then we need to create a scalar temporary
             # to hold its value.
-            temp_var = self.register_scalar_assignment(extent, jnames, within_inames)
+            temp_var = self.register_scalar_assignment(extent, index_registry)
             return str(temp_var)
         else:
             return extent
 
-    def register_scalar_assignment(self, array, jnames, within_inames):
+    def register_scalar_assignment(self, array, index_registry):
         # import pdb; pdb.set_trace()
         temp_name = self._namer.next("n")
         # need to create a scalar multi-axis with the same depth
+        # TODO is it not better to just "fully index" this thing?
         tempid = "mytempid" + str(0)
         tempaxis = MultiAxis([AxisPart(1, id=tempid)])
         oldtempid = tempid
@@ -992,7 +1040,7 @@ declared. we just need to traverse properly to check that we have the right numb
         else:
             depends_on = frozenset()
         insn = tlang.Read(array, temp, array.indices.multi_indices[0], depends_on=depends_on)
-        self._generate_assignment_insn(insn, jnames, within_inames, scalar=True)
+        self._generate_assignment_insn(insn, index_registry, scalar=True)
 
         # restore
         self._active_insn = old_assignment
