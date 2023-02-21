@@ -102,13 +102,17 @@ def to_c(expr):
 
 @dataclasses.dataclass
 class IndexRegistryItem:
-    index: TypedIndex
+    # index: TypedIndex
+    label: str
     iname: str
     jnames: Sequence[str]
     is_loop_index: bool = False
     registry: Optional[Sequence["IndexRegistryItem"]] = None
     """Need this if we have maps."""
     within_inames: FrozenSet = frozenset()
+
+    def __postinit__(self):
+        assert self.label is not None
 
 
 class LoopyKernelBuilder:
@@ -211,7 +215,7 @@ class LoopyKernelBuilder:
             for part_label in typed_idx.consumed_labels:
                 try:
                     item = utils.popwhen(
-                        lambda entry: entry.index.part_label == part_label, eaten_registry)
+                        lambda entry: entry.label == part_label, eaten_registry)
                     registry.append(item)
                 except KeyError:
                     pass
@@ -220,9 +224,13 @@ class LoopyKernelBuilder:
         # 2. construct a new index registry
         new_registry = []
         for typed_idx in multi_index:
-            if typed_idx in (entry.index for entry in index_registry):
+            # don't re-register loops (never failed to pop an index)
+            if len(registry_per_index[typed_idx]) == len(typed_idx.consumed_labels):
                 new_registry.extend(registry_per_index[typed_idx])
                 continue
+
+            # for now - not sure how to do this for partially indexed things
+            assert len(registry_per_index[typed_idx]) == 0
 
             if isinstance(typed_idx, Map):
                 """
@@ -266,7 +274,7 @@ class LoopyKernelBuilder:
             else:
                 within_inames = frozenset({iname})
 
-            registry_item = IndexRegistryItem(typed_idx, iname, jnames, is_loop_index=called_by_loop, registry=sub_registry, within_inames=within_inames)
+            registry_item = IndexRegistryItem(typed_idx.part_label, iname, jnames, is_loop_index=called_by_loop, registry=sub_registry, within_inames=within_inames)
             new_registry.append(registry_item)
         return new_registry
 
@@ -368,11 +376,11 @@ class LoopyKernelBuilder:
         index_registry = index_registry.copy()
         idx, *subidxs = multi_index
         try:
-            entry = utils.popwhen(lambda e: e.index == idx, index_registry)
+            entry = utils.popwhen(lambda e: e.label == idx.part_label, index_registry)
             has_scalar_shape = entry.is_loop_index
         except KeyError:
             has_scalar_shape = False
-        new_part = AxisPart(idx.size, indexed=has_scalar_shape)
+        new_part = AxisPart(idx.size, indexed=has_scalar_shape, label=idx.part_label)
 
         if subidxs:
             result = self.make_temp_axis_part_per_multi_index(subidxs, index_registry, return_final_part_id=return_final_part_id)
@@ -602,26 +610,26 @@ declared. we just need to traverse properly to check that we have the right numb
         # depends_on = depends_on | {f"{dep}*" for dep in assignment.depends_on}
 
         index_registry_copy = index_registry.copy()
-        selected = [utils.popwhen(lambda e: e.index == idx, index_registry_copy)
+        selected = [utils.popwhen(lambda e: e.label == idx.part_label, index_registry_copy)
                     for idx in assignment.indices]
 
         within_inames = functools.reduce(frozenset.__or__, [e.within_inames for e in selected])
 
         # 2. Generate map code
-        lpnames, ljnames = self.generate_index_insns(assignment.indices, index_registry, assignment.lhs.name, assignment, within_inames)
+        lpnames, ljnames = self.generate_index_insns(assignment.lhs.axes, assignment.indices, index_registry, assignment.lhs.name, assignment, within_inames)
 
         # reset here to avoid loop clashes - these don't need to sync
         self._latest_insn.pop(self._active_insn.id)
 
-        rpnames, rjnames = self.generate_index_insns(assignment.indices, index_registry, assignment.rhs.name, assignment, within_inames)
+        rpnames, rjnames = self.generate_index_insns(assignment.rhs.axes, assignment.indices, index_registry, assignment.rhs.name, assignment, within_inames)
 
         # 3. Generate layout code
         # import pdb; pdb.set_trace()
         loffset = self.make_offset_expr(
-            assignment.lhs, lpnames, ljnames, f"{assignment.id}_loffset", within_inames,
+            assignment.lhs, lpnames, index_registry, f"{assignment.id}_loffset", within_inames,
         )
         roffset = self.make_offset_expr(
-            assignment.rhs, rpnames, rjnames, f"{assignment.id}_roffset", within_inames,
+            assignment.rhs, rpnames, index_registry, f"{assignment.id}_roffset", within_inames,
         )
 
         # 4. Emit assignment instruction
@@ -660,7 +668,7 @@ declared. we just need to traverse properly to check that we have the right numb
         # else:
         #     no_sync_with = frozenset()
 
-    def make_offset_expr(self, array, part_names, jnames, insn_prefix, within_inames):
+    def make_offset_expr(self, array, part_names, index_registry, insn_prefix, within_inames):
         """create an instruction of the form
 
         off = 0
@@ -675,10 +683,7 @@ declared. we just need to traverse properly to check that we have the right numb
 
         returning the name of 'off'
         """
-        # if array.name == "dat1":
-        #     import pdb; pdb.set_trace()
-        assert len(part_names) == len(jnames)
-
+        # assert len(part_names) == len(jnames)
 
         # start at the root
         axis = array.axes
@@ -700,13 +705,13 @@ declared. we just need to traverse properly to check that we have the right numb
         stmts = [f"{offset_var_name} = 0 {{{inames_attr},dep={':'.join(depends_on)},id={init_insn_id}}}"]
         self._latest_insn[self._active_insn.id] = init_insn_id
 
-        new_stmts = self.make_offset_expr_inner(offset_var_name, axis, part_names, jnames, within_inames, insn_prefix)
+        new_stmts = self.make_offset_expr_inner(offset_var_name, axis, part_names, index_registry, within_inames, insn_prefix)
         stmts.extend(new_stmts)
         self.instructions.append("\n".join(stmts))
         return offset_var_name
 
     def make_offset_expr_inner(self, offset_var_name, axis, part_names,
-            jnames, within_inames, insn_prefix, depth=0):
+            index_registry, within_inames, insn_prefix, depth=0):
         assert axis.nparts > 0
 
         stmts = []
@@ -716,8 +721,9 @@ declared. we just need to traverse properly to check that we have the right numb
             if isinstance(axis.part.count, MultiArray) or (isinstance(axis.part.count, numbers.Integral) and axis.part.count > 1):
                 new_stmts = self.emit_layout_insns(
                     axis.part.layout_fn,
+                    0,  # not really a label
                     offset_var_name,
-                    jnames[:depth+1],
+                    index_registry,
                     within_inames,
                     insn_prefix,
                     depth
@@ -728,7 +734,7 @@ declared. we just need to traverse properly to check that we have the right numb
             subaxis = axis.part.subaxis
             if subaxis:
                 substmts = self.make_offset_expr_inner(offset_var_name,
-                        subaxis, part_names, jnames, within_inames, insn_prefix, depth+1)
+                        subaxis, part_names, index_registry, within_inames, insn_prefix, depth+1)
                 stmts.extend(substmts)
         else:
             for i, axis_part in enumerate(axis.parts):
@@ -745,7 +751,8 @@ declared. we just need to traverse properly to check that we have the right numb
 
                     newstmts = self.emit_layout_insns(
                         axis_part.layout_fn,
-                        offset_var_name, jnames[:depth+1], within_inames,
+                        i,  # not really a label
+                        offset_var_name, index_registry, within_inames,
                         insn_prefix, depth
                     )
                     stmts += newstmts
@@ -755,7 +762,7 @@ declared. we just need to traverse properly to check that we have the right numb
                 if subaxis:
                     newstmts = self.make_offset_expr_inner(
                         offset_var_name,
-                        subaxis, part_names, jnames, within_inames,
+                        subaxis, part_names, index_registry, within_inames,
                         insn_prefix, depth+1
                     )
                     stmts.extend(newstmts)
@@ -766,7 +773,7 @@ declared. we just need to traverse properly to check that we have the right numb
         # import pdb; pdb.set_trace()
         return stmts
 
-    def emit_layout_insns(self, layout_fn, offset_var, jnames, within_inames, insn_prefix, depth):
+    def emit_layout_insns(self, layout_fn, label, offset_var, index_registry, within_inames, insn_prefix, depth):
         """
         TODO
         """
@@ -783,7 +790,7 @@ declared. we just need to traverse properly to check that we have the right numb
 
         # TODO singledispatch!
         if isinstance(layout_fn, IndirectLayoutFunction):
-            layout_var = self.register_scalar_assignment(layout_fn.data, jnames, within_inames)
+            layout_var = self.register_scalar_assignment(layout_fn.data, index_registry)
 
             # generate the instructions
             stmts = [
@@ -800,12 +807,14 @@ declared. we just need to traverse properly to check that we have the right numb
             step = layout_fn.step
 
             if isinstance(start, MultiArray):
-                assert len(jnames) > 1
-                # must drop innermost index here as we don't want to index with it
-                start = self.register_scalar_assignment(layout_fn.start, jnames[:-1], within_inames)
+                start = self.register_scalar_assignment(layout_fn.start, index_registry)
 
-            # iname = useable_inames[-1]
-            iname = jnames[-1]
+            # import pdb; pdb.set_trace()
+            # this isn't quite good enough - I would previously truncate this and always
+            # take the last entry. Here we hit duplicates. How do I distinguish the
+            # particular index entry that I want?
+            # entry = utils.single_valued(e for e in index_registry if e.index.part_label == label)
+            iname = index_registry[depth].iname
 
             stmts = [
                 f"{offset_var} = {offset_var} + {iname}*{step} + {start} "
@@ -875,7 +884,7 @@ declared. we just need to traverse properly to check that we have the right numb
         self.instructions.append(assign_insn)
         self._latest_insn[self._active_insn.id] = insn_id
 
-    def generate_index_insns(self, multi_index, index_registry, prefix, context, within_inames):
+    def generate_index_insns(self, axis, multi_index, index_registry, prefix, context, within_inames):
         """This instruction needs to somehow traverse the indices and axes and probably
         return variable representing the parts and index name (NOT inames) for the LHS
         and RHS. Could possibly be done separately for each as the inames are known.
@@ -888,7 +897,7 @@ declared. we just need to traverse properly to check that we have the right numb
 
         idx, *subidxs = multi_index
 
-        entry = utils.popwhen(lambda it: it.index == idx, registry)
+        entry = utils.popwhen(lambda it: it.label == idx.part_label, registry)
 
         pname = self._namer.next(f"{prefix}_p")
         # jname = self._namer.next(f"{prefix}_j")
@@ -899,6 +908,7 @@ declared. we just need to traverse properly to check that we have the right numb
         if self._active_insn.id in self._latest_insn:
             depends_on |= frozenset({self._latest_insn[self._active_insn.id]})
 
+        npart = [part.label for part in axis.parts].index(idx.part_label)
 
         if isinstance(idx, Map):
             map_inames, inames = inames[:idx.depth], inames[idx.depth:]
@@ -906,9 +916,8 @@ declared. we just need to traverse properly to check that we have the right numb
             assign_insn = ...
         else:
             iname = entry.iname
-            # TODO handle step sizes etc here
             part_insn = lp.Assignment(
-                pym.var(pname), idx.part_label,
+                pym.var(pname), npart,
                 id=self._namer.next(f"{context.id}_"),
                 within_inames=within_inames,
                 depends_on=depends_on,
@@ -933,7 +942,8 @@ declared. we just need to traverse properly to check that we have the right numb
         ])
 
         if subidxs:
-            subp, subj = self.generate_index_insns(subidxs, registry, prefix, context, within_inames)
+            assert axis.parts[npart].subaxis
+            subp, subj = self.generate_index_insns(axis.parts[npart].subaxis, subidxs, registry, prefix, context, within_inames)
             return (pname,) + subp, (jname,) + subj
         else:
             return (pname,), (jname,)
@@ -1013,7 +1023,6 @@ declared. we just need to traverse properly to check that we have the right numb
             return extent
 
     def register_scalar_assignment(self, array, index_registry):
-        # import pdb; pdb.set_trace()
         temp_name = self._namer.next("n")
         # need to create a scalar multi-axis with the same depth
         # TODO is it not better to just "fully index" this thing?

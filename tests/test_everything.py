@@ -137,13 +137,13 @@ def ragged_copy_kernel():
 
 
 def test_read_single_dim(scalar_copy_kernel):
-    axes = MultiAxis([AxisPart(10)]).set_up()
+    axes = MultiAxis([AxisPart(10, label="l1")]).set_up()
     dat1 = MultiArray.new(axes, name="dat1", data=np.arange(10, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
 
     p = MultiIndexCollection([
         MultiIndex([
-            Range(0, 10)
+            Range("l1", 10)
         ])
     ])
 

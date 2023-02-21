@@ -69,6 +69,9 @@ def pad(iterable, length, after=True, padding_value=None):
         return itertools.chain(missing, iterable)
 
 
+single_valued = pytools.single_valued
+
+
 def unique(iterable):
     unique_items = []
     for item in iterable:
