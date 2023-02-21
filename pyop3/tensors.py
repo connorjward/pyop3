@@ -1275,11 +1275,14 @@ class Range(TypedIndex):
 
 # TODO: need to think about what happens when the map transforms multiple indices
 class Map(TypedIndex):
-    fields = TypedIndex.fields | {"from_multi_index", "arity"}
+    fields = TypedIndex.fields | {"from_multi_index", "arity", "consumed_inames"}
 
-    def __init__(self, part_label, from_multi_index, arity, *, depth=1, id=None):
+    def __init__(self, part_label, from_multi_index, arity, *, depth=1, id=None, consumed_inames=1):
         self.from_multi_index = from_multi_index
         self.arity = arity
+        self.consumed_inames = consumed_inames
+        """This might differ from depth if we have, say, i0 = map(i1, i2)
+        (depth = 1, consumed_inames = 2)"""
         super().__init__(part_label, depth=depth, id=id)
 
     @property

@@ -159,10 +159,16 @@ class LoopyKernelBuilder:
         # save these as they are needed fresh per-loop
         outer_active_inames = active_inames
         outer_within_inames = within_inames
+        outer_loop_indices = loop_indices
 
         for multi_idx in multi_indices:
             # 1. register loops
-            active_inames, within_inames, loop_indices = self.register_loop_indices(multi_idx, outer_active_inames, outer_within_inames, loop_indices)
+            loop_indices = outer_loop_indices | self.collect_loop_indices(multi_idx)
+
+            # pass mutable things through
+            active_inames = list(outer_active_inames)
+            within_inames = set(outer_within_inames)
+            self.register_loops2(multi_idx, active_inames, within_inames, loop_indices)
 
             # 2. emit instructions
             # we need to build a separate set of instructions for each multi-index
@@ -173,7 +179,21 @@ class LoopyKernelBuilder:
                 self._build(stmt, active_inames, within_inames, loop_indices)
 
 
-    def register_loop_indices(self, indices: MultiIndex, active_inames, within_inames, loop_indices):
+    def collect_loop_indices(self, multi_index):
+        loop_indices = set()
+        for typed_idx in multi_index:
+            if isinstance(typed_idx, Map):
+                loop_indices |= self.collect_loop_indices(typed_idx.from_multi_index)
+            loop_indices |= {typed_idx}
+        return frozenset(loop_indices)
+
+
+    def register_loops2(self, indices: MultiIndex, active_inames, within_inames, loop_indices):
+        old_active_inames = active_inames.copy()
+        """This is the key issue - how do we know what to consume/keep/pass back?
+        What is the right algorithm approach?
+        """
+
         for typed_idx in indices:
             if isinstance(typed_idx, Map):
                 """
@@ -182,11 +202,16 @@ class LoopyKernelBuilder:
 
                 it will always yield depth-many active_inames and emit a single loop
                 of size arity.
-                """
-                # FIXME: I think this is in the wrong order here...
-                active_inames, within_inames, new_loop_indices = self.register_loop_indices(typed_idx.from_multi_index, active_inames, within_inames)
 
-                loop_indices |= new_loop_indices
+                No. Actually I think it will *consume* depth-many active_inames and
+                yield a single new active iname
+
+                No. It will yield that many active_inames but also need to somehow
+                account for the number that are consumed. This is different to depth
+                I think.
+                """
+                active_inames2 = [old_active_inames.pop(0) for _ in range(typed_idx.consumed_inames)]
+                self.register_loops2(typed_idx.from_multi_index, active_inames2, within_inames, loop_indices)
 
             # do this before creating the new iname
             extent = self.register_extent(
@@ -201,8 +226,6 @@ class LoopyKernelBuilder:
             # only the last "new iname" actually results in a loop getting made
             iname_that_actually_yields_a_loop = new_inames[-1]
             within_inames |= {iname_that_actually_yields_a_loop}
-
-            loop_indices |= {typed_idx}
 
             domain_str = f"{{ [{iname_that_actually_yields_a_loop}]: 0 <= {iname_that_actually_yields_a_loop} < {extent} }}"
             self.domains.append(domain_str)
@@ -318,7 +341,7 @@ class LoopyKernelBuilder:
             bottom_part_id = new_part.id
 
         if isinstance(idx, Map):
-            super_part, bottom_part_id = self.make_temp_axis_part_per_multi_index(idx.from_multi_index, return_final_part_id=True)
+            super_part, bottom_part_id = self.make_temp_axis_part_per_multi_index(idx.from_multi_index, loop_indices, return_final_part_id=True)
             # wont work as need part IDs
             new_part = super_part.add_subaxis(bottom_part_id, MultiAxis([new_part]))
 
