@@ -265,7 +265,7 @@ class LoopyKernelBuilder:
                 domain_str = f"{{ [{iname}]: 0 <= {iname} < {extent} }}"
                 self.domains.append(domain_str)
 
-                return {multi_index: inames}
+            return {multi_index: inames}
 
     @_build.register
     def _(self, call: exprs.FunctionCall, index_registry, loop_indices):
@@ -1188,7 +1188,8 @@ class LoopyKernelBuilder:
             # we can only index things with all or one of the inames
             assert len(inames) == array.depth
 
-        insn = tlang.Read(array, temp, array.indices.multi_indices[0], depends_on=depends_on)
+        indices = "not a thing here"
+        insn = tlang.Read(array, temp, indices, depends_on=depends_on)
         self.emit_assignment_insn(insn, None, None, None, inames, depends_on, within_inames, scalar=True)
 
         return pym.var(temp_name)
