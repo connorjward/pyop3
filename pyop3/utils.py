@@ -140,6 +140,9 @@ class MultiQueue:
     def __repr__(self):
         return f"{self.__class__}({self._data!r})"
 
+    def __getitem__(self, key):
+        return self._data[key]
+
     def append(self, key, value):
         self._data[key].append(value)
 

@@ -267,6 +267,7 @@ class LoopyKernelBuilder:
         temporaries = {}
         for arg in call.arguments:
             # create an appropriate temporary
+            # temporary = self._temp_name_generator.next()
             dims = self._construct_temp_dims(arg.tensor.axes, arg.tensor.indices, index_registry, loop_indices)
             temporary = MultiArray.new(
                 dims, name=self._temp_name_generator.next(), dtype=arg.tensor.dtype,
@@ -379,34 +380,6 @@ class LoopyKernelBuilder:
             raise NotImplementedError
 
         return top_part, current_bottom_part_id
-
-        index_registry = index_registry.copy()
-        idx, *subidxs = multi_index
-        try:
-            entry = utils.popwhen(lambda e: e.label == idx.part_label, index_registry)
-            has_scalar_shape = entry.is_loop_index
-        except KeyError:
-            has_scalar_shape = False
-        new_part = AxisPart(idx.size, indexed=has_scalar_shape, label=idx.part_label)
-
-        if subidxs:
-            result = self.make_temp_axis_part_per_multi_index_collection(
-                subidxs, index_registry, loop_indices, return_final_part_id=return_final_part_id)
-            if return_final_part_id:
-                subpart, bottom_part_id = result
-            else:
-                subpart = result
-            new_part = new_part.copy(subaxis=MultiAxis([subpart]))
-        else:
-            bottom_part_id = new_part.id
-
-        if isinstance(idx, Map):
-            raise NotImplementedError
-            # super_part, bottom_part_id = self.make_temp_axis_part_per_multi_index(idx.from_multi_index, loop_indices, return_final_part_id=True)
-            # # wont work as need part IDs
-            # new_part = super_part.add_subaxis(bottom_part_id, MultiAxis([new_part]))
-
-        return new_part, bottom_part_id
 
     def make_gathers(self, temporaries, **kwargs):
         return tuple(
@@ -529,28 +502,22 @@ class LoopyKernelBuilder:
 
     @_make_instruction_context.register
     def _(self, assignment: tlang.Assignment, index_registry, loop_indices):
-        index_registry = index_registry.copy()
-
-        for multi_idx in assignment.indices:
-            bitsandpieces = self.register_loops2(multi_idx, index_registry, loop_indices)
-
-            for midx, inames in bitsandpieces.items():
-                index_registry.append(midx, inames)
-
+        # index_registry = index_registry.copy()
+        #
+        # for multi_idx in assignment.indices:
+        #     bitsandpieces = self.register_loops2(multi_idx, index_registry, loop_indices)
+        #
+        #     for midx, inames in bitsandpieces.items():
+        #         index_registry.append(midx, inames)
+        #
         self._generate_assignment_insn(assignment, index_registry, loop_indices)
 
-    def _generate_assignment_insn(self, assignment, index_registry, loop_indices, scalar=False):
+    def _generate_assignment_insn(self, assignment, index_registry, loop_indices):
         # import pdb; pdb.set_trace()
 
         # validate that the number of inames specified is the right number for the
         # indexed structure provided
         # e.g. self.check_inames()
-        if any(isinstance(idx, Map) for idx in assignment.indices):
-            raise NotImplementedError("""
-not expected.
-we can only hit this situation with something like map composition where the inames are already
-declared. we just need to traverse properly to check that we have the right number of inames.
-            """)
 
         # we don't always need all the indices (e.g. if we permute the inner dimension)
         # just use the first n outer ones
@@ -559,26 +526,15 @@ declared. we just need to traverse properly to check that we have the right numb
 
         # import pdb; pdb.set_trace()
         depends_on = frozenset({f"{dep}_*" for dep in assignment.depends_on})
-
-        # index_registry_copy = index_registry.copy()
-        # selected = [utils.popwhen(lambda e: e.label == idx.part_label, index_registry_copy)
-        #             for idx in assignment.indices]
-        #
-        # within_inames = functools.reduce(frozenset.__or__, [e.within_inames for e in selected])
-        within_inames = NotImplemented
+        within_inames = self.collect_within_inames(MultiIndexCollection([]), index_registry, loop_indices)
 
         # 2. Generate map code
-        lpnames, ljnames = self.generate_index_insns(assignment.lhs.axes, assignment.indices, index_registry, assignment.lhs.name, assignment, within_inames)
+        # no - do in 1 pass
 
-        rpnames, rjnames = self.generate_index_insns(assignment.rhs.axes, assignment.indices, index_registry, assignment.rhs.name, assignment, within_inames)
-
-        within_inames = self.collect_within_inames(assignment.indices, index_registry, loop_indices)
-
-        self.emit_assignment_insn(assignment, lpnames, ljnames, rpnames, rjnames, depends_on, within_inames, scalar=scalar)
+        self.generate_index_insns(
+                assignment, index_registry, loop_indices, within_inames, depends_on)
 
     def collect_within_inames(self, multi_indices, index_registry, loop_indices):
-
-
         assert isinstance(multi_indices, MultiIndexCollection)
 
         index_registry = index_registry.copy()
@@ -616,8 +572,8 @@ declared. we just need to traverse properly to check that we have the right numb
 
     def emit_assignment_insn(
             self, assignment,
-            lpnames, ljnames, rpnames, rjnames, depends_on,
-            within_inames, scalar):
+            temp_pnames, temp_inames, array_pnames, array_inames, depends_on,
+            within_inames, scalar=False):
 
         """
         This needs to be a separate function because when we index things like layouts
@@ -627,18 +583,18 @@ declared. we just need to traverse properly to check that we have the right numb
 
         # 3. Generate layout code
         # import pdb; pdb.set_trace()
-        loffset, ldeps = self.make_offset_expr(
-            assignment.lhs, lpnames, ljnames, f"{assignment.id}_loffset", depends_on, within_inames,
+        toffset, tdeps = self.make_offset_expr(
+            assignment.temporary, temp_pnames, temp_inames, f"{assignment.id}_loffset", depends_on, within_inames,
         )
-        roffset, rdeps = self.make_offset_expr(
-            assignment.rhs, rpnames, rjnames, f"{assignment.id}_roffset", depends_on, within_inames,
+        aoffset, adeps = self.make_offset_expr(
+            assignment.tensor, array_pnames, array_inames, f"{assignment.id}_roffset", depends_on, within_inames,
         )
 
-        depends_on |= {*ldeps, *rdeps}
+        depends_on |= {*tdeps, *adeps}
 
         # 4. Emit assignment instruction
-        self.generate_assignment_insn_inner(assignment, assignment.lhs, loffset,
-                                      assignment.rhs, roffset,
+        self.generate_assignment_insn_inner(assignment, assignment.temporary, toffset,
+                                      assignment.tensor, aoffset,
                                       scalar=scalar, depends_on=depends_on, within_inames=within_inames)
 
         # Register data
@@ -829,39 +785,45 @@ declared. we just need to traverse properly to check that we have the right numb
     def generate_assignment_insn_inner(
             self,
             assignment,
-            lhs,
-            loffset,
-            rhs,
-            roffset,
+            temp,
+            toffset,
+            array,
+            aoffset,
             scalar,
             depends_on,
             within_inames,
         ):
         # the final instruction needs to come after all offset-determining instructions
 
-        # handle scalar assignment (for loop bounds)
+        # # handle scalar assignment (for loop bounds)
+        # if scalar:
+        #     if assignment.lhs == assignment.temporary:
+        #         loffset = None
+        #     else:
+        #         assert assignment.rhs == assignment.temporary
+        #         roffset = None
+
         if scalar:
-            if assignment.lhs == assignment.temporary:
-                loffset = None
-            else:
-                assert assignment.rhs == assignment.temporary
-                roffset = None
-
-        if loffset is None:
-            lexpr = pym.var(lhs.name)
+            texpr = pym.var(temp.name)
         else:
-            lexpr = pym.subscript(pym.var(lhs.name), pym.var(loffset))
+            texpr = pym.subscript(pym.var(temp.name), pym.var(toffset))
 
-        if roffset is None:
-            rexpr = pym.var(rhs.name)
-        else:
-            rexpr = pym.subscript(pym.var(rhs.name), pym.var(roffset))
+        aexpr = pym.subscript(pym.var(array.name), pym.var(aoffset))
 
         if isinstance(assignment, tlang.Zero):
-            # import pdb; pdb.set_trace()
+            lexpr = aexpr
             rexpr = 0
         elif isinstance(assignment, tlang.Increment):
-            rexpr = lexpr + rexpr
+            lexpr = aexpr
+            rexpr = aexpr + texpr
+        elif isinstance(assignment, tlang.Write):
+            lexpr = aexpr
+            rexpr = texpr
+        elif isinstance(assignment, tlang.Read):
+            lexpr = texpr
+            rexpr = aexpr
+        else:
+            raise NotImplementedError
 
         # there are no ordering restrictions between assignments to the
         # same temporary - but this is only valid to declare if multiple insns are used
@@ -885,9 +847,8 @@ declared. we just need to traverse properly to check that we have the right numb
             # no_sync_with=no_sync_with,
         )
         self.instructions.append(assign_insn)
-        # self._latest_insn[self._active_insn.id] = insn_id
 
-    def generate_index_insns(self, axis, multi_indices, index_registry, prefix, context, within_inames):
+    def generate_index_insns(self, assignment, index_registry, loop_indices, within_inames, depends_on):
         """This instruction needs to somehow traverse the indices and axes and probably
         return variable representing the parts and index name (NOT inames) for the LHS
         and RHS. Could possibly be done separately for each as the inames are known.
@@ -896,61 +857,134 @@ declared. we just need to traverse properly to check that we have the right numb
         it is a map then yield something like j0 = map0[i0, i1] (and generate the right
         instructions).
         """
-
+        multi_indices = assignment.indices
 
         """
-        Really the inames should already exist and be registered - here we only really
-        need to collect the ones that we want."""
+        we need assignment indices to be the full thing as we need to construct the
+        right temporary shape here - want to only do one traversal
+
+        but is that possible? emitting instructions requires the full temp thing but we
+        want to do that as we go...
+        """
 
         assert isinstance(multi_indices, MultiIndexCollection)
+        # assert all(isinstance(x, MultiIndexCollection) for x in multi_indices)
+
         index_registry = index_registry.copy()
 
+        current_axis = assignment.tensor.axes
+
+        temp_pnames = []  # do we ever need this? I think if we are multi-part innermost
+        temp_inames = []
+        array_pnames = []
+        array_inames = []
+
         # import pdb; pdb.set_trace()
+        for multi_idx in multi_indices:
+            assert isinstance(multi_idx, MultiIndex)
 
-        multi_idx, *submulti_indices = multi_indices
+            is_loop_index = multi_idx in loop_indices
 
-        pnames = [self._namer.next(f"{prefix}_p") for _ in range(len(multi_idx))]
-        inames = index_registry.pop(multi_idx)
+            if isinstance(multi_idx, Map):
+                raise NotImplementedError
 
-        assert len(pnames) == len(inames)
+            if is_loop_index:
+                inames_per_multi_idx, = index_registry[multi_idx]
+            else:
+                # need to register more inames here
+                # remember that array inames don't have to be actual inames
+                # if its a map or range with steps and starts
+                raise NotImplementedError
 
-        # not needed as can be done at top of loop
-        # depends_on = frozenset({self._latest_insn[id] for id in self._active_insn.depends_on})
-        # if self._active_insn.id in self._latest_insn:
-        #     depends_on |= frozenset({self._latest_insn[self._active_insn.id]})
+            for typed_idx, iname in utils.checked_zip(multi_idx, inames_per_multi_idx):
+                if is_loop_index:
+                    temp_pnames.append(None)
+                    temp_inames.append(None)
+                else:
+                    temp_inames.append(self._namer.next(f"{assignment.id}_temp_p"))
+                    temp_inames.append(iname)
 
-        # npart = [part.label for part in axis.parts].index(idx.part_label)
+                pname = self._namer.next(f"{assignment.id}_p")
+                array_pnames.append(pname)
 
-        # if isinstance(idx, Map):
-        #     raise NotImplementedError("need to emit some clever code")
-        #     map_inames, inames = inames[:idx.depth], inames[idx.depth:]
-        #     assign_insn = ...
-        # else:
-        #     iname = entry.iname
-        #     part_insn = lp.Assignment(
-        #         pym.var(pname), npart,
-        #         id=self._namer.next(f"{context.id}_"),
-        #         within_inames=within_inames,
-        #         depends_on=depends_on,
-        #         # no_sync_with=no_sync_with,
-        #     )
-        #     jname, = jnames
-        #     index_insn = lp.Assignment(
-        #         pym.var(jname), pym.var(iname),
-        #         id=self._namer.next(f"{context.id}_"),
-        #         within_inames=within_inames,
-        #         depends_on=depends_on,
-        #         # no_sync_with=no_sync_with,
-        #     )
-        # self.instructions.append(part_insn)
-        # self.instructions.append(index_insn)
-        #
-        # self._latest_insn[self._active_insn.id] = index_insn.id
-        #
-        # self._temp_kernel_data.extend([
-        #     lp.TemporaryVariable(name, shape=(), dtype=np.uintp)
-        #     for name in [jname, pname]
-        # ])
+                npart = [part.label for part in current_axis.parts].index(typed_idx.part_label)
+
+                array_iname = f"{iname}_{assignment.tensor.name}"
+                array_inames.append(array_iname)
+
+                part_insn = lp.Assignment(
+                    pym.var(pname), npart,
+                    id=self._namer.next(f"{assignment.id}_"),
+                    within_inames=within_inames,
+                    depends_on=depends_on,
+                    # no_sync_with=no_sync_with,
+                )
+                index_insn = lp.Assignment(
+                    # pym.var(array_iname), pym.var(iname)*typed_idx.step+typed_idx.start,
+                    pym.var(array_iname), pym.var(iname),
+                    id=self._namer.next(f"{assignment.id}_"),
+                    within_inames=within_inames,
+                    depends_on=depends_on,
+                    # no_sync_with=no_sync_with,
+                )
+
+                self.instructions.append(part_insn)
+                self.instructions.append(index_insn)
+                depends_on |= {part_insn.id, index_insn.id}
+
+                self._temp_kernel_data.extend([
+                    lp.TemporaryVariable(name, shape=(), dtype=np.uintp)
+                    for name in [array_iname, pname]
+                ])
+
+                current_axis = current_axis.parts[npart].subaxis
+
+            if current_axis:
+                raise NotImplementedError("need to handle missing shape")
+
+            self.emit_assignment_insn(
+                assignment, temp_pnames, temp_inames, array_pnames, array_inames,
+                depends_on, within_inames)
+
+            return
+
+            # not needed as can be done at top of loop
+            # depends_on = frozenset({self._latest_insn[id] for id in self._active_insn.depends_on})
+            # if self._active_insn.id in self._latest_insn:
+            #     depends_on |= frozenset({self._latest_insn[self._active_insn.id]})
+
+            # npart = [part.label for part in axis.parts].index(idx.part_label)
+
+            # if isinstance(idx, Map):
+            #     raise NotImplementedError("need to emit some clever code")
+            #     map_inames, inames = inames[:idx.depth], inames[idx.depth:]
+            #     assign_insn = ...
+            # else:
+            #     iname = entry.iname
+            #     part_insn = lp.Assignment(
+            #         pym.var(pname), npart,
+            #         id=self._namer.next(f"{context.id}_"),
+            #         within_inames=within_inames,
+            #         depends_on=depends_on,
+            #         # no_sync_with=no_sync_with,
+            #     )
+            #     jname, = jnames
+            #     index_insn = lp.Assignment(
+            #         pym.var(jname), pym.var(iname),
+            #         id=self._namer.next(f"{context.id}_"),
+            #         within_inames=within_inames,
+            #         depends_on=depends_on,
+            #         # no_sync_with=no_sync_with,
+            #     )
+            # self.instructions.append(part_insn)
+            # self.instructions.append(index_insn)
+            #
+            # self._latest_insn[self._active_insn.id] = index_insn.id
+            #
+            # self._temp_kernel_data.extend([
+            #     lp.TemporaryVariable(name, shape=(), dtype=np.uintp)
+            #     for name in [jname, pname]
+            # ])
 
         if submulti_indices:
             raise NotImplementedError
@@ -958,7 +992,11 @@ declared. we just need to traverse properly to check that we have the right numb
             subp, subi = self.generate_index_insns(axis.parts[npart].subaxis, subidxs, registry, prefix, context, within_inames)
             return pnames + subp, inames + subi
         else:
-            return pnames, inames
+            # wontwork - want to do inside here (at bottom of call stack)
+            self.emit_assignment_insn(
+                assignment, temp_pnames, temp_inames, array_pnames, array_jnames,
+                depends_on, within_inames, scalar=scalar)
+
 
     def register_loops(self, indices, active_inames, within_inames, depth=0):
         """
