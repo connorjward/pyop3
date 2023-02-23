@@ -215,35 +215,12 @@ class LoopyKernelBuilder:
         return frozenset(loop_indices)
 
 
-    # index registry is just a list of IndexRegistryEntry items
     def register_loops2(self, multi_index, index_registry, loop_indices):
         """
         Register a bunch of loops related to a multi-index and return a mapping from index
         to inames
         """
-        # debug
-        assert not isinstance(loop_indices, bool)
-
         assert isinstance(multi_index, MultiIndex)
-
-        # import pdb; pdb.set_trace()
-        # eaten_registry = index_registry.copy()
-        # 1. partition the existing index registry
-        # registry_per_index = {}
-        # for typed_idx in multi_index:
-        #     registry = []
-        #     for part_label in typed_idx.consumed_labels:
-        #         try:
-        #             item = utils.popwhen(
-        #                 lambda entry: entry.label == part_label, eaten_registry)
-        #             registry.append(item)
-        #         except KeyError:
-        #             pass
-        #     registry_per_index[typed_idx] = registry
-
-        # 2. construct a new index registry
-        # new_registry = []
-
         if multi_index in loop_indices:
             return {}
 
@@ -273,61 +250,6 @@ class LoopyKernelBuilder:
         # import pdb; pdb.set_trace()
 
         return {multi_index: inames}
-
-        for typed_idx in multi_index:
-            # don't re-register loops (never failed to pop an index)
-            if len(registry_per_index[typed_idx]) == len(typed_idx.consumed_labels):
-                new_registry.extend(registry_per_index[typed_idx])
-                continue
-
-            # for now - not sure how to do this for partially indexed things
-            assert len(registry_per_index[typed_idx]) == 0
-
-            if isinstance(typed_idx, Map):
-                """
-                if we hit a map we want to handle its from_multi_index first, then
-                deal with it itself.
-
-                it will always yield depth-many active_inames and emit a single loop
-                of size arity.
-
-                No. Actually I think it will *consume* depth-many active_inames and
-                yield a single new active iname
-
-                No. It will yield that many active_inames but also need to somehow
-                account for the number that are consumed. This is different to depth
-                I think.
-                """
-                sub_registry = self.register_loops2(
-                    typed_idx.from_multi_index, registry_per_index[typed_idx], called_by_loop)
-            else:
-                sub_registry = None
-
-            # do this before creating the new iname
-            # FIXME shouldn't this use the stuff from the map if required?
-            extent = self.register_extent(
-                typed_idx.size,
-                new_registry,
-                # within_inames,
-            )
-
-            # each index can only emit a single new loop
-            iname = self._namer.next("i")
-            # but can yield depth-many new jnames (which are pretend inames)
-            jnames = tuple(self._namer.next("j") for _ in range(typed_idx.depth))
-
-            domain_str = f"{{ [{iname}]: 0 <= {iname} < {extent} }}"
-            self.domains.append(domain_str)
-
-            # import pdb; pdb.set_trace()
-            if sub_registry:
-                within_inames = frozenset({iname}) | {item for entry in sub_registry for item in entry.within_inames}
-            else:
-                within_inames = frozenset({iname})
-
-            registry_item = IndexRegistryItem(typed_idx.part_label, iname, jnames, is_loop_index=called_by_loop, registry=sub_registry, within_inames=within_inames)
-            new_registry.append(registry_item)
-        # return new_registry
 
     @_build.register
     def _(self, call: exprs.FunctionCall, index_registry, loop_indices):
@@ -433,7 +355,8 @@ class LoopyKernelBuilder:
         # axis might not be at the bottom so we'd need to shove on some extra shape
         # TODO: untested if multi-part
         if current_array_axis:
-            raise NotImplementedError("need to tackle trailing shape")
+            # oh this is elegant
+            top_temp_part = top_temp_part.add_subaxis(current_bottom_part_id, current_array_axis)
 
         return top_temp_part
 
@@ -814,7 +737,7 @@ declared. we just need to traverse properly to check that we have the right numb
             subaxis = axis.part.subaxis
             if subaxis:
                 substmts, deps = self.make_offset_expr_inner(offset_var_name,
-                        subaxis, part_names, inames, within_inames, insn_prefix, depth+1)
+                        subaxis, part_names, inames, depends_on, within_inames, insn_prefix, depth+1)
                 stmts.extend(substmts)
                 new_deps |= deps
         else:
@@ -844,7 +767,7 @@ declared. we just need to traverse properly to check that we have the right numb
                 if subaxis:
                     newstmts, deps = self.make_offset_expr_inner(
                         offset_var_name,
-                        subaxis, part_names, inames, within_inames,
+                        subaxis, part_names, inames, depends_on, within_inames,
                         insn_prefix, depth+1
                     )
                     stmts.extend(newstmts)
