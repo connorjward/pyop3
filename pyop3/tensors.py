@@ -1278,6 +1278,7 @@ class Range(TypedIndex):
 
 
 # TODO: need to think about what happens when the map transforms multiple indices
+# NO - a map is a multi-index!
 class Map(TypedIndex):
     fields = TypedIndex.fields | {"from_multi_index", "arity", "consumed_inames"}
 
@@ -1874,7 +1875,6 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         # collections- - needed for [closure(p), closure(p)] each of which returns
         # a list of multi-indices that need to be multiplicatively combined.
         # multi_indicess = self.merge_multiindicesss(multi_indicesss)
-        multi_indicess, = multi_indicesss  # for now assert length one
 
         # TODO Add support for already indexed items
         # This is complicated because additional indices should theoretically index
@@ -1886,17 +1886,21 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         # if not isinstance(indicess[0], collections.abc.Sequence):
         #     indicess = (indicess,)
         # import pdb; pdb.set_trace()
-        multi_indicess = MultiIndexCollection(tuple(
-            multi_idx_
-            for multi_idx in multi_indicess
-            for multi_idx_ in self._extend_multi_index(multi_idx)
-        ))
+
+        # Don't extend here because that won't work if we have multi-part bits that aren't
+        # indexed (i.e. "inside") - this approach would split them outside which we don't
+        # want. Instead we need to handle this later when we create the temporary.
+        # multi_indicess = MultiIndexCollection(tuple(
+        #     multi_idx_
+        #     for multi_idx in multi_indicess
+        #     for multi_idx_ in self._extend_multi_index(multi_idx)
+        # ))
 
         # NOTE: indices should not be a property of this data structure. The indices
         # are only relevant for codegen so I think an IndexedMultiArray or similar would
         # be better. It would also help if we wanted to swap out the data structure later
         # on (but naturally retain the same indices).
-        return self.copy(indices=multi_indicess)
+        return self.copy(indices=multi_indicesss)
 
     def _extend_multi_index(self, multi_index, axis=None):
         """Apply a multi-index to own axes and return a tuple of 'full' multi-indices.
@@ -2157,18 +2161,6 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
     def _merge_stencils(self, stencils1, stencils2):
         return _merge_stencils(stencils1, stencils2, self.dim)
-
-    def _compute_shapes(self, axis):
-        shapes = []
-        for part in axis.parts:
-            if isinstance(part, ScalarAxisPart):
-                shapes.append(())
-            elif part.subaxis:
-                for shape in self._compute_shapes(part.subaxis):
-                    shapes.append((part.size, *shape))
-            else:
-                shapes.append((part.size,))
-        return tuple(shapes)
 
 
 def indexed_shapes(tensor):

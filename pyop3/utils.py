@@ -1,4 +1,5 @@
 import collections
+import copy
 import itertools
 
 from mpi4py import MPI
@@ -128,8 +129,16 @@ def print_if_rank(rank, *args):
 # Maybe just use defaultdict?
 class MultiQueue:
     """Mash-up between a dictionary and a list."""
-    def __init__(self):
-        self._data = collections.defaultdict(list)
+    def __init__(self, data=None):
+        if not data:
+            data = collections.defaultdict(list)
+        self._data = data
+
+    def __str__(self):
+        return str(dict(self._data))
+
+    def __repr__(self):
+        return f"{self.__class__}({self._data!r})"
 
     def append(self, key, value):
         self._data[key].append(value)
@@ -139,6 +148,10 @@ class MultiQueue:
 
     def popfirst(self, key):
         return self.pop(key, 0)
+
+    def copy(self):
+        new_data = copy.deepcopy(self._data)
+        return MultiQueue(new_data)
 
 
 def popwhen(predicate, iterable):

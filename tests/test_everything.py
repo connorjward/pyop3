@@ -154,7 +154,7 @@ def test_read_single_dim(scalar_copy_kernel):
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
 
-    # import pdb; pdb.set_trace()
+    import pdb; pdb.set_trace()
 
     dll = compilemythings(exe)
     fn = getattr(dll, "mykernel")
