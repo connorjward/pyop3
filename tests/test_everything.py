@@ -152,11 +152,11 @@ def test_read_single_dim(scalar_copy_kernel):
     # produces a multi-index collection).
     expr = pyop3.Loop(p, scalar_copy_kernel(dat1[[p]], dat2[[p]]))
 
-    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
 
     # import pdb; pdb.set_trace()
 
-    dll = compilemythings(exe)
+    dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
     args = [dat1.data, dat2.data]
@@ -198,9 +198,11 @@ def test_compute_double_loop():
     ])
     expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
 
-    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
 
-    dll = compilemythings(exe)
+    import pdb; pdb.set_trace()
+
+    dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
     args = [dat1.data, dat2.data]

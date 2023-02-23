@@ -810,20 +810,17 @@ class LoopyKernelBuilder:
 
         aexpr = pym.subscript(pym.var(array.name), pym.var(aoffset))
 
-        if isinstance(assignment, tlang.Zero):
-            lexpr = aexpr
-            rexpr = 0
-        elif isinstance(assignment, tlang.Increment):
-            lexpr = aexpr
-            rexpr = aexpr + texpr
-        elif isinstance(assignment, tlang.Write):
+        if assignment.array is assignment.lhs:
             lexpr = aexpr
             rexpr = texpr
-        elif isinstance(assignment, tlang.Read):
+        else:
             lexpr = texpr
             rexpr = aexpr
-        else:
-            raise NotImplementedError
+
+        if isinstance(assignment, tlang.Zero):
+            rexpr = 0
+        elif isinstance(assignment, tlang.Increment):
+            rexpr = lexpr + rexpr
 
         # there are no ordering restrictions between assignments to the
         # same temporary - but this is only valid to declare if multiple insns are used
@@ -901,15 +898,33 @@ class LoopyKernelBuilder:
                     temp_pnames.append(None)
                     temp_inames.append(None)
                 else:
-                    temp_inames.append(self._namer.next(f"{assignment.id}_temp_p"))
+                    temp_pname = self._namer.next(f"{assignment.id}_temp_p")
+                    temp_pnames.append(temp_pname)
                     temp_inames.append(iname)
 
-                pname = self._namer.next(f"{assignment.id}_p")
+                    # if we are using a multi-index then the temporary part must be zero
+                    # since we don't permit multi-part (I think)
+                    # this isn't true at the top-most level
+                    tnpart = 0
+                    tpart_insn = lp.Assignment(
+                        pym.var(temp_pname), tnpart,
+                        id=self._namer.next(f"{assignment.id}_"),
+                        within_inames=within_inames,
+                        depends_on=depends_on,
+                        # no_sync_with=no_sync_with,
+                    )
+                    self.instructions.append(tpart_insn)
+                    self._temp_kernel_data.append([
+                        lp.TemporaryVariable(temp_pname, shape=(), dtype=np.uintp)
+                    ])
+                    depends_on |= {tpart_insn.id}
+
+                pname = self._namer.next(f"{assignment.array.name}_p")
                 array_pnames.append(pname)
 
                 npart = [part.label for part in current_axis.parts].index(typed_idx.part_label)
 
-                array_iname = f"{iname}_{assignment.tensor.name}"
+                array_iname = self._namer.next(f"{assignment.array.name}_i")
                 array_inames.append(array_iname)
 
                 part_insn = lp.Assignment(
@@ -940,63 +955,107 @@ class LoopyKernelBuilder:
                 current_axis = current_axis.parts[npart].subaxis
 
             if current_axis:
-                raise NotImplementedError("need to handle missing shape")
+                # diverge with sub-parts
+                self.generate_index_insns_without_indices(
+                    current_axis,
+                    assignment,
+                    temp_pnames.copy(),
+                    temp_inames.copy(),
+                    array_pnames.copy(),
+                    array_inames.copy(),
+                    depends_on,
+                    within_inames
+                )
+            else:
+                self.emit_assignment_insn(
+                    assignment, temp_pnames, temp_inames, array_pnames, array_inames,
+                    depends_on, within_inames)
 
-            self.emit_assignment_insn(
-                assignment, temp_pnames, temp_inames, array_pnames, array_inames,
-                depends_on, within_inames)
+    def generate_index_insns_without_indices(self, axis, assignment, tpnames, tinames,
+                                             apnames, ainames, depends_on, within_inames):
+        tpnames_outer = tpnames.copy()
+        tinames_outer = tinames.copy()
+        apnames_outer = apnames.copy()
+        ainames_outer = ainames.copy()
 
-            return
+        for npart, part in enumerate(axis.parts):
+            # generate loops
+            iname = self._namer.next("i")
+            extent = self.register_extent(
+                part.count,
+                "notathing",
+                # new_registry,
+                # within_inames,
+            )
+            domain_str = f"{{ [{iname}]: 0 <= {iname} < {extent} }}"
+            self.domains.append(domain_str)
 
-            # not needed as can be done at top of loop
-            # depends_on = frozenset({self._latest_insn[id] for id in self._active_insn.depends_on})
-            # if self._active_insn.id in self._latest_insn:
-            #     depends_on |= frozenset({self._latest_insn[self._active_insn.id]})
+            within_inames |= {iname}
 
-            # npart = [part.label for part in axis.parts].index(idx.part_label)
+            #############
 
-            # if isinstance(idx, Map):
-            #     raise NotImplementedError("need to emit some clever code")
-            #     map_inames, inames = inames[:idx.depth], inames[idx.depth:]
-            #     assign_insn = ...
-            # else:
-            #     iname = entry.iname
-            #     part_insn = lp.Assignment(
-            #         pym.var(pname), npart,
-            #         id=self._namer.next(f"{context.id}_"),
-            #         within_inames=within_inames,
-            #         depends_on=depends_on,
-            #         # no_sync_with=no_sync_with,
-            #     )
-            #     jname, = jnames
-            #     index_insn = lp.Assignment(
-            #         pym.var(jname), pym.var(iname),
-            #         id=self._namer.next(f"{context.id}_"),
-            #         within_inames=within_inames,
-            #         depends_on=depends_on,
-            #         # no_sync_with=no_sync_with,
-            #     )
-            # self.instructions.append(part_insn)
-            # self.instructions.append(index_insn)
-            #
-            # self._latest_insn[self._active_insn.id] = index_insn.id
-            #
-            # self._temp_kernel_data.extend([
-            #     lp.TemporaryVariable(name, shape=(), dtype=np.uintp)
-            #     for name in [jname, pname]
-            # ])
+            tpnames = tpnames_outer.copy()
+            tinames = tinames_outer.copy()
+            apnames = apnames_outer.copy()
+            ainames = ainames_outer.copy()
 
-        if submulti_indices:
-            raise NotImplementedError
-            assert axis.parts[npart].subaxis
-            subp, subi = self.generate_index_insns(axis.parts[npart].subaxis, subidxs, registry, prefix, context, within_inames)
-            return pnames + subp, inames + subi
-        else:
-            # wontwork - want to do inside here (at bottom of call stack)
-            self.emit_assignment_insn(
-                assignment, temp_pnames, temp_inames, array_pnames, array_jnames,
-                depends_on, within_inames, scalar=scalar)
+            tpname = self._namer.next(f"{assignment.temporary.name}_p")
+            tiname = self._namer.next(f"{assignment.temporary.name}_i")
+            apname = self._namer.next(f"{assignment.array.name}_p")
+            ainame = self._namer.next(f"{assignment.array.name}_i")
 
+            tpnames.append(tpname)
+            tinames.append(tiname)
+            apnames.append(apname)
+            ainames.append(ainame)
+
+            tpinsn = lp.Assignment(
+                pym.var(tpname), npart,
+                id=self._namer.next(f"{assignment.id}_"),
+                within_inames=within_inames,
+                depends_on=depends_on,
+                # no_sync_with=no_sync_with,
+            )
+            tiinsn = lp.Assignment(
+                pym.var(tiname), pym.var(iname),
+                id=self._namer.next(f"{assignment.id}_"),
+                within_inames=within_inames,
+                depends_on=depends_on,
+                # no_sync_with=no_sync_with,
+            )
+            apinsn = lp.Assignment(
+                pym.var(apname), npart,
+                id=self._namer.next(f"{assignment.id}_"),
+                within_inames=within_inames,
+                depends_on=depends_on,
+                # no_sync_with=no_sync_with,
+            )
+            aiinsn = lp.Assignment(
+                pym.var(ainame), pym.var(iname),
+                id=self._namer.next(f"{assignment.id}_"),
+                within_inames=within_inames,
+                depends_on=depends_on,
+                # no_sync_with=no_sync_with,
+            )
+
+            self.instructions.append(tpinsn)
+            self.instructions.append(tiinsn)
+            self.instructions.append(apinsn)
+            self.instructions.append(aiinsn)
+            depends_on |= {tpinsn.id, tiinsn.id, apinsn.id, aiinsn.id}
+
+            self._temp_kernel_data.extend([
+                lp.TemporaryVariable(name, shape=(), dtype=np.uintp)
+                for name in [tpname, tiname, apname, ainame]
+            ])
+
+            if not part.subaxis:
+                self.emit_assignment_insn(
+                    assignment, tpnames, tinames, apnames, ainames,
+                    depends_on, within_inames)
+            else:
+                # recurse
+                self.generate_index_insns_without_indices(part.subaxis, ...)
 
     def register_loops(self, indices, active_inames, within_inames, depth=0):
         """

@@ -38,6 +38,11 @@ class Assignment(Instruction):
         self.indices = indices
         super().__init__(**kwargs)
 
+    # better name
+    @property
+    def array(self):
+        return self.tensor
+
 
 class Read(Assignment):
     id_generator = NameGenerator("read")
