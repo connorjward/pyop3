@@ -21,7 +21,7 @@ import pyop3.utils
 from pyop3 import utils
 from pyop3.utils import MultiNameGenerator, NameGenerator, strictly_all
 from pyop3.utils import PrettyTuple, checked_zip, NameGenerator, rzip
-from pyop3.tensors import MultiArray, Map, MultiAxis, _compute_indexed_shape, _compute_indexed_shape2, AxisPart
+from pyop3.tensors import MultiArray, Map, MultiAxis, _compute_indexed_shape, _compute_indexed_shape2, AxisPart, TerminalMultiIndex
 from pyop3.tensors import index, MultiIndexCollection, MultiIndex, TypedIndex, AffineLayoutFunction, IndirectLayoutFunction
 
 
@@ -158,7 +158,10 @@ class LoopyKernelBuilder:
         raise TypeError
 
     @_build.register
-    def _(self, expr: exprs.Loop, index_registry=None, loop_indices=frozenset()):
+    def _(self, expr: exprs.Loop, index_registry=None, loop_indices=None):
+        if not loop_indices:
+            loop_indices = []
+
         # index_registry is a map from indices to inames
         if not index_registry:
             index_registry = utils.MultiQueue()
@@ -193,7 +196,7 @@ class LoopyKernelBuilder:
             for midx, inames in bitsandpieces.items():
                 index_registry.append(midx, inames)
 
-            loop_indices = outer_loop_indices | {multi_idx}
+            loop_indices = outer_loop_indices + self.collect_loop_indices(multi_idx)
 
             # new_index_registry = self.register_loops2(multi_idx, index_registry, True)
 
@@ -207,12 +210,11 @@ class LoopyKernelBuilder:
 
 
     def collect_loop_indices(self, multi_index):
-        loop_indices = []
-        for typed_idx in multi_index:
-            if isinstance(typed_idx, Map):
-                loop_indices |= self.collect_loop_indices(typed_idx.from_multi_index)
-            loop_indices.append(typed_idx)
-        return loop_indices
+        if isinstance(multi_index, Map):
+            return [multi_index] + self.collect_loop_indices(multi_index.from_multi_index)
+        else:
+            assert isinstance(multi_index, TerminalMultiIndex)
+            return [multi_index]
 
 
     def register_loops2(self, multi_index, index_registry, loop_indices):
@@ -224,10 +226,6 @@ class LoopyKernelBuilder:
         if multi_index in loop_indices:
             return {}
 
-        if isinstance(multi_index, Map):
-            # recurse
-            raise NotImplementedError
-
         within_inames = set()
         for idx in loop_indices:
             within_iname, = index_registry[idx]
@@ -237,30 +235,37 @@ class LoopyKernelBuilder:
         # hack for now - needs more thought
         depends_on = frozenset()
 
-        inames = []
-        for idx in multi_index:
+        if isinstance(multi_index, Map):
+            # recurse
+            extra_dict = self.register_loops2(multi_index.from_multi_index, index_registry, loop_indices)
+            inames = []
+            for _ in range(multi_index.depth):
+                # each index can only emit a single new loop
+                iname = self._namer.next("i")
+                inames.append(iname)
+            return {multi_index: inames} | extra_dict
+        else:
+            assert isinstance(multi_index, TerminalMultiIndex)
+            inames = []
+            for idx in multi_index:
 
-            # do this before creating the new iname
-            extent = self.register_extent(
-                idx.size,
-                inames,
-                within_inames,
-                depends_on,
-            )
+                # do this before creating the new iname
+                extent = self.register_extent(
+                    idx.size,
+                    inames,
+                    within_inames,
+                    depends_on,
+                )
 
-            # def register_extent(self, extent, inames, within_inames, depends_on):
+                # each index can only emit a single new loop
+                iname = self._namer.next("i")
+                inames.append(iname)
+                within_inames |= {iname}
 
-            # each index can only emit a single new loop
-            iname = self._namer.next("i")
-            inames.append(iname)
-            within_inames |= {iname}
+                domain_str = f"{{ [{iname}]: 0 <= {iname} < {extent} }}"
+                self.domains.append(domain_str)
 
-            domain_str = f"{{ [{iname}]: 0 <= {iname} < {extent} }}"
-            self.domains.append(domain_str)
-
-        # import pdb; pdb.set_trace()
-
-        return {multi_index: inames}
+                return {multi_index: inames}
 
     @_build.register
     def _(self, call: exprs.FunctionCall, index_registry, loop_indices):
@@ -361,8 +366,12 @@ class LoopyKernelBuilder:
                 top_temp_part = top_temp_part.add_subaxis(current_bottom_part_id, MultiAxis([temp_axis_part]))
                 current_bottom_part_id = bottom_part_id
 
-            for typed_idx in multi_idx:
-                current_array_axis = current_array_axis._parts_by_label[typed_idx.part_label].subaxis
+            if isinstance(multi_idx, Map):
+                current_array_axis = current_array_axis._parts_by_label[multi_idx.part_label].subaxis
+            else:
+                assert isinstance(multi_idx, TerminalMultiIndex)
+                for typed_idx in multi_idx:
+                    current_array_axis = current_array_axis._parts_by_label[typed_idx.part_label].subaxis
 
         # axis might not be at the bottom so we'd need to shove on some extra shape
         # TODO: untested if multi-part
@@ -378,15 +387,19 @@ class LoopyKernelBuilder:
         current_bottom_part_id = None
 
         if multi_index in loop_indices:
-            for typed_idx in multi_index:
-                new_part = AxisPart(typed_idx.size, indexed=True, label=typed_idx.part_label)
+            if isinstance(multi_index, Map):
+                return self.make_temp_axes_per_multi_index(multi_index.from_multi_index, index_registry, loop_indices)
+            else:
+                assert isinstance(multi_index, TerminalMultiIndex)
+                for typed_idx in multi_index:
+                    new_part = AxisPart(typed_idx.size, indexed=True, label=typed_idx.part_label)
 
-                if not top_part:
-                    top_part = new_part
-                    current_bottom_part_id = new_part.id
-                else:
-                    top_part = top_part.add_subaxis(current_bottom_part_id, MultiAxis([new_part]))
-                    current_bottom_part_id = new_part.id
+                    if not top_part:
+                        top_part = new_part
+                        current_bottom_part_id = new_part.id
+                    else:
+                        top_part = top_part.add_subaxis(current_bottom_part_id, MultiAxis([new_part]))
+                        current_bottom_part_id = new_part.id
         else:
             raise NotImplementedError
 

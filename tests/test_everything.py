@@ -15,6 +15,10 @@ from pyop3.mesh import *
 from pyop3.tensors import *
 
 
+# nasty hack because I changed names
+MultiIndex = TerminalMultiIndex
+
+
 """
 COMMON ERRORS
 -------------
@@ -915,9 +919,7 @@ def test_subset(scalar_copy_kernel):
     from_multi_index = MultiIndex([Range(0, 4)])
 
     p = MultiIndexCollection([
-        MultiIndex([
-            TabulatedMap(0, subset_array, from_multi_index, arity=1),
-        ])
+        TabulatedMap(0, subset_array, from_multi_index, arity=1),
     ])
     expr = pyop3.Loop(p, scalar_copy_kernel(dat1[[p]], dat2[[p]]))
 

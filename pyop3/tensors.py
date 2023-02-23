@@ -1277,18 +1277,50 @@ class Range(TypedIndex):
         return (self.part_label,)
 
 
+class MultiIndex(pytools.ImmutableRecord):
+    fields = {"id"}
+
+    _namer = NameGenerator("midx")
+
+    def __init__(self, id=None):
+        id = id or self._namer.next()
+        self.id = id
+
+
+class TerminalMultiIndex(MultiIndex):
+    fields = MultiIndex.fields | {"typed_indices"}
+
+    def __init__(self, typed_indices, id=None):
+        if any(not isinstance(idx, TypedIndex) for idx in typed_indices):
+            raise TypeError
+        self.typed_indices = tuple(typed_indices)
+        super().__init__(id=id)
+
+    def __iter__(self):
+        return iter(self.typed_indices)
+
+    def __len__(self):
+        return len(self.typed_indices)
+
+    @property
+    def depth(self):
+        return len(self.indices)
+
+
 # TODO: need to think about what happens when the map transforms multiple indices
-# NO - a map is a multi-index!
-class Map(TypedIndex):
-    fields = TypedIndex.fields | {"from_multi_index", "arity", "consumed_inames"}
+# NO - a map is a multi-index! is it??? why??? it yields multiple inames so it's a bit tricky
+class Map(MultiIndex):
+    fields = MultiIndex.fields | {"part_label", "depth", "from_multi_index", "arity", "consumed_inames"}
 
     def __init__(self, part_label, from_multi_index, arity, *, depth=1, id=None, consumed_inames=1):
+        self.part_label = part_label
+        self.depth = depth
         self.from_multi_index = from_multi_index
         self.arity = arity
         self.consumed_inames = consumed_inames
         """This might differ from depth if we have, say, i0 = map(i1, i2)
         (depth = 1, consumed_inames = 2)"""
-        super().__init__(part_label, depth=depth, id=id)
+        super().__init__(id)
 
     @property
     def size(self):
@@ -1338,25 +1370,6 @@ class TabulatedMap(Map):
 class AffineMap(Map):
     # TODO
     pass
-
-
-class MultiIndex(pytools.ImmutableRecord):
-    fields = {"typed_indices"}
-
-    def __init__(self, typed_indices):
-        if any(not isinstance(idx, TypedIndex) for idx in typed_indices):
-            raise TypeError
-        self.typed_indices = tuple(typed_indices)
-
-    def __iter__(self):
-        return iter(self.typed_indices)
-
-    def __len__(self):
-        return len(self.typed_indices)
-
-    @property
-    def depth(self):
-        return len(self.indices)
 
 
 class MultiIndexCollection(pytools.ImmutableRecord, abc.ABC):
@@ -1493,7 +1506,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         self.dim = dim
         # if not self._is_valid_indices(indices, dim.root):
         # assert all(self._is_valid_indices(idxs, dim) for idxs in indicess)
-        self.indices = indices or MultiIndexCollection(self._extend_multi_index(None))
+        self.indices = indices #or MultiIndexCollection(self._extend_multi_index(None))
 
         self.mesh = mesh
         self.dtype = np.dtype(dtype)  # since np.float64 is not actually the right thing
