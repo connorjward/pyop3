@@ -200,7 +200,7 @@ def test_compute_double_loop():
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
 
-    import pdb; pdb.set_trace()
+    # import pdb; pdb.set_trace()
 
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
@@ -350,19 +350,19 @@ def test_permuted_twice():
     ax2 = ax1.add_subaxis("p1", MultiAxis([AxisPart(3, id="p2", numbering=[2, 0, 1])]))
     ax3 = ax2.add_subaxis("p2", MultiAxis([AxisPart(2)])).set_up()
 
-    dat1 = MultiArray.new(ax3, name="dat1", data=np.arange(18, dtype=np.float64), dtype=np.float64)
+    dat1 = MultiArray.new(ax3, name="dat1", data=np.ones(18, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(ax3, name="dat2", data=np.zeros(18, dtype=np.float64), dtype=np.float64)
 
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 2 }",
-        "y[i] = x[i]",
+        "y[i] = x[i] + y[i]",
         [lp.GlobalArg("x", np.float64, (2,), is_input=True, is_output=False),
-        lp.GlobalArg("y", np.float64, (2,), is_input=False, is_output=True),],
+        lp.GlobalArg("y", np.float64, (2,), is_input=True, is_output=True),],
         target=lp.CTarget(),
         name="mylocalkernel",
         lang_version=(2018, 2),
     )
-    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.INC])
     p = MultiIndexCollection([
         MultiIndex([
             Range(0, 3),
@@ -474,7 +474,7 @@ def test_compute_double_loop_permuted_mixed():
     assert all(dat2.data == [0., 2., 3., 0., 5., 6., 0., 8., 9., 0.])
 
 
-def test_compute_double_loop_ragged():
+def test_compute_double_loop_ragged(scalar_copy_kernel):
     ax1 = MultiAxis([AxisPart(5, id="p1")])
 
     nnz = MultiArray.new(
@@ -486,24 +486,13 @@ def test_compute_double_loop_ragged():
     dat1 = MultiArray.new(ax2, name="dat1", data=np.ones(11, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(ax2, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
 
-    code = lp.make_kernel(
-        "{ [i]: 0 <= i < 1 }",
-        "y[i] = x[i] + y[i] + 1",
-        [lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
-        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
-        target=lp.CTarget(),
-        name="mylocalkernel",
-        lang_version=(2018, 2),
-    )
-    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-
     p = MultiIndexCollection([
         MultiIndex([
             Range(0, 5),
             Range(0, nnz),
         ])
     ])
-    expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
+    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[[p]], dat2[[p]]))
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     # dll = compilemythings(code, "XXtesting", True)
@@ -514,10 +503,9 @@ def test_compute_double_loop_ragged():
 
     args = [nnz.data, dat1.axes.part.subaxis.part.layout_fn.start.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
-
     fn(*(d.ctypes.data for d in args))
 
-    assert all(dat2.data == dat1.data + 1)
+    assert np.allclose(dat1.data, dat2.data)
 
 
 def test_doubly_ragged():

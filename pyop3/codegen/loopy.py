@@ -207,12 +207,12 @@ class LoopyKernelBuilder:
 
 
     def collect_loop_indices(self, multi_index):
-        loop_indices = set()
+        loop_indices = []
         for typed_idx in multi_index:
             if isinstance(typed_idx, Map):
                 loop_indices |= self.collect_loop_indices(typed_idx.from_multi_index)
-            loop_indices |= {typed_idx}
-        return frozenset(loop_indices)
+            loop_indices.append(typed_idx)
+        return loop_indices
 
 
     def register_loops2(self, multi_index, index_registry, loop_indices):
@@ -228,21 +228,32 @@ class LoopyKernelBuilder:
             # recurse
             raise NotImplementedError
 
+        within_inames = set()
+        for idx in loop_indices:
+            within_iname, = index_registry[idx]
+            within_inames |= {within_iname}
+        within_inames = frozenset(within_inames)
+
+        # hack for now - needs more thought
+        depends_on = frozenset()
+
         inames = []
         for idx in multi_index:
 
             # do this before creating the new iname
-            # FIXME shouldn't this use the stuff from the map if required?
             extent = self.register_extent(
                 idx.size,
-                "notathing",
-                # new_registry,
-                # within_inames,
+                inames,
+                within_inames,
+                depends_on,
             )
+
+            # def register_extent(self, extent, inames, within_inames, depends_on):
 
             # each index can only emit a single new loop
             iname = self._namer.next("i")
             inames.append(iname)
+            within_inames |= {iname}
 
             domain_str = f"{{ [{iname}]: 0 <= {iname} < {extent} }}"
             self.domains.append(domain_str)
@@ -450,12 +461,20 @@ class LoopyKernelBuilder:
         # we need to pass sizes through if they are only known at runtime (ragged)
         extents = {}
         # traverse the temporaries
+        inames = []
+        within_inames = set()
+        for idx in loop_indices:
+            within_inames_, = index_registry[idx]
+            inames.extend(within_inames_)
+            within_inames |= {*within_inames_}
+        within_inames = frozenset(within_inames)
+        depends_on = frozenset()  # might be wrong
         for temp in utils.unique(itertools.chain(call.reads, call.writes)):
             extents |= self.collect_extents(
                 temp.root,
-                index_registry,
-                # active_inames,
-                # within_inames,
+                inames,
+                within_inames,
+                depends_on,
             )
 
         # NOTE: If we register an extent to pass through loopy will complain
@@ -483,17 +502,17 @@ class LoopyKernelBuilder:
         self.instructions.append(call_insn)
         self.subkernels.append(call.function.code)
 
-    def collect_extents(self, axis, index_registry, depth=0):
+    def collect_extents(self, axis, inames, within_inames, depends_on, depth=0):
         extents = {}
 
         for part in axis.parts:
             if isinstance(part.count, MultiArray) and not part.indexed:
                 assert depth >= 1
-                extent = self.register_scalar_assignment(part.count, index_registry)
+                extent = self.register_scalar_assignment(part.count, inames[:depth], within_inames, depends_on)
                 extents[part.count] = extent
 
             if part.subaxis:
-                extents_ = self.collect_extents(part.subaxis, index_registry, depth+1)
+                extents_ = self.collect_extents(part.subaxis, inames, within_inames | {inames[depth]}, depends_on, depth+1)
                 if any(array in extents for array in extents_):
                     raise ValueError("subaxes should not be using the same nnz structures (I think)")
                 extents |= extents_
@@ -660,6 +679,8 @@ class LoopyKernelBuilder:
 
         stmts = [f"{offset_var_name} = 0 {{{inames_attr},dep={':'.join(depends_on)},id={init_insn_id}}}"]
 
+        depends_on |= {init_insn_id}
+
         new_stmts, new_deps = self.make_offset_expr_inner(offset_var_name, axis, part_names, inames, depends_on, within_inames, insn_prefix)
         stmts.extend(new_stmts)
         self.instructions.append("\n".join(stmts))
@@ -745,10 +766,12 @@ class LoopyKernelBuilder:
         insn_id = self._namer.next(insn_prefix)
         within_inames_attr = f"inames={':'.join(within_inames)}"
 
+        # import pdb; pdb.set_trace()
+
         # TODO singledispatch!
         if isinstance(layout_fn, IndirectLayoutFunction):
             # add 1 to depth here since we want to use the actual index for these, but not for start
-            layout_var = self.register_scalar_assignment(layout_fn.data, inames[:depth+1])
+            layout_var = self.register_scalar_assignment(layout_fn.data, inames[:depth+1], within_inames, depends_on)
 
             # generate the instructions
             stmts = [
@@ -765,7 +788,7 @@ class LoopyKernelBuilder:
             step = layout_fn.step
 
             if isinstance(start, MultiArray):
-                start = self.register_scalar_assignment(layout_fn.start, inames)
+                start = self.register_scalar_assignment(layout_fn.start, inames[:depth], within_inames, depends_on)
 
             # import pdb; pdb.set_trace()
             # this isn't quite good enough - I would previously truncate this and always
@@ -894,14 +917,11 @@ class LoopyKernelBuilder:
                 raise NotImplementedError
 
             for typed_idx, iname in utils.checked_zip(multi_idx, inames_per_multi_idx):
-                if is_loop_index:
-                    temp_pnames.append(None)
-                    temp_inames.append(None)
-                else:
-                    temp_pname = self._namer.next(f"{assignment.id}_temp_p")
-                    temp_pnames.append(temp_pname)
-                    temp_inames.append(iname)
+                temp_pname = self._namer.next(f"{assignment.id}_temp_p")
+                temp_pnames.append(temp_pname)
+                temp_inames.append(iname)
 
+                if not is_loop_index:
                     # if we are using a multi-index then the temporary part must be zero
                     # since we don't permit multi-part (I think)
                     # this isn't true at the top-most level
@@ -979,13 +999,18 @@ class LoopyKernelBuilder:
         ainames_outer = ainames.copy()
 
         for npart, part in enumerate(axis.parts):
+            tpnames = tpnames_outer.copy()
+            tinames = tinames_outer.copy()
+            apnames = apnames_outer.copy()
+            ainames = ainames_outer.copy()
+
             # generate loops
             iname = self._namer.next("i")
             extent = self.register_extent(
                 part.count,
-                "notathing",
-                # new_registry,
-                # within_inames,
+                tinames,
+                within_inames,
+                depends_on,
             )
             domain_str = f"{{ [{iname}]: 0 <= {iname} < {extent} }}"
             self.domains.append(domain_str)
@@ -993,11 +1018,6 @@ class LoopyKernelBuilder:
             within_inames |= {iname}
 
             #############
-
-            tpnames = tpnames_outer.copy()
-            tinames = tinames_outer.copy()
-            apnames = apnames_outer.copy()
-            ainames = ainames_outer.copy()
 
             tpname = self._namer.next(f"{assignment.temporary.name}_p")
             tiname = self._namer.next(f"{assignment.temporary.name}_i")
@@ -1122,17 +1142,14 @@ class LoopyKernelBuilder:
 
         return self.register_loops(indices, active_inames, within_inames, depth+1)
 
-    def register_extent(self, extent, index_registry):
+    def register_extent(self, extent, inames, within_inames, depends_on):
         if isinstance(extent, MultiArray):
-            raise NotImplementedError
-            # If we have a ragged thing then we need to create a scalar temporary
-            # to hold its value.
-            temp_var = self.register_scalar_assignment(extent, index_registry, within_inames)
+            temp_var = self.register_scalar_assignment(extent, inames, within_inames, depends_on)
             return str(temp_var)
         else:
             return extent
 
-    def register_scalar_assignment(self, array, inames, within_inames):
+    def register_scalar_assignment(self, array, inames, within_inames, depends_on):
         temp_name = self._namer.next("n")
         # need to create a scalar multi-axis with the same depth
         # TODO is it not better to just "fully index" this thing?
@@ -1151,18 +1168,15 @@ class LoopyKernelBuilder:
             dtype=np.int32,
         )
 
-        # track old assignment
-        old_assignment = self._active_insn
-
-        if self._active_insn:
-            depends_on = self._active_insn.depends_on
+        # make sure to use the right inames
+        if array.depth == 1:
+            inames = [inames[-1]]
         else:
-            depends_on = frozenset()
-        insn = tlang.Read(array, temp, array.indices.multi_indices[0], depends_on=depends_on)
-        self.emit_assignment_insn(insn, None, None, None, inames, within_inames, scalar=True)
+            # we can only index things with all or one of the inames
+            assert len(inames) == array.depth
 
-        # restore
-        self._active_insn = old_assignment
+        insn = tlang.Read(array, temp, array.indices.multi_indices[0], depends_on=depends_on)
+        self.emit_assignment_insn(insn, None, None, None, inames, depends_on, within_inames, scalar=True)
 
         return pym.var(temp_name)
 
