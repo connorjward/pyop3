@@ -1280,11 +1280,10 @@ class Range(TypedIndex):
 class MultiIndex(pytools.ImmutableRecord):
     fields = {"id"}
 
-    _namer = NameGenerator("midx")
+    namer = NameGenerator("midx")
 
     def __init__(self, id=None):
-        id = id or self._namer.next()
-        self.id = id
+        self.id = id or self.namer.next()
 
 
 class TerminalMultiIndex(MultiIndex):
@@ -1307,24 +1306,66 @@ class TerminalMultiIndex(MultiIndex):
         return len(self.indices)
 
 
-# TODO: need to think about what happens when the map transforms multiple indices
-# NO - a map is a multi-index! is it??? why??? it yields multiple inames so it's a bit tricky
-class Map(MultiIndex):
-    fields = MultiIndex.fields | {"part_label", "depth", "from_multi_index", "arity", "consumed_inames"}
+@dataclasses.dataclass(frozen=True)
+class Path:
+    # TODO Make a persistent dict?
+    from_axes: Tuple[Any]  # axis part IDs I guess
+    to_axess: Tuple[Any]  # axis part IDs I guess
+    selector: Optional[Any] = None
+    """The thing that chooses between the different possible output axes at runtime."""
 
-    def __init__(self, part_label, from_multi_index, arity, *, depth=1, id=None, consumed_inames=1):
-        self.part_label = part_label
-        self.depth = depth
-        self.from_multi_index = from_multi_index
-        self.arity = arity
-        self.consumed_inames = consumed_inames
-        """This might differ from depth if we have, say, i0 = map(i1, i2)
-        (depth = 1, consumed_inames = 2)"""
+    @property
+    def degree(self):
+        return len(self.to_axess)
+
+    @property
+    def to_axes(self):
+        if self.degree != 1:
+            raise RuntimeError("Only for degree 1 paths")
+        return self.to_axess[0]
+
+
+class Map(MultiIndex):
+    """
+    Map notes:
+
+    Rule 1:
+        A map can accept multiple multi-indices as input. If we have, for example,
+        star(closure(p)) then closure can yield a vertex, edge or cell and so star needs
+        to be able to handle each of these. Therefore, the map should have some sort of
+        mapping from input axis parts to possible output axis parts.
+    Rule 2:
+        A map can yield multiple multi-indices per input set of axis parts. Consider the
+        example given above. closure(p) yields a different multi-index depending on the type
+        of p.
+    Rule 3:
+        For each individual input axis part the map can, but rarely does, yield multiple
+        axis parts. This occurs for example with extruded meshes where cone(c) yields
+        (base_cell, extr_edge) and (base_vert, extr_edge). In these cases a selector
+        function needs to be provided that can be evaluated at runtime to determine which
+        needs to be used.
+    Rule 4:
+        The depth of the resulting multi-index does not need to be the same across
+        possible outputs.
+
+    Other observation:
+        A map can only have a single multi-index as an argument, but that multi-index
+        may be itself a map and hence obey the weird diverging structure described
+        above.
+    """
+
+    fields = MultiIndex.fields | {"paths", "from_index"}
+    namer = NameGenerator("map")
+
+    def __init__(self, paths, from_index, *, id=None):
+        self.paths = paths
+        self.from_index = from_index
         super().__init__(id)
 
     @property
-    def size(self):
-        return self.arity
+    def from_multi_index(self):
+        # alias, not sure which is better
+        return self.from_index
 
     # def __mul__(self, other):
     #     """The product of two maps produces a sparsity."""
@@ -1356,15 +1397,18 @@ class TabulatedMap(Map):
     """Map that uses a :class:`MultiArray` for relating input indices to a single output.
 
     Produces expressions of the form ``i = map[j, k, ...]``.
-
-    Can only have depth 1.
     """
     fields = Map.fields | {"data"}
-    depth = 1
 
-    def __init__(self, part_label, data, from_multi_index, arity, id=None):
+    def __init__(self, paths, from_index, data, *, id=None):
+        """
+        data: collection of multi-arrays, one per path
+        """
+        if len(paths) != len(data):
+            raise ValueError
+
         self.data = data
-        super().__init__(part_label, from_multi_index, arity, depth=self.__class__.depth, id=id)
+        super().__init__(paths, from_index, id=id)
 
 
 class AffineMap(Map):

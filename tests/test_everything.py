@@ -916,10 +916,11 @@ def test_subset(scalar_copy_kernel):
     subset_array = MultiArray.new(
         subset_axes, prefix="subset", data=np.array([2, 3, 5, 0], dtype=np.int32)
     )
-    from_multi_index = MultiIndex([Range(0, 4)])
 
+    from_multi_index = MultiIndex([Range(0, 4)])
+    path = Path((0,), ((0,),))  # maps from part 0 of the subset to part 0 of the dat
     p = MultiIndexCollection([
-        TabulatedMap(0, subset_array, from_multi_index, arity=1),
+        TabulatedMap((path,), from_multi_index, (subset_array,)),
     ])
     expr = pyop3.Loop(p, scalar_copy_kernel(dat1[[p]], dat2[[p]]))
 

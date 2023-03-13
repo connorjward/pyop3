@@ -211,7 +211,7 @@ class LoopyKernelBuilder:
 
     def collect_loop_indices(self, multi_index):
         if isinstance(multi_index, Map):
-            return [multi_index] + self.collect_loop_indices(multi_index.from_multi_index)
+            return [multi_index] + self.collect_loop_indices(multi_index.from_index)
         else:
             assert isinstance(multi_index, TerminalMultiIndex)
             return [multi_index]
@@ -221,6 +221,10 @@ class LoopyKernelBuilder:
         """
         Register a bunch of loops related to a multi-index and return a mapping from index
         to inames
+
+        TODO
+        This should be done as part of the same pass as the rest of the codegen! We can diverge
+        if we are looping over fancy maps
         """
         assert isinstance(multi_index, MultiIndex)
         if multi_index in loop_indices:
@@ -236,10 +240,14 @@ class LoopyKernelBuilder:
         depends_on = frozenset()
 
         if isinstance(multi_index, Map):
-            # recurse
-            extra_dict = self.register_loops2(multi_index.from_multi_index, index_registry, loop_indices)
+            if len(multi_index.paths) > 1:
+                raise NotImplementedError("wrong type of recursion for this - need to wrap "
+                                          "it all together")
+
+            extra_dict = self.register_loops2(multi_index.from_index, index_registry, loop_indices)
             inames = []
-            for _ in range(multi_index.depth):
+            path, = multi_index.paths
+            for _ in range(len(path.to_axes)):
                 # each index can only emit a single new loop
                 iname = self._namer.next("i")
                 inames.append(iname)
@@ -367,7 +375,12 @@ class LoopyKernelBuilder:
                 current_bottom_part_id = bottom_part_id
 
             if isinstance(multi_idx, Map):
-                current_array_axis = current_array_axis._parts_by_label[multi_idx.part_label].subaxis
+                if len(multi_idx.paths) > 1:
+                    raise NotImplementedError("need to branch recurse here")
+
+                # need this loop since a map can yield multiple axis parts
+                for part_label in multi_idx.paths[0].to_axes:
+                    current_array_axis = current_array_axis._parts_by_label[part_label].subaxis
             else:
                 assert isinstance(multi_idx, TerminalMultiIndex)
                 for typed_idx in multi_idx:
@@ -564,7 +577,7 @@ class LoopyKernelBuilder:
         # no - do in 1 pass
 
         self.generate_index_insns(
-                assignment, index_registry, loop_indices, within_inames, depends_on)
+                assignment, assignment.indices, assignment.tensor.axes, assignment.temporary.axes, index_registry, loop_indices, within_inames, depends_on)
 
     def collect_within_inames(self, multi_indices, index_registry, loop_indices):
         assert isinstance(multi_indices, MultiIndexCollection)
@@ -881,7 +894,15 @@ class LoopyKernelBuilder:
         )
         self.instructions.append(assign_insn)
 
-    def generate_index_insns(self, assignment, index_registry, loop_indices, within_inames, depends_on):
+    def generate_index_insns(
+            self,
+            assignment,
+            multi_indices, array_axis, temp_axis,
+            index_registry, loop_indices,
+            within_inames, depends_on,
+            temp_inames=PrettyTuple(),
+            array_inames=PrettyTuple(),
+    ):
         """This instruction needs to somehow traverse the indices and axes and probably
         return variable representing the parts and index name (NOT inames) for the LHS
         and RHS. Could possibly be done separately for each as the inames are known.
@@ -890,122 +911,98 @@ class LoopyKernelBuilder:
         it is a map then yield something like j0 = map0[i0, i1] (and generate the right
         instructions).
         """
-        multi_indices = assignment.indices
-
-        """
-        we need assignment indices to be the full thing as we need to construct the
-        right temporary shape here - want to only do one traversal
-
-        but is that possible? emitting instructions requires the full temp thing but we
-        want to do that as we go...
-        """
 
         assert isinstance(multi_indices, MultiIndexCollection)
-        # assert all(isinstance(x, MultiIndexCollection) for x in multi_indices)
 
         index_registry = index_registry.copy()
 
-        current_axis = assignment.tensor.axes
+        multi_idx, *subindices = multi_indices
 
-        temp_pnames = []  # do we ever need this? I think if we are multi-part innermost
-        temp_inames = []
-        array_pnames = []
-        array_inames = []
+        assert isinstance(multi_idx, MultiIndex)
 
-        # import pdb; pdb.set_trace()
-        for multi_idx in multi_indices:
-            assert isinstance(multi_idx, MultiIndex)
+        result = self.emit_index_insns_for_single_multi_index(assignment, multi_idx, index_registry, loop_indices, )
 
-            is_loop_index = multi_idx in loop_indices
+        for temp_pt_labels, array_pt_labels, temp_jnames, array_jnames, deps in result:
+            for temp_pt_label, array_pt_label in checked_zip(temp_pt_labels, array_pt_labels):
+                array_npart = [pt.label for pt in array_axis.parts].index(array_pt_label)
+                array_axis = array_axis.parts[array_npart].subaxis
+                temp_npart = [pt.label for pt in temp_axis.parts].index(temp_pt_label)
+                temp_axis = temp_axis.parts[temp_npart].subaxis
 
-            if isinstance(multi_idx, Map):
-                raise NotImplementedError
-
-            if is_loop_index:
-                inames_per_multi_idx, = index_registry[multi_idx]
+            if subindices:
+                self.generate_index_insns(
+                    assignment, subindices,
+                    array_axis, temp_axis,
+                    index_registry, loop_indices,
+                    within_inames, depends_on|deps,
+                    temp_jnames, array_jnames,
+                )
             else:
-                # need to register more inames here
-                # remember that array inames don't have to be actual inames
-                # if its a map or range with steps and starts
-                raise NotImplementedError
-
-            for typed_idx, iname in utils.checked_zip(multi_idx, inames_per_multi_idx):
-                temp_pname = self._namer.next(f"{assignment.id}_temp_p")
-                temp_pnames.append(temp_pname)
-                temp_inames.append(iname)
-
-                if not is_loop_index:
-                    # if we are using a multi-index then the temporary part must be zero
-                    # since we don't permit multi-part (I think)
-                    # this isn't true at the top-most level
-                    tnpart = 0
-                    tpart_insn = lp.Assignment(
-                        pym.var(temp_pname), tnpart,
-                        id=self._namer.next(f"{assignment.id}_"),
-                        within_inames=within_inames,
-                        depends_on=depends_on,
-                        # no_sync_with=no_sync_with,
-                    )
-                    self.instructions.append(tpart_insn)
-                    self._temp_kernel_data.append([
-                        lp.TemporaryVariable(temp_pname, shape=(), dtype=np.uintp)
-                    ])
-                    depends_on |= {tpart_insn.id}
-
-                pname = self._namer.next(f"{assignment.array.name}_p")
-                array_pnames.append(pname)
-
-                npart = [part.label for part in current_axis.parts].index(typed_idx.part_label)
-
-                array_iname = self._namer.next(f"{assignment.array.name}_i")
-                array_inames.append(array_iname)
-
-                part_insn = lp.Assignment(
-                    pym.var(pname), npart,
-                    id=self._namer.next(f"{assignment.id}_"),
-                    within_inames=within_inames,
-                    depends_on=depends_on,
-                    # no_sync_with=no_sync_with,
-                )
-                index_insn = lp.Assignment(
-                    # pym.var(array_iname), pym.var(iname)*typed_idx.step+typed_idx.start,
-                    pym.var(array_iname), pym.var(iname),
-                    id=self._namer.next(f"{assignment.id}_"),
-                    within_inames=within_inames,
-                    depends_on=depends_on,
-                    # no_sync_with=no_sync_with,
-                )
-
-                self.instructions.append(part_insn)
-                self.instructions.append(index_insn)
-                depends_on |= {part_insn.id, index_insn.id}
-
-                self._temp_kernel_data.extend([
-                    lp.TemporaryVariable(name, shape=(), dtype=np.uintp)
-                    for name in [array_iname, pname]
-                ])
-
-                current_axis = current_axis.parts[npart].subaxis
-
-            if current_axis:
-                # diverge with sub-parts
                 self.generate_index_insns_without_indices(
-                    current_axis,
+                    array_axis,
                     assignment,
-                    temp_pnames.copy(),
-                    temp_inames.copy(),
-                    array_pnames.copy(),
-                    array_inames.copy(),
-                    depends_on,
+                    temp_jnames,
+                    array_jnames,
+                    depends_on|deps,
                     within_inames
                 )
-            else:
-                self.emit_assignment_insn(
-                    assignment, temp_pnames, temp_inames, array_pnames, array_inames,
-                    depends_on, within_inames)
+
+    def emit_index_insns_for_single_multi_index(self, assignment, multi_idx, index_registry, loop_indices):
+        """
+        Returns
+        -------
+        An iterable of tuples of the form (temp_axis, array_axis, temp_jnames, array_jnames)
+        """
+        if is_loop_index := multi_idx in loop_indices:
+            inames_per_multi_idx, = index_registry[multi_idx]
+        else:
+            # need to register more inames here
+            # remember that array inames don't have to be actual inames
+            # if its a map or range with steps and starts
+            raise NotImplementedError
+
+        if isinstance(multi_idx, Map):
+            """
+            This is tricky because a map can take multiple inputs and yield > 1 output
+            per input. This requires a function like the following:
+
+                for path in map.paths:
+                    for possible_output in path.to_axess:
+                        # do something - recurse? pass current path and possible_output?
+            """
+            result = []
+
+            subresult = self.emit_index_insns_for_single_multi_index(
+                multi_idx.from_index,
+                array_axis=None,  # do not traverse the array axis
+            )
+            for tplabels, aplabels, tjnames, ajnames, deps in subresult:
+                selected_path = multi_idx.paths[aplabels]
+
+                if selected_path.selector:
+                    raise NotImplementedError("This is the right place to split codegen")
+
+                array_part_labels = selected_path.to_axes
+                array_jname = NotImplemented  # see register_terminal_multi_index
+                newthing = (tplabels, array_part_labels tjnames, array_jname, deps)
+                result.append(newthing)
+            return tuple(result)
+        else:
+            assert isinstance(multi_idx, TerminalMultiIndex)
+            result = self.register_terminal_multi_index(assignment, multi_idx, inames_per_multi_idx)
+            return (result,)
 
     def generate_index_insns_without_indices(self, axis, assignment, tpnames, tinames,
                                              apnames, ainames, depends_on, within_inames):
+        """ie do the bottom bit which isn't indexed
+
+        this should really be combined with the above function
+        """
+        if not axis:
+            self.emit_assignment_insn(
+                assignment, tpnames, tinames, apnames, ainames,
+                depends_on, within_inames)
+
         tpnames_outer = tpnames.copy()
         tinames_outer = tinames.copy()
         apnames_outer = apnames.copy()
@@ -1047,7 +1044,7 @@ class LoopyKernelBuilder:
                 id=self._namer.next(f"{assignment.id}_"),
                 within_inames=within_inames,
                 depends_on=depends_on,
-                # no_sync_with=no_sync_with,
+                # no_sync_with=no_sync_with,information
             )
             tiinsn = lp.Assignment(
                 pym.var(tiname), pym.var(iname),
@@ -1082,13 +1079,45 @@ class LoopyKernelBuilder:
                 for name in [tpname, tiname, apname, ainame]
             ])
 
-            if not part.subaxis:
-                self.emit_assignment_insn(
-                    assignment, tpnames, tinames, apnames, ainames,
-                    depends_on, within_inames)
-            else:
-                # recurse
-                self.generate_index_insns_without_indices(part.subaxis, ...)
+            # recurse
+            self.generate_index_insns_without_indices(part.subaxis, ...)
+
+    def register_terminal_multi_index(self, assignment, multi_idx, inames):
+        # Note: At the moment we are assuming that all of the loops have already
+        # been registered
+
+        assert len(inames) == len(multi_idx)
+
+        temp_pt_labels = []
+        temp_jnames = []
+        array_pt_labels = []
+        array_jnames = []
+        for typed_idx, iname in utils.checked_zip(multi_idx, inames):
+            array_jname = self._namer.next(f"{assignment.array.name}_j")
+
+            index_insn = lp.Assignment(
+                # pym.var(array_iname), pym.var(iname)*typed_idx.step+typed_idx.start,
+                pym.var(array_jname), pym.var(iname),
+                id=self._namer.next(f"{assignment.id}_"),
+                within_inames=within_inames,
+                depends_on=depends_on,
+                # no_sync_with=no_sync_with,
+            )
+
+            self.instructions.append(index_insn)
+            depends_on = frozenset({index_insn.id})
+
+            self._temp_kernel_data.extend([
+                lp.TemporaryVariable(name, shape=(), dtype=np.uintp)
+                for name in [array_iname]
+            ])
+
+            array_pt_labels.append(typed_idx.part_label)
+            array_jnames.append(array_jname)
+
+            temp_pt_labels.append(typed_idx.part_label)
+            temp_jnames.append(iname)
+        return tuple(temp_pt_labels), tuple(array_pt_labels), tuple(temp_jnames), tuple(array_jnames), depends_on
 
     def register_loops(self, indices, active_inames, within_inames, depth=0):
         """
