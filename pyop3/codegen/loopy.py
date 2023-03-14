@@ -617,30 +617,14 @@ class LoopyKernelBuilder:
 
     def emit_assignment_insn(
             self, assignment,
-            temp_pnames, temp_inames, array_pnames, array_inames, depends_on,
-            within_inames, scalar=False):
-
-        """
-        This needs to be a separate function because when we index things like layouts
-        and extents we already know that the shapes will agree (and they are single part)
-        so we just need to use the inames that we are given.
-        """
-
-        # 3. Generate layout code
-        # import pdb; pdb.set_trace()
-        toffset, tdeps = self.make_offset_expr(
-            assignment.temporary, temp_pnames, temp_inames, f"{assignment.id}_loffset", depends_on, within_inames,
-        )
-        aoffset, adeps = self.make_offset_expr(
-            assignment.tensor, array_pnames, array_inames, f"{assignment.id}_roffset", depends_on, within_inames,
-        )
-
-        depends_on |= {*tdeps, *adeps}
-
-        # 4. Emit assignment instruction
-        self.generate_assignment_insn_inner(assignment, assignment.temporary, toffset,
-                                      assignment.tensor, aoffset,
-                                      scalar=scalar, depends_on=depends_on, within_inames=within_inames)
+            array_offset, temp_offset,
+            within_inames, depends_on,
+            scalar=False
+    ):
+        self.generate_assignment_insn_inner(
+            assignment, assignment.temporary, temp_offset,
+            assignment.tensor, array_offset,
+            scalar=scalar, depends_on=depends_on, within_inames=within_inames)
 
         # Register data
         # TODO should only do once at a higher point
@@ -782,31 +766,21 @@ class LoopyKernelBuilder:
 
         return stmts, frozenset(new_deps)
 
-    def emit_layout_insns(self, layout_fn, label, offset_var, inames, depends_on, within_inames, insn_prefix, depth):
+    def emit_layout_insns(self, layout_fn, offset_var, jnames, within_inames, depends_on):
         """
         TODO
         """
         if layout_fn == "null layout":
-            return [], frozenset()
-
-        insn_id = self._namer.next(insn_prefix)
-        within_inames_attr = f"inames={':'.join(within_inames)}"
-
-        # import pdb; pdb.set_trace()
+            return frozenset()
 
         # TODO singledispatch!
         if isinstance(layout_fn, IndirectLayoutFunction):
             # add 1 to depth here since we want to use the actual index for these, but not for start
-            layout_var = self.register_scalar_assignment(layout_fn.data, inames[:depth+1], within_inames, depends_on)
-
-            # generate the instructions
-            stmts = [
-                f"{offset_var} = {offset_var} + {layout_var} "
-                f"{{{within_inames_attr},dep={':'.join(depends_on)},id={insn_id}}}"
-            ]
-
+            layout_var = self.register_scalar_assignment(layout_fn.data, jnames, within_inames, depends_on)
+            expr = pym.var(offset_var)+layout_var
 
             # register the data
+            # done in register_scalar_assignment?
             # layout_arg = lp.GlobalArg(layout_fn.data.name, np.uintp, (None,), is_input=True, is_output=False)
             # self._tensor_data[layout_fn.data.name] = layout_arg
         elif isinstance(layout_fn, AffineLayoutFunction):
@@ -814,22 +788,24 @@ class LoopyKernelBuilder:
             step = layout_fn.step
 
             if isinstance(start, MultiArray):
-                start = self.register_scalar_assignment(layout_fn.start, inames[:depth], within_inames, depends_on)
+                # drop the last jname
+                start = self.register_scalar_assignment(layout_fn.start, jnames[:-1], within_inames, depends_on)
 
-            # import pdb; pdb.set_trace()
-            # this isn't quite good enough - I would previously truncate this and always
-            # take the last entry. Here we hit duplicates. How do I distinguish the
-            # particular index entry that I want?
-            # entry = utils.single_valued(e for e in index_registry if e.index.part_label == label)
-            iname = inames[depth]
+            jname = pym.var(jnames[-1])
+            expr = pym.var(offset_var) + jname*step + start
+        else:
+            raise NotImplementedError
 
-            stmts = [
-                f"{offset_var} = {offset_var} + {iname}*{step} + {start} "
-                f"{{{within_inames_attr},dep={':'.join(depends_on)},id={insn_id}}}"
-            ]
+        insn = lp.Assignment(
+            offset_var, expr,
+            id=self._namer.next("insn"),
+            within_inames=within_inames,
+            depends_on=depends_on,
+        )
 
-        # self._latest_insn[self._active_insn.id] = insn_id
-        return stmts, frozenset({insn_id})
+        self.instructions.append(insn)
+
+        return frozenset({insn.id})
 
     def generate_assignment_insn_inner(
             self,
@@ -902,17 +878,37 @@ class LoopyKernelBuilder:
             within_inames, depends_on,
             temp_inames=PrettyTuple(),
             array_inames=PrettyTuple(),
+            array_offset=None,
+            temp_offset=None,
     ):
-        """This instruction needs to somehow traverse the indices and axes and probably
-        return variable representing the parts and index name (NOT inames) for the LHS
-        and RHS. Could possibly be done separately for each as the inames are known.
-
-        Something like 'if the index is not a map yield something equal to the iname, if
-        it is a map then yield something like j0 = map0[i0, i1] (and generate the right
-        instructions).
-        """
-
         assert isinstance(multi_indices, MultiIndexCollection)
+
+        if strictly_all(off is None for off in [array_offset, temp_offset]):
+            array_offset = f"{assignment.array.name}_ptr"
+            temp_offset = f"{assignment.temporary.name}_ptr"
+
+            self._temp_kernel_data.extend([
+                lp.TemporaryVariable(name, shape=(), dtype=np.uintp)
+                for name in [array_offset, temp_offset]
+            ])
+
+            array_offset_insn = lp.Assignment(
+                pym.var(array_offset), 0,
+                id=self._namer.next("insn"),
+                within_inames=within_inames,
+                depends_on=depends_on,
+            )
+            temp_offset_insn = lp.Assignment(
+                pym.var(temp_offset), 0,
+                id=self._namer.next("insn"),
+                within_inames=within_inames,
+                depends_on=depends_on,
+            )
+
+            self.instructions.append(array_offset_insn)
+            self.instructions.append(temp_offset_insn)
+
+            depends_on |= {array_offset_insn.id, temp_offset_insn.id}
 
         index_registry = index_registry.copy()
 
@@ -920,14 +916,35 @@ class LoopyKernelBuilder:
 
         assert isinstance(multi_idx, MultiIndex)
 
-        result = self.emit_index_insns_for_single_multi_index(assignment, multi_idx, index_registry, loop_indices, )
+        result = self.emit_index_insns_for_single_multi_index(
+            assignment, multi_idx, index_registry, loop_indices,
+            within_inames, depends_on,
+        )
 
         for temp_pt_labels, array_pt_labels, temp_jnames, array_jnames, deps in result:
-            for temp_pt_label, array_pt_label in checked_zip(temp_pt_labels, array_pt_labels):
+
+            for array_pt_label in array_pt_labels:
                 array_npart = [pt.label for pt in array_axis.parts].index(array_pt_label)
-                array_axis = array_axis.parts[array_npart].subaxis
+                array_part = array_axis.parts[array_npart]
+
+                deps = self.emit_layout_insns(
+                    array_part.layout_fn, array_offset, array_jnames,
+                    within_inames, depends_on, 
+                )
+                depends_on |= deps
+
+                array_axis = array_part.subaxis
+
+            for temp_pt_label in temp_pt_labels:
                 temp_npart = [pt.label for pt in temp_axis.parts].index(temp_pt_label)
-                temp_axis = temp_axis.parts[temp_npart].subaxis
+                temp_part = temp_axis.parts[temp_npart]
+
+                deps = self.emit_layout_insns(
+                    temp_part.layout_fn, temp_offset, temp_jnames,
+                    within_inames, depends_on, 
+                )
+                depends_on |= deps
+                temp_axis = temp_part.subaxis
 
             if subindices:
                 self.generate_index_insns(
@@ -936,18 +953,25 @@ class LoopyKernelBuilder:
                     index_registry, loop_indices,
                     within_inames, depends_on|deps,
                     temp_jnames, array_jnames,
+                    array_offset, temp_offset,
+                )
+            elif strictly_all(axis is not None for axis in [array_axis, temp_axis]):
+                raise NotImplementedError(
+                    "need to produce multiple subindices depending on multi-part-ness")
+                self.generate_index_insns(
+                    assignment, subindices,
+                    array_axis, temp_axis,
+                    index_registry, loop_indices,
+                    within_inames, depends_on|deps,
+                    temp_jnames, array_jnames,
                 )
             else:
-                self.generate_index_insns_without_indices(
-                    array_axis,
-                    assignment,
-                    temp_jnames,
-                    array_jnames,
-                    depends_on|deps,
-                    within_inames
-                )
+                # at the bottom
+                self.emit_assignment_insn(
+                    assignment, array_offset, temp_offset,
+                    within_inames, depends_on)
 
-    def emit_index_insns_for_single_multi_index(self, assignment, multi_idx, index_registry, loop_indices):
+    def emit_index_insns_for_single_multi_index(self, assignment, multi_idx, index_registry, loop_indices, within_inames, depends_on):
         """
         Returns
         -------
@@ -984,19 +1008,25 @@ class LoopyKernelBuilder:
 
                 array_part_labels = selected_path.to_axes
                 array_jname = NotImplemented  # see register_terminal_multi_index
-                newthing = (tplabels, array_part_labels tjnames, array_jname, deps)
+                newthing = (tplabels, array_part_labels, tjnames, array_jname, deps)
                 result.append(newthing)
             return tuple(result)
         else:
             assert isinstance(multi_idx, TerminalMultiIndex)
-            result = self.register_terminal_multi_index(assignment, multi_idx, inames_per_multi_idx)
+            result = self.register_terminal_multi_index(
+                assignment, multi_idx, inames_per_multi_idx,
+                within_inames, depends_on,
+            )
             return (result,)
 
-    def generate_index_insns_without_indices(self, axis, assignment, tpnames, tinames,
-                                             apnames, ainames, depends_on, within_inames):
+    def generate_index_insns_without_indices(
+            self, assignment,
+            temp_pt_labels, array_pt_labels,
+            temp_jnames, array_jnames,
+            depends_on, within_inames):
         """ie do the bottom bit which isn't indexed
 
-        this should really be combined with the above function
+        a lot of this should really be combined with the above function
         """
         if not axis:
             self.emit_assignment_insn(
@@ -1082,7 +1112,7 @@ class LoopyKernelBuilder:
             # recurse
             self.generate_index_insns_without_indices(part.subaxis, ...)
 
-    def register_terminal_multi_index(self, assignment, multi_idx, inames):
+    def register_terminal_multi_index(self, assignment, multi_idx, inames, within_inames, depends_on):
         # Note: At the moment we are assuming that all of the loops have already
         # been registered
 
@@ -1105,11 +1135,11 @@ class LoopyKernelBuilder:
             )
 
             self.instructions.append(index_insn)
-            depends_on = frozenset({index_insn.id})
+            new_deps = frozenset({index_insn.id})
 
             self._temp_kernel_data.extend([
                 lp.TemporaryVariable(name, shape=(), dtype=np.uintp)
-                for name in [array_iname]
+                for name in [array_jname]
             ])
 
             array_pt_labels.append(typed_idx.part_label)
@@ -1117,7 +1147,7 @@ class LoopyKernelBuilder:
 
             temp_pt_labels.append(typed_idx.part_label)
             temp_jnames.append(iname)
-        return tuple(temp_pt_labels), tuple(array_pt_labels), tuple(temp_jnames), tuple(array_jnames), depends_on
+        return tuple(temp_pt_labels), tuple(array_pt_labels), tuple(temp_jnames), tuple(array_jnames), new_deps
 
     def register_loops(self, indices, active_inames, within_inames, depth=0):
         """
@@ -1222,50 +1252,6 @@ class LoopyKernelBuilder:
         self.emit_assignment_insn(insn, None, None, None, inames, depends_on, within_inames, scalar=True)
 
         return pym.var(temp_name)
-
-    # I don't like needing the tensor here..  maybe I could attach the offset to the index?
-    # using from_dim
-    def handle_assignment(self, tensor, indices, within_loops):
-        index_expr = 0
-        mainoffset = 0
-
-        for axis, idx in zip(tensor.select_axes(indices), indices):
-            part = axis.get_part(idx.npart)
-            iname = within_loops.pop(0)
-
-            myexpr = self._as_expr(idx, iname, within_loops)
-
-            if axis.permutation:
-                raise AssertionError("should be old code")
-                offsets, _ = part.layout
-                mainoffset += pym.subscript(pym.var(offsets.name), pym.var(iname))
-                self._section_data.append(lp.GlobalArg(offsets.name, shape=None, dtype=np.int32))
-                index_expr *= part.size
-            else:
-                # Every dim uses a section to map the dim index (from the slice/map + iname)
-                # onto a location in the data structure. For nice regular data this can just be
-                # the index multiplied by the size of the inner dims (e.g. dat[4*i + j]), but for
-                # ragged things we need to always have a map for the outer dims.
-                # import pdb; pdb.set_trace()
-                layout, offset = part.layout
-
-                mainoffset += offset
-
-                if isinstance(layout, numbers.Integral):
-                    index_expr = index_expr * layout + myexpr
-                elif isinstance(layout, MultiArray):
-                    # TODO hack to avoid inserting nnzc[0] in places
-                    # I think to resolve this I need to think about how to do
-                    # permuted_inner_and_ragged which currently fails for another reason
-                    if index_expr != 0:
-                        index_expr = pym.subscript(pym.var(layout.name), index_expr) + myexpr
-                        self._section_data.append(lp.GlobalArg(layout.name, shape=None, dtype=np.int32))
-                    else:
-                        index_expr = myexpr
-                else:
-                    raise TypeError
-
-        return index_expr + mainoffset
 
 
 def _make_loopy_kernel(tlang_kernel):
