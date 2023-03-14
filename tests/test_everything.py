@@ -911,13 +911,13 @@ def test_subset(scalar_copy_kernel):
         axes, name="dat2", data=np.zeros(6, dtype=np.float64))
 
     # a subset is really a map
-    subset_axes = MultiAxis([AxisPart(4)]).set_up()
+    subset_axes = MultiAxis([AxisPart(4, subaxis=MultiAxis([AxisPart(1)]))]).set_up()
     subset_array = MultiArray.new(
         subset_axes, prefix="subset", data=np.array([2, 3, 5, 0], dtype=np.int32)
     )
 
     from_multi_index = MultiIndex([Range(0, 4)])
-    path = Path((0,), ((0,),))  # maps from part 0 of the subset to part 0 of the dat
+    path = Path((0,), ((0,),), arity=1)  # maps from part 0 of the subset to part 0 of the dat
     p = MultiIndexCollection([
         TabulatedMap((path,), from_multi_index, (subset_array,)),
     ])

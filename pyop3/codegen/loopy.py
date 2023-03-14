@@ -245,12 +245,28 @@ class LoopyKernelBuilder:
                                           "it all together")
 
             extra_dict = self.register_loops2(multi_index.from_index, index_registry, loop_indices)
+
+            # a map will yield a single extra loop
+            # TODO encode the arity
             inames = []
+            if len(multi_index.paths) > 1:
+                # if we have multiple paths then need to diverge here, complicated!
+                raise NotImplementedError("hard")
             path, = multi_index.paths
-            for _ in range(len(path.to_axes)):
-                # each index can only emit a single new loop
-                iname = self._namer.next("i")
-                inames.append(iname)
+            extent = self.register_extent(
+                path.arity,
+                inames,
+                within_inames,
+                depends_on,
+            )
+
+            iname = self._namer.next("i")
+            inames.append(iname)
+            within_inames |= {iname}
+
+            domain_str = f"{{ [{iname}]: 0 <= {iname} < {extent} }}"
+            self.domains.append(domain_str)
+            import pdb; pdb.set_trace()
             return {multi_index: inames} | extra_dict
         else:
             assert isinstance(multi_index, TerminalMultiIndex)
@@ -890,7 +906,9 @@ class LoopyKernelBuilder:
                     temp_inames+temp_jnames,
                     within_inames|within, depends_on|deps)
 
-    def emit_index_insns_for_single_multi_index(self, assignment, multi_idx, index_registry, loop_indices, array_jnames, temp_jnames, *, within_inames, depends_on):
+    def emit_index_insns_for_single_multi_index(
+            self, assignment, multi_idx, index_registry, loop_indices,
+            array_jnames, temp_jnames, *, within_inames, depends_on):
         """
         Returns
         -------
@@ -923,18 +941,41 @@ class LoopyKernelBuilder:
             result = []
 
             subresult = self.emit_index_insns_for_single_multi_index(
+                assignment,  # only needed for IDs I think
                 multi_idx.from_index,
-                array_axis=None,  # do not traverse the array axis
+                index_registry, loop_indices,
+                array_jnames, temp_jnames,
+                within_inames=within_inames, depends_on=depends_on
             )
-            for tplabels, aplabels, tjnames, ajnames, deps in subresult:
-                selected_path = multi_idx.paths[aplabels]
+            for tplabels, aplabels, tjnames, ajnames, within, deps in subresult:
+                selected_path, = [path for path in multi_idx.paths if path.from_axes == aplabels]
 
                 if selected_path.selector:
                     raise NotImplementedError("This is the right place to split codegen")
 
                 array_part_labels = selected_path.to_axes
-                array_jname = NotImplemented  # see register_terminal_multi_index
-                newthing = (tplabels, array_part_labels, tjnames, array_jname, within_inames, deps)
+                array_jname = self._namer.next(f"{assignment.array.name}_j")
+
+                # map expression
+                if len(multi_idx.data) > 1:
+                    raise NotImplementedError("should really attach data to paths")
+                expr = self.register_scalar_assignment(multi_idx.data[0], ajnames, within_inames, depends_on)
+
+                index_insn = lp.Assignment(
+                    pym.var(array_jname), expr,
+                    id=self._namer.next(f"{assignment.id}_"),
+                    within_inames=within_inames,
+                    depends_on=depends_on,
+                    # no_sync_with=no_sync_with,
+                )
+                self.instructions.append(index_insn)
+                self._temp_kernel_data.extend([
+                    lp.TemporaryVariable(name, shape=(), dtype=np.uintp)
+                    for name in [array_jname]
+                ])
+                new_deps = frozenset({index_insn.id})
+
+                newthing = (tplabels, array_part_labels, tjnames, (array_jname,), within_inames|within, deps|new_deps)
                 result.append(newthing)
             return tuple(result)
         else:
@@ -1074,71 +1115,6 @@ class LoopyKernelBuilder:
             temp_pt_labels.append(typed_idx.part_label)
             temp_jnames.append(iname)
         return tuple(temp_pt_labels), tuple(array_pt_labels), tuple(temp_jnames), tuple(array_jnames), within_inames, new_deps
-
-    def register_loops(self, indices, active_inames, within_inames, depth=0):
-        """
-        Take a multi-index and register any extra loops needed to fill "shape" for the
-        array.
-
-        Maybe this could be done when temporaries are registered?
-
-        Returns
-        -------
-        active_inames, within_inames
-        """
-        # not true if there are maps
-        # assert  len(indices) >= len(active_inames)
-
-        # at bottom
-        if depth == len(indices):
-            return active_inames, within_inames
-
-        if not active_inames:
-            active_inames = ()
-
-        inames = collections.deque()
-
-        idx = indices.typed_indices[depth]
-
-        try:
-            iname = active_inames[depth]
-        except IndexError:
-            iname = None
-
-        if isinstance(idx, Map):
-            raise NotImplementedError
-            inames.extendleft(self.register_loops([idx.from_], active_inames, within_inames))
-
-        if not iname:
-            # register the domain
-            iname = self._namer.next("i")
-
-            # import pdb; pdb.set_trace()
-
-            # TODO: index with depth??
-            if isinstance(idx.size, MultiArray):
-                assert depth > 0
-
-                extent = self.register_extent(
-                    idx.size,
-                    active_inames[:depth],
-                    within_inames,
-                )
-            else:
-                extent = self.register_extent(
-                    idx.size,
-                    None,
-                    within_inames,
-                )
-
-            domain_str = f"{{ [{iname}]: 0 <= {iname} < {extent} }}"
-            self.domains.append(domain_str)
-
-
-            active_inames += (iname,)
-            within_inames |= {iname}
-
-        return self.register_loops(indices, active_inames, within_inames, depth+1)
 
     def register_extent(self, extent, inames, within_inames, depends_on):
         if isinstance(extent, MultiArray):

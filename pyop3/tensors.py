@@ -1309,8 +1309,9 @@ class TerminalMultiIndex(MultiIndex):
 @dataclasses.dataclass(frozen=True)
 class Path:
     # TODO Make a persistent dict?
-    from_axes: Tuple[Any]  # axis part IDs I guess
-    to_axess: Tuple[Any]  # axis part IDs I guess
+    from_axes: Tuple[Any]  # axis part IDs I guess (or labels)
+    to_axess: Tuple[Any]  # axis part IDs I guess (or labels)
+    arity: int
     selector: Optional[Any] = None
     """The thing that chooses between the different possible output axes at runtime."""
 
