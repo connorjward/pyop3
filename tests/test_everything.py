@@ -468,10 +468,9 @@ def test_compute_double_loop_permuted_mixed():
     fn = getattr(dll, "mykernel")
 
     # import pdb; pdb.set_trace()
-    sec0 = dat1.dim.parts[0].layout_fn.data
     sec1 = dat1.dim.parts[1].layout_fn.data
 
-    args = [sec0.data, sec1.data, dat1.data, dat2.data]
+    args = [sec1.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
     fn(*(d.ctypes.data for d in args))
 

@@ -834,7 +834,9 @@ class LoopyKernelBuilder:
 
         result = self.emit_index_insns_for_single_multi_index(
             assignment, multi_idx, index_registry, loop_indices,
-            within_inames, depends_on,
+            array_inames, temp_inames,
+            within_inames=within_inames,
+            depends_on=depends_on,
         )
 
         for temp_pt_labels, array_pt_labels, temp_jnames, array_jnames, within, deps in result:
@@ -888,7 +890,7 @@ class LoopyKernelBuilder:
                     temp_inames+temp_jnames,
                     within_inames|within, depends_on|deps)
 
-    def emit_index_insns_for_single_multi_index(self, assignment, multi_idx, index_registry, loop_indices, within_inames, depends_on):
+    def emit_index_insns_for_single_multi_index(self, assignment, multi_idx, index_registry, loop_indices, array_jnames, temp_jnames, *, within_inames, depends_on):
         """
         Returns
         -------
@@ -906,7 +908,7 @@ class LoopyKernelBuilder:
                     iname = self._namer.next("i")
                     extent = self.register_extent(
                         typed_idx.size,
-                        [],  # FIXME should pass these down from above I reckon
+                        array_jnames,
                         within_inames=within_inames,
                         depends_on=depends_on,
                     )
