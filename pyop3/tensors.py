@@ -1417,14 +1417,19 @@ class AffineMap(Map):
     pass
 
 
-class MultiIndexCollection(pytools.ImmutableRecord, abc.ABC):
-    fields = {"multi_indices"}
+# TODO I think I prefer MultiIndexGroup
+class MultiIndexCollection(pytools.ImmutableRecord):
+    fields = {"multi_indices", "id"}
+    namer = NameGenerator("mig")
 
-    def __init__(self, multi_indices):
+    def __init__(self, multi_indices, *, id=None):
         if not all(isinstance(idx, MultiIndex) for idx in multi_indices):
-            raise ValueError
+            raise TypeError
 
         self.multi_indices = tuple(multi_indices)
+        self.id = id or self.namer.next()
+        # we need the id attribute here because this is what is keyed
+        # when we need to look up inames
 
     def __iter__(self):
         return iter(self.multi_indices)

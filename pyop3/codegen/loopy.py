@@ -158,45 +158,54 @@ class LoopyKernelBuilder:
         raise TypeError
 
     @_build.register
-    def _(self, expr: exprs.Loop, index_registry=None, loop_indices=None):
-        if not loop_indices:
-            loop_indices = []
+    def _(self, expr: exprs.Loop, within_multi_index_groups=None, depends_on=frozenset()):
+        # within_multi_index_groups is a map from multi-index groups to inames
+        # every multi-index group (which have unique IDs) may only appear once
+        """
+        We need to key by group rather than multi-index because that is what we
+        use in our loop definitions. For example:
 
-        # index_registry is a map from indices to inames
-        if not index_registry:
-            index_registry = utils.MultiQueue()
+            loop(f := extruded_mesh.interior_facets, dat[f])
 
-        multi_indices = expr.index
-        assert isinstance(multi_indices, MultiIndexCollection)
+        f is a multi-index group because it can be (base cell, extr edge) or
+        (base vert,extr edge). When we generate code for the dat we need to look up the
+        inames using f, rather than the selected multi-index.
 
-        if len(multi_indices.multi_indices) > 1:
-            raise NotImplementedError(
-            """In this case we need to follow different codegen pathways internally. I
-               expect this to cause big issues with how we identify the indices of the
-               arrays themselves as dat[p] where p can be one of many things is hard to
-               identify.
-            """)
+        This ties in well with the "path" logic I have already done for maps.
+        """
+        if within_multi_index_groups is None:
+            within_multi_index_groups = {}  # TODO should make persistent to avoid accidental side-effects
 
-        # save these as they are needed fresh per-loop
-        outer_loop_indices = loop_indices
+        if expr.index in within_multi_index_groups:
+            raise ValueError("Loop indices cannot be reused in nested loops")
 
-        # we need to build a separate set of instructions for each multi-index
-        # in the collection.
-        # e.g. if we are looping over interior facets of an extruded mesh - the
-        # iterset is two multi-indices: edges+hfacets and verts+vfacets
-        for multi_idx in multi_indices:
-            if multi_idx in loop_indices:
-                raise ValueError("Loops cannot reuse indices")
 
-            # 1. register loops
+        # this isn't sufficient
+        """
+        want something like:
+            
+            for all the possible variations from expr.index:
+                do the inner bit
 
-            # in theory we could reuse the same multi-index twice (e.g. dat[p, p]) so we
-            # need a clever stack I think
-            bitsandpieces = self.register_loops2(multi_idx, index_registry, loop_indices)
-            for midx, inames in bitsandpieces.items():
-                index_registry.append(midx, inames)
+        but what does this mean for assignment? when we have conflicting indices?
+        but actually the indices can be identical
+        either identical or declared outside...
+        not true! closure(c) for example is different
+        just the inner bits that would be the same - can use same axis labels though
 
-            loop_indices = outer_loop_indices + self.collect_loop_indices(multi_idx)
+        do I need to loop over them together?
+        """
+        for updated_within_migs, updated_deps in self.expand_multi_index_group(expr.index, within_multi_index_groups, depends_on, prefix=expr.id):
+            # I kind of want a paradigm like:
+            # new_state = handle_single_multi_index(old_state)
+            # means that there is less external bookkeeping though care needs to be taken
+            # with for loops like here
+
+            # bitsandpieces = self.register_loops2(multi_idx, index_registry, loop_indices)
+            # for midx, inames in bitsandpieces.items():
+            #     index_registry.append(midx, inames)
+            #
+            # loop_indices = outer_loop_indices + self.collect_loop_indices(multi_idx)
 
             # new_index_registry = self.register_loops2(multi_idx, index_registry, True)
 
@@ -204,10 +213,7 @@ class LoopyKernelBuilder:
 
             # 2. emit instructions
             for stmt in expr.statements:
-                self._build(stmt, index_registry, loop_indices)
-
-            index_registry.pop(multi_idx) # context manager?
-
+                self._build(stmt, updated_within_migs, updated_deps)
 
     def collect_loop_indices(self, multi_index):
         if isinstance(multi_index, Map):
@@ -292,11 +298,12 @@ class LoopyKernelBuilder:
             return {multi_index: inames}
 
     @_build.register
-    def _(self, call: exprs.FunctionCall, index_registry, loop_indices):
-        insns = self.expand_function_call(call, index_registry, loop_indices)
+    def _(self, call: exprs.FunctionCall, within_multi_index_groups, depends_on):
+        # I think I'd prefer to do this in a separate earlier pass?
+        insns = self.expand_function_call(call, within_multi_index_groups, depends_on)
 
         for insn in insns:
-            self._make_instruction_context(insn, index_registry, loop_indices)
+            self._make_instruction_context(insn, within_multi_index_groups, depends_on)
 
     def expand_function_call(self, call, index_registry, loop_indices):
         """
@@ -562,74 +569,27 @@ class LoopyKernelBuilder:
         return extents
 
     @_make_instruction_context.register
-    def _(self, assignment: tlang.Assignment, index_registry, loop_indices):
-        # index_registry = index_registry.copy()
-        #
-        # for multi_idx in assignment.indices:
-        #     bitsandpieces = self.register_loops2(multi_idx, index_registry, loop_indices)
-        #
-        #     for midx, inames in bitsandpieces.items():
-        #         index_registry.append(midx, inames)
-        #
-        self._generate_assignment_insn(assignment, index_registry, loop_indices)
+    def _(self, assignment: tlang.Assignment, within_multi_index_groups, depends_on):
+        for updated_within_migs, updated_deps in \
+                self.generate_index_insns([assignment.lhs.indices, assignment.rhs.indices],
+                                          within_multi_index_groups, depends_on):
 
-    def _generate_assignment_insn(self, assignment, index_registry, loop_indices):
-        # import pdb; pdb.set_trace()
+            """
+            at this point should have registered all of the different ways we can have loops
 
-        # validate that the number of inames specified is the right number for the
-        # indexed structure provided
-        # e.g. self.check_inames()
+            the bit below just needs to connect the indices to the axis parts to emit the
+            right layout instructions and then the right assignment.
+            """
 
-        # we don't always need all the indices (e.g. if we permute the inner dimension)
-        # just use the first n outer ones
-        # depth = len(assignment.indices.typed_indices)
-        # jnames = jnames[-depth:]
+            raise NotImplementedError
 
-        # import pdb; pdb.set_trace()
-        depends_on = frozenset({f"{dep}_*" for dep in assignment.depends_on})
-        within_inames = self.collect_within_inames(MultiIndexCollection([]), index_registry, loop_indices)
-
-        # 2. Generate map code
-        # no - do in 1 pass
-
-        self.generate_index_insns(
-                assignment, assignment.indices, assignment.tensor.axes, assignment.temporary.axes, index_registry, loop_indices, within_inames, depends_on)
-
-    def collect_within_inames(self, multi_indices, index_registry, loop_indices):
-        assert isinstance(multi_indices, MultiIndexCollection)
-
-        index_registry = index_registry.copy()
-        within_inames = set()
-
-        # register loop_indices first
-        for multi_idx in loop_indices:
-            inames = index_registry.popfirst(multi_idx)
-            within_inames |= set(inames)
-
-        for multi_idx in multi_indices:
-            # if a multi-index is also a loop index then it can only be registered once
-            if multi_idx in loop_indices:
-                continue
-
-            if isinstance(multi_idx, Map):
-                raise NotImplementedError
-                # remove from the registry for consistency
-                index_registry.popfirst(multi_idx)
-
-                # should use from_multi_indices instead (the inames here aren't registered)
-                # hack
-                frommidx = MultiIndexCollection([multi_idx.from_multi_index])
-                within_inames |= self.collect_within_inames(frommidx, index_registry, loop_indices)
-
-            else:
-                inames = index_registry.popfirst(multi_idx)
-                within_inames |= set(inames)
-
-        # If we register multi-indices multiple times (e.g. dat1[map0, map0]) then they
-        # should be fully consumed here - actually the whole thing should be empty
-        assert all(len(v) == 0 for v in index_registry._data.values())
-
-        return frozenset(within_inames)
+            self.emit_assignment_insn(
+                assignment,
+                array_part_labels+array_pt_labels,
+                temp_part_labels+temp_pt_labels,
+                array_inames+array_jnames,
+                temp_inames+temp_jnames,
+                within_inames|within, depends_on|deps)
 
     def emit_assignment_insn(
             self, assignment,
@@ -831,141 +791,87 @@ class LoopyKernelBuilder:
 
     def generate_index_insns(
             self,
-            assignment,
-            multi_indices, array_axis, temp_axis,
-            index_registry, loop_indices,
-            within_inames, depends_on,
-            temp_part_labels=PrettyTuple(),
-            array_part_labels=PrettyTuple(),
-            temp_inames=PrettyTuple(),
-            array_inames=PrettyTuple(),
-    ):
-        assert isinstance(multi_indices, MultiIndexCollection)
+            indicess,  # iterable of an iterable of multi-index groups
+            within_multi_index_groups,
+            depends_on):
 
-        index_registry = index_registry.copy()
+        if not utils.is_single_valued(len(idxs) for idxs in indicess):
+            raise NotImplementedError("Need to be clever about having different lengths"
+                                      "of indices for LHS and RHS")
 
-        multi_idx, *subindices = multi_indices
+        # this is a zip
+        current_index_groups = []
+        later_index_groupss = []
+        for indices in indicess:
+            current_group, *later_groups = indices
+            current_index_groups.append(current_group)
+            later_index_groupss.append(later_groups)
 
-        assert isinstance(multi_idx, MultiIndex)
+        state = []
+        expansion = self.expand_multi_index_group(
+            current_index_groups, within_multi_index_groups, depends_on)
+        for updated_within_migs, updated_deps in expansion:
+            subresult = self.generate_index_insns(
+                later_index_groupss,
+                updated_within_migs, updated_deps,
+            )
+            state.extend(subresult)
+        return tuple(state)
 
-        result = self.emit_index_insns_for_single_multi_index(
-            assignment, multi_idx, index_registry, loop_indices,
-            array_inames, temp_inames,
-            within_inames=within_inames,
-            depends_on=depends_on,
-        )
-
-        for temp_pt_labels, array_pt_labels, temp_jnames, array_jnames, within, deps in result:
-            for array_pt_label in array_pt_labels:
-                array_npart = [pt.label for pt in array_axis.parts].index(array_pt_label)
-                array_part = array_axis.parts[array_npart]
-                array_axis = array_part.subaxis
-
-            for temp_pt_label in temp_pt_labels:
-                temp_npart = [pt.label for pt in temp_axis.parts].index(temp_pt_label)
-                temp_part = temp_axis.parts[temp_npart]
-                temp_axis = temp_part.subaxis
-
-            if subindices:
-                # FIXME I think I need to pass part labels down here
-                self.generate_index_insns(
-                    assignment, subindices,
-                    array_axis, temp_axis,
-                    index_registry, loop_indices,
-                    within_inames|within, depends_on|deps,
-                    temp_part_labels+temp_pt_labels,
-                    array_part_labels+array_pt_labels,
-                    temp_inames+temp_jnames, array_inames+array_jnames,
-                )
-            elif strictly_all(axis is not None for axis in [array_axis, temp_axis]):
-                if any(ax.nparts != 1 for ax in [temp_axis, array_axis]):
-                    raise NotImplementedError
-
-                for temp_part, array_part in checked_zip(temp_axis.parts, array_axis.parts):
-                    # probably want indexed size or some such
-                    count = utils.single_valued([temp_part.count, array_part.count  ])
-
-                    subindices = MultiIndexCollection([TerminalMultiIndex([Range(0, count)])])
-                    self.generate_index_insns(
-                        assignment, subindices,
-                        array_axis, temp_axis,
-                        index_registry, loop_indices,
-                        within_inames|within, depends_on|deps,
-                        temp_part_labels+temp_pt_labels,
-                        array_part_labels+array_pt_labels,
-                        temp_inames+temp_jnames,
-                        array_inames+array_jnames,
-                    )
-            else:
-                # at the bottom
-                self.emit_assignment_insn(
-                    assignment,
-                    array_part_labels+array_pt_labels,
-                    temp_part_labels+temp_pt_labels,
-                    array_inames+array_jnames,
-                    temp_inames+temp_jnames,
-                    within_inames|within, depends_on|deps)
-
-    def emit_index_insns_for_single_multi_index(
-            self, assignment, multi_idx, index_registry, loop_indices,
-            array_jnames, temp_jnames, *, within_inames, depends_on):
+    def expand_multi_index_group(
+            self, multi_index_group, within_multi_index_groups, depends_on, prefix="mig"):
         """
-        Returns
-        -------
-        An iterable of tuples of the form (temp_axis, array_axis, temp_jnames, array_jnames)
-        """
-        if is_loop_index := multi_idx in loop_indices:
-            inames_per_multi_idx, = index_registry[multi_idx]
-        else:
-            if isinstance(multi_idx, Map):
-                raise NotImplementedError
-            else:
-                assert isinstance(multi_idx, TerminalMultiIndex)
-                inames_per_multi_idx = []
-                for typed_idx in multi_idx:
-                    iname = self._namer.next("i")
-                    extent = self.register_extent(
-                        typed_idx.size,
-                        array_jnames,
-                        within_inames=within_inames,
-                        depends_on=depends_on,
-                    )
-                    domain_str = f"{{ [{iname}]: 0 <= {iname} < {extent} }}"
-                    self.domains.append(domain_str)
+        N.B. multi_index_group can actually be an iterable of LHS, RHS etc
 
-                    inames_per_multi_idx.append(iname)
-                    within_inames |= {iname}
-                inames_per_multi_idx = tuple(inames_per_multi_idx)
+        Deciding what to do when we have unit-sized axes is *hard*.
+
+        E.g. mdat[0, :] = dat[:] should be valid
+         or dat[p, :] = t[:] (i.e. ignore outer axis for rhs traversal)
+        """
+        if multi_index_group in within_multi_index_groups:
+            return within_multi_index_groups, depends_on
 
         if isinstance(multi_idx, Map):
-            result = []
+            # map expression
+            if len(multi_idx.data) > 1:
+                raise NotImplementedError("should really attach data to paths")
 
-            subresult = self.emit_index_insns_for_single_multi_index(
-                assignment,  # only needed for IDs I think
+            result = []
+            subresult = self.expand_multi_index_group(
                 multi_idx.from_index,
-                index_registry, loop_indices,
-                array_jnames, temp_jnames,
-                within_inames=within_inames, depends_on=depends_on
+                within_multi_index_groups,
+                depends_on
             )
-            for tplabels, aplabels, tjnames, ajnames, within, deps in subresult:
+            for updated_within_migs, updated_deps in subresult:
+                # maybe one could yield multiple paths - similar to the non-map case
                 selected_path, = [path for path in multi_idx.paths if path.from_axes == aplabels]
 
                 if selected_path.selector:
                     raise NotImplementedError("This is the right place to split codegen")
 
-                array_part_labels = selected_path.to_axes
-                array_jname = self._namer.next(f"{assignment.array.name}_j")
+                # register a new loop
+                iname = self._namer.next("i")
+                extent = self.register_extent(
+                    selected_path.arity,
+                    ???,
+                    updated_deps,
+                )
+                domain_str = f"{{ [{iname}]: 0 <= {iname} < {extent} }}"
+                self.domains.append(domain_str)
 
-                # map expression
-                if len(multi_idx.data) > 1:
-                    raise NotImplementedError("should really attach data to paths")
-                expr = self.register_scalar_assignment(multi_idx.data[0], ajnames, within_inames, depends_on)
+                index_info = tuple(
+                    (label, self._namer.next(f"{prefix}_j"))
+                    for label in selected_path.to_axes)
+
+
+                # FIXME This is specific to a TabulatedMap
+                expr, deps = self.register_scalar_assignment(multi_idx.data[0], ajnames, within_inames, depends_on)
 
                 index_insn = lp.Assignment(
                     pym.var(array_jname), expr,
                     id=self._namer.next(f"{assignment.id}_"),
                     within_inames=within_inames,
-                    depends_on=depends_on,
+                    depends_on=updated_deps|deps,
                     # no_sync_with=no_sync_with,
                 )
                 self.instructions.append(index_insn)
@@ -975,109 +881,22 @@ class LoopyKernelBuilder:
                 ])
                 new_deps = frozenset({index_insn.id})
 
-                newthing = (tplabels, array_part_labels, tjnames, (array_jname,), within_inames|within, deps|new_deps)
+                within_migs = updated_within_migs | {multi_index_group: (index_info, {iname})}
+
+                newthing = (within_migs, updated_deps|new_deps)
                 result.append(newthing)
             return tuple(result)
         else:
-            assert isinstance(multi_idx, TerminalMultiIndex)
-            result = self.register_terminal_multi_index(
-                assignment, multi_idx, inames_per_multi_idx,
-                within_inames, depends_on,
-            )
-            return (result,)
-
-    def generate_index_insns_without_indices(
-            self, assignment,
-            temp_pt_labels, array_pt_labels,
-            temp_jnames, array_jnames,
-            depends_on, within_inames):
-        """ie do the bottom bit which isn't indexed
-
-        a lot of this should really be combined with the above function
-        """
-        if not axis:
-            self.emit_assignment_insn(
-                assignment, tpnames, tinames, apnames, ainames,
-                depends_on, within_inames)
-
-        tpnames_outer = tpnames.copy()
-        tinames_outer = tinames.copy()
-        apnames_outer = apnames.copy()
-        ainames_outer = ainames.copy()
-
-        for npart, part in enumerate(axis.parts):
-            tpnames = tpnames_outer.copy()
-            tinames = tinames_outer.copy()
-            apnames = apnames_outer.copy()
-            ainames = ainames_outer.copy()
-
-            # generate loops
-            iname = self._namer.next("i")
-            extent = self.register_extent(
-                part.count,
-                tinames,
-                within_inames,
-                depends_on,
-            )
-            domain_str = f"{{ [{iname}]: 0 <= {iname} < {extent} }}"
-            self.domains.append(domain_str)
-
-            within_inames |= {iname}
-
-            #############
-
-            tpname = self._namer.next(f"{assignment.temporary.name}_p")
-            tiname = self._namer.next(f"{assignment.temporary.name}_i")
-            apname = self._namer.next(f"{assignment.array.name}_p")
-            ainame = self._namer.next(f"{assignment.array.name}_i")
-
-            tpnames.append(tpname)
-            tinames.append(tiname)
-            apnames.append(apname)
-            ainames.append(ainame)
-
-            tpinsn = lp.Assignment(
-                pym.var(tpname), npart,
-                id=self._namer.next(f"{assignment.id}_"),
-                within_inames=within_inames,
-                depends_on=depends_on,
-                # no_sync_with=no_sync_with,information
-            )
-            tiinsn = lp.Assignment(
-                pym.var(tiname), pym.var(iname),
-                id=self._namer.next(f"{assignment.id}_"),
-                within_inames=within_inames,
-                depends_on=depends_on,
-                # no_sync_with=no_sync_with,
-            )
-            apinsn = lp.Assignment(
-                pym.var(apname), npart,
-                id=self._namer.next(f"{assignment.id}_"),
-                within_inames=within_inames,
-                depends_on=depends_on,
-                # no_sync_with=no_sync_with,
-            )
-            aiinsn = lp.Assignment(
-                pym.var(ainame), pym.var(iname),
-                id=self._namer.next(f"{assignment.id}_"),
-                within_inames=within_inames,
-                depends_on=depends_on,
-                # no_sync_with=no_sync_with,
-            )
-
-            self.instructions.append(tpinsn)
-            self.instructions.append(tiinsn)
-            self.instructions.append(apinsn)
-            self.instructions.append(aiinsn)
-            depends_on |= {tpinsn.id, tiinsn.id, apinsn.id, aiinsn.id}
-
-            self._temp_kernel_data.extend([
-                lp.TemporaryVariable(name, shape=(), dtype=np.uintp)
-                for name in [tpname, tiname, apname, ainame]
-            ])
-
-            # recurse
-            self.generate_index_insns_without_indices(part.subaxis, ...)
+            # if we aren't a map then iterate over all paths
+            result = []
+            for multi_idx in multi_index_group.multi_indices:
+                res = self.register_terminal_multi_index(
+                    multi_idx,
+                    within_multi_index_groups,
+                    depends_on,
+                )
+                result.append(res)
+            return tuple(result)
 
     def register_terminal_multi_index(self, assignment, multi_idx, inames, within_inames, depends_on):
         # Note: At the moment we are assuming that all of the loops have already

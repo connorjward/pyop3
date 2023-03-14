@@ -1,5 +1,4 @@
 import collections
-import copy
 import itertools
 
 from mpi4py import MPI
@@ -126,13 +125,11 @@ def print_if_rank(rank, *args):
         print(*args, flush=True)
 
 
-# Maybe just use defaultdict?
-class MultiQueue:
-    """Mash-up between a dictionary and a list."""
+class MultiStack:
+    """Keyed stack."""
     def __init__(self, data=None):
-        if not data:
-            data = collections.defaultdict(list)
-        self._data = data
+        raise NotImplementedError("shouldnt be needed")
+        self._data = data or collections.defaultdict(PrettyTuple)
 
     def __str__(self):
         return str(dict(self._data))
@@ -143,18 +140,14 @@ class MultiQueue:
     def __getitem__(self, key):
         return self._data[key]
 
-    def append(self, key, value):
-        self._data[key].append(value)
-
-    def pop(self, key, index=-1):
-        return self._data[key].pop(index)
-
-    def popfirst(self, key):
-        return self.pop(key, 0)
-
-    def copy(self):
-        new_data = copy.deepcopy(self._data)
-        return MultiQueue(new_data)
+    def __or__(self, other):
+        new_data = self._data.copy()
+        if isinstance(other, collections.abc.Mapping):
+            for key, value in other.items():
+                new_data[key] += value
+            return type(self)(new_data)
+        else:
+            return NotImplemented
 
 
 def popwhen(predicate, iterable):
