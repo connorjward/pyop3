@@ -1264,6 +1264,10 @@ class TypedIndex(pytools.ImmutableRecord):
         self.depth = depth
         self.id = id or self._id_generator.next()
 
+    @property
+    def label(self):  # alias
+        return self.part_label
+
 
 class Range(TypedIndex):
     fields = TypedIndex.fields | {"size"}
@@ -1275,6 +1279,16 @@ class Range(TypedIndex):
     @property
     def consumed_labels(self):
         return (self.part_label,)
+
+    @property
+    def start(self):
+        # TODO
+        return 0
+
+    @property
+    def step(self):
+        # TODO
+        return 1
 
 
 class MultiIndex(pytools.ImmutableRecord):

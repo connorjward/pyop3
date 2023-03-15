@@ -1,8 +1,17 @@
 import collections
+import dataclasses
 import itertools
+from typing import Any, Collection, Optional
 
-from mpi4py import MPI
 import pytools
+from mpi4py import MPI
+
+
+# a tree
+@dataclasses.dataclass(frozen=True)
+class Node:
+    value: Any
+    children: Optional[Collection] = None
 
 
 class MultiNameGenerator:

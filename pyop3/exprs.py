@@ -43,6 +43,16 @@ class Loop(pytools.ImmutableRecord, Operator):
         # deprecated alias for indices
         return self.indices
 
+    @property
+    def unrolled_migs(self):
+        from pyop3.tensors import Map
+        def unroll(mig):
+            if isinstance(mig, Map):
+                return tuple([*unroll(mig.from_index), mig])
+            else:
+                return (mig,)
+        return unroll(self.indices)
+
     # @property
     # def flat_indices(self):
     #     def flatten(item):
