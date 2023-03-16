@@ -79,6 +79,7 @@ def pad(iterable, length, after=True, padding_value=None):
 
 
 single_valued = pytools.single_valued
+is_single_valued = pytools.is_single_valued
 
 
 def unique(iterable):
@@ -132,6 +133,18 @@ def print_with_rank(*args):
 def print_if_rank(rank, *args):
     if rank == MPI.COMM_WORLD.rank:
         print(*args, flush=True)
+
+
+def just_one(iterable):
+    # bit of a hack
+    iterable = list(iterable)
+
+    if len(iterable) == 0:
+        raise ValueError("Empty iterable found")
+    if len(iterable) > 1:
+        raise ValueError("Too many values")
+    return iterable[0]
+
 
 
 class MultiStack:

@@ -1089,6 +1089,88 @@ def has_constant_step(part):
 PreparedMultiAxis = MultiAxis
 
 
+class Node(pytools.ImmutableRecord):
+    fields = {"children", "id"}
+    namer = NameGenerator("idx")
+
+    def __init__(self, children=(), *, id=None):
+        self.children = tuple(children)
+        self.id = id or self.namer.next()
+
+    # preferably free functions
+    def add_child(self, id, node):
+        if id not in self.all_child_ids:
+            raise ValueError("id not found")
+
+        new_children = []
+        for child in self.children:
+            if id in child.all_ids:
+                new_children.append(child.add_child(id, node))
+            else:
+                new_children.append(child)
+        return self.copy(children=new_children)
+
+    @functools.cached_property
+    def all_ids(self):
+        return self.ancestor_ids | {self.id}
+
+    @property
+    def ancestor_ids(self):
+        return frozenset({node.id for node in self.ancestors})
+
+    @functools.cached_property
+    def ancestors(self):
+        return frozenset(
+            {*self.children} | {node for ch in self.children for node in ch.ancestors})
+
+
+class RootNode(Node):
+    pass
+
+
+class IndexNode(Node, abc.ABC):
+    pass
+
+
+class RangeNode(IndexNode):
+    # TODO: Gracefully handle start, stop, step
+    # fields = IndexNode.fields | {"label", "start", "stop", "step"}
+    fields = IndexNode.fields | {"label", "stop"}
+
+    def __init__(self, label, stop, children=(), *, id=None):
+        self.label = label
+        self.stop = stop
+        super().__init__(children, id=id)
+
+    # TODO: This is temporary
+    @property
+    def size(self):
+        return self.stop
+
+    @property
+    def start(self):
+        return 0  # TODO
+
+    @property
+    def step(self):
+        return 1  # TODO
+
+
+class MapNode(IndexNode):
+    fields = IndexNode.fields | {"from_labels", "to_labels", "arity"}
+
+    def __init__(self, from_labels, to_labels, arity, children=(), *, id=None):
+        self.from_labels = from_labels
+        self.to_labels = to_labels
+        self.arity = arity
+        super().__init__(children, id=id)
+
+
+class TabulatedMapNode(MapNode):
+    fields = MapNode.fields | {"data"}
+
+    def __init__(self, *args, **kwargs):
+        raise NotImplementedError
 
 
 class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
@@ -1183,7 +1265,12 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
     def alloc_size(self):
         # TODO This should probably raise an exception if we do weird things with maps
         # (as in fix the layouts for reduced data movement)
-        count = self.max_count if not self.indexed else 1
+        if self.count == -1:  # scalar thing
+            count = 1
+        elif not self.indexed:
+            count = self.max_count
+        else:
+            count = 1
         if self.subaxis:
             return count * self.subaxis.alloc_size
         else:
@@ -1529,7 +1616,50 @@ class SyncStatus:
     halo_modified: bool = False
 
 
-# TODO this shouldn't be an immutable record
+"""
+TODO I don't know if I need axis parts here. Perhaps just a multi-axis is a sufficient
+abstraction.
+
+Things might get simpler if I just defined some sort of null "root" node
+"""
+
+def fill_shape(axis):
+    # return an iterable here, one per part
+    if not axis:
+        return ()
+
+    new_bits = []
+    for part in axis.parts:
+        if isinstance(part.count, MultiArray):
+            raise NotImplementedError("Need to index this")
+        new_bit = RangeNode(part.label, part.count, children=fill_shape(part.subaxis))
+        new_bits.append(new_bit)
+    return tuple(new_bits)
+
+
+def expand_indices_to_fill_empty_shape(axis, index_tree, part_labels=PrettyTuple()):
+    # 1. Traverse the index tree to collect the right axis part labels
+    if index_tree is not None:
+        new_children = []
+        for child in index_tree.children:
+            # catch scalar and bottom case
+            if child is None:
+                new_child = None
+            else:
+                subchildren = expand_indices_to_fill_empty_shape(axis, child, part_labels|child.label)
+                new_child = child.copy(children=subchildren)
+            new_children.append(new_child)
+        return tuple(new_children)
+
+    # 2. At the tree leaves determine if there is missing shape and attach as required
+    else:
+        for label in part_labels:
+            axis = axis.parts_by_label[label].subaxis
+        return fill_shape(axis) if axis else ()
+
+
+
+# TODO this shouldn't be an immutable record or pym var
 class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
     """Multi-dimensional, hierarchical array.
 
@@ -1570,7 +1700,8 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         self.dim = dim
         # if not self._is_valid_indices(indices, dim.root):
         # assert all(self._is_valid_indices(idxs, dim) for idxs in indicess)
-        self.indices = indices #or MultiIndexCollection(self._extend_multi_index(None))
+        # self.indices = indices #or MultiIndexCollection(self._extend_multi_index(None))
+        self.indices = RootNode(expand_indices_to_fill_empty_shape(dim, indices))
 
         self.mesh = mesh
         self.dtype = np.dtype(dtype)  # since np.float64 is not actually the right thing
@@ -1601,6 +1732,20 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         # dim = cls.compute_layouts(dim)
 
         return cls(dim, indices, *args, name=name, **kwargs)
+
+    @property
+    def unrolled_migs(self):
+        def unroll(mig):
+            if isinstance(mig, Map):
+                return tuple([*unroll(mig.from_index), mig])
+            else:
+                return (mig,)
+        return unroll(self.indices)
+
+    @property
+    def unrolled_indices(self):
+        return self.unrolled_migs  # alias
+
 
     @classmethod
     def compute_part_size(cls, part):

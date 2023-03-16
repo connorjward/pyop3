@@ -145,16 +145,8 @@ def test_read_single_dim(scalar_copy_kernel):
     dat1 = MultiArray.new(axes, name="dat1", data=np.ones(10, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
 
-    p = MultiIndexCollection([
-        MultiIndex([
-            Range("l1", 10)
-        ])
-    ])
-
-    # use [p] instead of p to have a list of multi-index collections. this is
-    # needed if we have dat[cone(p0), cone(p1)] for example (i.e. each cone(...)
-    # produces a multi-index collection).
-    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[[p]], dat2[[p]]))
+    p = RootNode([RangeNode("l1", 10)])
+    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[p], dat2[p]))
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
 
