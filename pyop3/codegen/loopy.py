@@ -201,7 +201,7 @@ class LoopyKernelBuilder:
             raise NotImplementedError
 
         iname = self._namer.next("i")
-        extent = self.register_extent(index.size)
+        extent = self.register_extent(index.size, within_indices, within_inames, depends_on)
         domain_str = f"{{ [{iname}]: 0 <= {iname} < {extent} }}"
         self.domains.append(domain_str)
 
@@ -781,8 +781,17 @@ class LoopyKernelBuilder:
 
         # TODO singledispatch!
         if isinstance(layout_fn, IndirectLayoutFunction):
-            # add 1 to depth here since we want to use the actual index for these, but not for start
-            layout_var = self.register_scalar_assignment(layout_fn.data, part_labels, jnames, within_inames, depends_on)
+            # we can either index with just the lowest index or all of them
+            if layout_fn.data.depth == 1:
+                mylabels = part_labels[-1:]
+                myjnames = jnames[-1:]
+            else:
+                assert layout_fn.data.depth == utils.single_valued(map(len, [part_labels, jnames]))
+                mylabels = part_labels
+                myjnames = jnames
+
+            layout_var = self.register_scalar_assignment(
+                layout_fn.data, mylabels, myjnames, within_inames, depends_on)
             expr = pym.var(offset_var)+layout_var
 
             # register the data
@@ -795,7 +804,8 @@ class LoopyKernelBuilder:
 
             if isinstance(start, MultiArray):
                 # drop the last jname
-                start = self.register_scalar_assignment(layout_fn.start, jnames[:-1], within_inames, depends_on)
+                start = self.register_scalar_assignment(
+                    layout_fn.start, part_labels[:-1], jnames[:-1], within_inames, depends_on)
 
             jname = pym.var(jnames[-1])
             expr = pym.var(offset_var) + jname*step + start
@@ -942,9 +952,21 @@ class LoopyKernelBuilder:
             temp_jnames.append(iname)
         return tuple(temp_pt_labels), tuple(array_pt_labels), tuple(temp_jnames), tuple(array_jnames), within_inames, new_deps
 
-    def register_extent(self, extent):
+    def register_extent(self, extent, within_indices, within_inames, depends_on):
         if isinstance(extent, MultiArray):
-            temp_var = self.register_scalar_assignment(extent)
+            labels, jnames = [], []
+            index, = extent.indices
+            while True:
+                new_labels, new_jnames = within_indices[index.id]
+                labels.extend(new_labels)
+                jnames.extend(new_jnames)
+                if index.children:
+                    index = index.child  # must be linear
+                else:
+                    break
+
+            temp_var = self.register_scalar_assignment(
+                extent, labels, jnames, within_inames, depends_on)
             return str(temp_var)
         else:
             return extent

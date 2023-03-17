@@ -189,14 +189,10 @@ def test_compute_double_loop():
 
     p = [RangeNode(0, 10)]
     expr = pyop3.Loop(p, kernel(dat1[p], dat2[p]))
-
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-
-    import pdb; pdb.set_trace()
 
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
-
     args = [dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
     fn(*(d.ctypes.data for d in args))
@@ -289,8 +285,8 @@ def test_compute_double_loop_scalar():
 def test_compute_double_loop_permuted():
     ax1 = MultiAxis([
         AxisPart(6, id="ax1", numbering=np.array([3, 2, 5, 0, 4, 1]))
-    ]).set_up()
-    ax2 = ax1.add_subaxis("ax1", MultiAxis([AxisPart(3)], parent=ax1.without_numbering().set_up())).set_up()
+    ])
+    ax2 = ax1.add_subaxis("ax1", MultiAxis([AxisPart(3)])).set_up()
 
     dat1 = MultiArray.new(
             ax2, name="dat1", data=np.arange(18, dtype=np.float64), dtype=np.float64)
@@ -420,12 +416,8 @@ def test_compute_double_loop_permuted_mixed():
         lang_version=(2018, 2),
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-    p = MultiIndexCollection([
-        MultiIndex([
-            Range(1, 3),
-        ])
-    ])
-    expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
+    p = [RangeNode(1, 3)]
+    expr = pyop3.Loop(p, kernel(dat1[p], dat2[p]))
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
 
@@ -454,13 +446,9 @@ def test_compute_double_loop_ragged(scalar_copy_kernel):
     dat1 = MultiArray.new(ax2, name="dat1", data=np.ones(11, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(ax2, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
 
-    p = MultiIndexCollection([
-        MultiIndex([
-            Range(0, 5),
-            Range(0, nnz),
-        ])
-    ])
-    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[[p]], dat2[[p]]))
+    p0 = RangeNode(0, 5, id="p0")
+    p = [p0.add_child("p0", RangeNode(0, nnz[[p0]]))]
+    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[p], dat2[p]))
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     # dll = compilemythings(code, "XXtesting", True)
@@ -507,15 +495,13 @@ def test_doubly_ragged():
         lang_version=(2018, 2),
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-    p = MultiIndexCollection([
-        MultiIndex([
-            Range(0, 3),
-            Range(0, nnz1),
-            Range(0, nnz2),
-        ])
-    ])
 
-    expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
+    p0 = RangeNode(0, 3, id="p0")
+    p1 = p0.add_child("p0", RangeNode(0, nnz1[[p0]], id="p1"))
+    p2 = p1.add_child("p1", RangeNode(0, nnz2[[p1]]))
+    p = [p2]
+
+    expr = pyop3.Loop(p, kernel(dat1[p], dat2[p]))
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")

@@ -112,33 +112,19 @@ def only_linear(func):
     return wrapper
 
 
-def prepare_layouts(part, npart, path=None):
+def prepare_layouts(part, path=None):
     """Make a magic nest of dictionaries for storing intermediate results."""
     # path is a tuple key for holding the different axis parts
     if not path:
-        path = (npart,)
+        path = (part.label,)
 
     # import pdb; pdb.set_trace()
     layouts = {path: None}
 
     if part.subaxis:
-        for npt, subpart in enumerate(part.subaxis.parts):
-            layouts |= prepare_layouts(subpart, npt, path+(npt,))
+        for subpart in part.subaxis.parts:
+            layouts |= prepare_layouts(subpart, path+(subpart.label,))
 
-    # if not part.subaxis:
-    #     layouts[path] = data.copy()
-    # else:
-        # FIXME do in _set_up instead of here (make this dict exhaustive)
-        # # if any of the inner axes have a constant size then we need to tabulate here
-        # # as the internal layout doesn't need this index
-        # if any(not size_requires_external_index(pt) for pt in part.subaxis.parts):
-        #     layouts[path] = data.copy()
-        #
-        # # recurse for any subparts for which the layouts requires this extra index to be
-        # # fully specified
-        # for npt, subpart in enumerate(part.subaxis.parts):
-        #     if requires_external_index(subpart):
-        #         layouts |= prepare_layouts(subpart, npt, data, path+(npt,))
     return layouts
 
 
@@ -166,15 +152,15 @@ def can_be_affine(part):
 def handle_const_starts(axis, layouts, path=PrettyTuple(), outer_axes_are_all_indexed=True):
     offset = 0
     # import pdb; pdb.set_trace()
-    for i, part in enumerate(axis.parts):
+    for part in axis.parts:
         # catch already set null layouts
-        if layouts[path|i] is not None:
+        if layouts[path|part.label] is not None:
             continue
         # need to track if ragged permuted below
         # check for None here in case we have already set this to a null layout
         if can_be_affine(part) and has_constant_start(part, outer_axes_are_all_indexed):
             step = step_size(part)
-            layouts[path|i] = AffineLayoutFunction(step, offset)
+            layouts[path|part.label] = AffineLayoutFunction(step, offset)
 
         if not has_fixed_size(part):
             # can't do any more as things to the right of this will also move around
@@ -182,9 +168,9 @@ def handle_const_starts(axis, layouts, path=PrettyTuple(), outer_axes_are_all_in
         else:
             offset += part.calc_size()
 
-    for i, part in enumerate(axis.parts):
+    for part in axis.parts:
         if part.subaxis:
-            handle_const_starts(part.subaxis, layouts, path|i,
+            handle_const_starts(part.subaxis, layouts, path|part.label,
                                 outer_axes_are_all_indexed and part.indexed)
 
 
@@ -660,8 +646,8 @@ class MultiAxis(pytools.ImmutableRecord):
         This function just traverses the axis tree and attaches the right thing.
         """
         new_parts = []
-        for npart, part in enumerate(self.parts):
-            pth = path | npart
+        for part in self.parts:
+            pth = path | part.label
 
             layout = layouts[pth]
             if part.subaxis:
@@ -697,16 +683,16 @@ class MultiAxis(pytools.ImmutableRecord):
             # the latter here
             layouts |= {k: v for k, v in data.items() if layouts[k] is None}
 
-        for npart, part in enumerate(self.parts):
+        for part in self.parts:
             # zero offset if layout exists or if we are part of a temporary (and indexed)
-            if layouts[path|npart] != "null layout" or part.indexed:
+            if layouts[path|part.label] != "null layout" or part.indexed:
                 saved_offset = offset.value
                 offset.value = 0
             else:
                 saved_offset = 0
 
             if part.subaxis:
-                part.subaxis.finish_off_layouts(layouts, offset, path|npart)
+                part.subaxis.finish_off_layouts(layouts, offset, path|part.label)
 
             offset.value += saved_offset
 
@@ -835,11 +821,11 @@ class MultiAxis(pytools.ImmutableRecord):
         return ret
 
     def get_part_from_path(self, path):
-        pidx, *subpath = path
+        label, *sublabels = path
 
-        part = self.parts[pidx]
-        if subpath:
-            return part.subaxis.get_part_from_path(subpath)
+        part = self.parts_by_label[label]
+        if sublabels:
+            return part.subaxis.get_part_from_path(sublabels)
         else:
             return part
 
@@ -851,7 +837,7 @@ class MultiAxis(pytools.ImmutableRecord):
             if can_be_affine(part):
                 if isinstance(layout, list):
                     name = self._my_layout_namer.next()
-                    starts = MultiArray.from_list(layout, name, np.uintp)
+                    starts = MultiArray.from_list(layout, path, name, np.uintp)
                     step = step_size(part)
                     layouts[path] = AffineLayoutFunction(step, starts)
             else:
@@ -859,7 +845,7 @@ class MultiAxis(pytools.ImmutableRecord):
                     continue
                 assert isinstance(layout, list)
                 name = self._my_layout_namer.next()
-                data = MultiArray.from_list(layout, name, np.uintp)
+                data = MultiArray.from_list(layout, path, name, np.uintp)
                 layouts[path] = IndirectLayoutFunction(data)
 
     def _set_up(self, indices=PrettyTuple(), offset=None):
@@ -874,40 +860,16 @@ class MultiAxis(pytools.ImmutableRecord):
         # loop over all points in all parts of the multi-axis
         # initialise layout array per axis part
         layouts = {}
-        for npart, part in enumerate(self.parts):
-            layouts |= prepare_layouts(part, npart)
+        for part in self.parts:
+            layouts |= prepare_layouts(part)
 
-        # import pdb; pdb.set_trace()
         set_null_layouts(layouts, self)
         handle_const_starts(self, layouts)
 
-        # myoff = IntRef(offset.value)
-        # npoints = 0
-        # for npart, part in enumerate(self.parts):
-        #     if part.has_integer_count:
-        #         count = part.count
-        #     else:
-        #         count = part.count.get_value(indices)
-        #
-        #     attach_affine_layouts(layouts, part, npart, myoff)
-        #
-        #     data = [None] * count
-        #
-        #     attach_blank_data_to_layouts(layouts, part, npart, data)
-        #     npoints += count
-
-            # I think I can avoid this as modified in the function - should pass explicitly
-            # myoff += 
-
-
-        # import pdb; pdb.set_trace()
         assert offset.value == 0
         self.finish_off_layouts(layouts, offset)
 
-        # import pdb; pdb.set_trace()
         self.turn_lists_into_layout_functions(layouts)
-
-        # import pdb; pdb.set_trace()
 
         for layout in layouts.values():
             if isinstance(layout, list):
@@ -1102,8 +1064,15 @@ class Node(pytools.ImmutableRecord):
         self.children = tuple(children)
         self.id = id or self.namer.next()
 
+    @property
+    def child(self):
+        return utils.just_one(self.children)
+
     # preferably free functions
     def add_child(self, id, node):
+        if id == self.id:
+            return self.copy(children=self.children+(node,))
+
         if id not in self.all_child_ids:
             raise ValueError("id not found")
 
@@ -1117,16 +1086,16 @@ class Node(pytools.ImmutableRecord):
 
     @functools.cached_property
     def all_ids(self):
-        return self.ancestor_ids | {self.id}
+        return self.all_child_ids | {self.id}
 
     @property
-    def ancestor_ids(self):
-        return frozenset({node.id for node in self.ancestors})
+    def all_child_ids(self):
+        return frozenset({node.id for node in self.all_children})
 
     @functools.cached_property
-    def ancestors(self):
+    def all_children(self):
         return frozenset(
-            {*self.children} | {node for ch in self.children for node in ch.ancestors})
+            {*self.children} | {node for ch in self.children for node in ch.all_children})
 
 
 class IndexNode(Node, abc.ABC):
@@ -1197,7 +1166,7 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
             numbering = list(numbering)
 
         if isinstance(numbering, collections.abc.Sequence):
-            numbering = MultiArray.from_list(numbering, name=f"{id}_ord", dtype=np.uintp)
+            numbering = MultiArray.from_list(numbering, [label], name=f"{id}_ord", dtype=np.uintp)
 
         if not isinstance(label, collections.abc.Hashable):
             raise ValueError("Provided label must be hashable")
@@ -1738,16 +1707,16 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         return size
 
     @classmethod
-    def from_list(cls, data, name, dtype, inc=0):
+    def from_list(cls, data, labels, name, dtype, inc=0):
         """Return a (linear) multi-array formed from a list of lists."""
         flat, count = cls._get_count_data(data)
 
         if isinstance(count, list):
-            count = cls.from_list(count, name, dtype, inc+1)
+            count = cls.from_list(count, labels, name, dtype, inc+1)
 
         flat = np.array(flat, dtype=dtype)
 
-        axis = MultiAxis([AxisPart(count)])
+        axis = MultiAxis([AxisPart(count, label=labels[inc])])
         if isinstance(count, MultiArray):
             base_part = get_bottom_part(count.root)
             axis = count.root.add_subaxis(base_part.id, axis)
@@ -1857,39 +1826,6 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         self._halo_modified = False
 
 
-    # @classmethod
-    # def compute_layouts(cls, axis):
-    #     if axis.permutation:
-    #         layouts = cls.make_offset_map(axis)
-    #     else:
-    #         layouts = [None] * len(axis.parts)
-    #
-    #     new_parts = []
-    #     offset = 0  # for mixed
-    #     for part, mylayout in zip(axis.parts, layouts):
-    #         if isinstance(part, ScalarAxisPart):
-    #             # FIXME may not work with mixed
-    #             new_part = part
-    #             offset += 1
-    #         else:
-    #             subaxis = cls.compute_layouts(part.subaxis) if part.subaxis else None
-    #
-    #             if axis.permutation:
-    #                 layout = mylayout, 0  # offset here is always 0 as accounted for in map
-    #                 # import pdb; pdb.set_trace()
-    #             else:
-    #                 if isinstance(part.size, pym.primitives.Expression):
-    #                     offsets = compute_offsets(part.size.data)
-    #                     layout = part.size.copy(name=part.size.name+"c", data=offsets), offset
-    #                 else:
-    #                     layout = part.size, offset
-    #             new_part = part.copy(layout=layout, subaxis=subaxis)
-    #             # import pdb; pdb.set_trace()
-    #             offset += cls._compute_full_part_size(part)
-    #
-    #         new_parts.append(new_part)
-    #     return axis.copy(parts=new_parts)
-
     @classmethod
     def _get_part_size(cls, part, parent_indices):
         size = part.size
@@ -1899,32 +1835,6 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
             return cls._read_tensor(size, parent_indices)
         else:
             raise TypeError
-
-    @classmethod
-    def make_offset_map(cls, axis):
-        offsets = collections.defaultdict(dict)
-        offset = 0
-        npoints = sum(p.size for p in axis.parts)
-        for pt in range(npoints):
-            pt = axis.permutation[pt]
-
-            npart, part = cls._get_subdim(axis, pt)
-            offsets[npart][pt] = offset
-
-            # increment the pointer by the size of the step for this subdim
-            # FIXME This does not work for ragged as the wrong result is returned here...
-            if part.subaxis:
-                offset += cls._compute_full_axis_size(part.subaxis, [pt])
-            else:
-                offset += 1
-
-        layouts = []
-        for npart in sorted(offsets):
-            idxs = np.array([offsets[npart][i] for i in sorted(offsets[npart])], dtype=np.int32)
-            new_section = MultiArray.new(MultiAxis(len(idxs)), data=idxs, prefix="sec", dtype=np.int32)
-            layouts.append(new_section)
-
-        return layouts
 
     @classmethod
     def _generate_looping_indices(cls, part):
