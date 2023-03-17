@@ -682,8 +682,8 @@ class LoopyKernelBuilder:
     ):
 
         # layout instructions - must be emitted innermost to make sense (reset appropriately)
-        array_offset = f"{assignment.array.name}_ptr"
-        temp_offset = f"{assignment.temporary.name}_ptr"
+        array_offset = self._namer.next(f"{assignment.array.name}_ptr")
+        temp_offset = self._namer.next(f"{assignment.temporary.name}_ptr")
         self._temp_kernel_data.extend([
             lp.TemporaryVariable(name, shape=(), dtype=np.uintp)
             for name in [array_offset, temp_offset]

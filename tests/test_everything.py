@@ -552,16 +552,13 @@ def test_interleaved_ragged(scalar_copy_kernel):
         root, name="dat2", data=np.zeros(19, dtype=np.float64), dtype=np.float64
     )
 
-    p = MultiIndexCollection([
-        MultiIndex([
-            Range(0, 3),
-            Range(0, nnz1),
-            Range(0, 2),
-            Range(0, nnz2),
-        ])
-    ])
+    p0 = RangeNode(0, 3, id="i0")
+    p1 = p0.add_child("i0", RangeNode(0, nnz1[[p0]], id="i1"))
+    p2 = p1.add_child("i1", RangeNode(0, 2, id="i2"))
+    p3 = p2.add_child("i2", RangeNode(0, nnz2[[p2]]))
 
-    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[[p]], dat2[[p]]))
+    p = [p3]
+    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[p], dat2[p]))
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
 
@@ -569,6 +566,8 @@ def test_interleaved_ragged(scalar_copy_kernel):
     fn = getattr(dll, "mykernel")
 
     # void mykernel(nnz1, layout0_0, nnz2, layout4_0, layout3_0, layout1_0, dat1, dat2)
+
+    # import pdb; pdb.set_trace()
 
     layout0_0 = nnz2.root.part.subaxis.part.layout_fn.start
     # yes, I'm well aware this is insane
