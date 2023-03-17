@@ -575,6 +575,11 @@ class MultiAxis(pytools.ImmutableRecord):
     def _parts_by_label(self):
         return {part.label: part for part in self.parts}
 
+    # alias
+    @property
+    def parts_by_label(self):
+        return self._parts_by_label
+
     def find_part_from_indices(self, indices):
         """Traverse axis to find things
 
@@ -1124,10 +1129,6 @@ class Node(pytools.ImmutableRecord):
             {*self.children} | {node for ch in self.children for node in ch.ancestors})
 
 
-class RootNode(Node):
-    pass
-
-
 class IndexNode(Node, abc.ABC):
     pass
 
@@ -1623,40 +1624,31 @@ abstraction.
 Things might get simpler if I just defined some sort of null "root" node
 """
 
-def fill_shape(axis):
-    # return an iterable here, one per part
-    if not axis:
-        return ()
-
-    new_bits = []
-    for part in axis.parts:
-        if isinstance(part.count, MultiArray):
-            raise NotImplementedError("Need to index this")
-        new_bit = RangeNode(part.label, part.count, children=fill_shape(part.subaxis))
-        new_bits.append(new_bit)
-    return tuple(new_bits)
+def fill_shape(part):
+    if isinstance(part.count, MultiArray):
+        raise NotImplementedError("Need to index this")
+    new_children = [fill_shape(pt) for pt in part.subaxis.parts] if part.subaxis else []
+    return RangeNode(part.label, part.count, children=new_children)
 
 
-def expand_indices_to_fill_empty_shape(axis, index_tree, part_labels=PrettyTuple()):
-    # 1. Traverse the index tree to collect the right axis part labels
-    if index_tree is not None:
-        new_children = []
-        for child in index_tree.children:
-            # catch scalar and bottom case
-            if child is None:
-                new_child = None
-            else:
-                subchildren = expand_indices_to_fill_empty_shape(axis, child, part_labels|child.label)
-                new_child = child.copy(children=subchildren)
+def expand_indices_to_fill_empty_shape(axis, index, labels=PrettyTuple()):
+    # import pdb; pdb.set_trace()
+    new_labels = labels | index.label
+
+    new_children = []
+    if len(index.children) > 0:
+        for child in index.children:
+            new_child = expand_indices_to_fill_empty_shape(axis, child, new_labels)
             new_children.append(new_child)
-        return tuple(new_children)
-
-    # 2. At the tree leaves determine if there is missing shape and attach as required
     else:
-        for label in part_labels:
+        for label in new_labels:
             axis = axis.parts_by_label[label].subaxis
-        return fill_shape(axis) if axis else ()
 
+        if axis:
+            for part in axis.parts:
+                new_child = fill_shape(part)
+                new_children.append(new_child)
+    return index.copy(children=new_children)
 
 
 # TODO this shouldn't be an immutable record or pym var
@@ -1676,8 +1668,14 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
     name_generator = pyop3.utils.MultiNameGenerator()
     prefix = "ten"
 
-    def __init__(self, dim, indices=None, dtype=None, *, mesh = None, name: str = None, prefix: str=None, data=None, max_value=32, sf=None):
-        dim = as_prepared_multiaxis(dim)
+    def __init__(self, dim, indices=(), dtype=None, *, mesh = None, name: str = None, prefix: str=None, data=None, max_value=32, sf=None):
+        if dim is not None:
+            dim = as_prepared_multiaxis(dim)
+            # can probably go
+            if not isinstance(dim, PreparedMultiAxis):
+                raise ValueError("dim needs to be prepared. call .set_up()")
+
+        name = name or cls.name_generator.next(prefix or cls.prefix)
 
         if not dtype:
             if data is None:
@@ -1689,19 +1687,13 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
         # TODO raise NotImplementedError if the multi-axis contains multiple parallel axes
 
-        if not isinstance(dim, PreparedMultiAxis):
-            raise ValueError("dim needs to be prepared. call .set_up()")
-
         self.data = data
         self.params = {}
         self._param_namer = NameGenerator(f"{name}_p")
         assert dtype is not None
 
         self.dim = dim
-        # if not self._is_valid_indices(indices, dim.root):
-        # assert all(self._is_valid_indices(idxs, dim) for idxs in indicess)
-        # self.indices = indices #or MultiIndexCollection(self._extend_multi_index(None))
-        self.indices = RootNode(expand_indices_to_fill_empty_shape(dim, indices))
+        self.indices = tuple(expand_indices_to_fill_empty_shape(dim, idx) for idx in indices)
 
         self.mesh = mesh
         self.dtype = np.dtype(dtype)  # since np.float64 is not actually the right thing
@@ -1717,21 +1709,12 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
     # TODO delete this and just use constructor
     @classmethod
-    def new(cls, dim, indices=None, *args, prefix=None, name=None, **kwargs):
-        name = name or cls.name_generator.next(prefix or cls.prefix)
+    def new(cls, *args, **kwargs):
+        return cls(*args, **kwargs)
 
-        dim = as_prepared_multiaxis(dim)
-
-        # if not indicess:
-        #     indicess = cls._fill_with_slices(dim)
-        # else:
-        #     if not isinstance(indicess[0], collections.abc.Sequence):
-        #         indicess = (indicess,)
-        #     indicess = [cls._parse_indices(dim, idxs) for idxs in indicess]
-
-        # dim = cls.compute_layouts(dim)
-
-        return cls(dim, indices, *args, name=name, **kwargs)
+    @property
+    def alloc_size(self):
+        return self.axes.alloc_size if self.axes else 1
 
     @property
     def unrolled_migs(self):

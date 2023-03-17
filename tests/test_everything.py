@@ -145,7 +145,7 @@ def test_read_single_dim(scalar_copy_kernel):
     dat1 = MultiArray.new(axes, name="dat1", data=np.ones(10, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
 
-    p = RootNode([RangeNode("l1", 10)])
+    p = [RangeNode("l1", 10)]
     expr = pyop3.Loop(p, scalar_copy_kernel(dat1[p], dat2[p]))
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
@@ -187,16 +187,12 @@ def test_compute_double_loop():
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
-    p = MultiIndexCollection([
-        MultiIndex([
-            Range(0, 10)
-        ])
-    ])
-    expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
+    p = [RangeNode(0, 10)]
+    expr = pyop3.Loop(p, kernel(dat1[p], dat2[p]))
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
 
-    # import pdb; pdb.set_trace()
+    import pdb; pdb.set_trace()
 
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
@@ -231,12 +227,8 @@ def test_compute_double_loop_mixed():
         lang_version=(2018, 2),
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-    p = MultiIndexCollection([
-        MultiIndex([
-            Range(1, 12)
-        ])
-    ])
-    expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
+    p = [RangeNode(1, 12)]
+    expr = pyop3.Loop(p, kernel(dat1[p], dat2[p]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
 
@@ -277,13 +269,8 @@ def test_compute_double_loop_scalar():
         lang_version=(2018, 2),
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-    p = MultiIndexCollection([
-        MultiIndex([
-            Range(1, 4),
-            Range(0, 2),
-        ])
-    ])
-    expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
+    p = [RangeNode(1, 4, children=[RangeNode(0, 2)])]
+    expr = pyop3.Loop(p, kernel(dat1[p], dat2[p]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(exe)
