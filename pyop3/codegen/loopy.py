@@ -710,8 +710,8 @@ class LoopyKernelBuilder:
             array_part = array_axis.parts[array_npart]
 
             deps = self.emit_layout_insns(
-                array_part.layout_fn,
-                array_offset, array_jnames[:i+1],
+                array_part.layout_fn, array_offset,
+                array_pt_labels[:i+1], array_jnames[:i+1],
                 within_inames, depends_on,
             )
             depends_on |= deps
@@ -727,7 +727,7 @@ class LoopyKernelBuilder:
 
                 deps = self.emit_layout_insns(
                     temp_part.layout_fn,
-                    temp_offset, temp_jnames[:i+1],
+                    temp_offset, temp_pt_labels[:i+1], temp_jnames[:i+1],
                     within_inames, depends_on,
                 )
                 depends_on |= deps
@@ -772,7 +772,7 @@ class LoopyKernelBuilder:
         # else:
         #     no_sync_with = frozenset()
 
-    def emit_layout_insns(self, layout_fn, offset_var, jnames, within_inames, depends_on):
+    def emit_layout_insns(self, layout_fn, offset_var, part_labels, jnames, within_inames, depends_on):
         """
         TODO
         """
@@ -782,7 +782,7 @@ class LoopyKernelBuilder:
         # TODO singledispatch!
         if isinstance(layout_fn, IndirectLayoutFunction):
             # add 1 to depth here since we want to use the actual index for these, but not for start
-            layout_var = self.register_scalar_assignment(layout_fn.data, jnames, within_inames, depends_on)
+            layout_var = self.register_scalar_assignment(layout_fn.data, part_labels, jnames, within_inames, depends_on)
             expr = pym.var(offset_var)+layout_var
 
             # register the data
@@ -949,49 +949,17 @@ class LoopyKernelBuilder:
         else:
             return extent
 
-    def register_scalar_assignment(self, array, within_inames, depends_on):
+    def register_scalar_assignment(self, array, part_labels, jnames, within_inames, depends_on):
         temp_name = self._namer.next("n")
-        # need to create a scalar multi-axis with the same depth
-        # TODO is it not better to just "fully index" this thing?
-        array_axis = array.axes
-        tempid = "mytempid" + str(0)
-        tempaxis = MultiAxis([AxisPart(1, id=tempid, label=array_axis.part.label)])
-        oldtempid = tempid
+        temp = MultiArray(None, name=temp_name, dtype=np.int32)
+        insn = tlang.Read(array, temp)
 
-        array_part_labels = [array_axis.part.label]
-        temp_part_labels = [array_axis.part.label]
+        temp_pt_labels = ()
+        temp_jnames = ()
 
-        for d in range(1, array.depth):
-            tempid = "mytempid" + str(d)
-            subaxis = MultiAxis([AxisPart(1, id=tempid, label=array_axis.part.label)])
-            tempaxis = tempaxis.add_subaxis(oldtempid, subaxis)
-            oldtempid = tempid
-
-            array_part_labels.append(array_axis.part.label)
-            temp_part_labels.append(array_axis.part.label)
-
-            array_axis = array_axis.part.subaxis
-
-        temp = MultiArray.new(
-            tempaxis.set_up(),
-            name=temp_name,
-            dtype=np.int32,
-        )
-
-        # make sure to use the right inames
-        if array.depth == 1:
-            # FIXME look up part labels and jnames from registered indices
-
-            inames = [inames[-1]]
-        else:
-            # we can only index things with all or one of the inames
-            assert len(inames) == array.depth
-
-        indices = "not a thing here"
-        insn = tlang.Read(array, temp, indices, depends_on=depends_on)
-
+        # TODO Think about dependencies
         self.emit_assignment_insn(
-            insn, array_part_labels, temp_part_labels, inames, None,
+            insn, part_labels, temp_pt_labels, jnames, temp_jnames,
             within_inames=within_inames,
             depends_on=depends_on,
             scalar=True

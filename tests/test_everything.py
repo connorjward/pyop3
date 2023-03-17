@@ -307,12 +307,8 @@ def test_compute_double_loop_permuted():
         lang_version=(2018, 2),
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-    p = MultiIndexCollection([
-        MultiIndex([
-            Range(0, 6),
-        ])
-    ])
-    expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
+    p = [RangeNode(0, 6)]
+    expr = pyop3.Loop(p, kernel(dat1[p], dat2[p]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(exe)
@@ -346,13 +342,8 @@ def test_permuted_twice():
         lang_version=(2018, 2),
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.INC])
-    p = MultiIndexCollection([
-        MultiIndex([
-            Range(0, 3),
-            Range(0, 3),
-        ])
-    ])
-    expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
+    p = [RangeNode(0, 3, [RangeNode(0, 3)])]
+    expr = pyop3.Loop(p, kernel(dat1[p], dat2[p]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(exe)
@@ -390,13 +381,8 @@ def test_somewhat_permuted():
         lang_version=(2018, 2),
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-    p = MultiIndexCollection([
-        MultiIndex([
-            Range(0, 2),
-            Range(0, 3),
-        ])
-    ])
-    expr = pyop3.Loop(p, kernel(dat1[[p]], dat2[[p]]))
+    p = [RangeNode(0, 2, [RangeNode(0, 3)])]
+    expr = pyop3.Loop(p, kernel(dat1[p], dat2[p]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(exe)
