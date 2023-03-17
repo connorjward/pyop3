@@ -1129,18 +1129,27 @@ class RangeNode(IndexNode):
 class MapNode(IndexNode):
     fields = IndexNode.fields | {"from_labels", "to_labels", "arity"}
 
+    # in theory we can have a selector function here too so to_labels is actually bigger?
+    # means we have multiple children?
+ 
     def __init__(self, from_labels, to_labels, arity, children=(), *, id=None):
         self.from_labels = from_labels
         self.to_labels = to_labels
         self.arity = arity
+        self.selector = None  # TODO
         super().__init__(children, id=id)
+
+    @property
+    def size(self):
+        return self.arity
 
 
 class TabulatedMapNode(MapNode):
     fields = MapNode.fields | {"data"}
 
-    def __init__(self, *args, **kwargs):
-        raise NotImplementedError
+    def __init__(self, from_labels, to_labels, arity, data, children=(), *, id=None):
+        self.data = data
+        super().__init__(from_labels, to_labels, arity, children, id=id)
 
 
 class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
@@ -1618,7 +1627,11 @@ def fill_shape(part, prev_indices):
 
 def expand_indices_to_fill_empty_shape(axis, index, labels=PrettyTuple(), prev_indices=PrettyTuple()):
     # import pdb; pdb.set_trace()
-    new_labels = labels | index.label
+    if isinstance(index, RangeNode):
+        new_labels = labels | index.label
+    else:
+        assert isinstance(index, MapNode)
+        new_labels = labels[:-len(index.from_labels)] + index.to_labels
 
     new_children = []
     if len(index.children) > 0:
@@ -1660,7 +1673,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
             if not isinstance(dim, PreparedMultiAxis):
                 raise ValueError("dim needs to be prepared. call .set_up()")
 
-        name = name or cls.name_generator.next(prefix or cls.prefix)
+        name = name or self.name_generator.next(prefix or self.prefix)
 
         if not dtype:
             if data is None:

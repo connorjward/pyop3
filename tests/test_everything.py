@@ -745,7 +745,7 @@ def test_permuted_ragged_permuted(scalar_copy_kernel):
     p = RangeNode(0, 6, id="i0")
     p = p.add_child("i0", RangeNode(0, nnz[[p]], [RangeNode(0, 2)]))
     p = [p]
-    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[[p]], dat2[[p]]))
+    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[p], dat2[p]))
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(code)
@@ -783,14 +783,10 @@ def test_permuted_inner_and_ragged(scalar_copy_kernel):
     dat2 = MultiArray.new(axes, name="dat2",
                           data=np.zeros(7, dtype=np.float64), dtype=np.float64)
 
-    p = MultiIndexCollection([
-        MultiIndex([
-            Range(0, 2),
-            Range(0, 2),
-            Range(0, nnz),
-        ])
-    ])
-    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[[p]], dat2[[p]]))
+    p = RangeNode(0, 2, [RangeNode(0, 2, id="i0")])
+    p = p.add_child("i0", RangeNode(0, nnz[[p]]))
+    p = [p]
+    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[p], dat2[p]))
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(code)
@@ -816,13 +812,8 @@ def test_permuted_inner(scalar_copy_kernel):
     dat2 = MultiArray.new(axes, name="dat2",
                           data=np.zeros(12, dtype=np.float64), dtype=np.float64)
 
-    p = MultiIndexCollection([
-        MultiIndex([
-            Range(0, 4),
-            Range(0, 3),
-        ])
-    ])
-    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[[p]], dat2[[p]]))
+    p = [RangeNode(0, 4, [RangeNode(0, 3)])]
+    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[p], dat2[p]))
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(code)
@@ -845,16 +836,14 @@ def test_subset(scalar_copy_kernel):
 
     # a subset is really a map
     subset_axes = MultiAxis([AxisPart(4, subaxis=MultiAxis([AxisPart(1)]))]).set_up()
-    subset_array = MultiArray.new(
+    subset_array = MultiArray(
         subset_axes, prefix="subset", data=np.array([2, 3, 5, 0], dtype=np.int32)
     )
 
-    from_multi_index = MultiIndex([Range(0, 4)])
-    path = Path((0,), ((0,),), arity=1)  # maps from part 0 of the subset to part 0 of the dat
-    p = MultiIndexCollection([
-        TabulatedMap((path,), from_multi_index, (subset_array,)),
-    ])
-    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[[p]], dat2[[p]]))
+    p0 = RangeNode(0, 4, id="i0")
+    p1 = p0.add_child("i0", TabulatedMapNode((0,), (0,), arity=1, data=subset_array[[p0]]))
+    p = [p1]
+    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[p], dat2[p]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(exe)

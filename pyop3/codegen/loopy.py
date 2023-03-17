@@ -184,7 +184,7 @@ class LoopyKernelBuilder:
             self.build_loop(
                     loop, index, within_multi_index_groups, within_inames, depends_on)
 
-    def build_loop(self, loop, index, within_indices, within_inames, depends_on, path=PrettyTuple()):
+    def build_loop(self, loop, index, within_indices, within_inames, depends_on, existing_labels=PrettyTuple(), existing_jnames=PrettyTuple()):
         """
         note: there is no need to track a current axis here. We just need to register
         loops and associated inames. We also need part labels because it informs
@@ -207,7 +207,8 @@ class LoopyKernelBuilder:
 
         # set these below (singledispatch me)
         index_insns = None
-        new_path = None
+        new_labels = None
+        new_jnames = None
         jnames = None
         if isinstance(index, RangeNode):
             jname = self._namer.next("j")
@@ -222,7 +223,8 @@ class LoopyKernelBuilder:
                 # no_sync_with=no_sync_with,
             )
             index_insns = [index_insn]
-            new_path = path | (index.label, jname)
+            new_labels = existing_labels | index.label
+            new_jnames = existing_jnames | jname
             jnames = (jname,)
             new_within = {index.id: ((index.label,), (jname,))}
         elif isinstance(index, TabulatedMapNode):
@@ -231,8 +233,8 @@ class LoopyKernelBuilder:
             self._temp_kernel_data.append(
                 lp.TemporaryVariable(jname, shape=(), dtype=np.uintp))
 
-            expr, deps = self.register_scalar_assignment(
-                index.data, path, within_inames, depends_on)
+            expr = self.register_scalar_assignment(
+                index.data, existing_labels, existing_jnames, within_inames, depends_on)
 
             index_insn = lp.Assignment(
                 pym.var(jname),
@@ -243,21 +245,25 @@ class LoopyKernelBuilder:
 
             index_insns = [index_insn]
 
-            temp_path = list(path)
+            temp_labels = list(existing_labels)
+            temp_jnames = list(existing_jnames)
             assert len(index.from_labels) == 1
             assert len(index.to_labels) == 1
             for label in index.from_labels:
-                assert temp_path.pop() == label
+                assert temp_labels.pop() == label
+                temp_jnames.pop()
 
             to_label, = index.to_labels
-            new_path = PrettyTuple(temp_path) | (to_label, jname)
+            new_labels = existing_labels | to_label
+            new_jnames = existing_jnames | jname
             jnames = (jname,)
             new_within = {index.id: ((to_label,), (jname,))}
         else:
             raise AssertionError
 
         assert index_insns is not None
-        assert new_path is not None
+        assert new_labels is not None
+        assert new_jnames is not None
         assert jnames is not None
         self.instructions.extend(index_insns)
         new_deps = frozenset({insn.id for insn in index_insns})
@@ -269,7 +275,7 @@ class LoopyKernelBuilder:
                     within_indices|new_within,
                     within_inames|{iname},
                     depends_on|new_deps,
-                    new_path)
+                    new_labels, new_jnames)
         else:
             for stmt in loop.statements:
                 self._build(
