@@ -97,8 +97,12 @@ def drop_within(myindex, within_indices):
     mylabels, myjnames = [], []
     while myindex.id in within_indices:
         labels, jnames = within_indices[myindex.id]
-        mylabels.extend(labels)
-        myjnames.extend(jnames)
+        if isinstance(myindex, RangeNode):
+            mylabels.extend(labels)
+            myjnames.extend(jnames)
+        else:
+            mylabels = mylabels[:-len(myindex.from_labels)] + list(labels)
+            myjnames = myjnames[:-len(myindex.from_labels)] + list(jnames)
 
         if len(myindex.children) == 0:
             return None, PrettyTuple(mylabels), PrettyTuple(myjnames)
@@ -233,18 +237,6 @@ class LoopyKernelBuilder:
             self._temp_kernel_data.append(
                 lp.TemporaryVariable(jname, shape=(), dtype=np.uintp))
 
-            expr = self.register_scalar_assignment(
-                index.data, existing_labels, existing_jnames, within_inames, depends_on)
-
-            index_insn = lp.Assignment(
-                pym.var(jname),
-                expr,
-                id=self._namer.next("myid_"),
-                within_inames=within_inames,
-                depends_on=depends_on)
-
-            index_insns = [index_insn]
-
             temp_labels = list(existing_labels)
             temp_jnames = list(existing_jnames)
             assert len(index.from_labels) == 1
@@ -258,6 +250,18 @@ class LoopyKernelBuilder:
             new_jnames = existing_jnames | jname
             jnames = (jname,)
             new_within = {index.id: ((to_label,), (jname,))}
+
+            expr = self.register_scalar_assignment(
+                index.data, new_labels, new_jnames, within_inames, depends_on)
+
+            index_insn = lp.Assignment(
+                pym.var(jname),
+                expr,
+                id=self._namer.next("myid_"),
+                within_inames=within_inames,
+                depends_on=depends_on)
+
+            index_insns = [index_insn]
         else:
             raise AssertionError
 
@@ -294,7 +298,7 @@ class LoopyKernelBuilder:
 
         # catch within_indices
         # ah - need to keep tracking the right part labels though!
-        # import pdb; pdb.set_trace()
+        import pdb; pdb.set_trace()
         lindex, innerllabels, innerljnames = drop_within(lindex, within_indices)
         rindex, innerrlabels, innerrjnames = drop_within(rindex, within_indices)
 
