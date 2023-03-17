@@ -600,15 +600,11 @@ def test_ragged_inside_two_standard_loops(scalar_inc_kernel):
         root, name="dat2", data=np.zeros(6, dtype=np.float64), dtype=np.float64
     )
 
-    p = MultiIndexCollection([
-        MultiIndex([
-            Range(0, 2),
-            Range(0, 2),
-            Range(0, nnz),
-        ])
-    ])
+    p0 = RangeNode(0, 2, [RangeNode(0, 2, id="i0")])
+    p1 = p0.add_child("i0", RangeNode(0, nnz[[p0]]))
+    p = [p1]
 
-    expr = pyop3.Loop(p, scalar_inc_kernel(dat1[[p]], dat2[[p]]))
+    expr = pyop3.Loop(p, scalar_inc_kernel(dat1[p], dat2[p]))
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
@@ -639,12 +635,8 @@ def test_compute_double_loop_ragged_inner(ragged_copy_kernel):
     dat1 = MultiArray.new(root, name="dat1", data=np.ones(11, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(root, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
 
-    p = MultiIndexCollection([
-        MultiIndex([
-            Range(0, 5),
-        ])
-    ])
-    expr = pyop3.Loop(p, ragged_copy_kernel(dat1[[p]], dat2[[p]]))
+    p = [RangeNode(0, 5)]
+    expr = pyop3.Loop(p, ragged_copy_kernel(dat1[p], dat2[p]))
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
@@ -659,7 +651,7 @@ def test_compute_double_loop_ragged_inner(ragged_copy_kernel):
 
 
 def test_compute_double_loop_ragged_mixed(scalar_copy_kernel):
-    ax1 = MultiAxis([AxisPart(5, id="p1")])
+    ax1 = MultiAxis([AxisPart(5, label=1, id="p1")])
     nnz = MultiArray.new(
         ax1.set_up(), name="nnz", dtype=np.int32,
         data=np.array([3, 2, 1, 2, 1], dtype=np.int32)
@@ -677,13 +669,10 @@ def test_compute_double_loop_ragged_mixed(scalar_copy_kernel):
     dat1 = MultiArray.new(axes, name="dat1", data=np.ones(4+9+8, dtype=np.float64), dtype=np.float64)
     dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(4+9+8, dtype=np.float64), dtype=np.float64)
 
-    p = MultiIndexCollection([
-        MultiIndex([
-            Range(1, 5),
-            Range(0, nnz),
-        ])
-    ])
-    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[[p]], dat2[[p]]))
+    p0 = RangeNode(1, 5, id="i0")
+    p1 = p0.add_child("i0", RangeNode(0, nnz[[p0]]))
+    p = [p1]
+    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[p], dat2[p]))
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
@@ -717,13 +706,11 @@ def test_compute_ragged_permuted(scalar_copy_kernel):
     dat2 = MultiArray.new(axes, name="dat2",
                           data=np.zeros(11, dtype=np.float64), dtype=np.float64)
 
-    p = MultiIndexCollection([
-        MultiIndex([
-            Range(0, 6),
-            Range(0, nnz),
-        ])
-    ])
-    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[[p]], dat2[[p]]))
+    p = RangeNode(0, 6, id="i0")
+    p = p.add_child("i0", RangeNode(0, nnz[[p]]))
+    p = [p]
+
+    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[p], dat2[p]))
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
@@ -755,13 +742,9 @@ def test_permuted_ragged_permuted(scalar_copy_kernel):
     dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(22, dtype=np.float64),
                           dtype=np.float64)
 
-    p = MultiIndexCollection([
-        MultiIndex([
-            Range(0, 6),
-            Range(0, nnz),
-            Range(0, 2),
-        ])
-    ])
+    p = RangeNode(0, 6, id="i0")
+    p = p.add_child("i0", RangeNode(0, nnz[[p]], [RangeNode(0, 2)]))
+    p = [p]
     expr = pyop3.Loop(p, scalar_copy_kernel(dat1[[p]], dat2[[p]]))
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)

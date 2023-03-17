@@ -1593,21 +1593,37 @@ abstraction.
 Things might get simpler if I just defined some sort of null "root" node
 """
 
-def fill_shape(part):
+def fill_shape(part, prev_indices):
     if isinstance(part.count, MultiArray):
-        raise NotImplementedError("Need to index this")
-    new_children = [fill_shape(pt) for pt in part.subaxis.parts] if part.subaxis else []
-    return RangeNode(part.label, part.count, children=new_children)
+        # turn prev_indices into a tree
+        assert len(prev_indices) > 0
+        prev = None
+        for prev_idx in reversed(prev_indices):
+            if prev is None:
+                prev = prev_idx
+            else:
+                prev = prev_idx.copy(children=[prev])
+        count = part.count[[prev]]
+    else:
+        count = part.count
+    new_index = RangeNode(part.label, count)
+    if part.subaxis:
+        new_children = [
+            fill_shape(pt, prev_indices|new_index)
+            for pt in part.subaxis.parts]
+    else:
+        new_children = []
+    return new_index.copy(children=new_children)
 
 
-def expand_indices_to_fill_empty_shape(axis, index, labels=PrettyTuple()):
+def expand_indices_to_fill_empty_shape(axis, index, labels=PrettyTuple(), prev_indices=PrettyTuple()):
     # import pdb; pdb.set_trace()
     new_labels = labels | index.label
 
     new_children = []
     if len(index.children) > 0:
         for child in index.children:
-            new_child = expand_indices_to_fill_empty_shape(axis, child, new_labels)
+            new_child = expand_indices_to_fill_empty_shape(axis, child, new_labels, prev_indices|index)
             new_children.append(new_child)
     else:
         for label in new_labels:
@@ -1615,7 +1631,7 @@ def expand_indices_to_fill_empty_shape(axis, index, labels=PrettyTuple()):
 
         if axis:
             for part in axis.parts:
-                new_child = fill_shape(part)
+                new_child = fill_shape(part, prev_indices|index)
                 new_children.append(new_child)
     return index.copy(children=new_children)
 

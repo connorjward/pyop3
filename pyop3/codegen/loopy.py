@@ -303,7 +303,7 @@ class LoopyKernelBuilder:
             size = utils.single_valued([lindex.size, rindex.size])
 
             iname = self._namer.next("i")
-            extent = self.register_extent(size)
+            extent = self.register_extent(size, within_indices, within_inames, depends_on)
             domain_str = f"{{ [{iname}]: 0 <= {iname} < {extent} }}"
             self.domains.append(domain_str)
 
@@ -596,7 +596,7 @@ class LoopyKernelBuilder:
 
 
     @_make_instruction_context.register
-    def _(self, call: tlang.FunctionCall, within_migs, within_inames, depends_on):
+    def _(self, call: tlang.FunctionCall, within_indices, within_inames, depends_on):
         # import pdb; pdb.set_trace()
 
         subarrayrefs = {}
@@ -609,19 +609,9 @@ class LoopyKernelBuilder:
 
         # we need to pass sizes through if they are only known at runtime (ragged)
         extents = {}
-        # traverse the temporaries
-        inames = []
-        within_inames = frozenset(within_inames)
-        depends_on = frozenset()  # might be wrong
         for temp in utils.unique(itertools.chain(call.reads, call.writes)):
-            # extents |= self.collect_extents(
-            #     temp.root,
-            #     inames,
-            #     within_inames,
-            #     depends_on,
-            # )
-            # we need to do this for ragged things - skip for now
-            pass
+            for index in temp.indices:
+                extents |= self.collect_extents(index, within_indices, within_inames, depends_on)
 
         # NOTE: If we register an extent to pass through loopy will complain
         # unless we register it as an assumption of the local kernel (e.g. "n <= 3")
@@ -647,20 +637,17 @@ class LoopyKernelBuilder:
         self.instructions.append(call_insn)
         self.subkernels.append(call.function.code)
 
-    def collect_extents(self, axis, inames, within_inames, depends_on, depth=0):
+    def collect_extents(self, index, within_indices, within_inames, depends_on):
         extents = {}
 
-        for part in axis.parts:
-            if isinstance(part.count, MultiArray) and not part.indexed:
-                assert depth >= 1
-                extent = self.register_scalar_assignment(part.count, inames[:depth], within_inames, depends_on)
-                extents[part.count] = extent
+        if isinstance(index.size, MultiArray):
+            # TODO This will overwrite if we have duplicates
+            extent = self.register_extent(index.size, within_indices, within_inames, depends_on)
+            extents[index.size] = pym.var(extent)
 
-            if part.subaxis:
-                extents_ = self.collect_extents(part.subaxis, inames, within_inames | {inames[depth]}, depends_on, depth+1)
-                if any(array in extents for array in extents_):
-                    raise ValueError("subaxes should not be using the same nnz structures (I think)")
-                extents |= extents_
+        if index.children:
+            for child in index.children:
+                extents |= self.collect_extents(child, within_indices, within_inames, depends_on)
 
         return extents
 
