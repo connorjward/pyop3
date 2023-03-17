@@ -849,9 +849,9 @@ def test_subset(scalar_copy_kernel):
     dll = compilemythings(exe)
     fn = getattr(dll, "mykernel")
 
-    import pdb; pdb.set_trace()
+    # import pdb; pdb.set_trace()
 
-    args = [subset_tensor.data, dat1.data, dat2.data]
+    args = [subset_array.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
     fn(*(d.ctypes.data for d in args))
 
