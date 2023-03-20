@@ -260,8 +260,8 @@ class LoopyKernelBuilder:
                 temp_jnames.pop()
 
             to_label, = index.to_labels
-            new_labels = existing_labels | to_label
-            new_jnames = existing_jnames | jname
+            new_labels = PrettyTuple(temp_labels) | to_label
+            new_jnames = PrettyTuple(temp_jnames) | jname
             jnames = (jname,)
             new_within = {index.id: ((to_label,), (jname,))}
         else:
@@ -348,16 +348,16 @@ class LoopyKernelBuilder:
                     self._temp_kernel_data.append(
                         lp.TemporaryVariable(jname, shape=(), dtype=np.uintp))
 
-                    # FIXME use labels and jnames?
-                    raise NotImplementedError
-                    expr, deps = self.register_scalar_assignment(
-                        index.data, path, within_inames, depends_on)
+                    map_labels = existing_labels | index.to_labels[0]
+                    map_jnames = existing_jnames | iname
+                    expr = self.register_scalar_assignment(
+                        index.data, map_labels, map_jnames, within_inames|{iname}, depends_on)
 
                     index_insn = lp.Assignment(
                         pym.var(jname),
                         expr,
                         id=self._namer.next("myid_"),
-                        within_inames=within_inames,
+                        within_inames=within_inames|{iname},
                         depends_on=depends_on)
 
                     index_insns = [index_insn]
@@ -371,7 +371,8 @@ class LoopyKernelBuilder:
                         temp_jnames.pop()
 
                     to_label, = index.to_labels
-                    new_path = PrettyTuple(temp_path) | (to_label, jname)
+                    new_labels = PrettyTuple(temp_labels) | to_label
+                    new_jnames = PrettyTuple(temp_jnames) | jname
                     jnames = (jname,)
                     new_within = {index.id: ((to_label,), (jname,))}
                 else:

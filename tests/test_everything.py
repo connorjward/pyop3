@@ -859,55 +859,43 @@ def test_subset(scalar_copy_kernel):
     assert np.allclose(dat2.data[[1, 4]], 0)
 
 
-@pytest.mark.skip
 def test_map():
-    axes = MultiAxis(AxisPart(5, id="ax1"))
+    axes = MultiAxis([AxisPart(5, id="p1")]).set_up()
+    dat1 = MultiArray(
+        axes, name="dat1", data=np.arange(5, dtype=np.float64))
+    dat2 = MultiArray(
+        axes, name="dat2", data=np.zeros(5, dtype=np.float64))
 
-    dat1 = MultiArray.new(axes, name="dat1", data=np.arange(5, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
-
-    map_array = MultiArray.new(
-        axes.add_subaxis("ax1", 2),
+    map_axes = axes.add_subaxis("p1", MultiAxis([AxisPart(2)])).set_up()
+    map_array = MultiArray(
+        map_axes, name="map1",
         data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32),
-        dtype=np.int32, prefix="map"
     )
 
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 2 }",
         "y[0] = y[0] + x[i]",
-        [lp.GlobalArg("x", np.float64, (2,), is_input=True, is_output=False),
-        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
+        [
+            lp.GlobalArg("x", np.float64, (2,), is_input=True, is_output=False),
+            lp.GlobalArg("y", np.float64, (1,), is_input=True, is_output=True),
+        ],
         target=lp.CTarget(),
         name="mylocalkernel",
         lang_version=(2018, 2),
     )
-    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.INC])
 
-    def to_func(inames, types_str, idxs_str, off_str):
-        iname = inames[-1]
-        return [
-            # read the map array entry
-            *pyop3.codegen.emit_offset_insns(map_array, types_str, idxs_str, off_str),
-            f"{types_str}[{iname}] = 0",
-            f"{idxs_str}[{iname}] = {map_array.name}[{off_str}]",
-        ]
+    p0 = RangeNode(0, 5, id="i0")
+    p1 = p0.add_child(
+        "i0", TabulatedMapNode((0,), (0,), arity=2, data=map_array[[p0]]))
 
-    i1 = Slice(5)  # or axes.index
-    i2 = Map(
-        i1,
-        size=1,  # consumes one index
-        arity=lambda _: 2,  # function returning arity of 2
-        to=to_func,
-        # N.B. arity returns an expression whereas to_func returns a set of instructions.
-    )
-
-    expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
+    expr = pyop3.Loop([p0], kernel(dat1[[p1]], dat2[[p0]]))
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    args = [map_tensor.data, dat1.data, dat2.data]
+    args = [map_array.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
