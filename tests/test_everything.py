@@ -945,9 +945,9 @@ def test_closure_ish():
     dll = compilemythings(exe)
     fn = getattr(dll, "mykernel")
 
-    import pdb; pdb.set_trace()
+    # import pdb; pdb.set_trace()
 
-    args = [map0.data, dat1.data, dat2.data]
+    args = [dat1.data, map1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))

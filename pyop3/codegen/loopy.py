@@ -162,6 +162,7 @@ class LoopyKernelBuilder:
             target=LOOPY_TARGET,
             lang_version=LOOPY_LANG_VERSION,
             name="mykernel",
+            options=lp.Options(check_dep_resolution=False),
         )
         tu = lp.merge((translation_unit, *self.subkernels))
         # import pdb; pdb.set_trace()
@@ -318,19 +319,18 @@ class LoopyKernelBuilder:
         # import pdb; pdb.set_trace()
 
         # also drop one-sized things
+        added_jnames = []
         while len(lres) == 1 and lres[0][0] is not None and lres[0][0].size == 1:
             lres_ = lres[0]
             if lres_[0].children:
                 lres = []
                 for child in lres_[0].children:
                     jname = self._namer.next("j")
-                    self._temp_kernel_data.append(
-                        lp.TemporaryVariable(jname, shape=(), dtype=np.uintp))
+                    added_jnames.append(jname)
                     lres.append((child, lres_[1]|lres_[0].label, lres_[2]|jname))
             else:
                 jname = self._namer.next("j")
-                self._temp_kernel_data.append(
-                    lp.TemporaryVariable(jname, shape=(), dtype=np.uintp))
+                added_jnames.append(jname)
                 lres = [(None, lres_[1]|lres_[0].label, lres_[2]|jname)]
 
         while len(rres) == 1 and rres[0][0] is not None and rres[0][0].size == 1:
@@ -339,17 +339,25 @@ class LoopyKernelBuilder:
                 rres = []
                 for child in rres_[0].children:
                     jname = self._namer.next("j")
-                    self._temp_kernel_data.append(
-                        lp.TemporaryVariable(jname, shape=(), dtype=np.uintp))
+                    added_jnames.append(jname)
                     rres.append((child, rres_[1]|rres_[0].label, rres_[2]|jname))
             else:
                 jname = self._namer.next("j")
-                self._temp_kernel_data.append(
-                    lp.TemporaryVariable(jname, shape=(), dtype=np.uintp))
+                added_jnames.append(jname)
                 rres = [(None, rres_[1]|rres_[0].label, rres_[2]|jname)]
 
+        # just set these to zero
+        new_insns = []
+        for jname in added_jnames:
+            self._temp_kernel_data.append(
+                lp.TemporaryVariable(jname, shape=(), dtype=np.uintp))
+            insn = lp.Assignment(
+                pym.var(jname), 0, id=self._namer.next("insn"),
+                within_inames=within_inames, depends_on=depends_on)
+            new_insns.append(insn)
 
-        # import pdb; pdb.set_trace()
+        self.instructions.extend(new_insns)
+        # depends_on |= {insn.id for insn in new_insns}
 
         for ((lindex, innerllabels, innerljnames), (rindex, innerrlabels, innerrjnames)) \
                 in utils.checked_zip(lres, rres):
@@ -687,7 +695,7 @@ class LoopyKernelBuilder:
 
     @_make_instruction_context.register
     def _(self, call: tlang.FunctionCall, within_indices, within_inames, depends_on):
-        import pdb; pdb.set_trace()
+        # import pdb; pdb.set_trace()
 
         subarrayrefs = {}
         for temp in utils.unique(itertools.chain(call.reads, call.writes)):
@@ -812,8 +820,14 @@ class LoopyKernelBuilder:
                 depends_on |= deps
                 temp_axis = temp_part.subaxis
 
-            # TODO make scalar stuff work a lot better
-            # assert temp_axis is None
+        # there are no ordering restrictions between assignments to the
+        # same temporary - but this is only valid to declare if multiple insns are used
+        # if len(assignment.lhs.indicess) > 1:
+        #     assert len(assignment.rhs.indicess) > 1
+        #     no_sync_with = frozenset({(f"{assignment.id}*", "any")})
+        # else:
+        #     no_sync_with = frozenset()
+
 
         self.generate_assignment_insn_inner(
             assignment, assignment.temporary, temp_offset,
@@ -838,18 +852,6 @@ class LoopyKernelBuilder:
             self._temp_kernel_data.append(
                 lp.TemporaryVariable(unindexed.name, shape=shape)
             )
-
-        return
-
-        # everything below shouldn't work now...
-        raise Exception("shouldn't touch below code")
-        # there are no ordering restrictions between assignments to the
-        # same temporary - but this is only valid to declare if multiple insns are used
-        # if len(assignment.lhs.indicess) > 1:
-        #     assert len(assignment.rhs.indicess) > 1
-        #     no_sync_with = frozenset({(f"{assignment.id}*", "any")})
-        # else:
-        #     no_sync_with = frozenset()
 
     def emit_layout_insns(self, layout_fn, offset_var, part_labels, jnames, within_inames, depends_on):
         """
@@ -913,16 +915,6 @@ class LoopyKernelBuilder:
             depends_on,
             within_inames,
         ):
-        # the final instruction needs to come after all offset-determining instructions
-
-        # # handle scalar assignment (for loop bounds)
-        # if scalar:
-        #     if assignment.lhs == assignment.temporary:
-        #         loffset = None
-        #     else:
-        #         assert assignment.rhs == assignment.temporary
-        #         roffset = None
-
         if scalar:
             texpr = pym.var(temp.name)
         else:
@@ -942,6 +934,8 @@ class LoopyKernelBuilder:
         elif isinstance(assignment, tlang.Increment):
             rexpr = lexpr + rexpr
 
+        insn_id = self._namer.next(f"{assignment.id}_")
+
         # there are no ordering restrictions between assignments to the
         # same temporary - but this is only valid to declare if multiple insns are used
         # if len(assignment.lhs.indicess) > 1:
@@ -949,11 +943,9 @@ class LoopyKernelBuilder:
         #     no_sync_with = frozenset({(f"{assignment.id}*", "any")})
         # else:
         #     no_sync_with = frozenset()
+        no_sync_with = frozenset({(f"{assignment.id}*", "any")})
 
-        insn_id = self._namer.next(f"{assignment.id}_")
-        # depends_on = frozenset({f"{id}_*" for id in assignment.depends_on})
-        # if self._active_insn.id in self._latest_insn:
-        #     depends_on |= {self._latest_insn[self._active_insn.id]}
+
 
         assign_insn = lp.Assignment(
             lexpr, rexpr,
@@ -961,7 +953,7 @@ class LoopyKernelBuilder:
             within_inames=frozenset(within_inames),
             within_inames_is_final=True,
             depends_on=depends_on,
-            # no_sync_with=no_sync_with,
+            no_sync_with=no_sync_with,
         )
         self.instructions.append(assign_insn)
 
