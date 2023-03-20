@@ -904,39 +904,48 @@ def test_map():
     assert all(dat2.data == np.array([1+2, 0+2, 0+1, 3+4, 2+1], dtype=np.int32))
 
 
-@pytest.mark.skip
 def test_closure_ish():
-    axes = MultiAxis([3, 4])
-    dat1 = MultiArray.new(axes, name="dat1", data=np.arange(7, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(MultiAxis(3), name="dat2", data=np.zeros(3, dtype=np.float64), dtype=np.float64)
+    axes1 = MultiAxis([AxisPart(3, label="p1"), AxisPart(4, label="p2")]).set_up()
+    dat1 = MultiArray(
+        axes1, name="dat1", data=np.arange(7, dtype=np.float64))
+    axes2 = MultiAxis([AxisPart(3, label="p1")]).set_up()
+    dat2 = MultiArray(
+        axes2, name="dat2", data=np.zeros(3, dtype=np.float64))
 
-    map_axes = (
-        MultiAxis(AxisPart(3, id="ax1"))
-        .add_subaxis("ax1", 2)
+    # create a map from each cell to 2 edges
+    axes3 = (
+        MultiAxis([AxisPart(3, id="p1", label="p1")])
+        .add_subaxis("p1", MultiAxis([AxisPart(2)]))
+        .set_up()
     )
-    map0 = MultiArray.new(
-        map_axes, dtype=np.int32, prefix="map",
-        data=np.array([1, 2, 0, 1, 3, 2], dtype=np.int32)
-    )
+    map1 = MultiArray(
+        axes3, name="map1", data=np.array([1, 2, 0, 1, 3, 2], dtype=np.int32))
 
+    # we have a loop of size 3 here because the temporary has 1 cell DoF and 2 edge DoFs
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 3 }",
         "y[0] = y[0] + x[i]",
         [lp.GlobalArg("x", np.float64, (3,), is_input=True, is_output=False),
-        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
+        lp.GlobalArg("y", np.float64, (1,), is_input=True, is_output=True),],
         target=lp.CTarget(),
         name="mylocalkernel",
         lang_version=(2018, 2),
     )
-    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.INC])
 
-    i1 = pyop3.index([Slice(3, npart=0)]) # loop over 'cells'
-    i2 = [i1, [NonAffineMap(map0[i1], npart=1)]]  # access 'cell' and 'edge' data
-    expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
+    p0 = RangeNode("p1", 3, id="i0")
+    p1 = (
+        p0.add_child("i0", IdentityMapNode(("p1",), ("p1",), arity=1))
+        .add_child("i0", TabulatedMapNode(("p1",), ("p2",), arity=2, data=map1[[p0]]))
+    )
+
+    expr = pyop3.Loop([p0], kernel(dat1[[p1]], dat2[[p0]]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(exe)
     fn = getattr(dll, "mykernel")
+
+    import pdb; pdb.set_trace()
 
     args = [map0.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)

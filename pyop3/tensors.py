@@ -1131,7 +1131,7 @@ class MapNode(IndexNode):
 
     # in theory we can have a selector function here too so to_labels is actually bigger?
     # means we have multiple children?
- 
+
     def __init__(self, from_labels, to_labels, arity, children=(), *, id=None):
         self.from_labels = from_labels
         self.to_labels = to_labels
@@ -1150,6 +1150,10 @@ class TabulatedMapNode(MapNode):
     def __init__(self, from_labels, to_labels, arity, data, children=(), *, id=None):
         self.data = data
         super().__init__(from_labels, to_labels, arity, children, id=id)
+
+
+class IdentityMapNode(MapNode):
+    pass
 
 
 class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):

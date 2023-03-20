@@ -22,7 +22,7 @@ from pyop3 import utils
 from pyop3.utils import MultiNameGenerator, NameGenerator, strictly_all
 from pyop3.utils import PrettyTuple, checked_zip, NameGenerator, rzip
 from pyop3.tensors import MultiArray, Map, MultiAxis, _compute_indexed_shape, _compute_indexed_shape2, AxisPart, TerminalMultiIndex
-from pyop3.tensors import MultiIndexCollection, MultiIndex, TypedIndex, AffineLayoutFunction, IndirectLayoutFunction, Range, Path, TabulatedMap, MapNode, TabulatedMapNode, RangeNode
+from pyop3.tensors import MultiIndexCollection, MultiIndex, TypedIndex, AffineLayoutFunction, IndirectLayoutFunction, Range, Path, TabulatedMap, MapNode, TabulatedMapNode, RangeNode, IdentityMapNode
 
 
 class VariableCollector(pym.mapper.Collector):
@@ -91,7 +91,7 @@ def drop_within(myindex, within_indices):
     this index inside of within_indices.
     """
     if myindex is None:
-        return None, PrettyTuple(), PrettyTuple()
+        return [(None, PrettyTuple(), PrettyTuple())]
 
     # import pdb; pdb.set_trace()
     mylabels, myjnames = [], []
@@ -101,26 +101,32 @@ def drop_within(myindex, within_indices):
             mylabels.extend(labels)
             myjnames.extend(jnames)
         else:
+            assert isinstance(myindex, MapNode)
+            assert len(myindex.from_labels) < len(mylabels)
             mylabels = mylabels[:-len(myindex.from_labels)] + list(labels)
             myjnames = myjnames[:-len(myindex.from_labels)] + list(jnames)
 
         if len(myindex.children) == 0:
-            return None, PrettyTuple(mylabels), PrettyTuple(myjnames)
+            return [(None, PrettyTuple(mylabels), PrettyTuple(myjnames))]
 
-        if isinstance(myindex, MapNode):
-            to_labels = myindex.to_labels
-        else:
-            to_labels = ((myindex.label,),)
-
+        # try to find a child node that has already been registered
+        # only one child node can be registered as we will have forked above and loops
+        # cannot have duplicate indices
         newindex = None
-        for ch, lbls in checked_zip(myindex.children, to_labels):
-            if lbls == labels:
-                assert newindex is None
+        found = False
+        for ch in myindex.children:
+            if ch.id in within_indices:
+                assert newindex is None, "multiple children cannot be registered as within here"
                 newindex = ch
-        assert newindex is not None
-        myindex = newindex
+                found = True
+        if found:
+            myindex = newindex
+        else:
+            return [
+                (ch, PrettyTuple(mylabels), PrettyTuple(myjnames))
+                for ch in myindex.children]
 
-    return myindex, PrettyTuple(mylabels), PrettyTuple(myjnames)
+    return [(myindex, PrettyTuple(mylabels), PrettyTuple(myjnames))]
 
 
 class LoopyKernelBuilder:
@@ -231,6 +237,10 @@ class LoopyKernelBuilder:
             new_jnames = existing_jnames | jname
             jnames = (jname,)
             new_within = {index.id: ((index.label,), (jname,))}
+
+        elif isinstance(index, IdentityMapNode):
+            raise NotImplementedError
+
         elif isinstance(index, TabulatedMapNode):
             # NOTE: some maps can produce multiple jnames (but not this one)
             jname = self._namer.next("j")
@@ -300,139 +310,197 @@ class LoopyKernelBuilder:
 
         # catch within_indices
         # ah - need to keep tracking the right part labels though!
+        # lindex, innerllabels, innerljnames = drop_within(lindex, within_indices)
+        # rindex, innerrlabels, innerrjnames = drop_within(rindex, within_indices)
+        lres = drop_within(lindex, within_indices)
+        rres = drop_within(rindex, within_indices)
+
         # import pdb; pdb.set_trace()
-        lindex, innerllabels, innerljnames = drop_within(lindex, within_indices)
-        rindex, innerrlabels, innerrjnames = drop_within(rindex, within_indices)
 
-
-        llabels = PrettyTuple(llabels+innerllabels)
-        ljnames = PrettyTuple(ljnames+innerljnames)
-        rlabels = PrettyTuple(rlabels+innerrlabels)
-        rjnames = PrettyTuple(rjnames+innerrjnames)
-
-        iname = None
-        if not strictly_all(idx is None for idx in [lindex, rindex]):
-            size = utils.single_valued([lindex.size, rindex.size])
-
-            iname = self._namer.next("i")
-            extent = self.register_extent(size, within_indices, within_inames, depends_on)
-            domain_str = f"{{ [{iname}]: 0 <= {iname} < {extent} }}"
-            self.domains.append(domain_str)
-
-            def myinnerfunc(index, existing_labels, existing_jnames):
-                # set these below (singledispatch me)
-                index_insns = None
-                new_labels = None
-                new_jnames = None
-                jnames = None
-                if isinstance(index, RangeNode):
+        # also drop one-sized things
+        while len(lres) == 1 and lres[0][0] is not None and lres[0][0].size == 1:
+            lres_ = lres[0]
+            if lres_[0].children:
+                lres = []
+                for child in lres_[0].children:
                     jname = self._namer.next("j")
                     self._temp_kernel_data.append(
                         lp.TemporaryVariable(jname, shape=(), dtype=np.uintp))
+                    lres.append((child, lres_[1]|lres_[0].label, lres_[2]|jname))
+            else:
+                jname = self._namer.next("j")
+                self._temp_kernel_data.append(
+                    lp.TemporaryVariable(jname, shape=(), dtype=np.uintp))
+                lres = [(None, lres_[1]|lres_[0].label, lres_[2]|jname)]
 
-                    index_insn = lp.Assignment(
-                        pym.var(jname), pym.var(iname)*index.step+index.start,
-                        id=self._namer.next("myid_"),
-                        within_inames=within_inames|{iname},
-                        depends_on=depends_on,
-                        # no_sync_with=no_sync_with,
-                    )
-                    index_insns = [index_insn]
-                    new_labels = existing_labels | index.label
-                    new_jnames = existing_jnames | jname
-                    jnames = (jname,)
-                    new_within = {index.id: ((index.label,), (jname,))}
-                elif isinstance(index, TabulatedMapNode):
-                    # NOTE: some maps can produce multiple jnames (but not this one)
+        while len(rres) == 1 and rres[0][0] is not None and rres[0][0].size == 1:
+            rres_ = rres[0]
+            if rres_[0].children:
+                rres = []
+                for child in rres_[0].children:
                     jname = self._namer.next("j")
                     self._temp_kernel_data.append(
                         lp.TemporaryVariable(jname, shape=(), dtype=np.uintp))
-
-                    map_labels = existing_labels | index.to_labels[0]
-                    map_jnames = existing_jnames | iname
-                    expr = self.register_scalar_assignment(
-                        index.data, map_labels, map_jnames, within_inames|{iname}, depends_on)
-
-                    index_insn = lp.Assignment(
-                        pym.var(jname),
-                        expr,
-                        id=self._namer.next("myid_"),
-                        within_inames=within_inames|{iname},
-                        depends_on=depends_on)
-
-                    index_insns = [index_insn]
-
-                    temp_labels = list(existing_labels)
-                    temp_jnames = list(existing_jnames)
-                    assert len(index.from_labels) == 1
-                    assert len(index.to_labels) == 1
-                    for label in index.from_labels:
-                        assert temp_labels.pop() == label
-                        temp_jnames.pop()
-
-                    to_label, = index.to_labels
-                    new_labels = PrettyTuple(temp_labels) | to_label
-                    new_jnames = PrettyTuple(temp_jnames) | jname
-                    jnames = (jname,)
-                    new_within = {index.id: ((to_label,), (jname,))}
-                else:
-                    raise AssertionError
-
-                assert index_insns is not None
-                assert new_labels is not None
-                assert new_jnames is not None
-                assert jnames is not None
-                self.instructions.extend(index_insns)
-                new_deps = frozenset({insn.id for insn in index_insns})
-
-                return new_labels, new_jnames, new_within, new_deps
-
-            lthings = myinnerfunc(lindex, llabels, ljnames)
-            rthings = myinnerfunc(rindex, rlabels, rjnames)
-
-            if strictly_all([lindex.children, rindex.children]):
-                for lsubindex, rsubindex in checked_zip(lindex.children, rindex.children):
-                    self.build_assignment(
-                        assignment, lsubindex, rsubindex,
-                        within_indices|lthings[2]|rthings[2],
-                        within_inames|{iname},
-                        depends_on|lthings[3]|rthings[3],
-                        lthings[0], lthings[1], rthings[0], rthings[1])
-
-                terminate = False
+                    rres.append((child, rres_[1]|rres_[0].label, rres_[2]|jname))
             else:
-                terminate = True
-        else:
-            lthings = [llabels, ljnames]  # other indices arent needed
-            rthings = [rlabels, rjnames]  # other indices arent needed
-            terminate = True
+                jname = self._namer.next("j")
+                self._temp_kernel_data.append(
+                    lp.TemporaryVariable(jname, shape=(), dtype=np.uintp))
+                rres = [(None, rres_[1]|rres_[0].label, rres_[2]|jname)]
 
-        if terminate:
-            lhs_part_labels, lhs_jnames = lthings[0], lthings[1]
-            rhs_part_labels, rhs_jnames = rthings[0], rthings[1]
 
-            if assignment.lhs is assignment.array:
-                array_part_labels = lhs_part_labels
-                array_jnames = lhs_jnames
-                temp_part_labels = rhs_part_labels
-                temp_jnames = rhs_jnames
-            else:
-                temp_part_labels = lhs_part_labels
-                temp_jnames = lhs_jnames
-                array_part_labels = rhs_part_labels
-                array_jnames = rhs_jnames
+        # import pdb; pdb.set_trace()
 
+        for ((lindex, innerllabels, innerljnames), (rindex, innerrlabels, innerrjnames)) \
+                in utils.checked_zip(lres, rres):
             # import pdb; pdb.set_trace()
-            extra_inames = {iname} if iname else set()
-            extra_deps = frozenset({f"{id}_*" for id in assignment.depends_on})
-            self.emit_assignment_insn(
-                assignment,
-                array_part_labels,
-                temp_part_labels,
-                array_jnames,
-                temp_jnames,
-                within_inames|extra_inames,
-                depends_on|extra_deps)
+
+            llabels_ = PrettyTuple(llabels+innerllabels)
+            ljnames_ = PrettyTuple(ljnames+innerljnames)
+            rlabels_ = PrettyTuple(rlabels+innerrlabels)
+            rjnames_ = PrettyTuple(rjnames+innerrjnames)
+
+            iname = None
+            if not strictly_all(idx is None for idx in [lindex, rindex]):
+                size = utils.single_valued([lindex.size, rindex.size])
+
+                iname = self._namer.next("i")
+                extent = self.register_extent(size, within_indices, within_inames, depends_on)
+                domain_str = f"{{ [{iname}]: 0 <= {iname} < {extent} }}"
+                self.domains.append(domain_str)
+
+                def myinnerfunc(index, existing_labels, existing_jnames):
+                    # set these below (singledispatch me)
+                    index_insns = None
+                    new_labels = None
+                    new_jnames = None
+                    jnames = None
+                    if isinstance(index, RangeNode):
+                        jname = self._namer.next("j")
+                        self._temp_kernel_data.append(
+                            lp.TemporaryVariable(jname, shape=(), dtype=np.uintp))
+
+                        index_insn = lp.Assignment(
+                            pym.var(jname), pym.var(iname)*index.step+index.start,
+                            id=self._namer.next("myid_"),
+                            within_inames=within_inames|{iname},
+                            depends_on=depends_on,
+                            # no_sync_with=no_sync_with,
+                        )
+                        index_insns = [index_insn]
+                        new_labels = existing_labels | index.label
+                        new_jnames = existing_jnames | jname
+                        jnames = (jname,)
+                        new_within = {index.id: ((index.label,), (jname,))}
+
+                    elif isinstance(index, IdentityMapNode):
+                        index_insns = []
+                        new_labels = existing_labels
+                        new_jnames = existing_jnames
+                        jnames = ()
+                        new_within = {}
+
+                    elif isinstance(index, TabulatedMapNode):
+                        # NOTE: some maps can produce multiple jnames (but not this one)
+                        jname = self._namer.next("j")
+                        self._temp_kernel_data.append(
+                            lp.TemporaryVariable(jname, shape=(), dtype=np.uintp))
+
+                        # import pdb; pdb.set_trace()
+
+                        # find the right target label for the map (assume can't be multi-part)
+                        mapaxis = index.data.axes
+                        for l in existing_labels:
+                            mapaxis = mapaxis.parts_by_label[l].subaxis
+                        assert mapaxis.nparts == 1
+                        assert not mapaxis.part.subaxis
+                        map_labels = existing_labels | mapaxis.part.label
+                        map_jnames = existing_jnames | iname
+                        expr = self.register_scalar_assignment(
+                            index.data, map_labels, map_jnames, within_inames|{iname}, depends_on)
+
+                        index_insn = lp.Assignment(
+                            pym.var(jname),
+                            expr,
+                            id=self._namer.next("myid_"),
+                            within_inames=within_inames|{iname},
+                            depends_on=depends_on)
+
+                        index_insns = [index_insn]
+
+                        temp_labels = list(existing_labels)
+                        temp_jnames = list(existing_jnames)
+                        assert len(index.from_labels) == 1
+                        assert len(index.to_labels) == 1
+                        for label in index.from_labels:
+                            assert temp_labels.pop() == label
+                            temp_jnames.pop()
+
+                        to_label, = index.to_labels
+                        new_labels = PrettyTuple(temp_labels) | to_label
+                        new_jnames = PrettyTuple(temp_jnames) | jname
+                        jnames = (jname,)
+                        new_within = {index.id: ((to_label,), (jname,))}
+                    else:
+                        raise AssertionError
+
+                    assert index_insns is not None
+                    assert new_labels is not None
+                    assert new_jnames is not None
+                    assert jnames is not None
+                    self.instructions.extend(index_insns)
+                    new_deps = frozenset({insn.id for insn in index_insns})
+
+                    return new_labels, new_jnames, new_within, new_deps
+
+                lthings = myinnerfunc(lindex, llabels_, ljnames_)
+                rthings = myinnerfunc(rindex, rlabels_, rjnames_)
+
+                # import pdb; pdb.set_trace()
+
+                if strictly_all([lindex.children, rindex.children]):
+                    for lsubindex, rsubindex in checked_zip(lindex.children, rindex.children):
+                        self.build_assignment(
+                            assignment, lsubindex, rsubindex,
+                            within_indices|lthings[2]|rthings[2],
+                            within_inames|{iname},
+                            depends_on|lthings[3]|rthings[3],
+                            lthings[0], lthings[1], rthings[0], rthings[1])
+
+                    terminate = False
+                else:
+                    terminate = True
+            else:
+                lthings = [llabels_, ljnames_]  # other indices arent needed
+                rthings = [rlabels_, rjnames_]  # other indices arent needed
+                terminate = True
+
+            if terminate:
+                lhs_part_labels, lhs_jnames = lthings[0], lthings[1]
+                rhs_part_labels, rhs_jnames = rthings[0], rthings[1]
+
+                if assignment.lhs is assignment.array:
+                    array_part_labels = lhs_part_labels
+                    array_jnames = lhs_jnames
+                    temp_part_labels = rhs_part_labels
+                    temp_jnames = rhs_jnames
+                else:
+                    temp_part_labels = lhs_part_labels
+                    temp_jnames = lhs_jnames
+                    array_part_labels = rhs_part_labels
+                    array_jnames = rhs_jnames
+
+                # import pdb; pdb.set_trace()
+                extra_inames = {iname} if iname else set()
+                extra_deps = frozenset({f"{id}_*" for id in assignment.depends_on})
+                self.emit_assignment_insn(
+                    assignment,
+                    array_part_labels,
+                    temp_part_labels,
+                    array_jnames,
+                    temp_jnames,
+                    within_inames|extra_inames,
+                    depends_on|extra_deps)
 
 
     @_build.register
@@ -452,25 +520,27 @@ class LoopyKernelBuilder:
         temporaries = {}
         for arg in call.arguments:
             # create an appropriate temporary
-            # temporary = self._temp_name_generator.next()
             parts = []
             indices = []
+            # each index here contributes a subaxis I think
             for idx in arg.tensor.indices:
-                new_part, newidx = self._construct_temp_dims(idx, within_indices)
-                parts.append(new_part)
-                indices.append(newidx)
+                subparts, subindices = self._construct_temp_dims(idx, within_indices)
 
-            # I don't think we can ever get some None and some not
-            if strictly_all(part is None for part in parts):
-                assert all(idx is None for idx in indices)
-                axes = None
-                indices = ()
-            else:
-                axes = MultiAxis(parts).set_up()
+                if strictly_all(x is None for x in [subparts, subindices]):
+                    subaxis = None
+                else:
+                    subaxis = MultiAxis(subparts)
 
-            temporary = MultiArray.new(
-                axes, indices=indices, name=self._temp_name_generator.next(), dtype=arg.tensor.dtype,
-            )
+                label = self._namer.next("myotherlabel")
+                parts.append(AxisPart(1, subaxis=subaxis, label=label))
+                indices.append(RangeNode(label, 1, children=subindices or ()))
+
+            # import pdb; pdb.set_trace()
+
+            axes = MultiAxis(parts).set_up()
+            temporary = MultiArray(
+                axes, indices=indices, name=self._temp_name_generator.next(),
+                dtype=arg.tensor.dtype)
             temporaries[arg] = temporary
 
         gathers = self.make_gathers(temporaries)
@@ -494,29 +564,36 @@ class LoopyKernelBuilder:
         parts from this function
         """
         # import pdb; pdb.set_trace()
-        index, newlabels, newjnames = drop_within(index, within_indices)
+        # index, newlabels, newjnames = drop_within(index, within_indices)
+        result = drop_within(index, within_indices)
 
         # scalar case
-        if index is None:
+        if len(result) == 1 and result[0][0] is None:
             return None, None
 
-        if len(index.children) > 0:
-            subparts = []
-            new_subidxs = []
-            for subidx in index.children:
-                subpart, new_subidx = self._construct_temp_dims(subidx, within_indices)
-                subparts.append(subpart)
-                new_subidxs.append(new_subidx)
-            subaxis = MultiAxis(subparts)
-        else:
-            subaxis = None
-            new_subidxs = []
+        new_parts = []
+        new_indices = []
+        for index, newlabels, newjnames in result:
+            if len(index.children) > 0:
+                subparts = []
+                new_subidxs = []
+                for subidx in index.children:
+                    subpart, new_subidx = self._construct_temp_dims(subidx, within_indices)
+                    subparts.append(subpart)
+                    new_subidxs.append(new_subidx)
+                subaxis = MultiAxis(subparts)
+            else:
+                subaxis = None
+                new_subidxs = []
 
-        label = self._namer.next("mylabel")
-        new_part = AxisPart(index.size, label=label, subaxis=subaxis)
-        new_index = RangeNode(label, index.size, children=new_subidxs)
+            label = self._namer.next("mylabel")
+            new_part = AxisPart(index.size, label=label, subaxis=subaxis)
+            new_index = RangeNode(label, index.size, children=new_subidxs)
 
-        return new_part, new_index
+            new_parts.append(new_part)
+            new_indices.append(new_index)
+
+        return new_parts, new_indices
 
 
     def make_temp_axis_part_per_multi_index_collection(
@@ -610,7 +687,7 @@ class LoopyKernelBuilder:
 
     @_make_instruction_context.register
     def _(self, call: tlang.FunctionCall, within_indices, within_inames, depends_on):
-        # import pdb; pdb.set_trace()
+        import pdb; pdb.set_trace()
 
         subarrayrefs = {}
         for temp in utils.unique(itertools.chain(call.reads, call.writes)):
@@ -669,6 +746,8 @@ class LoopyKernelBuilder:
         # TODO are these always the same length?
         lindices = assignment.lhs.indices or (None,)
         rindices = assignment.rhs.indices or (None,)
+
+        # import pdb; pdb.set_trace()
 
         for lindex, rindex in checked_zip(lindices, rindices):
             self.build_assignment(assignment, lindex, rindex, within_indices, within_inames, depends_on)
