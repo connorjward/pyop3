@@ -632,14 +632,16 @@ def test_compute_double_loop_ragged_inner(ragged_copy_kernel):
     ax2 = ax1.add_subaxis("p1", MultiAxis([AxisPart(nnz)]))
 
     root = ax2.set_up()
-    dat1 = MultiArray.new(root, name="dat1", data=np.ones(11, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(root, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
+    dat1 = MultiArray(root, name="dat1", data=np.ones(11, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray(root, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
 
     p = [RangeNode(0, 5)]
     expr = pyop3.Loop(p, ragged_copy_kernel(dat1[p], dat2[p]))
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
+
+    import pdb; pdb.set_trace()
 
     # void mykernel(nnz, layout0_0, dat1, dat2)
     layout0_0 = root.part.subaxis.part.layout_fn.start
@@ -954,6 +956,44 @@ def test_closure_ish():
 
     # from [1, 2, 0, 1, 3, 2] (-> [4, 5, 3, 4, 6, 5]) and [0, 1, 2]
     assert all(dat2.data == np.array([4+5+0, 3+4+1, 6+5+2], dtype=np.int32))
+
+
+def test_multipart_inner():
+    axes = MultiAxis([
+        AxisPart(5, label="p1", subaxis=MultiAxis([
+            AxisPart(3, label="p2_0"),
+            AxisPart(2, label="p2_1"),
+        ])),
+    ]).set_up()
+
+    dat1 = MultiArray(
+        axes, name="dat1", data=np.ones(25, dtype=np.float64))
+    dat2 = MultiArray(
+        axes, name="dat2", data=np.zeros(25, dtype=np.float64))
+
+    code = lp.make_kernel(
+        "{ [i]: 0 <= i < 5 }",
+        "y[i] = x[i]",
+        [lp.GlobalArg("x", np.float64, (5,), is_input=True, is_output=False),
+        lp.GlobalArg("y", np.float64, (5,), is_input=False, is_output=True),],
+        target=lp.CTarget(),
+        name="mylocalkernel",
+        lang_version=(2018, 2),
+    )
+    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+
+    p = [RangeNode("p1", 5)]
+    expr = pyop3.Loop(p, kernel(dat1[p], dat2[p]))
+
+    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+    dll = compilemythings(code)
+    fn = getattr(dll, "mykernel")
+
+    args = [dat1.data, dat2.data]
+    fn.argtypes = (ctypes.c_voidp,) * len(args)
+    fn(*(d.ctypes.data for d in args))
+
+    assert np.allclose(dat1.data, dat2.data)
 
 
 @pytest.mark.skip

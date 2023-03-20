@@ -136,8 +136,8 @@ def set_null_layouts(layouts, axis, path=()):
     We also get them when the axis is "indexed", that is, not ever actually used by
     temporaries.
     """
-    for npart, part in enumerate(axis.parts):
-        new_path = path + (npart,)
+    for part in axis.parts:
+        new_path = path + (part.label,)
         if not has_constant_step(part) or part.indexed:
             layouts[new_path] = "null layout"
 
@@ -192,19 +192,6 @@ def step_size(part, indices=PrettyTuple()):
     if not has_constant_step(part) and not indices:
         raise ValueError
     return part.subaxis.calc_size(indices) if part.subaxis else 1
-
-
-def attach_blank_data_to_layouts(layouts, part, npart, data, path=None):
-    # path is a tuple key for holding the different axis parts
-    if not path:
-        path = (npart,)
-
-    if layouts[path] is None:
-        layouts[path] = data.copy()
-
-    if part.subaxis:
-        for npt, subpart in enumerate(part.subaxis.parts):
-            attach_blank_data_to_layouts(layouts, subpart, npt, data, path+(npt,))
 
 
 def attach_star_forest(axis, with_halo_points=True):
@@ -671,9 +658,10 @@ class MultiAxis(pytools.ImmutableRecord):
 
         # fixme very hard to read - the conditions above aren't quite right
         test3 = path not in layouts or layouts[path] != "null layout"
-        # import pdb; pdb.set_trace()
         if (test1 or test2) and test3:
             data = self.create_layout_lists(path, offset)
+
+            # import pdb; pdb.set_trace()
 
             # we shouldn't reproduce anything here
             # if any(layouts[k] is not None for k in data):
@@ -699,7 +687,7 @@ class MultiAxis(pytools.ImmutableRecord):
     def create_layout_lists(self, path, offset, indices=PrettyTuple()):
         npoints = 0
         # data = {}
-        for npart, part in enumerate(self.parts):
+        for part in self.parts:
             if part.has_integer_count:
                 count = part.count
             else:
@@ -717,11 +705,11 @@ class MultiAxis(pytools.ImmutableRecord):
         # taken from const function - handle starts
         myoff = offset.value
         found = set()
-        for i, part in enumerate(self.parts):
+        for part in self.parts:
             # need to track if ragged permuted below
             if has_independently_indexed_subaxis_parts(part) and part.numbering is None:
-                new_layouts[path|i] = myoff
-                found.add(i)
+                new_layouts[path|part.label] = myoff
+                found.add(part.label)
 
             if not has_fixed_size(part):
                 # can't do any more as things to the right of this will also move around
@@ -763,7 +751,7 @@ class MultiAxis(pytools.ImmutableRecord):
 
             # find the right axis part and index thereof for the current 'global' numbering
             selected_part = None
-            selected_part_num = None
+            selected_part_label = None
             selected_index = None
             for part_num, axis_part in enumerate(self.parts):
                 try:
@@ -772,24 +760,24 @@ class MultiAxis(pytools.ImmutableRecord):
                         raise NotImplementedError("Need better indexing approach")
                     selected_index = list(axis_numbering[part_num].data).index(i)
                     selected_part = axis_part
-                    selected_part_num = part_num
+                    selected_part_label = axis_part.label
                 except ValueError:
                     continue
             if selected_part is None or selected_index is None:
                 raise ValueError(f"{i} not found in any numberings")
 
             # skip those where we just set start and return an integer
-            if selected_part_num in found:
+            if selected_part_label in found:
                 offset += step_size(selected_part, indices|selected_index)
                 continue
 
             if has_independently_indexed_subaxis_parts(selected_part):
-                new_layouts[path|selected_part_num][selected_index] = offset.value
+                new_layouts[path|selected_part_label][selected_index] = offset.value
                 offset += step_size(selected_part, indices|selected_index)
             else:
                 assert selected_part.subaxis
                 subdata = selected_part.subaxis.create_layout_lists(
-                    path|selected_part_num, offset, indices|selected_index
+                    path|selected_part_label, offset, indices|selected_index
                 )
 
                 for subpath, subdata in subdata.items():
@@ -2112,46 +2100,6 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
             else:
                 idxs += [[idx]]
         return idxs
-
-    @classmethod
-    def _is_valid_indices(cls, indices, dim):
-        # deal with all of this later - need a good scalar solution before this will make sense I think.
-        return True
-
-        # not sure what I'm trying to do here
-        if not indices and dim.sizes and None in dim.sizes:
-            return True
-
-        if dim.sizes and not indices:
-            return False
-
-        # scalar case
-        if not dim.sizes and not indices:
-            return True
-
-        idx, *subidxs = indices
-        assert idx.label in dim.labels
-
-        if isinstance(idx, NonAffineMap):
-            mapvalid = cls._is_valid_indices(idx.tensor.indices, idx.tensor.dim)
-            if not mapvalid:
-                return False
-            # import pdb; pdb.set_trace()
-            npart = dim.labels.index(idx.label)
-            if subdims := dim.subdims:
-                subdim = subdims[npart]
-                if not cls._is_valid_indices(subidxs, subdim):
-                    return False
-            return True
-        elif isinstance(idx, (Slice, IndexFunction)):
-            npart = dim.labels.index(idx.label)
-            if subdims := dim.subdims:
-                subdim = subdims[npart]
-                if not cls._is_valid_indices(subidxs, subdim):
-                    return False
-            return True
-        else:
-            raise TypeError
 
     def __str__(self):
         return self.name
