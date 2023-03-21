@@ -68,21 +68,6 @@ def to_c(expr):
     return lp.generate_code_v2(program).device_code()
 
 
-@dataclasses.dataclass
-class IndexRegistryItem:
-    # index: TypedIndex
-    label: str
-    iname: str
-    jnames: Sequence[str]
-    is_loop_index: bool = False
-    registry: Optional[Sequence["IndexRegistryItem"]] = None
-    """Need this if we have maps."""
-    within_inames: FrozenSet = frozenset()
-
-    def __postinit__(self):
-        assert self.label is not None
-
-
 def drop_within(myindex, within_indices):
     """So the idea here is that this index has multiple children so we can't
     just add a new path entry and move to the child. We need to know which
@@ -603,41 +588,6 @@ class LoopyKernelBuilder:
 
         return new_parts, new_indices
 
-
-    def make_temp_axis_part_per_multi_index_collection(
-            self, axis, multi_indices, within_migs, return_final_part_id=False):
-        current_array_axis = axis
-        top_temp_part = None
-        current_bottom_part_id = None
-        for multi_idx in multi_indices:
-            temp_axis_part, bottom_part_id = self.make_temp_axes_per_multi_index(multi_idx, within_migs)
-
-            if not top_temp_part:
-                top_temp_part = temp_axis_part
-                current_bottom_part_id = bottom_part_id
-            else:
-                top_temp_part = top_temp_part.add_subaxis(current_bottom_part_id, MultiAxis([temp_axis_part]))
-                current_bottom_part_id = bottom_part_id
-
-            if isinstance(multi_idx, Map):
-                if len(multi_idx.paths) > 1:
-                    raise NotImplementedError("need to branch recurse here")
-
-                # need this loop since a map can yield multiple axis parts
-                for part_label in multi_idx.paths[0].to_axes:
-                    current_array_axis = current_array_axis._parts_by_label[part_label].subaxis
-            else:
-                assert isinstance(multi_idx, TerminalMultiIndex)
-                for typed_idx in multi_idx:
-                    current_array_axis = current_array_axis._parts_by_label[typed_idx.part_label].subaxis
-
-        # axis might not be at the bottom so we'd need to shove on some extra shape
-        # TODO: untested if multi-part
-        if current_array_axis:
-            # oh this is elegant
-            top_temp_part = top_temp_part.add_subaxis(current_bottom_part_id, current_array_axis)
-
-        return top_temp_part
 
     def make_gathers(self, temporaries, **kwargs):
         return tuple(

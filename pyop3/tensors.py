@@ -171,7 +171,7 @@ def handle_const_starts(axis, layouts, path=PrettyTuple(), outer_axes_are_all_in
     for part in axis.parts:
         if part.subaxis:
             handle_const_starts(part.subaxis, layouts, path|part.label,
-                                outer_axes_are_all_indexed and part.indexed)
+                                outer_axes_are_all_indexed and (part.indexed or part.count == 1))
 
 
 def has_constant_start(part, outer_axes_are_all_indexed: bool):
@@ -847,6 +847,7 @@ class MultiAxis(pytools.ImmutableRecord):
 
         # loop over all points in all parts of the multi-axis
         # initialise layout array per axis part
+        # import pdb; pdb.set_trace()
         layouts = {}
         for part in self.parts:
             layouts |= prepare_layouts(part)

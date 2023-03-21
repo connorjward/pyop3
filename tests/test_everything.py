@@ -641,7 +641,7 @@ def test_compute_double_loop_ragged_inner(ragged_copy_kernel):
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    import pdb; pdb.set_trace()
+    # import pdb; pdb.set_trace()
 
     # void mykernel(nnz, layout0_0, dat1, dat2)
     layout0_0 = root.part.subaxis.part.layout_fn.start
