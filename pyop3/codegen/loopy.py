@@ -87,7 +87,7 @@ def drop_within(myindex, within_indices):
             myjnames.extend(jnames)
         else:
             assert isinstance(myindex, MapNode)
-            assert len(myindex.from_labels) < len(mylabels)
+            assert len(myindex.from_labels) <= len(mylabels)
             mylabels = mylabels[:-len(myindex.from_labels)] + list(labels)
             myjnames = myjnames[:-len(myindex.from_labels)] + list(jnames)
 
