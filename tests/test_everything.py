@@ -947,8 +947,6 @@ def test_closure_ish():
     dll = compilemythings(exe)
     fn = getattr(dll, "mykernel")
 
-    # import pdb; pdb.set_trace()
-
     args = [dat1.data, map1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
@@ -996,36 +994,45 @@ def test_multipart_inner():
     assert np.allclose(dat1.data, dat2.data)
 
 
-@pytest.mark.skip
 def test_index_function():
     """Imagine an interval mesh:
 
         3 0 4 1 5 2 6
         x---x---x---x
     """
-    root = MultiAxis([3, 4])
-
-    dat1 = MultiArray.new(root, name="dat1", data=np.arange(7, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(MultiAxis(3), name="dat2", data=np.zeros(3, dtype=np.float64), dtype=np.float64)
+    axes1 = MultiAxis([AxisPart(3, label="p1"), AxisPart(4, label="p2")]).set_up()
+    dat1 = MultiArray(
+        axes1, name="dat1", data=np.arange(7, dtype=np.float64))
+    axes2 = MultiAxis([AxisPart(3, label="p1")]).set_up()
+    dat2 = MultiArray(
+        axes2, name="dat2", data=np.zeros(3, dtype=np.float64))
 
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 3 }",
         "y[0] = y[0] + x[i]",
-        [lp.GlobalArg("x", np.float64, (3,), is_input=True, is_output=False),
-        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
+        [
+            lp.GlobalArg("x", np.float64, (3,), is_input=True, is_output=False),
+            lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),
+        ],
         target=lp.CTarget(),
         name="mylocalkernel",
         lang_version=(2018, 2),
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
-    # an IndexFunction contains an expression and the corresponding dim labels
-    x0, x1 = pym.variables("x0 x1")
-    map = IndexFunction(x0 + x1, arity=2, vars=[x0, x1], npart=1)
+    # import pdb; pdb.set_trace()
 
-    i1 = pyop3.index([Slice(3, npart=0)]) # loop over 'cells'
-    i2 = [i1, [map]]  # access 'cell' and 'edge' data
-    expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
+    # basically here we have "target multi-index is self and self+1"
+    mapexpr = ((j0 := pym.var("j0"), j1 := pym.var("j1")), j0 + j1)
+
+    i1 = RangeNode("p1", 3, id="i0")  # loop over "cells"
+    i2 = (
+        i1.add_child(  # "cell" data
+            "i0", IdentityMapNode(("p1",), ("p1",), arity=1))
+        .add_child(  # "vert" data
+            "i0", AffineMapNode(("p1",), ("p2",), arity=2, expr=mapexpr))
+    )
+    expr = pyop3.Loop([i1], kernel(dat1[[i2]], dat2[[i1]]))
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(code)
@@ -1033,11 +1040,10 @@ def test_index_function():
 
     args = [dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
-
     fn(*(d.ctypes.data for d in args))
 
     # [0, 1, 2] + [3+4, 4+5, 5+6]
-    assert all(dat2.data == np.array([0+3+4, 1+4+5, 2+5+6], dtype=np.int32))
+    assert np.allclose(dat2.data, [0+3+4, 1+4+5, 2+5+6])
 
 
 @pytest.mark.skip

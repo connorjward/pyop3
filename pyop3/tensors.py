@@ -1145,6 +1145,26 @@ class IdentityMapNode(MapNode):
     pass
 
 
+class AffineMapNode(MapNode):
+    fields = MapNode.fields | {"expr"}
+
+    def __init__(self, from_labels, to_labels, arity, expr, children=(), *, id=None):
+        """
+        Parameters
+        ----------
+        expr:
+            A 2-tuple of pymbolic variables and an expression. We need to split them
+            like this because we need to know the order in which the variables
+            correspond to the axis parts.
+        """
+        if len(expr[0]) != len(from_labels) + 1:
+            raise ValueError("Wrong number of variables in expression")
+
+        self.expr = expr
+        super().__init__(from_labels, to_labels, arity, children, id=id)
+
+
+
 class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
     """
     Parameters

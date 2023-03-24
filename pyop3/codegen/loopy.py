@@ -22,7 +22,7 @@ from pyop3 import utils
 from pyop3.utils import MultiNameGenerator, NameGenerator, strictly_all
 from pyop3.utils import PrettyTuple, checked_zip, NameGenerator, rzip
 from pyop3.tensors import MultiArray, Map, MultiAxis, _compute_indexed_shape, _compute_indexed_shape2, AxisPart, TerminalMultiIndex
-from pyop3.tensors import MultiIndexCollection, MultiIndex, TypedIndex, AffineLayoutFunction, IndirectLayoutFunction, Range, Path, TabulatedMap, MapNode, TabulatedMapNode, RangeNode, IdentityMapNode
+from pyop3.tensors import MultiIndexCollection, MultiIndex, TypedIndex, AffineLayoutFunction, IndirectLayoutFunction, Range, Path, TabulatedMap, MapNode, TabulatedMapNode, RangeNode, IdentityMapNode, AffineMapNode
 
 
 class VariableCollector(pym.mapper.Collector):
@@ -227,6 +227,9 @@ class LoopyKernelBuilder:
         elif isinstance(index, IdentityMapNode):
             raise NotImplementedError
 
+        elif isinstance(index, AffineMapNode):
+            raise NotImplementedError
+
         elif isinstance(index, TabulatedMapNode):
             # NOTE: some maps can produce multiple jnames (but not this one)
             jname = self._namer.next("j")
@@ -392,6 +395,42 @@ class LoopyKernelBuilder:
                         new_jnames = existing_jnames
                         jnames = ()
                         new_within = {}
+
+                    elif isinstance(index, AffineMapNode):
+                        jname = self._namer.next("j")
+                        self._temp_kernel_data.append(
+                            lp.TemporaryVariable(jname, shape=(), dtype=np.uintp))
+
+                        subst_rules = {
+                            var: pym.var(j)
+                            for var, j in checked_zip(index.expr[0][:-1],
+                                                      existing_jnames[-len(index.from_labels):])}
+                        subst_rules |= {index.expr[0][-1]: pym.var(iname)}
+
+                        expr = pym.substitute(index.expr[1], subst_rules)
+
+                        index_insn = lp.Assignment(
+                            pym.var(jname), expr,
+                            id=self._namer.next("myid_"),
+                            within_inames=within_inames|{iname},
+                            depends_on=depends_on,
+                            # no_sync_with=no_sync_with,
+                        )
+                        index_insns = [index_insn]
+
+                        temp_labels = list(existing_labels)
+                        temp_jnames = list(existing_jnames)
+                        assert len(index.from_labels) == 1
+                        assert len(index.to_labels) == 1
+                        for label in index.from_labels:
+                            assert temp_labels.pop() == label
+                            temp_jnames.pop()
+
+                        to_label, = index.to_labels
+                        new_labels = PrettyTuple(temp_labels) | to_label
+                        new_jnames = PrettyTuple(temp_jnames) | jname
+                        jnames = (jname,)
+                        new_within = {index.id: ((to_label,), (jname,))}
 
                     elif isinstance(index, TabulatedMapNode):
                         # NOTE: some maps can produce multiple jnames (but not this one)
