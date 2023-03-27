@@ -1095,40 +1095,42 @@ def test_multimap():
                                      dtype=np.int32))
 
 
-@pytest.mark.skip
 def test_multimap_with_scalar():
-    root = MultiAxis(AxisPart(5, id="ax1"))
+    axes = MultiAxis([AxisPart(5, id="p1", label="p1")]).set_up()
+    dat1 = MultiArray(
+        axes, name="dat1", data=np.arange(5, dtype=np.float64))
+    dat2 = MultiArray(
+        axes, name="dat2", data=np.zeros(5, dtype=np.float64))
 
-    dat1 = MultiArray.new(
-        root, name="dat1", data=np.arange(5, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(
-        root, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
-
-    map0 = MultiArray.new(
-        root.add_subaxis("ax1", 2),
-        data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32),
-        dtype=np.int32, prefix="map")
+    mapaxes = axes.add_subaxis("p1", MultiAxis([AxisPart(2)])).set_up()
+    map1 = MultiArray(
+        mapaxes, name="map1",
+        data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32))
 
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 3 }",
         "y[0] = y[0] + x[i]",
-        [lp.GlobalArg("x", np.float64, (3,), is_input=True, is_output=False),
-        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),],
+        [
+            lp.GlobalArg("x", np.float64, (3,), is_input=True, is_output=False),
+            lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),
+        ],
         target=lp.CTarget(),
         name="mylocalkernel",
         lang_version=(2018, 2),
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
-    i1 = pyop3.index([Slice(5)])
-    i2 = [i1, [NonAffineMap(map0[i1], npart=0)]]
-    expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
+    i1 = RangeNode("p1", 5, id="i1")
+    i2 = (
+        i1.add_child("i1", IdentityMapNode(("p1",), ("p1",), arity=1))
+        .add_child("i1", TabulatedMapNode(("p1",), ("p1",), arity=2, data=map1[[i1]])))
+    expr = pyop3.Loop([i1], kernel(dat1[[i2]], dat2[[i1]]))
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    args = [map0.data, dat1.data, dat2.data]
+    args = [dat1.data, map1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
