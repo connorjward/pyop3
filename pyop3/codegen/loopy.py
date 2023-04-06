@@ -308,7 +308,7 @@ class LoopyKernelBuilder:
 
         # also drop one-sized things
         added_jnames = []
-        while len(lres) == 1 and lres[0][0] is not None and lres[0][0].size == 1:
+        while len(lres) == 1 and lres[0][0] is not None and lres[0][0].terminal:
             lres_ = lres[0]
             if lres_[0].children:
                 lres = []
@@ -332,7 +332,7 @@ class LoopyKernelBuilder:
                     lres = [(None, lres_[1], lres_[2]|jname)]
 
 
-        while len(rres) == 1 and rres[0][0] is not None and rres[0][0].size == 1:
+        while len(rres) == 1 and rres[0][0] is not None and rres[0][0].terminal:
             rres_ = rres[0]
             if rres_[0].children:
                 rres = []
@@ -609,16 +609,15 @@ class LoopyKernelBuilder:
         Note: an index roughly corresponds to an axis part so we return single axis
         parts from this function
         """
-        # import pdb; pdb.set_trace()
         # index, newlabels, newjnames = drop_within(index, within_indices)
         result = drop_within(index, within_indices)
 
         # scalar case
         if len(result) == 1 and result[0][0] is None:
             label = self._namer.next("mylabel")
-            new_part = AxisPart(1, label=label)
-            new_index = RangeNode(label, 1)
-            return [new_part], [new_index]
+            new_part = AxisPart(1, label=label, is_a_terminal_thing=True)
+            new_index = RangeNode(label, 1, terminal=True)
+            return [new_part], []
 
         new_parts = []
         new_indices = []
@@ -628,9 +627,9 @@ class LoopyKernelBuilder:
                 subparts = []
                 new_subidxs = []
                 for subidx in index.children:
-                    subparts_, new_subidxs = self._construct_temp_dims(subidx, within_indices)
+                    subparts_, new_subidxs_ = self._construct_temp_dims(subidx, within_indices)
                     subparts.extend(subparts_)
-                    new_subidxs.extend(new_subidxs)
+                    new_subidxs.extend(new_subidxs_)
                 subaxis = MultiAxis(subparts)
             else:
                 subaxis = None

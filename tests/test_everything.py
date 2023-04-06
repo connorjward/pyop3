@@ -1174,9 +1174,7 @@ def test_map_composition():
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    import pdb; pdb.set_trace()
-
-    args = [map0_tensor.data, map1_tensor.data, dat1.data, dat2.data]
+    args = [map1.data, map2.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))

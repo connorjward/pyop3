@@ -1046,12 +1046,13 @@ PreparedMultiAxis = MultiAxis
 
 
 class Node(pytools.ImmutableRecord):
-    fields = {"children", "id"}
+    fields = {"children", "id", "terminal"}
     namer = NameGenerator("idx")
 
-    def __init__(self, children=(), *, id=None):
+    def __init__(self, children=(), *, id=None, terminal=False):
         self.children = tuple(children)
         self.id = id or self.namer.next()
+        self.terminal = terminal
 
     @property
     def child(self):
@@ -1096,10 +1097,11 @@ class RangeNode(IndexNode):
     # fields = IndexNode.fields | {"label", "start", "stop", "step"}
     fields = IndexNode.fields | {"label", "stop"}
 
-    def __init__(self, label, stop, children=(), *, id=None):
+    def __init__(self, label, stop, children=(), *, id=None, terminal=False):
         self.label = label
         self.stop = stop
-        super().__init__(children, id=id)
+        self.terminal = terminal
+        super().__init__(children, id=id, terminal=terminal)
 
     # TODO: This is temporary
     @property
@@ -1121,12 +1123,12 @@ class MapNode(IndexNode):
     # in theory we can have a selector function here too so to_labels is actually bigger?
     # means we have multiple children?
 
-    def __init__(self, from_labels, to_labels, arity, children=(), *, id=None):
+    def __init__(self, from_labels, to_labels, arity, children=(), *, id=None, terminal=False):
         self.from_labels = from_labels
         self.to_labels = to_labels
         self.arity = arity
         self.selector = None  # TODO
-        super().__init__(children, id=id)
+        super().__init__(children, id=id, terminal=terminal)
 
     @property
     def size(self):
@@ -1136,9 +1138,9 @@ class MapNode(IndexNode):
 class TabulatedMapNode(MapNode):
     fields = MapNode.fields | {"data"}
 
-    def __init__(self, from_labels, to_labels, arity, data, children=(), *, id=None):
+    def __init__(self, from_labels, to_labels, arity, data, children=(), **kwargs):
         self.data = data
-        super().__init__(from_labels, to_labels, arity, children, id=id)
+        super().__init__(from_labels, to_labels, arity, children, **kwargs)
 
 
 class IdentityMapNode(MapNode):
@@ -1154,7 +1156,7 @@ class IdentityMapNode(MapNode):
 class AffineMapNode(MapNode):
     fields = MapNode.fields | {"expr"}
 
-    def __init__(self, from_labels, to_labels, arity, expr, children=(), *, id=None):
+    def __init__(self, from_labels, to_labels, arity, expr, children=(), **kwargs):
         """
         Parameters
         ----------
@@ -1167,7 +1169,7 @@ class AffineMapNode(MapNode):
             raise ValueError("Wrong number of variables in expression")
 
         self.expr = expr
-        super().__init__(from_labels, to_labels, arity, children, id=id)
+        super().__init__(from_labels, to_labels, arity, children, **kwargs)
 
 
 
@@ -1179,11 +1181,11 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
         Is this axis indexed (as part of a temporary) - used to generate the right layouts
 
     """
-    fields = {"count", "subaxis", "numbering", "label", "id", "max_count", "is_layout", "layout_fn", "overlap", "overlap_sf", "indexed"}
+    fields = {"count", "subaxis", "numbering", "label", "id", "max_count", "is_layout", "layout_fn", "overlap", "overlap_sf", "indexed", "is_a_terminal_thing"}
 
     id_generator = NameGenerator("_p")
 
-    def __init__(self, count, subaxis=None, *, numbering=None, label=None, id=None, max_count=None, is_layout=False, layout_fn=None, overlap=None, indexed=False):
+    def __init__(self, count, subaxis=None, *, numbering=None, label=None, id=None, max_count=None, is_layout=False, layout_fn=None, overlap=None, indexed=False, is_a_terminal_thing=False):
         if isinstance(count, numbers.Integral):
             assert not max_count or max_count == count
             max_count = count
@@ -1229,6 +1231,9 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
         This effectively means that we need to zero the offset as we traverse the
         tree to produce the layout. This is why we need this ``indexed`` flag.
         """
+
+        # are we basically dealing with a scalar?
+        self.is_a_terminal_thing = is_a_terminal_thing
 
         super().__init__()
 
