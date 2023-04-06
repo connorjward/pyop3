@@ -741,10 +741,19 @@ class LoopyKernelBuilder:
         lindices = assignment.lhs.indices or (None,)
         rindices = assignment.rhs.indices or (None,)
 
-        # import pdb; pdb.set_trace()
+        lres = []
+        for lindex in lindices:
+            lres.extend(drop_within(lindex, within_indices))
 
-        for lindex, rindex in checked_zip(lindices, rindices):
-            self.build_assignment(assignment, lindex, rindex, within_indices, within_inames, depends_on)
+        rres = []
+        for rindex in rindices:
+            rres.extend(drop_within(rindex, within_indices))
+
+        # import pdb; pdb.set_trace()
+        for (lindex, llabels, ljnames), (rindex, rlabels, rjnames) in checked_zip(lres, rres):
+            self.build_assignment(
+                assignment, lindex, rindex, within_indices, within_inames, depends_on,
+                llabels, ljnames, rlabels, rjnames)
 
     def emit_assignment_insn(
             self, assignment,
