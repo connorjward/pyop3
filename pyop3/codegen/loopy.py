@@ -553,27 +553,20 @@ class LoopyKernelBuilder:
         for arg in call.arguments:
             # create an appropriate temporary
             parts = []
+            # we need the indices here because the temporary shape needs to be indexed
+            # by the same indices as the original array
             indices = []
-            # each index here contributes a subaxis I think
             for idx in arg.tensor.indices:
                 subparts, subindices = self._construct_temp_dims(idx, within_indices)
-
-                if strictly_all(x is None for x in [subparts, subindices]):
-                    subaxis = None
-                else:
-                    subaxis = MultiAxis(subparts)
-
-                label = self._namer.next("myotherlabel")
-                parts.append(AxisPart(1, subaxis=subaxis, label=label))
-                indices.append(RangeNode(label, 1, children=subindices or ()))
-
-            # import pdb; pdb.set_trace()
+                parts.extend(subparts)
+                indices.extend(subindices)
 
             axes = MultiAxis(parts).set_up()
             temporary = MultiArray(
                 axes, indices=indices, name=self._temp_name_generator.next(),
                 dtype=arg.tensor.dtype)
             temporaries[arg] = temporary
+            # import pdb; pdb.set_trace()
 
         gathers = self.make_gathers(temporaries)
         newcall = self.make_function_call(
@@ -585,7 +578,7 @@ class LoopyKernelBuilder:
         return (*gathers, newcall, *scatters)
 
     def _construct_temp_dims(self, index, within_indices):
-        """Return a multi-axis describing the temporary shape.
+        """Return an iterable of axis parts per index
 
         Parameters
         ----------
@@ -601,18 +594,22 @@ class LoopyKernelBuilder:
 
         # scalar case
         if len(result) == 1 and result[0][0] is None:
-            return None, None
+            label = self._namer.next("mylabel")
+            new_part = AxisPart(1, label=label)
+            new_index = RangeNode(label, 1)
+            return [new_part], [new_index]
 
         new_parts = []
         new_indices = []
-        for index, newlabels, newjnames in result:
+        # TODO do I need to track the labels?
+        for index, _, _ in result:
             if len(index.children) > 0:
                 subparts = []
                 new_subidxs = []
                 for subidx in index.children:
-                    subpart, new_subidx = self._construct_temp_dims(subidx, within_indices)
-                    subparts.append(subpart)
-                    new_subidxs.append(new_subidx)
+                    subparts_, new_subidxs = self._construct_temp_dims(subidx, within_indices)
+                    subparts.extend(subparts_)
+                    new_subidxs.extend(new_subidxs)
                 subaxis = MultiAxis(subparts)
             else:
                 subaxis = None
