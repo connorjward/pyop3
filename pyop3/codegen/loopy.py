@@ -313,26 +313,47 @@ class LoopyKernelBuilder:
             if lres_[0].children:
                 lres = []
                 for child in lres_[0].children:
+                    if not isinstance(child, RangeNode):
+                        raise NotImplementedError("see below")
                     jname = self._namer.next("j")
                     added_jnames.append(jname)
                     lres.append((child, lres_[1]|lres_[0].label, lres_[2]|jname))
             else:
                 jname = self._namer.next("j")
                 added_jnames.append(jname)
-                lres = [(None, lres_[1]|lres_[0].label, lres_[2]|jname)]
+                # FIXME make apply to above case too
+                if isinstance(lres_[0], RangeNode):
+                    lres = [(None, lres_[1]|lres_[0].label, lres_[2]|jname)]
+                else:
+                    assert isinstance(lres_[0], MapNode)
+                    # FIXME
+                    if not isinstance(lres_[0], IdentityMapNode):
+                        raise NotImplementedError
+                    lres = [(None, lres_[1], lres_[2]|jname)]
+
 
         while len(rres) == 1 and rres[0][0] is not None and rres[0][0].size == 1:
             rres_ = rres[0]
             if rres_[0].children:
                 rres = []
                 for child in rres_[0].children:
+                    if not isinstance(child, RangeNode):
+                        raise NotImplementedError("see below")
                     jname = self._namer.next("j")
                     added_jnames.append(jname)
                     rres.append((child, rres_[1]|rres_[0].label, rres_[2]|jname))
             else:
                 jname = self._namer.next("j")
                 added_jnames.append(jname)
-                rres = [(None, rres_[1]|rres_[0].label, rres_[2]|jname)]
+                # FIXME make apply to above case too
+                if isinstance(rres_[0], RangeNode):
+                    rres = [(None, rres_[1]|rres_[0].label, rres_[2]|jname)]
+                else:
+                    assert isinstance(rres_[0], MapNode)
+                    # FIXME
+                    if not isinstance(rres_[0], IdentityMapNode):
+                        raise NotImplementedError
+                    rres = [(None, rres_[1], rres_[2]|jname)]
 
         # just set these to zero
         new_insns = []

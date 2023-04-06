@@ -1144,6 +1144,12 @@ class TabulatedMapNode(MapNode):
 class IdentityMapNode(MapNode):
     pass
 
+    # TODO is this strictly needed?
+    # @property
+    # def label(self):
+    #     assert len(self.to_labels) == 1
+    #     return self.to_labels[0]
+
 
 class AffineMapNode(MapNode):
     fields = MapNode.fields | {"expr"}
