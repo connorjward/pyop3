@@ -1231,20 +1231,20 @@ def test_mixed_arity_map():
     assert all(dat2.data == np.array([1+2+3, 2+3, 3], dtype=np.int32))
 
 
-@pytest.mark.skip
 def test_iter_map_composition():
-    root = MultiAxis(AxisPart(5, id="ax1"))
-    dims = root
+    axes = MultiAxis([AxisPart(5, label="p1", id="p1")]).set_up()
+    dat1 = MultiArray(
+        axes, name="dat1", data=np.arange(5, dtype=np.float64))
+    dat2 = MultiArray(
+        axes, name="dat2", data=np.zeros(5, dtype=np.float64))
 
-    dat1 = MultiArray.new(dims, name="dat1", data=np.arange(5, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(dims, name="dat2", data=np.zeros(5, dtype=np.float64), dtype=np.float64)
-
-    map0_tensor = MultiArray.new(root.add_subaxis("ax1", 2),
-                         data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32),
-                         dtype=np.int32, prefix="map")
-    map1_tensor = MultiArray.new(root.add_subaxis("ax1", 2),
-                         data=np.array([3, 2, 2, 3, 0, 2, 1, 2, 1, 3], dtype=np.int32),
-                         dtype=np.int32, prefix="map")
+    mapaxes = axes.add_subaxis("p1", MultiAxis([AxisPart(2)])).set_up()
+    map1 = MultiArray(
+        mapaxes, name="map1",
+        data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32))
+    map2 = MultiArray(
+        mapaxes, name="map2",
+        data=np.array([3, 2, 2, 3, 0, 2, 1, 2, 1, 3], dtype=np.int32))
 
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
@@ -1257,23 +1257,21 @@ def test_iter_map_composition():
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
-    i1 = pyop3.index([Slice(5)])
-    map0 = NonAffineMap(map0_tensor[i1], npart=0)
-    i2 = [[map0]]
-    map1 = NonAffineMap(map1_tensor[i2], npart=0)
-    i3 = [[map1]]
-    expr = pyop3.Loop(p := pyop3.index(i3), kernel(dat1[p], dat2[p]))
+    i1 = RangeNode("p1", 5, id="i1")
+    i2 = i1.add_child("i1", TabulatedMapNode(("p1",), ("p1",), arity=2, data=map1[[i1]], id="i2"))
+    i3 = i2.add_child("i2", TabulatedMapNode(("p1",), ("p1",), arity=2, data=map2[[i2]]))
+
+    p = [i3]
+    expr = pyop3.Loop(p, kernel(dat1[p], dat2[p]))
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    args = [map0_tensor.data, map1_tensor.data, dat1.data, dat2.data]
+    args = [map1.data, map2.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
-
     fn(*(d.ctypes.data for d in args))
 
-    # import pdb; pdb.set_trace()
     # data is just written to itself (but not the final one because it's not in map1)
     ans = [0, 1, 2, 3, 0]
     assert all(dat2.data == np.array(ans, dtype=np.int32))
