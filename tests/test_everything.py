@@ -1183,45 +1183,47 @@ def test_map_composition():
     assert all(dat2.data == np.array(ans, dtype=np.int32))
 
 
-@pytest.mark.skip
 def test_mixed_arity_map():
-    root = MultiAxis(AxisPart(3, id="ax1"))
-    dims = root
+    axes = MultiAxis([AxisPart(3, id="p1", label="p1")]).set_up()
+    dat1 = MultiArray(
+        axes, name="dat1", data=np.arange(1, 4, dtype=np.float64))
+    dat2 = MultiArray(
+        axes, name="dat2", data=np.zeros(3, dtype=np.float64))
 
-    dat1 = MultiArray.new(dims, name="dat1", data=np.arange(1, 4, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(dims, name="dat2", data=np.zeros(3, dtype=np.float64), dtype=np.float64)
+    nnz = MultiArray(
+        axes, name="nnz", data=np.array([3, 2, 1], dtype=np.int32), max_value=3)
 
-    nnz_ = np.array([3, 2, 1], dtype=np.int32)
-    nnz = MultiArray.new(root, data=nnz_, name="nnz", dtype=np.int32, max_value=3)
-
-    map_data = np.array([2, 1, 0, 2, 1, 2], dtype=np.int32)
-    map_tensor = MultiArray.new(root.add_subaxis("ax1", nnz),
-            data=map_data, dtype=np.int32, prefix="map")
+    mapaxes = axes.add_subaxis("p1", MultiAxis([AxisPart(nnz)])).set_up()
+    map1 = MultiArray(
+        mapaxes, name="map1", data=np.array([2, 1, 0, 2, 1, 2], dtype=np.int32))
 
     code = lp.make_kernel(
         "{ [i]: 0 <= i < n }",
         "y[0] = y[0] + x[i]",
-        [lp.GlobalArg("x", np.float64, (2,), is_input=True, is_output=False),
-        lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),
+        [lp.GlobalArg("x", np.float64, shape=None, is_input=True, is_output=False),
+        lp.GlobalArg("y", np.float64, shape=None, is_input=False, is_output=True),
         lp.ValueArg("n", dtype=np.int32)],
+        assumptions="n <= 3",
         target=lp.CTarget(),
         name="mylocalkernel",
         lang_version=(2018, 2),
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
-    i1 = pyop3.index([[Slice(3)]])
-    map = NonAffineMap(map_tensor[i1], npart=0)
-    i2 = [[map]]
-    expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
+    i1 = RangeNode("p1", 3, id="i1")
+    i2 = i1.add_child(
+        "i1", TabulatedMapNode(("p1",), ("p1",), arity=nnz[[i1]], data=map1[[i1]]))
+
+    expr = pyop3.Loop([i1], kernel(dat1[[i2]], dat2[[i1]]))
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    nnzc, _ = map_tensor.dim.part.subaxis.part.layout
+    # import pdb; pdb.set_trace()
 
-    args = [nnz.data, map_tensor.data, dat1.data, dat2.data, nnzc.data]
+    layout0_0 = map1.axes.part.subaxis.part.layout_fn.start
+    args = [nnz.data, layout0_0.data, map1.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))
