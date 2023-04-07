@@ -68,52 +68,6 @@ def to_c(expr):
     return lp.generate_code_v2(program).device_code()
 
 
-def drop_within(myindex, within_indices):
-    """So the idea here is that this index has multiple children so we can't
-    just add a new path entry and move to the child. We need to know which
-    child to move to. Fortunately we have already decided which child we
-    need in the loop bit above. We have registered the "selected path" of
-    this index inside of within_indices.
-    """
-    if myindex is None:
-        return [(None, PrettyTuple(), PrettyTuple())]
-
-    # import pdb; pdb.set_trace()
-    mylabels, myjnames = [], []
-    while myindex.id in within_indices:
-        labels, jnames = within_indices[myindex.id]
-        if isinstance(myindex, RangeNode):
-            mylabels.extend(labels)
-            myjnames.extend(jnames)
-        else:
-            assert isinstance(myindex, MapNode)
-            assert len(myindex.from_labels) <= len(mylabels)
-            mylabels = mylabels[:-len(myindex.from_labels)] + list(labels)
-            myjnames = myjnames[:-len(myindex.from_labels)] + list(jnames)
-
-        if len(myindex.children) == 0:
-            return [(None, PrettyTuple(mylabels), PrettyTuple(myjnames))]
-
-        # try to find a child node that has already been registered
-        # only one child node can be registered as we will have forked above and loops
-        # cannot have duplicate indices
-        newindex = None
-        found = False
-        for ch in myindex.children:
-            if ch.id in within_indices:
-                assert newindex is None, "multiple children cannot be registered as within here"
-                newindex = ch
-                found = True
-        if found:
-            myindex = newindex
-        else:
-            return [
-                (ch, PrettyTuple(mylabels), PrettyTuple(myjnames))
-                for ch in myindex.children]
-
-    return [(myindex, PrettyTuple(mylabels), PrettyTuple(myjnames))]
-
-
 class LoopyKernelBuilder:
     def __init__(self):
         self._namer = MultiNameGenerator()
@@ -299,80 +253,8 @@ class LoopyKernelBuilder:
                          ljnames=PrettyTuple(),
                          rlabels=PrettyTuple(),
                          rjnames=PrettyTuple()):
-        """
-        Note: lindex and rindex can be different lengths if we include within_indices
-        """
-
-        # catch within_indices
-        # ah - need to keep tracking the right part labels though!
-        # lindex, innerllabels, innerljnames = drop_within(lindex, within_indices)
-        # rindex, innerrlabels, innerrjnames = drop_within(rindex, within_indices)
-        lres = drop_within(lindex, within_indices)
-        rres = drop_within(rindex, within_indices)
-
-        # import pdb; pdb.set_trace()
-
-        # also drop one-sized things
-        added_jnames = []
-        while len(lres) == 1 and lres[0][0] is not None and lres[0][0].terminal:
-            lres_ = lres[0]
-            if lres_[0].children:
-                lres = []
-                for child in lres_[0].children:
-                    if not isinstance(child, RangeNode):
-                        raise NotImplementedError("see below")
-                    jname = self._namer.next("j")
-                    added_jnames.append(jname)
-                    lres.append((child, lres_[1]|lres_[0].label, lres_[2]|jname))
-            else:
-                jname = self._namer.next("j")
-                added_jnames.append(jname)
-                # FIXME make apply to above case too
-                if isinstance(lres_[0], RangeNode):
-                    lres = [(None, lres_[1]|lres_[0].label, lres_[2]|jname)]
-                else:
-                    assert isinstance(lres_[0], MapNode)
-                    # FIXME
-                    if not isinstance(lres_[0], IdentityMapNode):
-                        raise NotImplementedError
-                    lres = [(None, lres_[1], lres_[2]|jname)]
-
-
-        while len(rres) == 1 and rres[0][0] is not None and rres[0][0].terminal:
-            rres_ = rres[0]
-            if rres_[0].children:
-                rres = []
-                for child in rres_[0].children:
-                    if not isinstance(child, RangeNode):
-                        raise NotImplementedError("see below")
-                    jname = self._namer.next("j")
-                    added_jnames.append(jname)
-                    rres.append((child, rres_[1]|rres_[0].label, rres_[2]|jname))
-            else:
-                jname = self._namer.next("j")
-                added_jnames.append(jname)
-                # FIXME make apply to above case too
-                if isinstance(rres_[0], RangeNode):
-                    rres = [(None, rres_[1]|rres_[0].label, rres_[2]|jname)]
-                else:
-                    assert isinstance(rres_[0], MapNode)
-                    # FIXME
-                    if not isinstance(rres_[0], IdentityMapNode):
-                        raise NotImplementedError
-                    rres = [(None, rres_[1], rres_[2]|jname)]
-
-        # just set these to zero
-        new_insns = []
-        for jname in added_jnames:
-            self._temp_kernel_data.append(
-                lp.TemporaryVariable(jname, shape=(), dtype=np.uintp))
-            insn = lp.Assignment(
-                pym.var(jname), 0, id=self._namer.next("insn"),
-                within_inames=within_inames, depends_on=depends_on)
-            new_insns.append(insn)
-
-        self.instructions.extend(new_insns)
-        # depends_on |= {insn.id for insn in new_insns}
+        lres = [(lindex, (), ())]
+        rres = [(rindex, (), ())]
 
         for ((lindex, innerllabels, innerljnames), (rindex, innerrlabels, innerrjnames)) \
                 in utils.checked_zip(lres, rres):
@@ -384,8 +266,13 @@ class LoopyKernelBuilder:
             rjnames_ = PrettyTuple(rjnames+innerrjnames)
 
             iname = None
+            # this should always hold now?
             if not strictly_all(idx is None for idx in [lindex, rindex]):
-                size = utils.single_valued([lindex.size, rindex.size])
+                # size = utils.single_valued([lindex.size, rindex.size])
+                # now need to catch one-sized things here
+                lsize = lindex.size if lindex.id not in within_indices else 1
+                rsize = rindex.size if rindex.id not in within_indices else 1
+                size = utils.single_valued([lsize, rsize])
 
                 iname = self._namer.next("i")
                 extent = self.register_extent(size, within_indices, within_inames, depends_on)
@@ -398,7 +285,34 @@ class LoopyKernelBuilder:
                     new_labels = None
                     new_jnames = None
                     jnames = None
-                    if isinstance(index, RangeNode):
+                    new_within = None
+
+                    if index.id in within_indices:
+                        # import pdb; pdb.set_trace()
+
+                        labels, jnames = within_indices[index.id]
+                        if isinstance(index, RangeNode):
+                            index_insns = []
+                            new_labels = existing_labels + labels
+                            new_jnames = existing_jnames + jnames
+                            jnames = "not used"
+                            new_within = {}
+                        else:
+                            index_insns = []
+                            temp_labels = list(existing_labels)
+                            temp_jnames = list(existing_jnames)
+                            assert len(index.from_labels) == 1
+                            assert len(index.to_labels) == 1
+                            for label in index.from_labels:
+                                assert temp_labels.pop() == label
+                                temp_jnames.pop()
+
+                            new_labels = PrettyTuple(temp_labels) + labels
+                            new_jnames = PrettyTuple(temp_jnames) + jnames
+                            jnames = "not used"
+                            new_within = {}
+
+                    elif isinstance(index, RangeNode):
                         jname = self._namer.next("j")
                         self._temp_kernel_data.append(
                             lp.TemporaryVariable(jname, shape=(), dtype=np.uintp))
@@ -507,6 +421,7 @@ class LoopyKernelBuilder:
                     assert new_labels is not None
                     assert new_jnames is not None
                     assert jnames is not None
+                    assert new_within is not None
                     self.instructions.extend(index_insns)
                     new_deps = frozenset({insn.id for insn in index_insns})
 
@@ -514,8 +429,6 @@ class LoopyKernelBuilder:
 
                 lthings = myinnerfunc(lindex, llabels_, ljnames_)
                 rthings = myinnerfunc(rindex, rlabels_, rjnames_)
-
-                # import pdb; pdb.set_trace()
 
                 if strictly_all([lindex.children, rindex.children]):
                     for lsubindex, rsubindex in checked_zip(lindex.children, rindex.children):
@@ -530,11 +443,14 @@ class LoopyKernelBuilder:
                 else:
                     terminate = True
             else:
+                raise AssertionError("dont think this should be hit any more")
                 lthings = [llabels_, ljnames_]  # other indices arent needed
                 rthings = [rlabels_, rjnames_]  # other indices arent needed
                 terminate = True
 
             if terminate:
+                # import pdb; pdb.set_trace()
+
                 lhs_part_labels, lhs_jnames = lthings[0], lthings[1]
                 rhs_part_labels, rhs_jnames = rthings[0], rthings[1]
 
@@ -584,9 +500,9 @@ class LoopyKernelBuilder:
             # by the same indices as the original array
             indices = []
             for idx in arg.tensor.indices:
-                subparts, subindices = self._construct_temp_dims(idx, within_indices)
-                parts.extend(subparts)
-                indices.extend(subindices)
+                part, newindex = self._construct_temp_dims(idx, within_indices)
+                parts.append(part)
+                indices.append(newindex)
 
             axes = MultiAxis(parts).set_up()
             temporary = MultiArray(
@@ -615,15 +531,7 @@ class LoopyKernelBuilder:
         Note: an index roughly corresponds to an axis part so we return single axis
         parts from this function
         """
-        # index, newlabels, newjnames = drop_within(index, within_indices)
-        result = drop_within(index, within_indices)
-
-        # scalar case
-        if len(result) == 1 and result[0][0] is None:
-            label = self._namer.next("mylabel")
-            new_part = AxisPart(1, label=label, is_a_terminal_thing=True)
-            new_index = RangeNode(label, 1, terminal=True)
-            return [new_part], []
+        result = [(index, (), ())]
 
         new_parts = []
         new_indices = []
@@ -633,22 +541,31 @@ class LoopyKernelBuilder:
                 subparts = []
                 new_subidxs = []
                 for subidx in index.children:
-                    subparts_, new_subidxs_ = self._construct_temp_dims(subidx, within_indices)
-                    subparts.extend(subparts_)
-                    new_subidxs.extend(new_subidxs_)
+                    subpart, new_subidx = self._construct_temp_dims(subidx, within_indices)
+                    subparts.append(subpart)
+                    new_subidxs.append(new_subidx)
                 subaxis = MultiAxis(subparts)
             else:
                 subaxis = None
                 new_subidxs = []
 
+            if index.id in within_indices:
+                size = 1
+            else:
+                size = index.size
+
             label = self._namer.next("mylabel")
-            new_part = AxisPart(index.size, label=label, subaxis=subaxis)
-            new_index = RangeNode(label, index.size, children=new_subidxs)
+            new_part = AxisPart(size, label=label, subaxis=subaxis)
+            new_index = RangeNode(label, size, children=new_subidxs)
 
             new_parts.append(new_part)
             new_indices.append(new_index)
 
-        return new_parts, new_indices
+        # since we're now not dropping "within" bits
+        assert len(new_parts) == 1
+        assert len(new_indices) == 1
+
+        return new_parts[0], new_indices[0]
 
 
     def make_gathers(self, temporaries, **kwargs):
@@ -763,17 +680,11 @@ class LoopyKernelBuilder:
 
     @_make_instruction_context.register
     def _(self, assignment: tlang.Assignment, within_indices, within_inames, depends_on):
-        # TODO are these always the same length?
-        lindices = assignment.lhs.indices or (None,)
-        rindices = assignment.rhs.indices or (None,)
-
-        lres = []
-        for lindex in lindices:
-            lres.extend(drop_within(lindex, within_indices))
-
-        rres = []
-        for rindex in rindices:
-            rres.extend(drop_within(rindex, within_indices))
+        # FIXME this is kinda dumb now
+        lres, rres = [], []
+        for lindex, rindex in checked_zip(assignment.lhs.indices, assignment.rhs.indices):
+            lres.append((lindex, (), ()))
+            rres.append((rindex, (), ()))
 
         # import pdb; pdb.set_trace()
         for (lindex, llabels, ljnames), (rindex, rlabels, rjnames) in checked_zip(lres, rres):
