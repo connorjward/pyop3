@@ -1277,6 +1277,43 @@ def test_iter_map_composition():
     assert all(dat2.data == np.array(ans, dtype=np.int32))
 
 
+def test_mixed_real_loop():
+    axes = MultiAxis([
+        AxisPart(3, label="p1", subaxis=MultiAxis([AxisPart(2)])),  # regular part
+        AxisPart(1, label="p2"),  # "real" part
+    ]).set_up()
+    dat1 = MultiArray(axes, name="dat1", data=np.zeros(7))
+
+    lpknl = lp.make_kernel(
+        "{ [i]: 0 <= i < 3 }",
+        "x[i]  = x[i] + 1",
+        [lp.GlobalArg("x", np.float64, (2,), is_input=True, is_output=True)],
+        target=lp.CTarget(),
+        name="mylocalkernel",
+        lang_version=(2018, 2),
+    )
+    kernel = pyop3.LoopyKernel(lpknl, [pyop3.INC])
+
+    i1 = RangeNode("p1", 3, id="i1")
+    i2 = (
+        i1.add_child("i1", IdentityMapNode(("p1",), ("p1",), arity=1))
+        # it's a map from everything to zero
+        .add_child("i1", AffineMapNode(("p1",), ("p2",), arity=1, expr=(pym.variables("x y"), 0)))
+    )
+
+    expr = pyop3.Loop([i1], kernel(dat1[[i2]]))
+
+    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+    dll = compilemythings(code)
+    fn = getattr(dll, "mykernel")
+
+    args = [dat1.data]
+    fn.argtypes = (ctypes.c_voidp,) * len(args)
+    fn(*(d.ctypes.data for d in args))
+
+    assert np.allclose(dat1.data, [1, 1, 1, 1, 1, 1, 3])
+
+
 @pytest.mark.skip
 def test_cone():
     mesh = Mesh.create_square(2, 2, 1)
