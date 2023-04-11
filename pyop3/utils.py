@@ -181,3 +181,14 @@ def popwhen(predicate, iterable):
         if predicate(item):
             return iterable.pop(i)
     raise KeyError("Predicate does not hold for any items in iterable")
+
+
+def strict_cast(obj, cast):
+    new_obj = cast(obj)
+    if new_obj != obj:
+        raise TypeError(f"Invalid cast from {obj} to {new_obj}")
+    return new_obj
+
+
+def strict_int(num):
+    return strict_cast(num, int)

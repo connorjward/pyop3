@@ -518,16 +518,10 @@ class MultiAxis(pytools.ImmutableRecord):
 
                     # handle sparsity
                     if axis.part.indices is not None:
+                        bstart, bend = get_slice_bounds(axis.part.indices, prior_indices)
 
-                        import pdb; pdb.set_trace()
-
-                        if isinstance(axis.part.layout_fn.start, MultiArray):
-                            bstart = axis.part.layout_fn.start.get_value(prior_indices)
-                        else:
-                            bstart = axis.part.layout_fn.start
-                        bend = bstart + axis.part.find_integer_count(prior_indices)
                         last_index = bisect.bisect_left(
-                            axis.part.indices, last_index, int(bstart), int(bend))
+                            axis.part.indices.data, last_index, bstart, bend)
                         last_index -= bstart
 
                     offset += last_index * layout.step + start
@@ -1037,6 +1031,26 @@ of a single label value if that label is unique in the whole tree.
             return args[0]
         else:
             return PreparedMultiAxis(*args)
+
+
+def get_slice_bounds(array, indices):
+    part = array.axes.part
+    for _ in indices:
+        part = part.subaxis.part
+
+    if isinstance(part.layout_fn, AffineLayoutFunction):
+        if isinstance(part.layout_fn.start, MultiArray):
+            start = part.layout_fn.start.get_value(indices)
+        else:
+            start = part.layout_fn.start
+        size = part.calc_size(indices)
+    else:
+        # I don't think that this ever happens. We only use IndirectLayoutFunctions when
+        # we have numbering and that is not permitted with sparsity
+        raise NotImplementedError
+
+    return start, start+size
+
 
 def requires_external_index(part):
     """Return ``True`` if more indices are required to index the multi-axis layouts
