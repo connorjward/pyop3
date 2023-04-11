@@ -508,7 +508,7 @@ class MultiAxis(pytools.ImmutableRecord):
                 else:
                     assert isinstance(layout, AffineLayoutFunction)
 
-                    prior_indices = indices[:-depth]
+                    prior_indices = PrettyTuple(indices[:depth])
                     last_index = indices[depth]
 
                     if isinstance(layout.start, MultiArray):
@@ -518,15 +518,22 @@ class MultiAxis(pytools.ImmutableRecord):
 
                     # handle sparsity
                     if axis.part.indices is not None:
-                        bstart = axis.part.layout_fn.start.get_value(prior_indices)
-                        bend = bstart + axis.part.calc_size(prior_indices)
+
+                        import pdb; pdb.set_trace()
+
+                        if isinstance(axis.part.layout_fn.start, MultiArray):
+                            bstart = axis.part.layout_fn.start.get_value(prior_indices)
+                        else:
+                            bstart = axis.part.layout_fn.start
+                        bend = bstart + axis.part.find_integer_count(prior_indices)
                         last_index = bisect.bisect_left(
-                            axis.part.indices, last_index, bstart, bend)
+                            axis.part.indices, last_index, int(bstart), int(bend))
                         last_index -= bstart
 
-                        # import pdb; pdb.set_trace()
-
                     offset += last_index * layout.step + start
+
+                    # update indices to include the modications for sparsity
+                    indices = PrettyTuple(prior_indices + (last_index,) + tuple(indices[depth+1:]))
 
             depth += 1
             axis = axis.part.subaxis
