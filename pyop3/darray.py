@@ -43,6 +43,23 @@ class PetscMat(DistributedArray, abc.ABC):
 
         # or similar
         can_be_mat_nest = all(part.size == 1 for part in itertools.chain(raxis.parts, caxis.parts))
+
+
+        """
+        * The axes reference only the nodes, not the cells
+        * The maps map from cells (e.g.) to the nodes
+
+        This makes matrices specific to the loop in which they are used as they
+        depend on the indices. This is not dissimilar to how vector overlaps depend
+        on the sizes of the stencils.
+
+        This is not a pleasing abstraction. Can we do things lazily?
+
+        I suppose that matrix allocation is dependent upon the discretisation (i.e.
+        the overlap). Therefore it should be allocat-able prior to a loop. The parloop
+        should check that the operations are being provided with valid data structures,
+        not allocating the data structures to conform to the operation.
+        """
         
 
 

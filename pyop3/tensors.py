@@ -1,3 +1,4 @@
+import bisect
 import copy
 import dataclasses
 import enum
@@ -130,7 +131,7 @@ def prepare_layouts(part, path=None):
 
 def set_null_layouts(layouts, axis, path=()):
     """
-    we have null layouts whenever the step in non-const (the variability is captured by
+    we have null layouts whenever the step is non-const (the variability is captured by
     the start property of the affine layout below it).
 
     We also get them when the axis is "indexed", that is, not ever actually used by
@@ -486,6 +487,7 @@ class MultiAxis(pytools.ImmutableRecord):
 
             # import pdb; pdb.set_trace()
             if axis.part.is_layout:
+                raise AssertionError("dead code")
                 if indices[depth] > 0:
                     if axis.part.subaxis:
                         # add the size of the one before
@@ -496,16 +498,42 @@ class MultiAxis(pytools.ImmutableRecord):
             else:
                 layout = axis.part.layout_fn
                 if isinstance(layout, IndirectLayoutFunction):
+                    if axis.part.indices:
+                        raise NotImplementedError(
+                            "Does not make sense for indirect layouts to have sparsity "
+                            "(I think) since the the indices must be ordered...")
                     offset += layout.data.get_value(indices[:depth+1])
                 elif layout == "null layout":
                     pass
                 else:
                     assert isinstance(layout, AffineLayoutFunction)
+
+                    prior_indices = indices[:-depth]
+                    last_index = indices[depth]
+
                     if isinstance(layout.start, MultiArray):
-                        start = layout.start.get_value(indices)
+                        start = layout.start.get_value(prior_indices)
                     else:
                         start = layout.start
-                    offset += indices[depth] * layout.step + start
+
+                    # handle sparsity
+                    if axis.part.indices is not None:
+                        if axis.part.indices.depth != 2:
+                            # basically we need to index through to the bottom part
+                            # as this is where the right layouts and sizes are. I don't
+                            # know how to do this without part.subaxis.part.subaxis.(...)
+                            raise NotImplementedError("needs more thought")
+                        # import pdb; pdb.set_trace()
+                        basepart = axis.part.indices.axes.part.subaxis.part
+                        bstart = basepart.layout_fn.start.get_value(prior_indices)
+                        bend = bstart + basepart.calc_size(prior_indices)
+                        last_index = bisect.bisect_left(
+                            axis.part.indices.data, last_index, bstart, bend)
+                        last_index -= bstart
+
+                        # import pdb; pdb.set_trace()
+
+                    offset += last_index * layout.step + start
 
             depth += 1
             axis = axis.part.subaxis
@@ -581,6 +609,8 @@ class MultiAxis(pytools.ImmutableRecord):
     def calc_size(self, indices=PrettyTuple()):
         # NOTE: this works because the size array cannot be multi-part, therefore integer
         # indices (as opposed to typed ones) are valid.
+        if not isinstance(indices, PrettyTuple):
+            indices = PrettyTuple(indices)
         return sum(pt.calc_size(indices) for pt in self.parts)
 
     @property
@@ -1180,17 +1210,30 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
     indexed : bool
         Is this axis indexed (as part of a temporary) - used to generate the right layouts
 
+    indices
+        If the thing is sparse then we need to specify the indices of the sparsity here.
+        This is like CSR. This is normally a nested/ragged thing.
+
+        E.g. a diagonal matrix would be 3 x [1, 1, 1] with indices being [0, 1, 2]. The
+        CSR row pointers are [0, 1, 2] (we already calculate this), but when we look up
+        the values we use [0, 1, 2] instead of [0, 0, 0]. A binary search of all the
+        indices is required to find the right offset.
+
     """
-    fields = {"count", "subaxis", "numbering", "label", "id", "max_count", "is_layout", "layout_fn", "overlap", "overlap_sf", "indexed", "is_a_terminal_thing"}
+    fields = {"count", "subaxis", "numbering", "label", "id", "max_count", "is_layout", "layout_fn", "overlap", "overlap_sf", "indexed", "is_a_terminal_thing", "indices"}
 
     id_generator = NameGenerator("_p")
 
-    def __init__(self, count, subaxis=None, *, numbering=None, label=None, id=None, max_count=None, is_layout=False, layout_fn=None, overlap=None, indexed=False, is_a_terminal_thing=False):
+    def __init__(self, count, subaxis=None, *, indices=None, numbering=None, label=None, id=None, max_count=None, is_layout=False, layout_fn=None, overlap=None, indexed=False, is_a_terminal_thing=False):
         if isinstance(count, numbers.Integral):
             assert not max_count or max_count == count
             max_count = count
         elif not max_count:
                 max_count = max(count.data)
+
+        if indices is not None and numbering is not None:
+            raise ValueError(
+                "indices must be sorted so a numbering should not be provided")
 
         if isinstance(numbering, np.ndarray):
             numbering = list(numbering)
@@ -1206,6 +1249,7 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
 
         self.count = count
         self.subaxis = subaxis
+        self.indices = indices
         self.numbering = numbering
         self.label = label
         self.id = id
