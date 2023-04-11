@@ -518,17 +518,10 @@ class MultiAxis(pytools.ImmutableRecord):
 
                     # handle sparsity
                     if axis.part.indices is not None:
-                        if axis.part.indices.depth != 2:
-                            # basically we need to index through to the bottom part
-                            # as this is where the right layouts and sizes are. I don't
-                            # know how to do this without part.subaxis.part.subaxis.(...)
-                            raise NotImplementedError("needs more thought")
-                        # import pdb; pdb.set_trace()
-                        basepart = axis.part.indices.axes.part.subaxis.part
-                        bstart = basepart.layout_fn.start.get_value(prior_indices)
-                        bend = bstart + basepart.calc_size(prior_indices)
+                        bstart = axis.part.layout_fn.start.get_value(prior_indices)
+                        bend = bstart + axis.part.calc_size(prior_indices)
                         last_index = bisect.bisect_left(
-                            axis.part.indices.data, last_index, bstart, bend)
+                            axis.part.indices, last_index, bstart, bend)
                         last_index -= bstart
 
                         # import pdb; pdb.set_trace()
