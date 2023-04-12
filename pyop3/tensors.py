@@ -1100,7 +1100,7 @@ class Node(pytools.ImmutableRecord):
 
     @property
     def child(self):
-        return utils.just_one(self.children)
+        return utils.just_one(self.children) if self.children else None
 
     # preferably free functions
     def add_child(self, id, node):
@@ -1233,6 +1233,14 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
         the values we use [0, 1, 2] instead of [0, 0, 0]. A binary search of all the
         indices is required to find the right offset.
 
+        Note that this is an entirely separate concept to the numbering. Imagine a
+        sparse matrix where the row and column axes are renumbered. The indices are
+        still sorted. The indices gives us a mapping from "dense" indices to "sparse"
+        ones. This is normally inverted (via binary search) to get the "dense" index
+        from the "sparse" one. The numbering then concerns the lookup from dense
+        indices to an offset. This means, for example, that the numbering of a sparse
+        thing is dense and contains the numbers [0, ..., ndense).
+
     """
     fields = {"count", "subaxis", "numbering", "label", "id", "max_count", "is_layout", "layout_fn", "overlap", "overlap_sf", "indexed", "is_a_terminal_thing", "indices"}
 
@@ -1244,10 +1252,6 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
             max_count = count
         elif not max_count:
                 max_count = max(count.data)
-
-        if indices is not None and numbering is not None:
-            raise ValueError(
-                "indices must be sorted so a numbering should not be provided")
 
         if isinstance(numbering, np.ndarray):
             numbering = list(numbering)
@@ -2347,6 +2351,95 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
     def _merge_stencils(self, stencils1, stencils2):
         return _merge_stencils(stencils1, stencils2, self.dim)
+
+
+def make_sparsity(
+    iterindex,
+    lmap,
+    rmap,
+    llabels=PrettyTuple(),
+    rlabels=PrettyTuple(),
+    lindices=PrettyTuple(),
+    rindices=PrettyTuple(),
+):
+    if iterindex:
+        if iterindex.children:
+            raise NotImplementedError(
+                "Need to think about what to do when we have more complicated "
+                "iteration sets that have multiple indices (e.g. extruded cells)")
+
+        if not isinstance(iterindex, RangeNode):
+            raise NotImplementedError(
+                "Need to think about whether maps are reasonable here")
+
+        if not utils.is_single_valued(idx.id for idx in [iterindex, lmap, rmap]):
+            raise ValueError("Indices must share common roots")
+
+        sparsity = collections.defaultdict(set)
+        for i in range(iterindex.size):
+            subsparsity = make_sparsity(
+                None, lmap.child, rmap.child,
+                llabels|iterindex.label, rlabels|iterindex.label,
+                lindices|i, rindices|i)
+            for labels, indices in subsparsity.items():
+                sparsity[labels].update(indices)
+        return sparsity
+    elif lmap:
+        if not isinstance(lmap, TabulatedMapNode):
+            raise NotImplementedError("Need to think about other index types")
+        if len(lmap.children) not in [0, 1]:
+            raise NotImplementedError("Need to think about maps forking")
+
+        new_labels = list(llabels)
+        # first pop the old things
+        for lbl in lmap.from_labels:
+            if lbl != new_labels[-1]:
+                raise ValueError("from_labels must match existing labels")
+            new_labels.pop()
+        # then append the new ones - only do the labels here, indices are
+        # done inside the loop
+        new_labels.extend(lmap.to_labels)
+        new_labels = PrettyTuple(new_labels)
+
+        sparsity = collections.defaultdict(set)
+        for i in range(lmap.size):
+            new_indices = PrettyTuple([lmap.data.get_value(lindices|i)])
+            subsparsity = make_sparsity(
+                None, lmap.child, rmap,
+                new_labels, rlabels,
+                new_indices, rindices)
+            for labels, indices in subsparsity.items():
+                sparsity[labels].update(indices)
+        return sparsity
+    elif rmap:
+        if not isinstance(rmap, TabulatedMapNode):
+            raise NotImplementedError("Need to think about other index types")
+        if len(rmap.children) not in [0, 1]:
+            raise NotImplementedError("Need to think about maps forking")
+
+        new_labels = list(rlabels)
+        # first pop the old labels
+        for lbl in rmap.from_labels:
+            if lbl != new_labels[-1]:
+                raise ValueError("from_labels must match existing labels")
+            new_labels.pop()
+        # then append the new ones
+        new_labels.extend(rmap.to_labels)
+        new_labels = PrettyTuple(new_labels)
+
+        sparsity = collections.defaultdict(set)
+        for i in range(rmap.size):
+            new_indices = PrettyTuple([rmap.data.get_value(rindices|i)])
+            subsparsity = make_sparsity(
+                None, lmap, rmap.child,
+                llabels, new_labels,
+                lindices, new_indices)
+            for labels, indices in subsparsity.items():
+                sparsity[labels].update(indices)
+        return sparsity
+    else:
+        # at the bottom, record an entry
+        return {(llabels, rlabels): {(lindices, rindices)}}
 
 
 def indexed_shapes(tensor):

@@ -62,3 +62,58 @@ def test_read_sparse_rank_3_tensor():
     assert tensor.get_value([1, 0, 1]) == 40
     assert tensor.get_value([1, 1, 0]) == 50
     assert tensor.get_value([1, 1, 2]) == 60
+
+
+def test_make_sparsity():
+    """
+
+    The cone sparsity of the following mesh:
+
+    v0  v1  v2  v3
+    x---x---x---x
+      c0  c1  c2
+
+    should look like:
+
+       v0 v1 v2 v3
+    v0 x  x
+    v1 x  x  x
+    v2    x  x  x
+    v3       x  x
+
+    """
+    mapaxes = (
+        MultiAxis([
+            AxisPart(
+                3, label="cells",
+                subaxis=MultiAxis([
+                    AxisPart(2, label="any"),
+                ]),
+            ),
+        ]).set_up())
+    mapdata = MultiArray(
+        mapaxes, name="map0", data=np.array([0, 1, 1, 2, 2, 3], dtype=np.uint64))
+
+    iterindex = RangeNode("cells", 3, id="i0")
+    lmap = rmap = iterindex.add_child(
+        "i0",
+        TabulatedMapNode(["cells"], ["verts"], arity=2,
+                         data=mapdata[[iterindex]]))
+
+    sparsity = make_sparsity(iterindex, lmap, rmap)
+    expected = {
+        (("verts",), ("verts",)): {
+            ((0,), (0,)),
+            ((0,), (1,)),
+            ((1,), (0,)),
+            ((1,), (1,)),
+            ((1,), (2,)),
+            ((2,), (1,)),
+            ((2,), (2,)),
+            ((2,), (3,)),
+            ((3,), (2,)),
+            ((3,), (3,)),
+        },
+    }
+
+    assert sparsity == expected
