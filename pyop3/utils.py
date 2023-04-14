@@ -126,8 +126,7 @@ def strictly_all(iterable):
 
 
 def print_with_rank(*args):
-    print(f"rank {MPI.COMM_WORLD.rank}: ", sep="", flush=True)
-    print(*args, flush=True)
+    print(f"rank {MPI.COMM_WORLD.rank}: ", *args, sep="", flush=True)
 
 
 def print_if_rank(rank, *args):

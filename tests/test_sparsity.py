@@ -1,4 +1,6 @@
+import pytest
 from pyop3 import *
+from pyop3.utils import print_with_rank
 
 
 def test_read_sparse_matrix():
@@ -64,7 +66,8 @@ def test_read_sparse_rank_3_tensor():
     assert tensor.get_value([1, 1, 2]) == 60
 
 
-def test_make_sparsity():
+@pytest.fixture
+def sparsity1dp1():
     """
 
     The cone sparsity of the following mesh:
@@ -92,17 +95,20 @@ def test_make_sparsity():
             ),
         ]).set_up())
     mapdata = MultiArray(
-        mapaxes, name="map0", data=np.array([0, 1, 1, 2, 2, 3], dtype=np.uint64))
+        mapaxes, name="map0", data=np.array([0, 1, 1, 2, 2, 3], dtype=IntType))
 
     iterindex = RangeNode("cells", 3, id="i0")
     lmap = rmap = iterindex.add_child(
         "i0",
-        TabulatedMapNode(["cells"], ["verts"], arity=2,
+        TabulatedMapNode(["cells"], ["nodes"], arity=2,
                          data=mapdata[[iterindex]]))
 
-    sparsity = make_sparsity(iterindex, lmap, rmap)
+    return make_sparsity(iterindex, lmap, rmap)
+
+
+def test_make_sparsity(sparsity1dp1):
     expected = {
-        (("verts",), ("verts",)): {
+        (("nodes",), ("nodes",)): {
             ((0,), (0,)),
             ((0,), (1,)),
             ((1,), (0,)),
@@ -116,4 +122,120 @@ def test_make_sparsity():
         },
     }
 
-    assert sparsity == expected
+    assert sparsity1dp1 == expected
+
+
+def test_make_matrix(sparsity1dp1):
+    raxes = MultiAxis([AxisPart(4, label="nodes")])
+    caxes = raxes.copy()
+
+    mat = PetscMatAIJ(raxes, caxes, sparsity1dp1)
+
+    import pdb; pdb.set_trace()
+
+    assert False
+
+
+@pytest.mark.parallel(nprocs=2)
+def test_make_parallel_matrix():
+    """TODO
+
+    Construct a P1 matrix for the following 1D mesh:
+
+        v0    v1    v2    v3
+        x-----x-----x-----x
+           c0    c1    c2
+
+    The mesh is distributed between 2 processes so the local meshes are:
+
+                 v0    v1    v2
+        proc 1:  x-----x-----o
+                    c0    c1
+
+                 v2    v3
+        proc 2:  x-----x
+                    c2
+
+    Where o (instead of x) denotes that v2 is a "halo" entry for process 1.
+
+    DoFs are stored on the vertices and adjacent cells overlap so the  sparsity
+    pattern for the global mesh should be:
+
+           v0 v1 v2 v3
+        v0 x  x
+        v1 x  x  x
+        v2    x  x  x
+        v3       x  x
+
+    The sparsities for each process are given by:
+
+        proc 1:
+
+               v0 v1 v2
+            v0 x  x
+            v1 x  x  x
+
+        proc 2:
+
+               v1 v2 v3
+            v2 x  x  x
+            v3    x  x
+
+    """
+    comm = PETSc.Sys.getDefaultComm()
+    assert comm.size == 2
+
+    if comm.rank == 0:
+        # v0, v1 and v2
+        nnodes = 3
+        overlap = [Owned(), Owned(), Halo(RemotePoint(1, 0))]
+
+        # now make the sparsity
+        mapaxes = MultiAxis([
+            AxisPart(
+                2, label="cells", subaxis=MultiAxis([AxisPart(2, label="any")])),
+            ]).set_up()
+        mapdata = MultiArray(
+            mapaxes, name="map0", data=np.array([0, 1, 1, 2], dtype=IntType))
+
+        iterindex = RangeNode("cells", 2, id="i0")
+        lmap = rmap = iterindex.add_child(
+            "i0",
+            TabulatedMapNode(["cells"], ["nodes"], arity=2,
+                             data=mapdata[[iterindex]]))
+    else:
+        # v2 and v3
+        nnodes = 2
+        overlap = [Shared(), Owned()]
+
+        # now make the sparsity
+        mapaxes = MultiAxis([
+            AxisPart(
+                1, label="cells", subaxis=MultiAxis([AxisPart(2, label="any")])),
+            ]).set_up()
+        mapdata = MultiArray(
+            mapaxes, name="map0", data=np.array([0, 1], dtype=IntType))
+
+        iterindex = RangeNode("cells", 1, id="i0")
+        lmap = rmap = iterindex.add_child(
+            "i0",
+            TabulatedMapNode(["cells"], ["nodes"], arity=2,
+                             data=mapdata[[iterindex]]))
+
+    axes = MultiAxis([AxisPart(nnodes, label="nodes", overlap=overlap)]).set_up()
+    sparsity = make_sparsity(iterindex, lmap, rmap)
+
+    print_with_rank(sparsity)
+
+    mat = PetscMatAIJ(axes, axes, sparsity)
+
+    # import pdb; pdb.set_trace()
+    #
+    # mat.petscmat.getLGMap()[0].view()
+    # mat.petscmat.getLGMap()[1].view()
+
+    mat.petscmat.view()
+
+
+if __name__ == "__main__":
+    test_make_parallel_matrix()

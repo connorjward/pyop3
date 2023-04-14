@@ -27,6 +27,10 @@ from pyop3 import utils
 myprint = utils.print_with_rank
 
 
+IntType = PETSc.IntType
+PointerType = IntType
+
+
 def is_distributed(axis):
     """Return ``True`` if any part of a :class:`MultiAxis` is distributed across ranks."""
     for part in axis.parts:
@@ -106,6 +110,7 @@ def has_independently_indexed_subaxis_parts(part):
 
 
 def only_linear(func):
+    @functools.wraps(func)
     def wrapper(self, *args, **kwargs):
         if not self.is_linear:
             raise RuntimeError(f"{func.__name__} only admits linear multi-axes")
@@ -209,8 +214,8 @@ def attach_star_forest(axis, with_halo_points=True):
 
     # 2. broadcast the root offset to all leaves
     # TODO use a single buffer
-    from_buffer = np.zeros(axis.part.count, dtype=np.uintp)
-    to_buffer = np.zeros(axis.part.count, dtype=np.uintp)
+    from_buffer = np.zeros(axis.part.count, dtype=PointerType)
+    to_buffer = np.zeros(axis.part.count, dtype=PointerType)
 
     for pt, label in enumerate(axis.part.overlap):
         # only need to broadcast offsets for roots
@@ -221,7 +226,7 @@ def attach_star_forest(axis, with_halo_points=True):
     # moved. Perhaps good to use some sort of map and create a minimal SF.
 
     cdim = axis.part.subaxis.calc_size() if axis.part.subaxis else 1
-    dtype, _ = get_mpi_dtype(np.dtype(np.uintp), cdim)
+    dtype, _ = get_mpi_dtype(np.dtype(PointerType), cdim)
     bcast_args = dtype, from_buffer, to_buffer, MPI.REPLACE
     point_sf.bcastBegin(*bcast_args)
     point_sf.bcastEnd(*bcast_args)
@@ -234,15 +239,15 @@ def attach_star_forest(axis, with_halo_points=True):
     i = 0
     for pt, label in enumerate(axis.part.overlap):
         # TODO not a nice check (is_leaf?)
-        cond1 = not isinstance(label, Owned) and label.root
+        cond1 = not is_owned_by_process(label)
         if cond1:
             if with_halo_points or (not with_halo_points and isinstance(label, Shared)):
                 local_offsets.append(axis.get_offset((pt,)))
                 remote_offsets.append((_remote[i, 0], to_buffer[pt]))
             i += 1
 
-    local_offsets = np.array(local_offsets, dtype=np.int32)
-    remote_offsets = np.array(remote_offsets, dtype=np.int32)
+    local_offsets = np.array(local_offsets, dtype=IntType)
+    remote_offsets = np.array(remote_offsets, dtype=IntType)
 
     sf = PETSc.SF().create(comm)
     if not with_halo_points:
@@ -258,16 +263,17 @@ def attach_star_forest(axis, with_halo_points=True):
 def make_star_forest_per_axis_part(part, comm):
     if part.is_distributed:
         # we have a root if a point is shared but doesn't point to another rank
-        nroots = len([pt for pt in part.overlap if isinstance(pt, Shared) and not pt.root])
+        nroots = len([pt for pt in part.overlap
+                      if isinstance(pt, Shared) and not pt.root])
 
         # which local points are leaves?
-        local_points = [i for i, pt in enumerate(part.overlap) if not isinstance(pt, Owned) and pt.root]
+        local_points = [i for i, pt in enumerate(part.overlap) if not is_owned_by_process(pt)]
 
         # roots of other processes (rank, index)
         remote_points = utils.flatten([
             pt.root.as_tuple()
             for pt in part.overlap
-            if not isinstance(pt, Owned) and pt.root
+            if not is_owned_by_process(pt)
         ])
 
         # import pdb; pdb.set_trace()
@@ -311,6 +317,13 @@ class Shared(PointOverlapLabel):
 @dataclasses.dataclass
 class Halo(PointOverlapLabel):
     root: RemotePoint
+
+
+def is_owned_by_process(olabel):
+    return (
+        isinstance(olabel, Owned)
+        or isinstance(olabel, Shared) and not olabel.root)
+
 
 # --------------------- \/ lifted from halo.py \/ -------------------------
 
@@ -600,6 +613,19 @@ class MultiAxis(pytools.ImmutableRecord):
     def nparts(self):
         return len(self.parts)
 
+    @functools.cached_property
+    def local_view(self):
+        if self.nparts > 1:
+            raise NotImplementedError
+        if not self.part.has_partitioned_halo:
+            raise NotImplementedError
+
+        if not self.part.is_distributed:
+            new_part = self.part.copy(overlap=None)
+        else:
+            new_part = self.part.copy(count=self.part.num_owned, max_count=None, overlap=None)
+        return self.copy(parts=[new_part])
+
     def calc_size(self, indices=PrettyTuple()):
         # NOTE: this works because the size array cannot be multi-part, therefore integer
         # indices (as opposed to typed ones) are valid.
@@ -625,7 +651,7 @@ class MultiAxis(pytools.ImmutableRecord):
     # TODO ultimately remove this as it leads to duplication of data
     layout_namer = NameGenerator("layout")
 
-    def set_up(self):
+    def set_up(self, with_sf=True):
         """Initialise the multi-axis by computing the layout functions."""
         layouts = self._set_up()
         # import pdb; pdb.set_trace()
@@ -633,7 +659,7 @@ class MultiAxis(pytools.ImmutableRecord):
         assert is_set_up(new_axis)
 
         # set the .sf and .owned_sf properties of new_axis
-        if is_distributed(new_axis):
+        if with_sf and is_distributed(new_axis):
             new_axis = attach_star_forest(new_axis)
             new_axis = attach_star_forest(new_axis, with_halo_points=False)
         # new_axis = attach_owned_star_forest(new_axis)
@@ -748,17 +774,17 @@ class MultiAxis(pytools.ImmutableRecord):
             axis_numbering = []
             start = 0
             stop = start + self.parts[0].find_integer_count(indices)
-            numb = np.arange(start, stop, dtype=np.uintp)
+            numb = np.arange(start, stop, dtype=PointerType)
             # don't set up to avoid recursion (should be able to use affine anyway)
             axis = MultiAxis([AxisPart(len(numb))])
-            numb = MultiArray(dim=axis,name=f"{self.id}_ord0", data=numb, dtype=np.uintp)
+            numb = MultiArray(dim=axis,name=f"{self.id}_ord0", data=numb, dtype=PointerType)
             axis_numbering.append(numb)
             start = stop
             for i in range(1, self.nparts):
                 stop = start + self.parts[i].find_integer_count(indices)
-                numb = np.arange(start, stop, dtype=np.uintp)
+                numb = np.arange(start, stop, dtype=PointerType)
                 axis = MultiAxis([AxisPart(len(numb))])
-                numb = MultiArray(dim=axis,name=f"{self.id}_ord{i}", data=numb, dtype=np.uintp)
+                numb = MultiArray(dim=axis,name=f"{self.id}_ord{i}", data=numb, dtype=PointerType)
                 axis_numbering.append(numb)
                 start = stop
         else:
@@ -849,7 +875,7 @@ class MultiAxis(pytools.ImmutableRecord):
             if can_be_affine(part):
                 if isinstance(layout, list):
                     name = self._my_layout_namer.next()
-                    starts = MultiArray.from_list(layout, path, name, np.uintp)
+                    starts = MultiArray.from_list(layout, path, name, PointerType)
                     step = step_size(part)
                     layouts[path] = AffineLayoutFunction(step, starts)
             else:
@@ -857,7 +883,7 @@ class MultiAxis(pytools.ImmutableRecord):
                     continue
                 assert isinstance(layout, list)
                 name = self._my_layout_namer.next()
-                data = MultiArray.from_list(layout, path, name, np.uintp)
+                data = MultiArray.from_list(layout, path, name, PointerType)
                 layouts[path] = IndirectLayoutFunction(data)
 
     def _set_up(self, indices=PrettyTuple(), offset=None):
@@ -909,8 +935,8 @@ class MultiAxis(pytools.ImmutableRecord):
         else:
             return False
 
-    @only_linear
     @functools.cached_property
+    @only_linear
     def depth(self):
         if subaxis := self.part.subaxis:
             return subaxis.depth + 1
@@ -1257,7 +1283,7 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
             numbering = list(numbering)
 
         if isinstance(numbering, collections.abc.Sequence):
-            numbering = MultiArray.from_list(numbering, [label], name=f"{id}_ord", dtype=np.uintp)
+            numbering = MultiArray.from_list(numbering, [label], name=f"{id}_ord", dtype=PointerType)
 
         if not isinstance(label, collections.abc.Hashable):
             raise ValueError("Provided label must be hashable")
@@ -1354,6 +1380,32 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
         else:
             assert isinstance(self.count, numbers.Integral)
             return self.count
+
+    @functools.cached_property
+    def has_partitioned_halo(self):
+        if self.overlap is None:
+            return True
+
+        remaining = itertools.dropwhile(
+            lambda o: is_owned_by_process(o), self.overlap)
+        return all(isinstance(o, Halo) for o in remaining)
+
+    @functools.cached_property
+    def num_owned(self) -> int:
+        """Return the number of owned points."""
+        if isinstance(self.count, MultiArray):
+            # TODO: Might we ever want this to work?
+            raise RuntimeError("nowned is only valid for non-ragged axes")
+
+        if self.overlap is None:
+            return self.count
+        else:
+            return sum(1 for o in self.overlap if is_owned_by_process(o))
+
+    @property
+    def nowned(self):
+        # alias, what is the best name?
+        return self.num_owned
 
 
 class AxisPart(AbstractAxisPart):
@@ -2440,6 +2492,48 @@ def make_sparsity(
     else:
         # at the bottom, record an entry
         return {(llabels, rlabels): {(lindices, rindices)}}
+
+
+def overlap_axes(ax1, ax2, sparsity=None):
+    """Combine two multiaxes, possibly sparsely."""
+    if ax1.depth != 1 or ax2.depth != 1:
+        raise NotImplementedError(
+            "Need to think about composition rules for nested axes")
+
+    new_parts = []
+    for pt1 in ax1.parts:
+        new_subparts = []
+        for pt2 in ax2.parts:
+            # some initial checks
+            if any(not isinstance(pt.count, numbers.Integral) for pt in [pt1, pt2]):
+                raise NotImplementedError(
+                    "Need to think about non-integral sized axis parts")
+
+            # now do the real work
+            count = []
+            indices = []
+            for i1 in range(pt1.count):
+                indices_per_row = []
+                for i2 in range(pt2.count):
+                    if ((i1,), (i2,)) in sparsity[(pt1.label,), (pt2.label,)]:
+                        indices_per_row.append(i2)
+                count.append(len(indices_per_row))
+                indices.append(indices_per_row)
+
+            count = MultiArray.from_list(count, labels=[pt1.label], name="count", dtype=IntType)
+            indices = MultiArray.from_list(indices, labels=[pt1.label, "any"], name="indices", dtype=IntType)
+
+            # FIXME: I think that the inner axis count should be "full", not
+            # the number of indices. This means that we need to use the
+            # number of indices when computing layouts.
+            new_subpart = pt2.copy(count=count, indices=indices)
+            new_subparts.append(new_subpart)
+
+        subaxis = MultiAxis(new_subparts)
+        new_part = pt1.copy(subaxis=subaxis)
+        new_parts.append(new_part)
+
+    return MultiAxis(new_parts).set_up(with_sf=False)
 
 
 def indexed_shapes(tensor):
