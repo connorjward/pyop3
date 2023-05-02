@@ -142,44 +142,55 @@ def test_make_parallel_matrix():
 
     Construct a P1 matrix for the following 1D mesh:
 
-        v0    v1    v2    v3
-        x-----x-----x-----x
-           c0    c1    c2
+    v0    v1    v2    v3
+    x-----x-----x-----x
+       c0    c1    c2
 
     The mesh is distributed between 2 processes so the local meshes are:
 
-                 v0    v1    v2
-        proc 1:  x-----x-----o
-                    c0    c1
+             v0    v1    v2
+    proc 1:  x-----x-----o
+                c0    c1
 
-                 v2    v3
-        proc 2:  x-----x
-                    c2
+             v1    v2    v3
+    proc 2:  o~~~~~x-----x
+                c1    c2
 
-    Where o (instead of x) denotes that v2 is a "halo" entry for process 1.
+    Where o and ~ (instead of x and -) denote that points are halo, not owned.
 
-    DoFs are stored on the vertices and adjacent cells overlap so the  sparsity
-    pattern for the global mesh should be:
+    It is essential that all owned points fully store all points in their
+    adjacency. For FEM the adjacency is given by cl(support(pt)). For process 1
+    this means that v2 must be stored, but for process 2, owning v2 requires
+    that c1 and v1 both exist in the halo.
 
-           v0 v1 v2 v3
-        v0 x  x
-        v1 x  x  x
-        v2    x  x  x
-        v3       x  x
+    Given the adjacency relation as described. The matrix sparsity should be:
+
+       v0 v1 v2 v3
+    v0 x  x
+    v1 x  x  x
+    v2    x  x  x
+    v3       x  x
 
     The sparsities for each process are given by:
 
-        proc 1:
+    proc 1:
 
-               v0 v1 v2
-            v0 x  x
-            v1 x  x  x
+       v0 v1 v2
+    v0 x  x
+    v1 x  s  s
+    v2    h  h
 
-        proc 2:
+    proc 2:
 
-               v1 v2 v3
-            v2 x  x  x
-            v3    x  x
+       v1 v2 v3
+    v1 h  h
+    v2 s  s  x
+    v3    x  x
+
+    Here "s" denotes shared and "h" halo.
+
+    Since PETSc divides ownership across rows, the DoFs in (v3, :) are dropped for
+    process 1 and the DoFs in (v1, :) are dropped for process 2.
 
     """
     comm = PETSc.Sys.getDefaultComm()
@@ -227,14 +238,18 @@ def test_make_parallel_matrix():
 
     print_with_rank(sparsity)
 
-    mat = PetscMatAIJ(axes, axes, sparsity)
+    new_sparsity = distribute_sparsity(sparsity, axes, axes)
+
+    print_with_rank(new_sparsity)
+
+    # mat = PetscMatAIJ(axes, axes, sparsity)
 
     # import pdb; pdb.set_trace()
     #
     # mat.petscmat.getLGMap()[0].view()
     # mat.petscmat.getLGMap()[1].view()
 
-    mat.petscmat.view()
+    # mat.petscmat.view()
 
 
 if __name__ == "__main__":

@@ -20,7 +20,7 @@ import pymbolic as pym
 import pytools
 import pyop3.exprs
 import pyop3.utils
-from pyop3.utils import as_tuple, checked_zip, NameGenerator, unique, PrettyTuple, strictly_all, has_unique_entries
+from pyop3.utils import as_tuple, checked_zip, NameGenerator, unique, PrettyTuple, strictly_all, has_unique_entries, single_valued
 from pyop3 import utils
 
 
@@ -662,6 +662,14 @@ class MultiAxis(pytools.ImmutableRecord):
         if with_sf and is_distributed(new_axis):
             new_axis = attach_star_forest(new_axis)
             new_axis = attach_star_forest(new_axis, with_halo_points=False)
+
+            # attach a local to global map
+            if new_axis.nparts > 1:
+                raise NotImplementedError(
+                    "Currently only compute lgmaps for a single part, shouldn't "
+                    "be hard to fix")
+            lgmap = create_lgmap(new_axis)
+            new_axis = new_axis.copy(parts=[new_axis.part.copy(lgmap=lgmap)])
         # new_axis = attach_owned_star_forest(new_axis)
         return new_axis
 
@@ -1268,11 +1276,11 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
         thing is dense and contains the numbers [0, ..., ndense).
 
     """
-    fields = {"count", "subaxis", "numbering", "label", "id", "max_count", "is_layout", "layout_fn", "overlap", "overlap_sf", "indexed", "is_a_terminal_thing", "indices"}
+    fields = {"count", "subaxis", "numbering", "label", "id", "max_count", "is_layout", "layout_fn", "overlap", "overlap_sf", "indexed", "is_a_terminal_thing", "indices", "lgmap"}
 
     id_generator = NameGenerator("_p")
 
-    def __init__(self, count, subaxis=None, *, indices=None, numbering=None, label=None, id=None, max_count=None, is_layout=False, layout_fn=None, overlap=None, indexed=False, is_a_terminal_thing=False):
+    def __init__(self, count, subaxis=None, *, indices=None, numbering=None, label=None, id=None, max_count=None, is_layout=False, layout_fn=None, overlap=None, indexed=False, is_a_terminal_thing=False, lgmap=None):
         if isinstance(count, numbers.Integral):
             assert not max_count or max_count == count
             max_count = count
@@ -1302,6 +1310,7 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
         self.layout_fn = layout_fn
         self.overlap = overlap
         self.indexed = indexed
+        self.lgmap = lgmap
         """
         this property is required because we can hit situations like the following:
 
@@ -2491,8 +2500,120 @@ def make_sparsity(
         return sparsity
     else:
         # at the bottom, record an entry
-        return {(llabels, rlabels): {(lindices, rindices)}}
+        # return {(llabels, rlabels): {(lindices, rindices)}}
+        # TODO: For now assume single values for each of these
+        llabel, rlabel = map(single_valued, [llabels, rlabels])
+        lindex, rindex = map(single_valued, [lindices, rindices])
+        return {(llabel, rlabel): {(lindex, rindex)}}
 
+
+def create_lgmap(axes):
+    # TODO: Fix imports
+    from pyop3.tensors import Owned, Shared, MPI, get_mpi_dtype
+
+    if axes.nparts > 1:
+        raise NotImplementedError
+    if axes.part.overlap is None:
+        raise ValueError("axes is expected to have a specified overlap")
+    if not isinstance(axes.part.count, numbers.Integral):
+        raise NotImplementedError("Expecting an integral axis size")
+
+    # 1. Globally number all owned processes
+    sendbuf = np.array([axes.part.nowned], dtype=PETSc.IntType)
+    recvbuf = np.zeros_like(sendbuf)
+    axes.sf.comm.tompi4py().Exscan(sendbuf, recvbuf)
+    global_num = single_valued(recvbuf)
+    indices = np.full(axes.part.count, -1, dtype=PETSc.IntType)
+    for i, olabel in enumerate(axes.part.overlap):
+        if (isinstance(olabel, Owned)
+            or isinstance(olabel, Shared) and olabel.root is None):
+            indices[i] = global_num
+            global_num += 1
+
+    # 2. Broadcast the global numbering to SF leaves
+    mpi_dtype, _ = get_mpi_dtype(indices.dtype)
+    mpi_op = MPI.REPLACE
+    args = (mpi_dtype, indices, indices, mpi_op)
+    axes.sf.bcastBegin(*args)
+    axes.sf.bcastEnd(*args)
+
+    assert not any(indices == -1)
+
+    # return PETSc.LGMap().create(indices, comm=axes.sf.comm)
+    return indices
+
+def distribute_sparsity(sparsity, ax1, ax2, owner="row"):
+    if any(ax.nparts > 1 for ax in [ax1, ax2]):
+        raise NotImplementedError(
+            "Only dealing with single-part multi-axes for now")
+
+    # how many points need to get sent to other processes?
+    # how many points do I get from other processes?
+    new_sparsity = collections.defaultdict(set)
+    points_to_send = collections.defaultdict(set)
+    for lindex, rindex in sparsity[ax1.part.label, ax2.part.label]:
+        if owner == "row":
+            olabel = ax1.part.overlap[lindex]
+            if is_owned_by_process(olabel):
+                new_sparsity[ax1.part.label, ax2.part.label].add((lindex, rindex))
+            else:
+                points_to_send[olabel.root.rank].add(
+                    (ax1.part.lgmap[lindex], ax2.part.lgmap[rindex]))
+        else:
+            raise NotImplementedError
+
+    # send points
+
+    # first determine how many new points we are getting from each rank
+    comm = single_valued([ax1.sf.comm, ax2.sf.comm]).tompi4py()
+    npoints_to_send = np.array(
+        [len(points_to_send[rank]) for rank in range(comm.size)], dtype=IntType)
+    npoints_to_recv = np.empty_like(npoints_to_send)
+    comm.Alltoall(npoints_to_send, npoints_to_recv)
+
+    # communicate the offsets back
+    from_offsets = np.cumsum(npoints_to_recv)
+    to_offsets = np.empty_like(from_offsets)
+    comm.Alltoall(from_offsets, to_offsets)
+
+    # now send the globally numbered row, col values for each point that
+    # needs to be sent. This is easiest with an SF.
+
+    # nroots is the number of points to send
+    nroots = sum(npoints_to_send)
+    local_points = None  # contiguous storage
+
+    idx = 0
+    remote_points = []
+    for rank in range(comm.size):
+        for i in range(npoints_to_recv[rank]):
+            remote_points.extend([rank, to_offsets[idx]])
+            idx += 1
+
+    sf = PETSc.SF().create(comm)
+    sf.setGraph(nroots, local_points, remote_points)
+
+    # create a buffer to hold the new values
+    # x2 since we are sending row and column numbers
+    new_points = np.empty(sum(npoints_to_recv)*2, dtype=IntType)
+    rootdata = np.array([
+        num
+        for rank in range(comm.size)
+        for lnum, rnum in points_to_send[rank]
+        for num in [lnum, rnum]
+    ], dtype=new_points.dtype)
+
+    mpi_dtype, _ = get_mpi_dtype(np.dtype(IntType))
+    mpi_op = MPI.REPLACE
+    args = (mpi_dtype, rootdata, new_points, mpi_op)
+    sf.bcastBegin(*args)
+    sf.bcastEnd(*args)
+
+    for i in range(sum(npoints_to_recv)):
+        new_sparsity[ax1.part.label, ax2.part.label].add((new_points[2*i], new_points[2*i+1]))
+
+    # import pdb; pdb.set_trace()
+    return new_sparsity
 
 def overlap_axes(ax1, ax2, sparsity=None):
     """Combine two multiaxes, possibly sparsely."""
