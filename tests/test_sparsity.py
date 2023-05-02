@@ -199,7 +199,7 @@ def test_make_parallel_matrix():
     if comm.rank == 0:
         # v0, v1 and v2
         nnodes = 3
-        overlap = [Owned(), Owned(), Halo(RemotePoint(1, 0))]
+        overlap = [Owned(), Shared(), Halo(RemotePoint(1, 1))]
 
         # now make the sparsity
         mapaxes = MultiAxis([
@@ -215,19 +215,21 @@ def test_make_parallel_matrix():
             TabulatedMapNode(["cells"], ["nodes"], arity=2,
                              data=mapdata[[iterindex]]))
     else:
-        # v2 and v3
-        nnodes = 2
-        overlap = [Shared(), Owned()]
+        # v1, v2 and v3
+        nnodes = 3
+        # FIXME: Unclear on the ordering of Shared and Owned
+        # should they be handled by some numbering?
+        overlap = [Owned(), Shared(), Halo(RemotePoint(0, 1))]
 
         # now make the sparsity
         mapaxes = MultiAxis([
             AxisPart(
-                1, label="cells", subaxis=MultiAxis([AxisPart(2, label="any")])),
+                2, label="cells", subaxis=MultiAxis([AxisPart(2, label="any")])),
             ]).set_up()
         mapdata = MultiArray(
-            mapaxes, name="map0", data=np.array([0, 1], dtype=IntType))
+            mapaxes, name="map0", data=np.array([2, 1, 1, 0], dtype=IntType))
 
-        iterindex = RangeNode("cells", 1, id="i0")
+        iterindex = RangeNode("cells", 2, id="i0")
         lmap = rmap = iterindex.add_child(
             "i0",
             TabulatedMapNode(["cells"], ["nodes"], arity=2,
@@ -238,18 +240,18 @@ def test_make_parallel_matrix():
 
     print_with_rank(sparsity)
 
-    new_sparsity = distribute_sparsity(sparsity, axes, axes)
+    # new_sparsity = distribute_sparsity(sparsity, axes, axes)
 
-    print_with_rank(new_sparsity)
+    # print_with_rank(new_sparsity)
 
-    # mat = PetscMatAIJ(axes, axes, sparsity)
+    mat = PetscMatAIJ(axes, axes, sparsity)
 
     # import pdb; pdb.set_trace()
     #
-    # mat.petscmat.getLGMap()[0].view()
-    # mat.petscmat.getLGMap()[1].view()
+    mat.petscmat.getLGMap()[0].view()
+    mat.petscmat.getLGMap()[1].view()
 
-    # mat.petscmat.view()
+    mat.petscmat.view()
 
 
 if __name__ == "__main__":

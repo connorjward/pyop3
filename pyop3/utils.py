@@ -129,6 +129,10 @@ def print_with_rank(*args):
     print(f"rank {MPI.COMM_WORLD.rank}: ", *args, sep="", flush=True)
 
 
+# better name?
+parprint = print_with_rank
+
+
 def print_if_rank(rank, *args):
     if rank == MPI.COMM_WORLD.rank:
         print(*args, flush=True)

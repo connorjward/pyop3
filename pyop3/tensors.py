@@ -26,6 +26,7 @@ from pyop3 import utils
 
 myprint = utils.print_with_rank
 
+parprint= myprint
 
 IntType = PETSc.IntType
 PointerType = IntType
@@ -250,9 +251,6 @@ def attach_star_forest(axis, with_halo_points=True):
     remote_offsets = np.array(remote_offsets, dtype=IntType)
 
     sf = PETSc.SF().create(comm)
-    if not with_halo_points:
-        utils.print_with_rank(f"local_offsets: {local_offsets}")
-        utils.print_with_rank(f"remote_offsets: {remote_offsets}")
     sf.setGraph(nroots, local_offsets, remote_offsets)
     if with_halo_points:
         return axis.copy(sf=sf)
@@ -2525,8 +2523,7 @@ def create_lgmap(axes):
     global_num = single_valued(recvbuf)
     indices = np.full(axes.part.count, -1, dtype=PETSc.IntType)
     for i, olabel in enumerate(axes.part.overlap):
-        if (isinstance(olabel, Owned)
-            or isinstance(olabel, Shared) and olabel.root is None):
+        if is_owned_by_process(olabel):
             indices[i] = global_num
             global_num += 1
 
@@ -2636,7 +2633,8 @@ def overlap_axes(ax1, ax2, sparsity=None):
             for i1 in range(pt1.count):
                 indices_per_row = []
                 for i2 in range(pt2.count):
-                    if ((i1,), (i2,)) in sparsity[(pt1.label,), (pt2.label,)]:
+                    # if ((i1,), (i2,)) in sparsity[(pt1.label,), (pt2.label,)]:
+                    if (i1, i2) in sparsity[(pt1.label, pt2.label)]:
                         indices_per_row.append(i2)
                 count.append(len(indices_per_row))
                 indices.append(indices_per_row)

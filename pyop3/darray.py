@@ -5,7 +5,7 @@ import numbers
 import numpy as np
 from petsc4py import PETSc
 
-from pyop3.utils import strictly_all, print_with_rank, single_valued
+from pyop3.utils import strictly_all, parprint, single_valued
 
 
 class DistributedArray(abc.ABC):
@@ -104,32 +104,37 @@ class PetscMatAIJ(PetscMat):
         row_part = axes.part
         col_part = row_part.subaxis.part
 
-        col_indices = col_part.indices.data
-        row_ptrs = np.concatenate(
-            [col_part.layout_fn.start.data, [len(col_indices)]],
-            dtype=col_indices.dtype)
+        # drop the last few because these are below the rows PETSc cares about
+        row_ptrs = col_part.layout_fn.start.data
+        col_indices = col_part.indices.data[:row_ptrs[rsize]]
+        # row_ptrs = np.concatenate(
+        #     [col_part.layout_fn.start.data, [len(col_indices)]],
+        #     dtype=col_indices.dtype)
+
 
         # row_ptrs = 
 
         # build the local to global maps from the provided star forests
         if strictly_all(ax.part.is_distributed for ax in [raxes, caxes]):
-            rlgmap = _create_lgmap(raxes)
-            clgmap = _create_lgmap(caxes)
+            # rlgmap = _create_lgmap(raxes)
+            # clgmap = _create_lgmap(caxes)
+            rlgmap = raxes.part.lgmap
+            clgmap = caxes.part.lgmap
         else:
             rlgmap = clgmap = None
 
-        print_with_rank(clgmap.indices)
-
         # convert column indices into global numbering
-        if strictly_all([rlgmap, clgmap]):
-            col_indices = clgmap.indices[col_indices]
+        if strictly_all(lgmap is not None for lgmap in [rlgmap, clgmap]):
+            col_indices = clgmap[col_indices]
 
         # csr is a 2-tuple of row pointers and column indices
         csr = (row_ptrs, col_indices)
-        print_with_rank(csr)
+        parprint(csr)
         petscmat = PETSc.Mat().createAIJ(sizes, csr=csr, comm=comm)
 
-        if strictly_all([rlgmap, clgmap]):
+        if strictly_all(lgmap is not None for lgmap in [rlgmap, clgmap]):
+            rlgmap = PETSc.LGMap().create(rlgmap, comm=comm)
+            clgmap = PETSc.LGMap().create(clgmap, comm=comm)
             petscmat.setLGMap(rlgmap, clgmap)
 
         petscmat.setUp()

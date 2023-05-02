@@ -51,7 +51,7 @@ def compilemythings(code, basename=None, recompile_existing_code=False):
             hsh = md5(code.encode())
             basename = hsh.hexdigest()
 
-        cachedir = "mycache"
+        cachedir = ".cache"
         dirpart, basename = basename[:2], basename[2:]
         cachedir = os.path.join(cachedir, dirpart)
         cname = os.path.join(cachedir, "%s.%s" % (basename, extension))
