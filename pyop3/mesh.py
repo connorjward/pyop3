@@ -13,35 +13,18 @@ class Mesh:
     _name_generator = NameGenerator(prefix="mesh")
 
     def __init__(self, dm, *, name=None):
+        parts = []
+        for i in range(self.height+1):
+            start, stop = self.dm.getHeightStratum(i)
+            parts.append(AxisPart(stop-start, id=(i,)))
+        axis = MultiAxis(id=name)
+
         self.dm = dm
+        self.axis = axis
         self.name = name or self._name_generator.next()
-
-    def __getitem__(self, indices):
-        """Return the correct set of indices..."""
-        indices = as_tuple(indices)
-
-        if len(indices) != 1:
-            raise ValueError
-
-        # We do all this tuple nonsense because the actual mesh part ID is a tuple
-        # but we can pass a scalar in here for some reason (code smell!)
-        index, = indices
-        npart = [pt.id for pt in self.axis.parts].index(as_tuple(index))
-        return Slice(self.axis.parts[npart].size, npart=npart, mesh=self),
-
-    def __mul__(self, other):
-        if isinstance(other, Mesh):
-            return ProductMesh(self, other)
-        else:
-            return NotImplemented
 
     @functools.cached_property
     def axis(self):
-        ax = MultiAxis(id=self.name)
-        for i in range(self.height+1):
-            start, stop = self.dm.getHeightStratum(i)
-            ax = ax.add_part(self.name, AxisPart(stop-start, id=(i,)))
-        return ax
 
     @property
     def dim(self):
