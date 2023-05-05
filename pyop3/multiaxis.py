@@ -19,7 +19,7 @@ import pymbolic as pym
 
 import pytools
 import pyop3.exprs
-from pyop3.utils import as_tuple, checked_zip, NameGenerator, unique, PrettyTuple, strictly_all, has_unique_entries, single_valued, just_one
+from pyop3.utils import as_tuple, checked_zip, NameGenerator, unique, PrettyTuple, strictly_all, has_unique_entries, single_valued, just_one, strict_int
 from pyop3 import utils
 
 from pyop3.dtypes import IntType, PointerType, get_mpi_dtype
@@ -188,9 +188,9 @@ def attach_star_forest(axis, with_halo_points=True):
     comm = MPI.COMM_WORLD
 
     # 1. construct the point-to-point SF per axis part
-    if len(axis.children("root")) != 1:
+    if len(axis.root_axes) != 1:
         raise NotImplementedError
-    for part in axis.children("root"):
+    for part in axis.root_axes:
         part_sf = make_star_forest_per_axis_part(part, comm)
 
     # for now, will want to concat or something
@@ -198,7 +198,7 @@ def attach_star_forest(axis, with_halo_points=True):
 
     # 2. broadcast the root offset to all leaves
     # TODO use a single buffer
-    part = just_one(axis.children("root"))
+    part = just_one(axis.root_axes)
     from_buffer = np.zeros(part.count, dtype=PointerType)
     to_buffer = np.zeros(part.count, dtype=PointerType)
 
@@ -370,12 +370,12 @@ class Sparsity:
 
 
 class NullRootNode(NewNode):
-    DEFAULT_ID = "root"
+    NODE_ID = "root"
 
     fields = set()
 
     def __init__(self):
-        super().__init__(self.DEFAULT_ID)
+        super().__init__(self.NODE_ID)
 
 
 class MultiAxisTree(Tree):
@@ -404,6 +404,10 @@ class MultiAxisTree(Tree):
             raise ValueError("Axis parts in the same multi-axis must have unique labels")
 
         super().add_nodes(axes, parent)
+
+    @property
+    def root_axes(self):
+        return self.children(NullRootNode.NODE_ID)
 
     @property
     def rootless_depth(self) -> int:
@@ -603,12 +607,12 @@ class MultiAxisTree(Tree):
             attach_star_forest(self, with_halo_points=False)
 
             # attach a local to global map
-            if len(self.children("root")) > 1:
+            if len(self.root_axes) > 1:
                 raise NotImplementedError(
                     "Currently only compute lgmaps for a single part, shouldn't "
                     "be hard to fix")
             lgmap = create_lgmap(self)
-            new_part, = self.children("root")
+            new_part = just_one(self.root_axes)
             self.replace_node(new_part.copy(lgmap=lgmap))
             # self.copy(parts=[new_axis.part.copy(lgmap=lgmap)])
         # new_axis = attach_owned_star_forest(new_axis)
@@ -1000,22 +1004,22 @@ MultiAxis = MultiAxisTree
 
 def get_slice_bounds(array, indices):
     from pyop3.distarray import MultiArray
-    part = array.axes.part
+    part = just_one(array.axes.root_axes)
     for _ in indices:
-        part = part.subaxis.part
+        part = just_one(array.axes.children(part))
 
     if isinstance(part.layout_fn, AffineLayoutFunction):
         if isinstance(part.layout_fn.start, MultiArray):
             start = part.layout_fn.start.get_value(indices)
         else:
             start = part.layout_fn.start
-        size = part.calc_size(indices)
+        size = part.calc_size(array.axes, indices)
     else:
         # I don't think that this ever happens. We only use IndirectLayoutFunctions when
         # we have numbering and that is not permitted with sparsity
         raise NotImplementedError
 
-    return start, start+size
+    return strict_int(start), strict_int(start+size)
 
 
 def requires_external_index(axtree, part):
@@ -1478,9 +1482,9 @@ def create_lgmap(axes):
     # TODO: Fix imports
     from pyop3.multiaxis import Owned, Shared
 
-    if len(axes.children("root")) > 1:
+    if len(axes.root_axes) > 1:
         raise NotImplementedError
-    axes_part = just_one(axes.children("root"))
+    axes_part = just_one(axes.root_axes)
     if axes_part.overlap is None:
         raise ValueError("axes is expected to have a specified overlap")
     if not isinstance(axes_part.count, numbers.Integral):

@@ -18,7 +18,7 @@ def test_read_sparse_matrix():
     indices = MultiArray.from_list(
         [[1, 2], [1, 2], [0]], labels=["p1", "any"], name="indices", dtype=np.uint64)
 
-    mataxes = nnzaxes.add_subaxis("p1", MultiAxis([AxisPart(nnz, indices=indices)])).set_up()
+    mataxes = nnzaxes.copy().add_subaxis("p1", [AxisPart(nnz, indices=indices)]).set_up()
     mat = MultiArray(mataxes, name="mat", data=np.arange(10, 51, 10))
 
     assert mat.get_value([0, 1]) == 10
@@ -50,13 +50,10 @@ def test_read_sparse_rank_3_tensor():
     indices2 = MultiArray.from_list(
         [[[0, 2]], [[0, 1], [0, 2]]], labels=["p1", "any1", "any2"], name="indices", dtype=np.uint64)
 
-    ax2 = ax1.add_subaxis(
-        "p1", MultiAxis([
-            AxisPart(
-                nnz,
-                indices=indices1,
-                subaxis=MultiAxis([AxisPart(2, indices=indices2)])),
-        ])).set_up()
+    ax2 = (
+        ax1.copy()
+        .add_subaxis("p1", [AxisPart(nnz, indices=indices1, id="p2")])
+        .add_subaxis("p2", [AxisPart(2, indices=indices2)])).set_up()
     tensor = MultiArray(ax2, name="tensor", data=np.arange(10, 61, 10))
 
     assert tensor.get_value([0, 1, 0]) == 10
@@ -87,14 +84,8 @@ def sparsity1dp1():
 
     """
     mapaxes = (
-        MultiAxis([
-            AxisPart(
-                3, label="cells",
-                subaxis=MultiAxis([
-                    AxisPart(2, label="any"),
-                ]),
-            ),
-        ]).set_up())
+        MultiAxis([AxisPart(3, label="cells", id="cells")])
+        .add_subaxis("cells", [AxisPart(2, label="any")])).set_up()
     mapdata = MultiArray(
         mapaxes, name="map0", data=np.array([0, 1, 1, 2, 2, 3], dtype=IntType))
 
@@ -203,10 +194,9 @@ def test_make_parallel_matrix():
         overlap = [Owned(), Shared(), Halo(RemotePoint(1, 1))]
 
         # now make the sparsity
-        mapaxes = MultiAxis([
-            AxisPart(
-                2, label="cells", subaxis=MultiAxis([AxisPart(2, label="any")])),
-            ]).set_up()
+        mapaxes = (
+            MultiAxis([AxisPart(2, label="cells", id="cells")])
+            .add_subaxis("cells", [AxisPart(2, label="any")])).set_up()
         mapdata = MultiArray(
             mapaxes, name="map0", data=np.array([0, 1, 1, 2], dtype=IntType))
 
@@ -223,10 +213,9 @@ def test_make_parallel_matrix():
         overlap = [Owned(), Shared(), Halo(RemotePoint(0, 1))]
 
         # now make the sparsity
-        mapaxes = MultiAxis([
-            AxisPart(
-                2, label="cells", subaxis=MultiAxis([AxisPart(2, label="any")])),
-            ]).set_up()
+        mapaxes = (
+            MultiAxis([AxisPart(2, label="cells", id="cells")])
+            .add_subaxis("cells", [AxisPart(2, label="any")])).set_up()
         mapdata = MultiArray(
             mapaxes, name="map0", data=np.array([2, 1, 1, 0], dtype=IntType))
 
