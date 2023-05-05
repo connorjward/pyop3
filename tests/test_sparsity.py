@@ -1,6 +1,6 @@
 import pytest
 from pyop3 import *
-from pyop3.utils import print_with_rank
+from pyop3.extras.debug import print_with_rank
 
 
 def test_read_sparse_matrix():

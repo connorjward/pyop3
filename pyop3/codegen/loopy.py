@@ -15,14 +15,15 @@ import numpy as np
 import pytools
 import pymbolic as pym
 
-import pyop3.exprs
 from pyop3 import exprs, tlang
-import pyop3.utils
 from pyop3 import utils
 from pyop3.utils import MultiNameGenerator, NameGenerator, strictly_all
-from pyop3.utils import PrettyTuple, checked_zip, NameGenerator, rzip
-from pyop3.tensors import MultiArray, Map, MultiAxis, _compute_indexed_shape, _compute_indexed_shape2, AxisPart, TerminalMultiIndex
-from pyop3.tensors import MultiIndexCollection, MultiIndex, TypedIndex, AffineLayoutFunction, IndirectLayoutFunction, Range, Path, TabulatedMap, MapNode, TabulatedMapNode, RangeNode, IdentityMapNode, AffineMapNode
+from pyop3.utils import PrettyTuple, checked_zip
+from pyop3.distarray.multiarray import MultiArray
+from pyop3.multiaxis import (
+    MultiAxis, AxisPart, MultiIndexCollection, MultiIndex, TypedIndex,
+    AffineLayoutFunction, IndirectLayoutFunction, Range, MapNode, TabulatedMapNode,
+    RangeNode, IdentityMapNode, AffineMapNode)
 
 
 class VariableCollector(pym.mapper.Collector):

@@ -1,9 +1,10 @@
-import dataclasses
-
 import pytools
 
-from pyop3.tensors import MultiAxis
+from pyop3.multiaxis import MultiAxis
 from pyop3.utils import Node, checked_zip
+
+
+__all__ = ["Dat"]
 
 
 class ConstrainedMultiAxis(pytools.ImmutableRecord):

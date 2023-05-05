@@ -12,7 +12,8 @@ import numpy as np
 import pyop3
 import pyop3.codegen
 from pyop3.mesh import *
-from pyop3.tensors import *
+from pyop3.distarray.multiarray import *
+from pyop3.multiaxis import *
 
 
 # nasty hack because I changed names

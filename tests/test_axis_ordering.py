@@ -1,8 +1,8 @@
 import pytest
 
 
-from pyop3.tensors import *
-from pyop3.meshdata.dat import order_axes, ConstrainedMultiAxis
+from pyop3 import *
+from pyop3.meshdata.dat import ConstrainedMultiAxis, order_axes
 
 
 # TODO parametrise this
