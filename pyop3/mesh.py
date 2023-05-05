@@ -25,6 +25,7 @@ class Mesh:
 
     @functools.cached_property
     def axis(self):
+        ...
 
     @property
     def dim(self):
