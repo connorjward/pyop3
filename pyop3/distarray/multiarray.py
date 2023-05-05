@@ -16,7 +16,7 @@ import pyop3.exprs
 import pyop3.utils
 from pyop3.utils import as_tuple, checked_zip, NameGenerator, unique, PrettyTuple, strictly_all, has_unique_entries, single_valued
 from pyop3 import utils
-from pyop3.dtypes import get_mpi_dtype
+from pyop3.dtypes import get_mpi_dtype, IntType
 from pyop3.multiaxis import (
     as_prepared_multiaxis, PreparedMultiAxis, expand_indices_to_fill_empty_shape,
     MultiAxis, AxisPart, get_bottom_part, RangeNode, TabulatedMapNode)
