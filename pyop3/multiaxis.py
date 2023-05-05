@@ -51,15 +51,6 @@ def get_bottom_part(axis):
         return axis.part
 
 
-def as_prepared_multiaxis(axis):
-    if isinstance(axis, PreparedMultiAxis):
-        return axis
-    elif isinstance(axis, PreparedAxisPart):
-        return PreparedMultiAxis(axis)
-    else:
-        raise TypeError
-
-
 def as_multiaxis(axis):
     if isinstance(axis, MultiAxis):
         return axis
@@ -377,11 +368,11 @@ class Sparsity:
 
 
 class MultiAxis(pytools.ImmutableRecord):
-    fields = {"parts", "id", "parent", "is_set_up", "sf", "shared_sf"}
+    fields = {"parts", "id", "sf", "shared_sf"}
 
     id_generator = NameGenerator("ax")
 
-    def __init__(self, parts, *, id=None, parent=None, is_set_up=False, sf=None, shared_sf=None):
+    def __init__(self, parts, *, id=None, sf=None, shared_sf=None):
         # make sure all parts have labels, default to integers if necessary
         if strictly_all(pt.label is None for pt in parts):
             # set the label to the index
@@ -395,8 +386,6 @@ class MultiAxis(pytools.ImmutableRecord):
 
         self.parts = tuple(parts)
         self.id = id or self.id_generator.next()
-        self.parent = parent
-        self.is_set_up = is_set_up
         self.sf = sf
         self.shared_sf = shared_sf
         super().__init__()
@@ -990,21 +979,6 @@ of a single label value if that label is unique in the whole tree.
             return MultiAxis(*args)
 
 
-    @staticmethod
-    def _parse_part(*args, **kwargs):
-        if len(args) == 1 and isinstance(args[0], PreparedAxisPart):
-            return args[0]
-        else:
-            return PreparedAxisPart(*args, **kwargs)
-
-    @staticmethod
-    def _parse_multiaxis(*args):
-        if len(args) == 1 and isinstance(args[0], PreparedMultiAxis):
-            return args[0]
-        else:
-            return PreparedMultiAxis(*args)
-
-
 def get_slice_bounds(array, indices):
     from pyop3.distarray import MultiArray
     part = array.axes.part
@@ -1058,8 +1032,6 @@ def has_constant_step(part):
         return all(not size_requires_external_index(pt) for pt in part.subaxis.parts)
     else:
         return True
-
-PreparedMultiAxis = MultiAxis
 
 
 class Node(pytools.ImmutableRecord):
@@ -1190,7 +1162,7 @@ class AffineMapNode(MapNode):
 
 
 
-class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
+class AxisPart(pytools.ImmutableRecord):
     """
     Parameters
     ----------
@@ -1221,6 +1193,9 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
 
     def __init__(self, count, subaxis=None, *, indices=None, numbering=None, label=None, id=None, max_count=None, is_layout=False, layout_fn=None, overlap=None, indexed=False, is_a_terminal_thing=False, lgmap=None):
         from pyop3.distarray import MultiArray
+
+        if subaxis:
+            subaxis = as_multiaxis(subaxis)
 
         if isinstance(count, numbers.Integral):
             assert not max_count or max_count == count
@@ -1360,14 +1335,6 @@ class AbstractAxisPart(pytools.ImmutableRecord, abc.ABC):
         # alias, what is the best name?
         return self.num_owned
 
-
-class AxisPart(AbstractAxisPart):
-    fields = AbstractAxisPart.fields
-    def __init__(self, count, subaxis=None, **kwargs):
-        if subaxis:
-            subaxis = as_multiaxis(subaxis)
-        super().__init__(count, subaxis, **kwargs)
-
     def add_subaxis(self, part_id, subaxis):
         if part_id == self.id and self.subaxis:
             raise RuntimeError
@@ -1378,103 +1345,6 @@ class AxisPart(AbstractAxisPart):
             return self.copy(subaxis=self.subaxis.add_subaxis(part_id, subaxis))
 
 
-PreparedAxisPart = AxisPart
-
-
-
-
-# not used
-class ExpressionTemplate:
-    """A thing that evaluates to some collection of loopy instructions when
-    provided with the right inames.
-
-    Useful for (e.g.) map0_getSize() since function calls are not allowed for GPUs.
-    """
-
-    def __init__(self, fn):
-        raise AssertionError("dont build this")
-        self._fn = fn
-        """Callable taking indices that evaluates to a pymbolic expression"""
-
-    def generate(self, _):
-        pass
-
-
-class Index:
-    def __init__(self, *args):
-        raise NotImplementedError("deprecated")
-
-
-class TypedIndex(pytools.ImmutableRecord):
-    # FIXME: I don't think that we need `id` attribute
-    fields = {"part_label", "depth", "id"}
-
-    _id_generator = NameGenerator(prefix="typed_idx")
-
-    def __init__(self, part_label, depth=1, id=None):
-        # `depth` is the number of indices yielded by the thing (a map can produce multiple
-        # if transforming "parent" points).
-        if depth > 1:
-            raise NotImplementedError
-
-        self.part_label = part_label
-        self.depth = depth
-        self.id = id or self._id_generator.next()
-
-    @property
-    def label(self):  # alias
-        return self.part_label
-
-
-class Range(TypedIndex):
-    fields = TypedIndex.fields | {"size"}
-
-    def __init__(self, part_label, size, id=None):
-        self.size = size
-        super().__init__(part_label, id=id)
-
-    @property
-    def consumed_labels(self):
-        return (self.part_label,)
-
-    @property
-    def start(self):
-        # TODO
-        return 0
-
-    @property
-    def step(self):
-        # TODO
-        return 1
-
-
-class MultiIndex(pytools.ImmutableRecord):
-    fields = {"id"}
-
-    namer = NameGenerator("midx")
-
-    def __init__(self, id=None):
-        self.id = id or self.namer.next()
-
-
-class TerminalMultiIndex(MultiIndex):
-    fields = MultiIndex.fields | {"typed_indices"}
-
-    def __init__(self, typed_indices, id=None):
-        if any(not isinstance(idx, TypedIndex) for idx in typed_indices):
-            raise TypeError
-        self.typed_indices = tuple(typed_indices)
-        super().__init__(id=id)
-
-    def __iter__(self):
-        return iter(self.typed_indices)
-
-    def __len__(self):
-        return len(self.typed_indices)
-
-    @property
-    def depth(self):
-        return len(self.indices)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1495,115 +1365,6 @@ class Path:
         if self.degree != 1:
             raise RuntimeError("Only for degree 1 paths")
         return self.to_axess[0]
-
-
-class Map(MultiIndex):
-    """
-    Map notes:
-
-    Rule 1:
-        A map can accept multiple multi-indices as input. If we have, for example,
-        star(closure(p)) then closure can yield a vertex, edge or cell and so star needs
-        to be able to handle each of these. Therefore, the map should have some sort of
-        mapping from input axis parts to possible output axis parts.
-    Rule 2:
-        A map can yield multiple multi-indices per input set of axis parts. Consider the
-        example given above. closure(p) yields a different multi-index depending on the type
-        of p.
-    Rule 3:
-        For each individual input axis part the map can, but rarely does, yield multiple
-        axis parts. This occurs for example with extruded meshes where cone(c) yields
-        (base_cell, extr_edge) and (base_vert, extr_edge). In these cases a selector
-        function needs to be provided that can be evaluated at runtime to determine which
-        needs to be used.
-    Rule 4:
-        The depth of the resulting multi-index does not need to be the same across
-        possible outputs.
-
-    Other observation:
-        A map can only have a single multi-index as an argument, but that multi-index
-        may be itself a map and hence obey the weird diverging structure described
-        above.
-    """
-
-    fields = MultiIndex.fields | {"paths", "from_index"}
-    namer = NameGenerator("map")
-
-    def __init__(self, paths, from_index, *, id=None):
-        self.paths = paths
-        self.from_index = from_index
-        super().__init__(id)
-
-    @property
-    def from_multi_index(self):
-        # alias, not sure which is better
-        return self.from_index
-
-    # def __mul__(self, other):
-    #     """The product of two maps produces a sparsity."""
-    #     if isinstance(other, Map):
-    #         return self.mul(other)
-    #     else:
-    #         return NotImplemented
-    #
-    # def mul(self, other, is_nonzero=None):
-    #     """is_nonzero is a function letting us exploit additional sparsity.
-    #
-    #     Something like:
-    #
-    #         for cell in cells:
-    #             # rdof and cdof are multi-indices
-    #             for rdof in self.dofs[cell]:
-    #                 for cdof in other.dofs[cell]:
-    #                     # maybe have extra loops here if we have multiple DoFs per entity
-    #                     if is_nonzero(rdof, cdof):
-    #                         # store the non-zero
-    #     """
-    #     ...
-    #     raise NotImplementedError
-    #     # not a sparsity object - should be some sort of multi-axis I think.
-    #     return Sparsity(...)
-
-
-class TabulatedMap(Map):
-    """Map that uses a :class:`MultiArray` for relating input indices to a single output.
-
-    Produces expressions of the form ``i = map[j, k, ...]``.
-    """
-    fields = Map.fields | {"data"}
-
-    def __init__(self, paths, from_index, data, *, id=None):
-        """
-        data: collection of multi-arrays, one per path
-        """
-        if len(paths) != len(data):
-            raise ValueError
-
-        self.data = data
-        super().__init__(paths, from_index, id=id)
-
-
-class AffineMap(Map):
-    # TODO
-    pass
-
-
-# TODO I think I prefer MultiIndexGroup
-class MultiIndexCollection(pytools.ImmutableRecord):
-    fields = {"multi_indices", "id"}
-    namer = NameGenerator("mig")
-
-    def __init__(self, multi_indices, *, id=None):
-        if not all(isinstance(idx, MultiIndex) for idx in multi_indices):
-            raise TypeError
-
-        self.multi_indices = tuple(multi_indices)
-        self.id = id or self.namer.next()
-        # we need the id attribute here because this is what is keyed
-        # when we need to look up inames
-
-    def __iter__(self):
-        return iter(self.multi_indices)
 
 
 # i.e. maps and layouts (that take in indices and write to things)

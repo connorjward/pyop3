@@ -14,11 +14,11 @@ import pymbolic as pym
 import pytools
 import pyop3.exprs
 import pyop3.utils
-from pyop3.utils import as_tuple, checked_zip, NameGenerator, unique, PrettyTuple, strictly_all, has_unique_entries, single_valued
+from pyop3.utils import NameGenerator, PrettyTuple, strictly_all, single_valued
 from pyop3 import utils
 from pyop3.dtypes import get_mpi_dtype, IntType
 from pyop3.multiaxis import (
-    as_prepared_multiaxis, PreparedMultiAxis, expand_indices_to_fill_empty_shape,
+    expand_indices_to_fill_empty_shape,
     MultiAxis, AxisPart, get_bottom_part, RangeNode, TabulatedMapNode)
 
 
@@ -40,12 +40,6 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
     prefix = "ten"
 
     def __init__(self, dim, indices=(), dtype=None, *, mesh = None, name: str = None, prefix: str=None, data=None, max_value=32, sf=None):
-        if dim is not None:
-            dim = as_prepared_multiaxis(dim)
-            # can probably go
-            if not isinstance(dim, PreparedMultiAxis):
-                raise ValueError("dim needs to be prepared. call .set_up()")
-
         name = name or self.name_generator.next(prefix or self.prefix)
 
         if not dtype:
@@ -77,11 +71,6 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         self._halo_valid = True
 
         self._sync_thread = None
-
-    # TODO delete this and just use constructor
-    @classmethod
-    def new(cls, *args, **kwargs):
-        return cls(*args, **kwargs)
 
     @property
     def alloc_size(self):

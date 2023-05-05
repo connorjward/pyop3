@@ -21,8 +21,8 @@ from pyop3.utils import MultiNameGenerator, NameGenerator, strictly_all
 from pyop3.utils import PrettyTuple, checked_zip
 from pyop3.distarray.multiarray import MultiArray
 from pyop3.multiaxis import (
-    MultiAxis, AxisPart, MultiIndexCollection, MultiIndex, TypedIndex,
-    AffineLayoutFunction, IndirectLayoutFunction, Range, MapNode, TabulatedMapNode,
+    MultiAxis, AxisPart,
+    AffineLayoutFunction, IndirectLayoutFunction, MapNode, TabulatedMapNode,
     RangeNode, IdentityMapNode, AffineMapNode)
 
 

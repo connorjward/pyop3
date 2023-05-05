@@ -16,10 +16,6 @@ from pyop3.distarray.multiarray import *
 from pyop3.multiaxis import *
 
 
-# nasty hack because I changed names
-MultiIndex = TerminalMultiIndex
-
-
 """
 COMMON ERRORS
 -------------
@@ -143,8 +139,8 @@ def ragged_copy_kernel():
 
 def test_read_single_dim(scalar_copy_kernel):
     axes = MultiAxis([AxisPart(10, label="l1")]).set_up()
-    dat1 = MultiArray.new(axes, name="dat1", data=np.ones(10, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
+    dat1 = MultiArray(axes, name="dat1", data=np.ones(10, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray(axes, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
 
     p = [RangeNode("l1", 10)]
     expr = pyop3.Loop(p, scalar_copy_kernel(dat1[p], dat2[p]))
@@ -168,10 +164,10 @@ def test_compute_double_loop():
     axes = MultiAxis([AxisPart(10, id="ax1")])
     axes = axes.add_subaxis("ax1", MultiAxis([AxisPart(3)])).set_up()
 
-    dat1 = MultiArray.new(
+    dat1 = MultiArray(
         axes, name="dat1", data=np.arange(30, dtype=np.float64), dtype=np.float64
     )
-    dat2 = MultiArray.new(
+    dat2 = MultiArray(
             axes, name="dat2", data=np.zeros(30, dtype=np.float64),
             dtype=np.float64)
 
@@ -211,8 +207,8 @@ def test_compute_double_loop_mixed():
         .add_subaxis("p2", MultiAxis([AxisPart(2)]))
     ).set_up()
 
-    dat1 = MultiArray.new(axes, name="dat1", data=np.arange(54, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(54, dtype=np.float64), dtype=np.float64)
+    dat1 = MultiArray(axes, name="dat1", data=np.arange(54, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray(axes, name="dat2", data=np.zeros(54, dtype=np.float64), dtype=np.float64)
 
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 2 }",
@@ -253,8 +249,8 @@ def test_compute_double_loop_scalar():
         .add_subaxis("ax1", MultiAxis([AxisPart(3)]))
         .add_subaxis("ax2", MultiAxis([AxisPart(2)]))
     ).set_up()
-    dat1 = MultiArray.new(axes, name="dat1", data=np.arange(18+8, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(18+8, dtype=np.float64), dtype=np.float64)
+    dat1 = MultiArray(axes, name="dat1", data=np.arange(18+8, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray(axes, name="dat2", data=np.zeros(18+8, dtype=np.float64), dtype=np.float64)
 
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 1 }",
@@ -289,9 +285,9 @@ def test_compute_double_loop_permuted():
     ])
     ax2 = ax1.add_subaxis("ax1", MultiAxis([AxisPart(3)])).set_up()
 
-    dat1 = MultiArray.new(
+    dat1 = MultiArray(
             ax2, name="dat1", data=np.arange(18, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(
+    dat2 = MultiArray(
             ax2, name="dat2", data=np.zeros(18, dtype=np.float64), dtype=np.float64)
 
     code = lp.make_kernel(
@@ -326,8 +322,8 @@ def test_permuted_twice():
     ax2 = ax1.add_subaxis("p1", MultiAxis([AxisPart(3, id="p2", numbering=[2, 0, 1])]))
     ax3 = ax2.add_subaxis("p2", MultiAxis([AxisPart(2)])).set_up()
 
-    dat1 = MultiArray.new(ax3, name="dat1", data=np.ones(18, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(ax3, name="dat2", data=np.zeros(18, dtype=np.float64), dtype=np.float64)
+    dat1 = MultiArray(ax3, name="dat1", data=np.ones(18, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray(ax3, name="dat2", data=np.zeros(18, dtype=np.float64), dtype=np.float64)
 
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 2 }",
@@ -359,14 +355,14 @@ def test_permuted_twice():
 def test_somewhat_permuted():
     ax1 = MultiAxis([AxisPart(2, id="ax1")]).set_up()
     ax2 = ax1.add_subaxis("ax1",
-        MultiAxis([AxisPart(3, id="ax2", numbering=[2, 0, 1])], parent=ax1)
+        MultiAxis([AxisPart(3, id="ax2", numbering=[2, 0, 1])])
     ).set_up()
     ax3 = ax2.add_subaxis("ax2",
-        MultiAxis([AxisPart(2)], parent=ax2)
+        MultiAxis([AxisPart(2)])
     ).set_up()
 
-    dat1 = MultiArray.new(ax3, name="dat1", data=np.arange(12, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(ax3, name="dat2", data=np.zeros(12, dtype=np.float64), dtype=np.float64)
+    dat1 = MultiArray(ax3, name="dat1", data=np.arange(12, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray(ax3, name="dat2", data=np.zeros(12, dtype=np.float64), dtype=np.float64)
 
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 2 }",
@@ -404,8 +400,8 @@ def test_compute_double_loop_permuted_mixed():
         .add_subaxis("p2", MultiAxis([AxisPart(2)]))
     ).set_up()
 
-    dat1 = MultiArray.new(axes, name="dat1", data=np.arange(10, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
+    dat1 = MultiArray(axes, name="dat1", data=np.arange(10, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray(axes, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64)
 
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 2 }",
@@ -438,14 +434,14 @@ def test_compute_double_loop_permuted_mixed():
 def test_compute_double_loop_ragged(scalar_copy_kernel):
     ax1 = MultiAxis([AxisPart(5, id="p1")])
 
-    nnz = MultiArray.new(
+    nnz = MultiArray(
         ax1.set_up(), name="nnz", dtype=np.int32, data=np.array([3, 2, 1, 3, 2], dtype=np.int32)
     )
 
     ax2 = ax1.add_subaxis("p1", MultiAxis([AxisPart(nnz, max_count=3)])).set_up()
 
-    dat1 = MultiArray.new(ax2, name="dat1", data=np.ones(11, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(ax2, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
+    dat1 = MultiArray(ax2, name="dat1", data=np.ones(11, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray(ax2, name="dat2", data=np.zeros(11, dtype=np.float64), dtype=np.float64)
 
     p0 = RangeNode(0, 5, id="p0")
     p = [p0.add_child("p0", RangeNode(0, nnz[[p0]]))]
@@ -467,22 +463,22 @@ def test_compute_double_loop_ragged(scalar_copy_kernel):
 
 def test_doubly_ragged():
     ax1 = MultiAxis([AxisPart(3, id="p1")])
-    nnz1 = MultiArray.new(
+    nnz1 = MultiArray(
         ax1.set_up(), name="nnz1", dtype=np.int32, max_value=3,
         data = np.array([3, 1, 2], dtype=np.int32)
     )
 
     ax2 = ax1.add_subaxis("p1", MultiAxis([AxisPart(nnz1, id="p2", max_count=3)]))
-    nnz2 = MultiArray.new(
+    nnz2 = MultiArray(
         ax2.set_up(), name="nnz2", dtype=np.int32, max_value=5,
         data = np.array([1, 1, 5, 4, 2, 3], dtype=np.int32)
     )
 
     ax3 = ax2.add_subaxis("p2", MultiAxis([AxisPart(nnz2, max_count=5)])).set_up()
-    dat1 = MultiArray.new(
+    dat1 = MultiArray(
         ax3, name="dat1", data=np.arange(16, dtype=np.float64), dtype=np.float64
     )
-    dat2 = MultiArray.new(
+    dat2 = MultiArray(
         ax3, name="dat2", data=np.zeros(16, dtype=np.float64), dtype=np.float64
     )
 
@@ -532,13 +528,13 @@ def test_interleaved_ragged(scalar_copy_kernel):
     2 -> [1, 2] -> 2 -> [[[a, b]], [[c, d], [e, f]]]
     """
     ax1 = MultiAxis([AxisPart(3, id="p1")])
-    nnz1 = MultiArray.new(
+    nnz1 = MultiArray(
         ax1.set_up(), name="nnz1", dtype=np.int32, max_value=3,
         data=np.array([1, 3, 2], dtype=np.int32)
     )
     ax2 = ax1.add_subaxis("p1", MultiAxis([AxisPart(nnz1, id="p2")]))
     ax3 = ax2.add_subaxis("p2", MultiAxis([AxisPart(2, id="p3")]))
-    nnz2 = MultiArray.new(
+    nnz2 = MultiArray(
         ax3.set_up(), name="nnz2", dtype=np.int32, max_value=3,
         data=np.array(utils.flatten([[[1, 2]], [[2, 1], [1, 1], [1, 1]], [[2, 3], [3, 1]]]), dtype=np.int32)
     )
@@ -546,10 +542,10 @@ def test_interleaved_ragged(scalar_copy_kernel):
 
     root = ax4.set_up()
 
-    dat1 = MultiArray.new(
+    dat1 = MultiArray(
         root, name="dat1", data=np.ones(19, dtype=np.float64), dtype=np.float64
     )
-    dat2 = MultiArray.new(
+    dat2 = MultiArray(
         root, name="dat2", data=np.zeros(19, dtype=np.float64), dtype=np.float64
     )
 
@@ -587,17 +583,17 @@ def test_interleaved_ragged(scalar_copy_kernel):
 def test_ragged_inside_two_standard_loops(scalar_inc_kernel):
     ax1 = MultiAxis([AxisPart(2, id="p1")])
     ax2 = ax1.add_subaxis("p1", MultiAxis([AxisPart(2, id="p2")]))
-    nnz = MultiArray.new(
+    nnz = MultiArray(
         ax2.set_up(), name="nnz", dtype=np.int32, max_value=2,
         data=np.array([1, 2, 1, 2], dtype=np.int32)
     )
     ax3 = ax2.add_subaxis("p2", MultiAxis([AxisPart(nnz)]))
 
     root = ax3.set_up()
-    dat1 = MultiArray.new(
+    dat1 = MultiArray(
         root, name="dat1", data=np.ones(6, dtype=np.float64), dtype=np.float64
     )
-    dat2 = MultiArray.new(
+    dat2 = MultiArray(
         root, name="dat2", data=np.zeros(6, dtype=np.float64), dtype=np.float64
     )
 
@@ -626,7 +622,7 @@ def test_ragged_inside_two_standard_loops(scalar_inc_kernel):
 
 def test_compute_double_loop_ragged_inner(ragged_copy_kernel):
     ax1 = MultiAxis([AxisPart(5, id="p1")])
-    nnz = MultiArray.new(
+    nnz = MultiArray(
         ax1.set_up(), name="nnz", dtype=np.int32, max_value=3,
         data=np.array([3, 2, 1, 3, 2], dtype=np.int32)
     )
@@ -655,7 +651,7 @@ def test_compute_double_loop_ragged_inner(ragged_copy_kernel):
 
 def test_compute_double_loop_ragged_mixed(scalar_copy_kernel):
     ax1 = MultiAxis([AxisPart(5, label=1, id="p1")])
-    nnz = MultiArray.new(
+    nnz = MultiArray(
         ax1.set_up(), name="nnz", dtype=np.int32,
         data=np.array([3, 2, 1, 2, 1], dtype=np.int32)
     )
@@ -669,8 +665,8 @@ def test_compute_double_loop_ragged_mixed(scalar_copy_kernel):
         .add_subaxis("p3", MultiAxis([AxisPart(2)]))
     ).set_up()
 
-    dat1 = MultiArray.new(axes, name="dat1", data=np.ones(4+9+8, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(4+9+8, dtype=np.float64), dtype=np.float64)
+    dat1 = MultiArray(axes, name="dat1", data=np.ones(4+9+8, dtype=np.float64), dtype=np.float64)
+    dat2 = MultiArray(axes, name="dat2", data=np.zeros(4+9+8, dtype=np.float64), dtype=np.float64)
 
     p0 = RangeNode(1, 5, id="i0")
     p1 = p0.add_child("i0", RangeNode(0, nnz[[p0]]))
@@ -694,7 +690,7 @@ def test_compute_double_loop_ragged_mixed(scalar_copy_kernel):
 
 
 def test_compute_ragged_permuted(scalar_copy_kernel):
-    nnz = MultiArray.new(
+    nnz = MultiArray(
         MultiAxis([AxisPart(6)]).set_up(), name="nnz", dtype=np.int32,
         data=np.array([3, 2, 0, 1, 3, 2], dtype=np.int32)
     )
@@ -704,9 +700,9 @@ def test_compute_ragged_permuted(scalar_copy_kernel):
         .add_subaxis("p1", MultiAxis([AxisPart(nnz)]))
     ).set_up()
 
-    dat1 = MultiArray.new(axes, name="dat1",
+    dat1 = MultiArray(axes, name="dat1",
                           data=np.ones(11, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(axes, name="dat2",
+    dat2 = MultiArray(axes, name="dat2",
                           data=np.zeros(11, dtype=np.float64), dtype=np.float64)
 
     p = RangeNode(0, 6, id="i0")
@@ -729,7 +725,7 @@ def test_compute_ragged_permuted(scalar_copy_kernel):
 
 
 def test_permuted_ragged_permuted(scalar_copy_kernel):
-    nnz = MultiArray.new(
+    nnz = MultiArray(
         MultiAxis([AxisPart(6)]).set_up(), name="nnz", dtype=np.int32,
         data=np.array([3, 2, 0, 1, 3, 2], dtype=np.int32)
     )
@@ -740,9 +736,9 @@ def test_permuted_ragged_permuted(scalar_copy_kernel):
         .add_subaxis("p2", MultiAxis([AxisPart(2, numbering=[1, 0])]))
     ).set_up()
 
-    dat1 = MultiArray.new(axes, name="dat1", data=np.ones(22, dtype=np.float64),
+    dat1 = MultiArray(axes, name="dat1", data=np.ones(22, dtype=np.float64),
                           dtype=np.float64)
-    dat2 = MultiArray.new(axes, name="dat2", data=np.zeros(22, dtype=np.float64),
+    dat2 = MultiArray(axes, name="dat2", data=np.zeros(22, dtype=np.float64),
                           dtype=np.float64)
 
     p = RangeNode(0, 6, id="i0")
@@ -771,7 +767,7 @@ def test_permuted_inner_and_ragged(scalar_copy_kernel):
         MultiAxis([AxisPart(2, id="p1")])
         .add_subaxis("p1", MultiAxis([AxisPart(2, id="p2")]))
     )
-    nnz = MultiArray.new(
+    nnz = MultiArray(
         axes.set_up(), name="nnz", dtype=np.int32,
         data=np.array([3, 2, 1, 1], dtype=np.int32)
     )
@@ -781,9 +777,9 @@ def test_permuted_inner_and_ragged(scalar_copy_kernel):
         .add_subaxis("p1", MultiAxis([AxisPart(2, id="p2", numbering=[1, 0])]))
     )
     axes = axes.add_subaxis("p2", MultiAxis([AxisPart(nnz)])).set_up()
-    dat1 = MultiArray.new(axes, name="dat1",
+    dat1 = MultiArray(axes, name="dat1",
                           data=np.ones(7, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(axes, name="dat2",
+    dat2 = MultiArray(axes, name="dat2",
                           data=np.zeros(7, dtype=np.float64), dtype=np.float64)
 
     p = RangeNode(0, 2, [RangeNode(0, 2, id="i0")])
@@ -810,9 +806,9 @@ def test_permuted_inner(scalar_copy_kernel):
         .add_subaxis("p1", MultiAxis([AxisPart(3, numbering=[2, 0, 1])]))
     ).set_up()
 
-    dat1 = MultiArray.new(axes, name="dat1",
+    dat1 = MultiArray(axes, name="dat1",
                           data=np.ones(12, dtype=np.float64), dtype=np.float64)
-    dat2 = MultiArray.new(axes, name="dat2",
+    dat2 = MultiArray(axes, name="dat2",
                           data=np.zeros(12, dtype=np.float64), dtype=np.float64)
 
     p = [RangeNode(0, 4, [RangeNode(0, 3)])]
@@ -832,9 +828,9 @@ def test_permuted_inner(scalar_copy_kernel):
 
 def test_subset(scalar_copy_kernel):
     axes = MultiAxis([AxisPart(6)]).set_up()
-    dat1 = MultiArray.new(
+    dat1 = MultiArray(
         axes, name="dat1", data=np.ones(6, dtype=np.float64))
-    dat2 = MultiArray.new(
+    dat2 = MultiArray(
         axes, name="dat2", data=np.zeros(6, dtype=np.float64))
 
     # a subset is really a map
@@ -1324,12 +1320,12 @@ def test_cone():
     for part_id, subaxis in dofs.items():
         axes = axes.add_subaxis(part_id, subaxis)
 
-    dat1 = MultiArray.new(
+    dat1 = MultiArray(
         axes, name="dat1",
         data=np.ones(MultiArray._compute_full_axis_size(axes), dtype=np.float64),
         dtype=np.float64
     )
-    dat2 = MultiArray.new(
+    dat2 = MultiArray(
         MultiAxis(mesh.ncells), name="dat2", dtype=np.float64,
         data=np.zeros(mesh.ncells, dtype=np.float64)
     )
