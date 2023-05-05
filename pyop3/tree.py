@@ -4,7 +4,7 @@ from typing import Any
 from collections.abc import Hashable, Sequence
 
 import pytools
-from pyop3.utils import strictly_all
+from pyop3.utils import strictly_all, just_one
 
 
 __all__ = ["Node", "Tree"]
@@ -21,6 +21,9 @@ class Node(pytools.ImmutableRecord):
         self.id = id
 
 
+# FIXME I run into trouble when I modify multiaxistrees after
+# they have been set up. I think I should spike the modifiers, or set
+# frozen or something to prevent this - needs some thought
 class Tree(pytools.RecordWithoutPickling):
     fields = set()
 
@@ -109,6 +112,10 @@ class Tree(pytools.RecordWithoutPickling):
         return tuple(
             node for nid, node in self._ids_to_nodes.items()
             if not self._parent_to_children[nid])
+
+    @property
+    def leaf(self) -> Node:
+        return just_one(self.leaves)
 
     def is_leaf(self, node: Node | str) -> bool:
         node = self._as_node(node)

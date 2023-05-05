@@ -510,9 +510,7 @@ def test_doubly_ragged():
     fn = getattr(dll, "mykernel")
 
     # void mykernel(nnz1, layout9_0, nnz2, layout11_0, layout10_0, dat1, dat2)
-    # layout9_0 = nnz2.root.part.subaxis.part.layout_fn.start
     layout9_0 = nnz2.root.node("p2").layout_fn.start
-    # layout10_0 = dat1.root.part.subaxis.part.subaxis.part.layout_fn.start
     layout10_0 = dat1.root.node("p3").layout_fn.start
     layout11_0 = layout10_0.dim.leaves[0].layout_fn.start
     args = [nnz1.data, layout9_0.data, nnz2.data, layout11_0.data, layout10_0.data, dat1.data, dat2.data]
@@ -540,13 +538,13 @@ def test_interleaved_ragged(scalar_copy_kernel):
         ax1.set_up(), name="nnz1", dtype=np.int32, max_value=3,
         data=np.array([1, 3, 2], dtype=np.int32)
     )
-    ax2 = ax1.add_subaxis("p1", [AxisPart(nnz1, id="p2")])
+    ax2 = ax1.copy().add_subaxis("p1", [AxisPart(nnz1, id="p2")])
     ax3 = ax2.add_subaxis("p2", [AxisPart(2, id="p3")])
     nnz2 = MultiArray(
         ax3.set_up(), name="nnz2", dtype=np.int32, max_value=3,
         data=np.array(utils.flatten([[[1, 2]], [[2, 1], [1, 1], [1, 1]], [[2, 3], [3, 1]]]), dtype=np.int32)
     )
-    ax4 = ax3.add_subaxis("p3", [AxisPart(nnz2)])
+    ax4 = ax3.copy().add_subaxis("p3", [AxisPart(nnz2, id="p4")])
 
     root = ax4.set_up()
 
@@ -572,13 +570,11 @@ def test_interleaved_ragged(scalar_copy_kernel):
 
     # void mykernel(nnz1, layout0_0, nnz2, layout4_0, layout3_0, layout1_0, dat1, dat2)
 
-    # import pdb; pdb.set_trace()
-
-    layout0_0 = nnz2.root.part.subaxis.part.layout_fn.start
+    layout0_0 = nnz2.root.node("p2").layout_fn.start
     # yes, I'm well aware this is insane
-    layout1_0 = dat1.root.part.subaxis.part.subaxis.part.subaxis.part.layout_fn.start
-    layout3_0 = layout1_0.root.part.subaxis.part.subaxis.part.layout_fn.start
-    layout4_0 = layout3_0.root.part.subaxis.part.layout_fn.start
+    layout1_0 = dat1.root.node("p4").layout_fn.start
+    layout3_0 = layout1_0.dim.leaf.layout_fn.start
+    layout4_0 = layout3_0.root.leaf.layout_fn.start
 
     args = [nnz1.data, layout0_0.data, nnz2.data, layout4_0.data, layout3_0.data, layout1_0.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
@@ -595,7 +591,7 @@ def test_ragged_inside_two_standard_loops(scalar_inc_kernel):
         ax2.set_up(), name="nnz", dtype=np.int32, max_value=2,
         data=np.array([1, 2, 1, 2], dtype=np.int32)
     )
-    ax3 = ax2.add_subaxis("p2", [AxisPart(nnz)])
+    ax3 = ax2.copy().add_subaxis("p2", [AxisPart(nnz, id="p3")])
 
     root = ax3.set_up()
     dat1 = MultiArray(
@@ -615,10 +611,10 @@ def test_ragged_inside_two_standard_loops(scalar_inc_kernel):
     fn = getattr(dll, "mykernel")
 
     # void mykernel(nnz, layout1_0, layout0_0, dat1, dat2)
-    layout0_0 = root.part.subaxis.part.subaxis.part.layout_fn.start
+    layout0_0 = root.node("p3").layout_fn.start
 
     # TODO: this is affine here, should it generally be?
-    layout1_0 = layout0_0.root.part.subaxis.part.layout_fn.start
+    layout1_0 = layout0_0.dim.leaf.layout_fn.start
 
     args = [nnz.data, layout1_0.data, layout0_0.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
@@ -634,7 +630,7 @@ def test_compute_double_loop_ragged_inner(ragged_copy_kernel):
         ax1.set_up(), name="nnz", dtype=np.int32, max_value=3,
         data=np.array([3, 2, 1, 3, 2], dtype=np.int32)
     )
-    ax2 = ax1.add_subaxis("p1", [AxisPart(nnz)])
+    ax2 = ax1.copy().add_subaxis("p1", [AxisPart(nnz, id="p2")])
 
     root = ax2.set_up()
     dat1 = MultiArray(root, name="dat1", data=np.ones(11, dtype=np.float64), dtype=np.float64)
@@ -646,10 +642,8 @@ def test_compute_double_loop_ragged_inner(ragged_copy_kernel):
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    # import pdb; pdb.set_trace()
-
     # void mykernel(nnz, layout0_0, dat1, dat2)
-    layout0_0 = root.part.subaxis.part.layout_fn.start
+    layout0_0 = root.node("p2").layout_fn.start
     args = [nnz.data, layout0_0.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
     fn(*(d.ctypes.data for d in args))
@@ -669,7 +663,7 @@ def test_compute_double_loop_ragged_mixed(scalar_copy_kernel):
             AxisPart(4, id="p1"), AxisPart(5, id="p2"), AxisPart(4, id="p3")
         ])
         .add_subaxis("p1", [AxisPart(1)])
-        .add_subaxis("p2", [AxisPart(nnz)])
+        .add_subaxis("p2", [AxisPart(nnz, id="p4")])
         .add_subaxis("p3", [AxisPart(2)])
     ).set_up()
 
@@ -685,7 +679,7 @@ def test_compute_double_loop_ragged_mixed(scalar_copy_kernel):
     fn = getattr(dll, "mykernel")
 
     # void mykernel(nnz, layout0_0, dat1, dat2)
-    layout0_0 = dat1.root.parts[1].subaxis.part.layout_fn.start
+    layout0_0 = dat1.root.node("p4").layout_fn.start
 
     args = [nnz.data, layout0_0.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
@@ -723,7 +717,7 @@ def test_compute_ragged_permuted(scalar_copy_kernel):
     fn = getattr(dll, "mykernel")
 
     # void mykernel(nnz, layout0_0, dat1, dat2)
-    layout0_0 = dat1.root.part.subaxis.part.layout_fn.start
+    layout0_0 = dat1.root.leaf.layout_fn.start
     args = [nnz.data, layout0_0.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
@@ -741,7 +735,7 @@ def test_permuted_ragged_permuted(scalar_copy_kernel):
     axes = (
         MultiAxis([AxisPart(6, id="p1", numbering=[3, 2, 5, 0, 4, 1])])
         .add_subaxis("p1", [AxisPart(nnz, id="p2")])
-        .add_subaxis("p2", [AxisPart(2, numbering=[1, 0])])
+        .add_subaxis("p2", [AxisPart(2, numbering=[1, 0], id="p3")])
     ).set_up()
 
     dat1 = MultiArray(axes, name="dat1", data=np.ones(22, dtype=np.float64),
@@ -759,8 +753,8 @@ def test_permuted_ragged_permuted(scalar_copy_kernel):
     fn = getattr(dll, "mykernel")
 
     # void mykernel(nnz, layout0_0, layout1_0, dat1, dat2)
-    layout0_0 = axes.part.subaxis.part.layout_fn.start
-    layout1_0 = axes.part.subaxis.part.subaxis.part.layout_fn.data
+    layout0_0 = axes.node("p2").layout_fn.start
+    layout1_0 = axes.node("p3").layout_fn.data
 
     args = [nnz.data, layout0_0.data, layout1_0.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
@@ -799,8 +793,8 @@ def test_permuted_inner_and_ragged(scalar_copy_kernel):
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    layout0_0 = dat1.root.part.subaxis.part.subaxis.part.layout_fn.start
-    layout1_0 = layout0_0.root.part.subaxis.part.layout_fn.start
+    layout0_0 = dat1.dim.leaf.layout_fn.start
+    layout1_0 = layout0_0.root.leaf.layout_fn.start
     args = [nnz.data, layout1_0.data, layout0_0.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
     fn(*(d.ctypes.data for d in args))
@@ -826,7 +820,7 @@ def test_permuted_inner(scalar_copy_kernel):
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    layout0_0 = dat1.root.part.subaxis.part.layout_fn.data
+    layout0_0 = dat1.root.leaf.layout_fn.data
     args = [layout0_0.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
     fn(*(d.ctypes.data for d in args))
@@ -1227,7 +1221,7 @@ def test_mixed_arity_map():
 
     # import pdb; pdb.set_trace()
 
-    layout0_0 = map1.axes.part.subaxis.part.layout_fn.start
+    layout0_0 = map1.axes.leaf.layout_fn.start
     args = [nnz.data, layout0_0.data, map1.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
