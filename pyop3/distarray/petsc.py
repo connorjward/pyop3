@@ -5,7 +5,7 @@ import numbers
 import numpy as np
 from petsc4py import PETSc
 
-from pyop3.utils import strictly_all, parprint, single_valued
+from pyop3.utils import strictly_all, single_valued
 
 
 class DistributedArray(abc.ABC):
@@ -76,7 +76,7 @@ class PetscMatDense(PetscMat):
 class PetscMatAIJ(PetscMat):
     def __init__(self, raxes, caxes, sparsity, *, comm=None):
         # TODO: Remove this import
-        from pyop3.tensors import overlap_axes
+        from pyop3.distarray.multiarray import overlap_axes
 
         if comm is None:
             comm = PETSc.Sys.getDefaultComm()
@@ -129,7 +129,6 @@ class PetscMatAIJ(PetscMat):
 
         # csr is a 2-tuple of row pointers and column indices
         csr = (row_ptrs, col_indices)
-        parprint(csr)
         petscmat = PETSc.Mat().createAIJ(sizes, csr=csr, comm=comm)
 
         if strictly_all(lgmap is not None for lgmap in [rlgmap, clgmap]):

@@ -1,10 +1,8 @@
 import collections
-import dataclasses
 import itertools
-from typing import Any, Collection, Optional
+from typing import Any, Collection
 
 import pytools
-from mpi4py import MPI
 
 
 # a tree
@@ -126,19 +124,6 @@ def strictly_all(iterable):
     if (result := any(it1)) and not all(it2):
         raise ValueError("Iterable contains inconsistent values")
     return result
-
-
-def print_with_rank(*args):
-    print(f"rank {MPI.COMM_WORLD.rank}: ", *args, sep="", flush=True)
-
-
-# better name?
-parprint = print_with_rank
-
-
-def print_if_rank(rank, *args):
-    if rank == MPI.COMM_WORLD.rank:
-        print(*args, flush=True)
 
 
 def just_one(iterable):

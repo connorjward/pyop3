@@ -15,14 +15,15 @@ import numpy as np
 import pytools
 import pymbolic as pym
 
-import pyop3.exprs
 from pyop3 import exprs, tlang
-import pyop3.utils
 from pyop3 import utils
 from pyop3.utils import MultiNameGenerator, NameGenerator, strictly_all
-from pyop3.utils import PrettyTuple, checked_zip, NameGenerator, rzip
-from pyop3.tensors import MultiArray, Map, MultiAxis, _compute_indexed_shape, _compute_indexed_shape2, AxisPart, TerminalMultiIndex
-from pyop3.tensors import MultiIndexCollection, MultiIndex, TypedIndex, AffineLayoutFunction, IndirectLayoutFunction, Range, Path, TabulatedMap, MapNode, TabulatedMapNode, RangeNode, IdentityMapNode, AffineMapNode
+from pyop3.utils import PrettyTuple, checked_zip
+from pyop3.distarray.multiarray import MultiArray
+from pyop3.multiaxis import (
+    MultiAxis, AxisPart,
+    AffineLayoutFunction, IndirectLayoutFunction, MapNode, TabulatedMapNode,
+    RangeNode, IdentityMapNode, AffineMapNode)
 
 
 class VariableCollector(pym.mapper.Collector):
@@ -192,11 +193,21 @@ class LoopyKernelBuilder:
 
             # find the right target label for the map (assume can't be multi-part)
             mapaxis = index.data.axes
+            mappartid = "root"
             for l in existing_labels:
-                mapaxis = mapaxis.parts_by_label[l].subaxis
-            assert mapaxis.nparts == 1
-            assert not mapaxis.part.subaxis
-            map_labels = existing_labels | mapaxis.part.label
+                _part_, = [pt for pt in mapaxis.children(mappartid) if l == pt.label]
+                mappartid = _part_.id
+            # not sure about this check
+            # assert mapaxis.nparts == 1
+            # assert not mapaxis.children(mappartid)
+            mypart, = mapaxis.children(mappartid)
+            map_labels = existing_labels | mypart.label
+            # mapaxis = index.data.axes
+            # for l in existing_labels:
+            #     mapaxis = mapaxis.parts_by_label[l].subaxis
+            # assert mapaxis.nparts == 1
+            # assert not mapaxis.part.subaxis
+            # map_labels = existing_labels | mapaxis.part.label
             map_jnames = existing_jnames | iname
             expr = self.register_scalar_assignment(
                 index.data, map_labels, map_jnames, within_inames|{iname}, depends_on)
@@ -383,11 +394,15 @@ class LoopyKernelBuilder:
 
                         # find the right target label for the map (assume can't be multi-part)
                         mapaxis = index.data.axes
+                        mappartid = "root"
                         for l in existing_labels:
-                            mapaxis = mapaxis.parts_by_label[l].subaxis
-                        assert mapaxis.nparts == 1
-                        assert not mapaxis.part.subaxis
-                        map_labels = existing_labels | mapaxis.part.label
+                            _part_, = [pt for pt in mapaxis.children(mappartid) if l == pt.label]
+                            mappartid = _part_.id
+                        # not sure about this check
+                        # assert mapaxis.nparts == 1
+                        # assert not mapaxis.children(mappartid)
+                        mypart, = mapaxis.children(mappartid)
+                        map_labels = existing_labels | mypart.label
                         map_jnames = existing_jnames | iname
                         expr = self.register_scalar_assignment(
                             index.data, map_labels, map_jnames, within_inames|{iname}, depends_on)
@@ -499,14 +514,14 @@ class LoopyKernelBuilder:
             # we need the indices here because the temporary shape needs to be indexed
             # by the same indices as the original array
             indices = []
+            axtree = MultiAxis()
             for idx in arg.tensor.indices:
-                part, newindex = self._construct_temp_dims(idx, within_indices)
-                parts.append(part)
+                newindex = self._construct_temp_dims(axtree, idx, within_indices)
                 indices.append(newindex)
 
-            axes = MultiAxis(parts).set_up()
+            axtree.set_up()
             temporary = MultiArray(
-                axes, indices=indices, name=self._temp_name_generator.next(),
+                axtree, indices=indices, name=self._temp_name_generator.next(),
                 dtype=arg.tensor.dtype)
             temporaries[arg] = temporary
             # import pdb; pdb.set_trace()
@@ -520,7 +535,7 @@ class LoopyKernelBuilder:
 
         return (*gathers, newcall, *scatters)
 
-    def _construct_temp_dims(self, index, within_indices):
+    def _construct_temp_dims(self, axtree, index, within_indices, partid="root"):
         """Return an iterable of axis parts per index
 
         Parameters
@@ -533,39 +548,32 @@ class LoopyKernelBuilder:
         """
         result = [(index, (), ())]
 
-        new_parts = []
         new_indices = []
         # TODO do I need to track the labels?
         for index, _, _ in result:
-            if len(index.children) > 0:
-                subparts = []
-                new_subidxs = []
-                for subidx in index.children:
-                    subpart, new_subidx = self._construct_temp_dims(subidx, within_indices)
-                    subparts.append(subpart)
-                    new_subidxs.append(new_subidx)
-                subaxis = MultiAxis(subparts)
-            else:
-                subaxis = None
-                new_subidxs = []
-
             if index.id in within_indices:
                 size = 1
             else:
                 size = index.size
-
             label = self._namer.next("mylabel")
-            new_part = AxisPart(size, label=label, subaxis=subaxis)
-            new_index = RangeNode(label, size, children=new_subidxs)
+            new_part = AxisPart(size, label=label)
+            axtree.add_node(new_part, parent=partid)
 
-            new_parts.append(new_part)
+            if len(index.children) > 0:
+                new_subidxs = []
+                for subidx in index.children:
+                    new_subidx = self._construct_temp_dims(axtree, subidx, within_indices, new_part.id)
+                    new_subidxs.append(new_subidx)
+            else:
+                new_subidxs = []
+
+            new_index = RangeNode(label, size, children=new_subidxs)
             new_indices.append(new_index)
 
         # since we're now not dropping "within" bits
-        assert len(new_parts) == 1
         assert len(new_indices) == 1
 
-        return new_parts[0], new_indices[0]
+        return new_indices[0]
 
 
     def make_gathers(self, temporaries, **kwargs):
@@ -724,9 +732,10 @@ class LoopyKernelBuilder:
         depends_on |= {array_offset_insn.id, temp_offset_insn.id}
 
         array_axis = assignment.array.axes
+        nodeid = "root"
         for i, pt_label in enumerate(array_pt_labels):
-            array_npart = [pt.label for pt in array_axis.parts].index(pt_label)
-            array_part = array_axis.parts[array_npart]
+            array_npart = [pt.label for pt in array_axis.children(nodeid)].index(pt_label)
+            array_part = array_axis.children(nodeid)[array_npart]
 
             deps = self.emit_layout_insns(
                 array_part.layout_fn, array_offset,
@@ -734,15 +743,16 @@ class LoopyKernelBuilder:
                 within_inames, depends_on,
             )
             depends_on |= deps
-            array_axis = array_part.subaxis
+            nodeid = array_part.id
 
-        assert array_axis is None
+        assert array_axis.is_leaf(nodeid)
 
         if not scalar:
             temp_axis = assignment.temporary.axes
+            nodeid = "root"
             for i, pt_label in enumerate(temp_pt_labels):
-                temp_npart = [pt.label for pt in temp_axis.parts].index(pt_label)
-                temp_part = temp_axis.parts[temp_npart]
+                temp_npart = [pt.label for pt in temp_axis.children(nodeid)].index(pt_label)
+                temp_part = temp_axis.children(nodeid)[temp_npart]
 
                 deps = self.emit_layout_insns(
                     temp_part.layout_fn,
@@ -750,7 +760,7 @@ class LoopyKernelBuilder:
                     within_inames, depends_on,
                 )
                 depends_on |= deps
-                temp_axis = temp_part.subaxis
+                nodeid = temp_part.id
 
         # there are no ordering restrictions between assignments to the
         # same temporary - but this is only valid to declare if multiple insns are used
@@ -795,11 +805,11 @@ class LoopyKernelBuilder:
         # TODO singledispatch!
         if isinstance(layout_fn, IndirectLayoutFunction):
             # we can either index with just the lowest index or all of them
-            if layout_fn.data.depth == 1:
+            if layout_fn.data.axes.rootless_depth == 1:
                 mylabels = part_labels[-1:]
                 myjnames = jnames[-1:]
             else:
-                assert layout_fn.data.depth == utils.single_valued(map(len, [part_labels, jnames]))
+                assert layout_fn.data.axes.rootless_depth == utils.single_valued(map(len, [part_labels, jnames]))
                 mylabels = part_labels
                 myjnames = jnames
 
