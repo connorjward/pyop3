@@ -354,10 +354,10 @@ def test_permuted_twice():
 
 
 def test_somewhat_permuted():
-    ax1 = MultiAxis([AxisPart(2, id="ax1")]).set_up()
+    ax1 = MultiAxis([AxisPart(2, id="ax1")])
     ax2 = ax1.add_subaxis("ax1",
         [AxisPart(3, id="ax2", numbering=[2, 0, 1])]
-    ).set_up()
+    )
     ax3 = ax2.add_subaxis("ax2",
         [AxisPart(2)]
     ).set_up()
@@ -869,7 +869,7 @@ def test_map():
     dat2 = MultiArray(
         axes, name="dat2", data=np.zeros(5, dtype=np.float64))
 
-    map_axes = axes.add_subaxis("p1", [AxisPart(2)]).set_up()
+    map_axes = axes.copy().add_subaxis("p1", [AxisPart(2)]).set_up()
     map_array = MultiArray(
         map_axes, name="map1",
         data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32),
@@ -958,7 +958,7 @@ def test_closure_ish():
 
 
 def test_multipart_inner():
-    axes = MultiAxis([AxisPart(5, label="p1")])
+    axes = MultiAxis([AxisPart(5, label="p1", id="p1")])
     axes.add_nodes([AxisPart(3, label="p2_0"), AxisPart(2, label="p2_1")], "p1")
 
     axes.set_up()
@@ -1052,7 +1052,7 @@ def test_multimap():
     dat2 = MultiArray(
         axes, name="dat2", data=np.zeros(5, dtype=np.float64))
 
-    mapaxes = axes.add_subaxis("p1", [AxisPart(2)]).set_up()
+    mapaxes = axes.copy().add_subaxis("p1", [AxisPart(2)]).set_up()
     map0 = MultiArray(
         mapaxes, name="map0",
         data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32))
@@ -1101,7 +1101,7 @@ def test_multimap_with_scalar():
     dat2 = MultiArray(
         axes, name="dat2", data=np.zeros(5, dtype=np.float64))
 
-    mapaxes = axes.add_subaxis("p1", [AxisPart(2)]).set_up()
+    mapaxes = axes.copy().add_subaxis("p1", [AxisPart(2)]).set_up()
     map1 = MultiArray(
         mapaxes, name="map1",
         data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32))
@@ -1144,7 +1144,7 @@ def test_map_composition():
     dat1 = MultiArray(axes, name="dat1", data=np.arange(5, dtype=np.float64))
     dat2 = MultiArray(axes, name="dat2", data=np.zeros(5, dtype=np.float64))
 
-    mapaxes = axes.add_subaxis("p1", [AxisPart(2)]).set_up()
+    mapaxes = axes.copy().add_subaxis("p1", [AxisPart(2)]).set_up()
     map1 = MultiArray(mapaxes, name="map1",
                       data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32))
     map2 = MultiArray(mapaxes, name="map2",
@@ -1192,7 +1192,7 @@ def test_mixed_arity_map():
     nnz = MultiArray(
         axes, name="nnz", data=np.array([3, 2, 1], dtype=np.int32), max_value=3)
 
-    mapaxes = axes.add_subaxis("p1", [AxisPart(nnz)]).set_up()
+    mapaxes = axes.copy().add_subaxis("p1", [AxisPart(nnz)]).set_up()
     map1 = MultiArray(
         mapaxes, name="map1", data=np.array([2, 1, 0, 2, 1, 2], dtype=np.int32))
 
@@ -1237,7 +1237,7 @@ def test_iter_map_composition():
     dat2 = MultiArray(
         axes, name="dat2", data=np.zeros(5, dtype=np.float64))
 
-    mapaxes = axes.add_subaxis("p1", [AxisPart(2)]).set_up()
+    mapaxes = axes.copy().add_subaxis("p1", [AxisPart(2)]).set_up()
     map1 = MultiArray(
         mapaxes, name="map1",
         data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32))

@@ -188,9 +188,9 @@ def attach_star_forest(axis, with_halo_points=True):
     comm = MPI.COMM_WORLD
 
     # 1. construct the point-to-point SF per axis part
-    if axis.nparts != 1:
+    if len(axis.children("root")) != 1:
         raise NotImplementedError
-    for part in axis.parts:
+    for part in axis.children("root"):
         part_sf = make_star_forest_per_axis_part(part, comm)
 
     # for now, will want to concat or something
@@ -198,10 +198,11 @@ def attach_star_forest(axis, with_halo_points=True):
 
     # 2. broadcast the root offset to all leaves
     # TODO use a single buffer
-    from_buffer = np.zeros(axis.part.count, dtype=PointerType)
-    to_buffer = np.zeros(axis.part.count, dtype=PointerType)
+    part = just_one(axis.children("root"))
+    from_buffer = np.zeros(part.count, dtype=PointerType)
+    to_buffer = np.zeros(part.count, dtype=PointerType)
 
-    for pt, label in enumerate(axis.part.overlap):
+    for pt, label in enumerate(part.overlap):
         # only need to broadcast offsets for roots
         if isinstance(label, Shared) and not label.root:
             from_buffer[pt] = axis.get_offset((pt,))
@@ -209,7 +210,7 @@ def attach_star_forest(axis, with_halo_points=True):
     # TODO: It's quite bad to allocate a massive buffer when not much of it gets
     # moved. Perhaps good to use some sort of map and create a minimal SF.
 
-    cdim = axis.part.subaxis.calc_size() if axis.part.subaxis else 1
+    cdim = axis.calc_size(part) if axis.children(part) else 1
     dtype, _ = get_mpi_dtype(np.dtype(PointerType), cdim)
     bcast_args = dtype, from_buffer, to_buffer, MPI.REPLACE
     point_sf.bcastBegin(*bcast_args)
@@ -221,7 +222,7 @@ def attach_star_forest(axis, with_halo_points=True):
     local_offsets = []
     remote_offsets = []
     i = 0
-    for pt, label in enumerate(axis.part.overlap):
+    for pt, label in enumerate(part.overlap):
         # TODO not a nice check (is_leaf?)
         cond1 = not is_owned_by_process(label)
         if cond1:
@@ -235,10 +236,13 @@ def attach_star_forest(axis, with_halo_points=True):
 
     sf = PETSc.SF().create(comm)
     sf.setGraph(nroots, local_offsets, remote_offsets)
+
     if with_halo_points:
-        return axis.copy(sf=sf)
+        axis.sf = sf
     else:
-        return axis.copy(shared_sf=sf)
+        axis.shared_sf = sf
+
+    return axis
 
 
 def make_star_forest_per_axis_part(part, comm):
@@ -604,10 +608,11 @@ class MultiAxisTree(Tree):
                     "Currently only compute lgmaps for a single part, shouldn't "
                     "be hard to fix")
             lgmap = create_lgmap(self)
-            new_part, = self.children(node)
+            new_part, = self.children("root")
             self.replace_node(new_part.copy(lgmap=lgmap))
             # self.copy(parts=[new_axis.part.copy(lgmap=lgmap)])
         # new_axis = attach_owned_star_forest(new_axis)
+        self.frozen = True
         return self
 
     def apply_layouts(self, layouts, path=PrettyTuple(), partid="root"):
@@ -1473,20 +1478,21 @@ def create_lgmap(axes):
     # TODO: Fix imports
     from pyop3.multiaxis import Owned, Shared
 
-    if axes.nparts > 1:
+    if len(axes.children("root")) > 1:
         raise NotImplementedError
-    if axes.part.overlap is None:
+    axes_part = just_one(axes.children("root"))
+    if axes_part.overlap is None:
         raise ValueError("axes is expected to have a specified overlap")
-    if not isinstance(axes.part.count, numbers.Integral):
+    if not isinstance(axes_part.count, numbers.Integral):
         raise NotImplementedError("Expecting an integral axis size")
 
     # 1. Globally number all owned processes
-    sendbuf = np.array([axes.part.nowned], dtype=PETSc.IntType)
+    sendbuf = np.array([axes_part.nowned], dtype=PETSc.IntType)
     recvbuf = np.zeros_like(sendbuf)
     axes.sf.comm.tompi4py().Exscan(sendbuf, recvbuf)
     global_num = single_valued(recvbuf)
-    indices = np.full(axes.part.count, -1, dtype=PETSc.IntType)
-    for i, olabel in enumerate(axes.part.overlap):
+    indices = np.full(axes_part.count, -1, dtype=PETSc.IntType)
+    for i, olabel in enumerate(axes_part.overlap):
         if is_owned_by_process(olabel):
             indices[i] = global_num
             global_num += 1
@@ -1502,4 +1508,3 @@ def create_lgmap(axes):
 
     # return PETSc.LGMap().create(indices, comm=axes.sf.comm)
     return indices
-

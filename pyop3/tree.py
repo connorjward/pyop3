@@ -1,4 +1,4 @@
-import dataclasses
+import functools
 from typing import Any
 
 from collections.abc import Hashable, Sequence
@@ -14,6 +14,10 @@ class NodeNotFoundException(Exception):
     pass
 
 
+class FrozenTreeException(Exception):
+    pass
+
+
 class Node(pytools.ImmutableRecord):
     fields = {"id"}
 
@@ -21,19 +25,31 @@ class Node(pytools.ImmutableRecord):
         self.id = id
 
 
+def unfrozen_only(meth):
+    @functools.wraps(meth)
+    def wrapper(self, *args, **kwargs):
+        if self.frozen:
+            raise FrozenTreeException("Tree is frozen and cannot be modified")
+        return meth(self, *args, **kwargs)
+    return wrapper
+
+
 # FIXME I run into trouble when I modify multiaxistrees after
 # they have been set up. I think I should spike the modifiers, or set
 # frozen or something to prevent this - needs some thought
 class Tree(pytools.RecordWithoutPickling):
-    fields = set()
-
     def __init__(self):
         super().__init__()
+        # TODO I don't really like that frozen-ness doesn't persist
+        # between copies. It is a weird, special property - maybe set_up returns
+        # a new object?
+        self.frozen = False
         self.reset()
 
     def __str__(self):
         return self._stringify()
 
+    @unfrozen_only
     def add_node(self, node: Node, parent: Node | str | None = None) -> None:
         if not parent:
             self._add_root(node)
@@ -45,10 +61,12 @@ class Tree(pytools.RecordWithoutPickling):
             self._parent_to_children[node.id] = ()
             self._child_to_parent[node.id] = parent.id
 
+    @unfrozen_only
     def add_nodes(self, nodes: Sequence[Node], parent: Node | str) -> None:
         for node in nodes:
             self.add_node(node, parent)
 
+    @unfrozen_only
     def replace_node(self, node: Node) -> None:
         """Replace a node in the tree with another.
 
@@ -98,11 +116,15 @@ class Tree(pytools.RecordWithoutPickling):
         except KeyError:
             raise NodeNotFoundException(f"{node_id} is not present in the tree")
 
+    # better alias?
+    find = node
+
     @property
     def root(self) -> Node | None:
         return self._root
 
     @root.setter
+    @unfrozen_only
     def root(self, node) -> None:
         self.reset()
         self._add_root(node)
@@ -133,6 +155,7 @@ class Tree(pytools.RecordWithoutPickling):
         count = lambda _, *o: max(o or [0]) + 1
         return postvisit(self, count)
 
+    @unfrozen_only
     def reset(self):
         self._root = None
         self._ids_to_nodes = {}
@@ -145,6 +168,7 @@ class Tree(pytools.RecordWithoutPickling):
         dup._ids_to_nodes = self._ids_to_nodes.copy()
         dup._parent_to_children = self._parent_to_children.copy()
         dup._child_to_parent = self._child_to_parent.copy()
+        dup.frozen = False
         return dup
 
     def _check_exists(self, node: Node | str) -> None:

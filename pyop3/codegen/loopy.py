@@ -193,11 +193,21 @@ class LoopyKernelBuilder:
 
             # find the right target label for the map (assume can't be multi-part)
             mapaxis = index.data.axes
+            mappartid = "root"
             for l in existing_labels:
-                mapaxis = mapaxis.parts_by_label[l].subaxis
-            assert mapaxis.nparts == 1
-            assert not mapaxis.part.subaxis
-            map_labels = existing_labels | mapaxis.part.label
+                _part_, = [pt for pt in mapaxis.children(mappartid) if l == pt.label]
+                mappartid = _part_.id
+            # not sure about this check
+            # assert mapaxis.nparts == 1
+            # assert not mapaxis.children(mappartid)
+            mypart, = mapaxis.children(mappartid)
+            map_labels = existing_labels | mypart.label
+            # mapaxis = index.data.axes
+            # for l in existing_labels:
+            #     mapaxis = mapaxis.parts_by_label[l].subaxis
+            # assert mapaxis.nparts == 1
+            # assert not mapaxis.part.subaxis
+            # map_labels = existing_labels | mapaxis.part.label
             map_jnames = existing_jnames | iname
             expr = self.register_scalar_assignment(
                 index.data, map_labels, map_jnames, within_inames|{iname}, depends_on)
