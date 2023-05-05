@@ -368,11 +368,9 @@ class Sparsity:
 
 
 class MultiAxis(pytools.ImmutableRecord):
-    fields = {"parts", "id", "sf", "shared_sf"}
+    fields = {"parts", "sf", "shared_sf"}
 
-    id_generator = NameGenerator("ax")
-
-    def __init__(self, parts, *, id=None, sf=None, shared_sf=None):
+    def __init__(self, parts, *, sf=None, shared_sf=None):
         # make sure all parts have labels, default to integers if necessary
         if strictly_all(pt.label is None for pt in parts):
             # set the label to the index
@@ -385,7 +383,6 @@ class MultiAxis(pytools.ImmutableRecord):
             raise ValueError("Axis parts in the same multi-axis must have unique labels")
 
         self.parts = tuple(parts)
-        self.id = id or self.id_generator.next()
         self.sf = sf
         self.shared_sf = shared_sf
         super().__init__()
@@ -666,6 +663,8 @@ class MultiAxis(pytools.ImmutableRecord):
 
             offset.value += saved_offset
 
+    _tmp_axis_namer = 0
+
     def create_layout_lists(self, path, offset, indices=PrettyTuple()):
         from pyop3.distarray import MultiArray
         npoints = 0
@@ -710,16 +709,18 @@ class MultiAxis(pytools.ImmutableRecord):
             numb = np.arange(start, stop, dtype=PointerType)
             # don't set up to avoid recursion (should be able to use affine anyway)
             axis = MultiAxis([AxisPart(len(numb))])
-            numb = MultiArray(dim=axis,name=f"{self.id}_ord0", data=numb, dtype=PointerType)
+            numb = MultiArray(dim=axis,name=f"ord{self._tmp_axis_namer}", data=numb, dtype=PointerType)
+            self._tmp_axis_namer += 1
             axis_numbering.append(numb)
             start = stop
             for i in range(1, self.nparts):
                 stop = start + self.parts[i].find_integer_count(indices)
                 numb = np.arange(start, stop, dtype=PointerType)
                 axis = MultiAxis([AxisPart(len(numb))])
-                numb = MultiArray(dim=axis,name=f"{self.id}_ord{i}", data=numb, dtype=PointerType)
+                numb = MultiArray(dim=axis,name=f"ord{self._tmp_axis_namer}_{i}", data=numb, dtype=PointerType)
                 axis_numbering.append(numb)
                 start = stop
+            self._tmp_axis_namer += 1
         else:
             axis_numbering = [pt.numbering for pt in self.parts]
 
