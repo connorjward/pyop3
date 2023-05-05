@@ -19,17 +19,17 @@ import pymbolic as pym
 
 import pytools
 import pyop3.exprs
-import pyop3.utils
-from pyop3.utils import as_tuple, checked_zip, NameGenerator, unique, PrettyTuple, strictly_all, has_unique_entries, single_valued
+from pyop3.utils import as_tuple, checked_zip, NameGenerator, unique, PrettyTuple, strictly_all, has_unique_entries, single_valued, just_one
 from pyop3 import utils
 
 from pyop3.dtypes import IntType, PointerType, get_mpi_dtype
+from pyop3.tree import Tree, Node as NewNode
 
 
-def is_distributed(axis):
+def is_distributed(axtree, partid="root"):
     """Return ``True`` if any part of a :class:`MultiAxis` is distributed across ranks."""
-    for part in axis.parts:
-        if part.is_distributed or part.subaxis and is_distributed(part.subaxis):
+    for part in axtree.children(partid):
+        if part.is_distributed or axtree.children(part) and is_distributed(axtree, part.id):
             return True
     return False
 
@@ -45,10 +45,7 @@ class IntRef:
 
 def get_bottom_part(axis):
     # must be linear
-    if axis.part.subaxis:
-        return get_bottom_part(axis.part.subaxis)
-    else:
-        return axis.part
+    return just_one(axis.leaves)
 
 
 def as_multiaxis(axis):
@@ -64,22 +61,22 @@ def compute_offsets(sizes):
     return np.concatenate([[0], np.cumsum(sizes)[:-1]], dtype=np.int32)
 
 
-def is_set_up(axis):
+def is_set_up(axtree, partid="root"):
     """Return ``True`` if all parts (recursively) of the multi-axis have an associated
     layout function.
     """
-    return all(part_is_set_up(pt) for pt in axis.parts)
+    return all(part_is_set_up(axtree, pt) for pt in axtree.children(partid))
 
 
-def part_is_set_up(part):
-    if part.subaxis and not is_set_up(part.subaxis):
+def part_is_set_up(axtree, part):
+    if axtree.children(part) and not is_set_up(axtree, part.id):
         return False
     if part.layout_fn is None:
         return False
     return True
 
 
-def has_independently_indexed_subaxis_parts(part):
+def has_independently_indexed_subaxis_parts(axtree, part):
     """
     subaxis parts are independently indexed if they don't depend on the index from
     ``part``.
@@ -89,8 +86,8 @@ def has_independently_indexed_subaxis_parts(part):
 
     Note that we need to consider both ragged sizes and permutations here
     """
-    if part.subaxis:
-        return not any(requires_external_index(pt) for pt in part.subaxis.parts)
+    if axtree.children(part):
+        return not any(requires_external_index(axtree, pt) for pt in axtree.children(part))
     else:
         return True
 
@@ -104,7 +101,7 @@ def only_linear(func):
     return wrapper
 
 
-def prepare_layouts(part, path=None):
+def prepare_layouts(axtree, part, path=None):
     """Make a magic nest of dictionaries for storing intermediate results."""
     # path is a tuple key for holding the different axis parts
     if not path:
@@ -113,14 +110,14 @@ def prepare_layouts(part, path=None):
     # import pdb; pdb.set_trace()
     layouts = {path: None}
 
-    if part.subaxis:
-        for subpart in part.subaxis.parts:
-            layouts |= prepare_layouts(subpart, path+(subpart.label,))
+    if axtree.children(part):
+        for subpart in axtree.children(part):
+            layouts |= prepare_layouts(axtree, subpart, path+(subpart.label,))
 
     return layouts
 
 
-def set_null_layouts(layouts, axis, path=()):
+def set_null_layouts(layouts, axtree, path=(), partid="root"):
     """
     we have null layouts whenever the step is non-const (the variability is captured by
     the start property of the affine layout below it).
@@ -128,62 +125,63 @@ def set_null_layouts(layouts, axis, path=()):
     We also get them when the axis is "indexed", that is, not ever actually used by
     temporaries.
     """
-    for part in axis.parts:
+    for part in axtree.children(partid):
         new_path = path + (part.label,)
-        if not has_constant_step(part) or part.indexed:
+        if not has_constant_step(axtree, part) or part.indexed:
             layouts[new_path] = "null layout"
 
-        if part.subaxis:
-            set_null_layouts(layouts, part.subaxis, new_path)
+        if axtree.children(part):
+            set_null_layouts(layouts, axtree, new_path, part.id)
 
 
-def can_be_affine(part):
-    return has_independently_indexed_subaxis_parts(part) and part.numbering is None
+def can_be_affine(axtree, part):
+    return has_independently_indexed_subaxis_parts(axtree, part) and part.numbering is None
 
 
-def handle_const_starts(axis, layouts, path=PrettyTuple(), outer_axes_are_all_indexed=True):
+def handle_const_starts(axis, layouts, path=PrettyTuple(), outer_axes_are_all_indexed=True, partid="root"):
     offset = 0
-    # import pdb; pdb.set_trace()
-    for part in axis.parts:
+    for part in axis.children(partid):
         # catch already set null layouts
         if layouts[path|part.label] is not None:
             continue
         # need to track if ragged permuted below
         # check for None here in case we have already set this to a null layout
-        if can_be_affine(part) and has_constant_start(part, outer_axes_are_all_indexed):
-            step = step_size(part)
+        if can_be_affine(axis, part) and has_constant_start(axis, part, outer_axes_are_all_indexed):
+            step = step_size(axis, part)
             layouts[path|part.label] = AffineLayoutFunction(step, offset)
 
-        if not has_fixed_size(part):
+        if not has_fixed_size(axis, part):
             # can't do any more as things to the right of this will also move around
             break
         else:
-            offset += part.calc_size()
+            offset += part.calc_size(axis)
 
-    for part in axis.parts:
-        if part.subaxis:
-            handle_const_starts(part.subaxis, layouts, path|part.label,
-                                outer_axes_are_all_indexed and (part.indexed or part.count == 1))
+    for part in axis.children(partid):
+        if axis.children(part.id):
+            handle_const_starts(
+                axis, layouts, path|part.label,
+                outer_axes_are_all_indexed and (part.indexed or part.count == 1),
+                part.id)
 
 
-def has_constant_start(part, outer_axes_are_all_indexed: bool):
+def has_constant_start(axtree, part, outer_axes_are_all_indexed: bool):
     """
     We will have an affine layout with a constant start (usually zero) if either we are not
     ragged or if we are ragged but everything above is indexed (i.e. a temporary).
     """
-    assert can_be_affine(part)
+    assert can_be_affine(axtree, part)
     return isinstance(part.count, numbers.Integral) or outer_axes_are_all_indexed
 
 
 
-def has_fixed_size(part):
-    return not size_requires_external_index(part)
+def has_fixed_size(axtree, part):
+    return not size_requires_external_index(axtree, part)
 
 
-def step_size(part, indices=PrettyTuple()):
-    if not has_constant_step(part) and not indices:
+def step_size(axtree, part, indices=PrettyTuple()):
+    if not has_constant_step(axtree, part) and not indices:
         raise ValueError
-    return part.subaxis.calc_size(indices) if part.subaxis else 1
+    return axtree.calc_size(indices, part) if axtree.children(part) else 1
 
 
 def attach_star_forest(axis, with_halo_points=True):
@@ -367,25 +365,46 @@ class Sparsity:
         raise NotImplementedError
 
 
-class MultiAxis(pytools.ImmutableRecord):
-    fields = {"parts", "sf", "shared_sf"}
+class NullRootNode(NewNode):
+    DEFAULT_ID = "root"
 
-    def __init__(self, parts, *, sf=None, shared_sf=None):
-        # make sure all parts have labels, default to integers if necessary
-        if strictly_all(pt.label is None for pt in parts):
-            # set the label to the index
-            parts = tuple(pt.copy(label=i) for i, pt in enumerate(parts))
+    fields = set()
 
-        if utils.some_but_not_all(pt.is_distributed for pt in parts):
-            raise ValueError("Cannot have a multi-axis with some parallel parts and some not")
+    def __init__(self):
+        super().__init__(self.DEFAULT_ID)
 
-        if not has_unique_entries(pt.label for pt in parts):
-            raise ValueError("Axis parts in the same multi-axis must have unique labels")
 
-        self.parts = tuple(parts)
+class MultiAxisTree(Tree):
+    # fields = {"parts", "sf", "shared_sf"}
+
+    def __init__(self, parts=(), *, sf=None, shared_sf=None):
+        super().__init__()
+
+        # We need a null root node since we effectively need an iterable of
+        # parts at the top level
+        self.add_node(NullRootNode())
+        self.add_nodes(parts, parent="root")
         self.sf = sf
         self.shared_sf = shared_sf
-        super().__init__()
+
+    def add_nodes(self, axes, parent=None):
+        # make sure all parts have labels, default to integers if necessary
+        if strictly_all(pt.label is None for pt in axes):
+            # set the label to the index
+            axes = tuple(pt.copy(label=i) for i, pt in enumerate(axes))
+
+        if utils.some_but_not_all(pt.is_distributed for pt in axes):
+            raise ValueError("Cannot have a multi-axis with some parallel parts and some not")
+
+        if not has_unique_entries(pt.label for pt in axes):
+            raise ValueError("Axis parts in the same multi-axis must have unique labels")
+
+        super().add_nodes(axes, parent)
+
+    @property
+    def rootless_depth(self) -> int:
+        """Return the depth of the tree ignoring the null root node."""
+        return self.depth - 1
 
     def __mul__(self, other):
         """Return the (dense) outer product."""
@@ -413,14 +432,15 @@ class MultiAxis(pytools.ImmutableRecord):
         # accumulate offsets from the layout functions
         offset = 0
         depth = 0
-        axis = self
+        partid = "root"
 
         # effectively loop over depth
-        while axis:
-            assert axis.nparts == 1
+        while True:
+            assert len(children := self.children(partid)) == 1
+            part, = children
 
             # import pdb; pdb.set_trace()
-            if axis.part.is_layout:
+            if part.is_layout:
                 raise AssertionError("dead code")
                 if indices[depth] > 0:
                     if axis.part.subaxis:
@@ -430,9 +450,9 @@ class MultiAxis(pytools.ImmutableRecord):
                     else:
                         offset += 1
             else:
-                layout = axis.part.layout_fn
+                layout = part.layout_fn
                 if isinstance(layout, IndirectLayoutFunction):
-                    if axis.part.indices:
+                    if part.indices:
                         raise NotImplementedError(
                             "Does not make sense for indirect layouts to have sparsity "
                             "(I think) since the the indices must be ordered...")
@@ -451,11 +471,11 @@ class MultiAxis(pytools.ImmutableRecord):
                         start = layout.start
 
                     # handle sparsity
-                    if axis.part.indices is not None:
-                        bstart, bend = get_slice_bounds(axis.part.indices, prior_indices)
+                    if part.indices is not None:
+                        bstart, bend = get_slice_bounds(part.indices, prior_indices)
 
                         last_index = bisect.bisect_left(
-                            axis.part.indices.data, last_index, bstart, bend)
+                            part.indices.data, last_index, bstart, bend)
                         last_index -= bstart
 
                     offset += last_index * layout.step + start
@@ -464,7 +484,10 @@ class MultiAxis(pytools.ImmutableRecord):
                     indices = PrettyTuple(prior_indices + (last_index,) + tuple(indices[depth+1:]))
 
             depth += 1
-            axis = axis.part.subaxis
+            partid = part.id
+
+            if not self.children(partid):
+                break
 
         # make sure its an int
         assert offset - int(offset) == 0
@@ -500,15 +523,6 @@ class MultiAxis(pytools.ImmutableRecord):
             "off-diagonal components."
         )
 
-    @functools.cached_property
-    def _parts_by_label(self):
-        return {part.label: part for part in self.parts}
-
-    # alias
-    @property
-    def parts_by_label(self):
-        return self._parts_by_label
-
     def find_part_from_indices(self, indices):
         """Traverse axis to find things
 
@@ -534,8 +548,9 @@ class MultiAxis(pytools.ImmutableRecord):
     def nparts(self):
         return len(self.parts)
 
-    @functools.cached_property
+    @property
     def local_view(self):
+        assert False, "dont think i touch this"
         if self.nparts > 1:
             raise NotImplementedError
         if not self.part.has_partitioned_halo:
@@ -547,16 +562,15 @@ class MultiAxis(pytools.ImmutableRecord):
             new_part = self.part.copy(count=self.part.num_owned, max_count=None, overlap=None)
         return self.copy(parts=[new_part])
 
-    def calc_size(self, indices=PrettyTuple()):
+    def calc_size(self, indices=PrettyTuple(), partid="root"):
         # NOTE: this works because the size array cannot be multi-part, therefore integer
         # indices (as opposed to typed ones) are valid.
         if not isinstance(indices, PrettyTuple):
             indices = PrettyTuple(indices)
-        return sum(pt.calc_size(indices) for pt in self.parts)
+        return sum(pt.calc_size(self, indices) for pt in self.children(partid))
 
-    @property
-    def alloc_size(self):
-        return sum(pt.alloc_size for pt in self.parts)
+    def alloc_size(self, partid="root"):
+        return sum(pt.alloc_size(self) for pt in self.children(partid))
 
     @property
     def count(self):
@@ -576,25 +590,27 @@ class MultiAxis(pytools.ImmutableRecord):
         """Initialise the multi-axis by computing the layout functions."""
         layouts = self._set_up()
         # import pdb; pdb.set_trace()
-        new_axis = self.apply_layouts(layouts)
-        assert is_set_up(new_axis)
+        self.apply_layouts(layouts)
+        assert is_set_up(self)
 
         # set the .sf and .owned_sf properties of new_axis
-        if with_sf and is_distributed(new_axis):
-            new_axis = attach_star_forest(new_axis)
-            new_axis = attach_star_forest(new_axis, with_halo_points=False)
+        if with_sf and is_distributed(self):
+            attach_star_forest(self)
+            attach_star_forest(self, with_halo_points=False)
 
             # attach a local to global map
-            if new_axis.nparts > 1:
+            if len(self.children("root")) > 1:
                 raise NotImplementedError(
                     "Currently only compute lgmaps for a single part, shouldn't "
                     "be hard to fix")
-            lgmap = create_lgmap(new_axis)
-            new_axis = new_axis.copy(parts=[new_axis.part.copy(lgmap=lgmap)])
+            lgmap = create_lgmap(self)
+            new_part, = self.children(node)
+            self.replace_node(new_part.copy(lgmap=lgmap))
+            # self.copy(parts=[new_axis.part.copy(lgmap=lgmap)])
         # new_axis = attach_owned_star_forest(new_axis)
-        return new_axis
+        return self
 
-    def apply_layouts(self, layouts, path=PrettyTuple()):
+    def apply_layouts(self, layouts, path=PrettyTuple(), partid="root"):
         """Attach a complicated dict of multiple parts and layouts functions to the
         right axis parts.
 
@@ -612,33 +628,33 @@ class MultiAxis(pytools.ImmutableRecord):
         This function just traverses the axis tree and attaches the right thing.
         """
         new_parts = []
-        for part in self.parts:
+        for part in self.children(partid):
             pth = path | part.label
 
             layout = layouts[pth]
-            if part.subaxis:
-                new_subaxis = part.subaxis.apply_layouts(layouts, pth)
-            else:
-                new_subaxis = None
-            new_part = part.copy(layout_fn=layout, subaxis=new_subaxis)
+            if self.children(part.id):
+                self.apply_layouts(layouts, pth, part.id)
+            new_part = part.copy(layout_fn=layout)
             new_parts.append(new_part)
-        return self.copy(parts=new_parts)
 
-    def finish_off_layouts(self, layouts, offset, path=PrettyTuple()):
+        for part in new_parts:
+            self.replace_node(part)
+
+    def finish_off_layouts(self, layouts, offset, path=PrettyTuple(), partid="root"):
 
         # since this search loops over all entries in the multi-axis
         # (not just the axis part) we need to execute the function if *any* axis part
         # requires tabulation.
         test1 = any(
-            part.subaxis and any(requires_external_index(pt) for pt in part.subaxis.parts)
-            for part in self.parts
+            self.children(part) and any(requires_external_index(self, pt) for pt in self.children(part))
+            for part in self.children(partid)
         )
-        test2 = any(pt.permutation for pt in self.parts)
+        test2 = any(pt.permutation for pt in self.children(partid))
 
         # fixme very hard to read - the conditions above aren't quite right
         test3 = path not in layouts or layouts[path] != "null layout"
         if (test1 or test2) and test3:
-            data = self.create_layout_lists(path, offset)
+            data = self.create_layout_lists(path, offset, partid)
 
             # import pdb; pdb.set_trace()
 
@@ -650,7 +666,7 @@ class MultiAxis(pytools.ImmutableRecord):
             # the latter here
             layouts |= {k: v for k, v in data.items() if layouts[k] is None}
 
-        for part in self.parts:
+        for part in self.children(partid):
             # zero offset if layout exists or if we are part of a temporary (and indexed)
             if layouts[path|part.label] != "null layout" or part.indexed:
                 saved_offset = offset.value
@@ -658,18 +674,18 @@ class MultiAxis(pytools.ImmutableRecord):
             else:
                 saved_offset = 0
 
-            if part.subaxis:
-                part.subaxis.finish_off_layouts(layouts, offset, path|part.label)
+            if self.children(part):
+                self.finish_off_layouts(layouts, offset, path|part.label, partid=part.id)
 
             offset.value += saved_offset
 
     _tmp_axis_namer = 0
 
-    def create_layout_lists(self, path, offset, indices=PrettyTuple()):
+    def create_layout_lists(self, path, offset, partid, indices=PrettyTuple()):
         from pyop3.distarray import MultiArray
         npoints = 0
         # data = {}
-        for part in self.parts:
+        for part in self.children(partid):
             if part.has_integer_count:
                 count = part.count
             else:
@@ -687,25 +703,25 @@ class MultiAxis(pytools.ImmutableRecord):
         # taken from const function - handle starts
         myoff = offset.value
         found = set()
-        for part in self.parts:
+        for part in self.children(partid):
             # need to track if ragged permuted below
-            if has_independently_indexed_subaxis_parts(part) and part.numbering is None:
+            if has_independently_indexed_subaxis_parts(self, part) and part.numbering is None:
                 new_layouts[path|part.label] = myoff
                 found.add(part.label)
 
-            if not has_fixed_size(part):
+            if not has_fixed_size(self, part):
                 # can't do any more as things to the right of this will also move around
                 break
             else:
-                myoff += part.calc_size()
+                myoff += part.calc_size(self)
 
 
         # if no numbering is provided create one
         # TODO should probably just set an affine one by default so we can mix these up
-        if not strictly_all(pt.numbering for pt in self.parts):
+        if not strictly_all(pt.numbering for pt in self.children(partid)):
             axis_numbering = []
             start = 0
-            stop = start + self.parts[0].find_integer_count(indices)
+            stop = start + self.children(partid)[0].find_integer_count(indices)
             numb = np.arange(start, stop, dtype=PointerType)
             # don't set up to avoid recursion (should be able to use affine anyway)
             axis = MultiAxis([AxisPart(len(numb))])
@@ -713,8 +729,8 @@ class MultiAxis(pytools.ImmutableRecord):
             self._tmp_axis_namer += 1
             axis_numbering.append(numb)
             start = stop
-            for i in range(1, self.nparts):
-                stop = start + self.parts[i].find_integer_count(indices)
+            for i in range(1, len(self.children(partid))):
+                stop = start + self.children(partid)[i].find_integer_count(indices)
                 numb = np.arange(start, stop, dtype=PointerType)
                 axis = MultiAxis([AxisPart(len(numb))])
                 numb = MultiArray(dim=axis,name=f"ord{self._tmp_axis_namer}_{i}", data=numb, dtype=PointerType)
@@ -722,7 +738,7 @@ class MultiAxis(pytools.ImmutableRecord):
                 start = stop
             self._tmp_axis_namer += 1
         else:
-            axis_numbering = [pt.numbering for pt in self.parts]
+            axis_numbering = [pt.numbering for pt in self.children(partid)]
 
         assert all(isinstance(num, MultiArray) for num in axis_numbering)
 
@@ -737,10 +753,10 @@ class MultiAxis(pytools.ImmutableRecord):
             selected_part = None
             selected_part_label = None
             selected_index = None
-            for part_num, axis_part in enumerate(self.parts):
+            for part_num, axis_part in enumerate(self.children(partid)):
                 try:
                     # is the current global index found in the numbering of this axis part?
-                    if axis_numbering[part_num].depth > 1:
+                    if axis_numbering[part_num].axes.rootless_depth > 1:
                         raise NotImplementedError("Need better indexing approach")
                     selected_index = list(axis_numbering[part_num].data).index(i)
                     selected_part = axis_part
@@ -752,16 +768,16 @@ class MultiAxis(pytools.ImmutableRecord):
 
             # skip those where we just set start and return an integer
             if selected_part_label in found:
-                offset += step_size(selected_part, indices|selected_index)
+                offset += step_size(self, selected_part, indices|selected_index)
                 continue
 
-            if has_independently_indexed_subaxis_parts(selected_part):
+            if has_independently_indexed_subaxis_parts(self, selected_part):
                 new_layouts[path|selected_part_label][selected_index] = offset.value
-                offset += step_size(selected_part, indices|selected_index)
+                offset += step_size(self, selected_part, indices|selected_index)
             else:
-                assert selected_part.subaxis
-                subdata = selected_part.subaxis.create_layout_lists(
-                    path|selected_part_label, offset, indices|selected_index
+                assert self.children(selected_part)
+                subdata = self.create_layout_lists(
+                    path|selected_part_label, offset, selected_part, indices|selected_index,
                 )
 
                 for subpath, subdata in subdata.items():
@@ -792,12 +808,12 @@ class MultiAxis(pytools.ImmutableRecord):
         assert not any(item is None for item in ret)
         return ret
 
-    def get_part_from_path(self, path):
+    def get_part_from_path(self, path, partid="root"):
         label, *sublabels = path
 
-        part = self.parts_by_label[label]
+        part, = [pt for pt in self.children(partid) if pt.label == label]
         if sublabels:
-            return part.subaxis.get_part_from_path(sublabels)
+            return self.get_part_from_path(sublabels, part.id)
         else:
             return part
 
@@ -808,11 +824,11 @@ class MultiAxis(pytools.ImmutableRecord):
 
         for path, layout in layouts.items():
             part = self.get_part_from_path(path)
-            if can_be_affine(part):
+            if can_be_affine(self, part):
                 if isinstance(layout, list):
                     name = self._my_layout_namer.next()
                     starts = MultiArray.from_list(layout, path, name, PointerType)
-                    step = step_size(part)
+                    step = step_size(self, part)
                     layouts[path] = AffineLayoutFunction(step, starts)
             else:
                 if layout == "null layout":
@@ -835,8 +851,8 @@ class MultiAxis(pytools.ImmutableRecord):
         # initialise layout array per axis part
         # import pdb; pdb.set_trace()
         layouts = {}
-        for part in self.parts:
-            layouts |= prepare_layouts(part)
+        for part in self.children(self.root):
+            layouts |= prepare_layouts(self, part)
 
         set_null_layouts(layouts, self)
         handle_const_starts(self, layouts)
@@ -861,9 +877,10 @@ class MultiAxis(pytools.ImmutableRecord):
             return self.copy(parts=[self.part.copy(subaxis=self.part.subaxis.drop_last())])
 
     def without_numbering(self):
+        assert False, "dont touch?"
         return self.copy(parts=[pt.without_numbering() for pt in self.parts])
 
-    @functools.cached_property
+    @property
     def is_linear(self):
         """Return ``True`` if the multi-axis contains no branches at any level."""
         if self.nparts == 1:
@@ -871,33 +888,26 @@ class MultiAxis(pytools.ImmutableRecord):
         else:
             return False
 
-    @functools.cached_property
-    @only_linear
-    def depth(self):
-        if subaxis := self.part.subaxis:
-            return subaxis.depth + 1
-        else:
-            return 1
-
     def as_layout(self):
+        assert False, "dont touch?"
         new_parts = tuple(pt.as_layout() for pt in self.parts)
         return self.copy(parts=new_parts)
 
     def add_part(self, axis_id, *args):
+        assert False, "dont touch?"
         if axis_id not in self._all_axis_ids:
             raise ValueError
 
         part = self._parse_part(*args)
         return self._add_part(axis_id, part)
 
-    def add_subaxis(self, part_id, *args):
-        if part_id not in self._all_part_ids:
-            raise ValueError
+    # old syntax - keep? add_subaxes?
+    def add_subaxis(self, part_id, subaxes):
+        self.add_nodes(subaxes, part_id)
+        return self
+        # return self._add_subaxis(part_id, subaxis)
 
-        subaxis = self._parse_multiaxis(*args)
-        return self._add_subaxis(part_id, subaxis)
-
-    @functools.cached_property
+    @property
     def _all_axis_ids(self):
         all_ids = [self.id]
         for part in self.parts:
@@ -918,7 +928,7 @@ of a single label value if that label is unique in the whole tree.
             )
         return frozenset(all_ids)
 
-    @functools.cached_property
+    @property
     def _all_part_ids(self):
         all_ids = []
         for part in self.parts:
@@ -979,6 +989,9 @@ of a single label value if that label is unique in the whole tree.
         else:
             return MultiAxis(*args)
 
+# old alias
+MultiAxis = MultiAxisTree
+
 
 def get_slice_bounds(array, indices):
     from pyop3.distarray import MultiArray
@@ -1000,37 +1013,37 @@ def get_slice_bounds(array, indices):
     return start, start+size
 
 
-def requires_external_index(part):
+def requires_external_index(axtree, part):
     """Return ``True`` if more indices are required to index the multi-axis layouts
     than exist in the given subaxis.
     """
-    return size_requires_external_index(part) or numbering_requires_external_index(part)
+    return size_requires_external_index(axtree, part) or numbering_requires_external_index(axtree, part)
 
-def size_requires_external_index(part, depth=0):
-    if not part.has_integer_count and part.count.depth > depth:
+def size_requires_external_index(axtree, part, depth=0):
+    if not part.has_integer_count and part.count.dim.rootless_depth > depth:
         return True
     else:
-        if part.subaxis:
-            for pt in part.subaxis.parts:
-                if size_requires_external_index(pt, depth+1):
+        if axtree.children(part):
+            for pt in axtree.children(part):
+                if size_requires_external_index(axtree, pt, depth+1):
                     return True
     return False
 
-def numbering_requires_external_index(part, depth=1):
-    if part.numbering is not None and part.numbering.depth > depth:
+def numbering_requires_external_index(axtree, part, depth=1):
+    if part.numbering is not None and part.numbering.dim.rootless_depth > depth:
         return True
     else:
-        if part.subaxis:
-            for pt in part.subaxis.parts:
-                if numbering_requires_external_index(pt, depth+1):
+        if axtree.children(part):
+            for pt in axtree.children(part):
+                if numbering_requires_external_index(axtree, pt, depth+1):
                     return True
     return False
 
-def has_constant_step(part):
+def has_constant_step(axtree, part):
     # we have a constant step if none of the internal dimensions need to index themselves
     # with the current index (numbering doesn't matter here)
-    if part.subaxis:
-        return all(not size_requires_external_index(pt) for pt in part.subaxis.parts)
+    if axtree.children(part):
+        return all(not size_requires_external_index(axtree, pt) for pt in axtree.children(part))
     else:
         return True
 
@@ -1064,7 +1077,7 @@ class Node(pytools.ImmutableRecord):
                 new_children.append(child)
         return self.copy(children=new_children)
 
-    @functools.cached_property
+    @property
     def all_ids(self):
         return self.all_child_ids | {self.id}
 
@@ -1072,7 +1085,7 @@ class Node(pytools.ImmutableRecord):
     def all_child_ids(self):
         return frozenset({node.id for node in self.all_children})
 
-    @functools.cached_property
+    @property
     def all_children(self):
         return frozenset(
             {*self.children} | {node for ch in self.children for node in ch.all_children})
@@ -1163,7 +1176,7 @@ class AffineMapNode(MapNode):
 
 
 
-class AxisPart(pytools.ImmutableRecord):
+class MultiAxisComponent(NewNode):
     """
     Parameters
     ----------
@@ -1188,15 +1201,12 @@ class AxisPart(pytools.ImmutableRecord):
         thing is dense and contains the numbers [0, ..., ndense).
 
     """
-    fields = {"count", "subaxis", "numbering", "label", "id", "max_count", "is_layout", "layout_fn", "overlap", "overlap_sf", "indexed", "is_a_terminal_thing", "indices", "lgmap"}
+    fields = {"count", "numbering", "label", "id", "max_count", "is_layout", "layout_fn", "overlap", "overlap_sf", "indexed", "is_a_terminal_thing", "indices", "lgmap"}
 
     id_generator = NameGenerator("_p")
 
-    def __init__(self, count, subaxis=None, *, indices=None, numbering=None, label=None, id=None, max_count=None, is_layout=False, layout_fn=None, overlap=None, indexed=False, is_a_terminal_thing=False, lgmap=None):
+    def __init__(self, count, *, indices=None, numbering=None, label=None, id=None, max_count=None, is_layout=False, layout_fn=None, overlap=None, indexed=False, is_a_terminal_thing=False, lgmap=None):
         from pyop3.distarray import MultiArray
-
-        if subaxis:
-            subaxis = as_multiaxis(subaxis)
 
         if isinstance(count, numbers.Integral):
             assert not max_count or max_count == count
@@ -1217,11 +1227,9 @@ class AxisPart(pytools.ImmutableRecord):
             id = self.id_generator.next()
 
         self.count = count
-        self.subaxis = subaxis
         self.indices = indices
         self.numbering = numbering
         self.label = label
-        self.id = id
         self.max_count = max_count
         self.is_layout = is_layout
         self.layout_fn = layout_fn
@@ -1249,7 +1257,7 @@ class AxisPart(pytools.ImmutableRecord):
         # are we basically dealing with a scalar?
         self.is_a_terminal_thing = is_a_terminal_thing
 
-        super().__init__()
+        super().__init__(id)
 
     @property
     def is_distributed(self):
@@ -1279,8 +1287,7 @@ class AxisPart(pytools.ImmutableRecord):
     def permutation(self):
         return self.numbering
 
-    @property
-    def alloc_size(self):
+    def alloc_size(self, axtree):
         # TODO This should probably raise an exception if we do weird things with maps
         # (as in fix the layouts for reduced data movement)
         if self.count == -1:  # scalar thing
@@ -1289,15 +1296,15 @@ class AxisPart(pytools.ImmutableRecord):
             count = self.max_count
         else:
             count = 1
-        if self.subaxis:
-            return count * self.subaxis.alloc_size
+        if axtree.children(self.id):
+            return count * axtree.alloc_size(self.id)
         else:
             return count
 
-    def calc_size(self, indices=PrettyTuple()):
+    def calc_size(self, axtree, indices=PrettyTuple()):
         extent = self.find_integer_count(indices)
-        if self.subaxis:
-            return sum(self.subaxis.calc_size(indices|i) for i in range(extent))
+        if axtree.children(self):
+            return sum(axtree.calc_size(indices|i, partid=self.id) for i in range(extent))
         else:
             return extent
 
@@ -1309,7 +1316,7 @@ class AxisPart(pytools.ImmutableRecord):
             assert isinstance(self.count, numbers.Integral)
             return self.count
 
-    @functools.cached_property
+    @property
     def has_partitioned_halo(self):
         if self.overlap is None:
             return True
@@ -1318,7 +1325,7 @@ class AxisPart(pytools.ImmutableRecord):
             lambda o: is_owned_by_process(o), self.overlap)
         return all(isinstance(o, Halo) for o in remaining)
 
-    @functools.cached_property
+    @property
     def num_owned(self) -> int:
         from pyop3.distarray import MultiArray
         """Return the number of owned points."""
@@ -1346,6 +1353,8 @@ class AxisPart(pytools.ImmutableRecord):
             return self.copy(subaxis=self.subaxis.add_subaxis(part_id, subaxis))
 
 
+# what's the best name?
+AxisPart = MultiAxisComponent
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1408,7 +1417,7 @@ abstraction.
 Things might get simpler if I just defined some sort of null "root" node
 """
 
-def fill_shape(part, prev_indices):
+def fill_shape(axtree, part, prev_indices):
     from pyop3.distarray import MultiArray
     if isinstance(part.count, MultiArray):
         # turn prev_indices into a tree
@@ -1423,17 +1432,18 @@ def fill_shape(part, prev_indices):
     else:
         count = part.count
     new_index = RangeNode(part.label, count)
-    if part.subaxis:
+    if axtree.children(part):
         new_children = [
-            fill_shape(pt, prev_indices|new_index)
-            for pt in part.subaxis.parts]
+            fill_shape(axtree, pt, prev_indices|new_index)
+            for pt in axtree.children(part)]
     else:
         new_children = []
     return new_index.copy(children=new_children)
 
 
-def expand_indices_to_fill_empty_shape(axis, index, labels=PrettyTuple(), prev_indices=PrettyTuple()):
-    # import pdb; pdb.set_trace()
+def expand_indices_to_fill_empty_shape(
+    axis, index, labels=PrettyTuple(), prev_indices=PrettyTuple(),
+):
     if isinstance(index, RangeNode):
         new_labels = labels | index.label
     else:
@@ -1446,12 +1456,15 @@ def expand_indices_to_fill_empty_shape(axis, index, labels=PrettyTuple(), prev_i
             new_child = expand_indices_to_fill_empty_shape(axis, child, new_labels, prev_indices|index)
             new_children.append(new_child)
     else:
+        # traverse where we have got to to get the bottom unindexed bit
+        partid = "root"
         for label in new_labels:
-            axis = axis.parts_by_label[label].subaxis
+            selected_part, = [pt for pt in axis.children(partid) if pt.label == label]
+            partid = selected_part.id
 
-        if axis:
-            for part in axis.parts:
-                new_child = fill_shape(part, prev_indices|index)
+        if axis.children(selected_part):
+            for part in axis.children(selected_part):
+                new_child = fill_shape(axis, part, prev_indices|index)
                 new_children.append(new_child)
     return index.copy(children=new_children)
 

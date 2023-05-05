@@ -85,3 +85,51 @@ def test_add_multiple_children(bulk):
     assert tree.parent(c) == a
     assert tree.children(b) == ()
     assert tree.children(c) == ()
+
+
+@pytest.fixture
+def treeA():
+    tree = Tree()
+    a = Node("a")
+    b = Node("b")
+    c = Node("c")
+    d = Node("d")
+    e = Node("e")
+    f = Node("f")
+
+    tree.root = a
+    tree.add_nodes([b, c], parent=a)
+    tree.add_nodes([d, e], parent=b)
+    tree.add_node(f, parent=c)
+    return tree
+
+
+def test_tree_str(treeA):
+    assert str(treeA) == """\
+Node(id='a')
+├──➤ Node(id='b')
+│    ├──➤ Node(id='d')
+│    └──➤ Node(id='e')
+└──➤ Node(id='c')
+     └──➤ Node(id='f')"""
+
+
+def test_tree_depth():
+    tree = Tree()
+    assert tree.depth == 0
+    tree.root = Node("a")
+    assert tree.depth == 1
+    tree.add_node(Node("b"), "a")
+    assert tree.depth == 2
+    tree.add_node(Node("c"), "a")
+    assert tree.depth == 2
+
+
+def test_tree_copy(treeA):
+    treeB = treeA.copy()
+    assert treeA.depth == treeB.depth == 3
+    assert str(treeA) == str(treeB)
+
+    treeA.add_node(Node("g"), "e")
+    assert treeA.depth == 4
+    assert treeB.depth == 3

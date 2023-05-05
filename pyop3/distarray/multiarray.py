@@ -13,7 +13,7 @@ import pymbolic as pym
 
 import pytools
 import pyop3.exprs
-import pyop3.utils
+from pyop3 import utils
 from pyop3.utils import NameGenerator, PrettyTuple, strictly_all, single_valued
 from pyop3 import utils
 from pyop3.dtypes import get_mpi_dtype, IntType
@@ -74,7 +74,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
     @property
     def alloc_size(self):
-        return self.axes.alloc_size if self.axes else 1
+        return self.axes.alloc_size() if self.axes else 1
 
     @property
     def unrolled_migs(self):
@@ -107,11 +107,15 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
         flat = np.array(flat, dtype=dtype)
 
-        axis = MultiAxis([AxisPart(count, label=labels[inc])])
+        axis = [AxisPart(count, label=labels[inc])]
         if isinstance(count, MultiArray):
             base_part = get_bottom_part(count.root)
-            axis = count.root.add_subaxis(base_part.id, axis)
-        return cls(axis.set_up(), name=f"{name}_{inc}", data=flat, dtype=dtype)
+            newax = count.root.copy()
+            newax.add_subaxis(base_part.id, axis)
+            # axis = count.root.add_subaxis(base_part.id, axis)
+        else:
+            newax = MultiAxis(axis)
+        return cls(newax.set_up(), name=f"{name}_{inc}", data=flat, dtype=dtype)
 
     @classmethod
     def _get_count_data(cls, data):
@@ -585,20 +589,6 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
     @property
     def size(self):
         return functools.reduce(operator.mul, self.shape, 1)
-
-    @property
-    def depth(self):
-        """Will only work if thing is not multi-part"""
-        # TODO should probably still be considered fine if the diverging parts have the same depth
-        # would likely require a tree traversal
-        depth_ = 0
-        axis = self.axes
-        while axis:
-            depth_ += 1
-            if axis.nparts > 1:
-                raise RuntimeError("depth not possible for multi-part layouts")
-            axis = axis.part.subaxis
-        return depth_
 
     @property
     def order(self):
