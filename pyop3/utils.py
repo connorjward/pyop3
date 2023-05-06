@@ -40,8 +40,15 @@ class NameGenerator:
         self._suffix = suffix
         self._counter = itertools.count()
 
+    def __next__(self):
+        return self.next()
+
     def next(self):
         return f"{self._prefix}{next(self._counter)}{self._suffix}"
+
+
+# better alias?
+UniqueNameGenerator = NameGenerator
 
 
 def as_tuple(item):

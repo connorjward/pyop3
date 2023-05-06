@@ -133,3 +133,38 @@ def test_tree_copy(treeA):
     treeA.add_node(Node("g"), "e")
     assert treeA.depth == 4
     assert treeB.depth == 3
+
+
+def test_pop_subtree(treeA):
+    # Test that popping 'b' from the tree
+    #
+    #     Node(id='a')
+    #     ├──➤ Node(id='b')
+    #     │    ├──➤ Node(id='d')
+    #     │    └──➤ Node(id='e')
+    #     └──➤ Node(id='c')
+    #          └──➤ Node(id='f')
+    #
+    # returns the subtree
+    #
+    #     Node(id='b')
+    #     ├──➤ Node(id='d')
+    #     └──➤ Node(id='e')
+    #
+    # and changes the original tree to
+    #
+    #     Node(id='a')
+    #     └──➤ Node(id='c')
+    #          └──➤ Node(id='f')
+
+    subtree = treeA.pop_subtree("b")
+    assert subtree.depth == 2
+    assert subtree.root.id == "b"
+    assert subtree.children("b") == (subtree.find("d"), subtree.find("e"))
+    assert not subtree.children("d") and not subtree.children("e")
+
+    assert treeA.depth == 3
+    assert treeA.root.id == "a"
+    assert treeA.children("a") == (treeA.find("c"),)
+    assert treeA.children("c") == (treeA.find("f"),)
+    assert not treeA.children("f")
