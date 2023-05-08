@@ -15,8 +15,9 @@ def label_tuple(nodes):
 
 # TODO parametrise this
 def test_axis_ordering():
-    ax1 = AxisPart(3, id="ax1")
-    ax2 = AxisPart(2, id="ax2")
+    # should we enforce that we always have a label?
+    ax1 = AxisPart(3, id="ax1", label="ax1")
+    ax2 = AxisPart(2, id="ax2", label="ax2")
 
     layout = [ConstrainedMultiAxis([ax1]), ConstrainedMultiAxis([ax2])]
     axtree = order_axes(layout)

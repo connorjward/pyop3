@@ -375,6 +375,7 @@ class NullRootNode(NewNode):
     fields = set()
 
     def __init__(self):
+        self.label = "root"
         super().__init__(self.NODE_ID)
 
 
@@ -1210,7 +1211,7 @@ class MultiAxisComponent(NewNode):
         thing is dense and contains the numbers [0, ..., ndense).
 
     """
-    fields = {"count", "numbering", "label", "id", "max_count", "is_layout", "layout_fn", "overlap", "overlap_sf", "indexed", "is_a_terminal_thing", "indices", "lgmap"}
+    fields = {"count", "numbering", "label", "id", "max_count", "is_layout", "layout_fn", "overlap", "indexed", "is_a_terminal_thing", "indices", "lgmap"}
 
     id_generator = NameGenerator("_p")
 
@@ -1267,6 +1268,9 @@ class MultiAxisComponent(NewNode):
         self.is_a_terminal_thing = is_a_terminal_thing
 
         super().__init__(id)
+
+    def __str__(self) -> str:
+        return f"{self.__class__.__name__}(id={self.id}, label={self.label})"
 
     @property
     def is_distributed(self):

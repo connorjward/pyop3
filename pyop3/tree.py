@@ -98,6 +98,9 @@ class Tree(pytools.RecordWithoutPickling):
                 f"{node.id} is not in the tree, replacement is not possible")
         self._ids_to_nodes[node.id] = node
 
+        if node.id == self._root.id:
+            self._root = node
+
     def parent(self, node: Node | str) -> Node | None:
         node = self._as_node(node)
 
