@@ -2,9 +2,9 @@ from typing import FrozenSet, Hashable, Sequence
 
 import pytools
 
-from pyop3.multiaxis import MultiAxis
-from pyop3.tree import Node, Tree
-from pyop3.utils import Node, checked_zip, UniqueNameGenerator
+from pyop3.multiaxis import MultiAxisTree, MultiAxisComponent
+from pyop3.tree import Node, Tree, previsit
+from pyop3.utils import checked_zip, UniqueNameGenerator
 
 
 __all__ = ["Dat"]
@@ -13,24 +13,31 @@ __all__ = ["Dat"]
 DEFAULT_PRIORITY = 100
 
 
+class ConstraintsNotMetException(Exception):
+    pass
+
+
 class ConstrainedMultiAxis(Node):
-    fields = {"axes", "within_axes", "priority", "id"}
-    # TODO We could use 'id' to set the priority
+    fields = {"axes", "within_labels", "priority", "label"} | Node.fields
+    # TODO We could use 'label' to set the priority
     # via commandline options
 
-    _id_generator = UniqueNameGenerator("_ConstrainedMultiAxis_")
+    _label_generator = UniqueNameGenerator("_label_ConstrainedMultiAxis_")
+    _id_generator = UniqueNameGenerator("_id_ConstrainedMultiAxis_")
 
     def __init__(
         self,
-        axes: Sequence[MultiAxis],
+        axes: Sequence[MultiAxisComponent],
         *,
-        within_axes: FrozenSet[Hashable] = frozenset(),
+        within_labels: FrozenSet[Hashable] = frozenset(),
         priority: int = DEFAULT_PRIORITY,
-        id: Hashable | None = None
+        label: Hashable | None = None,
+        id: Hashable | None = None,
     ):
         self.axes = tuple(axes)
-        self.within_axes = within_axes
+        self.within_labels = frozenset(within_labels)
         self.priority = priority
+        self.label = label or next(self._label_generator)
         super().__init__(id or next(self._id_generator))
 
 
@@ -54,45 +61,72 @@ def order_axes(layout):
     # TODO add missing bits to the mesh axes (zero-sized) here or,
     # more likely, in the dat constructor
     tree = Tree()
-    for axes in layout:
-        inserted = _insert_axes(tree, axes)
+    layout = list(layout)
+    history = set()
+    while layout:
+        if layout in history:
+            raise ValueError("Seen this before, cyclic")
+
+        history.add(tuple(layout))
+
+        axes = layout.pop(0)
+        inserted = _insert_axes(tree, axes, tree.root)
         if not inserted:
-            raise ValueError("Axes do not obey the provided constraints")
+            layout.append(axes)
+
+    _check_constraints(tree)
 
     # now turn the tree into a proper multi-axis
     return _create_multiaxis(tree)
 
 
 def _can_insert_before(new_axes, current_axes, within_labels):
-    return (
-        new_axes.priority < current_axes.priority
-        and new_axes.within_labels <= within_labels)
+    breakpoint()
+    # 1. compare priorities
+    if new_axes.priority < current_axes.priority:
+        return True
+    # 2. equal priorities, look at dependencies
+    elif (
+        new_axes.priority == current_axes.priority
+        # and new_axes.label in current_axes.within_labels
+    ):
+        return True
+    # 3. cannot insert before
+    else:
+        return False
 
 
 def _can_insert_after(new_axes, current_axes, within_labels):
-    return (
-        new_axes.priority >= current_axes.priority
-        and new_axes.within_labels <= within_labels | current_axes.label)
+    # breakpoint()
+    return new_axes.priority >= current_axes.priority
 
 
 def _insert_axes(
     tree: Tree,
     new_axes: ConstrainedMultiAxis,
-    current_axes: ConstrainedMultiAxis | None = None,
+    current_axes: ConstrainedMultiAxis,
     within_labels: FrozenSet[Hashable] = frozenset(),
 ):
     inserted = False
-    if (not current_axes or _can_insert_before(new_axes, current_axes, within_labels):
+
+    if not tree.root:
+        tree.root = new_axes
+        inserted = True
+
+    elif _can_insert_before(new_axes, current_axes, within_labels):
         parent_axes = tree.parent(current_axes)
         subtree = tree.pop_subtree(current_axes)
         tree.add_node(new_axes, parent_axes)
-        for _ in new_axes:
+        for _ in range(len(new_axes.axes)):
             tree.add_subtree(subtree, new_axes, uniquify=True)
         inserted = True
 
-    elif (tree.is_leaf(current_axes)
-            and _can_insert_after(new_axes, current_axes, within_labels)):
-        tree.add_nodes([new_axes]*tree.nchildren(current_axes), current_axes)
+    elif (tree.is_leaf(current_axes)):
+            # and _can_insert_after(new_axes, current_axes, within_labels)):
+
+        # FIXME: this won't work with constraints!
+
+        tree.add_nodes([new_axes]*len(current_axes.axes), current_axes, uniquify=True)
         inserted = True
 
     else:
@@ -102,15 +136,30 @@ def _insert_axes(
     return inserted
 
 
-def _create_multiaxis(tree):
-    if not tree:
-        raise ValueError
+def _check_constraints(ctree):
+    def check(node, within_labels):
+        if (parent := ctree.parent(node)) and parent.priority > node.priority:
+            raise ConstraintsNotMetException
+        if node.within_labels > within_labels:
+            raise ConstraintsNotMetException
 
-    axis = tree.value.axis
-    if tree.children:
-        parts = [
-            part.copy(subaxis=_create_multiaxis(child))
-            for part, child in checked_zip(axis.parts, tree.children)]
-    else:
-        parts = axis.parts
-    return axis.copy(parts=parts)
+        return within_labels | {node.label}
+    previsit(ctree, check, ctree.root, frozenset())
+
+
+def _create_multiaxis(tree: Tree) -> MultiAxisTree:
+    axtree = MultiAxisTree()
+
+    # note: constrained things contain multiple nodes
+    def build(constrained_axes, *_):
+        if (parent := tree.parent(constrained_axes)):
+            child_index = tree.children(parent).index(constrained_axes)
+            target_parent = parent.axes[child_index]
+        else:
+            target_parent = axtree.root
+
+        for i, part in enumerate(constrained_axes.axes):
+            axtree.add_node(part, target_parent, uniquify=True)
+
+    previsit(tree, build)
+    return axtree

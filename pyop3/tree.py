@@ -57,7 +57,10 @@ class Tree(pytools.RecordWithoutPickling):
         return self._as_node_id(node) in self._node_ids
 
     @unfrozen_only
-    def add_node(self, node: Node, parent: Node | str | None = None) -> None:
+    def add_node(self, node: Node, parent: Node | str | None = None, uniquify=False) -> None:
+        if uniquify:
+            node = node.copy(id=self._first_unique_id(node))
+
         if node in self:
             raise ValueError("Duplicate node found in the tree")
 
@@ -72,9 +75,9 @@ class Tree(pytools.RecordWithoutPickling):
             self._child_to_parent[node.id] = parent.id
 
     @unfrozen_only
-    def add_nodes(self, nodes: Sequence[Node], parent: Node | str) -> None:
+    def add_nodes(self, nodes: Sequence[Node], parent: Node | str, **kwargs) -> None:
         for node in nodes:
-            self.add_node(node, parent)
+            self.add_node(node, parent, **kwargs)
 
     @unfrozen_only
     def replace_node(self, node: Node) -> None:
