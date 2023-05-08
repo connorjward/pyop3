@@ -53,8 +53,14 @@ class Tree(pytools.RecordWithoutPickling):
     def __str__(self):
         return self._stringify()
 
+    def __contains__(self, node: Node | str) -> bool:
+        return self._as_node_id(node) in self._node_ids
+
     @unfrozen_only
     def add_node(self, node: Node, parent: Node | str | None = None) -> None:
+        if node in self:
+            raise ValueError("Duplicate node found in the tree")
+
         if not parent:
             self._add_root(node)
         else:
@@ -138,7 +144,7 @@ class Tree(pytools.RecordWithoutPickling):
         subtree = Tree(subroot)
 
         nodes_and_parents = []
-        def collect_node_and_parent(node, *_):
+        def collect_node_and_parent(node, _):
             nodes_and_parents.append((node, self.parent(node)))
         previsit(self, collect_node_and_parent, subroot)
 
@@ -152,6 +158,34 @@ class Tree(pytools.RecordWithoutPickling):
                 if child != node.id)
 
         return subtree
+
+    def add_subtree(
+        self,
+        subtree: "Tree",
+        parent: Node | str | None = None,
+        uniquify: bool = False,
+    ) -> None:
+        """
+        Parameters
+        ----------
+        etc
+            ...
+        uniquify
+            If ``False``, duplicate ``ids`` between the tree and subtree
+            will raise an exception. If ``True``, the ``ids`` will be changed
+            to avoid the clash.
+        """
+        if parent:
+            parent = self._as_node(parent)
+            self._check_exists(parent)
+
+        def add_subtree_node(node, parent_id):
+            if uniquify:
+                node = node.copy(id=self._first_unique_id(node))
+            self.add_node(node, parent_id)
+            return node.id
+
+        previsit(subtree, add_subtree_node, None, parent.id)
 
     @property
     def root(self) -> Node | None:
@@ -209,8 +243,23 @@ class Tree(pytools.RecordWithoutPickling):
         if (node_id := self._as_node(node).id) not in self._node_ids:
             raise NodeNotFoundException(f"{node_id} is not present in the tree")
 
+    def _first_unique_id(self, node: Node | str, sep: str = "_") -> str:
+        orig_node_id = self._as_node_id(node)
+        if orig_node_id not in self:
+            return orig_node_id
+
+        counter = 0
+        node_id = f"{orig_node_id}{sep}{counter}"
+        while node_id in self:
+            counter += 1
+            node_id = f"{orig_node_id}{sep}{counter}"
+        return node_id
+
     def _as_node(self, node: Node | str) -> Node:
         return node if isinstance(node, Node) else self.node(node)
+
+    def _as_node_id(self, node: Node | str) -> str:
+        return node.id if isinstance(node, Node) else node
 
     @property
     def _node_ids(self):

@@ -104,6 +104,27 @@ def treeA():
     return tree
 
 
+@pytest.fixture
+def tree2():
+    tree = Tree()
+    x = Node ("x")
+    y = Node ("y")
+    z = Node ("z")
+    tree.add_node(x)
+    tree.add_nodes([y, z], x)
+    return tree
+
+
+@pytest.fixture
+def tree3():
+    tree = Tree()
+    one = Node (1)
+    two = Node (2)
+    tree.add_node(one)
+    tree.add_node(two, one)
+    return tree
+
+
 def test_tree_str(treeA):
     assert str(treeA) == """\
 Node(id='a')
@@ -168,3 +189,56 @@ def test_pop_subtree(treeA):
     assert treeA.children("a") == (treeA.find("c"),)
     assert treeA.children("c") == (treeA.find("f"),)
     assert not treeA.children("f")
+
+
+def test_add_subtree():
+    tree = Tree()
+    a = Node("a")
+    b = Node("b")
+    c = Node("c")
+    tree.root = a
+    tree.add_nodes([b, c], a)
+    assert tree.depth == 2
+
+    subtree = Tree()
+    x = Node("x")
+    y = Node("y")
+    subtree.root = x
+    subtree.add_node(y, x)
+    assert subtree.depth == 2
+
+    tree.add_subtree(subtree, "b")
+
+    assert tree.depth == 4
+    assert tree.children("a") == (b, c)
+    assert tree.children("b") == (x,)
+    assert tree.children("c") == ()
+    assert tree.children("x") == (y,)
+    assert tree.children("y") == ()
+
+
+def test_add_subtree_with_uniquified_matching_ids():
+    a = Node("a")
+    b = Node("b")
+    tree = Tree(a)
+    tree.add_node(b, a)
+    subtree = Tree(b)
+
+    tree.add_subtree(subtree, a, uniquify=True)
+
+    assert tree.depth == 2
+    child1, child2 = tree.children(a)
+    assert child1 is not child2
+    assert child1.id == "b"
+    assert child2.id == "b_0"
+
+
+def test_add_subtree_with_matching_ids_fails_without_uniquify():
+    a = Node("a")
+    b = Node("b")
+    tree = Tree(a)
+    tree.add_node(b, a)
+    subtree = Tree(b)
+
+    with pytest.raises(ValueError):
+        tree.add_subtree(subtree, a, uniquify=False)
