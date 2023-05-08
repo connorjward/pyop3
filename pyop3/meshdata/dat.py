@@ -98,6 +98,10 @@ def _insert_axis(
     current_axes: ConstrainedMultiAxisNode,
     within_labels: FrozenSet[Hashable] = frozenset(),
 ):
+    # cleanup
+    # don't count this one
+    within_labels -= {None}
+
     inserted = False
 
     if not tree.root:
@@ -111,7 +115,8 @@ def _insert_axis(
     elif (
         new_axes.priority < current_axes.axis.priority
     ):
-        if new_axes.within_labels <= within_labels:
+        # breakpoint()
+        if new_axes.within_labels <= within_labels | {current_axes.parent_label}:
             # diagram or something?
             parent_axes = tree.parent(current_axes)
 
