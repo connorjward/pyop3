@@ -262,8 +262,16 @@ def test_compute_double_loop_scalar():
         lang_version=(2018, 2),
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-    p = IndexTree([RangeNode(1, 4, id="x")])
-    p.add_node(RangeNode(0, 2), parent="x")
+    # p = IndexTree([RangeNode(1, 4, id="x")])
+    # p.add_node(RangeNode(0, 2), parent="x")
+
+    p = IndexTree.from_dict(
+        {
+            IndexTree.ROOT: ("x",),
+            RangeNode(1, 4, id="x"): ("y",),
+            RangeNode(0, 2, id="y"): (),
+        }
+    )
     expr = pyop3.Loop(p, kernel(dat1[p], dat2[p]))
 
     exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)

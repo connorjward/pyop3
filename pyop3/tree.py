@@ -317,14 +317,39 @@ class Tree(pytools.RecordWithoutPickling):
 
 
 class NullRootTree(Tree):
+    ROOT = NullRootNode()
+
     def __init__(self, nodes: Sequence[Node] | None = None) -> None:
-        super().__init__(NullRootNode())
+        super().__init__(self.ROOT)
         if nodes:
             self.add_nodes(nodes, parent=NullRootNode.ID)
 
     @property
     def rootless_depth(self):
         return self.depth - 1
+
+    @classmethod
+    def from_dict(cls, node_dict: dict[Node, tuple[Hashable]]) -> "NullRootTree":
+        if cls.ROOT not in node_dict:
+            raise ValueError("Tree root must be provided")
+
+        tree = cls()
+        node_id_to_parent = {}
+        node_queue = list(node_dict.keys())
+        while node_queue:
+            node = node_queue.pop(0)
+            child_ids = node_dict[node]
+            for child_id in child_ids:
+                node_id_to_parent[child_id] = node
+
+            if node == cls.ROOT:
+                pass
+            elif node.id in node_id_to_parent:
+                tree.add_node(node, parent=node_id_to_parent[node.id])
+            else:
+                node_queue.append(node)
+        return tree
+
 
 
 def previsit(tree, fn, current_node: Node | None = None, prev_result: Any | None = None) -> Any:
