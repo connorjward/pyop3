@@ -5,7 +5,7 @@ import numbers
 import numpy as np
 from petsc4py import PETSc
 
-from pyop3.utils import strictly_all, single_valued
+from pyop3.utils import single_valued, strictly_all
 
 
 class DistributedArray(abc.ABC):

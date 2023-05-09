@@ -2,36 +2,40 @@ import abc
 import collections
 import copy
 import dataclasses
-import numbers
 import enum
 import functools
 import itertools
-
-from typing import Dict, Any, Tuple, FrozenSet, Sequence, Optional
+import numbers
+from typing import Any, Dict, FrozenSet, Optional, Sequence, Tuple
 
 import loopy as lp
 import loopy.symbolic
 import numpy as np
-import pytools
 import pymbolic as pym
+import pytools
 
-from pyop3 import exprs, tlang
-from pyop3 import utils
-from pyop3.utils import MultiNameGenerator, NameGenerator, strictly_all, just_one
-from pyop3.utils import PrettyTuple, checked_zip
+from pyop3 import exprs, tlang, utils
 from pyop3.distarray.multiarray import MultiArray
 from pyop3.multiaxis import (
-    MultiAxis,
-    AxisPart,
     AffineLayoutFunction,
+    AffineMapNode,
+    AxisPart,
+    IdentityMapNode,
     IndirectLayoutFunction,
     MapNode,
-    TabulatedMapNode,
+    MultiAxis,
     RangeNode,
-    IdentityMapNode,
-    AffineMapNode,
+    TabulatedMapNode,
 )
-from pyop3.tree import NullRootTree, NullRootNode
+from pyop3.tree import NullRootNode, NullRootTree
+from pyop3.utils import (
+    MultiNameGenerator,
+    NameGenerator,
+    PrettyTuple,
+    checked_zip,
+    just_one,
+    strictly_all,
+)
 
 
 class VariableCollector(pym.mapper.Collector):

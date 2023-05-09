@@ -7,11 +7,19 @@ name = "pyop3"
 version = "0.1"
 
 [project.optional-dependencies]
+dev = [
+  "black",
+  "isort",
+]
 tests = [
   "pytest",
   "pytest-mpi @ git+https://github.com/connorjward/pytest-mpi",
 ]
 
-# TODO: Get this implemented along with black
-# [tool.isort]
-# profile = "black"
+[tool.isort]
+profile = "black"
+
+[tool.pytest.ini_options]
+testpaths = [
+    "tests",
+]

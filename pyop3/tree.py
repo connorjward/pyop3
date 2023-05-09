@@ -1,12 +1,11 @@
 import collections
 import functools
+from collections.abc import Hashable, Sequence
 from typing import Any
 
-from collections.abc import Hashable, Sequence
-
 import pytools
-from pyop3.utils import strictly_all, just_one, UniqueNameGenerator
 
+from pyop3.utils import UniqueNameGenerator, just_one, strictly_all
 
 __all__ = ["Node", "Tree"]
 

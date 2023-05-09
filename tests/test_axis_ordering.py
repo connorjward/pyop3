@@ -1,6 +1,5 @@
 import pytest
 
-
 from pyop3 import *
 from pyop3.meshdata.dat import ConstrainedMultiAxis, order_axes
 

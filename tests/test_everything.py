@@ -1,20 +1,20 @@
 import copy
-import pytest
-import time
-import subprocess
-import os
-from hashlib import md5
 import ctypes
-import loopy as lp
 import dataclasses
+import os
+import subprocess
+import time
+from hashlib import md5
+
+import loopy as lp
 import numpy as np
+import pytest
 
 import pyop3
 import pyop3.codegen
-from pyop3.mesh import *
 from pyop3.distarray.multiarray import *
+from pyop3.mesh import *
 from pyop3.multiaxis import *
-
 
 """
 COMMON ERRORS

@@ -5,7 +5,6 @@ from petsc4py import PETSc
 
 from pyop3.utils import NameGenerator, as_tuple
 
-
 __all__ = ["Mesh"]
 
 

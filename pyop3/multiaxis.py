@@ -1,40 +1,39 @@
+import abc
 import bisect
+import collections
 import copy
 import dataclasses
 import enum
 import functools
-import numpy as np
-import operator
-import abc
 import itertools
-import collections
-import dataclasses
-from typing import Tuple, Union, Any, Optional, Sequence
 import numbers
+import operator
 import threading
+from typing import Any, Optional, Sequence, Tuple, Union
 
+import numpy as np
+import pymbolic as pym
+import pytools
 from mpi4py import MPI
 from petsc4py import PETSc
-import pymbolic as pym
 
-import pytools
 import pyop3.exprs
+from pyop3 import utils
+from pyop3.dtypes import IntType, PointerType, get_mpi_dtype
+from pyop3.tree import Node as NewNode
+from pyop3.tree import NullRootNode, NullRootTree, Tree
 from pyop3.utils import (
+    NameGenerator,
+    PrettyTuple,
     as_tuple,
     checked_zip,
-    NameGenerator,
-    unique,
-    PrettyTuple,
-    strictly_all,
     has_unique_entries,
-    single_valued,
     just_one,
+    single_valued,
     strict_int,
+    strictly_all,
+    unique,
 )
-from pyop3 import utils
-
-from pyop3.dtypes import IntType, PointerType, get_mpi_dtype
-from pyop3.tree import Tree, Node as NewNode, NullRootTree, NullRootNode
 
 
 def is_distributed(axtree, partid=NullRootNode.ID):
@@ -455,7 +454,6 @@ class MultiAxisTree(NullRootTree):
         # are not multi-part
         # if self.is_multi_part:
         #   raise Exception("cannot index with integers here")
-
         # accumulate offsets from the layout functions
         offset = 0
         depth = 0

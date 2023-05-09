@@ -2,10 +2,9 @@ from typing import FrozenSet, Hashable, Sequence
 
 import pytools
 
-from pyop3.multiaxis import MultiAxisTree, MultiAxisComponent
+from pyop3.multiaxis import MultiAxisComponent, MultiAxisTree
 from pyop3.tree import Node, Tree, previsit
-from pyop3.utils import checked_zip, UniqueNameGenerator, just_one
-
+from pyop3.utils import UniqueNameGenerator, checked_zip, just_one
 
 __all__ = ["Dat"]
 

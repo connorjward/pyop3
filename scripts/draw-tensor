@@ -6,9 +6,9 @@ import subprocess
 import matplotlib as mpl
 import numpy as np
 import pymbolic as pym
-import pyop3
 import svgwrite
 
+import pyop3
 
 CELL_HEIGHT = 30
 MAX_WIDTH = 600
@@ -29,7 +29,9 @@ def split_array(array, n):
     This is useful for dividing the values of a colormap.
     """
     k, m = divmod(len(array), n)
-    return tuple(array[i*k+min(i, m):(i+1)*k+min(i+1, m)] for i in range(n))
+    return tuple(
+        array[i * k + min(i, m) : (i + 1) * k + min(i + 1, m)] for i in range(n)
+    )
 
 
 def get_dim_size(dim):
@@ -38,7 +40,9 @@ def get_dim_size(dim):
 
 
 # TODO do something clever with redefining coordinates or something
-def draw(drawing, dim, *, xmin=0, xmax=MAX_WIDTH, ypos=TOP_BORDER, colormap=COLORMAP.colors):
+def draw(
+    drawing, dim, *, xmin=0, xmax=MAX_WIDTH, ypos=TOP_BORDER, colormap=COLORMAP.colors
+):
     draw_array(drawing, dim, xmin=xmin, xmax=xmax, y=ypos, colormap=colormap)
 
     cmaps = split_array(colormap, len(dim.sizes))
@@ -52,31 +56,51 @@ def draw(drawing, dim, *, xmin=0, xmax=MAX_WIDTH, ypos=TOP_BORDER, colormap=COLO
     for subdim, size, cmap in zip(dim.subdims, all_sizes, cmaps):
         width = size / total_size * (xmax - xmin)
         if size != 1:
-            draw(drawing, subdim, xmin=xmin_, xmax=xmin_+width, ypos=ypos+80, colormap=cmap)
+            draw(
+                drawing,
+                subdim,
+                xmin=xmin_,
+                xmax=xmin_ + width,
+                ypos=ypos + 80,
+                colormap=cmap,
+            )
         xmin_ += width + 30  # buffer
 
 
-def draw_array(drawing, dim, *, xmin=0, xmax=MAX_WIDTH, y=TOP_BORDER, colormap=COLORMAP.colors, inner=False):
+def draw_array(
+    drawing,
+    dim,
+    *,
+    xmin=0,
+    xmax=MAX_WIDTH,
+    y=TOP_BORDER,
+    colormap=COLORMAP.colors,
+    inner=False,
+):
     colormaps = split_array(colormap, len(dim.sizes))
     if dim.permutation:
         raise NotImplementedError
     else:
-        sections, sizess = pyop3.Tensor._collect_sections_unpermuted_array(dim, include_size=True)
+        sections, sizess = pyop3.Tensor._collect_sections_unpermuted_array(
+            dim, include_size=True
+        )
 
     # breakpoint()
-    scaling = (xmax-xmin) / get_dim_size(dim)
+    scaling = (xmax - xmin) / get_dim_size(dim)
 
     number = 0
-    for subdim_id, (dsize, ptrs, steps, cmap) in enumerate(zip(dim.sizes, sections, sizess, colormaps)):
+    for subdim_id, (dsize, ptrs, steps, cmap) in enumerate(
+        zip(dim.sizes, sections, sizess, colormaps)
+    ):
         # use the middle value
         color = cmap[len(cmap) // 2]
         color_css = f"rgb({','.join([str(int(c*256)) for c in color[:3]])})"
 
         for ptr, step in zip(ptrs, steps):
-            x = xmin + float(ptr*scaling)
+            x = xmin + float(ptr * scaling)
             pos = x, y
 
-            xsize = float(step*scaling)
+            xsize = float(step * scaling)
             ysize = CELL_HEIGHT
             size = xsize, ysize
 
@@ -86,8 +110,15 @@ def draw_array(drawing, dim, *, xmin=0, xmax=MAX_WIDTH, y=TOP_BORDER, colormap=C
             # do not do this if we are already 'inside'
             if dim.subdims and not inner:
                 subdim = dim.subdims[subdim_id]
-                draw_array(drawing, subdim, xmin=x, xmax=x+xsize, y=y, colormap=cmap, inner=True)
-
+                draw_array(
+                    drawing,
+                    subdim,
+                    xmin=x,
+                    xmax=x + xsize,
+                    y=y,
+                    colormap=cmap,
+                    inner=True,
+                )
 
             rect_kwargs = {}
 
@@ -103,7 +134,6 @@ def draw_array(drawing, dim, *, xmin=0, xmax=MAX_WIDTH, y=TOP_BORDER, colormap=C
             else:
                 rect_kwargs["fill"] = "none"
 
-
             rect = drawing.rect(pos, size, **rect_kwargs)
             drawing.add(rect)
 
@@ -116,7 +146,7 @@ def draw_array(drawing, dim, *, xmin=0, xmax=MAX_WIDTH, y=TOP_BORDER, colormap=C
                     "stroke_dasharray": 2,
                 }
                 start = pos
-                stop = x, y+ysize
+                stop = x, y + ysize
                 line = drawing.line(start, stop, **line_opts)
                 drawing.add(line)
 
@@ -125,7 +155,14 @@ def draw_array(drawing, dim, *, xmin=0, xmax=MAX_WIDTH, y=TOP_BORDER, colormap=C
                 if dim.permutation:
                     raise NotImplementedError
                 else:
-                    label = drawing.text(str(number), x=[x], y=[y], dx=[xsize//2], dy=[-5], text_anchor="middle")
+                    label = drawing.text(
+                        str(number),
+                        x=[x],
+                        y=[y],
+                        dx=[xsize // 2],
+                        dy=[-5],
+                        text_anchor="middle",
+                    )
                     drawing.add(label)
 
             number += 1
@@ -142,7 +179,16 @@ if __name__ == "__main__":
     # tensor = pyop3.Tensor.new(pyop3.Dim((4, 5), subdims=(pyop3.Dim(2), pyop3.Dim(3))), dtype=np.float64)
 
     # extra nesting
-    tensor = pyop3.Tensor.new(pyop3.Dim((4, 5), subdims=(pyop3.Dim((2, 3), subdims=(pyop3.Dim(2), pyop3.Dim(1))), pyop3.Dim((2, 1), subdims=(pyop3.Dim(1), pyop3.Dim(1))))), dtype=np.float64)
+    tensor = pyop3.Tensor.new(
+        pyop3.Dim(
+            (4, 5),
+            subdims=(
+                pyop3.Dim((2, 3), subdims=(pyop3.Dim(2), pyop3.Dim(1))),
+                pyop3.Dim((2, 1), subdims=(pyop3.Dim(1), pyop3.Dim(1))),
+            ),
+        ),
+        dtype=np.float64,
+    )
 
     # ragged
     # tensor = pyop3.Tensor.new(pyop3.Dim((4, 5), subdims=(pyop3.Dim(2), pyop3.Dim(3))), dtype=np.float64)

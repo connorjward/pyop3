@@ -9,7 +9,7 @@ import numpy as np
 import pytools
 
 # import pyop3.tensors
-from pyop3.utils import as_tuple, NameGenerator
+from pyop3.utils import NameGenerator, as_tuple
 
 
 class Expr:

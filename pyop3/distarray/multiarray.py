@@ -1,32 +1,31 @@
-import functools
-import numpy as np
-import operator
-import itertools
 import collections
-from typing import Tuple, Union, Any, Optional, Sequence
+import functools
+import itertools
 import numbers
+import operator
 import threading
+from typing import Any, Optional, Sequence, Tuple, Union
 
+import numpy as np
+import pymbolic as pym
+import pytools
 from mpi4py import MPI
 from petsc4py import PETSc
-import pymbolic as pym
 
-import pytools
 import pyop3.exprs
 from pyop3 import utils
-from pyop3.utils import NameGenerator, PrettyTuple, strictly_all, single_valued
-from pyop3 import utils
-from pyop3.dtypes import get_mpi_dtype, IntType
+from pyop3.dtypes import IntType, get_mpi_dtype
 from pyop3.multiaxis import (
-    expand_indices_to_fill_empty_shape,
-    fill_shape,
-    MultiAxis,
     AxisPart,
-    get_bottom_part,
+    MultiAxis,
     RangeNode,
     TabulatedMapNode,
+    expand_indices_to_fill_empty_shape,
+    fill_shape,
+    get_bottom_part,
 )
-from pyop3.tree import Tree, NullRootTree, NullRootNode
+from pyop3.tree import NullRootNode, NullRootTree, Tree
+from pyop3.utils import NameGenerator, PrettyTuple, single_valued, strictly_all
 
 
 # TODO this shouldn't be an immutable record or pym var
@@ -505,28 +504,6 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
             current_axis = current_axis.get_part(idx.npart).subaxis
         return tuple(selected)
 
-    @classmethod
-    def _fill_with_slices(cls, axis, parent_indices=None):
-        if not parent_indices:
-            parent_indices = []
-
-        idxs = []
-        for i, part in enumerate(axis.parts):
-            if isinstance(part, ScalarAxisPart):
-                idxs.append([])
-                continue
-            idx = Slice(part.size, npart=i)
-            if part.subaxis:
-                idxs += [
-                    [idx, *subidxs]
-                    for subidxs in cls._fill_with_slices(
-                        part.subaxis, parent_indices + [idx]
-                    )
-                ]
-            else:
-                idxs += [[idx]]
-        return idxs
-
     def __str__(self):
         return self.name
 
@@ -550,75 +527,6 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
                     return index.size != size
             except:
                 return True
-
-    @classmethod
-    def _parse_indices(cls, dim, indices, parent_indices=None):
-        # import pdb; pdb.set_trace()
-        if not parent_indices:
-            parent_indices = []
-
-        # cannot assume a slice if we are mixed - is this right?
-        # could duplicate parent indices I suppose
-        if not indices:
-            if len(dim.parts) > 1:
-                raise ValueError
-            else:
-                indices = [Slice(dim.part.size)]
-
-        # import pdb; pdb.set_trace()
-        idx, *subidxs = indices
-
-        if isinstance(idx, Map):
-            npart = idx.npart
-            part = dim.get_part(npart)
-            if part.subaxis:
-                return [idx] + cls._parse_indices(
-                    part.subaxis, subidxs, parent_indices + [idx]
-                )
-            else:
-                return [idx]
-        elif isinstance(idx, Slice):
-            if isinstance(idx.size, pym.primitives.Expression):
-                if not isinstance(idx.size, MultiArray):
-                    raise NotImplementedError
-
-            part = dim.get_part(idx.npart)
-            if part.subaxis:
-                return [idx] + cls._parse_indices(
-                    part.subaxis, subidxs, parent_indices + [idx]
-                )
-            else:
-                return [idx]
-        else:
-            raise TypeError
-
-    # @property
-    # def indices(self):
-    #     try:
-    #         idxs, = self.indicess
-    #         return idxs
-    #     except ValueError:
-    #         raise RuntimeError
-
-    # @property
-    # def linear_indicess(self):
-    #     # import pdb; pdb.set_trace()
-    #     if not self.indices:
-    #         return [[]]
-    #     return [val for item in self.indices for val in self._linearize(item)]
-
-    def _linearize(self, item):
-        # import pdb; pdb.set_trace()
-        value, children = item
-
-        if children:
-            return [
-                [value] + result
-                for child in children
-                for result in self._linearize(child)
-            ]
-        else:
-            return [[value]]
 
     @property
     def indexed_shape(self):

@@ -1,22 +1,22 @@
 import threading
 
-from mpi4py import MPI
 import numpy as np
-from petsc4py import PETSc
 import pytest
+from mpi4py import MPI
+from petsc4py import PETSc
 
-from pyop3 import utils
 from pyop3 import (
+    INC,
+    AxisPart,
+    Halo,
     MultiArray,
     MultiAxis,
-    AxisPart,
-    PointOwnershipLabel,
-    get_mpi_dtype,
     Owned,
-    Halo,
+    PointOwnershipLabel,
     RemotePoint,
     Shared,
-    INC,
+    get_mpi_dtype,
+    utils,
 )
 
 
