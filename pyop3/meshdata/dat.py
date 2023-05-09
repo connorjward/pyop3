@@ -43,7 +43,9 @@ class ConstrainedMultiAxisNode(Node):
 
     _id_generator = UniqueNameGenerator("_id_ConstrainedMultiAxisNode")
 
-    def __init__(self, axis, parent_label: Hashable | None = None, *, id: Hashable | None = None):
+    def __init__(
+        self, axis, parent_label: Hashable | None = None, *, id: Hashable | None = None
+    ):
         self.axis = axis
         self.parent_label = parent_label
         super().__init__(id or next(self._id_generator))
@@ -114,9 +116,7 @@ def _insert_axis(
             return False
 
     # elif _can_insert_before(new_axes, current_axes, within_labels):
-    elif (
-        new_axes.priority < current_axes.axis.priority
-    ):
+    elif new_axes.priority < current_axes.axis.priority:
         # breakpoint()
         if new_axes.within_labels <= within_labels | {current_axes.parent_label}:
             # diagram or something?
@@ -131,31 +131,28 @@ def _insert_axis(
             for axis_cpt in new_axes.axis:
                 stree = subtree.copy()
                 stree.replace_node(stree.root.copy(parent_label=axis_cpt.label))
-                tree.add_subtree(
-                    stree,
-                    new_node,
-                    uniquify=True
-                )
+                tree.add_subtree(stree, new_node, uniquify=True)
             inserted = True
         else:
             # The priority is less so the axes should definitely
             # not be inserted below here - do not recurse
             pass
 
-    elif (
-        tree.is_leaf(current_axes)
-    ):
+    elif tree.is_leaf(current_axes):
         assert new_axes.priority >= current_axes.axis.priority
         for axis_cpt in current_axes.axis.axis:
             if new_axes.within_labels <= within_labels | {axis_cpt.label}:
-                new_node = ConstrainedMultiAxisNode(new_axes, parent_label=axis_cpt.label)
+                new_node = ConstrainedMultiAxisNode(
+                    new_axes, parent_label=axis_cpt.label
+                )
                 tree.add_node(new_node, parent=current_axes)  # make unique?
             inserted = True
 
     else:
         for child in tree.children(current_axes):
             inserted = inserted or _insert_axis(
-                tree, new_axes, child, within_labels|{current_axes.parent_label})
+                tree, new_axes, child, within_labels | {current_axes.parent_label}
+            )
     return inserted
 
 
@@ -167,6 +164,7 @@ def _check_constraints(ctree):
             raise ConstraintsNotMetException
 
         return within_labels | {node.label}
+
     previsit(ctree, check, ctree.root, frozenset())
 
 
@@ -175,7 +173,7 @@ def _create_multiaxis(tree: Tree) -> MultiAxisTree:
 
     # note: constrained things contain multiple nodes
     def build(constrained_axes, *_):
-        if (parent := tree.parent(constrained_axes)):
+        if parent := tree.parent(constrained_axes):
             target_parent = just_one(
                 axis_cpt
                 for axis_cpt in parent.axis.axis

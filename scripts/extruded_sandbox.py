@@ -2,7 +2,6 @@ import numpy as np
 from petsc4py import PETSc
 
 
-
 def create_mesh(npoints, edges):
     dm = PETSc.DMPlex()
     dm.create()
@@ -136,7 +135,7 @@ def collect_adjacent(coverings):
     starts = []
     counts = []
     for covering in coverings.values():
-        if starts and all(covering == starts[-1]+counts[-1]):
+        if starts and all(covering == starts[-1] + counts[-1]):
             counts[-1] += 1
         else:
             starts.append(covering)
@@ -154,6 +153,7 @@ def get_exterior_facets(dm):
     edges = range(*dm.getHeightStratum(1))
     facet_covering = compute_covering(dm, edges, [support])
     return [pt for pt, cover in facet_covering.items() if len(cover) == 1]
+
 
 def test_facets(dm):
     interior_facets = get_interior_facets(dm)

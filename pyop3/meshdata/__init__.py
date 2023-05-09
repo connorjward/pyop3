@@ -1,4 +1,3 @@
-
 # TODO put these in the right place (probably relate to mesh somehow)
 def make_global(*args, **kwargs):
     # not related to a mesh

@@ -16,15 +16,21 @@ def get_petsc_dirs():
 
 def make_sparsity_extension():
     petsc_dirs = get_petsc_dirs()
-    include_dirs = ([np.get_include(), petsc4py.get_include()]
-                    + [f"{dir}/include" for dir in petsc_dirs])
-    extra_link_args = ([f"-L{dir}/lib" for dir in petsc_dirs]
-                       + [f"-Wl,-rpath,{dir}/lib" for dir in petsc_dirs])
+    include_dirs = [np.get_include(), petsc4py.get_include()] + [
+        f"{dir}/include" for dir in petsc_dirs
+    ]
+    extra_link_args = [f"-L{dir}/lib" for dir in petsc_dirs] + [
+        f"-Wl,-rpath,{dir}/lib" for dir in petsc_dirs
+    ]
 
-    return Extension(name="pyop3.sparsity", sources=["pyop3/sparsity.pyx"],
-                             include_dirs=include_dirs, language="c",
-                             libraries=["petsc"],
-                             extra_link_args=extra_link_args)
+    return Extension(
+        name="pyop3.sparsity",
+        sources=["pyop3/sparsity.pyx"],
+        include_dirs=include_dirs,
+        language="c",
+        libraries=["petsc"],
+        extra_link_args=extra_link_args,
+    )
 
 
 if __name__ == "__main__":

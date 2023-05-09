@@ -57,6 +57,7 @@ class PrettyTuple(tuple):
     def __or__(self, other):
         return type(self)(self + (other,))
 
+
 def checked_zip(*iterables):
     if not pytools.is_single_valued(set(len(it) for it in iterables)):
         raise ValueError
@@ -137,9 +138,9 @@ def just_one(iterable):
     return iterable[0]
 
 
-
 class MultiStack:
     """Keyed stack."""
+
     def __init__(self, data=None):
         raise NotImplementedError("shouldnt be needed")
         self._data = data or collections.defaultdict(PrettyTuple)

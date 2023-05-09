@@ -6,7 +6,19 @@ from petsc4py import PETSc
 import pytest
 
 from pyop3 import utils
-from pyop3 import MultiArray, MultiAxis, AxisPart, PointOwnershipLabel, get_mpi_dtype, Owned, Halo, RemotePoint, Shared, INC
+from pyop3 import (
+    MultiArray,
+    MultiAxis,
+    AxisPart,
+    PointOwnershipLabel,
+    get_mpi_dtype,
+    Owned,
+    Halo,
+    RemotePoint,
+    Shared,
+    INC,
+)
+
 
 @pytest.fixture
 def comm():
@@ -75,13 +87,11 @@ def make_global(comm):
     return array
 
 
-
 @pytest.mark.parallel(nprocs=2)
 def test_sf_exchanges_data(comm):
     # pretend like the last thing we did was INC into the arrays
     # array.last_op = INC  # TODO distinguish local and stencil ops
     overlapped_array = make_overlapped_array(comm)
-
 
     mpi_dtype, _ = get_mpi_dtype(overlapped_array.dtype)
     buffer = overlapped_array.data
@@ -103,6 +113,7 @@ def test_sf_exchanges_data(comm):
     # assert not array.halo_valid  # or similar
 
     # assert data == ???
+
 
 @pytest.mark.parallel(nprocs=2)
 def test_sync(comm):
@@ -166,11 +177,22 @@ def test_global_sync(comm):
 def test_contrived_distribution(comm):
     # Construct an array with some shared points and some halo points
     if comm.rank == 0:
-        overlap = [Shared(RemotePoint(1, 2)), Shared(), Shared(), Halo(RemotePoint(1, 0))]
+        overlap = [
+            Shared(RemotePoint(1, 2)),
+            Shared(),
+            Shared(),
+            Halo(RemotePoint(1, 0)),
+        ]
         npoints = 4
     else:
         assert comm.rank == 1
-        overlap = [Shared(), Owned(), Shared(), Halo(RemotePoint(0, 2)), Shared(RemotePoint(0, 1))]
+        overlap = [
+            Shared(),
+            Owned(),
+            Shared(),
+            Halo(RemotePoint(0, 2)),
+            Shared(RemotePoint(0, 1)),
+        ]
         npoints = 5
 
     root = MultiAxis([AxisPart(npoints, overlap=overlap)]).set_up()
@@ -178,7 +200,7 @@ def test_contrived_distribution(comm):
     assert array._halo_valid
     assert not array._pending_write_op
 
-    # halo_valid and pending_write_op should not be allowed 
+    # halo_valid and pending_write_op should not be allowed
     array._pending_write_op = INC
     array._halo_modified = False
     array._halo_valid = True

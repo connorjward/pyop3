@@ -16,9 +16,12 @@ def test_read_sparse_matrix():
     nnz = MultiArray(nnzaxes, name="nnz", data=np.array([2, 2, 1], dtype=np.uint64))
 
     indices = MultiArray.from_list(
-        [[1, 2], [1, 2], [0]], labels=["p1", "any"], name="indices", dtype=np.uint64)
+        [[1, 2], [1, 2], [0]], labels=["p1", "any"], name="indices", dtype=np.uint64
+    )
 
-    mataxes = nnzaxes.copy().add_subaxis("p1", [AxisPart(nnz, indices=indices)]).set_up()
+    mataxes = (
+        nnzaxes.copy().add_subaxis("p1", [AxisPart(nnz, indices=indices)]).set_up()
+    )
     mat = MultiArray(mataxes, name="mat", data=np.arange(10, 51, 10))
 
     assert mat.get_value([0, 1]) == 10
@@ -45,15 +48,21 @@ def test_read_sparse_rank_3_tensor():
     nnz = MultiArray(ax1, name="nnz", data=np.array([1, 2], dtype=np.uint64))
 
     indices1 = MultiArray.from_list(
-        [[1], [0, 1]], labels=["p1", "any"], name="indices", dtype=np.uint64)
+        [[1], [0, 1]], labels=["p1", "any"], name="indices", dtype=np.uint64
+    )
 
     indices2 = MultiArray.from_list(
-        [[[0, 2]], [[0, 1], [0, 2]]], labels=["p1", "any1", "any2"], name="indices", dtype=np.uint64)
+        [[[0, 2]], [[0, 1], [0, 2]]],
+        labels=["p1", "any1", "any2"],
+        name="indices",
+        dtype=np.uint64,
+    )
 
     ax2 = (
         ax1.copy()
         .add_subaxis("p1", [AxisPart(nnz, indices=indices1, id="p2")])
-        .add_subaxis("p2", [AxisPart(2, indices=indices2)])).set_up()
+        .add_subaxis("p2", [AxisPart(2, indices=indices2)])
+    ).set_up()
     tensor = MultiArray(ax2, name="tensor", data=np.arange(10, 61, 10))
 
     assert tensor.get_value([0, 1, 0]) == 10
@@ -84,16 +93,18 @@ def sparsity1dp1():
 
     """
     mapaxes = (
-        MultiAxis([AxisPart(3, label="cells", id="cells")])
-        .add_subaxis("cells", [AxisPart(2, label="any")])).set_up()
+        MultiAxis([AxisPart(3, label="cells", id="cells")]).add_subaxis(
+            "cells", [AxisPart(2, label="any")]
+        )
+    ).set_up()
     mapdata = MultiArray(
-        mapaxes, name="map0", data=np.array([0, 1, 1, 2, 2, 3], dtype=IntType))
+        mapaxes, name="map0", data=np.array([0, 1, 1, 2, 2, 3], dtype=IntType)
+    )
 
     iterindex = RangeNode("cells", 3, id="i0")
     lmap = rmap = iterindex.add_child(
-        "i0",
-        TabulatedMapNode(["cells"], ["nodes"], arity=2,
-                         data=mapdata[[iterindex]]))
+        "i0", TabulatedMapNode(["cells"], ["nodes"], arity=2, data=mapdata[[iterindex]])
+    )
 
     return make_sparsity(iterindex, lmap, rmap)
 
@@ -123,7 +134,9 @@ def test_make_matrix(sparsity1dp1):
 
     mat = PetscMatAIJ(raxes, caxes, sparsity1dp1)
 
-    import pdb; pdb.set_trace()
+    import pdb
+
+    pdb.set_trace()
 
     assert False
 
@@ -195,16 +208,19 @@ def test_make_parallel_matrix():
 
         # now make the sparsity
         mapaxes = (
-            MultiAxis([AxisPart(2, label="cells", id="cells")])
-            .add_subaxis("cells", [AxisPart(2, label="any")])).set_up()
+            MultiAxis([AxisPart(2, label="cells", id="cells")]).add_subaxis(
+                "cells", [AxisPart(2, label="any")]
+            )
+        ).set_up()
         mapdata = MultiArray(
-            mapaxes, name="map0", data=np.array([0, 1, 1, 2], dtype=IntType))
+            mapaxes, name="map0", data=np.array([0, 1, 1, 2], dtype=IntType)
+        )
 
         iterindex = RangeNode("cells", 2, id="i0")
         lmap = rmap = iterindex.add_child(
             "i0",
-            TabulatedMapNode(["cells"], ["nodes"], arity=2,
-                             data=mapdata[[iterindex]]))
+            TabulatedMapNode(["cells"], ["nodes"], arity=2, data=mapdata[[iterindex]]),
+        )
     else:
         # v1, v2 and v3
         nnodes = 3
@@ -214,16 +230,19 @@ def test_make_parallel_matrix():
 
         # now make the sparsity
         mapaxes = (
-            MultiAxis([AxisPart(2, label="cells", id="cells")])
-            .add_subaxis("cells", [AxisPart(2, label="any")])).set_up()
+            MultiAxis([AxisPart(2, label="cells", id="cells")]).add_subaxis(
+                "cells", [AxisPart(2, label="any")]
+            )
+        ).set_up()
         mapdata = MultiArray(
-            mapaxes, name="map0", data=np.array([2, 1, 1, 0], dtype=IntType))
+            mapaxes, name="map0", data=np.array([2, 1, 1, 0], dtype=IntType)
+        )
 
         iterindex = RangeNode("cells", 2, id="i0")
         lmap = rmap = iterindex.add_child(
             "i0",
-            TabulatedMapNode(["cells"], ["nodes"], arity=2,
-                             data=mapdata[[iterindex]]))
+            TabulatedMapNode(["cells"], ["nodes"], arity=2, data=mapdata[[iterindex]]),
+        )
 
     axes = MultiAxis([AxisPart(nnodes, label="nodes", overlap=overlap)]).set_up()
     sparsity = make_sparsity(iterindex, lmap, rmap)

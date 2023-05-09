@@ -49,6 +49,7 @@ def unfrozen_only(meth):
         if self.frozen:
             raise FrozenTreeException("Tree is frozen and cannot be modified")
         return meth(self, *args, **kwargs)
+
     return wrapper
 
 
@@ -57,6 +58,7 @@ def unfrozen_only(meth):
 # frozen or something to prevent this - needs some thought
 # We need a null root node since we effectively need an iterable of
 # parts at the top level
+
 
 # Instead of freezing with a property, could maybe delete methods when it is frozen?
 class Tree(pytools.RecordWithoutPickling):
@@ -78,7 +80,9 @@ class Tree(pytools.RecordWithoutPickling):
         return self._as_node_id(node) in self._node_ids
 
     @unfrozen_only
-    def add_node(self, node: Node, parent: Node | str | None = None, uniquify=False) -> None:
+    def add_node(
+        self, node: Node, parent: Node | str | None = None, uniquify=False
+    ) -> None:
         if uniquify:
             node = node.copy(id=self._first_unique_id(node))
 
@@ -129,7 +133,8 @@ class Tree(pytools.RecordWithoutPickling):
         """
         if node.id not in self._node_ids:
             raise NodeNotFoundException(
-                f"{node.id} is not in the tree, replacement is not possible")
+                f"{node.id} is not in the tree, replacement is not possible"
+            )
         self._ids_to_nodes[node.id] = node
 
     def _is_root(self, node: Node | str):
@@ -181,8 +186,10 @@ class Tree(pytools.RecordWithoutPickling):
         subtree = Tree(subroot)
 
         nodes_and_parents = []
+
         def collect_node_and_parent(node, _):
             nodes_and_parents.append((node, self.parent(node)))
+
         previsit(self, collect_node_and_parent, subroot)
 
         for node, parent in nodes_and_parents:
@@ -191,8 +198,10 @@ class Tree(pytools.RecordWithoutPickling):
             del self._ids_to_nodes[node.id]
             del self._child_to_parent[node.id]
             self._parent_to_children[parent.id] = tuple(
-                child for child in self._parent_to_children[parent.id]
-                if child != node.id)
+                child
+                for child in self._parent_to_children[parent.id]
+                if child != node.id
+            )
 
         return subtree
 
@@ -227,8 +236,10 @@ class Tree(pytools.RecordWithoutPickling):
     @property
     def leaves(self) -> tuple[Node]:
         return tuple(
-            node for nid, node in self._ids_to_nodes.items()
-            if not self._parent_to_children[nid])
+            node
+            for nid, node in self._ids_to_nodes.items()
+            if not self._parent_to_children[nid]
+        )
 
     @property
     def leaf(self) -> Node:
@@ -351,8 +362,9 @@ class NullRootTree(Tree):
         return tree
 
 
-
-def previsit(tree, fn, current_node: Node | None = None, prev_result: Any | None = None) -> Any:
+def previsit(
+    tree, fn, current_node: Node | None = None, prev_result: Any | None = None
+) -> Any:
     if tree.is_empty:
         raise RuntimeError("Cannot traverse an empty tree")
 
@@ -382,4 +394,5 @@ def postvisit(tree, fn, current_node: Node | None = None) -> Any:
     current_node = current_node or tree.root
     return fn(
         current_node,
-        *(postvisit(tree, fn, child) for child in tree.children(current_node)))
+        *(postvisit(tree, fn, child) for child in tree.children(current_node)),
+    )

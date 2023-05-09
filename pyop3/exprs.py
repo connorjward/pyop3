@@ -46,11 +46,13 @@ class Loop(pytools.ImmutableRecord, Operator):
     @property
     def unrolled_migs(self):
         from pyop3.tensors import Map
+
         def unroll(mig):
             if isinstance(mig, Map):
                 return tuple([*unroll(mig.from_index), mig])
             else:
                 return (mig,)
+
         return unroll(self.indices)
 
     # @property
@@ -66,17 +68,17 @@ class Loop(pytools.ImmutableRecord, Operator):
 
     def __call__(self, *args, **kwargs):
         from pyop3.codegen.loopy import to_c
+
         code = to_c(self)
 
         breakpoint()
         from pyop2.compilation import load
+
         exe = load(code)
         exe()
 
 
-
 class AccessDescriptor(enum.Enum):
-
     READ = enum.auto()
     WRITE = enum.auto()
     INC = enum.auto()
@@ -95,7 +97,6 @@ MAX = AccessDescriptor.MAX
 
 @dataclasses.dataclass(frozen=True)
 class ArgumentSpec:
-
     access: AccessDescriptor
     dtype: np.dtype
     space: Tuple[int]
@@ -103,7 +104,6 @@ class ArgumentSpec:
 
 @dataclasses.dataclass(frozen=True)
 class FunctionArgument:
-
     tensor: "IndexedTensor"
     spec: ArgumentSpec
 
@@ -127,6 +127,7 @@ class FunctionArgument:
 
 class LoopyKernel:
     """A callable function."""
+
     def __init__(self, loopy_kernel, access_descrs):
         self.code = loopy_kernel
         self._access_descrs = access_descrs
@@ -147,7 +148,12 @@ class LoopyKernel:
 
     @property
     def argspec(self):
-        return tuple(ArgumentSpec(access, arg.dtype, arg.shape) for access, arg in zip(self._access_descrs, self.code.default_entrypoint.args))
+        return tuple(
+            ArgumentSpec(access, arg.dtype, arg.shape)
+            for access, arg in zip(
+                self._access_descrs, self.code.default_entrypoint.args
+            )
+        )
 
     @property
     def name(self):
@@ -189,7 +195,6 @@ class FunctionCall(Terminal):
 
     @property
     def output_specs(self):
-
         return tuple(
             filter(
                 lambda spec: spec.access

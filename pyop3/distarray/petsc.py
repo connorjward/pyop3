@@ -35,8 +35,8 @@ class PetscVecNest(PetscVec):
 
 class PetscMat(DistributedArray, abc.ABC):
     # def __new__(cls, *args, **kwargs):
-        # dispatch to different mat types based on -mat_type
-        # raise NotImplementedError
+    # dispatch to different mat types based on -mat_type
+    # raise NotImplementedError
 
     # TODO: What is the best way to instantiate these things?
     @classmethod
@@ -48,8 +48,9 @@ class PetscMat(DistributedArray, abc.ABC):
         # need to "flatten" axes and maps s.t. there is a constant inner shape
 
         # or similar
-        can_be_mat_nest = all(part.size == 1 for part in itertools.chain(raxis.parts, caxis.parts))
-
+        can_be_mat_nest = all(
+            part.size == 1 for part in itertools.chain(raxis.parts, caxis.parts)
+        )
 
         """
         * The axes reference only the nodes, not the cells
@@ -66,7 +67,6 @@ class PetscMat(DistributedArray, abc.ABC):
         should check that the operations are being provided with valid data structures,
         not allocating the data structures to conform to the operation.
         """
-        
 
 
 class PetscMatDense(PetscMat):
@@ -82,13 +82,13 @@ class PetscMatAIJ(PetscMat):
             comm = PETSc.Sys.getDefaultComm()
 
         if any(ax.nparts > 1 for ax in [raxes, caxes]):
-            raise ValueError(
-                "Cannot construct a PetscMat with multi-part axes")
+            raise ValueError("Cannot construct a PetscMat with multi-part axes")
 
         if not all(ax.part.has_partitioned_halo for ax in [raxes, caxes]):
             raise ValueError(
                 "Multi-axes must store halo points in a contiguous block "
-                "after owned points")
+                "after owned points"
+            )
 
         # axes = overlap_axes(raxes.local_view, caxes.local_view, sparsity)
         axes = overlap_axes(raxes, caxes, sparsity)
@@ -106,13 +106,12 @@ class PetscMatAIJ(PetscMat):
 
         # drop the last few because these are below the rows PETSc cares about
         row_ptrs = col_part.layout_fn.start.data
-        col_indices = col_part.indices.data[:row_ptrs[rsize]]
+        col_indices = col_part.indices.data[: row_ptrs[rsize]]
         # row_ptrs = np.concatenate(
         #     [col_part.layout_fn.start.data, [len(col_indices)]],
         #     dtype=col_indices.dtype)
 
-
-        # row_ptrs = 
+        # row_ptrs =
 
         # build the local to global maps from the provided star forests
         if strictly_all(ax.part.is_distributed for ax in [raxes, caxes]):
@@ -152,5 +151,3 @@ class PetscMatNest(PetscMat):
 
 class PetscMatPython(PetscMat):
     ...
-
-

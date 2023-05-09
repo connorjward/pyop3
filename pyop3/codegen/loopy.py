@@ -21,9 +21,16 @@ from pyop3.utils import MultiNameGenerator, NameGenerator, strictly_all, just_on
 from pyop3.utils import PrettyTuple, checked_zip
 from pyop3.distarray.multiarray import MultiArray
 from pyop3.multiaxis import (
-    MultiAxis, AxisPart,
-    AffineLayoutFunction, IndirectLayoutFunction, MapNode, TabulatedMapNode,
-    RangeNode, IdentityMapNode, AffineMapNode)
+    MultiAxis,
+    AxisPart,
+    AffineLayoutFunction,
+    IndirectLayoutFunction,
+    MapNode,
+    TabulatedMapNode,
+    RangeNode,
+    IdentityMapNode,
+    AffineMapNode,
+)
 from pyop3.tree import NullRootTree, NullRootNode
 
 
@@ -47,7 +54,6 @@ LOOPY_LANG_VERSION = (2018, 2)
 
 
 class CodegenTarget(enum.Enum):
-
     LOOPY = enum.auto()
     C = enum.auto()
 
@@ -89,7 +95,11 @@ class LoopyKernelBuilder:
 
     @property
     def kernel_data(self):
-        return list(self._tensor_data.values()) + self._section_data + self._temp_kernel_data
+        return (
+            list(self._tensor_data.values())
+            + self._section_data
+            + self._temp_kernel_data
+        )
 
     def build(self, tlang_expr):
         self._namer.reset()
@@ -114,7 +124,13 @@ class LoopyKernelBuilder:
         raise TypeError
 
     @_build.register
-    def _(self, loop: exprs.Loop, within_multi_index_groups=None, within_inames=frozenset(), depends_on=frozenset()):
+    def _(
+        self,
+        loop: exprs.Loop,
+        within_multi_index_groups=None,
+        within_inames=frozenset(),
+        depends_on=frozenset(),
+    ):
         # within_multi_index_groups is a map from multi-index groups to inames
         # every multi-index group (which have unique IDs) may only appear once
         """
@@ -130,13 +146,31 @@ class LoopyKernelBuilder:
         This ties in well with the "path" logic I have already done for maps.
         """
         if within_multi_index_groups is None:
-            within_multi_index_groups = {}  # TODO should make persistent to avoid accidental side-effects
+            within_multi_index_groups = (
+                {}
+            )  # TODO should make persistent to avoid accidental side-effects
 
         for index in loop.index.children(loop.index.root):
             self.build_loop(
-                    loop, loop.index, index, within_multi_index_groups, within_inames, depends_on)
+                loop,
+                loop.index,
+                index,
+                within_multi_index_groups,
+                within_inames,
+                depends_on,
+            )
 
-    def build_loop(self, loop, itree, index, within_indices, within_inames, depends_on, existing_labels=PrettyTuple(), existing_jnames=PrettyTuple()):
+    def build_loop(
+        self,
+        loop,
+        itree,
+        index,
+        within_indices,
+        within_inames,
+        depends_on,
+        existing_labels=PrettyTuple(),
+        existing_jnames=PrettyTuple(),
+    ):
         """
         note: there is no need to track a current axis here. We just need to register
         loops and associated inames. We also need part labels because it informs
@@ -153,7 +187,9 @@ class LoopyKernelBuilder:
             raise NotImplementedError
 
         iname = self._namer.next("i")
-        extent = self.register_extent(index.size, within_indices, within_inames, depends_on)
+        extent = self.register_extent(
+            index.size, within_indices, within_inames, depends_on
+        )
         domain_str = f"{{ [{iname}]: 0 <= {iname} < {extent} }}"
         self.domains.append(domain_str)
 
@@ -165,10 +201,12 @@ class LoopyKernelBuilder:
         if isinstance(index, RangeNode):
             jname = self._namer.next("j")
             self._temp_kernel_data.append(
-                lp.TemporaryVariable(jname, shape=(), dtype=np.uintp))
+                lp.TemporaryVariable(jname, shape=(), dtype=np.uintp)
+            )
 
             index_insn = lp.Assignment(
-                pym.var(jname), pym.var(iname)*index.step+index.start,
+                pym.var(jname),
+                pym.var(iname) * index.step + index.start,
                 id=self._namer.next("myid_"),
                 within_inames=within_inames,
                 depends_on=depends_on,
@@ -190,18 +228,19 @@ class LoopyKernelBuilder:
             # NOTE: some maps can produce multiple jnames (but not this one)
             jname = self._namer.next("j")
             self._temp_kernel_data.append(
-                lp.TemporaryVariable(jname, shape=(), dtype=np.uintp))
+                lp.TemporaryVariable(jname, shape=(), dtype=np.uintp)
+            )
 
             # find the right target label for the map (assume can't be multi-part)
             mapaxis = index.data.axes
             mappartid = NullRootNode.ID
             for l in existing_labels:
-                _part_, = [pt for pt in mapaxis.children(mappartid) if l == pt.label]
+                (_part_,) = [pt for pt in mapaxis.children(mappartid) if l == pt.label]
                 mappartid = _part_.id
             # not sure about this check
             # assert mapaxis.nparts == 1
             # assert not mapaxis.children(mappartid)
-            mypart, = mapaxis.children(mappartid)
+            (mypart,) = mapaxis.children(mappartid)
             map_labels = existing_labels | mypart.label
             # mapaxis = index.data.axes
             # for l in existing_labels:
@@ -211,14 +250,16 @@ class LoopyKernelBuilder:
             # map_labels = existing_labels | mapaxis.part.label
             map_jnames = existing_jnames | iname
             expr = self.register_scalar_assignment(
-                index.data, map_labels, map_jnames, within_inames|{iname}, depends_on)
+                index.data, map_labels, map_jnames, within_inames | {iname}, depends_on
+            )
 
             index_insn = lp.Assignment(
                 pym.var(jname),
                 expr,
                 id=self._namer.next("myid_"),
-                within_inames=within_inames|{iname},
-                depends_on=depends_on)
+                within_inames=within_inames | {iname},
+                depends_on=depends_on,
+            )
 
             index_insns = [index_insn]
 
@@ -230,7 +271,7 @@ class LoopyKernelBuilder:
                 assert temp_labels.pop() == label
                 temp_jnames.pop()
 
-            to_label, = index.to_labels
+            (to_label,) = index.to_labels
             new_labels = PrettyTuple(temp_labels) | to_label
             new_jnames = PrettyTuple(temp_jnames) | jname
             jnames = (jname,)
@@ -248,34 +289,51 @@ class LoopyKernelBuilder:
         if children := itree.children(index):
             for subindex in children:
                 self.build_loop(
-                    loop, itree, subindex,
-                    within_indices|new_within,
-                    within_inames|{iname},
-                    depends_on|new_deps,
-                    new_labels, new_jnames)
+                    loop,
+                    itree,
+                    subindex,
+                    within_indices | new_within,
+                    within_inames | {iname},
+                    depends_on | new_deps,
+                    new_labels,
+                    new_jnames,
+                )
         else:
             for stmt in loop.statements:
                 self._build(
-                    stmt, within_indices|new_within, within_inames|{iname}, depends_on|new_deps)
+                    stmt,
+                    within_indices | new_within,
+                    within_inames | {iname},
+                    depends_on | new_deps,
+                )
 
-
-    def build_assignment(self, assignment, lindex, rindex, within_indices, within_inames,
-                         depends_on,
-                         llabels=PrettyTuple(),
-                         ljnames=PrettyTuple(),
-                         rlabels=PrettyTuple(),
-                         rjnames=PrettyTuple()):
+    def build_assignment(
+        self,
+        assignment,
+        lindex,
+        rindex,
+        within_indices,
+        within_inames,
+        depends_on,
+        llabels=PrettyTuple(),
+        ljnames=PrettyTuple(),
+        rlabels=PrettyTuple(),
+        rjnames=PrettyTuple(),
+    ):
         lres = [(lindex, (), ())]
         rres = [(rindex, (), ())]
 
-        for ((lindex, innerllabels, innerljnames), (rindex, innerrlabels, innerrjnames)) \
-                in utils.checked_zip(lres, rres):
+        for (lindex, innerllabels, innerljnames), (
+            rindex,
+            innerrlabels,
+            innerrjnames,
+        ) in utils.checked_zip(lres, rres):
             # import pdb; pdb.set_trace()
 
-            llabels_ = PrettyTuple(llabels+innerllabels)
-            ljnames_ = PrettyTuple(ljnames+innerljnames)
-            rlabels_ = PrettyTuple(rlabels+innerrlabels)
-            rjnames_ = PrettyTuple(rjnames+innerrjnames)
+            llabels_ = PrettyTuple(llabels + innerllabels)
+            ljnames_ = PrettyTuple(ljnames + innerljnames)
+            rlabels_ = PrettyTuple(rlabels + innerrlabels)
+            rjnames_ = PrettyTuple(rjnames + innerrjnames)
 
             iname = None
             # this should always hold now?
@@ -287,7 +345,9 @@ class LoopyKernelBuilder:
                 size = utils.single_valued([lsize, rsize])
 
                 iname = self._namer.next("i")
-                extent = self.register_extent(size, within_indices, within_inames, depends_on)
+                extent = self.register_extent(
+                    size, within_indices, within_inames, depends_on
+                )
                 domain_str = f"{{ [{iname}]: 0 <= {iname} < {extent} }}"
                 self.domains.append(domain_str)
 
@@ -327,12 +387,14 @@ class LoopyKernelBuilder:
                     elif isinstance(index, RangeNode):
                         jname = self._namer.next("j")
                         self._temp_kernel_data.append(
-                            lp.TemporaryVariable(jname, shape=(), dtype=np.uintp))
+                            lp.TemporaryVariable(jname, shape=(), dtype=np.uintp)
+                        )
 
                         index_insn = lp.Assignment(
-                            pym.var(jname), pym.var(iname)*index.step+index.start,
+                            pym.var(jname),
+                            pym.var(iname) * index.step + index.start,
                             id=self._namer.next("myid_"),
-                            within_inames=within_inames|{iname},
+                            within_inames=within_inames | {iname},
                             depends_on=depends_on,
                             # no_sync_with=no_sync_with,
                         )
@@ -352,20 +414,25 @@ class LoopyKernelBuilder:
                     elif isinstance(index, AffineMapNode):
                         jname = self._namer.next("j")
                         self._temp_kernel_data.append(
-                            lp.TemporaryVariable(jname, shape=(), dtype=np.uintp))
+                            lp.TemporaryVariable(jname, shape=(), dtype=np.uintp)
+                        )
 
                         subst_rules = {
                             var: pym.var(j)
-                            for var, j in checked_zip(index.expr[0][:-1],
-                                                      existing_jnames[-len(index.from_labels):])}
+                            for var, j in checked_zip(
+                                index.expr[0][:-1],
+                                existing_jnames[-len(index.from_labels) :],
+                            )
+                        }
                         subst_rules |= {index.expr[0][-1]: pym.var(iname)}
 
                         expr = pym.substitute(index.expr[1], subst_rules)
 
                         index_insn = lp.Assignment(
-                            pym.var(jname), expr,
+                            pym.var(jname),
+                            expr,
                             id=self._namer.next("myid_"),
-                            within_inames=within_inames|{iname},
+                            within_inames=within_inames | {iname},
                             depends_on=depends_on,
                             # no_sync_with=no_sync_with,
                         )
@@ -379,7 +446,7 @@ class LoopyKernelBuilder:
                             assert temp_labels.pop() == label
                             temp_jnames.pop()
 
-                        to_label, = index.to_labels
+                        (to_label,) = index.to_labels
                         new_labels = PrettyTuple(temp_labels) | to_label
                         new_jnames = PrettyTuple(temp_jnames) | jname
                         jnames = (jname,)
@@ -389,7 +456,8 @@ class LoopyKernelBuilder:
                         # NOTE: some maps can produce multiple jnames (but not this one)
                         jname = self._namer.next("j")
                         self._temp_kernel_data.append(
-                            lp.TemporaryVariable(jname, shape=(), dtype=np.uintp))
+                            lp.TemporaryVariable(jname, shape=(), dtype=np.uintp)
+                        )
 
                         # import pdb; pdb.set_trace()
 
@@ -397,23 +465,33 @@ class LoopyKernelBuilder:
                         mapaxis = index.data.axes
                         mappartid = NullRootNode.ID
                         for l in existing_labels:
-                            _part_, = [pt for pt in mapaxis.children(mappartid) if l == pt.label]
+                            (_part_,) = [
+                                pt
+                                for pt in mapaxis.children(mappartid)
+                                if l == pt.label
+                            ]
                             mappartid = _part_.id
                         # not sure about this check
                         # assert mapaxis.nparts == 1
                         # assert not mapaxis.children(mappartid)
-                        mypart, = mapaxis.children(mappartid)
+                        (mypart,) = mapaxis.children(mappartid)
                         map_labels = existing_labels | mypart.label
                         map_jnames = existing_jnames | iname
                         expr = self.register_scalar_assignment(
-                            index.data, map_labels, map_jnames, within_inames|{iname}, depends_on)
+                            index.data,
+                            map_labels,
+                            map_jnames,
+                            within_inames | {iname},
+                            depends_on,
+                        )
 
                         index_insn = lp.Assignment(
                             pym.var(jname),
                             expr,
                             id=self._namer.next("myid_"),
-                            within_inames=within_inames|{iname},
-                            depends_on=depends_on)
+                            within_inames=within_inames | {iname},
+                            depends_on=depends_on,
+                        )
 
                         index_insns = [index_insn]
 
@@ -425,7 +503,7 @@ class LoopyKernelBuilder:
                             assert temp_labels.pop() == label
                             temp_jnames.pop()
 
-                        to_label, = index.to_labels
+                        (to_label,) = index.to_labels
                         new_labels = PrettyTuple(temp_labels) | to_label
                         new_jnames = PrettyTuple(temp_jnames) | jname
                         jnames = (jname,)
@@ -451,11 +529,17 @@ class LoopyKernelBuilder:
                 if strictly_all([lchildren, rchildren]):
                     for lsubindex, rsubindex in checked_zip(lchildren, rchildren):
                         self.build_assignment(
-                            assignment, lsubindex, rsubindex,
-                            within_indices|lthings[2]|rthings[2],
-                            within_inames|{iname},
-                            depends_on|lthings[3]|rthings[3],
-                            lthings[0], lthings[1], rthings[0], rthings[1])
+                            assignment,
+                            lsubindex,
+                            rsubindex,
+                            within_indices | lthings[2] | rthings[2],
+                            within_inames | {iname},
+                            depends_on | lthings[3] | rthings[3],
+                            lthings[0],
+                            lthings[1],
+                            rthings[0],
+                            rthings[1],
+                        )
 
                     terminate = False
                 else:
@@ -492,17 +576,25 @@ class LoopyKernelBuilder:
                     temp_part_labels,
                     array_jnames,
                     temp_jnames,
-                    within_inames|extra_inames,
-                    depends_on|extra_deps)
-
+                    within_inames | extra_inames,
+                    depends_on | extra_deps,
+                )
 
     @_build.register
-    def _(self, call: exprs.FunctionCall, within_multi_index_groups, within_inames, depends_on):
+    def _(
+        self,
+        call: exprs.FunctionCall,
+        within_multi_index_groups,
+        within_inames,
+        depends_on,
+    ):
         # I think I'd prefer to do this in a separate earlier pass?
         insns = self.expand_function_call(call, within_multi_index_groups, depends_on)
 
         for insn in insns:
-            self._make_instruction_context(insn, within_multi_index_groups, within_inames, depends_on)
+            self._make_instruction_context(
+                insn, within_multi_index_groups, within_inames, depends_on
+            )
 
     def expand_function_call(self, call, within_indices, depends_on):
         """
@@ -518,25 +610,38 @@ class LoopyKernelBuilder:
             itree = NullRootTree()
             axtree = MultiAxis()
             for idx in arg.tensor.indices.children(arg.tensor.indices.root):
-                self._construct_temp_dims(axtree, itree, arg.tensor.indices, idx, within_indices)
+                self._construct_temp_dims(
+                    axtree, itree, arg.tensor.indices, idx, within_indices
+                )
 
             axtree.set_up()
             temporary = MultiArray(
-                axtree, indices=itree, name=self._temp_name_generator.next(),
-                dtype=arg.tensor.dtype)
+                axtree,
+                indices=itree,
+                name=self._temp_name_generator.next(),
+                dtype=arg.tensor.dtype,
+            )
             temporaries[arg] = temporary
             # import pdb; pdb.set_trace()
 
         gathers = self.make_gathers(temporaries)
         newcall = self.make_function_call(
-            call, temporaries,
-            depends_on=frozenset(gather.id for gather in gathers)
+            call, temporaries, depends_on=frozenset(gather.id for gather in gathers)
         )
         scatters = self.make_scatters(temporaries, depends_on=frozenset({newcall.id}))
 
         return (*gathers, newcall, *scatters)
 
-    def _construct_temp_dims(self, axtree, itree, currentindices, index, within_indices, partid=NullRootNode.ID, iid=NullRootNode.ID):
+    def _construct_temp_dims(
+        self,
+        axtree,
+        itree,
+        currentindices,
+        index,
+        within_indices,
+        partid=NullRootNode.ID,
+        iid=NullRootNode.ID,
+    ):
         """Return an iterable of axis parts per index
 
         Parameters
@@ -566,12 +671,19 @@ class LoopyKernelBuilder:
 
             if children := currentindices.children(index):
                 for subidx in children:
-                    self._construct_temp_dims(axtree, itree, currentindices, subidx, within_indices, new_part.id, new_index.id)
+                    self._construct_temp_dims(
+                        axtree,
+                        itree,
+                        currentindices,
+                        subidx,
+                        within_indices,
+                        new_part.id,
+                        new_index.id,
+                    )
 
     def make_gathers(self, temporaries, **kwargs):
         return tuple(
-            self.make_gather(arg, temp, **kwargs)
-            for arg, temp in temporaries.items()
+            self.make_gather(arg, temp, **kwargs) for arg, temp in temporaries.items()
         )
 
     def make_gather(self, argument, temporary, **kwargs):
@@ -584,28 +696,35 @@ class LoopyKernelBuilder:
             raise NotImplementedError
 
     def make_function_call(self, call, temporaries, **kwargs):
-        assert all(arg.access in {exprs.READ, exprs.WRITE, exprs.INC, exprs.RW} for arg in call.arguments)
+        assert all(
+            arg.access in {exprs.READ, exprs.WRITE, exprs.INC, exprs.RW}
+            for arg in call.arguments
+        )
 
         reads = tuple(
             # temporaries[arg] for arg in call.arguments
-            temp for arg, temp in temporaries.items()
+            temp
+            for arg, temp in temporaries.items()
             if arg.access in {exprs.READ, exprs.INC, exprs.RW}
         )
         writes = tuple(
-            temp for arg, temp in temporaries.items()
+            temp
+            for arg, temp in temporaries.items()
             # temporaries[arg] for arg in call.arguments
             if arg.access in {exprs.WRITE, exprs.INC, exprs.RW}
         )
         return tlang.FunctionCall(call.function, reads, writes, **kwargs)
 
     def make_scatters(self, temporaries, **kwargs):
-        return tuple(filter(
-            None,
-            (
-                self.make_scatter(arg, temp, **kwargs)
-                for arg, temp in temporaries.items()
+        return tuple(
+            filter(
+                None,
+                (
+                    self.make_scatter(arg, temp, **kwargs)
+                    for arg, temp in temporaries.items()
+                ),
             )
-        ))
+        )
 
     def make_scatter(self, argument, temporary, **kwargs):
         if argument.access == exprs.READ:
@@ -618,9 +737,10 @@ class LoopyKernelBuilder:
             raise AssertionError
 
     @functools.singledispatchmethod
-    def _make_instruction_context(self, instruction: tlang.Instruction, *args, **kwargs):
+    def _make_instruction_context(
+        self, instruction: tlang.Instruction, *args, **kwargs
+    ):
         raise TypeError
-
 
     @_make_instruction_context.register
     def _(self, call: tlang.FunctionCall, within_indices, within_inames, depends_on):
@@ -638,7 +758,9 @@ class LoopyKernelBuilder:
         extents = {}
         for temp in utils.unique(itertools.chain(call.reads, call.writes)):
             for index in temp.indices.children(temp.indices.root):
-                extents |= self.collect_extents(temp.indices, index, within_indices, within_inames, depends_on)
+                extents |= self.collect_extents(
+                    temp.indices, index, within_indices, within_inames, depends_on
+                )
 
         # NOTE: If we register an extent to pass through loopy will complain
         # unless we register it as an assumption of the local kernel (e.g. "n <= 3")
@@ -658,7 +780,7 @@ class LoopyKernelBuilder:
             id=insn_id,
             within_inames=within_inames,
             within_inames_is_final=True,
-            depends_on=depends_on
+            depends_on=depends_on,
         )
 
         self.instructions.append(call_insn)
@@ -669,55 +791,79 @@ class LoopyKernelBuilder:
 
         if isinstance(index.size, MultiArray):
             # TODO This will overwrite if we have duplicates
-            extent = self.register_extent(index.size, within_indices, within_inames, depends_on)
+            extent = self.register_extent(
+                index.size, within_indices, within_inames, depends_on
+            )
             extents[index.size] = pym.var(extent)
 
         if children := itree.children(index):
             for child in children:
-                extents |= self.collect_extents(itree, child, within_indices, within_inames, depends_on)
+                extents |= self.collect_extents(
+                    itree, child, within_indices, within_inames, depends_on
+                )
 
         return extents
 
     @_make_instruction_context.register
-    def _(self, assignment: tlang.Assignment, within_indices, within_inames, depends_on):
+    def _(
+        self, assignment: tlang.Assignment, within_indices, within_inames, depends_on
+    ):
         # FIXME this is kinda dumb now
         lres, rres = [], []
         for lindex, rindex in checked_zip(
-                assignment.lhs.indices.children(assignment.lhs.indices.root),
-                assignment.rhs.indices.children(assignment.rhs.indices.root)
+            assignment.lhs.indices.children(assignment.lhs.indices.root),
+            assignment.rhs.indices.children(assignment.rhs.indices.root),
         ):
             lres.append((lindex, (), ()))
             rres.append((rindex, (), ()))
 
         # import pdb; pdb.set_trace()
-        for (lindex, llabels, ljnames), (rindex, rlabels, rjnames) in checked_zip(lres, rres):
+        for (lindex, llabels, ljnames), (rindex, rlabels, rjnames) in checked_zip(
+            lres, rres
+        ):
             self.build_assignment(
-                assignment, lindex, rindex, within_indices, within_inames, depends_on,
-                llabels, ljnames, rlabels, rjnames)
+                assignment,
+                lindex,
+                rindex,
+                within_indices,
+                within_inames,
+                depends_on,
+                llabels,
+                ljnames,
+                rlabels,
+                rjnames,
+            )
 
     def emit_assignment_insn(
-            self, assignment,
-            array_pt_labels, temp_pt_labels,
-            array_jnames, temp_jnames,
-            within_inames, depends_on,
-            scalar=False
+        self,
+        assignment,
+        array_pt_labels,
+        temp_pt_labels,
+        array_jnames,
+        temp_jnames,
+        within_inames,
+        depends_on,
+        scalar=False,
     ):
-
         # layout instructions - must be emitted innermost to make sense (reset appropriately)
         array_offset = self._namer.next(f"{assignment.array.name}_ptr")
         temp_offset = self._namer.next(f"{assignment.temporary.name}_ptr")
-        self._temp_kernel_data.extend([
-            lp.TemporaryVariable(name, shape=(), dtype=np.uintp)
-            for name in [array_offset, temp_offset]
-        ])
+        self._temp_kernel_data.extend(
+            [
+                lp.TemporaryVariable(name, shape=(), dtype=np.uintp)
+                for name in [array_offset, temp_offset]
+            ]
+        )
         array_offset_insn = lp.Assignment(
-            pym.var(array_offset), 0,
+            pym.var(array_offset),
+            0,
             id=self._namer.next("insn"),
             within_inames=within_inames,
             depends_on=depends_on,
         )
         temp_offset_insn = lp.Assignment(
-            pym.var(temp_offset), 0,
+            pym.var(temp_offset),
+            0,
             id=self._namer.next("insn"),
             within_inames=within_inames,
             depends_on=depends_on,
@@ -729,13 +875,18 @@ class LoopyKernelBuilder:
         array_axis = assignment.array.axes
         nodeid = NullRootNode.ID
         for i, pt_label in enumerate(array_pt_labels):
-            array_npart = [pt.label for pt in array_axis.children(nodeid)].index(pt_label)
+            array_npart = [pt.label for pt in array_axis.children(nodeid)].index(
+                pt_label
+            )
             array_part = array_axis.children(nodeid)[array_npart]
 
             deps = self.emit_layout_insns(
-                array_part.layout_fn, array_offset,
-                array_pt_labels[:i+1], array_jnames[:i+1],
-                within_inames, depends_on,
+                array_part.layout_fn,
+                array_offset,
+                array_pt_labels[: i + 1],
+                array_jnames[: i + 1],
+                within_inames,
+                depends_on,
             )
             depends_on |= deps
             nodeid = array_part.id
@@ -746,13 +897,18 @@ class LoopyKernelBuilder:
             temp_axis = assignment.temporary.axes
             nodeid = NullRootNode.ID
             for i, pt_label in enumerate(temp_pt_labels):
-                temp_npart = [pt.label for pt in temp_axis.children(nodeid)].index(pt_label)
+                temp_npart = [pt.label for pt in temp_axis.children(nodeid)].index(
+                    pt_label
+                )
                 temp_part = temp_axis.children(nodeid)[temp_npart]
 
                 deps = self.emit_layout_insns(
                     temp_part.layout_fn,
-                    temp_offset, temp_pt_labels[:i+1], temp_jnames[:i+1],
-                    within_inames, depends_on,
+                    temp_offset,
+                    temp_pt_labels[: i + 1],
+                    temp_jnames[: i + 1],
+                    within_inames,
+                    depends_on,
                 )
                 depends_on |= deps
                 nodeid = temp_part.id
@@ -765,11 +921,16 @@ class LoopyKernelBuilder:
         # else:
         #     no_sync_with = frozenset()
 
-
         self.generate_assignment_insn_inner(
-            assignment, assignment.temporary, temp_offset,
-            assignment.tensor, array_offset,
-            scalar=scalar, depends_on=depends_on, within_inames=within_inames)
+            assignment,
+            assignment.temporary,
+            temp_offset,
+            assignment.tensor,
+            array_offset,
+            scalar=scalar,
+            depends_on=depends_on,
+            within_inames=within_inames,
+        )
 
         # Register data
         # TODO should only do once at a higher point
@@ -790,7 +951,9 @@ class LoopyKernelBuilder:
                 lp.TemporaryVariable(unindexed.name, shape=shape)
             )
 
-    def emit_layout_insns(self, layout_fn, offset_var, part_labels, jnames, within_inames, depends_on):
+    def emit_layout_insns(
+        self, layout_fn, offset_var, part_labels, jnames, within_inames, depends_on
+    ):
         """
         TODO
         """
@@ -804,13 +967,16 @@ class LoopyKernelBuilder:
                 mylabels = part_labels[-1:]
                 myjnames = jnames[-1:]
             else:
-                assert layout_fn.data.axes.rootless_depth == utils.single_valued(map(len, [part_labels, jnames]))
+                assert layout_fn.data.axes.rootless_depth == utils.single_valued(
+                    map(len, [part_labels, jnames])
+                )
                 mylabels = part_labels
                 myjnames = jnames
 
             layout_var = self.register_scalar_assignment(
-                layout_fn.data, mylabels, myjnames, within_inames, depends_on)
-            expr = pym.var(offset_var)+layout_var
+                layout_fn.data, mylabels, myjnames, within_inames, depends_on
+            )
+            expr = pym.var(offset_var) + layout_var
 
             # register the data
             # done in register_scalar_assignment?
@@ -823,15 +989,21 @@ class LoopyKernelBuilder:
             if isinstance(start, MultiArray):
                 # drop the last jname
                 start = self.register_scalar_assignment(
-                    layout_fn.start, part_labels[:-1], jnames[:-1], within_inames, depends_on)
+                    layout_fn.start,
+                    part_labels[:-1],
+                    jnames[:-1],
+                    within_inames,
+                    depends_on,
+                )
 
             jname = pym.var(jnames[-1])
-            expr = pym.var(offset_var) + jname*step + start
+            expr = pym.var(offset_var) + jname * step + start
         else:
             raise NotImplementedError
 
         insn = lp.Assignment(
-            offset_var, expr,
+            offset_var,
+            expr,
             id=self._namer.next("insn"),
             within_inames=within_inames,
             depends_on=depends_on,
@@ -842,16 +1014,16 @@ class LoopyKernelBuilder:
         return frozenset({insn.id})
 
     def generate_assignment_insn_inner(
-            self,
-            assignment,
-            temp,
-            toffset,
-            array,
-            aoffset,
-            scalar,
-            depends_on,
-            within_inames,
-        ):
+        self,
+        assignment,
+        temp,
+        toffset,
+        array,
+        aoffset,
+        scalar,
+        depends_on,
+        within_inames,
+    ):
         if scalar:
             texpr = pym.var(temp.name)
         else:
@@ -882,10 +1054,9 @@ class LoopyKernelBuilder:
         #     no_sync_with = frozenset()
         no_sync_with = frozenset({(f"{assignment.id}*", "any")})
 
-
-
         assign_insn = lp.Assignment(
-            lexpr, rexpr,
+            lexpr,
+            rexpr,
             id=insn_id,
             within_inames=frozenset(within_inames),
             within_inames_is_final=True,
@@ -895,14 +1066,16 @@ class LoopyKernelBuilder:
         self.instructions.append(assign_insn)
 
     def generate_index_insns(
-            self,
-            indicess,  # iterable of an iterable of multi-index groups
-            within_multi_index_groups,
-            depends_on):
-
+        self,
+        indicess,  # iterable of an iterable of multi-index groups
+        within_multi_index_groups,
+        depends_on,
+    ):
         if not utils.is_single_valued(len(idxs) for idxs in indicess):
-            raise NotImplementedError("Need to be clever about having different lengths"
-                                      "of indices for LHS and RHS")
+            raise NotImplementedError(
+                "Need to be clever about having different lengths"
+                "of indices for LHS and RHS"
+            )
 
         # this is a zip
         current_index_groups = []
@@ -914,16 +1087,20 @@ class LoopyKernelBuilder:
 
         state = []
         expansion = self.expand_multi_index_group(
-            current_index_groups, within_multi_index_groups, depends_on)
+            current_index_groups, within_multi_index_groups, depends_on
+        )
         for updated_within_migs, updated_deps in expansion:
             subresult = self.generate_index_insns(
                 later_index_groupss,
-                updated_within_migs, updated_deps,
+                updated_within_migs,
+                updated_deps,
             )
             state.extend(subresult)
         return tuple(state)
 
-    def register_terminal_multi_index(self, assignment, multi_idx, inames, within_inames, depends_on):
+    def register_terminal_multi_index(
+        self, assignment, multi_idx, inames, within_inames, depends_on
+    ):
         # Note: At the moment we are assuming that all of the loops have already
         # been registered
 
@@ -938,7 +1115,8 @@ class LoopyKernelBuilder:
 
             index_insn = lp.Assignment(
                 # pym.var(array_iname), pym.var(iname)*typed_idx.step+typed_idx.start,
-                pym.var(array_jname), pym.var(iname),
+                pym.var(array_jname),
+                pym.var(iname),
                 id=self._namer.next(f"{assignment.id}_"),
                 within_inames=within_inames,
                 depends_on=depends_on,
@@ -948,17 +1126,26 @@ class LoopyKernelBuilder:
             self.instructions.append(index_insn)
             new_deps = frozenset({index_insn.id})
 
-            self._temp_kernel_data.extend([
-                lp.TemporaryVariable(name, shape=(), dtype=np.uintp)
-                for name in [array_jname]
-            ])
+            self._temp_kernel_data.extend(
+                [
+                    lp.TemporaryVariable(name, shape=(), dtype=np.uintp)
+                    for name in [array_jname]
+                ]
+            )
 
             array_pt_labels.append(typed_idx.part_label)
             array_jnames.append(array_jname)
 
             temp_pt_labels.append(typed_idx.part_label)
             temp_jnames.append(iname)
-        return tuple(temp_pt_labels), tuple(array_pt_labels), tuple(temp_jnames), tuple(array_jnames), within_inames, new_deps
+        return (
+            tuple(temp_pt_labels),
+            tuple(array_pt_labels),
+            tuple(temp_jnames),
+            tuple(array_jnames),
+            within_inames,
+            new_deps,
+        )
 
     def register_extent(self, extent, within_indices, within_inames, depends_on):
         if isinstance(extent, MultiArray):
@@ -974,12 +1161,15 @@ class LoopyKernelBuilder:
                     break
 
             temp_var = self.register_scalar_assignment(
-                extent, labels, jnames, within_inames, depends_on)
+                extent, labels, jnames, within_inames, depends_on
+            )
             return str(temp_var)
         else:
             return extent
 
-    def register_scalar_assignment(self, array, part_labels, jnames, within_inames, depends_on):
+    def register_scalar_assignment(
+        self, array, part_labels, jnames, within_inames, depends_on
+    ):
         temp_name = self._namer.next("n")
         temp = MultiArray(None, name=temp_name, dtype=np.int32)
         insn = tlang.Read(array, temp)
@@ -989,10 +1179,14 @@ class LoopyKernelBuilder:
 
         # TODO Think about dependencies
         self.emit_assignment_insn(
-            insn, part_labels, temp_pt_labels, jnames, temp_jnames,
+            insn,
+            part_labels,
+            temp_pt_labels,
+            jnames,
+            temp_jnames,
             within_inames=within_inames,
             depends_on=depends_on,
-            scalar=True
+            scalar=True,
         )
 
         return pym.var(temp_name)
@@ -1018,10 +1212,7 @@ def _(assignment: tlang.Assignment):
 def as_subarrayref(temporary, iname):
     """Register an argument to a function."""
     index = (pym.var(iname),)
-    return lp.symbolic.SubArrayRef(
-        index, pym.subscript(pym.var(temporary.name), index)
-    )
-
+    return lp.symbolic.SubArrayRef(index, pym.subscript(pym.var(temporary.name), index))
 
 
 def resolve(instruction, *args):
@@ -1056,7 +1247,6 @@ class AssignmentResolver:
             return pym.subscript(name, self.local_idxs + self.local_offset)
         else:
             return name
-
 
 
 class ReadAssignmentResolver(AssignmentResolver):

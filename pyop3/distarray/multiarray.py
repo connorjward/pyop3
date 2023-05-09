@@ -18,8 +18,14 @@ from pyop3.utils import NameGenerator, PrettyTuple, strictly_all, single_valued
 from pyop3 import utils
 from pyop3.dtypes import get_mpi_dtype, IntType
 from pyop3.multiaxis import (
-    expand_indices_to_fill_empty_shape, fill_shape,
-    MultiAxis, AxisPart, get_bottom_part, RangeNode, TabulatedMapNode)
+    expand_indices_to_fill_empty_shape,
+    fill_shape,
+    MultiAxis,
+    AxisPart,
+    get_bottom_part,
+    RangeNode,
+    TabulatedMapNode,
+)
 from pyop3.tree import Tree, NullRootTree, NullRootNode
 
 
@@ -40,7 +46,19 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
     name_generator = pyop3.utils.MultiNameGenerator()
     prefix = "ten"
 
-    def __init__(self, dim, indices=(), dtype=None, *, mesh = None, name: str = None, prefix: str=None, data=None, max_value=32, sf=None):
+    def __init__(
+        self,
+        dim,
+        indices=(),
+        dtype=None,
+        *,
+        mesh=None,
+        name: str = None,
+        prefix: str = None,
+        data=None,
+        max_value=32,
+        sf=None,
+    ):
         name = name or self.name_generator.next(prefix or self.prefix)
 
         if not dtype:
@@ -96,12 +114,12 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
                 return tuple([*unroll(mig.from_index), mig])
             else:
                 return (mig,)
+
         return unroll(self.indices)
 
     @property
     def unrolled_indices(self):
         return self.unrolled_migs  # alias
-
 
     @classmethod
     def compute_part_size(cls, part):
@@ -116,7 +134,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         flat, count = cls._get_count_data(data)
 
         if isinstance(count, list):
-            count = cls.from_list(count, labels, name, dtype, inc+1)
+            count = cls.from_list(count, labels, name, dtype, inc + 1)
 
         flat = np.array(flat, dtype=dtype)
 
@@ -175,7 +193,8 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         """Finish synchronizing shared data."""
         if not self._sync_thread:
             raise RuntimeError(
-                "Cannot call sync_end without a prior call to sync_begin")
+                "Cannot call sync_end without a prior call to sync_begin"
+            )
         self._sync_thread.join()
         self._sync_thread = None
 
@@ -199,7 +218,9 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         # 1. Reduce leaf values to roots if they have been written to.
         # (this is basically local-to-global)
         if self._pending_write_op:
-            assert not self._halo_valid, "If a write is pending the halo cannot be valid"
+            assert (
+                not self._halo_valid
+            ), "If a write is pending the halo cannot be valid"
             # If halo entries have also been written to then we need to use the
             # full SF containing both shared and halo points. If the halo has not
             # been modified then we only need to reduce with shared points.
@@ -233,7 +254,6 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         self._pending_write_op = None
         self._halo_modified = False
 
-
     @classmethod
     def _get_part_size(cls, part, parent_indices):
         size = part.size
@@ -251,7 +271,9 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         else:
             result = []
             for parent_indices in part.size.mygenerateindices():
-                result.append([parent_indices, range(cls._read_tensor(part.size, parent_indices))])
+                result.append(
+                    [parent_indices, range(cls._read_tensor(part.size, parent_indices))]
+                )
             return result
 
     @classmethod
@@ -270,7 +292,9 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
             idxs = [
                 [i, *subidxs]
                 for i in idxs
-                for subidxs in cls._generate_indices(part.subaxis, parent_indices=parent_indices+[i])
+                for subidxs in cls._generate_indices(
+                    part.subaxis, parent_indices=parent_indices + [i]
+                )
             ]
         else:
             idxs = [[i] for i in idxs]
@@ -288,7 +312,9 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         idxs = []
         for i in range(cls._get_size(axis, parent_indices)):
             if axis.part.subaxis:
-                for subidxs in cls._mygenindices(axis.part.subaxis, parent_indices+[i]): 
+                for subidxs in cls._mygenindices(
+                    axis.part.subaxis, parent_indices + [i]
+                ):
                     idxs.append([i] + subidxs)
             else:
                 idxs.append([i])
@@ -311,7 +337,10 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
             current_size *= part.size
 
         if part.subaxis:
-            return sum(cls._compute_full_part_size(pt, parent_indices, current_size) for pt in part.subaxis.parts)
+            return sum(
+                cls._compute_full_part_size(pt, parent_indices, current_size)
+                for pt in part.subaxis.parts
+            )
         else:
             return current_size
 
@@ -328,13 +357,20 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         elif len(parent_indices) == 1:
             if marray.dim.part.subaxis:
                 ptr = 0
-                parent_idx, = parent_indices
+                (parent_idx,) = parent_indices
                 for i in range(parent_idx):
-                    ptr += compute_subaxis_size(marray.dim.part.subaxis, parent_indices+[i])
-                return marray.data[ptr:ptr+compute_subaxis_size(marray.dim.part.subaxis, parent_indices+[parent_idx])]
+                    ptr += compute_subaxis_size(
+                        marray.dim.part.subaxis, parent_indices + [i]
+                    )
+                return marray.data[
+                    ptr : ptr
+                    + compute_subaxis_size(
+                        marray.dim.part.subaxis, parent_indices + [parent_idx]
+                    )
+                ]
             else:
-                idx, = parent_indices
-                return marray.data[idx],
+                (idx,) = parent_indices
+                return (marray.data[idx],)
         else:
             raise NotImplementedError
 
@@ -348,7 +384,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
     @classmethod
     def _get_subdim(cls, dim, point):
         bounds = list(np.cumsum([p.size for p in dim.parts]))
-        for i, (start, stop) in enumerate(zip([0]+bounds, bounds)):
+        for i, (start, stop) in enumerate(zip([0] + bounds, bounds)):
             if start <= point < stop:
                 npart = i
                 break
@@ -461,7 +497,6 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
                     new_idxs.append(MultiIndex((idx,)))
             return tuple(new_idxs)
 
-
     def select_axes(self, indices):
         selected = []
         current_axis = self.axes
@@ -482,8 +517,12 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
                 continue
             idx = Slice(part.size, npart=i)
             if part.subaxis:
-                idxs += [[idx, *subidxs]
-                    for subidxs in cls._fill_with_slices(part.subaxis, parent_indices+[idx])]
+                idxs += [
+                    [idx, *subidxs]
+                    for subidxs in cls._fill_with_slices(
+                        part.subaxis, parent_indices + [idx]
+                    )
+                ]
             else:
                 idxs += [[idx]]
         return idxs
@@ -498,7 +537,9 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
     def _check_indexed(self, dim, indices):
         for label, size in zip(dim.labels, dim.sizes):
             try:
-                (index, subindices), = [(idx, subidxs) for idx, subidxs in indices if idx.label == label]
+                ((index, subindices),) = [
+                    (idx, subidxs) for idx, subidxs in indices if idx.label == label
+                ]
 
                 npart = dim.labels.index(index.label)
 
@@ -531,7 +572,9 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
             npart = idx.npart
             part = dim.get_part(npart)
             if part.subaxis:
-                return [idx] + cls._parse_indices(part.subaxis, subidxs, parent_indices+[idx])
+                return [idx] + cls._parse_indices(
+                    part.subaxis, subidxs, parent_indices + [idx]
+                )
             else:
                 return [idx]
         elif isinstance(idx, Slice):
@@ -541,7 +584,9 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
             part = dim.get_part(idx.npart)
             if part.subaxis:
-                return [idx] + cls._parse_indices(part.subaxis, subidxs, parent_indices+[idx])
+                return [idx] + cls._parse_indices(
+                    part.subaxis, subidxs, parent_indices + [idx]
+                )
             else:
                 return [idx]
         else:
@@ -567,14 +612,18 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         value, children = item
 
         if children:
-            return [[value] + result for child in children for result in self._linearize(child)]
+            return [
+                [value] + result
+                for child in children
+                for result in self._linearize(child)
+            ]
         else:
             return [[value]]
 
     @property
     def indexed_shape(self):
         try:
-            sh, = self.indexed_shapes
+            (sh,) = self.indexed_shapes
             return sh
         except ValueError:
             raise RuntimeError
@@ -590,7 +639,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
     @property
     def shape(self):
         try:
-            sh, = self.shapes
+            (sh,) = self.shapes
             return sh
         except ValueError:
             raise RuntimeError
@@ -626,7 +675,9 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         elif len(ords) == 1:
             return 1 + ords.pop()
         if len(ords) > 1:
-            raise Exception("tensor order cannot be established (subdims are different depths)")
+            raise Exception(
+                "tensor order cannot be established (subdims are different depths)"
+            )
 
     def _merge_stencils(self, stencils1, stencils2):
         return _merge_stencils(stencils1, stencils2, self.dim)
@@ -645,11 +696,13 @@ def make_sparsity(
         if iterindex.children:
             raise NotImplementedError(
                 "Need to think about what to do when we have more complicated "
-                "iteration sets that have multiple indices (e.g. extruded cells)")
+                "iteration sets that have multiple indices (e.g. extruded cells)"
+            )
 
         if not isinstance(iterindex, RangeNode):
             raise NotImplementedError(
-                "Need to think about whether maps are reasonable here")
+                "Need to think about whether maps are reasonable here"
+            )
 
         if not utils.is_single_valued(idx.id for idx in [iterindex, lmap, rmap]):
             raise ValueError("Indices must share common roots")
@@ -657,9 +710,14 @@ def make_sparsity(
         sparsity = collections.defaultdict(set)
         for i in range(iterindex.size):
             subsparsity = make_sparsity(
-                None, lmap.child, rmap.child,
-                llabels|iterindex.label, rlabels|iterindex.label,
-                lindices|i, rindices|i)
+                None,
+                lmap.child,
+                rmap.child,
+                llabels | iterindex.label,
+                rlabels | iterindex.label,
+                lindices | i,
+                rindices | i,
+            )
             for labels, indices in subsparsity.items():
                 sparsity[labels].update(indices)
         return sparsity
@@ -682,11 +740,10 @@ def make_sparsity(
 
         sparsity = collections.defaultdict(set)
         for i in range(lmap.size):
-            new_indices = PrettyTuple([lmap.data.get_value(lindices|i)])
+            new_indices = PrettyTuple([lmap.data.get_value(lindices | i)])
             subsparsity = make_sparsity(
-                None, lmap.child, rmap,
-                new_labels, rlabels,
-                new_indices, rindices)
+                None, lmap.child, rmap, new_labels, rlabels, new_indices, rindices
+            )
             for labels, indices in subsparsity.items():
                 sparsity[labels].update(indices)
         return sparsity
@@ -708,11 +765,10 @@ def make_sparsity(
 
         sparsity = collections.defaultdict(set)
         for i in range(rmap.size):
-            new_indices = PrettyTuple([rmap.data.get_value(rindices|i)])
+            new_indices = PrettyTuple([rmap.data.get_value(rindices | i)])
             subsparsity = make_sparsity(
-                None, lmap, rmap.child,
-                llabels, new_labels,
-                lindices, new_indices)
+                None, lmap, rmap.child, llabels, new_labels, lindices, new_indices
+            )
             for labels, indices in subsparsity.items():
                 sparsity[labels].update(indices)
         return sparsity
@@ -727,8 +783,7 @@ def make_sparsity(
 
 def distribute_sparsity(sparsity, ax1, ax2, owner="row"):
     if any(ax.nparts > 1 for ax in [ax1, ax2]):
-        raise NotImplementedError(
-            "Only dealing with single-part multi-axes for now")
+        raise NotImplementedError("Only dealing with single-part multi-axes for now")
 
     # how many points need to get sent to other processes?
     # how many points do I get from other processes?
@@ -741,7 +796,8 @@ def distribute_sparsity(sparsity, ax1, ax2, owner="row"):
                 new_sparsity[ax1.part.label, ax2.part.label].add((lindex, rindex))
             else:
                 points_to_send[olabel.root.rank].add(
-                    (ax1.part.lgmap[lindex], ax2.part.lgmap[rindex]))
+                    (ax1.part.lgmap[lindex], ax2.part.lgmap[rindex])
+                )
         else:
             raise NotImplementedError
 
@@ -750,7 +806,8 @@ def distribute_sparsity(sparsity, ax1, ax2, owner="row"):
     # first determine how many new points we are getting from each rank
     comm = single_valued([ax1.sf.comm, ax2.sf.comm]).tompi4py()
     npoints_to_send = np.array(
-        [len(points_to_send[rank]) for rank in range(comm.size)], dtype=IntType)
+        [len(points_to_send[rank]) for rank in range(comm.size)], dtype=IntType
+    )
     npoints_to_recv = np.empty_like(npoints_to_send)
     comm.Alltoall(npoints_to_send, npoints_to_recv)
 
@@ -778,13 +835,16 @@ def distribute_sparsity(sparsity, ax1, ax2, owner="row"):
 
     # create a buffer to hold the new values
     # x2 since we are sending row and column numbers
-    new_points = np.empty(sum(npoints_to_recv)*2, dtype=IntType)
-    rootdata = np.array([
-        num
-        for rank in range(comm.size)
-        for lnum, rnum in points_to_send[rank]
-        for num in [lnum, rnum]
-    ], dtype=new_points.dtype)
+    new_points = np.empty(sum(npoints_to_recv) * 2, dtype=IntType)
+    rootdata = np.array(
+        [
+            num
+            for rank in range(comm.size)
+            for lnum, rnum in points_to_send[rank]
+            for num in [lnum, rnum]
+        ],
+        dtype=new_points.dtype,
+    )
 
     mpi_dtype, _ = get_mpi_dtype(np.dtype(IntType))
     mpi_op = MPI.REPLACE
@@ -793,16 +853,20 @@ def distribute_sparsity(sparsity, ax1, ax2, owner="row"):
     sf.bcastEnd(*args)
 
     for i in range(sum(npoints_to_recv)):
-        new_sparsity[ax1.part.label, ax2.part.label].add((new_points[2*i], new_points[2*i+1]))
+        new_sparsity[ax1.part.label, ax2.part.label].add(
+            (new_points[2 * i], new_points[2 * i + 1])
+        )
 
     # import pdb; pdb.set_trace()
     return new_sparsity
+
 
 def overlap_axes(ax1, ax2, sparsity=None):
     """Combine two multiaxes, possibly sparsely."""
     if ax1.depth != 1 or ax2.depth != 1:
         raise NotImplementedError(
-            "Need to think about composition rules for nested axes")
+            "Need to think about composition rules for nested axes"
+        )
 
     new_parts = []
     for pt1 in ax1.parts:
@@ -811,7 +875,8 @@ def overlap_axes(ax1, ax2, sparsity=None):
             # some initial checks
             if any(not isinstance(pt.count, numbers.Integral) for pt in [pt1, pt2]):
                 raise NotImplementedError(
-                    "Need to think about non-integral sized axis parts")
+                    "Need to think about non-integral sized axis parts"
+                )
 
             # now do the real work
             count = []
@@ -825,8 +890,12 @@ def overlap_axes(ax1, ax2, sparsity=None):
                 count.append(len(indices_per_row))
                 indices.append(indices_per_row)
 
-            count = MultiArray.from_list(count, labels=[pt1.label], name="count", dtype=IntType)
-            indices = MultiArray.from_list(indices, labels=[pt1.label, "any"], name="indices", dtype=IntType)
+            count = MultiArray.from_list(
+                count, labels=[pt1.label], name="count", dtype=IntType
+            )
+            indices = MultiArray.from_list(
+                indices, labels=[pt1.label, "any"], name="indices", dtype=IntType
+            )
 
             # FIXME: I think that the inner axis count should be "full", not
             # the number of indices. This means that we need to use the
@@ -856,6 +925,7 @@ def _compute_indexed_shape(indices):
 
 def _compute_indexed_shape2(flat_indices):
     import warnings
+
     warnings.warn("need to remove", DeprecationWarning)
     shape = ()
     for index in flat_indices:
@@ -868,12 +938,10 @@ def _merge_stencils(stencils1, stencils2, dims):
     stencils2 = as_stencil_group(stencils2, dims)
 
     return StencilGroup(
-        Stencil(
-            idxs1+idxs2
-            for idxs1, idxs2 in itertools.product(stc1, stc2)
-        )
+        Stencil(idxs1 + idxs2 for idxs1, idxs2 in itertools.product(stc1, stc2))
         for stc1, stc2 in itertools.product(stencils1, stencils2)
     )
+
 
 def as_stencil_group(stencils, dims):
     if isinstance(stencils, StencilGroup):
@@ -882,35 +950,25 @@ def as_stencil_group(stencils, dims):
     is_sequence = lambda seq: isinstance(seq, collections.abc.Sequence)
     # case 1: dat[x]
     if not is_sequence(stencils):
-        return StencilGroup([
-            Stencil([
-                _construct_indices([stencils], dims, dims.root)
-            ])
-        ])
+        return StencilGroup(
+            [Stencil([_construct_indices([stencils], dims, dims.root)])]
+        )
     # case 2: dat[x, y]
     elif not is_sequence(stencils[0]):
-        return StencilGroup([
-            Stencil([
-                _construct_indices(stencils, dims, dims.root)
-            ])
-        ])
+        return StencilGroup([Stencil([_construct_indices(stencils, dims, dims.root)])])
     # case 3: dat[(a, b), (c, d)]
     elif not is_sequence(stencils[0][0]):
-        return StencilGroup([
-            Stencil([
-                _construct_indices(idxs, dims, dims.root)
-                for idxs in stencils
-            ])
-        ])
+        return StencilGroup(
+            [Stencil([_construct_indices(idxs, dims, dims.root) for idxs in stencils])]
+        )
     # case 4: dat[((a, b), (c, d)), ((e, f), (g, h))]
     elif not is_sequence(stencils[0][0][0]):
-        return StencilGroup([
-            Stencil([
-                _construct_indices(idxs, dims, dims.root)
-                for idxs in stencil
-            ])
-            for stencil in stencils
-        ])
+        return StencilGroup(
+            [
+                Stencil([_construct_indices(idxs, dims, dims.root) for idxs in stencil])
+                for stencil in stencils
+            ]
+        )
     # default
     else:
         raise ValueError
@@ -937,8 +995,9 @@ def _construct_indices(input_indices, dims, current_dim, parent_indices=None):
     else:
         subdim = None
 
-    return (index,) + _construct_indices(subindices, dims, subdim, parent_indices + [index.copy(is_loop_index=True)])
-
+    return (index,) + _construct_indices(
+        subindices, dims, subdim, parent_indices + [index.copy(is_loop_index=True)]
+    )
 
 
 def index(indices):
@@ -951,14 +1010,18 @@ def index(indices):
 
 def _index(idx):
     if isinstance(idx, NonAffineMap):
-        return idx.copy(is_loop_index=True, tensor=idx.tensor.copy(indicess=(index(idx.tensor.indices),)))
+        return idx.copy(
+            is_loop_index=True,
+            tensor=idx.tensor.copy(indicess=(index(idx.tensor.indices),)),
+        )
     else:
         return idx.copy(is_loop_index=True)
 
 
 def _break_mixed_slices(stencils, dtree):
     return tuple(
-        tuple(idxs
+        tuple(
+            idxs
             for indices in stencil
             for idxs in _break_mixed_slices_per_indices(indices, dtree)
         )
@@ -1007,9 +1070,12 @@ def _partition_slice(slice_, dtree):
             dstop = ptr + dsize
 
             # check for overlap
-            if ((slice_.stop is None or dstart < slice_.stop)
-                    and (slice_.start is None or dstop > slice_.start)):
-                start = max(dstart, slice_.start) if slice_.start is not None else dstart
+            if (slice_.stop is None or dstart < slice_.stop) and (
+                slice_.start is None or dstop > slice_.start
+            ):
+                start = (
+                    max(dstart, slice_.start) if slice_.start is not None else dstart
+                )
                 stop = min(dstop, slice_.stop) if slice_.stop is not None else dstop
                 yield i, slice(start, stop)
             ptr += dsize

@@ -101,9 +101,9 @@ def treeA():
 @pytest.fixture
 def tree2():
     tree = Tree()
-    x = Node ("x")
-    y = Node ("y")
-    z = Node ("z")
+    x = Node("x")
+    y = Node("y")
+    z = Node("z")
     tree.add_node(x)
     tree.add_nodes([y, z], x)
     return tree
@@ -112,21 +112,24 @@ def tree2():
 @pytest.fixture
 def tree3():
     tree = Tree()
-    one = Node (1)
-    two = Node (2)
+    one = Node(1)
+    two = Node(2)
     tree.add_node(one)
     tree.add_node(two, one)
     return tree
 
 
 def test_tree_str(treeA):
-    assert str(treeA) == """\
+    assert (
+        str(treeA)
+        == """\
 Node(id='a')
 ├──➤ Node(id='b')
 │    ├──➤ Node(id='d')
 │    └──➤ Node(id='e')
 └──➤ Node(id='c')
      └──➤ Node(id='f')"""
+    )
 
 
 def test_tree_depth():
@@ -252,7 +255,7 @@ def test_tree_construction_from_nested_list():
         [
             [RangeNode("b"), [RangeNode("c"), RangeNode("d")]],
             [RangeNode("e"), [RangeNode("f")]],
-        ]
+        ],
     ]
     nodes = {
         Node("a"): ("b", "c"),

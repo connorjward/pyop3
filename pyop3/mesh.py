@@ -9,7 +9,6 @@ from pyop3.utils import NameGenerator, as_tuple
 __all__ = ["Mesh"]
 
 
-
 class Mesh:
     map_cache = {}
 
@@ -17,9 +16,9 @@ class Mesh:
 
     def __init__(self, dm, *, name=None):
         parts = []
-        for i in range(self.height+1):
+        for i in range(self.height + 1):
             start, stop = self.dm.getHeightStratum(i)
-            parts.append(AxisPart(stop-start, id=(i,)))
+            parts.append(AxisPart(stop - start, id=(i,)))
         axis = MultiAxis(id=name)
 
         self.dm = dm
@@ -37,22 +36,22 @@ class Mesh:
     @property
     def ncells(self):
         start, stop = self.dm.getHeightStratum(0)
-        return stop-start
+        return stop - start
 
     @property
     def nedges(self):
         start, stop = self.dm.getHeightStratum(1)
-        return stop-start
+        return stop - start
 
     @property
     def nfacets(self):
         start, stop = self.dm.getDepthStratum(1)
-        return stop-start
+        return stop - start
 
     @property
     def nvertices(self):
         start, stop = self.dm.getDepthStratum(0)
-        return stop-start
+        return stop - start
 
     # TODO I need to create a better index type for this sort of thing
     @property
@@ -70,13 +69,13 @@ class Mesh:
     def facets(self):
         if self.dim < 3:
             raise RuntimeError
-        return [Slice(self.nfacets, npart=self.dim-2, mesh=self)]
+        return [Slice(self.nfacets, npart=self.dim - 2, mesh=self)]
 
     @property
     def vertices(self):
         if self.dim < 1:
             raise RuntimeError
-        return [Slice(self.nvertices, npart=self.dim-1, mesh=self)]
+        return [Slice(self.nvertices, npart=self.dim - 1, mesh=self)]
 
     @property
     def depth(self):
@@ -88,7 +87,7 @@ class Mesh:
 
     @functools.lru_cache
     def cone(self, index):
-        index, = as_tuple(index)
+        (index,) = as_tuple(index)
         from_stratum = index.npart
         to_stratum = from_stratum + 1
 
@@ -97,16 +96,18 @@ class Mesh:
 
         # We assume a constant cone size
         arity = self.dm.getConeSize(start)
-        data = np.zeros(((stop-start), arity), dtype=np.int32) - 1
+        data = np.zeros(((stop - start), arity), dtype=np.int32) - 1
 
         for i, pt in enumerate(range(start, stop)):
             data[i] = self.dm.getCone(pt) - offset
 
         assert (data >= 0).all()
 
-        axes = MultiAxis(AxisPart(stop-start, id="myid")).add_subaxis("myid", arity)
+        axes = MultiAxis(AxisPart(stop - start, id="myid")).add_subaxis("myid", arity)
         tensor = MultiArray.new(axes, prefix="map", data=data, dtype=np.int32)
-        return NonAffineMap(tensor[[index]], arity=arity, npart=from_stratum+1, mesh=self)
+        return NonAffineMap(
+            tensor[[index]], arity=arity, npart=from_stratum + 1, mesh=self
+        )
 
     @classmethod
     def create_interval(cls, ncells, length_or_left, right=None):
@@ -134,8 +135,12 @@ class Mesh:
         dx = length / ncells
         # This ensures the rightmost point is actually present.
         coords = np.arange(left, right + 0.01 * dx, dx, dtype=np.double).reshape(-1, 1)
-        cells = np.dstack((np.arange(0, len(coords) - 1, dtype=np.int32),
-                           np.arange(1, len(coords), dtype=np.int32))).reshape(-1, 2)
+        cells = np.dstack(
+            (
+                np.arange(0, len(coords) - 1, dtype=np.int32),
+                np.arange(1, len(coords), dtype=np.int32),
+            )
+        ).reshape(-1, 2)
         dm = PETSc.DMPlex().createFromCellList(1, cells, coords)
         return cls(dm)
 
@@ -177,8 +182,8 @@ class Mesh:
         """
         xcoords = np.unique(xcoords)
         ycoords = np.unique(ycoords)
-        nx = np.size(xcoords)-1
-        ny = np.size(ycoords)-1
+        nx = np.size(xcoords) - 1
+        ny = np.size(ycoords) - 1
 
         for n in (nx, ny):
             if n <= 0:
@@ -188,7 +193,12 @@ class Mesh:
         # cell vertices
         i, j = np.meshgrid(np.arange(nx, dtype=np.int32), np.arange(ny, dtype=np.int32))
 
-        cells = [i*(ny+1) + j, i*(ny+1) + j+1, (i+1)*(ny+1) + j+1, (i+1)*(ny+1) + j]
+        cells = [
+            i * (ny + 1) + j,
+            i * (ny + 1) + j + 1,
+            (i + 1) * (ny + 1) + j + 1,
+            (i + 1) * (ny + 1) + j,
+        ]
         cells = np.asarray(cells).swapaxes(0, 2).reshape(-1, 4)
 
         if not quadrilateral:
@@ -217,26 +227,52 @@ class Mesh:
         ycoords = np.linspace(0, Ly, ny + 1, dtype=np.double)
         zcoords = np.linspace(0, Lz, nz + 1, dtype=np.double)
         # X moves fastest, then Y, then Z
-        coords = np.asarray(np.meshgrid(xcoords, ycoords, zcoords)).swapaxes(0, 3).reshape(-1, 3)
-        i, j, k = np.meshgrid(np.arange(nx, dtype=np.int32),
-                              np.arange(ny, dtype=np.int32),
-                              np.arange(nz, dtype=np.int32))
+        coords = (
+            np.asarray(np.meshgrid(xcoords, ycoords, zcoords))
+            .swapaxes(0, 3)
+            .reshape(-1, 3)
+        )
+        i, j, k = np.meshgrid(
+            np.arange(nx, dtype=np.int32),
+            np.arange(ny, dtype=np.int32),
+            np.arange(nz, dtype=np.int32),
+        )
 
-        v0 = k*(nx + 1)*(ny + 1) + j*(nx + 1) + i
+        v0 = k * (nx + 1) * (ny + 1) + j * (nx + 1) + i
         v1 = v0 + 1
         v2 = v0 + (nx + 1)
         v3 = v1 + (nx + 1)
-        v4 = v0 + (nx + 1)*(ny + 1)
-        v5 = v1 + (nx + 1)*(ny + 1)
-        v6 = v2 + (nx + 1)*(ny + 1)
-        v7 = v3 + (nx + 1)*(ny + 1)
+        v4 = v0 + (nx + 1) * (ny + 1)
+        v5 = v1 + (nx + 1) * (ny + 1)
+        v6 = v2 + (nx + 1) * (ny + 1)
+        v7 = v3 + (nx + 1) * (ny + 1)
 
-        cells = [v0, v1, v3, v7,
-                 v0, v1, v7, v5,
-                 v0, v5, v7, v4,
-                 v0, v3, v2, v7,
-                 v0, v6, v4, v7,
-                 v0, v2, v6, v7]
+        cells = [
+            v0,
+            v1,
+            v3,
+            v7,
+            v0,
+            v1,
+            v7,
+            v5,
+            v0,
+            v5,
+            v7,
+            v4,
+            v0,
+            v3,
+            v2,
+            v7,
+            v0,
+            v6,
+            v4,
+            v7,
+            v0,
+            v2,
+            v6,
+            v7,
+        ]
         cells = np.asarray(cells).swapaxes(0, 3).reshape(-1, 4)
 
         dm = PETSc.DMPlex().createFromCellList(dim, cells, coords)
@@ -272,8 +308,8 @@ class ProductMesh:
 
         new_parts = []
         for part in mesh.axis.parts:
-            new_subaxis = self._productify_mesh_axes(rest, parent_ids+part.id)
-            new_part = part.copy(subaxis=new_subaxis, id=parent_ids+part.id)
+            new_subaxis = self._productify_mesh_axes(rest, parent_ids + part.id)
+            new_part = part.copy(subaxis=new_subaxis, id=parent_ids + part.id)
             new_parts.append(new_part)
         return mesh.axis.copy(parts=new_parts)
 

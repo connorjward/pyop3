@@ -93,25 +93,16 @@ def direct():
         "{ [i]: 0 <= i < 1 }",
         ["z[i] = z[i] + x[i] * y[i]"],
         [
-            lp.GlobalArg(
-                "x", np.float64, (6,), is_input=True, is_output=False
-            ),
-            lp.GlobalArg(
-                "y", np.float64, (6,), is_input=True, is_output=False
-            ),
-            lp.GlobalArg(
-                "z", np.float64, (6,), is_input=True, is_output=True
-            ),
+            lp.GlobalArg("x", np.float64, (6,), is_input=True, is_output=False),
+            lp.GlobalArg("y", np.float64, (6,), is_input=True, is_output=False),
+            lp.GlobalArg("z", np.float64, (6,), is_input=True, is_output=True),
         ],
         target=lp.CTarget(),
         name="local_kernel",
         lang_version=(2018, 2),
     )
     kernel = pyop3.LoopyKernel(loopy_kernel, [pyop3.READ, pyop3.READ, pyop3.INC])
-    return pyop3.Loop(
-        p := pyop3.index(ITERSET),
-        kernel(dat1[p], dat2[p], result[p])
-    )
+    return pyop3.Loop(p := pyop3.index(ITERSET), kernel(dat1[p], dat2[p], result[p]))
 
 
 @register_demo
@@ -121,15 +112,9 @@ def inc():
         f"{{ [i]: 0 <= i < {size} }}",
         ["z[i] = z[i] + x[i] * y[i]"],
         [
-            lp.GlobalArg(
-                "x", np.float64, (size,), is_input=True, is_output=False
-            ),
-            lp.GlobalArg(
-                "y", np.float64, (size,), is_input=True, is_output=False
-            ),
-            lp.GlobalArg(
-                "z", np.float64, (size,), is_input=True, is_output=True
-            ),
+            lp.GlobalArg("x", np.float64, (size,), is_input=True, is_output=False),
+            lp.GlobalArg("y", np.float64, (size,), is_input=True, is_output=False),
+            lp.GlobalArg("z", np.float64, (size,), is_input=True, is_output=True),
         ],
         target=lp.CTarget(),
         name="local_kernel",
@@ -138,7 +123,7 @@ def inc():
     kernel = pyop3.LoopyKernel(loopy_kernel, [pyop3.READ, pyop3.READ, pyop3.INC])
     return pyop3.Loop(
         p := pyop3.index(ITERSET),
-        kernel(dat1[MESH.closure(p)], dat2[MESH.closure(p)], dat3[MESH.closure(p)])
+        kernel(dat1[MESH.closure(p)], dat2[MESH.closure(p)], dat3[MESH.closure(p)]),
     )
 
 
@@ -223,15 +208,9 @@ def extruded():
         "{ [i]: 0 <= i < 1 }",
         ["z = x + y"],
         [
-            lp.GlobalArg(
-                "x", np.float64, (), is_input=True, is_output=False
-            ),
-            lp.GlobalArg(
-                "y", np.float64, (), is_input=True, is_output=False
-            ),
-            lp.GlobalArg(
-                "z", np.float64, (), is_input=False, is_output=True
-            ),
+            lp.GlobalArg("x", np.float64, (), is_input=True, is_output=False),
+            lp.GlobalArg("y", np.float64, (), is_input=True, is_output=False),
+            lp.GlobalArg("z", np.float64, (), is_input=False, is_output=True),
         ],
         target=pyop3.codegen.LOOPY_TARGET,
         name="local_kernel",
@@ -248,30 +227,24 @@ def extruded():
     )
     return pyop3.Loop(
         p := EXTRUDED_MESH.cells.index,
-        [
-            kernel(
-                dat1[p], dat2[p], result[p]
-            )
-        ],
+        [kernel(dat1[p], dat2[p], result[p])],
     )
 
 
 @register_demo
 def extr_inc():
-    size = 6 + EXTRUDED_MESH.NEDGES_IN_CELL_CLOSURE * 7 + EXTRUDED_MESH.NVERTS_IN_CELL_CLOSURE * 8
+    size = (
+        6
+        + EXTRUDED_MESH.NEDGES_IN_CELL_CLOSURE * 7
+        + EXTRUDED_MESH.NVERTS_IN_CELL_CLOSURE * 8
+    )
     loopy_kernel = lp.make_kernel(
         f"{{ [i]: 0 <= i < {size} }}",
         ["z[i] = z[i] + x[i] * y[i]"],
         [
-            lp.GlobalArg(
-                "x", np.float64, (size,), is_input=True, is_output=False
-            ),
-            lp.GlobalArg(
-                "y", np.float64, (size,), is_input=True, is_output=False
-            ),
-            lp.GlobalArg(
-                "z", np.float64, (size,), is_input=True, is_output=True
-            ),
+            lp.GlobalArg("x", np.float64, (size,), is_input=True, is_output=False),
+            lp.GlobalArg("y", np.float64, (size,), is_input=True, is_output=False),
+            lp.GlobalArg("z", np.float64, (size,), is_input=True, is_output=True),
         ],
         target=lp.CTarget(),
         name="local_kernel",
@@ -290,10 +263,13 @@ def extr_inc():
         p := EXTRUDED_MESH.cells.index,
         [
             kernel(
-                edat1[pyop3.closure(p)], edat2[pyop3.closure(p)], edat3[pyop3.closure(p)]
+                edat1[pyop3.closure(p)],
+                edat2[pyop3.closure(p)],
+                edat3[pyop3.closure(p)],
             )
         ],
     )
+
 
 @register_demo
 def multi_kernel():

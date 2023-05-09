@@ -44,7 +44,10 @@ def test_multicomponent_constraints():
 
     ###
 
-    layout = [ConstrainedMultiAxis(axes1, within_labels={"cpt3"}), ConstrainedMultiAxis(axes2)]
+    layout = [
+        ConstrainedMultiAxis(axes1, within_labels={"cpt3"}),
+        ConstrainedMultiAxis(axes2),
+    ]
     axtree = order_axes(layout)
 
     assert axtree.rootless_depth == 2
