@@ -448,49 +448,38 @@ class MultiAxisTree(Tree):
             assert len(children := self.children(partid)) == 1
             part, = children
 
-            # import pdb; pdb.set_trace()
-            if part.is_layout:
-                raise AssertionError("dead code")
-                if indices[depth] > 0:
-                    if axis.part.subaxis:
-                        # add the size of the one before
-                        newidxs = indices[:-1] + (indices[-1]-1,)
-                        offset += axis.part.subaxis.calc_size(newidxs)
-                    else:
-                        offset += 1
+            layout = part.layout_fn
+            if isinstance(layout, IndirectLayoutFunction):
+                if part.indices:
+                    raise NotImplementedError(
+                        "Does not make sense for indirect layouts to have sparsity "
+                        "(I think) since the the indices must be ordered...")
+                offset += layout.data.get_value(indices[:depth+1])
+            elif layout == "null layout":
+                pass
             else:
-                layout = part.layout_fn
-                if isinstance(layout, IndirectLayoutFunction):
-                    if part.indices:
-                        raise NotImplementedError(
-                            "Does not make sense for indirect layouts to have sparsity "
-                            "(I think) since the the indices must be ordered...")
-                    offset += layout.data.get_value(indices[:depth+1])
-                elif layout == "null layout":
-                    pass
+                assert isinstance(layout, AffineLayoutFunction)
+
+                prior_indices = PrettyTuple(indices[:depth])
+                last_index = indices[depth]
+
+                if isinstance(layout.start, MultiArray):
+                    start = layout.start.get_value(prior_indices)
                 else:
-                    assert isinstance(layout, AffineLayoutFunction)
+                    start = layout.start
 
-                    prior_indices = PrettyTuple(indices[:depth])
-                    last_index = indices[depth]
+                # handle sparsity
+                if part.indices is not None:
+                    bstart, bend = get_slice_bounds(part.indices, prior_indices)
 
-                    if isinstance(layout.start, MultiArray):
-                        start = layout.start.get_value(prior_indices)
-                    else:
-                        start = layout.start
+                    last_index = bisect.bisect_left(
+                        part.indices.data, last_index, bstart, bend)
+                    last_index -= bstart
 
-                    # handle sparsity
-                    if part.indices is not None:
-                        bstart, bend = get_slice_bounds(part.indices, prior_indices)
+                offset += last_index * layout.step + start
 
-                        last_index = bisect.bisect_left(
-                            part.indices.data, last_index, bstart, bend)
-                        last_index -= bstart
-
-                    offset += last_index * layout.step + start
-
-                    # update indices to include the modications for sparsity
-                    indices = PrettyTuple(prior_indices + (last_index,) + tuple(indices[depth+1:]))
+                # update indices to include the modications for sparsity
+                indices = PrettyTuple(prior_indices + (last_index,) + tuple(indices[depth+1:]))
 
             depth += 1
             partid = part.id
@@ -898,11 +887,6 @@ class MultiAxisTree(Tree):
         else:
             return False
 
-    def as_layout(self):
-        assert False, "dont touch?"
-        new_parts = tuple(pt.as_layout() for pt in self.parts)
-        return self.copy(parts=new_parts)
-
     def add_part(self, axis_id, *args):
         assert False, "dont touch?"
         if axis_id not in self._all_axis_ids:
@@ -1059,13 +1043,12 @@ def has_constant_step(axtree, part):
 
 
 class Node(pytools.ImmutableRecord):
-    fields = {"children", "id", "terminal"}
+    fields = {"children", "id"}
     namer = NameGenerator("idx")
 
-    def __init__(self, children=(), *, id=None, terminal=False):
+    def __init__(self, children=(), *, id=None):
         self.children = tuple(children)
         self.id = id or self.namer.next()
-        self.terminal = terminal
 
     @property
     def child(self):
@@ -1110,11 +1093,10 @@ class RangeNode(IndexNode):
     # fields = IndexNode.fields | {"label", "start", "stop", "step"}
     fields = IndexNode.fields | {"label", "stop"}
 
-    def __init__(self, label, stop, children=(), *, id=None, terminal=False):
+    def __init__(self, label, stop, children=(), *, id=None):
         self.label = label
         self.stop = stop
-        self.terminal = terminal
-        super().__init__(children, id=id, terminal=terminal)
+        super().__init__(children, id=id)
 
     # TODO: This is temporary
     @property
@@ -1136,12 +1118,12 @@ class MapNode(IndexNode):
     # in theory we can have a selector function here too so to_labels is actually bigger?
     # means we have multiple children?
 
-    def __init__(self, from_labels, to_labels, arity, children=(), *, id=None, terminal=False):
+    def __init__(self, from_labels, to_labels, arity, children=(), *, id=None):
         self.from_labels = from_labels
         self.to_labels = to_labels
         self.arity = arity
         self.selector = None  # TODO
-        super().__init__(children, id=id, terminal=terminal)
+        super().__init__(children, id=id)
 
     @property
     def size(self):
@@ -1211,11 +1193,11 @@ class MultiAxisComponent(NewNode):
         thing is dense and contains the numbers [0, ..., ndense).
 
     """
-    fields = {"count", "numbering", "label", "id", "max_count", "is_layout", "layout_fn", "overlap", "indexed", "is_a_terminal_thing", "indices", "lgmap"}
+    fields = {"count", "numbering", "label", "id", "max_count", "layout_fn", "overlap", "indexed", "indices", "lgmap"}
 
     id_generator = NameGenerator("_p")
 
-    def __init__(self, count, *, indices=None, numbering=None, label=None, id=None, max_count=None, is_layout=False, layout_fn=None, overlap=None, indexed=False, is_a_terminal_thing=False, lgmap=None):
+    def __init__(self, count, *, indices=None, numbering=None, label=None, id=None, max_count=None, layout_fn=None, overlap=None, indexed=False, lgmap=None):
         from pyop3.distarray import MultiArray
 
         if isinstance(count, numbers.Integral):
@@ -1241,7 +1223,6 @@ class MultiAxisComponent(NewNode):
         self.numbering = numbering
         self.label = label
         self.max_count = max_count
-        self.is_layout = is_layout
         self.layout_fn = layout_fn
         self.overlap = overlap
         self.indexed = indexed
@@ -1264,9 +1245,6 @@ class MultiAxisComponent(NewNode):
         tree to produce the layout. This is why we need this ``indexed`` flag.
         """
 
-        # are we basically dealing with a scalar?
-        self.is_a_terminal_thing = is_a_terminal_thing
-
         super().__init__(id)
 
     def __str__(self) -> str:
@@ -1285,10 +1263,6 @@ class MultiAxisComponent(NewNode):
             return self.copy(numbering=None, subaxis=self.subaxis.without_numbering())
         else:
             return self.copy(numbering=None)
-
-    def as_layout(self):
-        new_subaxis = self.subaxis.as_layout() if self.subaxis else None
-        return self.copy(is_layout=True, layout_fn=None, subaxis=new_subaxis)
 
     @property
     def is_ragged(self):

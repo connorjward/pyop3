@@ -5,16 +5,6 @@ from typing import Any, Collection
 import pytools
 
 
-# a tree
-class Node(pytools.ImmutableRecord):
-    fields = {"value", "children"}
-
-    def __init__(self, value, children=()):
-        self.value = value
-        self.children = tuple(children)
-        super().__init__()
-
-
 class MultiNameGenerator:
     def __init__(self):
         self._namers = {}
