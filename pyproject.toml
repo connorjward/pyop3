@@ -13,7 +13,7 @@ dev = [
 ]
 tests = [
   "pytest",
-  "pytest-mpi @ git+https://github.com/connorjward/pytest-mpi",
+  "pytest-mpi @ git+https://github.com/firedrakeproject/pytest-mpi",
 ]
 
 [tool.isort]
