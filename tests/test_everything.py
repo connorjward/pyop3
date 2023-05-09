@@ -1019,10 +1019,11 @@ def test_index_function():
 
     i1 = IndexTree([RangeNode("p1", 3, id="i0")])  # loop over "cells"
     i2 = i1.copy()
-    i2.add_node(  # "cell" data
-        IdentityMapNode(("p1",), ("p1",), arity=1), "i0")
-    i2.add_node(  # "vert" data
-        AffineMapNode(("p1",), ("p2",), arity=2, expr=mapexpr), "i0")
+    i2.add_nodes([
+        IdentityMapNode(("p1",), ("p1",), arity=1),  # "cell" data
+        AffineMapNode(("p1",), ("p2",), arity=2, expr=mapexpr),  # "vert" data
+    ], "i0")
+
     expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
