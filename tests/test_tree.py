@@ -4,10 +4,9 @@ from pyop3.tree import *
 
 
 def test_parent_works_with_nodes_and_ids():
-    tree = Tree()
     a = Node("a")
     b = Node("b")
-    tree.root = a
+    tree = Tree(a)
     tree.add_node(b, parent=a)
 
     assert tree.parent(b) == a
@@ -15,10 +14,9 @@ def test_parent_works_with_nodes_and_ids():
 
 
 def test_children_works_with_nodes_and_ids():
-    tree = Tree()
     a = Node("a")
     b = Node("b")
-    tree.root = a
+    tree = Tree(a)
     tree.add_node(b, parent=a)
 
     assert tree.children(a) == (b,)
@@ -26,19 +24,19 @@ def test_children_works_with_nodes_and_ids():
 
 
 def test_tree_root_has_no_parent():
-    tree = Tree()
     a = Node("a")
-    tree.root = a
+    tree = Tree(a)
     assert tree.parent(a) is None
 
 
 def test_tree_is_empty():
     tree = Tree()
     assert tree.is_empty
-    tree.root = Node("a")
+    tree.add_node(Node("a"))
     assert not tree.is_empty
 
 
+@pytest.mark.skip("not sure if we still want this")
 def test_can_set_root_multiple_times():
     tree = Tree()
     tree.root = Node("a")
@@ -48,17 +46,15 @@ def test_can_set_root_multiple_times():
 
 
 def test_cannot_add_another_root():
-    tree = Tree()
-    tree.root = Node("a")
+    tree = Tree(Node("a"))
     with pytest.raises(ValueError):
         tree.add_node(Node("b"))
 
 
 def test_add_node():
-    tree = Tree()
     a = Node("a")
     b = Node("b")
-    tree.root = a
+    tree = Tree(a)
     tree.add_node(b, parent=a)
 
     assert tree.children(a) == (b,)
@@ -68,12 +64,11 @@ def test_add_node():
 
 @pytest.mark.parametrize("bulk", [True, False])
 def test_add_multiple_children(bulk):
-    tree = Tree()
     a = Node("a")
     b = Node("b")
     c = Node("c")
 
-    tree.root = a
+    tree = Tree(a)
     if bulk:
         tree.add_node(b, parent=a)
         tree.add_node(c, parent=a)
@@ -89,7 +84,6 @@ def test_add_multiple_children(bulk):
 
 @pytest.fixture
 def treeA():
-    tree = Tree()
     a = Node("a")
     b = Node("b")
     c = Node("c")
@@ -97,7 +91,7 @@ def treeA():
     e = Node("e")
     f = Node("f")
 
-    tree.root = a
+    tree = Tree(a)
     tree.add_nodes([b, c], parent=a)
     tree.add_nodes([d, e], parent=b)
     tree.add_node(f, parent=c)
@@ -138,7 +132,7 @@ Node(id='a')
 def test_tree_depth():
     tree = Tree()
     assert tree.depth == 0
-    tree.root = Node("a")
+    tree.add_node(Node("a"))
     assert tree.depth == 1
     tree.add_node(Node("b"), "a")
     assert tree.depth == 2
@@ -192,18 +186,17 @@ def test_pop_subtree(treeA):
 
 
 def test_add_subtree():
-    tree = Tree()
     a = Node("a")
     b = Node("b")
     c = Node("c")
-    tree.root = a
+
+    tree = Tree(a)
     tree.add_nodes([b, c], a)
     assert tree.depth == 2
 
-    subtree = Tree()
     x = Node("x")
     y = Node("y")
-    subtree.root = x
+    subtree = Tree(x)
     subtree.add_node(y, x)
     assert subtree.depth == 2
 
@@ -242,3 +235,33 @@ def test_add_subtree_with_matching_ids_fails_without_uniquify():
 
     with pytest.raises(ValueError):
         tree.add_subtree(subtree, a, uniquify=False)
+
+
+@pytest.mark.skip("Not sure on the right API")
+def test_tree_construction_from_nested_list():
+    # Create a tree corresponding to:
+    #
+    #     Node(id='a')
+    #     ├──➤ Node(id='b')
+    #     │    ├──➤ Node(id='d')
+    #     │    └──➤ Node(id='e')
+    #     └──➤ Node(id='c')
+    #          └──➤ Node(id='f')
+    nodes = [
+        RangeNode("a"),
+        [
+            [RangeNode("b"), [RangeNode("c"), RangeNode("d")]],
+            [RangeNode("e"), [RangeNode("f")]],
+        ]
+    ]
+    nodes = {
+        Node("a"): ("b", "c"),
+        Node("b"): ("d", "e"),
+        Node("c"): ("f",),
+        Node("d"): (),
+        Node("e"): (),
+        Node("f"): (),
+    }
+    tree = Tree(nodes)
+
+    assert False

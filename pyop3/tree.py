@@ -1,10 +1,11 @@
+import collections
 import functools
 from typing import Any
 
 from collections.abc import Hashable, Sequence
 
 import pytools
-from pyop3.utils import strictly_all, just_one
+from pyop3.utils import strictly_all, just_one, UniqueNameGenerator
 
 
 __all__ = ["Node", "Tree"]
@@ -21,8 +22,25 @@ class FrozenTreeException(Exception):
 class Node(pytools.ImmutableRecord):
     fields = {"id"}
 
-    def __init__(self, id: Hashable):
-        self.id = id
+    def __init__(self, id: Hashable | None = None):
+        self.id = id or next(self._id_generator)
+
+    @classmethod
+    @property
+    def _id_generator(cls):
+        if not hasattr(cls, "_lazy_id_generator"):
+            id_generator = UniqueNameGenerator(f"_id_{cls.__name__}")
+            cls._lazy_id_generator = id_generator
+        return cls._lazy_id_generator
+
+
+class NullRootNode(Node):
+    ID = "root"
+
+    fields = set()
+
+    def __init__(self):
+        super().__init__(self.ID)
 
 
 def unfrozen_only(meth):
@@ -37,8 +55,12 @@ def unfrozen_only(meth):
 # FIXME I run into trouble when I modify multiaxistrees after
 # they have been set up. I think I should spike the modifiers, or set
 # frozen or something to prevent this - needs some thought
+# We need a null root node since we effectively need an iterable of
+# parts at the top level
+
+# Instead of freezing with a property, could maybe delete methods when it is frozen?
 class Tree(pytools.RecordWithoutPickling):
-    def __init__(self, root=None):
+    def __init__(self, root: Node | None = None) -> None:
         super().__init__()
         # TODO I don't really like that frozen-ness doesn't persist
         # between copies. It is a weird, special property - maybe set_up returns
@@ -46,9 +68,8 @@ class Tree(pytools.RecordWithoutPickling):
         self.frozen = False
         self.reset()
 
-        # all a bit messy
         if root:
-            self.root = root
+            self.add_node(root, parent=None)
 
     def __str__(self):
         return self._stringify()
@@ -64,15 +85,28 @@ class Tree(pytools.RecordWithoutPickling):
         if node in self:
             raise ValueError("Duplicate node found in the tree")
 
-        if not parent:
-            self._add_root(node)
-        else:
-            parent = self._as_node(parent)
-            self._check_exists(parent)
+        if parent:
+            parent = self._as_existing_node(parent)
             self._ids_to_nodes[node.id] = node
             self._parent_to_children[parent.id] += (node.id,)
-            self._parent_to_children[node.id] = ()
             self._child_to_parent[node.id] = parent.id
+        else:
+            if self._root_id:
+                raise ValueError
+            self._ids_to_nodes[node.id] = node
+            self._parent_to_children[None] += (node.id,)
+            self._child_to_parent[node.id] = None
+            self._root_id = node.id
+
+    def _as_existing_node(self, node: Node | str) -> Node:
+        node = self._as_node(node)
+        self._check_exists(node)
+        return node
+
+    def _as_existing_node_id(self, node: Node | str) -> str:
+        node_id = self._as_node_id(node)
+        self._check_exists(node_id)
+        return node_id
 
     @unfrozen_only
     def add_nodes(self, nodes: Sequence[Node], parent: Node | str, **kwargs) -> None:
@@ -98,28 +132,25 @@ class Tree(pytools.RecordWithoutPickling):
                 f"{node.id} is not in the tree, replacement is not possible")
         self._ids_to_nodes[node.id] = node
 
-        if node.id == self._root.id:
-            self._root = node
+    def _is_root(self, node: Node | str):
+        return self._root_id == self._as_existing_node_id(node)
+
+    @property
+    def root(self):
+        if not self._root_id:
+            return None
+        return self._as_node(self._root_id)
 
     def parent(self, node: Node | str) -> Node | None:
-        node = self._as_node(node)
-
-        if node == self.root:
+        if self._as_existing_node_id(node) == self._root_id:
             return None
-
-        try:
-            parent_id = self._child_to_parent[node.id]
-        except KeyError:
-            raise NodeNotFoundException(f"{node.id} is not present in the tree")
+        node_id = self._as_existing_node_id(node)
+        parent_id = self._child_to_parent[node_id]
         return self._ids_to_nodes[parent_id]
 
-    def children(self, node: Node | str) -> tuple[Node]:
-        node = self._as_node(node)
-
-        try:
-            child_ids = self._parent_to_children[node.id]
-        except KeyError:
-            raise NodeNotFoundException(f"{node.id} is not present in the tree")
+    def children(self, node: Node | str | None) -> tuple[Node]:
+        node_id = self._as_existing_node_id(node) if node else None
+        child_ids = self._parent_to_children[node_id]
         return tuple(self._ids_to_nodes[child_id] for child_id in child_ids)
 
     def nchildren(self, node: Node | str) -> int:
@@ -142,7 +173,7 @@ class Tree(pytools.RecordWithoutPickling):
         subroot = self._as_node(subroot)
         self._check_exists(subroot)
 
-        if subroot == self.root:
+        if self._is_root(subroot):
             subtree = self.copy()
             self.reset()
             return subtree
@@ -194,16 +225,6 @@ class Tree(pytools.RecordWithoutPickling):
         previsit(subtree, add_subtree_node, None, parent.id)
 
     @property
-    def root(self) -> Node | None:
-        return self._root
-
-    @root.setter
-    @unfrozen_only
-    def root(self, node) -> None:
-        self.reset()
-        self._add_root(node)
-
-    @property
     def leaves(self) -> tuple[Node]:
         return tuple(
             node for nid, node in self._ids_to_nodes.items()
@@ -220,7 +241,7 @@ class Tree(pytools.RecordWithoutPickling):
 
     @property
     def is_empty(self) -> bool:
-        return not self.root
+        return not self._ids_to_nodes
 
     @property
     def depth(self) -> int:
@@ -231,14 +252,14 @@ class Tree(pytools.RecordWithoutPickling):
 
     @unfrozen_only
     def reset(self):
-        self._root = None
+        self._root_id = None
         self._ids_to_nodes = {}
-        self._parent_to_children = {}
+        self._parent_to_children = collections.defaultdict(tuple)
         self._child_to_parent = {}
 
     def copy(self, **kwargs):
         dup = super().copy(**kwargs)
-        dup._root = self._root.copy()
+        dup._root_id = self._root_id
         dup._ids_to_nodes = self._ids_to_nodes.copy()
         dup._parent_to_children = self._parent_to_children.copy()
         dup._child_to_parent = self._child_to_parent.copy()
@@ -271,14 +292,6 @@ class Tree(pytools.RecordWithoutPickling):
     def _node_ids(self):
         return self._ids_to_nodes.keys()
 
-    def _add_root(self, node: Node):
-        if self.root:
-            raise ValueError("The tree already has a root")
-        self._root = node
-        self._ids_to_nodes[node.id] = node
-        self._parent_to_children[node.id] = ()
-        self._child_to_parent[node.id] = None
-
     def _stringify(
         self,
         node: Node | str | None = None,
@@ -287,7 +300,8 @@ class Tree(pytools.RecordWithoutPickling):
     ) -> list[str] | str:
         if not node:
             node = self.root
-        node = self._as_node(node)
+        else:
+            node = self._as_node(node)
 
         nodestr = [f"{begin_prefix}{node}"]
         for i, child in enumerate(children := self.children(node)):
@@ -300,6 +314,17 @@ class Tree(pytools.RecordWithoutPickling):
             return "\n".join(nodestr)
         else:
             return nodestr
+
+
+class NullRootTree(Tree):
+    def __init__(self, nodes: Sequence[Node] | None = None) -> None:
+        super().__init__(NullRootNode())
+        if nodes:
+            self.add_nodes(nodes, parent=NullRootNode.ID)
+
+    @property
+    def rootless_depth(self):
+        return self.depth - 1
 
 
 def previsit(tree, fn, current_node: Node | None = None, prev_result: Any | None = None) -> Any:

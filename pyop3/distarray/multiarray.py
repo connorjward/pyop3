@@ -18,8 +18,9 @@ from pyop3.utils import NameGenerator, PrettyTuple, strictly_all, single_valued
 from pyop3 import utils
 from pyop3.dtypes import get_mpi_dtype, IntType
 from pyop3.multiaxis import (
-    expand_indices_to_fill_empty_shape,
+    expand_indices_to_fill_empty_shape, fill_shape,
     MultiAxis, AxisPart, get_bottom_part, RangeNode, TabulatedMapNode)
+from pyop3.tree import Tree, NullRootTree, NullRootNode
 
 
 # TODO this shouldn't be an immutable record or pym var
@@ -58,7 +59,19 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         assert dtype is not None
 
         self.dim = dim
-        self.indices = tuple(expand_indices_to_fill_empty_shape(dim, idx) for idx in indices)
+
+        # breakpoint()
+        if indices:
+            indices = indices.copy()
+            for idx in indices.children(indices.root):
+                expand_indices_to_fill_empty_shape(dim, indices, idx)
+        elif dim:
+            indices = NullRootTree()
+            for pt in dim.children(dim.root):
+                fill_shape(dim, pt, indices, NullRootNode.ID, PrettyTuple())
+        else:
+            indices = NullRootTree()
+        self.indices = indices
 
         self.mesh = mesh
         self.dtype = np.dtype(dtype)  # since np.float64 is not actually the right thing

@@ -80,7 +80,7 @@ def order_axes(layout):
         history.add(tuple(layout))
 
         constrained_axis = layout.pop(0)
-        inserted = _insert_axis(axes, constrained_axis, axes.root)
+        inserted = _insert_axis(axes, constrained_axis, None)
         if not inserted:
             layout.append(constrained_axis)
 
@@ -98,6 +98,8 @@ def _insert_axis(
     current_axes: ConstrainedMultiAxisNode,
     within_labels: FrozenSet[Hashable] = frozenset(),
 ):
+    if tree.root and current_axes is None:
+        current_axes = tree.root
     # cleanup
     # don't count this one
     within_labels -= {None}
@@ -128,7 +130,7 @@ def _insert_axis(
             # must already obey the constraints - so stick all back in
             for axis_cpt in new_axes.axis:
                 stree = subtree.copy()
-                stree._root = stree._root.copy(parent_label=axis_cpt.label)
+                stree.replace_node(stree.root.copy(parent_label=axis_cpt.label))
                 tree.add_subtree(
                     stree,
                     new_node,

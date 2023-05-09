@@ -17,13 +17,14 @@ import pymbolic as pym
 
 from pyop3 import exprs, tlang
 from pyop3 import utils
-from pyop3.utils import MultiNameGenerator, NameGenerator, strictly_all
+from pyop3.utils import MultiNameGenerator, NameGenerator, strictly_all, just_one
 from pyop3.utils import PrettyTuple, checked_zip
 from pyop3.distarray.multiarray import MultiArray
 from pyop3.multiaxis import (
     MultiAxis, AxisPart,
     AffineLayoutFunction, IndirectLayoutFunction, MapNode, TabulatedMapNode,
     RangeNode, IdentityMapNode, AffineMapNode)
+from pyop3.tree import NullRootTree, NullRootNode
 
 
 class VariableCollector(pym.mapper.Collector):
@@ -131,11 +132,11 @@ class LoopyKernelBuilder:
         if within_multi_index_groups is None:
             within_multi_index_groups = {}  # TODO should make persistent to avoid accidental side-effects
 
-        for index in loop.index:
+        for index in loop.index.children(loop.index.root):
             self.build_loop(
-                    loop, index, within_multi_index_groups, within_inames, depends_on)
+                    loop, loop.index, index, within_multi_index_groups, within_inames, depends_on)
 
-    def build_loop(self, loop, index, within_indices, within_inames, depends_on, existing_labels=PrettyTuple(), existing_jnames=PrettyTuple()):
+    def build_loop(self, loop, itree, index, within_indices, within_inames, depends_on, existing_labels=PrettyTuple(), existing_jnames=PrettyTuple()):
         """
         note: there is no need to track a current axis here. We just need to register
         loops and associated inames. We also need part labels because it informs
@@ -193,7 +194,7 @@ class LoopyKernelBuilder:
 
             # find the right target label for the map (assume can't be multi-part)
             mapaxis = index.data.axes
-            mappartid = "root"
+            mappartid = NullRootNode.ID
             for l in existing_labels:
                 _part_, = [pt for pt in mapaxis.children(mappartid) if l == pt.label]
                 mappartid = _part_.id
@@ -244,10 +245,10 @@ class LoopyKernelBuilder:
         self.instructions.extend(index_insns)
         new_deps = frozenset({insn.id for insn in index_insns})
 
-        if index.children:
-            for subindex in index.children:
+        if children := itree.children(index):
+            for subindex in children:
                 self.build_loop(
-                    loop, subindex,
+                    loop, itree, subindex,
                     within_indices|new_within,
                     within_inames|{iname},
                     depends_on|new_deps,
@@ -394,7 +395,7 @@ class LoopyKernelBuilder:
 
                         # find the right target label for the map (assume can't be multi-part)
                         mapaxis = index.data.axes
-                        mappartid = "root"
+                        mappartid = NullRootNode.ID
                         for l in existing_labels:
                             _part_, = [pt for pt in mapaxis.children(mappartid) if l == pt.label]
                             mappartid = _part_.id
@@ -445,8 +446,10 @@ class LoopyKernelBuilder:
                 lthings = myinnerfunc(lindex, llabels_, ljnames_)
                 rthings = myinnerfunc(rindex, rlabels_, rjnames_)
 
-                if strictly_all([lindex.children, rindex.children]):
-                    for lsubindex, rsubindex in checked_zip(lindex.children, rindex.children):
+                lchildren = assignment.lhs.indices.children(lindex)
+                rchildren = assignment.rhs.indices.children(rindex)
+                if strictly_all([lchildren, rchildren]):
+                    for lsubindex, rsubindex in checked_zip(lchildren, rchildren):
                         self.build_assignment(
                             assignment, lsubindex, rsubindex,
                             within_indices|lthings[2]|rthings[2],
@@ -510,18 +513,16 @@ class LoopyKernelBuilder:
         temporaries = {}
         for arg in call.arguments:
             # create an appropriate temporary
-            parts = []
             # we need the indices here because the temporary shape needs to be indexed
             # by the same indices as the original array
-            indices = []
+            itree = NullRootTree()
             axtree = MultiAxis()
-            for idx in arg.tensor.indices:
-                newindex = self._construct_temp_dims(axtree, idx, within_indices)
-                indices.append(newindex)
+            for idx in arg.tensor.indices.children(arg.tensor.indices.root):
+                self._construct_temp_dims(axtree, itree, arg.tensor.indices, idx, within_indices)
 
             axtree.set_up()
             temporary = MultiArray(
-                axtree, indices=indices, name=self._temp_name_generator.next(),
+                axtree, indices=itree, name=self._temp_name_generator.next(),
                 dtype=arg.tensor.dtype)
             temporaries[arg] = temporary
             # import pdb; pdb.set_trace()
@@ -535,7 +536,7 @@ class LoopyKernelBuilder:
 
         return (*gathers, newcall, *scatters)
 
-    def _construct_temp_dims(self, axtree, index, within_indices, partid="root"):
+    def _construct_temp_dims(self, axtree, itree, currentindices, index, within_indices, partid=NullRootNode.ID, iid=NullRootNode.ID):
         """Return an iterable of axis parts per index
 
         Parameters
@@ -548,7 +549,8 @@ class LoopyKernelBuilder:
         """
         result = [(index, (), ())]
 
-        new_indices = []
+        # breakpoint()
+
         # TODO do I need to track the labels?
         for index, _, _ in result:
             if index.id in within_indices:
@@ -559,22 +561,12 @@ class LoopyKernelBuilder:
             new_part = AxisPart(size, label=label)
             axtree.add_node(new_part, parent=partid)
 
-            if len(index.children) > 0:
-                new_subidxs = []
-                for subidx in index.children:
-                    new_subidx = self._construct_temp_dims(axtree, subidx, within_indices, new_part.id)
-                    new_subidxs.append(new_subidx)
-            else:
-                new_subidxs = []
+            new_index = RangeNode(label, size)
+            itree.add_node(new_index, parent=iid)
 
-            new_index = RangeNode(label, size, children=new_subidxs)
-            new_indices.append(new_index)
-
-        # since we're now not dropping "within" bits
-        assert len(new_indices) == 1
-
-        return new_indices[0]
-
+            if children := currentindices.children(index):
+                for subidx in children:
+                    self._construct_temp_dims(axtree, itree, currentindices, subidx, within_indices, new_part.id, new_index.id)
 
     def make_gathers(self, temporaries, **kwargs):
         return tuple(
@@ -645,8 +637,8 @@ class LoopyKernelBuilder:
         # we need to pass sizes through if they are only known at runtime (ragged)
         extents = {}
         for temp in utils.unique(itertools.chain(call.reads, call.writes)):
-            for index in temp.indices:
-                extents |= self.collect_extents(index, within_indices, within_inames, depends_on)
+            for index in temp.indices.children(temp.indices.root):
+                extents |= self.collect_extents(temp.indices, index, within_indices, within_inames, depends_on)
 
         # NOTE: If we register an extent to pass through loopy will complain
         # unless we register it as an assumption of the local kernel (e.g. "n <= 3")
@@ -672,7 +664,7 @@ class LoopyKernelBuilder:
         self.instructions.append(call_insn)
         self.subkernels.append(call.function.code)
 
-    def collect_extents(self, index, within_indices, within_inames, depends_on):
+    def collect_extents(self, itree, index, within_indices, within_inames, depends_on):
         extents = {}
 
         if isinstance(index.size, MultiArray):
@@ -680,9 +672,9 @@ class LoopyKernelBuilder:
             extent = self.register_extent(index.size, within_indices, within_inames, depends_on)
             extents[index.size] = pym.var(extent)
 
-        if index.children:
-            for child in index.children:
-                extents |= self.collect_extents(child, within_indices, within_inames, depends_on)
+        if children := itree.children(index):
+            for child in children:
+                extents |= self.collect_extents(itree, child, within_indices, within_inames, depends_on)
 
         return extents
 
@@ -690,7 +682,10 @@ class LoopyKernelBuilder:
     def _(self, assignment: tlang.Assignment, within_indices, within_inames, depends_on):
         # FIXME this is kinda dumb now
         lres, rres = [], []
-        for lindex, rindex in checked_zip(assignment.lhs.indices, assignment.rhs.indices):
+        for lindex, rindex in checked_zip(
+                assignment.lhs.indices.children(assignment.lhs.indices.root),
+                assignment.rhs.indices.children(assignment.rhs.indices.root)
+        ):
             lres.append((lindex, (), ()))
             rres.append((rindex, (), ()))
 
@@ -732,7 +727,7 @@ class LoopyKernelBuilder:
         depends_on |= {array_offset_insn.id, temp_offset_insn.id}
 
         array_axis = assignment.array.axes
-        nodeid = "root"
+        nodeid = NullRootNode.ID
         for i, pt_label in enumerate(array_pt_labels):
             array_npart = [pt.label for pt in array_axis.children(nodeid)].index(pt_label)
             array_part = array_axis.children(nodeid)[array_npart]
@@ -749,7 +744,7 @@ class LoopyKernelBuilder:
 
         if not scalar:
             temp_axis = assignment.temporary.axes
-            nodeid = "root"
+            nodeid = NullRootNode.ID
             for i, pt_label in enumerate(temp_pt_labels):
                 temp_npart = [pt.label for pt in temp_axis.children(nodeid)].index(pt_label)
                 temp_part = temp_axis.children(nodeid)[temp_npart]
@@ -968,13 +963,13 @@ class LoopyKernelBuilder:
     def register_extent(self, extent, within_indices, within_inames, depends_on):
         if isinstance(extent, MultiArray):
             labels, jnames = [], []
-            index, = extent.indices
+            index = just_one(extent.indices.children(extent.indices.root))
             while True:
                 new_labels, new_jnames = within_indices[index.id]
                 labels.extend(new_labels)
                 jnames.extend(new_jnames)
-                if index.children:
-                    index = index.child  # must be linear
+                if children := extent.indices.children(index):
+                    index = just_one(children)  # must be linear
                 else:
                     break
 

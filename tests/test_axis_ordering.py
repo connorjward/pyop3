@@ -23,14 +23,14 @@ def test_axis_ordering():
     axtree = order_axes(layout)
 
     assert axtree.rootless_depth == 2
-    assert axtree.root_axes == (ax1,)
+    assert axtree.children(axtree.root) == (ax1,)
     assert axtree.children(ax1) == (ax2,)
     assert axtree.children(ax2) == ()
 
     axes = [ConstrainedMultiAxis([ax1]), ConstrainedMultiAxis([ax2], priority=0)]
     axtree = order_axes(axes)
     assert axtree.rootless_depth == 2
-    assert axtree.root_axes == (ax2,)
+    assert axtree.children(axtree.root) == (ax2,)
     assert axtree.children(ax2) == (ax1,)
     assert axtree.children(ax1) == ()
 
@@ -48,7 +48,7 @@ def test_multicomponent_constraints():
     axtree = order_axes(layout)
 
     assert axtree.rootless_depth == 2
-    assert id_tuple(axtree.root_axes) == ("cpt3",)
+    assert id_tuple(axtree.children(axtree.root)) == ("cpt3",)
     assert id_tuple(axtree.children("cpt3")) == ("cpt1", "cpt2")
     assert all(axtree.children(node) == () for node in ["cpt1", "cpt2"])
 
@@ -70,7 +70,7 @@ def test_multicomponent_constraints():
     axtree = order_axes(layout)
 
     assert axtree.rootless_depth == 2
-    assert id_tuple(axtree.root_axes) == ("cpt1", "cpt2")
+    assert id_tuple(axtree.children(axtree.root)) == ("cpt1", "cpt2")
     assert axtree.children("cpt1") == ()
     assert id_tuple(axtree.children("cpt2")) == ("cpt3",)
 
@@ -100,7 +100,7 @@ def test_multicomponent_constraints_more():
     axtree = order_axes(layout)
 
     assert axtree.rootless_depth == 3
-    assert label_tuple(axtree.root_axes) == ("cpt1", "cpt2")
+    assert label_tuple(axtree.children(axtree.root)) == ("cpt1", "cpt2")
     assert label_tuple(axtree.children("cpt1")) == ("cpt3",)
     assert label_tuple(axtree.children("cpt2")) == ("cpt4",)
     assert label_tuple(axtree.children("cpt4")) == ("cpt3",)

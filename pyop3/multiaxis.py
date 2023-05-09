@@ -23,10 +23,10 @@ from pyop3.utils import as_tuple, checked_zip, NameGenerator, unique, PrettyTupl
 from pyop3 import utils
 
 from pyop3.dtypes import IntType, PointerType, get_mpi_dtype
-from pyop3.tree import Tree, Node as NewNode
+from pyop3.tree import Tree, Node as NewNode, NullRootTree, NullRootNode
 
 
-def is_distributed(axtree, partid="root"):
+def is_distributed(axtree, partid=NullRootNode.ID):
     """Return ``True`` if any part of a :class:`MultiAxis` is distributed across ranks."""
     for part in axtree.children(partid):
         if part.is_distributed or axtree.children(part) and is_distributed(axtree, part.id):
@@ -61,7 +61,7 @@ def compute_offsets(sizes):
     return np.concatenate([[0], np.cumsum(sizes)[:-1]], dtype=np.int32)
 
 
-def is_set_up(axtree, partid="root"):
+def is_set_up(axtree, partid=NullRootNode.ID):
     """Return ``True`` if all parts (recursively) of the multi-axis have an associated
     layout function.
     """
@@ -117,7 +117,7 @@ def prepare_layouts(axtree, part, path=None):
     return layouts
 
 
-def set_null_layouts(layouts, axtree, path=(), partid="root"):
+def set_null_layouts(layouts, axtree, path=(), partid=NullRootNode.ID):
     """
     we have null layouts whenever the step is non-const (the variability is captured by
     the start property of the affine layout below it).
@@ -138,7 +138,7 @@ def can_be_affine(axtree, part):
     return has_independently_indexed_subaxis_parts(axtree, part) and part.numbering is None
 
 
-def handle_const_starts(axis, layouts, path=PrettyTuple(), outer_axes_are_all_indexed=True, partid="root"):
+def handle_const_starts(axis, layouts, path=PrettyTuple(), outer_axes_are_all_indexed=True, partid=NullRootNode.ID):
     offset = 0
     for part in axis.children(partid):
         # catch already set null layouts
@@ -188,9 +188,9 @@ def attach_star_forest(axis, with_halo_points=True):
     comm = MPI.COMM_WORLD
 
     # 1. construct the point-to-point SF per axis part
-    if len(axis.root_axes) != 1:
+    if len(axis.children(axis.root)) != 1:
         raise NotImplementedError
-    for part in axis.root_axes:
+    for part in axis.children(axis.root):
         part_sf = make_star_forest_per_axis_part(part, comm)
 
     # for now, will want to concat or something
@@ -198,7 +198,7 @@ def attach_star_forest(axis, with_halo_points=True):
 
     # 2. broadcast the root offset to all leaves
     # TODO use a single buffer
-    part = just_one(axis.root_axes)
+    part = just_one(axis.children(axis.root))
     from_buffer = np.zeros(part.count, dtype=PointerType)
     to_buffer = np.zeros(part.count, dtype=PointerType)
 
@@ -369,26 +369,11 @@ class Sparsity:
         raise NotImplementedError
 
 
-class NullRootNode(NewNode):
-    NODE_ID = "root"
-
-    fields = set()
-
-    def __init__(self):
-        self.label = "root"
-        super().__init__(self.NODE_ID)
-
-
-class MultiAxisTree(Tree):
+class MultiAxisTree(NullRootTree):
     # fields = {"parts", "sf", "shared_sf"}
 
     def __init__(self, parts=(), *, sf=None, shared_sf=None):
-        super().__init__()
-
-        # We need a null root node since we effectively need an iterable of
-        # parts at the top level
-        self.add_node(NullRootNode())
-        self.add_nodes(parts, parent="root")
+        super().__init__(parts)
         self.sf = sf
         self.shared_sf = shared_sf
 
@@ -405,15 +390,6 @@ class MultiAxisTree(Tree):
             raise ValueError("Axis parts in the same multi-axis must have unique labels")
 
         super().add_nodes(axes, parent)
-
-    @property
-    def root_axes(self):
-        return self.children(NullRootNode.NODE_ID)
-
-    @property
-    def rootless_depth(self) -> int:
-        """Return the depth of the tree ignoring the null root node."""
-        return self.depth - 1
 
     def __mul__(self, other):
         """Return the (dense) outer product."""
@@ -441,7 +417,7 @@ class MultiAxisTree(Tree):
         # accumulate offsets from the layout functions
         offset = 0
         depth = 0
-        partid = "root"
+        partid = NullRootNode.ID
 
         # effectively loop over depth
         while True:
@@ -560,14 +536,14 @@ class MultiAxisTree(Tree):
             new_part = self.part.copy(count=self.part.num_owned, max_count=None, overlap=None)
         return self.copy(parts=[new_part])
 
-    def calc_size(self, indices=PrettyTuple(), partid="root"):
+    def calc_size(self, indices=PrettyTuple(), partid=NullRootNode.ID):
         # NOTE: this works because the size array cannot be multi-part, therefore integer
         # indices (as opposed to typed ones) are valid.
         if not isinstance(indices, PrettyTuple):
             indices = PrettyTuple(indices)
         return sum(pt.calc_size(self, indices) for pt in self.children(partid))
 
-    def alloc_size(self, partid="root"):
+    def alloc_size(self, partid=NullRootNode.ID):
         return sum(pt.alloc_size(self) for pt in self.children(partid))
 
     @property
@@ -597,19 +573,19 @@ class MultiAxisTree(Tree):
             attach_star_forest(self, with_halo_points=False)
 
             # attach a local to global map
-            if len(self.root_axes) > 1:
+            if len(self.children(self.root)) > 1:
                 raise NotImplementedError(
                     "Currently only compute lgmaps for a single part, shouldn't "
                     "be hard to fix")
             lgmap = create_lgmap(self)
-            new_part = just_one(self.root_axes)
+            new_part = just_one(self.children(self.root))
             self.replace_node(new_part.copy(lgmap=lgmap))
             # self.copy(parts=[new_axis.part.copy(lgmap=lgmap)])
         # new_axis = attach_owned_star_forest(new_axis)
         self.frozen = True
         return self
 
-    def apply_layouts(self, layouts, path=PrettyTuple(), partid="root"):
+    def apply_layouts(self, layouts, path=PrettyTuple(), partid=NullRootNode.ID):
         """Attach a complicated dict of multiple parts and layouts functions to the
         right axis parts.
 
@@ -639,7 +615,7 @@ class MultiAxisTree(Tree):
         for part in new_parts:
             self.replace_node(part)
 
-    def finish_off_layouts(self, layouts, offset, path=PrettyTuple(), partid="root"):
+    def finish_off_layouts(self, layouts, offset, path=PrettyTuple(), partid=NullRootNode.ID):
 
         # since this search loops over all entries in the multi-axis
         # (not just the axis part) we need to execute the function if *any* axis part
@@ -807,7 +783,7 @@ class MultiAxisTree(Tree):
         assert not any(item is None for item in ret)
         return ret
 
-    def get_part_from_path(self, path, partid="root"):
+    def get_part_from_path(self, path, partid=NullRootNode.ID):
         label, *sublabels = path
 
         part, = [pt for pt in self.children(partid) if pt.label == label]
@@ -989,7 +965,7 @@ MultiAxis = MultiAxisTree
 
 def get_slice_bounds(array, indices):
     from pyop3.distarray import MultiArray
-    part = just_one(array.axes.root_axes)
+    part = just_one(array.axes.children(array.axes.root))
     for _ in indices:
         part = just_one(array.axes.children(part))
 
@@ -1042,11 +1018,16 @@ def has_constant_step(axtree, part):
         return True
 
 
+class IndexTree(NullRootTree):
+    pass
+
+
 class Node(pytools.ImmutableRecord):
     fields = {"children", "id"}
     namer = NameGenerator("idx")
 
     def __init__(self, children=(), *, id=None):
+        raise AssertionError("this can go")
         self.children = tuple(children)
         self.id = id or self.namer.next()
 
@@ -1084,7 +1065,7 @@ class Node(pytools.ImmutableRecord):
             {*self.children} | {node for ch in self.children for node in ch.all_children})
 
 
-class IndexNode(Node, abc.ABC):
+class IndexNode(NewNode, abc.ABC):
     pass
 
 
@@ -1093,10 +1074,10 @@ class RangeNode(IndexNode):
     # fields = IndexNode.fields | {"label", "start", "stop", "step"}
     fields = IndexNode.fields | {"label", "stop"}
 
-    def __init__(self, label, stop, children=(), *, id=None):
+    def __init__(self, label, stop, **kwargs):
         self.label = label
         self.stop = stop
-        super().__init__(children, id=id)
+        super().__init__(**kwargs)
 
     # TODO: This is temporary
     @property
@@ -1118,12 +1099,12 @@ class MapNode(IndexNode):
     # in theory we can have a selector function here too so to_labels is actually bigger?
     # means we have multiple children?
 
-    def __init__(self, from_labels, to_labels, arity, children=(), *, id=None):
+    def __init__(self, from_labels, to_labels, arity, **kwargs):
         self.from_labels = from_labels
         self.to_labels = to_labels
         self.arity = arity
         self.selector = None  # TODO
-        super().__init__(children, id=id)
+        super().__init__(**kwargs)
 
     @property
     def size(self):
@@ -1133,9 +1114,9 @@ class MapNode(IndexNode):
 class TabulatedMapNode(MapNode):
     fields = MapNode.fields | {"data"}
 
-    def __init__(self, from_labels, to_labels, arity, data, children=(), **kwargs):
+    def __init__(self, from_labels, to_labels, arity, data, **kwargs):
         self.data = data
-        super().__init__(from_labels, to_labels, arity, children, **kwargs)
+        super().__init__(from_labels, to_labels, arity, **kwargs)
 
 
 class IdentityMapNode(MapNode):
@@ -1151,7 +1132,7 @@ class IdentityMapNode(MapNode):
 class AffineMapNode(MapNode):
     fields = MapNode.fields | {"expr"}
 
-    def __init__(self, from_labels, to_labels, arity, expr, children=(), **kwargs):
+    def __init__(self, from_labels, to_labels, arity, expr, **kwargs):
         """
         Parameters
         ----------
@@ -1164,7 +1145,7 @@ class AffineMapNode(MapNode):
             raise ValueError("Wrong number of variables in expression")
 
         self.expr = expr
-        super().__init__(from_labels, to_labels, arity, children, **kwargs)
+        super().__init__(from_labels, to_labels, arity, **kwargs)
 
 
 
@@ -1404,32 +1385,28 @@ abstraction.
 Things might get simpler if I just defined some sort of null "root" node
 """
 
-def fill_shape(axtree, part, prev_indices):
+def fill_shape(axtree, part, itree, iparent, prev_indices):
     from pyop3.distarray import MultiArray
     if isinstance(part.count, MultiArray):
         # turn prev_indices into a tree
         assert len(prev_indices) > 0
-        prev = None
-        for prev_idx in reversed(prev_indices):
-            if prev is None:
-                prev = prev_idx
-            else:
-                prev = prev_idx.copy(children=[prev])
-        count = part.count[[prev]]
+        mynewtree = IndexTree()
+        prev = NullRootNode.ID
+        for prev_idx in prev_indices:
+            mynewtree.add_node(prev_idx, parent=prev)
+            prev = prev_idx
+        count = part.count[mynewtree]
     else:
         count = part.count
     new_index = RangeNode(part.label, count)
-    if axtree.children(part):
-        new_children = [
-            fill_shape(axtree, pt, prev_indices|new_index)
-            for pt in axtree.children(part)]
-    else:
-        new_children = []
-    return new_index.copy(children=new_children)
+    itree.add_node(new_index, parent=iparent)
+    if children := axtree.children(part):
+        for pt in children:
+            fill_shape(axtree, pt, itree, new_index, prev_indices|new_index)
 
 
 def expand_indices_to_fill_empty_shape(
-    axis, index, labels=PrettyTuple(), prev_indices=PrettyTuple(),
+    axis, itree, index, labels=PrettyTuple(), prev_indices=PrettyTuple(),
 ):
     if isinstance(index, RangeNode):
         new_labels = labels | index.label
@@ -1438,31 +1415,28 @@ def expand_indices_to_fill_empty_shape(
         new_labels = labels[:-len(index.from_labels)] + index.to_labels
 
     new_children = []
-    if len(index.children) > 0:
-        for child in index.children:
-            new_child = expand_indices_to_fill_empty_shape(axis, child, new_labels, prev_indices|index)
-            new_children.append(new_child)
+    if children := itree.children(index):
+        for child in children:
+            expand_indices_to_fill_empty_shape(axis, itree, child, new_labels, prev_indices|index)
     else:
         # traverse where we have got to to get the bottom unindexed bit
-        partid = "root"
+        partid = NullRootNode.ID
         for label in new_labels:
             selected_part, = [pt for pt in axis.children(partid) if pt.label == label]
             partid = selected_part.id
 
         if axis.children(selected_part):
             for part in axis.children(selected_part):
-                new_child = fill_shape(axis, part, prev_indices|index)
-                new_children.append(new_child)
-    return index.copy(children=new_children)
+                fill_shape(axis, part, itree, index, prev_indices|index)
 
 
 def create_lgmap(axes):
     # TODO: Fix imports
     from pyop3.multiaxis import Owned, Shared
 
-    if len(axes.root_axes) > 1:
+    if len(axes.children(axes.root)) > 1:
         raise NotImplementedError
-    axes_part = just_one(axes.root_axes)
+    axes_part = just_one(axes.children(axes.root))
     if axes_part.overlap is None:
         raise ValueError("axes is expected to have a specified overlap")
     if not isinstance(axes_part.count, numbers.Integral):
