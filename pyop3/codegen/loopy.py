@@ -32,6 +32,7 @@ from pyop3.utils import (
     MultiNameGenerator,
     NameGenerator,
     PrettyTuple,
+    StrictlyUniqueSet,
     checked_zip,
     just_one,
     strictly_all,
@@ -41,6 +42,11 @@ from pyop3.utils import (
 class VariableCollector(pym.mapper.Collector):
     def map_variable(self, expr, *args, **kwargs):
         return {expr}
+
+
+# @dataclasses.dataclass(frozen=True)
+# class CodegenContext:
+#     indices:
 
 
 def merge_bins(bin1, bin2):
@@ -131,7 +137,7 @@ class LoopyKernelBuilder:
     def _(
         self,
         loop: exprs.Loop,
-        within_multi_index_groups=None,
+        within_indices=None,
         within_inames=frozenset(),
         depends_on=frozenset(),
     ):
@@ -149,17 +155,15 @@ class LoopyKernelBuilder:
 
         This ties in well with the "path" logic I have already done for maps.
         """
-        if within_multi_index_groups is None:
-            within_multi_index_groups = (
-                {}
-            )  # TODO should make persistent to avoid accidental side-effects
+        if not within_indices:
+            within_indices = {}
 
         for index in loop.index.children(loop.index.root):
             self.build_loop(
                 loop,
                 loop.index,
                 index,
-                within_multi_index_groups,
+                within_indices,
                 within_inames,
                 depends_on,
             )
@@ -197,6 +201,13 @@ class LoopyKernelBuilder:
         domain_str = f"{{ [{iname}]: 0 <= {iname} < {extent} }}"
         self.domains.append(domain_str)
 
+        # pass around mutable or immutable things?
+        # new_labels and new_jnames are *new* objects that *replace* existing
+        # new_within and new_deps are *added* to the existing ones
+        # we are doing a tree traversal, what is the generic solution here?
+        # probably always do a full replacement - that will work for both
+        # wrap into an object?
+        # don't tie it to the kernel builder as that could cause issues between forks
         new_labels, new_jnames, new_within, new_deps = self.myinnerfunc(
             iname,
             index,
@@ -485,25 +496,39 @@ class LoopyKernelBuilder:
                 lhs_part_labels, lhs_jnames = lthings[0], lthings[1]
                 rhs_part_labels, rhs_jnames = rthings[0], rthings[1]
 
+                # refactoring - part labels always match jnames - tie together?
+                # map part label to jname?
+                assert len(lhs_part_labels) == len(lhs_jnames)
+                assert len(rhs_part_labels) == len(rhs_jnames)
+
+                lhs_labels_to_jnames = {
+                    l: j for l, j in checked_zip(lhs_part_labels, lhs_jnames)
+                }
+                rhs_labels_to_jnames = {
+                    l: j for l, j in checked_zip(rhs_part_labels, rhs_jnames)
+                }
+
                 if assignment.lhs is assignment.array:
-                    array_part_labels = lhs_part_labels
-                    array_jnames = lhs_jnames
-                    temp_part_labels = rhs_part_labels
-                    temp_jnames = rhs_jnames
+                    # array_part_labels = lhs_part_labels
+                    # array_jnames = lhs_jnames
+                    array_labels_to_jnames = lhs_labels_to_jnames
+                    # temp_part_labels = rhs_part_labels
+                    # temp_jnames = rhs_jnames
+                    temp_labels_to_jnames = rhs_labels_to_jnames
                 else:
-                    temp_part_labels = lhs_part_labels
-                    temp_jnames = lhs_jnames
-                    array_part_labels = rhs_part_labels
-                    array_jnames = rhs_jnames
+                    # temp_part_labels = lhs_part_labels
+                    # temp_jnames = lhs_jnames
+                    temp_labels_to_jnames = lhs_labels_to_jnames
+                    # array_part_labels = rhs_part_labels
+                    # array_jnames = rhs_jnames
+                    array_labels_to_jnames = rhs_labels_to_jnames
 
                 extra_inames = {iname} if iname else set()
                 extra_deps = frozenset({f"{id}_*" for id in assignment.depends_on})
                 self.emit_assignment_insn(
                     assignment,
-                    array_part_labels,
-                    temp_part_labels,
-                    array_jnames,
-                    temp_jnames,
+                    array_labels_to_jnames,
+                    temp_labels_to_jnames,
                     within_inames | extra_inames,
                     depends_on | extra_deps,
                 )
@@ -512,16 +537,16 @@ class LoopyKernelBuilder:
     def _(
         self,
         call: exprs.FunctionCall,
-        within_multi_index_groups,
+        within_indices,
         within_inames,
         depends_on,
     ):
         # I think I'd prefer to do this in a separate earlier pass?
-        insns = self.expand_function_call(call, within_multi_index_groups, depends_on)
+        insns = self.expand_function_call(call, within_indices, depends_on)
 
         for insn in insns:
             self._make_instruction_context(
-                insn, within_multi_index_groups, within_inames, depends_on
+                insn, within_indices, within_inames, depends_on
             )
 
     def expand_function_call(self, call, within_indices, depends_on):
@@ -765,10 +790,8 @@ class LoopyKernelBuilder:
     def emit_assignment_insn(
         self,
         assignment,
-        array_pt_labels,
-        temp_pt_labels,
-        array_jnames,
-        temp_jnames,
+        array_labels_to_jnames,
+        temp_labels_to_jnames,
         within_inames,
         depends_on,
         scalar=False,
@@ -802,17 +825,23 @@ class LoopyKernelBuilder:
 
         array_axis = assignment.array.axes
         nodeid = NullRootNode.ID
-        for i, pt_label in enumerate(array_pt_labels):
-            array_npart = [pt.label for pt in array_axis.children(nodeid)].index(
-                pt_label
+        while not array_axis.is_leaf(nodeid):
+            # for i, pt_label in enumerate(array_pt_labels):
+            # array_npart = [pt.label for pt in array_axis.children(nodeid)].index(
+            #     pt_label
+            # )
+            array_part = just_one(
+                child
+                for child in array_axis.children(nodeid)
+                if child.label in array_labels_to_jnames
             )
-            array_part = array_axis.children(nodeid)[array_npart]
 
             deps = self.emit_layout_insns(
                 array_part.layout_fn,
                 array_offset,
-                array_pt_labels[: i + 1],
-                array_jnames[: i + 1],
+                array_labels_to_jnames,
+                # array_pt_labels[: i + 1],
+                # array_jnames[: i + 1],
                 within_inames,
                 depends_on,
             )
