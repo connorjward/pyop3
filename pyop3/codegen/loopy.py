@@ -372,8 +372,9 @@ class LoopyKernelBuilder:
             map_jnames = existing_jnames | iname
             expr = self.register_scalar_assignment(
                 index.data,
-                map_labels,
-                map_jnames,
+                dict(checked_zip(map_labels, map_jnames)),
+                # map_labels,
+                # map_jnames,
                 within_inames | {iname},
                 depends_on,
             )
@@ -837,7 +838,7 @@ class LoopyKernelBuilder:
             )
 
             deps = self.emit_layout_insns(
-                array_part.layout_fn,
+                array_part,
                 array_offset,
                 array_labels_to_jnames,
                 # array_pt_labels[: i + 1],
@@ -853,17 +854,24 @@ class LoopyKernelBuilder:
         if not scalar:
             temp_axis = assignment.temporary.axes
             nodeid = NullRootNode.ID
-            for i, pt_label in enumerate(temp_pt_labels):
-                temp_npart = [pt.label for pt in temp_axis.children(nodeid)].index(
-                    pt_label
+            while not temp_axis.is_leaf(nodeid):
+                # for i, pt_label in enumerate(temp_pt_labels):
+                # temp_npart = [pt.label for pt in temp_axis.children(nodeid)].index(
+                #     pt_label
+                # )
+                # temp_part = temp_axis.children(nodeid)[temp_npart]
+                temp_part = just_one(
+                    child
+                    for child in temp_axis.children(nodeid)
+                    if child.label in temp_labels_to_jnames
                 )
-                temp_part = temp_axis.children(nodeid)[temp_npart]
 
                 deps = self.emit_layout_insns(
-                    temp_part.layout_fn,
+                    temp_part,
                     temp_offset,
-                    temp_pt_labels[: i + 1],
-                    temp_jnames[: i + 1],
+                    temp_labels_to_jnames,
+                    # temp_pt_labels[: i + 1],
+                    # temp_jnames[: i + 1],
                     within_inames,
                     depends_on,
                 )
@@ -909,29 +917,31 @@ class LoopyKernelBuilder:
             )
 
     def emit_layout_insns(
-        self, layout_fn, offset_var, part_labels, jnames, within_inames, depends_on
+        self, axis_part, offset_var, labels_to_jnames, within_inames, depends_on
     ):
         """
         TODO
         """
+        layout_fn = axis_part.layout_fn
+
         if layout_fn == "null layout":
             return frozenset()
 
         # TODO singledispatch!
         if isinstance(layout_fn, IndirectLayoutFunction):
             # we can either index with just the lowest index or all of them
-            if layout_fn.data.axes.rootless_depth == 1:
-                mylabels = part_labels[-1:]
-                myjnames = jnames[-1:]
-            else:
-                assert layout_fn.data.axes.rootless_depth == utils.single_valued(
-                    map(len, [part_labels, jnames])
-                )
-                mylabels = part_labels
-                myjnames = jnames
+            # if layout_fn.data.axes.rootless_depth == 1:
+            #     mylabels = part_labels[-1:]
+            #     myjnames = jnames[-1:]
+            # else:
+            #     assert layout_fn.data.axes.rootless_depth == utils.single_valued(
+            #         map(len, [part_labels, jnames])
+            #     )
+            #     mylabels = part_labels
+            #     myjnames = jnames
 
             layout_var = self.register_scalar_assignment(
-                layout_fn.data, mylabels, myjnames, within_inames, depends_on
+                layout_fn.data, labels_to_jnames, within_inames, depends_on
             )
             expr = pym.var(offset_var) + layout_var
 
@@ -947,13 +957,14 @@ class LoopyKernelBuilder:
                 # drop the last jname
                 start = self.register_scalar_assignment(
                     layout_fn.start,
-                    part_labels[:-1],
-                    jnames[:-1],
+                    labels_to_jnames,
+                    # part_labels[:-1],
+                    # jnames[:-1],
                     within_inames,
                     depends_on,
                 )
 
-            jname = pym.var(jnames[-1])
+            jname = pym.var(labels_to_jnames[axis_part.label])
             expr = pym.var(offset_var) + jname * step + start
         else:
             raise NotImplementedError
@@ -1117,30 +1128,29 @@ class LoopyKernelBuilder:
                 else:
                     break
 
+            labels_to_jnames = dict(checked_zip(labels, jnames))
+
             temp_var = self.register_scalar_assignment(
-                extent, labels, jnames, within_inames, depends_on
+                extent, labels_to_jnames, within_inames, depends_on
             )
             return str(temp_var)
         else:
             return extent
 
     def register_scalar_assignment(
-        self, array, part_labels, jnames, within_inames, depends_on
+        self, array, array_labels_to_jnames, within_inames, depends_on
     ):
         temp_name = self._namer.next("n")
         temp = MultiArray(None, name=temp_name, dtype=np.int32)
         insn = tlang.Read(array, temp)
 
-        temp_pt_labels = ()
-        temp_jnames = ()
+        temp_labels_to_jnames = {}
 
         # TODO Think about dependencies
         self.emit_assignment_insn(
             insn,
-            part_labels,
-            temp_pt_labels,
-            jnames,
-            temp_jnames,
+            array_labels_to_jnames,
+            temp_labels_to_jnames,
             within_inames=within_inames,
             depends_on=depends_on,
             scalar=True,
