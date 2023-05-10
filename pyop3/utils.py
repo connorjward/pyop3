@@ -44,6 +44,26 @@ class NameGenerator:
 UniqueNameGenerator = NameGenerator
 
 
+class DuplicateInsertionException(Exception):
+    pass
+
+
+class StrictlyUniqueSet(set):
+    def add(self, element):
+        if element in self:
+            raise DuplicateInsertionException(
+                f"{element} is already present in the set"
+            )
+        super().add(element)
+
+    def update(self, other):
+        if any(el in self for el in other):
+            raise DuplicateInsertionException(
+                "Attempting to add set entries that already exist"
+            )
+        super().update(other)
+
+
 def as_tuple(item):
     if isinstance(item, collections.abc.Sequence):
         return tuple(item)
