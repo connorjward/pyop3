@@ -197,98 +197,15 @@ class LoopyKernelBuilder:
         domain_str = f"{{ [{iname}]: 0 <= {iname} < {extent} }}"
         self.domains.append(domain_str)
 
-        # set these below (singledispatch me)
-        index_insns = None
-        new_labels = None
-        new_jnames = None
-        jnames = None
-        if isinstance(index, RangeNode):
-            jname = self._namer.next("j")
-            self._temp_kernel_data.append(
-                lp.TemporaryVariable(jname, shape=(), dtype=np.uintp)
-            )
-
-            index_insn = lp.Assignment(
-                pym.var(jname),
-                pym.var(iname) * index.step + index.start,
-                id=self._namer.next("myid_"),
-                within_inames=within_inames,
-                depends_on=depends_on,
-                # no_sync_with=no_sync_with,
-            )
-            index_insns = [index_insn]
-            new_labels = existing_labels | index.label
-            new_jnames = existing_jnames | jname
-            jnames = (jname,)
-            new_within = {index.id: ((index.label,), (jname,))}
-
-        elif isinstance(index, IdentityMapNode):
-            raise NotImplementedError
-
-        elif isinstance(index, AffineMapNode):
-            raise NotImplementedError
-
-        elif isinstance(index, TabulatedMapNode):
-            # NOTE: some maps can produce multiple jnames (but not this one)
-            jname = self._namer.next("j")
-            self._temp_kernel_data.append(
-                lp.TemporaryVariable(jname, shape=(), dtype=np.uintp)
-            )
-
-            # find the right target label for the map (assume can't be multi-part)
-            mapaxis = index.data.axes
-            mappartid = NullRootNode.ID
-            for l in existing_labels:
-                (_part_,) = [pt for pt in mapaxis.children(mappartid) if l == pt.label]
-                mappartid = _part_.id
-            # not sure about this check
-            # assert mapaxis.nparts == 1
-            # assert not mapaxis.children(mappartid)
-            (mypart,) = mapaxis.children(mappartid)
-            map_labels = existing_labels | mypart.label
-            # mapaxis = index.data.axes
-            # for l in existing_labels:
-            #     mapaxis = mapaxis.parts_by_label[l].subaxis
-            # assert mapaxis.nparts == 1
-            # assert not mapaxis.part.subaxis
-            # map_labels = existing_labels | mapaxis.part.label
-            map_jnames = existing_jnames | iname
-            expr = self.register_scalar_assignment(
-                index.data, map_labels, map_jnames, within_inames | {iname}, depends_on
-            )
-
-            index_insn = lp.Assignment(
-                pym.var(jname),
-                expr,
-                id=self._namer.next("myid_"),
-                within_inames=within_inames | {iname},
-                depends_on=depends_on,
-            )
-
-            index_insns = [index_insn]
-
-            temp_labels = list(existing_labels)
-            temp_jnames = list(existing_jnames)
-            assert len(index.from_labels) == 1
-            assert len(index.to_labels) == 1
-            for label in index.from_labels:
-                assert temp_labels.pop() == label
-                temp_jnames.pop()
-
-            (to_label,) = index.to_labels
-            new_labels = PrettyTuple(temp_labels) | to_label
-            new_jnames = PrettyTuple(temp_jnames) | jname
-            jnames = (jname,)
-            new_within = {index.id: ((to_label,), (jname,))}
-        else:
-            raise AssertionError
-
-        assert index_insns is not None
-        assert new_labels is not None
-        assert new_jnames is not None
-        assert jnames is not None
-        self.instructions.extend(index_insns)
-        new_deps = frozenset({insn.id for insn in index_insns})
+        new_labels, new_jnames, new_within, new_deps = self.myinnerfunc(
+            iname,
+            index,
+            existing_labels,
+            existing_jnames,
+            within_indices,
+            within_inames,
+            depends_on,
+        )
 
         if children := itree.children(index):
             for subindex in children:
