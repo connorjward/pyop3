@@ -5,7 +5,7 @@ from typing import Any
 
 import pytools
 
-from pyop3.utils import UniqueNameGenerator, just_one, strictly_all
+from pyop3.utils import UniqueNameGenerator, just_one, some_but_not_all, strictly_all
 
 __all__ = ["Node", "Tree"]
 
@@ -359,6 +359,81 @@ class NullRootTree(Tree):
             else:
                 node_queue.append(node)
         return tree
+
+
+class LabelledNode(Node):
+    fields = Node.fields | {"labels"}
+
+    def __init__(self, labels: Sequence[Hashable], **kwargs):
+        super().__init__(**kwargs)
+        self.labels = tuple(labels)
+
+
+class LabelledTree(Tree):
+    def __init__(self):
+        super().__init__()
+        self._parent_and_label_to_child = {}
+
+    def register_node(
+        self,
+        node: LabelledNode,
+        parent: LabelledNode | Hashable | None = None,
+        label: Hashable | None = None,
+    ):
+        if some_but_not_all([parent, label]):
+            raise ValueError
+
+        # TODO handle root case
+        if not parent:
+            super().add_node(node)
+            for new_label in node.labels:
+                self._parent_and_label_to_child[(node.id, new_label)] = None
+            return
+
+        parent_id = self._as_existing_node_id(parent)
+        super().add_node(node, parent_id)
+        self._parent_and_label_to_child[(parent_id, label)] = node.id
+
+        for new_label in node.labels:
+            self._parent_and_label_to_child[(node.id, new_label)] = None
+
+    def child_by_label(self, node: LabelledNode | Hashable, label: Hashable):
+        node_id = self._as_existing_node_id(node)
+        child = self._parent_and_label_to_child[node_id, label]
+        if child is not None:
+            return self._as_node(child)
+        else:
+            return None
+
+    @classmethod
+    def from_dict(
+        cls, node_dict: dict[Node, Hashable]
+    ) -> "LabelledTree":  # -> subclass?
+        tree = cls()
+        node_queue = list(node_dict.keys())
+        history = set()
+        while node_queue:
+            if tuple(node_queue) in history:
+                raise ValueError("cycle!")
+
+            history.add(tuple(node_queue))
+
+            node = node_queue.pop(0)
+            parent_info = node_dict[node]
+            if parent_info is None:
+                tree.register_node(node)
+            else:
+                parent_id, parent_label = parent_info
+                if parent_id in tree._node_ids:
+                    tree.register_node(node, parent=parent_id, label=parent_label)
+                else:
+                    node_queue.append(node)
+        return tree
+
+    def copy(self):
+        new = super().copy()
+        new._parent_and_label_to_child = self._parent_and_label_to_child.copy()
+        return new
 
 
 def previsit(

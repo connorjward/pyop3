@@ -24,6 +24,8 @@ from pyop3.multiaxis import (
     IndirectLayoutFunction,
     MapNode,
     MultiAxis,
+    MultiAxisComponent,
+    MultiAxisNode,
     RangeNode,
     TabulatedMapNode,
 )
@@ -593,7 +595,8 @@ class LoopyKernelBuilder:
         currentindices,
         index,
         within_indices,
-        partid=NullRootNode.ID,
+        parent_axis=None,
+        parent_label=None,
         iid=NullRootNode.ID,
     ):
         """Return an iterable of axis parts per index
@@ -617,8 +620,9 @@ class LoopyKernelBuilder:
             else:
                 size = index.size
             label = self._namer.next("mylabel")
-            new_part = AxisPart(size, label=label)
-            axtree.add_node(new_part, parent=partid)
+            new_part = MultiAxisComponent(size, label=label)
+            new_axis = MultiAxisNode([new_part])
+            axtree.register_node(new_axis, parent=parent_axis, label=parent_label)
 
             new_index = RangeNode(label, size)
             itree.add_node(new_index, parent=iid)
@@ -631,7 +635,8 @@ class LoopyKernelBuilder:
                         currentindices,
                         subidx,
                         within_indices,
-                        new_part.id,
+                        new_axis,
+                        new_part.label,
                         new_index.id,
                     )
 
@@ -824,67 +829,40 @@ class LoopyKernelBuilder:
         self.instructions.append(temp_offset_insn)
         depends_on |= {array_offset_insn.id, temp_offset_insn.id}
 
-        array_axis = assignment.array.axes
-        nodeid = NullRootNode.ID
-        while not array_axis.is_leaf(nodeid):
-            # for i, pt_label in enumerate(array_pt_labels):
-            # array_npart = [pt.label for pt in array_axis.children(nodeid)].index(
-            #     pt_label
-            # )
-            array_part = just_one(
-                child
-                for child in array_axis.children(nodeid)
-                if child.label in array_labels_to_jnames
+        axes = assignment.array.axes
+        axis = axes.root
+        while axis:
+            component = just_one(
+                cpt for cpt in axis.components if cpt.label in array_labels_to_jnames
             )
 
             deps = self.emit_layout_insns(
-                array_part,
+                component,
                 array_offset,
                 array_labels_to_jnames,
-                # array_pt_labels[: i + 1],
-                # array_jnames[: i + 1],
                 within_inames,
                 depends_on,
             )
             depends_on |= deps
-            nodeid = array_part.id
-
-        assert array_axis.is_leaf(nodeid)
+            axis = axes.child_by_label(axis, component.label)
 
         if not scalar:
-            temp_axis = assignment.temporary.axes
-            nodeid = NullRootNode.ID
-            while not temp_axis.is_leaf(nodeid):
-                # for i, pt_label in enumerate(temp_pt_labels):
-                # temp_npart = [pt.label for pt in temp_axis.children(nodeid)].index(
-                #     pt_label
-                # )
-                # temp_part = temp_axis.children(nodeid)[temp_npart]
-                temp_part = just_one(
-                    child
-                    for child in temp_axis.children(nodeid)
-                    if child.label in temp_labels_to_jnames
+            temp_axes = assignment.temporary.axes
+            axis = temp_axes.root
+            while axis:
+                component = just_one(
+                    cpt for cpt in axis.components if cpt.label in temp_labels_to_jnames
                 )
 
                 deps = self.emit_layout_insns(
-                    temp_part,
+                    component,
                     temp_offset,
                     temp_labels_to_jnames,
-                    # temp_pt_labels[: i + 1],
-                    # temp_jnames[: i + 1],
                     within_inames,
                     depends_on,
                 )
                 depends_on |= deps
-                nodeid = temp_part.id
-
-        # there are no ordering restrictions between assignments to the
-        # same temporary - but this is only valid to declare if multiple insns are used
-        # if len(assignment.lhs.indicess) > 1:
-        #     assert len(assignment.rhs.indicess) > 1
-        #     no_sync_with = frozenset({(f"{assignment.id}*", "any")})
-        # else:
-        #     no_sync_with = frozenset()
+                axis = temp_axes.child_by_label(axis, component.label)
 
         self.generate_assignment_insn_inner(
             assignment,

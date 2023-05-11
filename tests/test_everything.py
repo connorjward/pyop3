@@ -878,21 +878,36 @@ def test_permuted_ragged_permuted(scalar_copy_kernel):
 
 
 def test_permuted_inner_and_ragged(scalar_copy_kernel):
-    # NOTE: nnz here is NOT permuted (and I don't think it ever should be)
-    axes = MultiAxis([AxisPart(2, label="a", id="p1")]).add_subaxis(
-        "p1", [AxisPart(2, label="b", id="p2")]
+    axes = MultiAxisTree.from_dict(
+        {
+            MultiAxisNode([MultiAxisComponent(2, "x")], id="a"): None,
+            MultiAxisNode([MultiAxisComponent(2, "y")]): ("a", "x"),
+        }
     )
+    # breakpoint()
     nnz = MultiArray(
-        axes.set_up(),
+        axes.copy().set_up(),
         name="nnz",
         dtype=np.int32,
         data=np.array([3, 2, 1, 1], dtype=np.int32),
     )
 
-    axes = MultiAxis([AxisPart(2, label="a", id="p1")]).add_subaxis(
-        "p1", [AxisPart(2, "b", id="p2", numbering=[1, 0])]
+    # we currently need to do this because ragged things admit no numbering
+    # probably want a .without_numbering() method or similar
+    # also, we might want to store the numbering per MultiAxisNode instead of per
+    # component. That would then match DMPlex.
+    axes = MultiAxisTree.from_dict(
+        {
+            MultiAxisNode([MultiAxisComponent(2, "x")], id="id0"): None,
+            MultiAxisNode([MultiAxisComponent(2, "y", numbering=[1, 0])], id="id1"): (
+                "id0",
+                "x",
+            ),
+            MultiAxisNode([MultiAxisComponent(nnz, "z")]): ("id1", "y"),
+        }
     )
-    axes = axes.add_subaxis("p2", [AxisPart(nnz, "c")]).set_up()
+    axes.set_up()
+
     dat1 = MultiArray(
         axes, name="dat1", data=np.ones(7, dtype=np.float64), dtype=np.float64
     )
@@ -900,17 +915,17 @@ def test_permuted_inner_and_ragged(scalar_copy_kernel):
         axes, name="dat2", data=np.zeros(7, dtype=np.float64), dtype=np.float64
     )
 
-    p = IndexTree([RangeNode("a", 2, id="i0")])
-    p.add_node(RangeNode("b", 2, id="i1"), "i0")
-    p.add_node(RangeNode("c", nnz[p.copy()]), "i1")
+    p = IndexTree([RangeNode("x", 2, id="i0")])
+    p.add_node(RangeNode("y", 2, id="i1"), "i0")
+    p.add_node(RangeNode("z", nnz[p.copy()]), "i1")
     expr = pyop3.Loop(p, scalar_copy_kernel(dat1[p], dat2[p]))
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(code)
     fn = getattr(dll, "mykernel")
 
-    layout0_0 = dat1.dim.leaf.layout_fn.start
-    layout1_0 = layout0_0.root.leaf.layout_fn.start
+    layout0_0 = dat1.dim.leaf.components[0].layout_fn.start
+    layout1_0 = layout0_0.root.leaf.components[0].layout_fn.start
     args = [nnz.data, layout1_0.data, layout0_0.data, dat1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
     fn(*(d.ctypes.data for d in args))

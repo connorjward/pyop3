@@ -93,6 +93,18 @@ def order_axes(layout):
     return axes
 
 
+"""
+So constrained multiaxes should have a name associated with them so they can
+be identified by PETSc options etc (e.g. 'field'). This is distinct from 'id' in the
+tree because we can have multiple 'field' multiaxes if they are nested.
+
+The problem that we have is that we sometimes have duplicated labels in our code
+(e.g. if we have 2 meshes then there can be 2 "cell" labels) To resolve this I
+think we should, in this function, store labels and a 2-tuple of (mesh name, label)
+e.g. ("mesh0", "cells"). This is sufficiently unique.
+"""
+
+
 def _insert_axis(
     tree: Tree,
     new_axes: ConstrainedMultiAxis,

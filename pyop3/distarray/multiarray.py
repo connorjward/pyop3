@@ -18,6 +18,9 @@ from pyop3.dtypes import IntType, get_mpi_dtype
 from pyop3.multiaxis import (
     AxisPart,
     MultiAxis,
+    MultiAxisComponent,
+    MultiAxisNode,
+    MultiAxisTree,
     RangeNode,
     TabulatedMapNode,
     expand_indices_to_fill_empty_shape,
@@ -25,7 +28,13 @@ from pyop3.multiaxis import (
     get_bottom_part,
 )
 from pyop3.tree import NullRootNode, NullRootTree, Tree
-from pyop3.utils import NameGenerator, PrettyTuple, single_valued, strictly_all
+from pyop3.utils import (
+    NameGenerator,
+    PrettyTuple,
+    just_one,
+    single_valued,
+    strictly_all,
+)
 
 
 # TODO this shouldn't be an immutable record or pym var
@@ -84,8 +93,8 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
                 expand_indices_to_fill_empty_shape(dim, indices, idx)
         elif dim:
             indices = NullRootTree()
-            for pt in dim.children(dim.root):
-                fill_shape(dim, pt, indices, NullRootNode.ID, PrettyTuple())
+            for cpt in dim.root.components:
+                fill_shape(dim, dim.root, cpt, indices, indices.root, PrettyTuple())
         else:
             indices = NullRootTree()
         self.indices = indices
@@ -106,20 +115,6 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
     def alloc_size(self):
         return self.axes.alloc_size() if self.axes else 1
 
-    @property
-    def unrolled_migs(self):
-        def unroll(mig):
-            if isinstance(mig, Map):
-                return tuple([*unroll(mig.from_index), mig])
-            else:
-                return (mig,)
-
-        return unroll(self.indices)
-
-    @property
-    def unrolled_indices(self):
-        return self.unrolled_migs  # alias
-
     @classmethod
     def compute_part_size(cls, part):
         size = 0
@@ -137,15 +132,17 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
         flat = np.array(flat, dtype=dtype)
 
-        axis = [AxisPart(count, label=labels[-1])]
+        axis = MultiAxisNode([MultiAxisComponent(count, label=labels[-1])])
         if isinstance(count, MultiArray):
-            base_part = get_bottom_part(count.root)
+            base_axis = get_bottom_part(count.root)
+            base_component = just_one(base_axis.components)
             newax = count.root.copy()
-            newax.add_subaxis(base_part.id, axis)
+            newax.register_node(axis, base_axis, base_component.label)
         else:
-            newax = MultiAxis(axis)
+            newax = MultiAxisTree()
+            newax.register_node(axis)
 
-        assert newax.rootless_depth == len(labels)
+        assert newax.depth == len(labels)
 
         return cls(newax.set_up(), name=f"{name}_{inc}", data=flat, dtype=dtype)
 
