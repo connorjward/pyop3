@@ -128,29 +128,25 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         return size
 
     @classmethod
-    def from_list(cls, data, labels, name, dtype, inc=None):
+    def from_list(cls, data, labels, name, dtype, inc=0):
         """Return a (linear) multi-array formed from a list of lists."""
         flat, count = cls._get_count_data(data)
 
-        # weird but we're going backwards
-        if inc is None:
-            inc = len(labels) - 1
-
         if isinstance(count, list):
-            count = cls.from_list(count, labels, name, dtype, inc - 1)
-        else:
-            assert inc == 0
+            count = cls.from_list(count, labels[:-1], name, dtype, inc + 1)
 
         flat = np.array(flat, dtype=dtype)
 
-        axis = [AxisPart(count, label=labels[inc])]
+        axis = [AxisPart(count, label=labels[-1])]
         if isinstance(count, MultiArray):
             base_part = get_bottom_part(count.root)
             newax = count.root.copy()
             newax.add_subaxis(base_part.id, axis)
-            # axis = count.root.add_subaxis(base_part.id, axis)
         else:
             newax = MultiAxis(axis)
+
+        assert newax.rootless_depth == len(labels)
+
         return cls(newax.set_up(), name=f"{name}_{inc}", data=flat, dtype=dtype)
 
     @classmethod
