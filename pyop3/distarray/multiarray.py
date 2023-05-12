@@ -86,7 +86,6 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
         self.dim = dim
 
-        # breakpoint()
         if indices:
             indices = indices.copy()
             for idx in indices.children(indices.root):
@@ -123,16 +122,19 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         return size
 
     @classmethod
-    def from_list(cls, data, labels, name, dtype, inc=0):
+    def from_list(cls, data, names_and_labels, name, dtype, inc=0):
         """Return a (linear) multi-array formed from a list of lists."""
         flat, count = cls._get_count_data(data)
 
         if isinstance(count, list):
-            count = cls.from_list(count, labels[:-1], name, dtype, inc + 1)
+            count = cls.from_list(count, names_and_labels[:-1], name, dtype, inc + 1)
 
         flat = np.array(flat, dtype=dtype)
 
-        axis = MultiAxisNode([MultiAxisComponent(count, label=labels[-1])])
+        axis = MultiAxisNode(
+            [MultiAxisComponent(count, label=names_and_labels[-1][1])],
+            name=names_and_labels[-1][0],
+        )
         if isinstance(count, MultiArray):
             base_axis = get_bottom_part(count.root)
             base_component = just_one(base_axis.components)
@@ -142,7 +144,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
             newax = MultiAxisTree()
             newax.register_node(axis)
 
-        assert newax.depth == len(labels)
+        assert newax.depth == len(names_and_labels)
 
         return cls(newax.set_up(), name=f"{name}_{inc}", data=flat, dtype=dtype)
 

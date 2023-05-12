@@ -9,7 +9,7 @@ import itertools
 import numbers
 import operator
 import threading
-from typing import Any, Optional, Sequence, Tuple, Union
+from typing import Any, Hashable, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pymbolic as pym
@@ -23,9 +23,10 @@ from pyop3.dtypes import IntType, PointerType, get_mpi_dtype
 from pyop3.tree import LabelledNode, LabelledTree
 from pyop3.tree import Node as NewNode
 from pyop3.tree import NullRootNode, NullRootTree, Tree, previsit
+from pyop3.utils import NameGenerator  # TODO delete
 from pyop3.utils import (
-    NameGenerator,
     PrettyTuple,
+    UniqueNameGenerator,
     as_tuple,
     checked_zip,
     has_unique_entries,
@@ -126,23 +127,26 @@ def only_linear(func):
     return wrapper
 
 
-def prepare_layouts(axtree, maxis, part, path=None):
+def prepare_layouts(axtree, axis, component, path=None):
     """Make a magic nest of dictionaries for storing intermediate results."""
     # path is a tuple key for holding the different axis parts
     if not path:
-        path = (part.label,)
+        path = ((axis.name, component.label),)
+    # path += ((axis.name, component.label),)
 
     # import pdb; pdb.set_trace()
     layouts = {path: None}
 
-    if child := axtree.child_by_label(maxis, part.label):
+    if child := axtree.child_by_label(axis, component.label):
         for subcpt in child.components:
-            layouts |= prepare_layouts(axtree, child, subcpt, path + (subcpt.label,))
+            layouts |= prepare_layouts(
+                axtree, child, subcpt, path + ((child.name, subcpt.label),)
+            )
 
     return layouts
 
 
-def set_null_layouts(layouts, axtree, path=(), node=None):
+def set_null_layouts(layouts, axtree, path=(), axis=None):
     """
     we have null layouts whenever the step is non-const (the variability is captured by
     the start property of the affine layout below it).
@@ -150,13 +154,13 @@ def set_null_layouts(layouts, axtree, path=(), node=None):
     We also get them when the axis is "indexed", that is, not ever actually used by
     temporaries.
     """
-    node = node or axtree.root
-    for part in node.components:
-        new_path = path + (part.label,)
-        if not has_constant_step(axtree, node, part) or part.indexed:
+    axis = axis or axtree.root
+    for part in axis.components:
+        new_path = path + ((axis.name, part.label),)
+        if not has_constant_step(axtree, axis, part) or part.indexed:
             layouts[new_path] = "null layout"
 
-        if child := axtree.child_by_label(node, part.label):
+        if child := axtree.child_by_label(axis, part.label):
             set_null_layouts(layouts, axtree, new_path, child)
 
 
@@ -168,38 +172,38 @@ def can_be_affine(axtree, axis, component):
 
 
 def handle_const_starts(
-    axis,
+    axtree,
     layouts,
     path=PrettyTuple(),
     outer_axes_are_all_indexed=True,
-    node=None,
+    axis=None,
 ):
-    node = node or axis.root
+    axis = axis or axtree.root
     offset = 0
-    for part in node.components:
+    for part in axis.components:
         # catch already set null layouts
-        if layouts[path | part.label] is not None:
+        if layouts[path | (axis.name, part.label)] is not None:
             continue
         # need to track if ragged permuted below
         # check for None here in case we have already set this to a null layout
-        if can_be_affine(axis, node, part) and has_constant_start(
-            axis, node, part, outer_axes_are_all_indexed
+        if can_be_affine(axtree, axis, part) and has_constant_start(
+            axtree, axis, part, outer_axes_are_all_indexed
         ):
-            step = step_size(axis, node, part)
-            layouts[path | part.label] = AffineLayoutFunction(step, offset)
+            step = step_size(axtree, axis, part)
+            layouts[path | (axis.name, part.label)] = AffineLayoutFunction(step, offset)
 
-        if not has_fixed_size(axis, node, part):
+        if not has_fixed_size(axtree, axis, part):
             # can't do any more as things to the right of this will also move around
             break
         else:
-            offset += part.calc_size(axis, node)
+            offset += part.calc_size(axtree, axis)
 
-    for part in node.components:
-        if child := axis.child_by_label(node, part.label):
+    for part in axis.components:
+        if child := axtree.child_by_label(axis, part.label):
             handle_const_starts(
-                axis,
+                axtree,
                 layouts,
-                path | part.label,
+                path | (axis.name, part.label),
                 outer_axes_are_all_indexed and (part.indexed or part.count == 1),
                 child,
             )
@@ -626,7 +630,6 @@ class MultiAxisTree(LabelledTree):
 
     def _check_labels(self):
         def check(node, prev_labels):
-            # breakpoint()
             if node == self.root:
                 return prev_labels
             if node.label in prev_labels:
@@ -684,7 +687,7 @@ class MultiAxisTree(LabelledTree):
         axis = axis or self.root
         new_parts = []
         for part in axis.components:
-            pth = path | part.label
+            pth = path | (axis.name, part.label)
 
             layout = layouts[pth]
             if subaxis := self.child_by_label(axis, part.label):
@@ -715,7 +718,6 @@ class MultiAxisTree(LabelledTree):
         # fixme very hard to read - the conditions above aren't quite right
         test3 = path not in layouts or layouts[path] != "null layout"
         if (test1 or test2) and test3:
-            # breakpoint()
             data = self.create_layout_lists(path, layout_path, offset, axis)
 
             # we shouldn't reproduce anything here
@@ -728,7 +730,7 @@ class MultiAxisTree(LabelledTree):
 
         for part in axis.components:
             # zero offset if layout exists or if we are part of a temporary (and indexed)
-            if layouts[path | part.label] != "null layout" or part.indexed:
+            if layouts[path | (axis.name, part.label)] != "null layout" or part.indexed:
                 subaxis_needs_part = False
                 saved_offset = offset.value
                 offset.value = 0
@@ -738,11 +740,15 @@ class MultiAxisTree(LabelledTree):
 
             if subaxis := self.child_by_label(axis, part.label):
                 if subaxis_needs_part:
-                    new_layout_path = layout_path | part.label
+                    new_layout_path = layout_path | (axis.name, part.label)
                 else:
                     new_layout_path = PrettyTuple()
                 self.finish_off_layouts(
-                    layouts, offset, path | part.label, new_layout_path, subaxis
+                    layouts,
+                    offset,
+                    path | (axis.name, part.label),
+                    new_layout_path,
+                    subaxis,
                 )
 
             offset.value += saved_offset
@@ -780,7 +786,7 @@ class MultiAxisTree(LabelledTree):
                 has_independently_indexed_subaxis_parts(self, axis, part)
                 and part.numbering is None
             ):
-                new_layouts[path | part.label] = (layout_path, myoff)
+                new_layouts[path | (axis.name, part.label)] = (layout_path, myoff)
                 found.add(part.label)
 
             if not has_fixed_size(self, axis, part):
@@ -829,9 +835,6 @@ class MultiAxisTree(LabelledTree):
 
         assert all(isinstance(num, MultiArray) for num in axis_numbering)
 
-        # if indices:
-        #     import pdb; pdb.set_trace()
-
         for i in range(npoints):
             # TODO add a shortcut here to catch if i is inside the numbering of an affine
             # subpart.
@@ -862,23 +865,28 @@ class MultiAxisTree(LabelledTree):
                 # the layout is indirect and requires the current axis part if there only
                 # if there is numbering
                 if selected_part.numbering is not None:
-                    new_layouts[path | selected_part_label][selected_index] = (
-                        layout_path | selected_part_label,
+                    new_layouts[path | (axis.name, selected_part_label)][
+                        selected_index
+                    ] = (
+                        layout_path | (axis.name, selected_part_label),
                         offset.value,
                     )
                 else:
-                    new_layouts[path | selected_part_label][selected_index] = (
+                    new_layouts[path | (axis.name, selected_part_label)][
+                        selected_index
+                    ] = (
                         layout_path,
                         offset.value,
                     )
-                offset += step_size(self, selected_part, indices | selected_index)
+                # FIXME
+                offset += step_size(self, axis, selected_part, indices | selected_index)
+                # offset += step_size(self, selected_part, indices | selected_index)
             else:
                 subaxis = self.child_by_label(axis, selected_part.label)
                 assert subaxis
-                # breakpoint()
                 subdata = self.create_layout_lists(
-                    path | selected_part_label,
-                    layout_path | selected_part_label,
+                    path | (axis.name, selected_part_label),
+                    layout_path | (axis.name, selected_part_label),
                     offset,
                     subaxis,
                     indices | selected_index,
@@ -901,7 +909,6 @@ class MultiAxisTree(LabelledTree):
             path_: self.unpack_index_dict(layout_)
             for path_, layout_ in new_layouts.items()
         }
-        # breakpoint()
 
         return ret
 
@@ -909,7 +916,6 @@ class MultiAxisTree(LabelledTree):
     def unpack_index_dict(idict):
         # catch just a number
         # if isinstance(idict, numbers.Integral):
-        # breakpoint()
         if isinstance(idict, tuple):
             return idict
 
@@ -928,7 +934,9 @@ class MultiAxisTree(LabelledTree):
 
         label, *sublabels = path
 
-        (component,) = [cpt for cpt in axis.components if cpt.label == label]
+        (component,) = [
+            cpt for cpt in axis.components if (axis.name, cpt.label) == label
+        ]
         if sublabels:
             return self.get_part_from_path(
                 sublabels, self.child_by_label(axis, component.label)
@@ -943,7 +951,6 @@ class MultiAxisTree(LabelledTree):
 
         for path, layout in layouts.items():
             axis, part = self.get_part_from_path(path)
-            # breakpoint()
             if can_be_affine(self, axis, part):
                 if isinstance(layout, tuple):
                     layout_path, layout = layout
@@ -951,7 +958,6 @@ class MultiAxisTree(LabelledTree):
                     starts = MultiArray.from_list(
                         layout, layout_path, name, PointerType
                     )
-                    # breakpoint()
                     step = step_size(self, axis, part)
                     layouts[path] = AffineLayoutFunction(step, starts)
             else:
@@ -1314,15 +1320,18 @@ class AffineMapNode(MapNode):
 
 
 class MultiAxisNode(LabelledNode):
-    fields = {"components", "id"}
+    fields = {"components", "name", "id"}
 
-    def __init__(self, components, *, id=None):
+    _name_generator = UniqueNameGenerator("_MultiAxisNode_name")
+
+    def __init__(self, components, name: str | None = None, *, id=None):
         labels = tuple(cpt.label for cpt in components)
         super().__init__(labels, id=id)
         self.components = tuple(components)
+        self.name = name or next(self._name_generator)
 
     def __str__(self) -> str:
-        return f"[{', '.join(str(cpt.label) for cpt in self.components)}]"
+        return f"{self.name} : [{', '.join(str(cpt.label) for cpt in self.components)}]"
 
 
 class MultiAxisComponent(pytools.ImmutableRecord):
@@ -1364,17 +1373,15 @@ class MultiAxisComponent(pytools.ImmutableRecord):
         "lgmap",
     }
 
-    _id_generator = NameGenerator("_id_MultiAxisComponent")
-    _label_generator = NameGenerator("_label_MultiAxisComponent")
+    _label_generator = NameGenerator("_MultiAxisComponent_label")
 
     def __init__(
         self,
         count,
-        label=None,
+        label: Hashable | None = None,
         *,
         indices=None,
         numbering=None,
-        # id=None,
         max_count=None,
         layout_fn=None,
         overlap=None,
@@ -1389,18 +1396,23 @@ class MultiAxisComponent(pytools.ImmutableRecord):
         elif not max_count:
             max_count = max(count.data)
 
-        if isinstance(numbering, np.ndarray):
-            numbering = list(numbering)
+        if numbering is not None and not isinstance(numbering, MultiArray):
+            # FIXME: This is an excellent argument for why the numbering should
+            # be a property of the multi-axis, not the particular component
+            # this name attribute, needed for indexing, is very nasty to determine here
+            assert isinstance(numbering, tuple) and len(numbering) == 2
+            axis_name, numbering = numbering
 
-        if isinstance(numbering, collections.abc.Sequence):
-            numbering = MultiArray.from_list(
-                numbering, [label], name=f"{id}_ord", dtype=PointerType
-            )
+            if isinstance(numbering, np.ndarray):
+                numbering = list(numbering)
 
-        if not isinstance(label, collections.abc.Hashable):
-            raise ValueError("Provided label must be hashable")
-
-        # id = id if id is not None else next(self._id_generator)
+            if isinstance(numbering, collections.abc.Sequence):
+                numbering = MultiArray.from_list(
+                    numbering,
+                    [(axis_name, label)],
+                    name=f"{axis_name}_{label}_num",
+                    dtype=PointerType,
+                )
 
         self.count = count
         self.indices = indices
@@ -1605,7 +1617,7 @@ def fill_shape(axtree, axis, component, itree, iparent, prev_indices):
         count = component.count[mynewtree]
     else:
         count = component.count
-    new_index = RangeNode(component.label, count)
+    new_index = RangeNode((axis.name, component.label), count)
     itree.add_node(new_index, parent=iparent)
     if subaxis := axtree.child_by_label(axis, component.label):
         for cpt in subaxis.components:
@@ -1625,7 +1637,6 @@ def expand_indices_to_fill_empty_shape(
         assert isinstance(index, MapNode)
         new_labels = labels[: -len(index.from_labels)] + index.to_labels
 
-    new_children = []
     if children := itree.children(index):
         for child in children:
             expand_indices_to_fill_empty_shape(
@@ -1635,12 +1646,9 @@ def expand_indices_to_fill_empty_shape(
         # traverse where we have got to to get the bottom unindexed bit
         myaxis = axis.root
         for label in new_labels:
-            selected_parts = [pt for pt in myaxis.components if pt.label == label]
-            if not selected_parts:
-                raise ValueError(f"part with label {label} not found")
-            if len(selected_parts) > 1:
-                raise AssertionError("multiple parts should never match")
-            (selected_part,) = selected_parts
+            selected_part = just_one(
+                [pt for pt in myaxis.components if (myaxis.name, pt.label) == label]
+            )
             myaxis = axis.child_by_label(myaxis, selected_part.label)
 
         if myaxis:

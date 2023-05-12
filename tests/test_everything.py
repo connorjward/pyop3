@@ -878,10 +878,12 @@ def test_permuted_ragged_permuted(scalar_copy_kernel):
 
 
 def test_permuted_inner_and_ragged(scalar_copy_kernel):
+    # N.B. Do not try to modify the axis labels here, they are supposed to match
+    # this demonstrates that naming the multi-axis nodes does the right thing
     axes = MultiAxisTree.from_dict(
         {
-            MultiAxisNode([MultiAxisComponent(2, "x")], id="a"): None,
-            MultiAxisNode([MultiAxisComponent(2, "y")]): ("a", "x"),
+            MultiAxisNode([MultiAxisComponent(2, "x")], id="a", name="ax1"): None,
+            MultiAxisNode([MultiAxisComponent(2, "x")], name="ax2"): ("a", "x"),
         }
     )
     # breakpoint()
@@ -898,12 +900,16 @@ def test_permuted_inner_and_ragged(scalar_copy_kernel):
     # component. That would then match DMPlex.
     axes = MultiAxisTree.from_dict(
         {
-            MultiAxisNode([MultiAxisComponent(2, "x")], id="id0"): None,
-            MultiAxisNode([MultiAxisComponent(2, "y", numbering=[1, 0])], id="id1"): (
+            MultiAxisNode([MultiAxisComponent(2, "x")], id="id0", name="ax1"): None,
+            MultiAxisNode(
+                [MultiAxisComponent(2, "x", numbering=("ax2", [1, 0]))],
+                id="id1",
+                name="ax2",
+            ): (
                 "id0",
                 "x",
             ),
-            MultiAxisNode([MultiAxisComponent(nnz, "z")]): ("id1", "y"),
+            MultiAxisNode([MultiAxisComponent(nnz, "z")], name="ax3"): ("id1", "x"),
         }
     )
     axes.set_up()
@@ -915,9 +921,9 @@ def test_permuted_inner_and_ragged(scalar_copy_kernel):
         axes, name="dat2", data=np.zeros(7, dtype=np.float64), dtype=np.float64
     )
 
-    p = IndexTree([RangeNode("x", 2, id="i0")])
-    p.add_node(RangeNode("y", 2, id="i1"), "i0")
-    p.add_node(RangeNode("z", nnz[p.copy()]), "i1")
+    p = IndexTree([RangeNode(("ax1", "x"), 2, id="i0")])
+    p.add_node(RangeNode(("ax2", "x"), 2, id="i1"), "i0")
+    p.add_node(RangeNode(("ax3", "z"), nnz[p.copy()]), "i1")
     expr = pyop3.Loop(p, scalar_copy_kernel(dat1[p], dat2[p]))
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)

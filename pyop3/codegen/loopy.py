@@ -611,20 +611,17 @@ class LoopyKernelBuilder:
         """
         result = [(index, (), ())]
 
-        # breakpoint()
-
         # TODO do I need to track the labels?
         for index, _, _ in result:
             if index.id in within_indices:
                 size = 1
             else:
                 size = index.size
-            label = self._namer.next("mylabel")
-            new_part = MultiAxisComponent(size, label=label)
+            new_part = MultiAxisComponent(size)
             new_axis = MultiAxisNode([new_part])
             axtree.register_node(new_axis, parent=parent_axis, label=parent_label)
 
-            new_index = RangeNode(label, size)
+            new_index = RangeNode((new_axis.name, new_part.label), size)
             itree.add_node(new_index, parent=iid)
 
             if children := currentindices.children(index):
@@ -833,10 +830,13 @@ class LoopyKernelBuilder:
         axis = axes.root
         while axis:
             component = just_one(
-                cpt for cpt in axis.components if cpt.label in array_labels_to_jnames
+                cpt
+                for cpt in axis.components
+                if (axis.name, cpt.label) in array_labels_to_jnames
             )
 
             deps = self.emit_layout_insns(
+                axis,
                 component,
                 array_offset,
                 array_labels_to_jnames,
@@ -851,10 +851,12 @@ class LoopyKernelBuilder:
             axis = temp_axes.root
             while axis:
                 component = just_one(
-                    cpt for cpt in axis.components if cpt.label in temp_labels_to_jnames
+                    cpt
+                    for cpt in axis.components
+                    if (axis.name, cpt.label) in temp_labels_to_jnames
                 )
-
                 deps = self.emit_layout_insns(
+                    axis,
                     component,
                     temp_offset,
                     temp_labels_to_jnames,
@@ -895,7 +897,7 @@ class LoopyKernelBuilder:
             )
 
     def emit_layout_insns(
-        self, axis_part, offset_var, labels_to_jnames, within_inames, depends_on
+        self, axis, axis_part, offset_var, labels_to_jnames, within_inames, depends_on
     ):
         """
         TODO
@@ -942,7 +944,7 @@ class LoopyKernelBuilder:
                     depends_on,
                 )
 
-            jname = pym.var(labels_to_jnames[axis_part.label])
+            jname = pym.var(labels_to_jnames[(axis.name, axis_part.label)])
             expr = pym.var(offset_var) + jname * step + start
         else:
             raise NotImplementedError
