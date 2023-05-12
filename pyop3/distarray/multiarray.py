@@ -133,7 +133,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
         axis = MultiAxisNode(
             [MultiAxisComponent(count, label=names_and_labels[-1][1])],
-            name=names_and_labels[-1][0],
+            label=names_and_labels[-1][0],
         )
         if isinstance(count, MultiArray):
             base_axis = get_bottom_part(count.root)

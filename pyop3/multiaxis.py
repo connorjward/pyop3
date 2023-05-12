@@ -428,11 +428,12 @@ class Sparsity:
 class MultiAxisTree(LabelledTree):
     # fields = {"parts", "sf", "shared_sf"}
 
-    def __init__(self, parts=(), *, sf=None, shared_sf=None):
-        # super().__init__(parts)
+    def __init__(self, root=None, *, sf=None, shared_sf=None):
         super().__init__()
         self.sf = sf
         self.shared_sf = shared_sf
+        if root:
+            self.register_node(root)
 
     def add_nodes(self, axes, parent=None):
         # make sure all parts have labels, default to integers if necessary
@@ -1319,18 +1320,23 @@ class AffineMapNode(MapNode):
 
 
 class MultiAxis(LabelledNode):
-    fields = {"components", "name", "id"}
+    fields = {"components", "label", "id"}
 
-    _name_generator = UniqueNameGenerator("_MultiAxisNode_name")
+    _label_generator = UniqueNameGenerator("_MultiAxisNode_label")
 
-    def __init__(self, components, name: str | None = None, *, id=None):
+    def __init__(self, components, label: Hashable | None = None, *, id=None):
         labels = tuple(cpt.label for cpt in components)
         super().__init__(labels, id=id)
         self.components = tuple(components)
-        self.name = name or next(self._name_generator)
+        self.label = label or next(self._label_generator)
 
     def __str__(self) -> str:
         return f"{self.name} : [{', '.join(str(cpt.label) for cpt in self.components)}]"
+
+    # old alias
+    @property
+    def name(self):
+        return self.label
 
 
 # old alias
@@ -1420,7 +1426,7 @@ class MultiAxisComponent(pytools.ImmutableRecord):
         self.count = count
         self.indices = indices
         self.numbering = numbering
-        self.label = label if label is not None else next(self._label_generator)
+        self.label = label or next(self._label_generator)
         self.max_count = max_count
         self.layout_fn = layout_fn
         self.overlap = overlap
@@ -1448,6 +1454,11 @@ class MultiAxisComponent(pytools.ImmutableRecord):
 
     def __str__(self) -> str:
         return f"{self.__class__.__name__}(id={self.id}, label={self.label})"
+
+    # old alias
+    @property
+    def name(self) -> str:
+        return self.label
 
     @property
     def is_distributed(self):

@@ -340,23 +340,19 @@ class NullRootTree(Tree):
 
     @classmethod
     def from_dict(cls, node_dict: dict[Node, tuple[Hashable]]) -> "NullRootTree":
-        if cls.ROOT not in node_dict:
-            raise ValueError("Tree root must be provided")
-
         tree = cls()
-        node_id_to_parent = {}
         node_queue = list(node_dict.keys())
+        history = set()
         while node_queue:
-            node = node_queue.pop(0)
-            child_ids = node_dict[node]
-            for child_id in child_ids:
-                node_id_to_parent[child_id] = node
+            if tuple(node_queue) in history:
+                raise ValueError("cycle")
+            history.add(tuple(node_queue))
 
-            if node == cls.ROOT:
-                pass
-            elif node.id in node_id_to_parent:
-                tree.add_node(node, parent=node_id_to_parent[node.id])
-            else:
+            node = node_queue.pop(0)
+            parent_id = node_dict[node]
+            try:
+                tree.add_node(node, parent_id)
+            except:  # TODO catch correct exception
                 node_queue.append(node)
         return tree
 
@@ -407,7 +403,9 @@ class LabelledTree(Tree):
 
     @classmethod
     def from_dict(
-        cls, node_dict: dict[Node, Hashable]
+        cls,
+        node_dict: dict[Node, Hashable],
+        set_up: bool = False,
     ) -> "LabelledTree":  # -> subclass?
         tree = cls()
         node_queue = list(node_dict.keys())
@@ -428,6 +426,10 @@ class LabelledTree(Tree):
                     tree.register_node(node, parent=parent_id, label=parent_label)
                 else:
                     node_queue.append(node)
+
+        if set_up:
+            tree.set_up()
+
         return tree
 
     def copy(self):
