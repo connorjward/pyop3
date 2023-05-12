@@ -25,7 +25,7 @@ from pyop3.multiaxis import (
     MapNode,
     MultiAxis,
     MultiAxisComponent,
-    MultiAxisNode,
+    MultiAxisTree,
     RangeNode,
     TabulatedMapNode,
 )
@@ -564,7 +564,7 @@ class LoopyKernelBuilder:
             # we need the indices here because the temporary shape needs to be indexed
             # by the same indices as the original array
             itree = NullRootTree()
-            axtree = MultiAxis()
+            axtree = MultiAxisTree()
             for idx in arg.tensor.indices.children(arg.tensor.indices.root):
                 self._construct_temp_dims(
                     axtree, itree, arg.tensor.indices, idx, within_indices
@@ -618,7 +618,7 @@ class LoopyKernelBuilder:
             else:
                 size = index.size
             new_part = MultiAxisComponent(size)
-            new_axis = MultiAxisNode([new_part])
+            new_axis = MultiAxis([new_part])
             axtree.register_node(new_axis, parent=parent_axis, label=parent_label)
 
             new_index = RangeNode((new_axis.name, new_part.label), size)

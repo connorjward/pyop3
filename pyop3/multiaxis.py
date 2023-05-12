@@ -1119,10 +1119,6 @@ of a single label value if that label is unique in the whole tree.
             return MultiAxis(*args)
 
 
-# old alias
-MultiAxis = MultiAxisTree
-
-
 def get_slice_bounds(array, indices):
     from pyop3.distarray import MultiArray
 
@@ -1191,6 +1187,9 @@ class IndexTree(NullRootTree):
     pass
 
 
+IndexLabel = collections.namedtuple("IndexLabel", ["axis", "component"])
+
+
 class Node(pytools.ImmutableRecord):
     fields = {"children", "id"}
     namer = NameGenerator("idx")
@@ -1245,8 +1244,8 @@ class RangeNode(IndexNode):
     # fields = IndexNode.fields | {"label", "start", "stop", "step"}
     fields = IndexNode.fields | {"label", "stop"}
 
-    def __init__(self, label, stop, **kwargs):
-        self.label = label
+    def __init__(self, label: IndexLabel | tuple[Hashable, Hashable], stop, **kwargs):
+        self.label = IndexLabel(*label)
         self.stop = stop
         super().__init__(**kwargs)
 
@@ -1319,7 +1318,7 @@ class AffineMapNode(MapNode):
         super().__init__(from_labels, to_labels, arity, **kwargs)
 
 
-class MultiAxisNode(LabelledNode):
+class MultiAxis(LabelledNode):
     fields = {"components", "name", "id"}
 
     _name_generator = UniqueNameGenerator("_MultiAxisNode_name")
@@ -1332,6 +1331,10 @@ class MultiAxisNode(LabelledNode):
 
     def __str__(self) -> str:
         return f"{self.name} : [{', '.join(str(cpt.label) for cpt in self.components)}]"
+
+
+# old alias
+MultiAxisNode = MultiAxis
 
 
 class MultiAxisComponent(pytools.ImmutableRecord):

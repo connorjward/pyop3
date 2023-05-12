@@ -882,8 +882,8 @@ def test_permuted_inner_and_ragged(scalar_copy_kernel):
     # this demonstrates that naming the multi-axis nodes does the right thing
     axes = MultiAxisTree.from_dict(
         {
-            MultiAxisNode([MultiAxisComponent(2, "x")], id="a", name="ax1"): None,
-            MultiAxisNode([MultiAxisComponent(2, "x")], name="ax2"): ("a", "x"),
+            MultiAxis([MultiAxisComponent(2, "x")], "ax1", id="ax1"): None,
+            MultiAxis([MultiAxisComponent(2, "x")], "ax2"): ("ax1", "x"),
         }
     )
     # breakpoint()
@@ -900,16 +900,16 @@ def test_permuted_inner_and_ragged(scalar_copy_kernel):
     # component. That would then match DMPlex.
     axes = MultiAxisTree.from_dict(
         {
-            MultiAxisNode([MultiAxisComponent(2, "x")], id="id0", name="ax1"): None,
-            MultiAxisNode(
+            MultiAxis([MultiAxisComponent(2, "x")], "ax1", id="ax1"): None,
+            MultiAxis(
                 [MultiAxisComponent(2, "x", numbering=("ax2", [1, 0]))],
-                id="id1",
-                name="ax2",
+                "ax2",
+                id="ax2",
             ): (
-                "id0",
+                "ax1",
                 "x",
             ),
-            MultiAxisNode([MultiAxisComponent(nnz, "z")], name="ax3"): ("id1", "x"),
+            MultiAxisNode([MultiAxisComponent(nnz, "z")], "ax3"): ("ax2", "x"),
         }
     )
     axes.set_up()
