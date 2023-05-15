@@ -225,6 +225,7 @@ def test_compute_double_loop():
     assert all(dat2.data == dat1.data + 1)
 
 
+# TODO parametrise the sizes here
 def test_compute_double_loop_mixed(vector_copy_kernel):
     axes = MultiAxisTree.from_dict(
         {

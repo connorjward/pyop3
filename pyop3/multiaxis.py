@@ -9,7 +9,7 @@ import itertools
 import numbers
 import operator
 import threading
-from typing import Any, Hashable, Optional, Sequence, Tuple, Union
+from typing import Any, FrozenSet, Hashable, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pymbolic as pym
@@ -20,9 +20,15 @@ from petsc4py import PETSc
 import pyop3.exprs
 from pyop3 import utils
 from pyop3.dtypes import IntType, PointerType, get_mpi_dtype
-from pyop3.tree import LabelledNode, LabelledTree
-from pyop3.tree import Node as NewNode
-from pyop3.tree import NullRootNode, NullRootTree, Tree, previsit
+from pyop3.tree import (
+    LabelledNode,
+    LabelledTree,
+    Node,
+    NullRootNode,
+    NullRootTree,
+    Tree,
+    previsit,
+)
 from pyop3.utils import NameGenerator  # TODO delete
 from pyop3.utils import (
     PrettyTuple,
@@ -36,6 +42,36 @@ from pyop3.utils import (
     strictly_all,
     unique,
 )
+
+# old alias
+NewNode = Node
+
+DEFAULT_PRIORITY = 100
+
+
+class InvalidConstraintsException(Exception):
+    pass
+
+
+class ConstrainedMultiAxis(pytools.ImmutableRecord):
+    fields = {"axis", "priority", "within_labels"}
+    # TODO We could use 'label' to set the priority
+    # via commandline options
+
+    def __init__(
+        self,
+        axis: "MultiAxis",
+        *,
+        priority: int = DEFAULT_PRIORITY,
+        within_labels: FrozenSet[Hashable] = frozenset(),
+    ):
+        self.axis = axis
+        self.priority = priority
+        self.within_labels = frozenset(within_labels)
+        super().__init__()
+
+    def __str__(self) -> str:
+        return f"{self.__class__.__name__}(axis=({', '.join(str(axis_cpt) for axis_cpt in self.axis)}), priority={self.priority}, within_labels={self.within_labels})"
 
 
 def is_distributed(axtree, axis=None):
@@ -433,7 +469,7 @@ class MultiAxisTree(LabelledTree):
         self.sf = sf
         self.shared_sf = shared_sf
         if root:
-            self.register_node(root)
+            self.add_node(root)
 
     def add_nodes(self, axes, parent=None):
         # make sure all parts have labels, default to integers if necessary
@@ -756,6 +792,10 @@ class MultiAxisTree(LabelledTree):
 
     _tmp_axis_namer = 0
 
+    @classmethod
+    def from_layout(cls, layout: Sequence[ConstrainedMultiAxis]) -> Any:  # TODO
+        return order_axes(layout)
+
     def create_layout_lists(
         self, path, layout_path, offset, axis, indices=PrettyTuple()
     ):
@@ -820,7 +860,7 @@ class MultiAxisTree(LabelledTree):
                 stop = start + axis.components[i].find_integer_count(indices)
                 numb = np.arange(start, stop, dtype=PointerType)
                 myaxes = MultiAxisTree()
-                myaxes.register_node(MultiAxisNode([MultiAxisComponent(len(numb))]))
+                myaxes.register_node(MultiAxis([MultiAxisComponent(len(numb))]))
                 myaxes.set_up()  # ???
                 numb = MultiArray(
                     dim=myaxes,
@@ -1191,49 +1231,49 @@ class IndexTree(NullRootTree):
 IndexLabel = collections.namedtuple("IndexLabel", ["axis", "component"])
 
 
-class Node(pytools.ImmutableRecord):
-    fields = {"children", "id"}
-    namer = NameGenerator("idx")
-
-    def __init__(self, children=(), *, id=None):
-        raise AssertionError("this can go")
-        self.children = tuple(children)
-        self.id = id or self.namer.next()
-
-    @property
-    def child(self):
-        return utils.just_one(self.children) if self.children else None
-
-    # preferably free functions
-    def add_child(self, id, node):
-        if id == self.id:
-            return self.copy(children=self.children + (node,))
-
-        if id not in self.all_child_ids:
-            raise ValueError("id not found")
-
-        new_children = []
-        for child in self.children:
-            if id in child.all_ids:
-                new_children.append(child.add_child(id, node))
-            else:
-                new_children.append(child)
-        return self.copy(children=new_children)
-
-    @property
-    def all_ids(self):
-        return self.all_child_ids | {self.id}
-
-    @property
-    def all_child_ids(self):
-        return frozenset({node.id for node in self.all_children})
-
-    @property
-    def all_children(self):
-        return frozenset(
-            {*self.children}
-            | {node for ch in self.children for node in ch.all_children}
-        )
+# class Node(pytools.ImmutableRecord):
+#     fields = {"children", "id"}
+#     namer = NameGenerator("idx")
+#
+#     def __init__(self, children=(), *, id=None):
+#         raise AssertionError("this can go")
+#         self.children = tuple(children)
+#         self.id = id or self.namer.next()
+#
+#     @property
+#     def child(self):
+#         return utils.just_one(self.children) if self.children else None
+#
+#     # preferably free functions
+#     def add_child(self, id, node):
+#         if id == self.id:
+#             return self.copy(children=self.children + (node,))
+#
+#         if id not in self.all_child_ids:
+#             raise ValueError("id not found")
+#
+#         new_children = []
+#         for child in self.children:
+#             if id in child.all_ids:
+#                 new_children.append(child.add_child(id, node))
+#             else:
+#                 new_children.append(child)
+#         return self.copy(children=new_children)
+#
+#     @property
+#     def all_ids(self):
+#         return self.all_child_ids | {self.id}
+#
+#     @property
+#     def all_child_ids(self):
+#         return frozenset({node.id for node in self.all_children})
+#
+#     @property
+#     def all_children(self):
+#         return frozenset(
+#             {*self.children}
+#             | {node for ch in self.children for node in ch.all_children}
+#         )
 
 
 class IndexNode(NewNode, abc.ABC):
@@ -1322,7 +1362,7 @@ class AffineMapNode(MapNode):
 class MultiAxis(LabelledNode):
     fields = {"components", "label", "id"}
 
-    _label_generator = UniqueNameGenerator("_MultiAxisNode_label")
+    _label_generator = UniqueNameGenerator("_MultiAxis_label")
 
     def __init__(self, components, label: Hashable | None = None, *, id=None):
         labels = tuple(cpt.label for cpt in components)
@@ -1704,3 +1744,183 @@ def create_lgmap(axes):
 
     # return PETSc.LGMap().create(indices, comm=axes.sf.comm)
     return indices
+
+
+def order_axes(layout):
+    # TODO add missing bits to the mesh axes (zero-sized) here or,
+    # more likely, in the dat constructor
+    # axes = Tree()
+    axes = MultiAxisTree()
+    layout = list(layout)
+    axis_to_constraint = {}
+    history = set()
+    while layout:
+        if tuple(layout) in history:
+            raise ValueError("Seen this before, cyclic")
+        history.add(tuple(layout))
+
+        constrained_axis = layout.pop(0)
+        inserted = _insert_axis(axes, constrained_axis, axes.root, axis_to_constraint)
+        if not inserted:
+            layout.append(constrained_axis)
+
+    # should be able to delete
+    # _check_constraints(tree)
+
+    # now turn the tree into a proper multi-axis
+    return axes
+    return _create_multiaxis(axes)
+
+
+"""
+So constrained multiaxes should have a name associated with them so they can
+be identified by PETSc options etc (e.g. 'field'). This is distinct from 'id' in the
+tree because we can have multiple 'field' multiaxes if they are nested.
+
+The problem that we have is that we sometimes have duplicated labels in our code
+(e.g. if we have 2 meshes then there can be 2 "cell" labels) To resolve this I
+think we should, in this function, store labels and a 2-tuple of (mesh name, label)
+e.g. ("mesh0", "cells"). This is sufficiently unique.
+"""
+
+
+# class ConstrainedMultiAxisNode(Node):
+#     fields = Node.fields | {"axis", "parent_label"}
+#
+#     _id_generator = UniqueNameGenerator("_id_ConstrainedMultiAxisNode")
+#
+#     def __init__(
+#         self, axis, parent_label: Hashable | None = None, *, id: Hashable | None = None
+#     ):
+#         self.axis = axis
+#         self.parent_label = parent_label
+#         super().__init__(id or next(self._id_generator))
+#
+#     def __str__(self) -> str:
+#         return f"{self.__class__.__name__}(axis={self.axis}, parent_label={self.parent_label})"
+
+
+def _insert_axis(
+    axes: MultiAxisTree,
+    new_caxis: ConstrainedMultiAxis,
+    current_axis: MultiAxis,
+    axis_to_caxis: dict[MultiAxis, ConstrainedMultiAxis],
+    path: dict[Hashable] | None = None,
+):
+    # breakpoint()
+    path = path or {}
+
+    within_labels = set(path.items())
+
+    # alias - remove
+    axis_to_constraint = axis_to_caxis
+
+    if new_caxis.axis not in axis_to_constraint:
+        axis_to_constraint[new_caxis.axis.label] = new_caxis
+
+    if not axes.root:
+        if not new_caxis.within_labels:
+            axes.add_node(new_caxis.axis)
+            return True
+        else:
+            return False
+
+    # current_axis = current_axis or axes.root
+    current_caxis = axis_to_constraint[current_axis.label]
+
+    if new_caxis.priority < current_caxis.priority:
+        # breakpoint()
+        if new_caxis.within_labels <= within_labels:
+            # diagram or something?
+            parent_axis = axes.parent(current_axis)
+            #
+            # if parent_axis:
+            #     mylabel = None
+            #     for key, val in axes._parent_and_label_to_child.items():
+            #         if val == current_axis.id:
+            #             assert parent_axis.id == key[0]
+            #             mylabel = key[1]
+            #     assert mylabel
+            # else:
+            #     mylabel = None
+
+            subtree = axes.pop_subtree(current_axis)
+            betterid = new_caxis.axis.copy(id=next(MultiAxis._id_generator))
+            if not parent_axis:
+                axes.add_node(betterid)
+            else:
+                axes.add_node(betterid, path)
+
+            # must already obey the constraints - so stick  back in for all sub components
+            for comp in betterid.components:
+                stree = subtree.copy()
+                # stree.replace_node(stree.root.copy(id=next(MultiAxis._id_generator)))
+                mypath = (axes._node_to_path[betterid.id] or {}) | {
+                    betterid.label: comp.label
+                }
+                axes.add_subtree(stree, mypath, uniquify=True)
+                axes._parent_and_label_to_child[(betterid, comp.label)] = stree.root.id
+                # need to register the right parent label
+            return True
+        else:
+            # The priority is less so the axes should definitely
+            # not be inserted below here - do not recurse
+            return False
+    elif axes.is_leaf(current_axis):
+        assert new_caxis.priority >= current_caxis.priority
+        for cpt in current_axis.components:
+            if new_caxis.within_labels <= within_labels | {
+                (current_axis.label, cpt.label)
+            }:
+                betterid = new_caxis.axis.copy(id=next(MultiAxis._id_generator))
+                axes.add_node(betterid, path | {current_axis.label: cpt.label})
+        return True
+    else:
+        inserted = False
+        for cpt in current_axis.components:
+            subaxis = axes.child_by_label(current_axis, cpt.label)
+            # if not subaxis then we dont insert here
+            if subaxis:
+                inserted = inserted or _insert_axis(
+                    axes,
+                    new_caxis,
+                    subaxis,
+                    axis_to_constraint,
+                    path | {current_axis.label: cpt.label},
+                )
+        return inserted
+
+
+def _check_constraints(ctree):
+    def check(node, within_labels):
+        if (parent := ctree.parent(node)) and parent.priority > node.priority:
+            raise ConstraintsNotMetException
+        if node.within_labels > within_labels:
+            raise ConstraintsNotMetException
+
+        return within_labels | {node.label}
+
+    previsit(ctree, check, ctree.root, frozenset())
+
+
+def _create_multiaxis(tree: Tree) -> MultiAxisTree:
+    axes = MultiAxisTree()
+
+    # note: constrained things contain multiple nodes
+    def build(node, *_):
+        if node == tree.root:
+            target_parent = None
+            parent_axis = None
+        else:
+            parent = tree.parent(node)
+            target_parent = just_one(
+                cpt
+                for cpt in parent.data[0].axis.components
+                if cpt.label == node.data[1]
+            )
+            parent_axis = parent.data[0].axis
+        parent_component = node.data[1]
+        axes.add_node(node.data[0].axis, (parent_axis, parent_component))
+
+    previsit(tree, build)
+    return axes

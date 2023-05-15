@@ -1,7 +1,7 @@
 import collections
 import functools
 from collections.abc import Hashable, Sequence
-from typing import Any
+from typing import Any, Mapping
 
 import pytools
 
@@ -19,10 +19,11 @@ class FrozenTreeException(Exception):
 
 
 class Node(pytools.ImmutableRecord):
-    fields = {"id"}
+    fields = {"id", "data"}
 
-    def __init__(self, id: Hashable | None = None):
+    def __init__(self, id: Hashable | None = None, data: Any | None = None):
         self.id = id or next(self._id_generator)
+        self.data = data
 
     @classmethod
     @property
@@ -357,41 +358,178 @@ class NullRootTree(Tree):
         return tree
 
 
-class LabelledNode(Node):
-    fields = Node.fields | {"labels"}
+class LabelledNodeComponent(pytools.ImmutableRecord):
+    fields = {"label"}
 
-    def __init__(self, labels: Sequence[Hashable], **kwargs):
+    _label_generator = UniqueNameGenerator("_LabelledNodeComponent_label")
+
+    def __init__(self, label: Hashable | None = None) -> None:
+        super().__init__()
+        self.label = label or next(self._label_generator)
+
+
+class LabelledNode(Node):
+    fields = Node.fields | {"components", "label"}
+
+    _label_generator = UniqueNameGenerator("_LabelledNode_label")
+
+    def __init__(
+        self,
+        components: Sequence[LabelledNodeComponent],
+        label: Hashable | None = None,
+        **kwargs,
+    ) -> None:
         super().__init__(**kwargs)
-        self.labels = tuple(labels)
+        self.components = tuple(components)
+        self.label = label or next(self._label_generator)
+
+    # def __eq__(self, other):
+    #     # TODO
+    #     ...
+
+
+NodePath = dict[Hashable, Hashable]
+"""Mapping from axis labels to component labels."""
 
 
 class LabelledTree(Tree):
     def __init__(self):
         super().__init__()
         self._parent_and_label_to_child = {}
+        self._child_to_parent_and_label = {}
+        self._node_to_path = {}
 
-    def register_node(
+    def children(self, node: LabelledNode | Hashable | NodePath) -> tuple[Node]:
+        if isinstance(node, Mapping):
+            node, label = self._node_from_path(node)
+            child_id = self._parent_and_label_to_child[node.id, label]
+            if child_id:
+                return (self._as_existing_node(child_id),)
+            else:
+                return ()
+        else:
+            return super().children(node)
+
+    def add_node(
         self,
         node: LabelledNode,
-        parent: LabelledNode | Hashable | None = None,
-        label: Hashable | None = None,
+        parent: LabelledNode | Hashable | NodePath | None = None,
     ):
-        if some_but_not_all([parent, label]):
-            raise ValueError
-
-        # TODO handle root case
         if not parent:
             super().add_node(node)
-            for new_label in node.labels:
-                self._parent_and_label_to_child[(node.id, new_label)] = None
-            return
+            self._node_to_path[node.id] = {}
+        else:
+            if isinstance(parent, tuple):
+                parent_id, parent_component_label = parent
+                myparent = self._as_node(parent_id)
+                self._node_to_path[node.id] = self._node_to_path[parent_id] | {
+                    myparent.label: parent_component_label
+                }
+            else:
+                assert isinstance(parent, Mapping)
+                parent_id, parent_component_label = self._node_from_path(parent)
+                self._node_to_path[node.id] = parent
+            parent = self._as_node(parent_id)
+            if self._parent_and_label_to_child.get(
+                (parent.id, parent_component_label), None
+            ):
+                raise ValueError("already exists")
+            super().add_node(node, parent)
 
-        parent_id = self._as_existing_node_id(parent)
-        super().add_node(node, parent_id)
-        self._parent_and_label_to_child[(parent_id, label)] = node.id
+            self._parent_and_label_to_child[
+                (parent.id, parent_component_label)
+            ] = node.id
+            self._child_to_parent_and_label[node.id] = (
+                parent.id,
+                parent_component_label,
+            )
 
-        for new_label in node.labels:
-            self._parent_and_label_to_child[(node.id, new_label)] = None
+        for component in node.components:
+            self._parent_and_label_to_child[(node.id, component.label)] = None
+
+    def add_subtree(
+        self,
+        subtree: "Tree",
+        parent: NodePath = None,
+        uniquify: bool = False,
+    ) -> None:
+        """
+        Parameters
+        ----------
+        etc
+            ...
+        uniquify
+            If ``False``, duplicate ``ids`` between the tree and subtree
+            will raise an exception. If ``True``, the ``ids`` will be changed
+            to avoid the clash.
+        """
+        if parent:
+            myparent, parentlabel = self._node_from_path(parent)
+            self._check_exists(myparent)
+            myouterpath = self._node_to_path[myparent.id] or {}
+            myouterpath |= {myparent.label: parentlabel}
+        else:
+            myouterpath = {}
+
+        def add_subtree_node(node, parent_id):
+            if parent_id == myparent.id:
+                path = myouterpath
+            else:
+                path = myouterpath | subtree._node_to_path[parent_id]
+            if uniquify:
+                node = node.copy(id=self._first_unique_id(node))
+            self.add_node(node, path)
+            return node.id
+
+        previsit(subtree, add_subtree_node, None, myparent.id)
+
+    def pop_subtree(self, subroot: Node | str) -> "Tree":
+        subroot = self._as_node(subroot)
+        self._check_exists(subroot)
+
+        if self._is_root(subroot):
+            subtree = self.copy()
+            self.reset()
+            return subtree
+
+        subtree = type(self)(subroot)
+
+        nodes_and_parents = []
+
+        def collect_node_and_parent(node, _):
+            nodes_and_parents.append((node, self._child_to_parent_and_label[node.id]))
+
+        previsit(self, collect_node_and_parent, subroot)
+
+        for node, parent in nodes_and_parents:
+            parent_id, component_label = parent
+            if node != subroot:
+                subtree.add_node(node, parent)
+            del self._ids_to_nodes[node.id]
+            del self._child_to_parent[node.id]
+            self._parent_to_children[parent_id] = tuple(
+                child
+                for child in self._parent_to_children[parent_id]
+                if child != node.id
+            )
+
+            del self._parent_and_label_to_child[(parent_id, component_label)]
+            del self._child_to_parent_and_label[node.id]
+            del self._node_to_path[node.id]
+            for component in node.components:
+                del self._parent_and_label_to_child[(node.id, component.label)]
+
+        return subtree
+
+    def _node_from_path(self, path: NodePath) -> tuple[Node, Hashable]:
+        node = self.root
+        path = path.copy()
+        while True:
+            label = path.pop(node.label)
+
+            if not path:
+                return node, label
+            node = self.child_by_label(node, label)
 
     def child_by_label(self, node: LabelledNode | Hashable, label: Hashable):
         node_id = self._as_existing_node_id(node)
@@ -436,6 +574,10 @@ class LabelledTree(Tree):
         new = super().copy()
         new._parent_and_label_to_child = self._parent_and_label_to_child.copy()
         return new
+
+
+# better alias?
+MultiTree = LabelledTree
 
 
 def previsit(

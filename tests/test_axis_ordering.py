@@ -1,7 +1,7 @@
 import pytest
 
 from pyop3 import *
-from pyop3.meshdata.dat import ConstrainedMultiAxis, order_axes
+from pyop3.multiaxis import ConstrainedMultiAxis
 
 
 def id_tuple(nodes):
@@ -12,97 +12,103 @@ def label_tuple(nodes):
     return tuple(node.label for node in nodes)
 
 
-# TODO parametrise this
 def test_axis_ordering():
-    # should we enforce that we always have a label?
-    ax1 = AxisPart(3, id="ax1", label="ax1")
-    ax2 = AxisPart(2, id="ax2", label="ax2")
+    axis0 = MultiAxis([MultiAxisComponent(3, "cpt0")], "ax0")
+    axis1 = MultiAxis([MultiAxisComponent(1, "cpt0")], "ax1")
 
-    layout = [ConstrainedMultiAxis([ax1]), ConstrainedMultiAxis([ax2])]
-    axtree = order_axes(layout)
+    layout = [ConstrainedMultiAxis(axis0), ConstrainedMultiAxis(axis1)]
+    axes = MultiAxisTree.from_layout(layout)
 
-    assert axtree.rootless_depth == 2
-    assert axtree.children(axtree.root) == (ax1,)
-    assert axtree.children(ax1) == (ax2,)
-    assert axtree.children(ax2) == ()
+    assert axes.depth == 2
+    assert axes.root == axis0
+    assert just_one(axes.children({"ax0": "cpt0"})).label == "ax1"
+    assert not axes.children({"ax0": "cpt0", "ax1": "cpt0"})
 
-    axes = [ConstrainedMultiAxis([ax1]), ConstrainedMultiAxis([ax2], priority=0)]
-    axtree = order_axes(axes)
-    assert axtree.rootless_depth == 2
-    assert axtree.children(axtree.root) == (ax2,)
-    assert axtree.children(ax2) == (ax1,)
-    assert axtree.children(ax1) == ()
+    ###
+
+    layout = [ConstrainedMultiAxis(axis0), ConstrainedMultiAxis(axis1, priority=0)]
+    axes = MultiAxisTree.from_layout(layout)
+    assert axes.depth == 2
+    assert axes.root.label == "ax1"
+    assert just_one(axes.children({"ax1": "cpt0"})).label == "ax0"
+    assert not axes.children({"ax0": "cpt0", "ax1": "cpt0"})
 
 
 def test_multicomponent_constraints():
-    axes1 = [
-        MultiAxisComponent(3, label="cpt1", id="cpt1"),
-        MultiAxisComponent(3, label="cpt2", id="cpt2"),
-    ]
-    axes2 = [MultiAxisComponent(3, label="cpt3", id="cpt3")]
+    axis0 = MultiAxis(
+        [MultiAxisComponent(3, "cpt0"), MultiAxisComponent(3, "cpt1")], "ax0"
+    )
+    axis1 = MultiAxis([MultiAxisComponent(3, "cpt0")], "ax1")
 
     ###
 
     layout = [
-        ConstrainedMultiAxis(axes1, within_labels={"cpt3"}),
-        ConstrainedMultiAxis(axes2),
+        ConstrainedMultiAxis(axis0, within_labels={("ax1", "cpt0")}),
+        ConstrainedMultiAxis(axis1),
     ]
-    axtree = order_axes(layout)
+    axes = order_axes(layout)
 
-    assert axtree.rootless_depth == 2
-    assert id_tuple(axtree.children(axtree.root)) == ("cpt3",)
-    assert id_tuple(axtree.children("cpt3")) == ("cpt1", "cpt2")
-    assert all(axtree.children(node) == () for node in ["cpt1", "cpt2"])
+    assert axes.depth == 2
+    assert axes.root.label == "ax1"
+    assert just_one(axes.children({"ax1": "cpt0"})).label == "ax0"
+    assert not axes.children({"ax1": "cpt0", "ax0": "cpt0"})
+    assert not axes.children({"ax1": "cpt0", "ax0": "cpt1"})
 
     ###
 
     with pytest.raises(ValueError):
         layout = [
-            ConstrainedMultiAxis(axes1, within_labels={"cpt3"}),
-            ConstrainedMultiAxis(axes2, within_labels={"cpt1"}),
+            ConstrainedMultiAxis(axis0, within_labels={("ax1", "cpt0")}),
+            ConstrainedMultiAxis(axis1, within_labels={("ax0", "cpt0")}),
         ]
-        axtree = order_axes(layout)
+        order_axes(layout)
 
     ###
 
     layout = [
-        ConstrainedMultiAxis(axes1),
-        ConstrainedMultiAxis(axes2, within_labels={"cpt2"}),
+        ConstrainedMultiAxis(axis0),
+        ConstrainedMultiAxis(axis1, within_labels={("ax0", "cpt1")}),
     ]
-    axtree = order_axes(layout)
+    axes = order_axes(layout)
 
-    assert axtree.rootless_depth == 2
-    assert id_tuple(axtree.children(axtree.root)) == ("cpt1", "cpt2")
-    assert axtree.children("cpt1") == ()
-    assert id_tuple(axtree.children("cpt2")) == ("cpt3",)
+    assert axes.depth == 2
+    assert axes.root.label == "ax0"
+    assert not axes.children({"ax0": "cpt0"})
+    assert just_one(axes.children({"ax0": "cpt1"})).label == "ax1"
+    assert not axes.children({"ax0": "cpt1", "ax1": "cpt0"})
 
     ###
 
 
 def test_multicomponent_constraints_more():
-    axes1 = [
-        MultiAxisComponent(3, label="cpt1", id="cpt1"),
-        MultiAxisComponent(3, label="cpt2", id="cpt2"),
-    ]
-    axes2 = [MultiAxisComponent(3, label="cpt3", id="cpt3")]
-    axes3 = [MultiAxisComponent(3, label="cpt4", id="cpt4")]
+    # ax0
+    # ├──➤ cpt0 : ax1
+    # │           └──➤ cpt0
+    # └──➤ cpt1 : ax2
+    #             └──➤ cpt0 : ax1
+    #                         └──➤ cpt0
 
-    # root
-    # ├──➤ cpt1
-    # │    └──➤ cpt3
-    # └──➤ cpt2
-    #      └──➤ cpt4
-    #           └──➤ cpt3
+    axis0 = MultiAxis(
+        [
+            MultiAxisComponent(3, "cpt0"),
+            MultiAxisComponent(3, "cpt1"),
+        ],
+        "ax0",
+    )
+    axis1 = MultiAxis([MultiAxisComponent(3, "cpt0")], "ax1")
+    axis2 = MultiAxis([MultiAxisComponent(3, "cpt0")], "ax2")
 
     layout = [
-        ConstrainedMultiAxis(axes1, priority=0),  # cpt1, cpt2
-        ConstrainedMultiAxis(axes2, priority=20),  # cpt3
-        ConstrainedMultiAxis(axes3, within_labels={"cpt2"}, priority=10),  # cpt4
+        ConstrainedMultiAxis(axis0, priority=0),
+        ConstrainedMultiAxis(axis1, priority=20),
+        ConstrainedMultiAxis(axis2, within_labels={("ax0", "cpt1")}, priority=10),
     ]
-    axtree = order_axes(layout)
+    axes = order_axes(layout)
 
-    assert axtree.rootless_depth == 3
-    assert label_tuple(axtree.children(axtree.root)) == ("cpt1", "cpt2")
-    assert label_tuple(axtree.children("cpt1")) == ("cpt3",)
-    assert label_tuple(axtree.children("cpt2")) == ("cpt4",)
-    assert label_tuple(axtree.children("cpt4")) == ("cpt3",)
+    assert axes.depth == 3
+    assert axes.root.label == "ax0"
+    assert just_one(axes.children({"ax0": "cpt0"})).label == "ax1"
+    assert just_one(axes.children({"ax0": "cpt1"})).label == "ax2"
+    assert not axes.children({"ax0": "cpt0", "ax1": "cpt0"})
+    assert just_one(axes.children({"ax0": "cpt1", "ax2": "cpt0"})).label == "ax1"
+    assert not axes.children({"ax0": "cpt1", "ax2": "cpt0", "ax1": "cpt0"})
