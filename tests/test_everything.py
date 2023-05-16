@@ -183,6 +183,10 @@ def test_read_single_dim(scalar_copy_kernel):
           Make a map connecting names to data
         - The kernel can register what arguments it needs. These can then be
           retrieved from the expression.
+
+    how do i swap out bits of data?
+
+    kernelargs = kwargs.get("myarg", expr.data["myarg"])
     """
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)

@@ -5,6 +5,7 @@ import enum
 import functools
 import operator
 from typing import Iterable, Tuple
+from weakref import WeakValueDictionary
 
 import numpy as np
 import pytools
@@ -13,21 +14,43 @@ from pyop3.distarray import DistributedArray
 from pyop3.utils import NameGenerator, as_tuple
 
 
-class Expr(abc.ABC):
-    # FIXME I don't like this name
-    # this is a mapping from names to multi-arrays
+class AccessDescriptor(enum.Enum):
+    READ = "read"
+    WRITE = "write"
+    RW = "rw"
+    INC = "inc"
+    MIN = "min"
+    MAX = "max"
+
+
+READ = AccessDescriptor.READ
+WRITE = AccessDescriptor.WRITE
+INC = AccessDescriptor.INC
+RW = AccessDescriptor.RW
+MIN = AccessDescriptor.MIN
+MAX = AccessDescriptor.MAX
+
+
+class LoopExpr(pytools.ImmutableRecord, abc.ABC):
+    fields = set()
+
     @property
     @abc.abstractmethod
-    def data(self):
+    def data(self) -> WeakValueDictionary[str, DistributedArray]:
+        """Map from names to arrays.
+
+        weakref since we don't want to hold a reference to these things?
+        """
+        pass
+
+    @property
+    @abc.abstractmethod
+    def operands(self) -> tuple["LoopExpr"]:
         pass
 
 
-class Operator(Expr):
-    pass
-
-
-class Loop(pytools.ImmutableRecord, Operator):
-    fields = {"indices", "statements", "id", "depends_on"}
+class Loop(LoopExpr):
+    fields = LoopExpr.fields | {"indices", "statements", "id", "depends_on"}
 
     id_generator = NameGenerator("loop")
 
@@ -55,26 +78,6 @@ class Loop(pytools.ImmutableRecord, Operator):
         # deprecated alias for indices
         return self.indices
 
-    @property
-    def unrolled_migs(self):
-        from pyop3.tensors import Map
-
-        def unroll(mig):
-            if isinstance(mig, Map):
-                return tuple([*unroll(mig.from_index), mig])
-            else:
-                return (mig,)
-
-        return unroll(self.indices)
-
-    # @property
-    # def flat_indices(self):
-    #     def flatten(item):
-    #         value, children = item
-    #         return (value,) + tuple(val for child in children for val in flatten(child))
-    #
-    #     return tuple(v for it in self.index for v in flatten(it))
-
     def __str__(self):
         return f"for {self.index} ∊ {self.index.point_set}"
 
@@ -88,23 +91,6 @@ class Loop(pytools.ImmutableRecord, Operator):
 
         exe = load(code)
         exe()
-
-
-class AccessDescriptor(enum.Enum):
-    READ = enum.auto()
-    WRITE = enum.auto()
-    INC = enum.auto()
-    RW = enum.auto()
-    MIN = enum.auto()
-    MAX = enum.auto()
-
-
-READ = AccessDescriptor.READ
-WRITE = AccessDescriptor.WRITE
-INC = AccessDescriptor.INC
-RW = AccessDescriptor.RW
-MIN = AccessDescriptor.MIN
-MAX = AccessDescriptor.MAX
 
 
 @dataclasses.dataclass(frozen=True)
