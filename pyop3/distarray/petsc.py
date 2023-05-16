@@ -5,18 +5,9 @@ import numbers
 import numpy as np
 from petsc4py import PETSc
 
+from pyop3.distarray.base import DistributedArray
+from pyop3.multiaxis import IndexTree
 from pyop3.utils import single_valued, strictly_all
-
-
-class DistributedArray(abc.ABC):
-    """Base class for all :mod:`pyop3` parallel objects."""
-
-    # @abc.abstractmethod
-    # def sync(self):
-    #     pass
-
-
-# TODO make MultiArray inherit from this too
 
 
 class PetscVec(DistributedArray, abc.ABC):
@@ -67,6 +58,13 @@ class PetscMat(DistributedArray, abc.ABC):
         should check that the operations are being provided with valid data structures,
         not allocating the data structures to conform to the operation.
         """
+
+    def __getitem__(
+        self, row_index: IndexError, col_index: IndexTree
+    ) -> "IndexedPetscMat":
+        from pyop3.distarray.indexed import IndexedPetscMat
+
+        return IndexedPetscMat(self, row_index, col_index)
 
 
 class PetscMatDense(PetscMat):

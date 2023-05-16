@@ -557,11 +557,11 @@ class LabelledTree(Tree):
             node = node_queue.pop(0)
             parent_info = node_dict[node]
             if parent_info is None:
-                tree.register_node(node)
+                tree.add_node(node)
             else:
                 parent_id, parent_label = parent_info
                 if parent_id in tree._node_ids:
-                    tree.register_node(node, parent=parent_id, label=parent_label)
+                    tree.add_node(node, (parent_id, parent_label))
                 else:
                     node_queue.append(node)
 

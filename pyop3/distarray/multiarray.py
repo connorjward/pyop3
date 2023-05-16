@@ -14,9 +14,9 @@ from petsc4py import PETSc
 
 import pyop3.exprs
 from pyop3 import utils
+from pyop3.distarray.base import DistributedArray
 from pyop3.dtypes import IntType, get_mpi_dtype
 from pyop3.multiaxis import (
-    AxisPart,
     MultiAxis,
     MultiAxisComponent,
     MultiAxisNode,
@@ -27,7 +27,7 @@ from pyop3.multiaxis import (
     fill_shape,
     get_bottom_part,
 )
-from pyop3.tree import NullRootNode, NullRootTree, Tree
+from pyop3.tree import NullRootTree
 from pyop3.utils import (
     NameGenerator,
     PrettyTuple,
@@ -37,8 +37,7 @@ from pyop3.utils import (
 )
 
 
-# TODO this shouldn't be an immutable record or pym var
-class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling):
+class MultiArray(DistributedArray):
     """Multi-dimensional, hierarchical array.
 
     Parameters
@@ -49,7 +48,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
     """
 
-    fields = {"dim", "indices", "dtype", "mesh", "name", "data", "max_value", "sf"}
+    fields = {"dim", "dtype", "name", "data", "max_value", "sf"}
 
     name_generator = pyop3.utils.MultiNameGenerator()
     prefix = "ten"
@@ -57,16 +56,15 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
     def __init__(
         self,
         dim,
-        indices=(),
         dtype=None,
         *,
-        mesh=None,
         name: str = None,
         prefix: str = None,
         data=None,
         max_value=32,
         sf=None,
     ):
+        super().__init__()
         name = name or self.name_generator.next(prefix or self.prefix)
 
         if not dtype:
@@ -84,25 +82,12 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         self._param_namer = NameGenerator(f"{name}_p")
         assert dtype is not None
 
+        self.name = name
         self.dim = dim
 
-        if indices:
-            indices = indices.copy()
-            for idx in indices.children(indices.root):
-                expand_indices_to_fill_empty_shape(dim, indices, idx)
-        elif dim:
-            indices = NullRootTree()
-            for cpt in dim.root.components:
-                fill_shape(dim, dim.root, cpt, indices, indices.root, PrettyTuple())
-        else:
-            indices = NullRootTree()
-        self.indices = indices
-
-        self.mesh = mesh
         self.dtype = np.dtype(dtype)  # since np.float64 is not actually the right thing
         self.max_value = max_value
         self.sf = sf
-        super().__init__(name)
 
         self._pending_write_op = None
         self._halo_modified = False
@@ -139,10 +124,10 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
             base_axis = get_bottom_part(count.root)
             base_component = just_one(base_axis.components)
             newax = count.root.copy()
-            newax.register_node(axis, base_axis, base_component.label)
+            newax.add_node(axis, (base_axis, base_component.label))
         else:
             newax = MultiAxisTree()
-            newax.register_node(axis)
+            newax.add_node(axis)
 
         assert newax.depth == len(names_and_labels)
 
@@ -254,142 +239,6 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
         self._pending_write_op = None
         self._halo_modified = False
 
-    @classmethod
-    def _get_part_size(cls, part, parent_indices):
-        size = part.size
-        if isinstance(size, numbers.Integral):
-            return size
-        elif isinstance(size, MultiArray):
-            return cls._read_tensor(size, parent_indices)
-        else:
-            raise TypeError
-
-    @classmethod
-    def _generate_looping_indices(cls, part):
-        if isinstance(part.size, numbers.Integral):
-            return [([], range(part.size))]
-        else:
-            result = []
-            for parent_indices in part.size.mygenerateindices():
-                result.append(
-                    [parent_indices, range(cls._read_tensor(part.size, parent_indices))]
-                )
-            return result
-
-    @classmethod
-    def _generate_indices(cls, part, parent_indices=None):
-        if not parent_indices:
-            parent_indices = []
-
-        if isinstance(part.size, MultiArray):
-            # there must already be an outer dim or this makes no sense
-            assert parent_indices
-            idxs = [i for i in range(cls._read_tensor(part.size, parent_indices))]
-        else:
-            idxs = [i for i in range(part.size)]
-
-        if part.subaxis:
-            idxs = [
-                [i, *subidxs]
-                for i in idxs
-                for subidxs in cls._generate_indices(
-                    part.subaxis, parent_indices=parent_indices + [i]
-                )
-            ]
-        else:
-            idxs = [[i] for i in idxs]
-
-        return idxs
-
-    def mygenerateindices(self):
-        return self._mygenindices(self.dim)
-
-    @classmethod
-    def _mygenindices(cls, axis, parent_indices=None):
-        if not parent_indices:
-            parent_indices = []
-
-        idxs = []
-        for i in range(cls._get_size(axis, parent_indices)):
-            if axis.part.subaxis:
-                for subidxs in cls._mygenindices(
-                    axis.part.subaxis, parent_indices + [i]
-                ):
-                    idxs.append([i] + subidxs)
-            else:
-                idxs.append([i])
-        return idxs
-
-    @classmethod
-    def _compute_full_part_size(cls, part, parent_indices=None, current_size=1):
-        if not parent_indices:
-            parent_indices = []
-
-        if isinstance(part, ScalarAxisPart):
-            return 1
-
-        # if we encounter an array then discard everything before and make this the new size
-        # e.g. if we have 2 * 2 * [1, 2, 3, 4] then the actual size is 1+2+3+4 = 10
-        if isinstance(part.size, MultiArray):
-            d = cls._slice_marray(part.size, parent_indices)
-            current_size = sum(d)
-        else:
-            current_size *= part.size
-
-        if part.subaxis:
-            return sum(
-                cls._compute_full_part_size(pt, parent_indices, current_size)
-                for pt in part.subaxis.parts
-            )
-        else:
-            return current_size
-
-    @classmethod
-    def _slice_marray(cls, marray, parent_indices):
-        def compute_subaxis_size(subaxis, idxs):
-            if subaxis:
-                return cls._compute_full_axis_size(subaxis, idxs)
-            else:
-                return 1
-
-        if not parent_indices:
-            return marray.data
-        elif len(parent_indices) == 1:
-            if marray.dim.part.subaxis:
-                ptr = 0
-                (parent_idx,) = parent_indices
-                for i in range(parent_idx):
-                    ptr += compute_subaxis_size(
-                        marray.dim.part.subaxis, parent_indices + [i]
-                    )
-                return marray.data[
-                    ptr : ptr
-                    + compute_subaxis_size(
-                        marray.dim.part.subaxis, parent_indices + [parent_idx]
-                    )
-                ]
-            else:
-                (idx,) = parent_indices
-                return (marray.data[idx],)
-        else:
-            raise NotImplementedError
-
-    @classmethod
-    def _compute_full_axis_size(cls, axis, parent_indices=None):
-        if not parent_indices:
-            parent_indices = []
-
-        return sum(cls._compute_full_part_size(pt, parent_indices) for pt in axis.parts)
-
-    @classmethod
-    def _get_subdim(cls, dim, point):
-        bounds = list(np.cumsum([p.size for p in dim.parts]))
-        for i, (start, stop) in enumerate(zip([0] + bounds, bounds)):
-            if start <= point < stop:
-                npart = i
-                break
-        return npart, dim.parts[npart]
-
     def get_value(self, indices):
         offset = self.root.get_offset(indices)
         return self.data[int(offset)]
@@ -403,99 +252,13 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
     def root(self):
         return self.dim
 
-    def __getitem__(self, multi_indicesss):
-        """
-        pass in an iterable of an iterable of multi-indices (e.g. returned by closure)
-        """
-        """The (outdated) plan of action here is as follows:
+    def __getitem__(self, index: "IndexTree"):
+        from pyop3.distarray.indexed import IndexedMultiArray
 
-        - if a tensor is indexed by a set of stencils then that's great.
-        - if it is indexed by a set of slices and integers then we convert
-          that to a set of stencils.
-        - if passed a combination of stencil groups and integers/slices then
-          the integers/slices are first converted to stencil groups and then
-          the groups are concatenated, multiplying where required.
-
-        N.B. for matrices, we want to take a tensor product of the stencil groups
-        rather than concatenate them. For example:
-
-        mat[f(p), g(q)]
-
-        where f(p) is (0, map[i]) and g(q) is (0, map[j]) would produce the wrong
-        thing because we would get mat[0, map[i], 0, map[j]] where what we really
-        want is mat[0, 0, map[i], map[j]]. Therefore we instead write:
-
-        mat[f(p)*g(q)]
-
-        to get the correct behaviour.
-        """
-
-        # convert an iterable of multi-index collections into a single set of multi-index
-        # collections- - needed for [closure(p), closure(p)] each of which returns
-        # a list of multi-indices that need to be multiplicatively combined.
-        # multi_indicess = self.merge_multiindicesss(multi_indicesss)
-
-        # TODO Add support for already indexed items
-        # This is complicated because additional indices should theoretically index
-        # pre-existing slices, rather than get appended/prepended as is currently
-        # assumed.
-        # if self.is_indexed:
-        #     raise NotImplementedError("Needs more thought")
-
-        # if not isinstance(indicess[0], collections.abc.Sequence):
-        #     indicess = (indicess,)
-        # import pdb; pdb.set_trace()
-
-        # Don't extend here because that won't work if we have multi-part bits that aren't
-        # indexed (i.e. "inside") - this approach would split them outside which we don't
-        # want. Instead we need to handle this later when we create the temporary.
-        # multi_indicess = MultiIndexCollection(tuple(
-        #     multi_idx_
-        #     for multi_idx in multi_indicess
-        #     for multi_idx_ in self._extend_multi_index(multi_idx)
-        # ))
-
-        # NOTE: indices should not be a property of this data structure. The indices
-        # are only relevant for codegen so I think an IndexedMultiArray or similar would
-        # be better. It would also help if we wanted to swap out the data structure later
-        # on (but naturally retain the same indices).
-        return self.copy(indices=multi_indicesss)
-
-    def _extend_multi_index(self, multi_index, axis=None):
-        """Apply a multi-index to own axes and return a tuple of 'full' multi-indices.
-
-        This is required in case an inner dimension is multi-part which would require two
-        multi-indices to correctly index both.
-        """
-        # import pdb; pdb.set_trace()
-        if not axis:
-            axis = self.root
-
-        if multi_index:
-            idx, *subidxs = multi_index
-
-            if subaxis := axis.find_part(idx.part_label).subaxis:
-                return tuple(
-                    MultiIndex((idx,) + subidxs_.typed_indices)
-                    for subidxs_ in self._extend_multi_index(subidxs, subaxis)
-                )
-            else:
-                if subidxs:
-                    raise ValueError
-                return (MultiIndex((idx,)),)
-        else:
-            new_idxs = []
-            for pt in axis.parts:
-                idx, subidxs = Range(pt.label, pt.count), []
-
-                if subaxis := axis.find_part(idx.part_label).subaxis:
-                    new_idxs.extend(
-                        MultiIndex((idx,) + subidxs_.typed_indices)
-                        for subidxs_ in self._extend_multi_index(subidxs, subaxis)
-                    )
-                else:
-                    new_idxs.append(MultiIndex((idx,)))
-            return tuple(new_idxs)
+        index = index.copy()
+        for idx in index.children(index.root):
+            expand_indices_to_fill_empty_shape(self.axes, index, idx)
+        return IndexedMultiArray(self, index)
 
     def select_axes(self, indices):
         selected = []
@@ -510,9 +273,11 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
     @property
     def is_indexed(self):
+        assert False, "not touched"
         return all(self._check_indexed(self.dim, idxs) for idxs in self.indicess)
 
     def _check_indexed(self, dim, indices):
+        assert False, "not touched"
         for label, size in zip(dim.labels, dim.sizes):
             try:
                 ((index, subindices),) = [
@@ -531,6 +296,7 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
     @property
     def indexed_shape(self):
+        assert False, "not touched"
         try:
             (sh,) = self.indexed_shapes
             return sh
@@ -539,14 +305,17 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
     @property
     def indexed_shapes(self):
+        assert False, "not touched"
         return indexed_shapes(self)
 
     @property
     def indexed_size(self):
+        assert False, "not touched"
         return functools.reduce(operator.mul, self.indexed_shape, 1)
 
     @property
     def shape(self):
+        assert False, "not touched"
         try:
             (sh,) = self.shapes
             return sh
@@ -555,41 +324,13 @@ class MultiArray(pym.primitives.Variable, pytools.ImmutableRecordWithoutPickling
 
     @property
     def shapes(self):
+        assert False, "not touched"
         return self._compute_shapes(self.dim)
 
     @property
     def size(self):
+        assert False, "not touched"
         return functools.reduce(operator.mul, self.shape, 1)
-
-    @property
-    def order(self):
-        return self._compute_order(self.dim)
-
-    def _parametrise_if_needed(self, value):
-        if isinstance(value, MultiArray):
-            if (param := pym.var(value.name)) in self.params:
-                assert self.params[param] == value
-            else:
-                self.params[param] = value
-            return param
-        else:
-            return value
-
-    def _compute_order(self, dim):
-        subdims = dim.subdims
-        ords = {self._compute_order(subdim) for subdim in subdims}
-
-        if len(ords) == 0:
-            return 1
-        elif len(ords) == 1:
-            return 1 + ords.pop()
-        if len(ords) > 1:
-            raise Exception(
-                "tensor order cannot be established (subdims are different depths)"
-            )
-
-    def _merge_stencils(self, stencils1, stencils2):
-        return _merge_stencils(stencils1, stencils2, self.dim)
 
 
 def make_sparsity(
@@ -819,96 +560,6 @@ def overlap_axes(ax1, ax2, sparsity=None):
     return MultiAxis(new_parts).set_up(with_sf=False)
 
 
-def indexed_shapes(tensor):
-    return tuple(_compute_indexed_shape(idxs) for idxs in tensor.indicess)
-
-
-def _compute_indexed_shape(indices):
-    if not indices:
-        return ()
-
-    index, *subindices = indices
-
-    return index_shape(index) + _compute_indexed_shape(subindices)
-
-
-def _compute_indexed_shape2(flat_indices):
-    import warnings
-
-    warnings.warn("need to remove", DeprecationWarning)
-    shape = ()
-    for index in flat_indices:
-        shape += index_shape(index)
-    return shape
-
-
-def _merge_stencils(stencils1, stencils2, dims):
-    stencils1 = as_stencil_group(stencils1, dims)
-    stencils2 = as_stencil_group(stencils2, dims)
-
-    return StencilGroup(
-        Stencil(idxs1 + idxs2 for idxs1, idxs2 in itertools.product(stc1, stc2))
-        for stc1, stc2 in itertools.product(stencils1, stencils2)
-    )
-
-
-def as_stencil_group(stencils, dims):
-    if isinstance(stencils, StencilGroup):
-        return stencils
-
-    is_sequence = lambda seq: isinstance(seq, collections.abc.Sequence)
-    # case 1: dat[x]
-    if not is_sequence(stencils):
-        return StencilGroup(
-            [Stencil([_construct_indices([stencils], dims, dims.root)])]
-        )
-    # case 2: dat[x, y]
-    elif not is_sequence(stencils[0]):
-        return StencilGroup([Stencil([_construct_indices(stencils, dims, dims.root)])])
-    # case 3: dat[(a, b), (c, d)]
-    elif not is_sequence(stencils[0][0]):
-        return StencilGroup(
-            [Stencil([_construct_indices(idxs, dims, dims.root) for idxs in stencils])]
-        )
-    # case 4: dat[((a, b), (c, d)), ((e, f), (g, h))]
-    elif not is_sequence(stencils[0][0][0]):
-        return StencilGroup(
-            [
-                Stencil([_construct_indices(idxs, dims, dims.root) for idxs in stencil])
-                for stencil in stencils
-            ]
-        )
-    # default
-    else:
-        raise ValueError
-
-
-def _construct_indices(input_indices, dims, current_dim, parent_indices=None):
-    if not parent_indices:
-        parent_indices = []
-    # import pdb; pdb.set_trace()
-    if not current_dim:
-        return ()
-
-    if not input_indices:
-        if len(dims.get_children(current_dim)) > 1:
-            raise RuntimeError("Ambiguous npart")
-        input_indices = [Slice.from_dim(current_dim, 0)]
-
-    index, *subindices = input_indices
-
-    npart = current_dim.labels.index(index.label)
-
-    if subdims := dims.get_children(current_dim):
-        subdim = subdims[npart]
-    else:
-        subdim = None
-
-    return (index,) + _construct_indices(
-        subindices, dims, subdim, parent_indices + [index.copy(is_loop_index=True)]
-    )
-
-
 def index(indices):
     """wrap all slices and maps in loop index objs."""
     # cannot be multiple sets of indices if we are shoving this into a loop
@@ -925,68 +576,3 @@ def _index(idx):
         )
     else:
         return idx.copy(is_loop_index=True)
-
-
-def _break_mixed_slices(stencils, dtree):
-    return tuple(
-        tuple(
-            idxs
-            for indices in stencil
-            for idxs in _break_mixed_slices_per_indices(indices, dtree)
-        )
-        for stencil in stencils
-    )
-
-
-def _break_mixed_slices_per_indices(indices, dtree):
-    """Every slice over a mixed dim should branch the indices."""
-    if not indices:
-        yield ()
-    else:
-        index, *subindices = indices
-        for i, idx in _partition_slice(index, dtree):
-            subtree = dtree.children[i]
-            for subidxs in _break_mixed_slices_per_indices(subindices, subtree):
-                yield (idx, *subidxs)
-
-
-"""
-so I like it if we could go dat[:mesh.ncells, 2] to access the right part of the mixed dim. How to do multiple stencils?
-
-dat[(), ()] for a single stencil
-or dat[((), ()), ((), ())] for stencils
-
-also dat[:] should return multiple indicess (for each part of the mixed dim) (but same stencil/temp)
-
-how to handle dat[2:mesh.ncells] with raggedness? Global offset required.
-
-N.B. dim tree no longer used for codegen - can probably get removed. Though a tree still needed since dims should
-be independent of their children.
-
-What about LoopIndex?
-
-N.B. it is really difficult to support partial indexing (inc. integers) because, for ragged tensors, the initial offset
-is non-trivial and needs to be computed by summing all preceding entries.
-"""
-
-
-def _partition_slice(slice_, dtree):
-    if isinstance(slice_, slice):
-        ptr = 0
-        for i, child in enumerate(dtree.children):
-            dsize = child.value.size
-            dstart = ptr
-            dstop = ptr + dsize
-
-            # check for overlap
-            if (slice_.stop is None or dstart < slice_.stop) and (
-                slice_.start is None or dstop > slice_.start
-            ):
-                start = (
-                    max(dstart, slice_.start) if slice_.start is not None else dstart
-                )
-                stop = min(dstop, slice_.stop) if slice_.stop is not None else dstop
-                yield i, slice(start, stop)
-            ptr += dsize
-    else:
-        yield 0, slice_

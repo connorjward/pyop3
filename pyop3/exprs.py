@@ -3,17 +3,23 @@ import collections
 import dataclasses
 import enum
 import functools
+import operator
 from typing import Iterable, Tuple
 
 import numpy as np
 import pytools
 
-# import pyop3.tensors
+from pyop3.distarray import DistributedArray
 from pyop3.utils import NameGenerator, as_tuple
 
 
-class Expr:
-    pass
+class Expr(abc.ABC):
+    # FIXME I don't like this name
+    # this is a mapping from names to multi-arrays
+    @property
+    @abc.abstractmethod
+    def data(self):
+        pass
 
 
 class Operator(Expr):
@@ -37,6 +43,12 @@ class Loop(pytools.ImmutableRecord, Operator):
         self.depends_on = depends_on
 
         super().__init__()
+
+    @functools.cached_property
+    def data(self):
+        return functools.reduce(
+            operator.or_, [stmt.data for stmt in self.statements], {}
+        )
 
     @property
     def index(self):
@@ -168,6 +180,10 @@ class FunctionCall(Terminal):
     def __init__(self, function, arguments):
         self.function = function
         self.arguments = arguments
+
+    @property
+    def data(self) -> dict[str, DistributedArray]:
+        return functools.reduce(operator.or_, [arg.data for arg in self.arguments], {})
 
     @property
     def name(self):

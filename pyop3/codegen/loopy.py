@@ -21,6 +21,7 @@ from pyop3.multiaxis import (
     AffineMapNode,
     AxisPart,
     IdentityMapNode,
+    IndexTree,
     IndirectLayoutFunction,
     MapNode,
     MultiAxis,
@@ -143,20 +144,6 @@ class LoopyKernelBuilder:
         within_inames=frozenset(),
         depends_on=frozenset(),
     ):
-        # within_multi_index_groups is a map from multi-index groups to inames
-        # every multi-index group (which have unique IDs) may only appear once
-        """
-        We need to key by group rather than multi-index because that is what we
-        use in our loop definitions. For example:
-
-            loop(f := extruded_mesh.interior_facets, dat[f])
-
-        f is a multi-index group because it can be (base cell, extr edge) or
-        (base vert,extr edge). When we generate code for the dat we need to look up the
-        inames using f, rather than the selected multi-index.
-
-        This ties in well with the "path" logic I have already done for maps.
-        """
         if not within_indices:
             within_indices = {}
 
@@ -478,8 +465,8 @@ class LoopyKernelBuilder:
                 depends_on,
             )
 
-            lchildren = assignment.lhs.indices.children(lindex)
-            rchildren = assignment.rhs.indices.children(rindex)
+            lchildren = assignment.lhs.index.children(lindex)
+            rchildren = assignment.rhs.index.children(rindex)
             if strictly_all([lchildren, rchildren]):
                 for lsubindex, rsubindex in checked_zip(lchildren, rchildren):
                     self.build_assignment(
@@ -512,22 +499,18 @@ class LoopyKernelBuilder:
                 }
 
                 if assignment.lhs is assignment.array:
-                    # array_part_labels = lhs_part_labels
-                    # array_jnames = lhs_jnames
                     array_labels_to_jnames = lhs_labels_to_jnames
-                    # temp_part_labels = rhs_part_labels
-                    # temp_jnames = rhs_jnames
                     temp_labels_to_jnames = rhs_labels_to_jnames
                 else:
-                    # temp_part_labels = lhs_part_labels
-                    # temp_jnames = lhs_jnames
                     temp_labels_to_jnames = lhs_labels_to_jnames
-                    # array_part_labels = rhs_part_labels
-                    # array_jnames = rhs_jnames
                     array_labels_to_jnames = rhs_labels_to_jnames
 
                 extra_inames = {iname} if iname else set()
                 extra_deps = frozenset({f"{id}_*" for id in assignment.depends_on})
+
+                lexpr = ???
+                rexpr = ???
+
                 self.emit_assignment_insn(
                     assignment,
                     array_labels_to_jnames,
@@ -563,21 +546,23 @@ class LoopyKernelBuilder:
             # create an appropriate temporary
             # we need the indices here because the temporary shape needs to be indexed
             # by the same indices as the original array
-            itree = NullRootTree()
+            # is this definitely true???
+            if not isinstance(arg.tensor.data, MultiArray):
+                raise NotImplementedError("Need to handle indices to create temp shape differently")
+            itree = IndexTree()
             axtree = MultiAxisTree()
-            for idx in arg.tensor.indices.children(arg.tensor.indices.root):
+            for idx in arg.tensor.index.children(arg.tensor.index.root):
                 self._construct_temp_dims(
-                    axtree, itree, arg.tensor.indices, idx, within_indices
+                    axtree, itree, arg.tensor.index, idx, within_indices
                 )
 
             axtree.set_up()
             temporary = MultiArray(
                 axtree,
-                indices=itree,
                 name=self._temp_name_generator.next(),
-                dtype=arg.tensor.dtype,
+                dtype=arg.tensor.data.dtype,
             )
-            temporaries[arg] = temporary
+            temporaries[arg] = temporary[itree]
             # import pdb; pdb.set_trace()
 
         gathers = self.make_gathers(temporaries)
@@ -619,7 +604,11 @@ class LoopyKernelBuilder:
                 size = index.size
             new_part = MultiAxisComponent(size)
             new_axis = MultiAxis([new_part])
-            axtree.register_node(new_axis, parent=parent_axis, label=parent_label)
+            # FIXME: This wont work for more nested temporaries, need to pass path down
+            if parent_axis:
+                axtree.add_node(new_axis, {parent_axis.label: parent_label})
+            else:
+                axtree.add_node(new_axis)
 
             new_index = RangeNode((new_axis.name, new_part.label), size)
             itree.add_node(new_index, parent=iid)
@@ -704,18 +693,18 @@ class LoopyKernelBuilder:
 
         subarrayrefs = {}
         for temp in utils.unique(itertools.chain(call.reads, call.writes)):
-            temp_size = temp.alloc_size
+            temp_size = temp.data.alloc_size
             iname = self._namer.next("i")
-            subarrayrefs[temp] = as_subarrayref(temp, iname)
+            subarrayrefs[temp] = as_subarrayref(temp.data, iname)
             self.domains.append(f"{{ [{iname}]: 0 <= {iname} < {temp_size} }}")
-            assert temp.name in [d.name for d in self._temp_kernel_data]
+            assert temp.data.name in [d.name for d in self._temp_kernel_data]
 
         # we need to pass sizes through if they are only known at runtime (ragged)
         extents = {}
         for temp in utils.unique(itertools.chain(call.reads, call.writes)):
-            for index in temp.indices.children(temp.indices.root):
+            for index in temp.index.children(temp.index.root):
                 extents |= self.collect_extents(
-                    temp.indices, index, within_indices, within_inames, depends_on
+                    temp.index, index, within_indices, within_inames, depends_on
                 )
 
         # NOTE: If we register an extent to pass through loopy will complain
@@ -764,18 +753,32 @@ class LoopyKernelBuilder:
     def _(
         self, assignment: tlang.Assignment, within_indices, within_inames, depends_on
     ):
-        # FIXME this is kinda dumb now
-        lres, rres = [], []
-        for lindex, rindex in checked_zip(
-            assignment.lhs.indices.children(assignment.lhs.indices.root),
-            assignment.rhs.indices.children(assignment.rhs.indices.root),
-        ):
-            lres.append((lindex, (), ()))
-            rres.append((rindex, (), ()))
+        if not isinstance(assignment.tensor.data, MultiArray):
+            raise NotImplementedError("probably want to dispatch here if we hit a PetscMat etc")
+
+        # Register data
+        # TODO should only do once at a higher point
+        indexed = assignment.tensor.data
+        unindexed = assignment.temporary.data
+        if indexed.name not in self._tensor_data:
+            self._tensor_data[indexed.name] = lp.GlobalArg(
+                indexed.name, dtype=indexed.dtype, shape=None
+            )
 
         # import pdb; pdb.set_trace()
-        for (lindex, llabels, ljnames), (rindex, rlabels, rjnames) in checked_zip(
-            lres, rres
+        if unindexed.name not in [d.name for d in self._temp_kernel_data]:
+            if scalar:
+                shape = ()
+            else:
+                shape = (unindexed.alloc_size,)
+            self._temp_kernel_data.append(
+                lp.TemporaryVariable(unindexed.name, shape=shape)
+            )
+
+
+        for lindex, rindex in checked_zip(
+            assignment.lhs.index.children(assignment.lhs.index.root),
+            assignment.rhs.index.children(assignment.rhs.index.root),
         ):
             self.build_assignment(
                 assignment,
@@ -784,10 +787,7 @@ class LoopyKernelBuilder:
                 within_indices,
                 within_inames,
                 depends_on,
-                llabels,
-                ljnames,
-                rlabels,
-                rjnames,
+                (), (), (), (),
             )
 
     def emit_assignment_insn(
@@ -800,8 +800,8 @@ class LoopyKernelBuilder:
         scalar=False,
     ):
         # layout instructions - must be emitted innermost to make sense (reset appropriately)
-        array_offset = self._namer.next(f"{assignment.array.name}_ptr")
-        temp_offset = self._namer.next(f"{assignment.temporary.name}_ptr")
+        array_offset = self._namer.next(f"{assignment.array.data.name}_ptr")
+        temp_offset = self._namer.next(f"{assignment.temporary.data.name}_ptr")
         self._temp_kernel_data.extend(
             [
                 lp.TemporaryVariable(name, shape=(), dtype=np.uintp)
@@ -826,7 +826,7 @@ class LoopyKernelBuilder:
         self.instructions.append(temp_offset_insn)
         depends_on |= {array_offset_insn.id, temp_offset_insn.id}
 
-        axes = assignment.array.axes
+        axes = assignment.array.data.axes
         axis = axes.root
         while axis:
             component = just_one(
@@ -847,7 +847,7 @@ class LoopyKernelBuilder:
             axis = axes.child_by_label(axis, component.label)
 
         if not scalar:
-            temp_axes = assignment.temporary.axes
+            temp_axes = assignment.temporary.data.axes
             axis = temp_axes.root
             while axis:
                 component = just_one(
@@ -866,35 +866,18 @@ class LoopyKernelBuilder:
                 depends_on |= deps
                 axis = temp_axes.child_by_label(axis, component.label)
 
+        # return offset, depends_on
+
         self.generate_assignment_insn_inner(
             assignment,
-            assignment.temporary,
+            assignment.temporary.data,
             temp_offset,
-            assignment.tensor,
+            assignment.tensor.data,
             array_offset,
             scalar=scalar,
             depends_on=depends_on,
             within_inames=within_inames,
         )
-
-        # Register data
-        # TODO should only do once at a higher point
-        indexed = assignment.tensor
-        unindexed = assignment.temporary
-        if indexed.name not in self._tensor_data:
-            self._tensor_data[indexed.name] = lp.GlobalArg(
-                indexed.name, dtype=indexed.dtype, shape=None
-            )
-
-        # import pdb; pdb.set_trace()
-        if unindexed.name not in [d.name for d in self._temp_kernel_data]:
-            if scalar:
-                shape = ()
-            else:
-                shape = (unindexed.alloc_size,)
-            self._temp_kernel_data.append(
-                lp.TemporaryVariable(unindexed.name, shape=shape)
-            )
 
     def emit_layout_insns(
         self, axis, axis_part, offset_var, labels_to_jnames, within_inames, depends_on
@@ -1125,6 +1108,10 @@ class LoopyKernelBuilder:
         insn = tlang.Read(array, temp)
 
         temp_labels_to_jnames = {}
+
+        lexpr = ???
+        rexpr = ???
+        ???
 
         # TODO Think about dependencies
         self.emit_assignment_insn(

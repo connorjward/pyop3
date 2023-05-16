@@ -160,7 +160,12 @@ def ragged_copy_kernel():
 
 
 def test_read_single_dim(scalar_copy_kernel):
-    axes = MultiAxisTree(MultiAxis([MultiAxisComponent(10, "cpt0")], "ax0")).set_up()
+    axes = MultiAxisTree.from_dict(
+        {
+            MultiAxis([MultiAxisComponent(10, "cpt0")], "ax0"): None,
+        },
+        set_up=True,
+    )
     dat1 = MultiArray(
         axes, name="dat1", data=np.ones(10, dtype=np.float64), dtype=np.float64
     )
@@ -170,6 +175,15 @@ def test_read_single_dim(scalar_copy_kernel):
 
     p = IndexTree([RangeNode(("ax0", "cpt0"), 10)])
     expr = pyop3.Loop(p, scalar_copy_kernel(dat1[p], dat2[p]))
+
+    """
+    plan for data lookup:
+
+        - Expressions are immutable. They can collect and track data things.
+          Make a map connecting names to data
+        - The kernel can register what arguments it needs. These can then be
+          retrieved from the expression.
+    """
 
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
     dll = compilemythings(code)

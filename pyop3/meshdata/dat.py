@@ -19,6 +19,11 @@ class Dat:
         # to the list prior to doing the function below?
         layout += ConstrainedMultiAxis(mesh.axis, priority=10)
 
+    # TODO: Use darray as the name of the property for the underlying data structure.
+    @property
+    def data(self):
+        return self.darray.data
+
 
 def create_dat(mesh, axes) -> Dat:
     # axes is a list of multi-axes with additional constraint information
