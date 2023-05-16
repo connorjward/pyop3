@@ -401,7 +401,7 @@ def test_permuted_twice(vector_copy_kernel):
     sec0 = dat1.dim.node("axid0").components[0].layout_fn.data
     sec1 = dat1.dim.node("axid1").components[0].layout_fn.data
 
-    args = [sec0.data, sec1.data, dat1.data, dat2.data]
+    args = [dat1.data, sec0.data, sec1.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
     fn(*(d.ctypes.data for d in args))
 

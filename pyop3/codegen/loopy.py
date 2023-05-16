@@ -616,8 +616,7 @@ class LoopyKernelBuilder:
         currentindices,
         index,
         within_indices,
-        parent_axis=None,
-        parent_label=None,
+        path=None,
         iid=NullRootNode.ID,
     ):
         """Return an iterable of axis parts per index
@@ -632,6 +631,8 @@ class LoopyKernelBuilder:
         """
         result = [(index, (), ())]
 
+        path = path or {}
+
         # TODO do I need to track the labels?
         for index, _, _ in result:
             if index.id in within_indices:
@@ -640,9 +641,8 @@ class LoopyKernelBuilder:
                 size = index.size
             new_part = MultiAxisComponent(size)
             new_axis = MultiAxis([new_part])
-            # FIXME: This wont work for more nested temporaries, need to pass path down
-            if parent_axis:
-                axtree.add_node(new_axis, {parent_axis.label: parent_label})
+            if path:
+                axtree.add_node(new_axis, path)
             else:
                 axtree.add_node(new_axis)
 
@@ -657,8 +657,7 @@ class LoopyKernelBuilder:
                         currentindices,
                         subidx,
                         within_indices,
-                        new_axis,
-                        new_part.label,
+                        path | {new_axis.label: new_part.label},
                         new_index.id,
                     )
 
