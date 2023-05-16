@@ -355,7 +355,9 @@ def test_compute_double_loop_permuted(vector_copy_kernel):
 
     layout0 = dat1.dim.node("axid0").components[0].layout_fn.data
 
-    args = [layout0.data, dat1.data, dat2.data]
+    # breakpoint()
+
+    args = [dat1.data, layout0.data, dat2.data]
     fn.argtypes = (ctypes.c_voidp,) * len(args)
 
     fn(*(d.ctypes.data for d in args))

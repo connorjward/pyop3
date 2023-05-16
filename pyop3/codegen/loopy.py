@@ -508,15 +508,49 @@ class LoopyKernelBuilder:
                 extra_inames = {iname} if iname else set()
                 extra_deps = frozenset({f"{id}_*" for id in assignment.depends_on})
 
-                lexpr = ???
-                rexpr = ???
+                ###
 
-                self.emit_assignment_insn(
-                    assignment,
+                array_offset, array_deps = self.emit_assignment_insn(
+                    assignment.array.data.name,
+                    assignment.array.data.axes,
                     array_labels_to_jnames,
+                    within_inames | extra_inames,
+                    depends_on | extra_deps,
+                )
+                temp_offset, temp_deps = self.emit_assignment_insn(
+                    assignment.temporary.data.name,
+                    assignment.temporary.data.axes,
                     temp_labels_to_jnames,
                     within_inames | extra_inames,
                     depends_on | extra_deps,
+                )
+
+                array = assignment.array.data
+                temporary = assignment.temporary.data
+                temp_expr = pym.subscript(pym.var(temporary.name), pym.var(temp_offset))
+                array_expr = pym.subscript(pym.var(array.name), pym.var(array_offset))
+
+                if isinstance(assignment, tlang.Read):
+                    lexpr = temp_expr
+                    rexpr = array_expr
+                elif isinstance(assignment, tlang.Write):
+                    lexpr = array_expr
+                    rexpr = temp_expr
+                elif isinstance(assignment, tlang.Increment):
+                    lexpr = array_expr
+                    rexpr = array_expr + temp_expr
+                elif isinstance(assignment, tlang.Zero):
+                    lexpr = temp_expr
+                    rexpr = 0
+                else:
+                    raise NotImplementedError
+
+                self.generate_assignment_insn_inner(
+                    lexpr,
+                    rexpr,
+                    assignment.id,
+                    depends_on=depends_on | extra_deps | array_deps | temp_deps,
+                    within_inames=within_inames | extra_inames,
                 )
 
     @_build.register
@@ -548,7 +582,9 @@ class LoopyKernelBuilder:
             # by the same indices as the original array
             # is this definitely true???
             if not isinstance(arg.tensor.data, MultiArray):
-                raise NotImplementedError("Need to handle indices to create temp shape differently")
+                raise NotImplementedError(
+                    "Need to handle indices to create temp shape differently"
+                )
             itree = IndexTree()
             axtree = MultiAxisTree()
             for idx in arg.tensor.index.children(arg.tensor.index.root):
@@ -754,7 +790,9 @@ class LoopyKernelBuilder:
         self, assignment: tlang.Assignment, within_indices, within_inames, depends_on
     ):
         if not isinstance(assignment.tensor.data, MultiArray):
-            raise NotImplementedError("probably want to dispatch here if we hit a PetscMat etc")
+            raise NotImplementedError(
+                "probably want to dispatch here if we hit a PetscMat etc"
+            )
 
         # Register data
         # TODO should only do once at a higher point
@@ -767,14 +805,10 @@ class LoopyKernelBuilder:
 
         # import pdb; pdb.set_trace()
         if unindexed.name not in [d.name for d in self._temp_kernel_data]:
-            if scalar:
-                shape = ()
-            else:
-                shape = (unindexed.alloc_size,)
+            shape = (unindexed.alloc_size,)
             self._temp_kernel_data.append(
                 lp.TemporaryVariable(unindexed.name, shape=shape)
             )
-
 
         for lindex, rindex in checked_zip(
             assignment.lhs.index.children(assignment.lhs.index.root),
@@ -787,97 +821,58 @@ class LoopyKernelBuilder:
                 within_indices,
                 within_inames,
                 depends_on,
-                (), (), (), (),
+                (),
+                (),
+                (),
+                (),
             )
 
     def emit_assignment_insn(
         self,
-        assignment,
-        array_labels_to_jnames,
-        temp_labels_to_jnames,
+        array_name,
+        array_axes,  # can be None
+        labels_to_jnames,
         within_inames,
         depends_on,
         scalar=False,
     ):
         # layout instructions - must be emitted innermost to make sense (reset appropriately)
-        array_offset = self._namer.next(f"{assignment.array.data.name}_ptr")
-        temp_offset = self._namer.next(f"{assignment.temporary.data.name}_ptr")
-        self._temp_kernel_data.extend(
-            [
-                lp.TemporaryVariable(name, shape=(), dtype=np.uintp)
-                for name in [array_offset, temp_offset]
-            ]
+        offset = self._namer.next(f"{array_name}_ptr")
+        self._temp_kernel_data.append(
+            lp.TemporaryVariable(offset, shape=(), dtype=np.uintp)
         )
         array_offset_insn = lp.Assignment(
-            pym.var(array_offset),
-            0,
-            id=self._namer.next("insn"),
-            within_inames=within_inames,
-            depends_on=depends_on,
-        )
-        temp_offset_insn = lp.Assignment(
-            pym.var(temp_offset),
+            pym.var(offset),
             0,
             id=self._namer.next("insn"),
             within_inames=within_inames,
             depends_on=depends_on,
         )
         self.instructions.append(array_offset_insn)
-        self.instructions.append(temp_offset_insn)
-        depends_on |= {array_offset_insn.id, temp_offset_insn.id}
-
-        axes = assignment.array.data.axes
-        axis = axes.root
-        while axis:
-            component = just_one(
-                cpt
-                for cpt in axis.components
-                if (axis.name, cpt.label) in array_labels_to_jnames
-            )
-
-            deps = self.emit_layout_insns(
-                axis,
-                component,
-                array_offset,
-                array_labels_to_jnames,
-                within_inames,
-                depends_on,
-            )
-            depends_on |= deps
-            axis = axes.child_by_label(axis, component.label)
+        depends_on |= {array_offset_insn.id}
 
         if not scalar:
-            temp_axes = assignment.temporary.data.axes
-            axis = temp_axes.root
+            axes = array_axes
+            axis = axes.root
             while axis:
                 component = just_one(
                     cpt
                     for cpt in axis.components
-                    if (axis.name, cpt.label) in temp_labels_to_jnames
+                    if (axis.name, cpt.label) in labels_to_jnames
                 )
+
                 deps = self.emit_layout_insns(
                     axis,
                     component,
-                    temp_offset,
-                    temp_labels_to_jnames,
+                    offset,
+                    labels_to_jnames,
                     within_inames,
                     depends_on,
                 )
                 depends_on |= deps
-                axis = temp_axes.child_by_label(axis, component.label)
+                axis = axes.child_by_label(axis, component.label)
 
-        # return offset, depends_on
-
-        self.generate_assignment_insn_inner(
-            assignment,
-            assignment.temporary.data,
-            temp_offset,
-            assignment.tensor.data,
-            array_offset,
-            scalar=scalar,
-            depends_on=depends_on,
-            within_inames=within_inames,
-        )
+        return offset, depends_on
 
     def emit_layout_insns(
         self, axis, axis_part, offset_var, labels_to_jnames, within_inames, depends_on
@@ -946,44 +941,17 @@ class LoopyKernelBuilder:
 
     def generate_assignment_insn_inner(
         self,
-        assignment,
-        temp,
-        toffset,
-        array,
-        aoffset,
-        scalar,
+        lexpr,
+        rexpr,
+        assignment_id,  # FIXME
         depends_on,
         within_inames,
     ):
-        if scalar:
-            texpr = pym.var(temp.name)
-        else:
-            texpr = pym.subscript(pym.var(temp.name), pym.var(toffset))
-
-        aexpr = pym.subscript(pym.var(array.name), pym.var(aoffset))
-
-        if assignment.array is assignment.lhs:
-            lexpr = aexpr
-            rexpr = texpr
-        else:
-            lexpr = texpr
-            rexpr = aexpr
-
-        if isinstance(assignment, tlang.Zero):
-            rexpr = 0
-        elif isinstance(assignment, tlang.Increment):
-            rexpr = lexpr + rexpr
-
-        insn_id = self._namer.next(f"{assignment.id}_")
+        insn_id = self._namer.next(f"{assignment_id}_")
 
         # there are no ordering restrictions between assignments to the
-        # same temporary - but this is only valid to declare if multiple insns are used
-        # if len(assignment.lhs.indicess) > 1:
-        #     assert len(assignment.rhs.indicess) > 1
-        #     no_sync_with = frozenset({(f"{assignment.id}*", "any")})
-        # else:
-        #     no_sync_with = frozenset()
-        no_sync_with = frozenset({(f"{assignment.id}*", "any")})
+        # same temporary
+        no_sync_with = frozenset({(f"{assignment_id}*", "any")})
 
         assign_insn = lp.Assignment(
             lexpr,
@@ -1029,55 +997,6 @@ class LoopyKernelBuilder:
             state.extend(subresult)
         return tuple(state)
 
-    def register_terminal_multi_index(
-        self, assignment, multi_idx, inames, within_inames, depends_on
-    ):
-        # Note: At the moment we are assuming that all of the loops have already
-        # been registered
-
-        assert len(inames) == len(multi_idx)
-
-        temp_pt_labels = []
-        temp_jnames = []
-        array_pt_labels = []
-        array_jnames = []
-        for typed_idx, iname in utils.checked_zip(multi_idx, inames):
-            array_jname = self._namer.next(f"{assignment.array.name}_j")
-
-            index_insn = lp.Assignment(
-                # pym.var(array_iname), pym.var(iname)*typed_idx.step+typed_idx.start,
-                pym.var(array_jname),
-                pym.var(iname),
-                id=self._namer.next(f"{assignment.id}_"),
-                within_inames=within_inames,
-                depends_on=depends_on,
-                # no_sync_with=no_sync_with,
-            )
-
-            self.instructions.append(index_insn)
-            new_deps = frozenset({index_insn.id})
-
-            self._temp_kernel_data.extend(
-                [
-                    lp.TemporaryVariable(name, shape=(), dtype=np.uintp)
-                    for name in [array_jname]
-                ]
-            )
-
-            array_pt_labels.append(typed_idx.part_label)
-            array_jnames.append(array_jname)
-
-            temp_pt_labels.append(typed_idx.part_label)
-            temp_jnames.append(iname)
-        return (
-            tuple(temp_pt_labels),
-            tuple(array_pt_labels),
-            tuple(temp_jnames),
-            tuple(array_jnames),
-            within_inames,
-            new_deps,
-        )
-
     def register_extent(self, extent, within_indices, within_inames, depends_on):
         if isinstance(extent, MultiArray):
             labels, jnames = [], []
@@ -1103,24 +1022,33 @@ class LoopyKernelBuilder:
     def register_scalar_assignment(
         self, array, array_labels_to_jnames, within_inames, depends_on
     ):
+        # Register data
+        # TODO should only do once at a higher point
+        if array.name not in self._tensor_data:
+            self._tensor_data[array.name] = lp.GlobalArg(
+                array.name, dtype=array.dtype, shape=None
+            )
+
         temp_name = self._namer.next("n")
-        temp = MultiArray(None, name=temp_name, dtype=np.int32)
-        insn = tlang.Read(array, temp)
+        self._temp_kernel_data.append(lp.TemporaryVariable(temp_name, shape=()))
 
-        temp_labels_to_jnames = {}
+        array_offset, array_deps = self.emit_assignment_insn(
+            array.name, array.axes, array_labels_to_jnames, within_inames, depends_on
+        )
+        # TODO: Does this function even do anything when I use a scalar?
+        temp_offset, temp_deps = self.emit_assignment_insn(
+            temp_name, None, {}, within_inames, depends_on, scalar=True
+        )
 
-        lexpr = ???
-        rexpr = ???
-        ???
+        lexpr = pym.var(temp_name)
+        rexpr = pym.subscript(pym.var(array.name), pym.var(array_offset))
 
-        # TODO Think about dependencies
-        self.emit_assignment_insn(
-            insn,
-            array_labels_to_jnames,
-            temp_labels_to_jnames,
+        self.generate_assignment_insn_inner(
+            lexpr,
+            rexpr,
+            self._namer.next("_scalar_assign"),
+            depends_on=depends_on | array_deps | temp_deps,
             within_inames=within_inames,
-            depends_on=depends_on,
-            scalar=True,
         )
 
         return pym.var(temp_name)
