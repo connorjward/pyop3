@@ -13,6 +13,7 @@ import pytest
 import pyop3
 import pyop3.codegen
 from pyop3.distarray.multiarray import *
+from pyop3.index import *
 from pyop3.mesh import *
 from pyop3.multiaxis import *
 
@@ -230,8 +231,17 @@ def test_compute_double_loop():
     )
     kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
-    p = IndexTree([RangeNode(("ax0", "cpt0"), 10)])
-    expr = pyop3.Loop(p, kernel(dat1[p], dat2[p]))
+    p = IndexTree.from_dict(
+        {
+            MultiIndex("ax0", [RangeNode("cpt0", 10)], id="idx0"): None,
+        }
+    )
+
+    q = p.copy().add_node(MultiIndex("ax1", [RangeNode("cpt0", 3)]), ("idx0", "cpt0"))
+
+    breakpoint()
+
+    expr = pyop3.Loop(p, kernel(dat1[q], dat2[q]))
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
 
     dll = compilemythings(code)

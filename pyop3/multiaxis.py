@@ -17,9 +17,17 @@ import pytools
 from mpi4py import MPI
 from petsc4py import PETSc
 
-import pyop3.exprs
 from pyop3 import utils
 from pyop3.dtypes import IntType, PointerType, get_mpi_dtype
+from pyop3.index import (
+    AffineMapNode,
+    Index,
+    IndexTree,
+    MapNode,
+    MultiIndex,
+    RangeNode,
+    TabulatedMapNode,
+)
 from pyop3.tree import (
     LabelledNode,
     LabelledTree,
@@ -1224,141 +1232,6 @@ def has_constant_step(axtree, node, part):
         return True
 
 
-class IndexTree(NullRootTree):
-    pass
-
-
-IndexLabel = collections.namedtuple("IndexLabel", ["axis", "component"])
-
-
-# class Node(pytools.ImmutableRecord):
-#     fields = {"children", "id"}
-#     namer = NameGenerator("idx")
-#
-#     def __init__(self, children=(), *, id=None):
-#         raise AssertionError("this can go")
-#         self.children = tuple(children)
-#         self.id = id or self.namer.next()
-#
-#     @property
-#     def child(self):
-#         return utils.just_one(self.children) if self.children else None
-#
-#     # preferably free functions
-#     def add_child(self, id, node):
-#         if id == self.id:
-#             return self.copy(children=self.children + (node,))
-#
-#         if id not in self.all_child_ids:
-#             raise ValueError("id not found")
-#
-#         new_children = []
-#         for child in self.children:
-#             if id in child.all_ids:
-#                 new_children.append(child.add_child(id, node))
-#             else:
-#                 new_children.append(child)
-#         return self.copy(children=new_children)
-#
-#     @property
-#     def all_ids(self):
-#         return self.all_child_ids | {self.id}
-#
-#     @property
-#     def all_child_ids(self):
-#         return frozenset({node.id for node in self.all_children})
-#
-#     @property
-#     def all_children(self):
-#         return frozenset(
-#             {*self.children}
-#             | {node for ch in self.children for node in ch.all_children}
-#         )
-
-
-class IndexNode(NewNode, abc.ABC):
-    pass
-
-
-class RangeNode(IndexNode):
-    # TODO: Gracefully handle start, stop, step
-    # fields = IndexNode.fields | {"label", "start", "stop", "step"}
-    fields = IndexNode.fields | {"label", "stop"}
-
-    def __init__(self, label: IndexLabel | tuple[Hashable, Hashable], stop, **kwargs):
-        self.label = IndexLabel(*label)
-        self.stop = stop
-        super().__init__(**kwargs)
-
-    # TODO: This is temporary
-    @property
-    def size(self):
-        return self.stop
-
-    @property
-    def start(self):
-        return 0  # TODO
-
-    @property
-    def step(self):
-        return 1  # TODO
-
-
-class MapNode(IndexNode):
-    fields = IndexNode.fields | {"from_labels", "to_labels", "arity"}
-
-    # in theory we can have a selector function here too so to_labels is actually bigger?
-    # means we have multiple children?
-
-    def __init__(self, from_labels, to_labels, arity, **kwargs):
-        self.from_labels = from_labels
-        self.to_labels = to_labels
-        self.arity = arity
-        self.selector = None  # TODO
-        super().__init__(**kwargs)
-
-    @property
-    def size(self):
-        return self.arity
-
-
-class TabulatedMapNode(MapNode):
-    fields = MapNode.fields | {"data"}
-
-    def __init__(self, from_labels, to_labels, arity, data, **kwargs):
-        self.data = data
-        super().__init__(from_labels, to_labels, arity, **kwargs)
-
-
-class IdentityMapNode(MapNode):
-    pass
-
-    # TODO is this strictly needed?
-    # @property
-    # def label(self):
-    #     assert len(self.to_labels) == 1
-    #     return self.to_labels[0]
-
-
-class AffineMapNode(MapNode):
-    fields = MapNode.fields | {"expr"}
-
-    def __init__(self, from_labels, to_labels, arity, expr, **kwargs):
-        """
-        Parameters
-        ----------
-        expr:
-            A 2-tuple of pymbolic variables and an expression. We need to split them
-            like this because we need to know the order in which the variables
-            correspond to the axis parts.
-        """
-        if len(expr[0]) != len(from_labels) + 1:
-            raise ValueError("Wrong number of variables in expression")
-
-        self.expr = expr
-        super().__init__(from_labels, to_labels, arity, **kwargs)
-
-
 class MultiAxis(LabelledNode):
     fields = {"components", "label", "id"}
 
@@ -1706,6 +1579,8 @@ def expand_indices_to_fill_empty_shape(
             myaxis = axis.child_by_label(myaxis, selected_part.label)
 
         if myaxis:
+            # this is controversial if we allow arbitrary ordering of axes
+            raise AssertionError("dont want to do this any more")
             for part in myaxis.components:
                 fill_shape(axis, myaxis, part, itree, index, prev_indices | index)
 

@@ -43,10 +43,11 @@ class LoopExpr(pytools.ImmutableRecord, abc.ABC):
         """
         pass
 
-    @property
-    @abc.abstractmethod
-    def operands(self) -> tuple["LoopExpr"]:
-        pass
+    # nice for drawing diagrams
+    # @property
+    # @abc.abstractmethod
+    # def operands(self) -> tuple["LoopExpr"]:
+    #     pass
 
 
 class Loop(LoopExpr):
@@ -158,7 +159,7 @@ class LoopyKernel:
         return self.code.default_entrypoint.name
 
 
-class Terminal(Expr):
+class Terminal(LoopExpr):
     pass
 
 
@@ -170,6 +171,10 @@ class FunctionCall(Terminal):
     @property
     def data(self) -> dict[str, DistributedArray]:
         return functools.reduce(operator.or_, [arg.data for arg in self.arguments], {})
+
+    # @property
+    # def operands(self):
+    #     ...
 
     @property
     def name(self):

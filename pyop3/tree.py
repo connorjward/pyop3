@@ -447,6 +447,8 @@ class LabelledTree(Tree):
         for component in node.components:
             self._parent_and_label_to_child[(node.id, component.label)] = None
 
+        return self
+
     def add_subtree(
         self,
         subtree: "Tree",
@@ -522,6 +524,8 @@ class LabelledTree(Tree):
         return subtree
 
     def _node_from_path(self, path: NodePath) -> tuple[Node, Hashable]:
+        # breakpoint()
+
         node = self.root
         path = path.copy()
         while True:
@@ -573,6 +577,7 @@ class LabelledTree(Tree):
     def copy(self):
         new = super().copy()
         new._parent_and_label_to_child = self._parent_and_label_to_child.copy()
+        new._node_to_path = self._node_to_path.copy()
         return new
 
 

@@ -12,17 +12,16 @@ import pytools
 from mpi4py import MPI
 from petsc4py import PETSc
 
-import pyop3.exprs
+import pyop3.loop
 from pyop3 import utils
 from pyop3.distarray.base import DistributedArray
 from pyop3.dtypes import IntType, get_mpi_dtype
+from pyop3.index import RangeNode, TabulatedMapNode
 from pyop3.multiaxis import (
     MultiAxis,
     MultiAxisComponent,
     MultiAxisNode,
     MultiAxisTree,
-    RangeNode,
-    TabulatedMapNode,
     expand_indices_to_fill_empty_shape,
     fill_shape,
     get_bottom_part,
@@ -148,7 +147,7 @@ class MultiArray(DistributedArray):
             return flattened, count
 
     reduction_ops = {
-        pyop3.exprs.INC: MPI.SUM,
+        pyop3.loop.INC: MPI.SUM,
     }
 
     def reduce_leaves_to_roots(self, sf, pending_write_op):
@@ -255,9 +254,12 @@ class MultiArray(DistributedArray):
     def __getitem__(self, index: "IndexTree"):
         from pyop3.distarray.indexed import IndexedMultiArray
 
+        # ideally get rid of this copy by making the tree immutable
         index = index.copy()
-        for idx in index.children(index.root):
-            expand_indices_to_fill_empty_shape(self.axes, index, idx)
+
+        # no longer "fill" things like this - doesn't work with reordering axes
+        # for idx in index.children(index.root):
+        #     expand_indices_to_fill_empty_shape(self.axes, index, idx)
         return IndexedMultiArray(self, index)
 
     def select_axes(self, indices):
