@@ -202,34 +202,25 @@ def test_read_single_dim(scalar_copy_kernel):
     assert np.allclose(dat1.data, dat2.data)
 
 
-def test_compute_double_loop():
+def test_compute_double_loop(vector_copy_kernel):
     axes = MultiAxisTree.from_dict(
         {
-            MultiAxis([MultiAxisComponent(10)], "ax0", id="ax_id0"): None,
-            MultiAxis([MultiAxisComponent(3)], "ax1"): ("ax_id0", 0),
+            MultiAxis([MultiAxisComponent(10, "cpt0")], "ax0", id="ax_id0"): None,
+            MultiAxis([MultiAxisComponent(3, "cpt0")], "ax1"): ("ax_id0", "cpt0"),
         },
         set_up=True,
     )
 
     dat1 = MultiArray(
-        axes, name="dat1", data=np.arange(30, dtype=np.float64), dtype=np.float64
+        axes,
+        name="dat1",
+        data=np.arange(30, dtype=np.float64),
     )
     dat2 = MultiArray(
-        axes, name="dat2", data=np.zeros(30, dtype=np.float64), dtype=np.float64
+        axes,
+        name="dat2",
+        data=np.zeros(30, dtype=np.float64),
     )
-
-    code = lp.make_kernel(
-        "{ [i]: 0 <= i < 3 }",
-        "y[i] = x[i] + 1",
-        [
-            lp.GlobalArg("x", np.float64, (3,), is_input=True, is_output=False),
-            lp.GlobalArg("y", np.float64, (3,), is_input=False, is_output=True),
-        ],
-        target=lp.CTarget(),
-        name="mylocalkernel",
-        lang_version=(2018, 2),
-    )
-    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
     p = IndexTree.from_dict(
         {
@@ -239,7 +230,7 @@ def test_compute_double_loop():
 
     q = p.copy().add_node(MultiIndex([RangeNode(("ax1", "cpt0"), 3)]), ("idx_id0", 0))
 
-    expr = pyop3.Loop(p, kernel(dat1[q], dat2[q]))
+    expr = pyop3.Loop(p, vector_copy_kernel(dat1[q], dat2[q]))
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
 
     dll = compilemythings(code)
@@ -248,7 +239,7 @@ def test_compute_double_loop():
     fn.argtypes = (ctypes.c_voidp,) * len(args)
     fn(*(d.ctypes.data for d in args))
 
-    assert all(dat2.data == dat1.data + 1)
+    assert np.allclose(dat2.data, dat1.data)
 
 
 # TODO parametrise the sizes here
