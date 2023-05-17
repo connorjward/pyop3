@@ -30,6 +30,7 @@ from pyop3.index import (
 )
 from pyop3.tree import (
     LabelledNode,
+    LabelledNodeComponent,
     LabelledTree,
     Node,
     NullRootNode,
@@ -1253,7 +1254,7 @@ class MultiAxis(LabelledNode):
 MultiAxisNode = MultiAxis
 
 
-class MultiAxisComponent(pytools.ImmutableRecord):
+class MultiAxisComponent(LabelledNodeComponent):
     """
     Parameters
     ----------
@@ -1279,11 +1280,9 @@ class MultiAxisComponent(pytools.ImmutableRecord):
 
     """
 
-    fields = {
+    fields = LabelledNodeComponent.fields | {
         "count",
         "numbering",
-        "label",
-        # "id",
         "max_count",
         "layout_fn",
         "overlap",
@@ -1291,8 +1290,6 @@ class MultiAxisComponent(pytools.ImmutableRecord):
         "indices",
         "lgmap",
     }
-
-    _label_generator = NameGenerator("_MultiAxisComponent_label")
 
     def __init__(
         self,
@@ -1333,10 +1330,11 @@ class MultiAxisComponent(pytools.ImmutableRecord):
                     dtype=PointerType,
                 )
 
+        super().__init__(label)
+
         self.count = count
         self.indices = indices
         self.numbering = numbering
-        self.label = label or next(self._label_generator)
         self.max_count = max_count
         self.layout_fn = layout_fn
         self.overlap = overlap
@@ -1359,8 +1357,6 @@ class MultiAxisComponent(pytools.ImmutableRecord):
         This effectively means that we need to zero the offset as we traverse the
         tree to produce the layout. This is why we need this ``indexed`` flag.
         """
-
-        super().__init__()
 
     def __str__(self) -> str:
         return f"{self.__class__.__name__}(id={self.id}, label={self.label})"
