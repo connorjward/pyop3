@@ -205,8 +205,8 @@ def test_read_single_dim(scalar_copy_kernel):
 def test_compute_double_loop():
     axes = MultiAxisTree.from_dict(
         {
-            MultiAxis([MultiAxisComponent(10, "cpt0")], "ax0", id="axid0"): None,
-            MultiAxis([MultiAxisComponent(3, "cpt0")], "ax1"): ("axid0", "cpt0"),
+            MultiAxis([MultiAxisComponent(10)], "ax0", id="ax_id0"): None,
+            MultiAxis([MultiAxisComponent(3)], "ax1"): ("ax_id0", 0),
         },
         set_up=True,
     )
@@ -233,13 +233,11 @@ def test_compute_double_loop():
 
     p = IndexTree.from_dict(
         {
-            MultiIndex("ax0", [RangeNode("cpt0", 10)], id="idx0"): None,
+            MultiIndex([RangeNode(("ax0", "cpt0"), 10)], id="idx_id0"): None,
         }
     )
 
-    q = p.copy().add_node(MultiIndex("ax1", [RangeNode("cpt0", 3)]), ("idx0", "cpt0"))
-
-    breakpoint()
+    q = p.copy().add_node(MultiIndex([RangeNode(("ax1", "cpt0"), 3)]), ("idx_id0", 0))
 
     expr = pyop3.Loop(p, kernel(dat1[q], dat2[q]))
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)

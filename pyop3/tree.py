@@ -361,11 +361,9 @@ class NullRootTree(Tree):
 class LabelledNodeComponent(pytools.ImmutableRecord):
     fields = {"label"}
 
-    _label_generator = UniqueNameGenerator("_LabelledNodeComponent_label")
-
     def __init__(self, label: Hashable | None = None) -> None:
         super().__init__()
-        self.label = label or next(self._label_generator)
+        self.label = label
 
 
 class LabelledNode(Node):
@@ -379,6 +377,9 @@ class LabelledNode(Node):
         label: Hashable | None = None,
         **kwargs,
     ) -> None:
+        if strictly_all(cpt.label is None for cpt in components):
+            components = tuple(cpt.copy(label=i) for i, cpt in enumerate(components))
+
         super().__init__(**kwargs)
         self.components = tuple(components)
         self.label = label or next(self._label_generator)

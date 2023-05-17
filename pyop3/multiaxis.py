@@ -1237,11 +1237,8 @@ class MultiAxis(LabelledNode):
 
     _label_generator = UniqueNameGenerator("_MultiAxis_label")
 
-    def __init__(self, components, label: Hashable | None = None, *, id=None):
-        labels = tuple(cpt.label for cpt in components)
-        super().__init__(labels, id=id)
-        self.components = tuple(components)
-        self.label = label or next(self._label_generator)
+    def __init__(self, components, label: Hashable | None = None, **kwargs):
+        super().__init__(components, label, **kwargs)
 
     def __str__(self) -> str:
         return f"{self.name} : [{', '.join(str(cpt.label) for cpt in self.components)}]"

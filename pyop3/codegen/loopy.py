@@ -298,10 +298,10 @@ class LoopyKernelBuilder:
                 # no_sync_with=no_sync_with,
             )
             index_insns = [index_insn]
-            new_labels = existing_labels | (multi_index.label, index.label)
+            new_labels = existing_labels | index.path
             new_jnames = existing_jnames | jname
             jnames = (jname,)
-            new_within = {index.id: (((multi_index.label, index.label),), (jname,))}
+            new_within = {index.id: ((index.path,), (jname,))}
 
         elif isinstance(index, IdentityMapNode):
             index_insns = []
@@ -643,6 +643,7 @@ class LoopyKernelBuilder:
         within_indices,
         path=None,
         index_path=None,
+        new_index_path=None,
     ):
         """Return an iterable of axis parts per index
 
@@ -656,6 +657,7 @@ class LoopyKernelBuilder:
         """
         path = path or {}
         index_path = index_path or {}
+        new_index_path = new_index_path or {}
 
         # TODO do I need to track the labels?
         if index.id in within_indices:
@@ -664,17 +666,17 @@ class LoopyKernelBuilder:
             size = index.size
 
         # FIXME: multipart?
-        new_part = MultiAxisComponent(size, index.label)
-        new_axis = MultiAxis([new_part], multi_index.label)
+        new_part = MultiAxisComponent(size, index.path[1])
+        new_axis = MultiAxis([new_part], index.path[0])
         if path:
             axtree.add_node(new_axis, path)
         else:
             axtree.add_node(new_axis)
 
-        new_index = RangeNode(new_part.label, size)
-        new_multi_index = MultiIndex(new_axis.label, [new_index])
+        new_index = RangeNode((new_axis.label, new_part.label), size, label=0)
+        new_multi_index = MultiIndex([new_index])
         if index_path:
-            itree.add_node(new_multi_index, index_path)
+            itree.add_node(new_multi_index, new_index_path)
         else:
             itree.add_node(new_multi_index)
 
@@ -691,7 +693,8 @@ class LoopyKernelBuilder:
                     subidx,
                     within_indices,
                     path | {new_axis.label: new_part.label},
-                    index_path | {new_multi_index.label: new_index.label},
+                    index_path | {multi_index.label: index.label},
+                    new_index_path | {new_multi_index.label: new_index.label},
                 )
 
     def make_gathers(self, temporaries, **kwargs):

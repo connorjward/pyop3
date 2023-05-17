@@ -14,8 +14,8 @@ IndexLabel = collections.namedtuple("IndexLabel", ["axis", "component"])
 
 
 class MultiIndex(LabelledNode):
-    def __init__(self, label: Hashable, indices, **kwargs):
-        super().__init__(indices, label, **kwargs)
+    def __init__(self, indices, **kwargs):
+        super().__init__(indices, **kwargs)
 
     @property
     def indices(self) -> Sequence["Index"]:
@@ -24,12 +24,15 @@ class MultiIndex(LabelledNode):
 
 # FIXME: not a node any more
 class IndexNode(LabelledNodeComponent, abc.ABC):
-    fields = LabelledNodeComponent.fields | {"id"}
+    fields = LabelledNodeComponent.fields | {"path", "id"}
 
     _lazy_id_generator = None
 
-    def __init__(self, label, *, id: Hashable | None = None):
+    def __init__(
+        self, path, *, label: Hashable | None = None, id: Hashable | None = None
+    ):
         super().__init__(label)
+        self.path = path
         self.id = id or next(self._id_generator)
 
     @classmethod
@@ -49,8 +52,8 @@ class RangeNode(IndexNode):
     # fields = IndexNode.fields | {"label", "start", "stop", "step"}
     fields = IndexNode.fields | {"stop"}
 
-    def __init__(self, label: Hashable, stop, **kwargs):
-        super().__init__(label, **kwargs)
+    def __init__(self, path, stop, **kwargs):
+        super().__init__(path, **kwargs)
         self.stop = stop
 
     # TODO: This is temporary
