@@ -2,7 +2,9 @@ import abc
 import collections
 from typing import Hashable, Sequence
 
-from pyop3.tree import LabelledNode, LabelledNodeComponent, LabelledTree
+import pytools
+
+from pyop3.tree import LabelledNode, LabelledTree
 from pyop3.utils import UniqueNameGenerator
 
 
@@ -14,24 +16,24 @@ IndexLabel = collections.namedtuple("IndexLabel", ["axis", "component"])
 
 
 class MultiIndex(LabelledNode):
-    def __init__(self, indices, **kwargs):
-        super().__init__(indices, **kwargs)
+    fields = LabelledNode.fields | {"indices"}
 
-    @property
-    def indices(self) -> Sequence["Index"]:
-        return self.components
+    def __init__(self, indices: Sequence["IndexNode"], **kwargs):
+        super().__init__(degree=len(indices), **kwargs)
+        self.indices = tuple(indices)
+
+    def index(self, x: "IndexNode") -> int:
+        return self.indices.index(x)
 
 
 # FIXME: not a node any more
-class IndexNode(LabelledNodeComponent, abc.ABC):
-    fields = LabelledNodeComponent.fields | {"path", "id"}
+class IndexNode(pytools.ImmutableRecord, abc.ABC):
+    fields = {"path", "id"}
 
     _lazy_id_generator = None
 
-    def __init__(
-        self, path, *, label: Hashable | None = None, id: Hashable | None = None
-    ):
-        super().__init__(label)
+    def __init__(self, path, *, id: Hashable | None = None):
+        super().__init__()
         self.path = path
         self.id = id or next(self._id_generator)
 

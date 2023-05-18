@@ -26,7 +26,6 @@ from pyop3.multiaxis import (
     fill_shape,
     get_bottom_part,
 )
-from pyop3.tree import NullRootTree
 from pyop3.utils import (
     NameGenerator,
     PrettyTuple,
@@ -63,6 +62,9 @@ class MultiArray(DistributedArray):
         max_value=32,
         sf=None,
     ):
+        # likely not already done
+        dim.set_up()
+
         super().__init__()
         name = name or self.name_generator.next(prefix or self.prefix)
 
@@ -253,9 +255,6 @@ class MultiArray(DistributedArray):
 
     def __getitem__(self, index: "IndexTree"):
         from pyop3.distarray.indexed import IndexedMultiArray
-
-        # ideally get rid of this copy by making the tree immutable
-        index = index.copy()
 
         # no longer "fill" things like this - doesn't work with reordering axes
         # for idx in index.children(index.root):

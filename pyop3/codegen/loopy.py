@@ -6,6 +6,7 @@ import enum
 import functools
 import itertools
 import numbers
+import operator
 from typing import Any, Dict, FrozenSet, Optional, Sequence, Tuple
 
 import loopy as lp
@@ -34,7 +35,6 @@ from pyop3.multiaxis import (
     MultiAxisComponent,
     MultiAxisTree,
 )
-from pyop3.tree import NullRootNode, NullRootTree
 from pyop3.utils import (
     MultiNameGenerator,
     NameGenerator,
@@ -217,8 +217,9 @@ class LoopyKernelBuilder:
             depends_on,
         )
 
-        if children := itree.children(path | {multi_index.label: index.label}):
-            child = just_one(children)
+        if child := itree.find_node(
+            path | {multi_index.label: multi_index.index(index)}
+        ):
             for subindex in child.indices:
                 self.build_loop(
                     loop,
@@ -424,6 +425,7 @@ class LoopyKernelBuilder:
         rmulti_index,
         lindex,
         rindex,
+        mycounter,
         within_indices,
         within_inames,
         depends_on,
@@ -475,18 +477,19 @@ class LoopyKernelBuilder:
             depends_on,
         )
 
-        lchild = assignment.lhs.index.child_by_label(lmulti_index, lindex.label)
-        rchild = assignment.rhs.index.child_by_label(rmulti_index, rindex.label)
+        lchild = assignment.lhs.index.find_node((lmulti_index.id, mycounter))
+        rchild = assignment.rhs.index.find_node((rmulti_index.id, mycounter))
         if strictly_all([lchild, rchild]):
-            # lchild = just_one(lchildren)
-            # rchild = just_one(rchildren)
-            for lsubindex, rsubindex in checked_zip(lchild.indices, rchild.indices):
+            for mynewcounter, (lsubindex, rsubindex) in enumerate(
+                checked_zip(lchild.indices, rchild.indices)
+            ):
                 self.build_assignment(
                     assignment,
                     lchild,
                     rchild,
                     lsubindex,
                     rsubindex,
+                    mynewcounter,  # FIXME do the loop at the top of this function, not "outside"
                     within_indices | lthings[2] | rthings[2],
                     within_inames | {iname},
                     depends_on | lthings[3] | rthings[3],
@@ -494,8 +497,8 @@ class LoopyKernelBuilder:
                     lthings[1],
                     rthings[0],
                     rthings[1],
-                    lindex_path | {lmulti_index.label: lindex.label},
-                    rindex_path | {rmulti_index.label: rindex.label},
+                    lindex_path | {lmulti_index.label: mycounter},
+                    rindex_path | {rmulti_index.label: mycounter},
                 )
 
         else:
@@ -604,26 +607,13 @@ class LoopyKernelBuilder:
                 raise NotImplementedError(
                     "Need to handle indices to create temp shape differently"
                 )
-            itree = IndexTree()
-            axtree = MultiAxisTree()
-            for idx in arg.tensor.index.root.indices:
-                self._construct_temp_dims(
-                    axtree,
-                    itree,
-                    arg.tensor.index,
-                    arg.tensor.index.root,
-                    idx,
-                    within_indices,
-                )
-
-            axtree.set_up()
+            axes = self._axes_from_index_tree(arg.tensor.index, within_indices)
             temporary = MultiArray(
-                axtree,
+                axes,
                 name=self._temp_name_generator.next(),
                 dtype=arg.tensor.data.dtype,
             )
-            temporaries[arg] = temporary[itree]
-            # import pdb; pdb.set_trace()
+            temporaries[arg] = temporary[...]
 
         gathers = self.make_gathers(temporaries)
         newcall = self.make_function_call(
@@ -633,69 +623,41 @@ class LoopyKernelBuilder:
 
         return (*gathers, newcall, *scatters)
 
-    def _construct_temp_dims(
-        self,
-        axtree,
-        itree,
-        old_itree,
-        multi_index,
-        index,
-        within_indices,
-        path=None,
-        index_path=None,
-        new_index_path=None,
-    ):
-        """Return an iterable of axis parts per index
-
-        Parameters
-        ----------
-        multi_indices : ???
-            Iterable of :class:`MultiIndex`.
-
-        Note: an index roughly corresponds to an axis part so we return single axis
-        parts from this function
-        """
-        path = path or {}
+    # TODO This algorithm is pretty much identical to fill_shape
+    def _axes_from_index_tree(self, index_tree, within_indices, index_path=None):
         index_path = index_path or {}
-        new_index_path = new_index_path or {}
 
-        # TODO do I need to track the labels?
-        if index.id in within_indices:
-            size = 1
-        else:
-            size = index.size
+        components = []
+        subaxess = []
+        multi_index = index_tree.find_node(index_path)
+        for i, index in enumerate(multi_index.indices):
+            size = 1 if index.id in within_indices else index.size
 
-        # FIXME: multipart?
-        new_part = MultiAxisComponent(size, index.path[1])
-        new_axis = MultiAxis([new_part], index.path[0])
-        if path:
-            axtree.add_node(new_axis, path)
-        else:
-            axtree.add_node(new_axis)
+            # axis labels do not matter, that's not the point of the indices
+            components.append(MultiAxisComponent(size))
 
-        new_index = RangeNode((new_axis.label, new_part.label), size, label=0)
-        new_multi_index = MultiIndex([new_index])
-        if index_path:
-            itree.add_node(new_multi_index, new_index_path)
-        else:
-            itree.add_node(new_multi_index)
-
-        if children := old_itree.children(
-            index_path | {multi_index.label: index.label}
-        ):
-            child = just_one(children)
-            for subidx in child.indices:
-                self._construct_temp_dims(
-                    axtree,
-                    itree,
-                    old_itree,
-                    child,
-                    subidx,
+            if child := index_tree.find_node(index_path | {multi_index.label: i}):
+                subaxes = self._axes_from_index_tree(
+                    index_tree,
                     within_indices,
-                    path | {new_axis.label: new_part.label},
-                    index_path | {multi_index.label: index.label},
-                    new_index_path | {new_multi_index.label: new_index.label},
+                    index_path | {multi_index.label: i},
                 )
+                subaxess.append(subaxes)
+            else:
+                subaxess.append(None)
+
+        root = MultiAxis(components)
+        subroots = [
+            just_one(subaxes._parent_to_children.pop(None)) if subaxes else None
+            for subaxes in subaxess
+        ]
+        others = functools.reduce(
+            operator.or_,
+            [subaxes._parent_to_children if subaxes else {} for subaxes in subaxess],
+            {},
+        )
+
+        return MultiAxisTree({None: [root], root.id: subroots} | others)
 
     def make_gathers(self, temporaries, **kwargs):
         return tuple(
@@ -820,7 +782,7 @@ class LoopyKernelBuilder:
             )
             extents[index.size] = pym.var(extent)
 
-        if child := itree.child_by_label(multi_index, index.label):
+        if child := itree.find_node((multi_index.id, multi_index.index(index))):
             for subidx in child.indices:
                 extents |= self.collect_extents(
                     itree, child, subidx, within_indices, within_inames, depends_on
@@ -853,9 +815,11 @@ class LoopyKernelBuilder:
                 lp.TemporaryVariable(unindexed.name, shape=shape)
             )
 
-        for lindex, rindex in checked_zip(
-            assignment.lhs.index.root.indices,
-            assignment.rhs.index.root.indices,
+        for mycounter, (lindex, rindex) in enumerate(
+            checked_zip(
+                assignment.lhs.index.root.indices,
+                assignment.rhs.index.root.indices,
+            )
         ):
             self.build_assignment(
                 assignment,
@@ -863,6 +827,7 @@ class LoopyKernelBuilder:
                 assignment.rhs.index.root,
                 lindex,
                 rindex,
+                mycounter,
                 within_indices,
                 within_inames,
                 depends_on,
@@ -900,13 +865,14 @@ class LoopyKernelBuilder:
             axes = array_axes
             axis = axes.root
             while axis:
-                component = just_one(
-                    cpt
-                    for cpt in axis.components
-                    if (axis.name, cpt.label) in labels_to_jnames
+                component, component_index = just_one(
+                    (cpt, i)
+                    for i, cpt in enumerate(axis.components)
+                    if (axis.label, i) in labels_to_jnames
                 )
 
                 deps = self.emit_layout_insns(
+                    axes,
                     axis,
                     component,
                     offset,
@@ -915,17 +881,24 @@ class LoopyKernelBuilder:
                     depends_on,
                 )
                 depends_on |= deps
-                axis = axes.child_by_label(axis, component.label)
+                axis = axes.find_node((axis.id, component_index))
 
         return offset, depends_on
 
     def emit_layout_insns(
-        self, axis, axis_part, offset_var, labels_to_jnames, within_inames, depends_on
+        self,
+        axes,
+        axis,
+        axis_part,
+        offset_var,
+        labels_to_jnames,
+        within_inames,
+        depends_on,
     ):
         """
         TODO
         """
-        layout_fn = axis_part.layout_fn
+        layout_fn = axes._layouts[axis_part]
 
         if layout_fn == "null layout":
             return frozenset()
@@ -967,7 +940,9 @@ class LoopyKernelBuilder:
                     depends_on,
                 )
 
-            jname = pym.var(labels_to_jnames[(axis.name, axis_part.label)])
+            jname = pym.var(
+                labels_to_jnames[(axis.label, axis.components.index(axis_part))]
+            )
             expr = pym.var(offset_var) + jname * step + start
         else:
             raise NotImplementedError

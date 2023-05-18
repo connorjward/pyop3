@@ -7,6 +7,7 @@ from pyop3.distarray.base import DistributedArray
 from pyop3.distarray.multiarray import MultiArray
 from pyop3.distarray.petsc import PetscMat
 from pyop3.index import IndexTree
+from pyop3.multiaxis import fill_shape
 from pyop3.utils import just_one
 
 
@@ -21,6 +22,10 @@ class IndexedArray(pytools.ImmutableRecord, abc.ABC):
 
 class IndexedMultiArray(IndexedArray):
     def __init__(self, data: MultiArray, index: IndexTree) -> None:
+        # lets you do myarray[...]
+        if index is Ellipsis:
+            index = fill_shape(data.axes)
+
         super().__init__(data, [index])
 
     @property

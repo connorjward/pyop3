@@ -5,9 +5,14 @@ from typing import Any, Mapping
 
 import pytools
 
-from pyop3.utils import UniqueNameGenerator, just_one, some_but_not_all, strictly_all
-
-__all__ = ["Node", "Tree"]
+from pyop3.utils import (
+    UniqueNameGenerator,
+    flatten,
+    has_unique_entries,
+    just_one,
+    some_but_not_all,
+    strictly_all,
+)
 
 
 class NodeNotFoundException(Exception):
@@ -19,132 +24,140 @@ class FrozenTreeException(Exception):
 
 
 class Node(pytools.ImmutableRecord):
-    fields = {"id", "data"}
+    fields = {"degree", "id"}
 
-    def __init__(self, id: Hashable | None = None, data: Any | None = None):
+    _lazy_id_generator = None
+
+    def __init__(self, degree: int, id: Hashable | None = None):
+        self.degree = degree
         self.id = id or next(self._id_generator)
-        self.data = data
 
     @classmethod
     @property
     def _id_generator(cls):
-        if not hasattr(cls, "_lazy_id_generator"):
-            id_generator = UniqueNameGenerator(f"_id_{cls.__name__}")
-            cls._lazy_id_generator = id_generator
+        if not cls._lazy_id_generator:
+            cls._lazy_id_generator = UniqueNameGenerator(f"_{cls.__name__}_id")
         return cls._lazy_id_generator
 
 
-class NullRootNode(Node):
-    ID = "root"
+class FixedAryTree:
+    node_class = Node
 
-    fields = set()
+    def __init__(self, parent_to_children: dict | None = None) -> None:
+        parent_to_children = parent_to_children or {}
 
-    def __init__(self):
-        super().__init__(self.ID)
+        # if parent_to_children and None not in parent_to_children:
+        #     raise ValueError("Tree has no root")
+        # if any(node is not None and not isinstance(node, self.node_class) for node in flatten(parent_to_children.values())):
+        #     raise TypeError(f"All tree nodes must inherit from {self.node_class.__name__}")
+        # node_ids = {child.id for children in parent_to_children.values() for child in children}
+        # if not has_unique_entries(node_ids):
+        #     raise ValueError("Nodes with duplicate IDs found")
+        # if any(parent_id not in node_ids | {None} for parent_id in parent_to_children.keys()):
+        #     raise ValueError("Parent ID not found")
+        # if any(node.id in parent_to_children and len(parent_to_children[node.id]) != node.degree
+        #        for nodes in parent_to_children.values() for node in nodes):
+        #     raise ValueError("Node has the wrong number of children")
 
+        parent_to_children_ = {
+            parent_id: tuple(children)
+            for parent_id, children in parent_to_children.items()
+        }
+        for children in parent_to_children.values():
+            for child in filter(None, children):
+                if child.id not in parent_to_children:
+                    parent_to_children_[child.id] = (None,) * child.degree
 
-def unfrozen_only(meth):
-    @functools.wraps(meth)
-    def wrapper(self, *args, **kwargs):
-        if self.frozen:
-            raise FrozenTreeException("Tree is frozen and cannot be modified")
-        return meth(self, *args, **kwargs)
-
-    return wrapper
-
-
-# FIXME I run into trouble when I modify multiaxistrees after
-# they have been set up. I think I should spike the modifiers, or set
-# frozen or something to prevent this - needs some thought
-# We need a null root node since we effectively need an iterable of
-# parts at the top level
-
-
-# Instead of freezing with a property, could maybe delete methods when it is frozen?
-class Tree(pytools.RecordWithoutPickling):
-    def __init__(self, root: Node | None = None) -> None:
-        super().__init__()
-        # TODO I don't really like that frozen-ness doesn't persist
-        # between copies. It is a weird, special property - maybe set_up returns
-        # a new object?
-        self.frozen = False
-        self.reset()
-
-        if root:
-            self.add_node(root, parent=None)
+        # TODO pyrsistent pmap?
+        self._parent_to_children = parent_to_children_
 
     def __str__(self):
         return self._stringify()
 
     def __contains__(self, node: Node | str) -> bool:
-        return self._as_node_id(node) in self._node_ids
+        return self._as_node(node) in self.nodes
 
-    @unfrozen_only
-    def add_node(
-        self, node: Node, parent: Node | str | None = None, uniquify=False
+    def children(self, node: Node | str) -> tuple[Node]:
+        node_id = self._as_existing_node_id(node)
+        return self._parent_to_children[node_id]
+
+    def place_node(
+        self,
+        node: Node,
+        loc: tuple[Node | Hashable, int] | None = None,
+        uniquify: bool = False,
     ) -> None:
-        if uniquify:
-            node = node.copy(id=self._first_unique_id(node))
-
         if node in self:
-            raise ValueError("Duplicate node found in the tree")
+            if uniquify:
+                node = node.copy(id=self._first_unique_id(node.id))
+            else:
+                raise ValueError("Cannot insert a node with the same ID")
 
-        if parent:
-            parent = self._as_existing_node(parent)
-            self._ids_to_nodes[node.id] = node
-            self._parent_to_children[parent.id] += (node.id,)
-            self._child_to_parent[node.id] = parent.id
+        if loc is None:
+            if self.root:
+                raise ValueError("Cannot add multiple roots")
+            return type(self)({None: [node]})
         else:
-            if self._root_id:
-                raise ValueError
-            self._ids_to_nodes[node.id] = node
-            self._parent_to_children[None] += (node.id,)
-            self._child_to_parent[node.id] = None
-            self._root_id = node.id
+            parent, component_index = loc
+            parent_id = self._as_existing_node_id(parent)
+            new_parent_to_children = self._parent_to_children.copy()
+            new_children = list(self._parent_to_children[parent_id])
+            new_children[component_index] = node
+            new_parent_to_children[parent_id] = new_children
+            return type(self)(new_parent_to_children)
 
-    def _as_existing_node(self, node: Node | str) -> Node:
-        node = self._as_node(node)
-        self._check_exists(node)
-        return node
+    # alias
+    put_node = place_node
 
-    def _as_existing_node_id(self, node: Node | str) -> str:
-        node_id = self._as_node_id(node)
-        self._check_exists(node_id)
-        return node_id
+    def find_node(self, loc: tuple[Node | Hashable, int] | None = None) -> Node:
+        if not loc:
+            return self.root
+        else:
+            parent_id, component_index = loc
+            return self._parent_to_children[parent_id][component_index]
 
-    @unfrozen_only
-    def add_nodes(self, nodes: Sequence[Node], parent: Node | str, **kwargs) -> None:
-        for node in nodes:
-            self.add_node(node, parent, **kwargs)
-
-    @unfrozen_only
-    def replace_node(self, node: Node) -> None:
-        """Replace a node in the tree with another.
-
-        The new node must have the same ``id`` as the old one.
-
-        This function is useful when one wants nodes to be immutable.
-
-        Parameters
-        ----------
-        node
-            The new node to be inserted.
-
-        """
-        if node.id not in self._node_ids:
-            raise NodeNotFoundException(
-                f"{node.id} is not in the tree, replacement is not possible"
-            )
-        self._ids_to_nodes[node.id] = node
-
-    def _is_root(self, node: Node | str):
-        return self._root_id == self._as_existing_node_id(node)
+    # def as_node
+    # """Return the node from the tree matching the provided ``id``.
+    #
+    # Raises an exception if ``id`` is not found in the tree.
+    # """
+    #     try:
+    #         return just_one(node for node in self.nodes if node.id == node_id)
+    #     except:
+    #         raise NodeNotFoundException(f"{node_id} is not present in the tree")
 
     @property
-    def root(self):
-        if not self._root_id:
-            return None
-        return self._as_node(self._root_id)
+    def root(self) -> Node:
+        return (
+            just_one(self._parent_to_children[None])
+            if self._parent_to_children
+            else None
+        )
+
+    @functools.cached_property
+    def node_ids(self) -> frozenset[Hashable]:
+        return frozenset(node.id for node in self.nodes)
+
+    @functools.cached_property
+    def nodes(self) -> frozenset[Node]:
+        return frozenset(
+            child
+            for children in self._parent_to_children.values()
+            for child in children
+            if child is not None
+        )
+
+    def _as_existing_node(self, node: Node | str) -> Node:
+        node = node if isinstance(node, Node) else self.find_node(node)
+        if node.id not in self.node_ids:
+            raise NodeNotFoundException(f"{node.id} is not present in the tree")
+        return node
+
+    def _as_existing_node_id(self, node: Node | Hashable) -> Hashable:
+        node_id = node.id if isinstance(node, Node) else node
+        if node_id not in self.node_ids:
+            raise NodeNotFoundException(f"{node_id} is not present in the tree")
+        return node_id
 
     def parent(self, node: Node | str) -> Node | None:
         if self._as_existing_node_id(node) == self._root_id:
@@ -152,27 +165,6 @@ class Tree(pytools.RecordWithoutPickling):
         node_id = self._as_existing_node_id(node)
         parent_id = self._child_to_parent[node_id]
         return self._ids_to_nodes[parent_id]
-
-    def children(self, node: Node | str | None) -> tuple[Node]:
-        node_id = self._as_existing_node_id(node) if node else None
-        child_ids = self._parent_to_children[node_id]
-        return tuple(self._ids_to_nodes[child_id] for child_id in child_ids)
-
-    def nchildren(self, node: Node | str) -> int:
-        return len(self.children(node))
-
-    def node(self, node_id: str) -> Node:
-        """Return the node from the tree matching the provided ``id``.
-
-        Raises an exception if ``id`` is not found in the tree.
-        """
-        try:
-            return self._ids_to_nodes[node_id]
-        except KeyError:
-            raise NodeNotFoundException(f"{node_id} is not present in the tree")
-
-    # better alias?
-    find = node
 
     def pop_subtree(self, subroot: Node | str) -> "Tree":
         subroot = self._as_node(subroot)
@@ -261,27 +253,11 @@ class Tree(pytools.RecordWithoutPickling):
         count = lambda _, *o: max(o or [0]) + 1
         return postvisit(self, count)
 
-    @unfrozen_only
-    def reset(self):
-        self._root_id = None
-        self._ids_to_nodes = {}
-        self._parent_to_children = collections.defaultdict(tuple)
-        self._child_to_parent = {}
-
-    def copy(self, **kwargs):
-        dup = super().copy(**kwargs)
-        dup._root_id = self._root_id
-        dup._ids_to_nodes = self._ids_to_nodes.copy()
-        dup._parent_to_children = self._parent_to_children.copy()
-        dup._child_to_parent = self._child_to_parent.copy()
-        dup.frozen = False
-        return dup
-
     def _check_exists(self, node: Node | str) -> None:
         if (node_id := self._as_node(node).id) not in self._node_ids:
             raise NodeNotFoundException(f"{node_id} is not present in the tree")
 
-    def _first_unique_id(self, node: Node | str, sep: str = "_") -> str:
+    def _first_unique_id(self, node: Node | Hashable, sep: str = "_") -> str:
         orig_node_id = self._as_node_id(node)
         if orig_node_id not in self:
             return orig_node_id
@@ -293,33 +269,29 @@ class Tree(pytools.RecordWithoutPickling):
             node_id = f"{orig_node_id}{sep}{counter}"
         return node_id
 
-    def _as_node(self, node: Node | str) -> Node:
-        return node if isinstance(node, Node) else self.node(node)
+    def _as_node(self, node: Node | Hashable) -> Node:
+        return node if isinstance(node, Node) else self.find_node(node)
 
-    def _as_node_id(self, node: Node | str) -> str:
+    def _as_node_id(self, node: Node | Hashable) -> Hashable:
         return node.id if isinstance(node, Node) else node
-
-    @property
-    def _node_ids(self):
-        return self._ids_to_nodes.keys()
 
     def _stringify(
         self,
-        node: Node | str | None = None,
+        node: Node | Hashable | None = None,
         begin_prefix: str = "",
         cont_prefix: str = "",
     ) -> list[str] | str:
-        if not node:
-            node = self.root
-        else:
-            node = self._as_node(node)
+        node = self._as_node(node) if node else self.root
 
         nodestr = [f"{begin_prefix}{node}"]
         for i, child in enumerate(children := self.children(node)):
             last_child = i == len(children) - 1
             next_begin_prefix = f"{cont_prefix}{'└' if last_child else '├'}──➤ "
             next_cont_prefix = f"{cont_prefix}{' ' if last_child else '│'}    "
-            nodestr += self._stringify(child, next_begin_prefix, next_cont_prefix)
+            if child is not None:
+                nodestr += self._stringify(child, next_begin_prefix, next_cont_prefix)
+            else:
+                nodestr += [f"{next_begin_prefix}None"]
 
         if not strictly_all([begin_prefix, cont_prefix]):
             return "\n".join(nodestr)
@@ -327,128 +299,136 @@ class Tree(pytools.RecordWithoutPickling):
             return nodestr
 
 
-class NullRootTree(Tree):
-    ROOT = NullRootNode()
-
-    def __init__(self, nodes: Sequence[Node] | None = None) -> None:
-        super().__init__(self.ROOT)
-        if nodes:
-            self.add_nodes(nodes, parent=NullRootNode.ID)
-
-    @property
-    def rootless_depth(self):
-        return self.depth - 1
-
-    @classmethod
-    def from_dict(cls, node_dict: dict[Node, tuple[Hashable]]) -> "NullRootTree":
-        tree = cls()
-        node_queue = list(node_dict.keys())
-        history = set()
-        while node_queue:
-            if tuple(node_queue) in history:
-                raise ValueError("cycle")
-            history.add(tuple(node_queue))
-
-            node = node_queue.pop(0)
-            parent_id = node_dict[node]
-            try:
-                tree.add_node(node, parent_id)
-            except:  # TODO catch correct exception
-                node_queue.append(node)
-        return tree
-
-
-class LabelledNodeComponent(pytools.ImmutableRecord):
-    fields = {"label"}
-
-    def __init__(self, label: Hashable | None = None) -> None:
-        super().__init__()
-        self.label = label
-
-
 class LabelledNode(Node):
-    fields = Node.fields | {"components", "label"}
+    fields = Node.fields | {"label"}
 
-    _label_generator = UniqueNameGenerator("_LabelledNode_label")
+    _lazy_label_generator = None
 
-    def __init__(
-        self,
-        components: Sequence[LabelledNodeComponent],
-        label: Hashable | None = None,
-        **kwargs,
-    ) -> None:
-        if strictly_all(cpt.label is None for cpt in components):
-            components = tuple(cpt.copy(label=i) for i, cpt in enumerate(components))
-
+    def __init__(self, label: Hashable | None = None, **kwargs) -> None:
         super().__init__(**kwargs)
-        self.components = tuple(components)
         self.label = label or next(self._label_generator)
 
-    # def __eq__(self, other):
-    #     # TODO
-    #     ...
+    @classmethod
+    @property
+    def _label_generator(cls):
+        if not cls._lazy_label_generator:
+            cls._lazy_label_generator = UniqueNameGenerator(f"_{cls.__name__}_label")
+        return cls._lazy_label_generator
 
 
 NodePath = dict[Hashable, Hashable]
 """Mapping from axis labels to component labels."""
+# wrong now
 
 
-class LabelledTree(Tree):
-    def __init__(self):
-        super().__init__()
-        self._parent_and_label_to_child = {}
-        self._child_to_parent_and_label = {}
-        self._node_to_path = {}
+class LabelledTree(FixedAryTree):
+    node_class = LabelledNode
+
+    def put_node(
+        self,
+        node: Node,
+        loc: tuple[Node | Hashable, int] | None = None,
+        uniquify: bool = False,
+    ) -> None:
+        # TODO don't repeat this
+        if node in self:
+            if uniquify:
+                node = node.copy(id=self._first_unique_id(node.id))
+            else:
+                raise ValueError("Cannot insert a node with the same ID")
+
+        if isinstance(loc, Mapping):
+            loc = self._parent_id_and_component_index(loc)
+        return super().put_node(node, loc, uniquify)
+
+    # alias
+    place_node = put_node
+
+    def _parent_id_and_component_index(self, path):
+        if not path:
+            return None, 0
+
+        path_ = path.copy()
+        parent = self.root
+        while True:
+            component_index = path_.pop(parent.label)
+            if path_:
+                parent = self._parent_to_children[parent.id][component_index]
+            else:
+                return parent.id, component_index
+
+    def find_node(
+        self, loc: Mapping[Hashable, int] | tuple[Node | Hashable, int] | None = None
+    ) -> LabelledNode:
+        if isinstance(loc, Mapping):
+            loc = self._parent_id_and_component_index(loc)
+        return super().find_node(loc)
+
+    def path(self, node: Node | Hashable):
+        path_ = {}
+        parent_id, label = self._child_to_parent_and_label[self._as_node_id(node)]
+        while parent_id:
+            path_[parent_id] = label
+            parent_id, label = self._child_to_parent_and_label[parent_id]
+        return path_
+
+    def from_path(self, path):
+        node = self.root
+        while path:
+            label = path.pop(node.label)
+            if node_id := self._parent_and_label_to_child[node.id, label]:
+                node = self._as_node(node)
+            else:
+                assert not path
+                node = None
+        return node
 
     def children(self, node: LabelledNode | Hashable | NodePath) -> tuple[Node]:
         if isinstance(node, Mapping):
-            node, label = self._node_from_path(node)
-            child_id = self._parent_and_label_to_child[node.id, label]
-            if child_id:
-                return (self._as_existing_node(child_id),)
-            else:
-                return ()
+            child = self.from_path(node)
+            return (child,) if child else ()
         else:
             return super().children(node)
 
-    def add_node(
-        self,
-        node: LabelledNode,
-        parent: LabelledNode | Hashable | NodePath | None = None,
-    ):
-        if not parent:
-            super().add_node(node)
-            self._node_to_path[node.id] = {}
-        else:
-            if isinstance(parent, tuple):
-                parent_id, parent_component_label = parent
-                myparent = self._as_node(parent_id)
-                self._node_to_path[node.id] = self._node_to_path[parent_id] | {
-                    myparent.label: parent_component_label
-                }
-            else:
-                assert isinstance(parent, Mapping)
-                parent_id, parent_component_label = self._node_from_path(parent)
-                self._node_to_path[node.id] = parent
-            parent = self._as_node(parent_id)
-            if self._parent_and_label_to_child.get(
-                (parent.id, parent_component_label), None
-            ):
-                raise ValueError("already exists")
-            super().add_node(node, parent)
-
-            self._parent_and_label_to_child[
-                (parent.id, parent_component_label)
-            ] = node.id
-            self._child_to_parent_and_label[node.id] = (
-                parent.id,
-                parent_component_label,
-            )
-
-        for component in node.components:
-            self._parent_and_label_to_child[(node.id, component.label)] = None
-
-        return self
+    # def add_node(
+    #     self,
+    #     node: LabelledNode,
+    #     parent: LabelledNode | Hashable | NodePath | None = None,
+    # ):
+    #     return self.copy(node_to_parent=self.node_to_parent | {node: parent})
+    #     if not parent:
+    #         super().add_node(node)
+    #         self._node_to_path[node.id] = {}
+    #     else:
+    #         if isinstance(parent, tuple):
+    #             parent_id, parent_component_label = parent
+    #             myparent = self._as_node(parent_id)
+    #             self._node_to_path[node.id] = self._node_to_path[parent_id] | {
+    #                 myparent.label: parent_component_label
+    #             }
+    #         else:
+    #             assert isinstance(parent, Mapping)
+    #             parent_id, parent_component_label = self._node_from_path(parent)
+    #             self._node_to_path[node.id] = parent
+    #         parent = self._as_node(parent_id)
+    #         if self._parent_and_label_to_child.get(
+    #             (parent.id, parent_component_label), None
+    #         ):
+    #             raise ValueError("already exists")
+    #         super().add_node(node, parent)
+    #
+    #         self._parent_and_label_to_child[
+    #             (parent.id, parent_component_label)
+    #         ] = node.id
+    #         self._child_to_parent_and_label[node.id] = (
+    #             parent.id,
+    #             parent_component_label,
+    #         )
+    #
+    #     for component in node.components:
+    #         self._parent_and_label_to_child[(node.id, component.label)] = None
+    #
+    #     return self
 
     def add_subtree(
         self,
@@ -574,12 +554,6 @@ class LabelledTree(Tree):
             tree.set_up()
 
         return tree
-
-    def copy(self):
-        new = super().copy()
-        new._parent_and_label_to_child = self._parent_and_label_to_child.copy()
-        new._node_to_path = self._node_to_path.copy()
-        return new
 
 
 # better alias?
