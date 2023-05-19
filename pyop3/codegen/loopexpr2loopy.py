@@ -217,7 +217,7 @@ class LoopyKernelBuilder:
                     depends_on | new_deps,
                     new_labels,
                     new_jnames,
-                    path | {multi_index.label: index.label},
+                    path | {multi_index.label: multi_index.index(index)},
                 )
         else:
             for stmt in loop.statements:
@@ -653,14 +653,7 @@ class LoopyKernelBuilder:
             raise NotImplementedError
 
     def make_function_call(self, call, temporaries, **kwargs):
-        # assert all(
-        #     arg.access
-        #     in {READ, WRITE, INC, RW}
-        #     for arg in call.arguments
-        # )
-
         reads = tuple(
-            # temporaries[arg] for arg in call.arguments
             temp
             for arg, (temp, access) in temporaries.items()
             if access in {READ, INC, RW}
@@ -668,7 +661,6 @@ class LoopyKernelBuilder:
         writes = tuple(
             temp
             for arg, (temp, access) in temporaries.items()
-            # temporaries[arg] for arg in call.arguments
             if access in {WRITE, INC, RW}
         )
         return tlang.FunctionCall(call.function, reads, writes, **kwargs)

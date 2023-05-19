@@ -1,113 +1,13 @@
-import copy
 import ctypes
-import dataclasses
-import os
-import subprocess
-import time
-from hashlib import md5
 
 import loopy as lp
 import numpy as np
 import pytest
 
-import pyop3
-import pyop3.codegen
-from pyop3.distarray.multiarray import *
-from pyop3.index import *
-from pyop3.mesh import *
-from pyop3.multiaxis import *
-
-"""
-COMMON ERRORS
--------------
-
-If you see the message:
-
-corrupted size vs. prev_size
-Aborted (core dumped)
-
-then this usually means that the arrays you are passing in are too small.
-
-This happens usually when you copy and paste things and forget.
-"""
-
-
-def compilemythings(code, basename=None, recompile_existing_code=False):
-    """Build a shared library and load it
-
-    :arg jitmodule: The JIT Module which can generate the code to compile.
-    :arg extension: extension of the source file (c, cpp).
-    Returns a :class:`ctypes.CDLL` object of the resulting shared
-    library."""
-
-    compiler = "gcc"
-    compiler_flags = ("-fPIC", "-Wall", "-std=gnu11", "-shared", "-O0", "-g")
-
-    extension = "c"
-
-    if not basename:
-        hsh = md5(code.encode())
-        basename = hsh.hexdigest()
-
-    cachedir = ".cache"
-    dirpart, basename = basename[:2], basename[2:]
-    cachedir = os.path.join(cachedir, dirpart)
-    cname = os.path.join(cachedir, "%s.%s" % (basename, extension))
-    soname = os.path.join(cachedir, "%s.so" % basename)
-    # Link into temporary file, then rename to shared library
-    # atomically (avoiding races).
-    tmpname = os.path.join(cachedir, "%s.so.tmp" % (basename))
-
-    try:
-        if recompile_existing_code:
-            raise OSError
-        # Are we in the cache?
-        return ctypes.CDLL(soname)
-    except OSError:
-        # No need to do this on all ranks
-        os.makedirs(cachedir, exist_ok=True)
-        logfile = os.path.join(cachedir, "%s.log" % (basename))
-        errfile = os.path.join(cachedir, "%s.err" % (basename))
-
-        if not recompile_existing_code or os._exists(cname):
-            with open(cname, "w") as f:
-                f.write(code)
-        # Compiler also links
-        cc = (compiler,) + compiler_flags + ("-o", tmpname, cname)
-        with open(logfile, "w") as log, open(errfile, "w") as err:
-            log.write("Compilation command:\n")
-            log.write(" ".join(cc))
-            log.write("\n\n")
-            try:
-                subprocess.check_call(cc, stderr=err, stdout=log)
-            except subprocess.CalledProcessError as e:
-                raise Exception(
-                    """Command "%s" return error status %d.
-Unable to compile code
-Compile log in %s
-Compile errors in %s"""
-                    % (e.cmd, e.returncode, logfile, errfile)
-                )
-        # Atomically ensure soname exists
-        os.rename(tmpname, soname)
-        # Load resulting library
-        return ctypes.CDLL(soname)
-
-
-@pytest.fixture
-def scalar_inc_kernel():
-    code = lp.make_kernel(
-        "{ [i]: 0 <= i < 1 }",
-        "y[i] = x[i] + y[i] + 1",
-        [
-            lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
-            lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),
-        ],
-        target=lp.CTarget(),
-        name="mylocalkernel",
-        lang_version=(2018, 2),
-    )
-    return pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+from pyop3.distarray import MultiArray
+from pyop3.index import IndexTree, MultiIndex, RangeNode, TabulatedMapNode
+from pyop3.loopexpr import READ, WRITE, LoopyKernel, do_loop
+from pyop3.multiaxis import MultiAxis, MultiAxisComponent, MultiAxisTree
 
 
 @pytest.fixture
@@ -123,7 +23,7 @@ def scalar_copy_kernel():
         name="scalar_copy",
         lang_version=(2018, 2),
     )
-    return pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+    return LoopyKernel(code, [READ, WRITE])
 
 
 @pytest.fixture
@@ -139,7 +39,7 @@ def vector_copy_kernel():
         name="vector_copy",
         lang_version=(2018, 2),
     )
-    return pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+    return LoopyKernel(code, [READ, WRITE])
 
 
 @pytest.fixture
@@ -160,51 +60,29 @@ def ragged_copy_kernel():
     return pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
 
-def test_read_single_dim(scalar_copy_kernel):
-    axes = MultiAxisTree.from_dict(
-        {
-            MultiAxis([MultiAxisComponent(10, "cpt0")], "ax0"): None,
-        },
-        set_up=True,
-    )
+@pytest.mark.parametrize("m", [1, 10])
+def test_scalar_copy(scalar_copy_kernel, m):
+    axes = MultiAxisTree(MultiAxis([MultiAxisComponent(m)], "ax0"))
     dat1 = MultiArray(
-        axes, name="dat1", data=np.ones(10, dtype=np.float64), dtype=np.float64
+        axes,
+        name="dat1",
+        data=np.arange(m, dtype=np.float64),
     )
     dat2 = MultiArray(
-        axes, name="dat2", data=np.zeros(10, dtype=np.float64), dtype=np.float64
+        axes,
+        name="dat2",
+        data=np.zeros(m, dtype=np.float64),
     )
+    p = IndexTree(MultiIndex([RangeNode(("ax0", 0), m)]))
+    do_loop(p, scalar_copy_kernel(dat1[p], dat2[p]))
 
-    p = IndexTree([RangeNode(("ax0", "cpt0"), 10)])
-    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[p], dat2[p]))
-
-    """
-    plan for data lookup:
-
-        - Expressions are immutable. They can collect and track data things.
-          Make a map connecting names to data
-        - The kernel can register what arguments it needs. These can then be
-          retrieved from the expression.
-
-    how do i swap out bits of data?
-
-    kernelargs = kwargs.get("myarg", expr.data["myarg"])
-    """
-
-    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-    dll = compilemythings(code)
-    fn = getattr(dll, "mykernel")
-
-    args = [dat1.data, dat2.data]
-    fn.argtypes = (ctypes.c_voidp,) * len(args)
-
-    fn(*(d.ctypes.data for d in args))
-
-    assert np.allclose(dat1.data, dat2.data)
+    assert np.allclose(dat2.data, dat1.data)
 
 
-def test_compute_double_loop(vector_copy_kernel):
+def test_vector_copy(vector_copy_kernel):
+    m = 10
     axes = MultiAxisTree(
-        MultiAxis([MultiAxisComponent(10)], "ax0", id="ax_id0"),
+        MultiAxis([MultiAxisComponent(m)], "ax0", id="ax_id0"),
         {
             "ax_id0": [MultiAxis([MultiAxisComponent(3)], "ax1")],
         },
@@ -212,129 +90,97 @@ def test_compute_double_loop(vector_copy_kernel):
     dat1 = MultiArray(
         axes,
         name="dat1",
-        data=np.arange(30, dtype=np.float64),
+        data=np.arange(m * 3, dtype=np.float64),
     )
     dat2 = MultiArray(
         axes,
         name="dat2",
-        data=np.zeros(30, dtype=np.float64),
+        data=np.zeros(m * 3, dtype=np.float64),
     )
-    p = IndexTree(MultiIndex([RangeNode(("ax0", 0), 10)]))
-    pyop3.do_loop(p, vector_copy_kernel(dat1[p], dat2[p]))
 
-    # code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-    #
-    # dll = compilemythings(code)
-    # fn = getattr(dll, "mykernel")
-    # args = [dat1.data, dat2.data]
-    # fn.argtypes = (ctypes.c_voidp,) * len(args)
-    # fn(*(d.ctypes.data for d in args))
+    p = IndexTree(MultiIndex([RangeNode(("ax0", 0), m)]))
+    do_loop(p, vector_copy_kernel(dat1[p], dat2[p]))
 
     assert np.allclose(dat2.data, dat1.data)
 
 
-# TODO parametrise the sizes here
-def test_compute_double_loop_mixed(vector_copy_kernel):
-    axes = MultiAxisTree.from_dict(
+@pytest.mark.parametrize("m", [1, 10])
+@pytest.mark.parametrize("n", [1, 10])
+@pytest.mark.parametrize("a", [1, 2])
+def test_multi_component_vector_copy(vector_copy_kernel, m, n, a):
+    axes = MultiAxisTree(
+        MultiAxis([MultiAxisComponent(m), MultiAxisComponent(n)], "ax0", id="ax_id0"),
         {
-            MultiAxis(
-                [
-                    MultiAxisComponent(10, "cpt0"),
-                    MultiAxisComponent(12, "cpt1"),
-                ],
-                "ax0",
-                id="axid0",
-            ): None,
-            MultiAxis([MultiAxisComponent(2)]): ("axid0", "cpt0"),
-            MultiAxis([MultiAxisComponent(3)]): ("axid0", "cpt1"),
+            "ax_id0": [
+                MultiAxis([MultiAxisComponent(a)]),
+                MultiAxis([MultiAxisComponent(3)]),
+            ]
         },
-        set_up=True,
     )
-
     dat1 = MultiArray(
         axes,
         name="dat1",
-        data=np.ones(10 * 2 + 12 * 3, dtype=np.float64),
+        data=np.arange(m * a + n * 3, dtype=np.float64),
         dtype=np.float64,
     )
     dat2 = MultiArray(
         axes,
         name="dat2",
-        data=np.zeros(10 * 2 + 12 * 3, dtype=np.float64),
+        data=np.zeros(m * a + n * 3, dtype=np.float64),
         dtype=np.float64,
     )
+    p = IndexTree(MultiIndex([RangeNode(("ax0", 1), n)]))
+    do_loop(p, vector_copy_kernel(dat1[p], dat2[p]))
 
-    p = IndexTree([RangeNode(("ax0", "cpt1"), 12)])
-    expr = pyop3.Loop(p, vector_copy_kernel(dat1[p], dat2[p]))
-
-    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-
-    dll = compilemythings(exe)
-    fn = getattr(dll, "mykernel")
-
-    args = [dat1.data, dat2.data]
-    fn.argtypes = (ctypes.c_voidp,) * len(args)
-    fn.restype = ctypes.c_int
-
-    myargs = [d.ctypes.data for d in args]
-    fn(*myargs)
-
-    assert all(dat2.data[:20] == 0)
-    assert all(dat2.data[20:] == dat1.data[20:])
+    assert all(dat2.data[: m * a] == 0)
+    assert all(dat2.data[m * a :] == dat1.data[m * a :])
 
 
-def test_compute_double_loop_scalar(scalar_copy_kernel):
-    """As in the temporary lives within both of the loops"""
-    axes = MultiAxisTree.from_dict(
+def test_multi_component_scalar_copy_with_two_outer_loops(scalar_copy_kernel):
+    N0, N1, N2, N3 = 8, 6, 2, 3
+
+    axes = MultiAxisTree(
+        MultiAxis(
+            [
+                MultiAxisComponent(N0),
+                MultiAxisComponent(N1),
+            ],
+            "ax0",
+            id="ax_id0",
+        ),
         {
-            MultiAxis(
-                [
-                    MultiAxisComponent(6, "cpt0"),
-                    MultiAxisComponent(4, "cpt1"),
-                ],
-                "ax0",
-                id="axid0",
-            ): None,
-            MultiAxis([MultiAxisComponent(3, "cpt0")], "ax1"): ("axid0", "cpt0"),
-            MultiAxis([MultiAxisComponent(2, "cpt0")], "ax1"): ("axid0", "cpt1"),
+            "ax_id0": [
+                MultiAxis([MultiAxisComponent(N2)], "ax1"),
+                MultiAxis([MultiAxisComponent(N3)], "ax1"),
+            ]
         },
-        set_up=True,
     )
-    dat1 = MultiArray(axes, name="dat1", data=np.arange(18 + 8, dtype=np.float64))
-    dat2 = MultiArray(axes, name="dat2", data=np.zeros(18 + 8, dtype=np.float64))
-
-    p = IndexTree.from_dict(
-        {
-            RangeNode(("ax0", "cpt1"), 4, id="x"): IndexTree.ROOT,
-            RangeNode(("ax1", "cpt0"), 2, id="y"): "x",
-        }
+    dat1 = MultiArray(
+        axes, name="dat1", data=np.arange(N0 * N2 + N1 * N3, dtype=np.float64)
     )
-    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[p], dat2[p]))
+    dat2 = MultiArray(
+        axes, name="dat2", data=np.zeros(N0 * N2 + N1 * N3, dtype=np.float64)
+    )
+    p = IndexTree(
+        MultiIndex([RangeNode(("ax0", 1), N1)], id="idx_id0"),
+        {"idx_id0": [MultiIndex([RangeNode(("ax1", 0), N3)])]},
+    )
+    do_loop(p, scalar_copy_kernel(dat1[p], dat2[p]))
 
-    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-    dll = compilemythings(exe)
-    fn = getattr(dll, "mykernel")
-
-    args = [dat1.data, dat2.data]
-    fn.argtypes = (ctypes.c_voidp,) * len(args)
-
-    fn(*(d.ctypes.data for d in args))
-
-    assert all(dat2.data[:18] == 0)
-    assert all(dat2.data[18:] == dat1.data[18:])
+    assert all(dat2.data[: N0 * N2] == 0)
+    assert all(dat2.data[N0 * N2 :] == dat1.data[N0 * N2 :])
 
 
-def test_compute_double_loop_permuted(vector_copy_kernel):
-    axes = MultiAxisTree.from_dict(
+def test_permuted_vector_copy(vector_copy_kernel):
+    axes = MultiAxisTree(
+        MultiAxis(
+            [MultiAxisComponent(6, "cpt0", numbering=("ax0", [3, 2, 5, 0, 4, 1]))],
+            "ax0",
+            id="ax_id0",
+        ),
         {
-            MultiAxis(
-                [MultiAxisComponent(6, "cpt0", numbering=("ax0", [3, 2, 5, 0, 4, 1]))],
-                "ax0",
-                id="axid0",
-            ): None,
-            MultiAxis([MultiAxisComponent(3)]): ("axid0", "cpt0"),
+            "ax_id0": [MultiAxis([MultiAxisComponent(3)])],
         },
-        set_up=True,
     )
 
     dat1 = MultiArray(axes, name="dat1", data=np.arange(18, dtype=np.float64))
@@ -1450,52 +1296,60 @@ def test_mixed_real_loop():
     assert np.allclose(dat1.data, [1, 1, 1, 1, 1, 1, 3])
 
 
-@pytest.mark.skip
-def test_cone():
-    mesh = Mesh.create_square(2, 2, 1)
-
-    dofs = {(0,): 1, (1,): 2, (2,): 0}
-    axes = mesh.axis
-    for part_id, subaxis in dofs.items():
-        axes = axes.add_subaxis(part_id, subaxis)
-
-    dat1 = MultiArray(
-        axes,
-        name="dat1",
-        data=np.ones(MultiArray._compute_full_axis_size(axes), dtype=np.float64),
-        dtype=np.float64,
-    )
-    dat2 = MultiArray(
-        MultiAxis(mesh.ncells),
-        name="dat2",
-        dtype=np.float64,
-        data=np.zeros(mesh.ncells, dtype=np.float64),
-    )
-
-    loopy_knl = lp.make_kernel(
-        "{ [i]: 0 <= i < 6 }",
-        "y[0] = y[0] + x[i]",
+def test_different_axis_orderings_do_not_change_packing_order():
+    # FIXME
+    # code = lp.make_kernel(
+    #     "{ [i, j]: 0 <= i, j < 2 }",
+    #     "y[i, j] = x[i, j]",
+    #     [
+    #         lp.GlobalArg("x", np.float64, (2, 2), is_input=True, is_output=False),
+    #         lp.GlobalArg("y", np.float64, (2, 2), is_input=False, is_output=True),
+    #     ],
+    #     target=lp.CTarget(),
+    #     name="copy",
+    #     lang_version=(2018, 2),
+    # )
+    code = lp.make_kernel(
+        "{ [i]: 0 <= i < 4 }",
+        "y[i] = x[i]",
         [
-            lp.GlobalArg("x", np.float64, (6,), is_input=True, is_output=False),
-            lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),
+            lp.GlobalArg("x", np.float64, (4,), is_input=True, is_output=False),
+            lp.GlobalArg("y", np.float64, (4,), is_input=False, is_output=True),
         ],
         target=lp.CTarget(),
-        name="mylocalkernel",
+        name="copy",
         lang_version=(2018, 2),
     )
-    kernel = pyop3.LoopyKernel(loopy_knl, [pyop3.READ, pyop3.WRITE])
+    copy_kernel = LoopyKernel(code, [READ, WRITE])
 
-    expr = pyop3.Loop(p := pyop3.index(mesh.cells), [kernel(dat1[cone(p)], dat2[p])])
+    axis0 = MultiAxis([MultiAxisComponent(2)], "ax0")
+    axis1 = MultiAxis([MultiAxisComponent(2)], "ax1")
+    axis2 = MultiAxis([MultiAxisComponent(2)], "ax2")
 
-    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-    dll = compilemythings(code)
-    fn = getattr(dll, "mykernel")
+    axes0 = MultiAxisTree(axis0, {axis0.id: [axis1], axis1.id: [axis2]})
+    axes1 = MultiAxisTree(axis0, {axis0.id: [axis2], axis2.id: [axis1]})
 
-    map0 = mesh.cone(p[0])
+    dat0_0 = MultiArray(
+        axes0, name="dat0_0", data=np.arange(2 * 2 * 2, dtype=np.float64)
+    )
+    dat0_1 = MultiArray(
+        axes1, name="dat0_1", data=np.array([0, 2, 1, 3, 4, 6, 5, 7], dtype=np.float64)
+    )
+    dat1 = MultiArray(axes0, name="dat1", data=np.zeros(2 * 2 * 2, dtype=np.float64))
 
-    args = [map0.tensor.data, dat1.data, dat2.data]
-    fn.argtypes = (ctypes.c_voidp,) * len(args)
+    p = IndexTree(MultiIndex([RangeNode(("ax0", 0), 2)]))
+    q = IndexTree(
+        p.root,
+        {
+            p.root.id: [MultiIndex([RangeNode(("ax1", 0), 2)], id="idx_id0")],
+            "idx_id0": [MultiIndex([RangeNode(("ax2", 0), 2)])],
+        },
+    )
 
-    fn(*(d.ctypes.data for d in args))
+    do_loop(p, copy_kernel(dat0_0[q], dat1[q]))
+    assert np.allclose(dat1.data, dat0_0.data)
 
-    assert (dat2.data == 6).all()
+    dat1.data[...] = 0
+
+    do_loop(p, copy_kernel(dat0_1[q], dat1[q]))
+    assert np.allclose(dat1.data, dat0_0.data)

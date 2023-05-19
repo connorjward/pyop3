@@ -125,7 +125,7 @@ class MultiArray(DistributedArray):
         flat = np.array(flat, dtype=dtype)
 
         axis = MultiAxisNode(
-            [MultiAxisComponent(count, label=names_and_labels[-1][1])],
+            [MultiAxisComponent(count)],
             label=names_and_labels[-1][0],
         )
         if isinstance(count, MultiArray):

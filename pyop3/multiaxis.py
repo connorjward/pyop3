@@ -214,7 +214,7 @@ def can_be_affine(axtree, axis, component, component_index):
         has_independently_indexed_subaxis_parts(
             axtree, axis, component, component_index
         )
-        and component.numbering is None
+        and component.permutation is None
     )
 
 
@@ -912,7 +912,15 @@ class MultiAxisTree(LabelledTree):
                 start = stop
             self._tmp_axis_namer += 1
         else:
-            axis_numbering = [cpt.numbering for cpt in axis.components]
+            axis_numbering = [
+                MultiArray.from_list(
+                    cpt.numbering,
+                    [(axis, cidx)],
+                    name=f"ord{self._tmp_axis_namer}_{i}",
+                    dtype=PointerType,
+                )
+                for (cidx, cpt) in enumerate(axis.components)
+            ]
 
         assert all(isinstance(num, MultiArray) for num in axis_numbering)
 
@@ -1309,9 +1317,10 @@ class MultiAxisComponent(pytools.ImmutableRecord):
     """
 
     fields = {
+        "id",
         "count",
         "name",
-        "numbering",
+        "permutation",
         "max_count",
         "overlap",
         "indexed",
@@ -1319,17 +1328,20 @@ class MultiAxisComponent(pytools.ImmutableRecord):
         "lgmap",
     }
 
+    _lazy_id_generator = None
+
     def __init__(
         self,
         count,
         *,
         name: str | None = None,
         indices=None,
-        numbering=None,
+        permutation=None,
         max_count=None,
         overlap=None,
         indexed=False,
         lgmap=None,
+        id=None,
     ):
         from pyop3.distarray import MultiArray
 
@@ -1339,34 +1351,36 @@ class MultiAxisComponent(pytools.ImmutableRecord):
         elif not max_count:
             max_count = max(count.data)
 
-        if numbering is not None and not isinstance(numbering, MultiArray):
-            # FIXME: This is an excellent argument for why the numbering should
-            # be a property of the multi-axis, not the particular component
-            # this name attribute, needed for indexing, is very nasty to determine here
-            assert isinstance(numbering, tuple) and len(numbering) == 2
-            axis_name, numbering = numbering
-
-            if isinstance(numbering, np.ndarray):
-                numbering = list(numbering)
-
-            if isinstance(numbering, collections.abc.Sequence):
-                numbering = MultiArray.from_list(
-                    numbering,
-                    [(axis_name, label)],
-                    name=f"{axis_name}_{label}_num",
-                    dtype=PointerType,
-                )
+        # if numbering is not None and not isinstance(numbering, MultiArray):
+        #     # FIXME: This is an excellent argument for why the numbering should
+        #     # be a property of the multi-axis, not the particular component
+        #     # this name attribute, needed for indexing, is very nasty to determine here
+        #     assert isinstance(numbering, tuple) and len(numbering) == 2
+        #     axis_name, numbering = numbering
+        #
+        #     if isinstance(numbering, np.ndarray):
+        #         numbering = list(numbering)
+        #
+        #     if isinstance(numbering, collections.abc.Sequence):
+        #         numbering = MultiArray.from_list(
+        #             numbering,
+        #             [(axis_name, label)],
+        #             name=f"{axis_name}_{label}_num",
+        #             dtype=PointerType,
+        #         )
+        # FIXME: what if nested etc? what do we label things as?
 
         super().__init__()
 
         self.count = count
         self.name = name
         self.indices = indices
-        self.numbering = numbering
+        self.permutation = permutation
         self.max_count = max_count
         self.overlap = overlap
         self.indexed = indexed
         self.lgmap = lgmap
+        self.id = id or next(self._id_generator)
         """
         this property is required because we can hit situations like the following:
 
@@ -1384,6 +1398,13 @@ class MultiAxisComponent(pytools.ImmutableRecord):
         This effectively means that we need to zero the offset as we traverse the
         tree to produce the layout. This is why we need this ``indexed`` flag.
         """
+
+    @classmethod
+    @property
+    def _id_generator(cls):
+        if not cls._lazy_id_generator:
+            cls._lazy_id_generator = UniqueNameGenerator(f"_{cls.__name__}_id")
+        return cls._lazy_id_generator
 
     def __str__(self) -> str:
         return f"{{count={self.count}}}"
@@ -1410,8 +1431,8 @@ class MultiAxisComponent(pytools.ImmutableRecord):
 
     # deprecated alias
     @property
-    def permutation(self):
-        return self.numbering
+    def numbering(self):
+        return self.permutation
 
     # TODO this is just a traversal - clean up
     def alloc_size(self, axtree, axis, component_index):
@@ -1682,7 +1703,6 @@ def _insert_axis(
     axis_to_caxis: dict[MultiAxis, ConstrainedMultiAxis],
     path: dict[Hashable] | None = None,
 ):
-    # breakpoint()
     path = path or {}
 
     within_labels = set(path.items())
@@ -1704,7 +1724,6 @@ def _insert_axis(
     current_caxis = axis_to_constraint[current_axis.label]
 
     if new_caxis.priority < current_caxis.priority:
-        # breakpoint()
         if new_caxis.within_labels <= within_labels:
             # diagram or something?
             parent_axis = axes.parent(current_axis)
