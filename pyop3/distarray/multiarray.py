@@ -62,7 +62,8 @@ class MultiArray(DistributedArray):
         max_value=32,
         sf=None,
     ):
-        # likely not already done
+        # likely not already done - we could have a cached_property layouts
+        # instead to avoid this
         dim.set_up()
 
         super().__init__()
@@ -253,13 +254,15 @@ class MultiArray(DistributedArray):
     def root(self):
         return self.dim
 
-    def __getitem__(self, index: "IndexTree"):
+    def __getitem__(self, indices: "IndexTree"):
         from pyop3.distarray.indexed import IndexedMultiArray
 
-        # no longer "fill" things like this - doesn't work with reordering axes
-        # for idx in index.children(index.root):
-        #     expand_indices_to_fill_empty_shape(self.axes, index, idx)
-        return IndexedMultiArray(self, index)
+        # lets you do myarray[...]
+        if indices is Ellipsis:
+            indices = fill_shape(self.axes)
+        else:
+            indices = expand_indices_to_fill_empty_shape(self.axes, indices)
+        return IndexedMultiArray(self, indices)
 
     def select_axes(self, indices):
         selected = []

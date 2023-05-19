@@ -22,10 +22,6 @@ class IndexedArray(pytools.ImmutableRecord, abc.ABC):
 
 class IndexedMultiArray(IndexedArray):
     def __init__(self, data: MultiArray, index: IndexTree) -> None:
-        # lets you do myarray[...]
-        if index is Ellipsis:
-            index = fill_shape(data.axes)
-
         super().__init__(data, [index])
 
     @property

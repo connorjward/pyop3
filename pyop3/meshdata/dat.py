@@ -19,6 +19,11 @@ class Dat:
         # to the list prior to doing the function below?
         layout += ConstrainedMultiAxis(mesh.axis, priority=10)
 
+    def __getitem__(self, indices: IndexTree) -> IndexedMultiArray:
+        if not is_fully_indexed(self.array.axes, indices):
+            raise ValueError("Dats must be fully indexed")
+        return self.array[indices]
+
     # TODO: Use darray as the name of the property for the underlying data structure.
     @property
     def data(self):

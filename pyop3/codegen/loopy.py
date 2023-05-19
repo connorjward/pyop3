@@ -628,7 +628,8 @@ class LoopyKernelBuilder:
         index_path = index_path or {}
 
         components = []
-        subaxess = []
+        subroots = []
+        bits = {}
         multi_index = index_tree.find_node(index_path)
         for i, index in enumerate(multi_index.indices):
             size = 1 if index.id in within_indices else index.size
@@ -636,28 +637,19 @@ class LoopyKernelBuilder:
             # axis labels do not matter, that's not the point of the indices
             components.append(MultiAxisComponent(size))
 
-            if child := index_tree.find_node(index_path | {multi_index.label: i}):
+            if index_tree.find_node(index_path | {multi_index.label: i}):
                 subaxes = self._axes_from_index_tree(
                     index_tree,
                     within_indices,
                     index_path | {multi_index.label: i},
                 )
-                subaxess.append(subaxes)
+                subroots.append(subaxes.root)
+                bits |= subaxes.parent_to_children
             else:
-                subaxess.append(None)
+                subroots.append(None)
 
         root = MultiAxis(components)
-        subroots = [
-            just_one(subaxes._parent_to_children.pop(None)) if subaxes else None
-            for subaxes in subaxess
-        ]
-        others = functools.reduce(
-            operator.or_,
-            [subaxes._parent_to_children if subaxes else {} for subaxes in subaxess],
-            {},
-        )
-
-        return MultiAxisTree({None: [root], root.id: subroots} | others)
+        return MultiAxisTree(root, {root.id: subroots} | bits)
 
     def make_gathers(self, temporaries, **kwargs):
         return tuple(

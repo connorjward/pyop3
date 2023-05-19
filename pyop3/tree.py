@@ -43,13 +43,18 @@ class Node(pytools.ImmutableRecord):
 class FixedAryTree:
     node_class = Node
 
-    def __init__(self, parent_to_children: dict | None = None) -> None:
+    def __init__(
+        self, root: Node | None = None, parent_to_children: dict | None = None
+    ) -> None:
         parent_to_children = parent_to_children or {}
 
-        # if parent_to_children and None not in parent_to_children:
-        #     raise ValueError("Tree has no root")
-        # if any(node is not None and not isinstance(node, self.node_class) for node in flatten(parent_to_children.values())):
-        #     raise TypeError(f"All tree nodes must inherit from {self.node_class.__name__}")
+        if parent_to_children and not root:
+            raise ValueError("Tree has no root")
+        for node in filter(None, flatten(parent_to_children.values())):
+            if not isinstance(node, self.node_class):
+                raise TypeError(
+                    f"All tree nodes must inherit from {self.node_class.__name__}"
+                )
         # node_ids = {child.id for children in parent_to_children.values() for child in children}
         # if not has_unique_entries(node_ids):
         #     raise ValueError("Nodes with duplicate IDs found")
@@ -58,6 +63,9 @@ class FixedAryTree:
         # if any(node.id in parent_to_children and len(parent_to_children[node.id]) != node.degree
         #        for nodes in parent_to_children.values() for node in nodes):
         #     raise ValueError("Node has the wrong number of children")
+
+        if not parent_to_children and root:
+            parent_to_children = {root.id: (None,) * root.degree}
 
         parent_to_children_ = {
             parent_id: tuple(children)
@@ -68,8 +76,14 @@ class FixedAryTree:
                 if child.id not in parent_to_children:
                     parent_to_children_[child.id] = (None,) * child.degree
 
+        self.root = root
         # TODO pyrsistent pmap?
-        self._parent_to_children = parent_to_children_
+        self.parent_to_children = parent_to_children_
+
+    # old alias
+    @property
+    def _parent_to_children(self):
+        return self.parent_to_children
 
     def __str__(self):
         return self._stringify()
@@ -126,26 +140,15 @@ class FixedAryTree:
     #     except:
     #         raise NodeNotFoundException(f"{node_id} is not present in the tree")
 
-    @property
-    def root(self) -> Node:
-        return (
-            just_one(self._parent_to_children[None])
-            if self._parent_to_children
-            else None
-        )
-
     @functools.cached_property
     def node_ids(self) -> frozenset[Hashable]:
         return frozenset(node.id for node in self.nodes)
 
     @functools.cached_property
     def nodes(self) -> frozenset[Node]:
-        return frozenset(
-            child
-            for children in self._parent_to_children.values()
-            for child in children
-            if child is not None
-        )
+        return frozenset({self.root}) | {
+            node for node in filter(None, flatten(self._parent_to_children.values()))
+        }
 
     def _as_existing_node(self, node: Node | str) -> Node:
         node = node if isinstance(node, Node) else self.find_node(node)
@@ -360,6 +363,8 @@ class LabelledTree(FixedAryTree):
     def find_node(
         self, loc: Mapping[Hashable, int] | tuple[Node | Hashable, int] | None = None
     ) -> LabelledNode:
+        if not loc:
+            return self.root
         if isinstance(loc, Mapping):
             loc = self._parent_id_and_component_index(loc)
         return super().find_node(loc)

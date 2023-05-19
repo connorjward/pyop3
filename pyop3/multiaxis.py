@@ -471,15 +471,45 @@ class Sparsity:
         raise NotImplementedError
 
 
-class MultiAxisTree(LabelledTree):
+class MultiAxis(LabelledNode):
+    fields = LabelledNode.fields - {"degree"} | {"components"}
+
     def __init__(
-        self, parent_to_children: dict | None = None, *, sf=None, shared_sf=None
+        self,
+        components: Sequence["MultiAxisComponent"],
+        label: Hashable | None = None,
+        **kwargs,
     ):
-        super().__init__(parent_to_children)
+        super().__init__(label, degree=len(components), **kwargs)
+        self.components = tuple(components)
+
+    def __str__(self) -> str:
+        return f"{self.__class__.__name__}([{', '.join(str(cpt) for cpt in self.components)}], label={self.label})"
+
+
+# old alias
+MultiAxisNode = MultiAxis
+
+
+class MultiAxisTree(LabelledTree):
+    """
+    static_layout
+        Flag indicating whether or not the tree structure is fixed (``True``) or
+        configurable at runtime (``False``). If the latter then the tree must be
+        fully indexed to avoid variability in the shape of the final temporary.
+    """
+
+    def __init__(
+        self,
+        root: MultiAxis | None = None,
+        parent_to_children: dict | None = None,
+        *,
+        sf=None,
+        shared_sf=None,
+    ):
+        super().__init__(root, parent_to_children)
         self.sf = sf
         self.shared_sf = shared_sf
-        # if root:
-        #     self.add_node(root)
 
         self._layouts = {}
 
@@ -490,6 +520,11 @@ class MultiAxisTree(LabelledTree):
             return pt
         except ValueError:
             raise RuntimeError
+
+    @functools.cached_property
+    def layouts(self):
+        self.set_up()
+        return self._layouts
 
     def find_part(self, label):
         return self._parts_by_label[label]
@@ -1232,26 +1267,6 @@ def has_constant_step(axtree, node, part, component_index):
         return True
 
 
-class MultiAxis(LabelledNode):
-    fields = LabelledNode.fields - {"degree"} | {"components"}
-
-    def __init__(
-        self,
-        components: Sequence["MultiAxisComponent"],
-        label: Hashable | None = None,
-        **kwargs,
-    ):
-        super().__init__(label, degree=len(components), **kwargs)
-        self.components = tuple(components)
-
-    def __str__(self) -> str:
-        return f"{self.__class__.__name__}([{', '.join(str(cpt) for cpt in self.components)}], label={self.label})"
-
-
-# old alias
-MultiAxisNode = MultiAxis
-
-
 class MultiAxisComponent(pytools.ImmutableRecord):
     """
     Parameters
@@ -1516,7 +1531,7 @@ def fill_shape(axes, axis_path=None, prev_indices=PrettyTuple()):
 
     axis_path = axis_path or {}
 
-    axis = axes.find_node(axis_path)
+    axis = axes.find_node(dict(axis_path))
     indices = []
     subindex_trees = []
     for i, component in enumerate(axis.components):
@@ -1535,7 +1550,7 @@ def fill_shape(axes, axis_path=None, prev_indices=PrettyTuple()):
         new_index = RangeNode((axis.label, i), count)
         indices.append(new_index)
 
-        new_axis_path = axis_path | {axis.label: i}
+        new_axis_path = dict(axis_path) | {axis.label: i}
         if axes.find_node(new_axis_path):
             subindex_tree = fill_shape(axes, new_axis_path, prev_indices | new_index)
             subindex_trees.append(subindex_tree)
@@ -1544,7 +1559,7 @@ def fill_shape(axes, axis_path=None, prev_indices=PrettyTuple()):
 
     root = MultiIndex(indices)
     subroots = [
-        just_one(subindex_tree._parent_to_children.pop(None)) if subindex_tree else None
+        subindex_tree.root if subindex_tree else None
         for subindex_tree in subindex_trees
     ]
     others = functools.reduce(
@@ -1553,47 +1568,43 @@ def fill_shape(axes, axis_path=None, prev_indices=PrettyTuple()):
         {},
     )
 
-    return IndexTree(
-        {
-            None: [root],
-            root.id: subroots,
-        }
-        | others
-    )
+    return IndexTree(root, {root.id: subroots} | others)
 
 
 def expand_indices_to_fill_empty_shape(
     axis,
     itree,
-    index,
-    labels=PrettyTuple(),
+    multi_index=None,
+    path=PrettyTuple(),
     prev_indices=PrettyTuple(),
 ):
-    if isinstance(index, RangeNode):
-        new_labels = labels | index.label
-    else:
-        assert isinstance(index, MapNode)
-        new_labels = labels[: -len(index.from_labels)] + index.to_labels
+    multi_index = multi_index or itree.root
 
-    if children := itree.children(index):
-        for child in children:
-            expand_indices_to_fill_empty_shape(
-                axis, itree, child, new_labels, prev_indices | index
-            )
-    else:
-        # traverse where we have got to to get the bottom unindexed bit
-        myaxis = axis.root
-        for label in new_labels:
-            selected_part = just_one(
-                [pt for pt in myaxis.components if (myaxis.name, pt.label) == label]
-            )
-            myaxis = axis.child_by_label(myaxis, selected_part.label)
+    subroots = []
+    subnodes = {}
+    for i, index in enumerate(multi_index.indices):
+        # TODO: this bit is very similar to myinnerfunc in loopy.py
+        if isinstance(index, RangeNode):
+            path = path | index.path
+        else:
+            assert isinstance(index, MapNode)
+            path = path[: -len(index.from_labels)] + index.to_labels
 
-        if myaxis:
-            # this is controversial if we allow arbitrary ordering of axes
-            raise AssertionError("dont want to do this any more")
-            for part in myaxis.components:
-                fill_shape(axis, myaxis, part, itree, index, prev_indices | index)
+        if submidx := itree.find_node((multi_index.id, i)):
+            subitree = expand_indices_to_fill_empty_shape(
+                axis, itree, submidx, path, prev_indices | index
+            )
+            subroots.append(subitree.root)
+            subnodes |= subitree.parent_to_children
+        elif axis.find_node(dict(path)):
+            subitree = fill_shape(axis, path, prev_indices | index)
+            subroots.append(subitree.root)
+            subnodes |= subitree.parent_to_children
+        else:
+            subroots.append(None)
+
+    root = MultiIndex(multi_index.indices)
+    return IndexTree(root, {root.id: subroots} | subnodes)
 
 
 def create_lgmap(axes):
@@ -1633,9 +1644,6 @@ def create_lgmap(axes):
 
 
 def order_axes(layout):
-    # TODO add missing bits to the mesh axes (zero-sized) here or,
-    # more likely, in the dat constructor
-    # axes = Tree()
     axes = MultiAxisTree()
     layout = list(layout)
     axis_to_constraint = {}
@@ -1649,41 +1657,7 @@ def order_axes(layout):
         inserted = _insert_axis(axes, constrained_axis, axes.root, axis_to_constraint)
         if not inserted:
             layout.append(constrained_axis)
-
-    # should be able to delete
-    # _check_constraints(tree)
-
-    # now turn the tree into a proper multi-axis
     return axes
-    return _create_multiaxis(axes)
-
-
-"""
-So constrained multiaxes should have a name associated with them so they can
-be identified by PETSc options etc (e.g. 'field'). This is distinct from 'id' in the
-tree because we can have multiple 'field' multiaxes if they are nested.
-
-The problem that we have is that we sometimes have duplicated labels in our code
-(e.g. if we have 2 meshes then there can be 2 "cell" labels) To resolve this I
-think we should, in this function, store labels and a 2-tuple of (mesh name, label)
-e.g. ("mesh0", "cells"). This is sufficiently unique.
-"""
-
-
-# class ConstrainedMultiAxisNode(Node):
-#     fields = Node.fields | {"axis", "parent_label"}
-#
-#     _id_generator = UniqueNameGenerator("_id_ConstrainedMultiAxisNode")
-#
-#     def __init__(
-#         self, axis, parent_label: Hashable | None = None, *, id: Hashable | None = None
-#     ):
-#         self.axis = axis
-#         self.parent_label = parent_label
-#         super().__init__(id or next(self._id_generator))
-#
-#     def __str__(self) -> str:
-#         return f"{self.__class__.__name__}(axis={self.axis}, parent_label={self.parent_label})"
 
 
 def _insert_axis(
@@ -1719,17 +1693,6 @@ def _insert_axis(
         if new_caxis.within_labels <= within_labels:
             # diagram or something?
             parent_axis = axes.parent(current_axis)
-            #
-            # if parent_axis:
-            #     mylabel = None
-            #     for key, val in axes._parent_and_label_to_child.items():
-            #         if val == current_axis.id:
-            #             assert parent_axis.id == key[0]
-            #             mylabel = key[1]
-            #     assert mylabel
-            # else:
-            #     mylabel = None
-
             subtree = axes.pop_subtree(current_axis)
             betterid = new_caxis.axis.copy(id=next(MultiAxis._id_generator))
             if not parent_axis:
@@ -1775,38 +1738,3 @@ def _insert_axis(
                     path | {current_axis.label: cpt.label},
                 )
         return inserted
-
-
-def _check_constraints(ctree):
-    def check(node, within_labels):
-        if (parent := ctree.parent(node)) and parent.priority > node.priority:
-            raise ConstraintsNotMetException
-        if node.within_labels > within_labels:
-            raise ConstraintsNotMetException
-
-        return within_labels | {node.label}
-
-    previsit(ctree, check, ctree.root, frozenset())
-
-
-def _create_multiaxis(tree) -> MultiAxisTree:
-    axes = MultiAxisTree()
-
-    # note: constrained things contain multiple nodes
-    def build(node, *_):
-        if node == tree.root:
-            target_parent = None
-            parent_axis = None
-        else:
-            parent = tree.parent(node)
-            target_parent = just_one(
-                cpt
-                for cpt in parent.data[0].axis.components
-                if cpt.label == node.data[1]
-            )
-            parent_axis = parent.data[0].axis
-        parent_component = node.data[1]
-        axes.add_node(node.data[0].axis, (parent_axis, parent_component))
-
-    previsit(tree, build)
-    return axes

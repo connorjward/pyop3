@@ -204,8 +204,8 @@ def test_read_single_dim(scalar_copy_kernel):
 
 def test_compute_double_loop(vector_copy_kernel):
     axes = MultiAxisTree(
+        MultiAxis([MultiAxisComponent(10)], "ax0", id="ax_id0"),
         {
-            None: [MultiAxis([MultiAxisComponent(10)], "ax0", id="ax_id0")],
             "ax_id0": [MultiAxis([MultiAxisComponent(3)], "ax1")],
         },
     )
@@ -221,15 +221,9 @@ def test_compute_double_loop(vector_copy_kernel):
         data=np.zeros(30, dtype=np.float64),
     )
 
-    p = IndexTree(
-        {
-            None: [MultiIndex([RangeNode(("ax0", 0), 10)], id="idx_id0")],
-        }
-    )
+    p = IndexTree(MultiIndex([RangeNode(("ax0", 0), 10)]))
+    expr = pyop3.Loop(p, vector_copy_kernel(dat1[p], dat2[p]))
 
-    q = p.place_node(MultiIndex([RangeNode(("ax1", 0), 3)]), ("idx_id0", 0))
-
-    expr = pyop3.Loop(p, vector_copy_kernel(dat1[q], dat2[q]))
     code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
 
     dll = compilemythings(code)
