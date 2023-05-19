@@ -1,5 +1,7 @@
 import collections
+import functools
 import itertools
+import operator
 from typing import Any, Collection
 
 import pytools
@@ -102,6 +104,10 @@ def pad(iterable, length, after=True, padding_value=None):
 
 single_valued = pytools.single_valued
 is_single_valued = pytools.is_single_valued
+
+
+def merge_dicts(dicts):
+    return functools.reduce(operator.or_, dicts, {})
 
 
 def unique(iterable):

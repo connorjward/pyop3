@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import collections
 import functools
 import itertools
@@ -12,7 +14,6 @@ import pytools
 from mpi4py import MPI
 from petsc4py import PETSc
 
-import pyop3.loop
 from pyop3 import utils
 from pyop3.distarray.base import DistributedArray
 from pyop3.dtypes import IntType, get_mpi_dtype
@@ -27,6 +28,7 @@ from pyop3.multiaxis import (
     get_bottom_part,
 )
 from pyop3.utils import (
+    MultiNameGenerator,
     NameGenerator,
     PrettyTuple,
     just_one,
@@ -48,7 +50,7 @@ class MultiArray(DistributedArray):
 
     fields = {"dim", "dtype", "name", "data", "max_value", "sf"}
 
-    name_generator = pyop3.utils.MultiNameGenerator()
+    name_generator = MultiNameGenerator()
     prefix = "ten"
 
     def __init__(
@@ -96,6 +98,10 @@ class MultiArray(DistributedArray):
         self._halo_valid = True
 
         self._sync_thread = None
+
+    @functools.cached_property
+    def datamap(self) -> dict[str:DistributedArray]:
+        return {self.name: self} | self.axes.datamap
 
     @property
     def alloc_size(self):
@@ -149,9 +155,13 @@ class MultiArray(DistributedArray):
                 count.append(y)
             return flattened, count
 
-    reduction_ops = {
-        pyop3.loop.INC: MPI.SUM,
-    }
+    @property
+    def reduction_ops(self):
+        from pyop3.loopexprs import INC
+
+        return {
+            INC: MPI.SUM,
+        }
 
     def reduce_leaves_to_roots(self, sf, pending_write_op):
         mpi_dtype, _ = get_mpi_dtype(self.data.dtype)
@@ -254,7 +264,7 @@ class MultiArray(DistributedArray):
     def root(self):
         return self.dim
 
-    def __getitem__(self, indices: "IndexTree"):
+    def __getitem__(self, indices: IndexTree):
         from pyop3.distarray.indexed import IndexedMultiArray
 
         # lets you do myarray[...]

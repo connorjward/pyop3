@@ -247,7 +247,7 @@ class FixedAryTree:
 
     @property
     def is_empty(self) -> bool:
-        return not self._ids_to_nodes
+        return not self.root
 
     @property
     def depth(self) -> int:
@@ -578,7 +578,7 @@ def previsit(
         previsit(tree, fn, child, result)
 
 
-def postvisit(tree, fn, current_node: Node | None = None) -> Any:
+def postvisit(tree, fn, current_node: Node | None = None, **kwargs) -> Any:
     """Traverse the tree in postorder.
 
     # TODO rewrite
@@ -597,5 +597,9 @@ def postvisit(tree, fn, current_node: Node | None = None) -> Any:
     current_node = current_node or tree.root
     return fn(
         current_node,
-        *(postvisit(tree, fn, child) for child in tree.children(current_node)),
+        *(
+            postvisit(tree, fn, child, **kwargs)
+            for child in filter(None, tree.children(current_node))
+        ),
+        **kwargs,
     )

@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import abc
 import collections
+import functools
 from typing import Hashable, Sequence
 
 import pytools
@@ -9,7 +12,10 @@ from pyop3.utils import UniqueNameGenerator
 
 
 class IndexTree(LabelledTree):
-    pass
+    @functools.cached_property
+    def datamap(self) -> dict[str:DistributedArray]:
+        # FIXME
+        return {}
 
 
 IndexLabel = collections.namedtuple("IndexLabel", ["axis", "component"])

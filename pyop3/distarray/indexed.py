@@ -1,4 +1,5 @@
 import abc
+import functools
 from typing import Sequence
 
 import pytools
@@ -8,7 +9,7 @@ from pyop3.distarray.multiarray import MultiArray
 from pyop3.distarray.petsc import PetscMat
 from pyop3.index import IndexTree
 from pyop3.multiaxis import fill_shape
-from pyop3.utils import just_one
+from pyop3.utils import just_one, merge_dicts
 
 
 class IndexedArray(pytools.ImmutableRecord, abc.ABC):
@@ -19,14 +20,17 @@ class IndexedArray(pytools.ImmutableRecord, abc.ABC):
         self.data = data
         self.indices = tuple(indices)
 
+    @functools.cached_property
+    def datamap(self) -> dict[str:DistributedArray]:
+        return self.data.datamap | merge_dicts(index.datamap for index in self.indices)
+
 
 class IndexedMultiArray(IndexedArray):
+    fields = IndexedArray.fields - {"indices"} | {"index"}
+
     def __init__(self, data: MultiArray, index: IndexTree) -> None:
         super().__init__(data, [index])
-
-    @property
-    def index(self):
-        return just_one(self.indices)
+        self.index = index
 
 
 class IndexedPetscMat(IndexedArray):

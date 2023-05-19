@@ -209,7 +209,6 @@ def test_compute_double_loop(vector_copy_kernel):
             "ax_id0": [MultiAxis([MultiAxisComponent(3)], "ax1")],
         },
     )
-
     dat1 = MultiArray(
         axes,
         name="dat1",
@@ -220,17 +219,16 @@ def test_compute_double_loop(vector_copy_kernel):
         name="dat2",
         data=np.zeros(30, dtype=np.float64),
     )
-
     p = IndexTree(MultiIndex([RangeNode(("ax0", 0), 10)]))
-    expr = pyop3.Loop(p, vector_copy_kernel(dat1[p], dat2[p]))
+    pyop3.do_loop(p, vector_copy_kernel(dat1[p], dat2[p]))
 
-    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-
-    dll = compilemythings(code)
-    fn = getattr(dll, "mykernel")
-    args = [dat1.data, dat2.data]
-    fn.argtypes = (ctypes.c_voidp,) * len(args)
-    fn(*(d.ctypes.data for d in args))
+    # code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+    #
+    # dll = compilemythings(code)
+    # fn = getattr(dll, "mykernel")
+    # args = [dat1.data, dat2.data]
+    # fn.argtypes = (ctypes.c_voidp,) * len(args)
+    # fn(*(d.ctypes.data for d in args))
 
     assert np.allclose(dat2.data, dat1.data)
 

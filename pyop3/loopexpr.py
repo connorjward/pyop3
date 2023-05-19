@@ -4,14 +4,14 @@ import dataclasses
 import enum
 import functools
 import operator
-from typing import Iterable, Tuple
+from typing import Iterable, Sequence, Tuple
 from weakref import WeakValueDictionary
 
 import numpy as np
 import pytools
 
-from pyop3.distarray import DistributedArray
-from pyop3.utils import NameGenerator, as_tuple
+from pyop3.distarray import DistributedArray, MultiArray
+from pyop3.utils import NameGenerator, as_tuple, merge_dicts
 
 
 class AccessDescriptor(enum.Enum):
@@ -36,7 +36,7 @@ class LoopExpr(pytools.ImmutableRecord, abc.ABC):
 
     @property
     @abc.abstractmethod
-    def data(self) -> WeakValueDictionary[str, DistributedArray]:
+    def datamap(self) -> WeakValueDictionary[str, DistributedArray]:
         """Map from names to arrays.
 
         weakref since we don't want to hold a reference to these things?
@@ -55,7 +55,9 @@ class Loop(LoopExpr):
 
     id_generator = NameGenerator("loop")
 
-    def __init__(self, indices, statements, id=None, depends_on=frozenset()):
+    def __init__(
+        self, indices, statements: Sequence[LoopExpr], id=None, depends_on=frozenset()
+    ):
         # FIXME
         # assert isinstance(index, pyop3.tensors.Indexed)
         if not id:
@@ -69,10 +71,8 @@ class Loop(LoopExpr):
         super().__init__()
 
     @functools.cached_property
-    def data(self):
-        return functools.reduce(
-            operator.or_, [stmt.data for stmt in self.statements], {}
-        )
+    def datamap(self):
+        return merge_dicts(stmt.datamap for stmt in self.statements)
 
     @property
     def index(self):
@@ -82,16 +82,21 @@ class Loop(LoopExpr):
     def __str__(self):
         return f"for {self.index} ∊ {self.index.point_set}"
 
-    def __call__(self, *args, **kwargs):
-        from pyop3.codegen.loopy import to_c
+    def __call__(self, **kwargs):
+        from pyop3.codegen.loopexpr2loopy import compile
+        from pyop3.codegen.loopy2exe import compile_loopy
 
-        code = to_c(self)
+        kernel = compile(self)
+        exe = compile_loopy(kernel)
 
-        breakpoint()
-        from pyop2.compilation import load
+        args = [
+            _as_pointer(self.datamap[arg.name])
+            for arg in kernel.default_entrypoint.args
+        ]
 
-        exe = load(code)
-        exe()
+        # TODO parse kwargs
+
+        exe(*args)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -105,6 +110,8 @@ class ArgumentSpec:
 class FunctionArgument:
     tensor: "IndexedTensor"
     spec: ArgumentSpec
+
+    # alias
 
     @property
     def name(self):
@@ -137,13 +144,7 @@ class LoopyKernel:
                 f"Wrong number of arguments provided, expected {len(self.argspec)} "
                 f"but received {len(args)}"
             )
-        return FunctionCall(
-            self,
-            tuple(
-                FunctionArgument(tensor, spec)
-                for tensor, spec in zip(args, self.argspec)
-            ),
-        )
+        return FunctionCall(self, args)
 
     @property
     def argspec(self):
@@ -168,9 +169,11 @@ class FunctionCall(Terminal):
         self.function = function
         self.arguments = arguments
 
-    @property
-    def data(self) -> dict[str, DistributedArray]:
-        return functools.reduce(operator.or_, [arg.data for arg in self.arguments], {})
+    @functools.cached_property
+    def datamap(self) -> dict[str, DistributedArray]:
+        return functools.reduce(
+            operator.or_, [arg.datamap for arg in self.arguments], {}
+        )
 
     # @property
     # def operands(self):
@@ -217,3 +220,13 @@ def loop(*args, **kwargs):
 
 def do_loop(*args, **kwargs):
     loop(*args, **kwargs)()
+
+
+@functools.singledispatch
+def _as_pointer(array: DistributedArray) -> int:
+    raise NotImplementedError
+
+
+@_as_pointer.register
+def _(array: MultiArray):
+    return array.data.ctypes.data

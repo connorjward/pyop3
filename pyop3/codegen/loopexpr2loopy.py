@@ -15,7 +15,6 @@ import numpy as np
 import pymbolic as pym
 import pytools
 
-import pyop3.loop
 from pyop3 import tlang, utils
 from pyop3.distarray.multiarray import MultiArray
 from pyop3.index import (
@@ -27,6 +26,7 @@ from pyop3.index import (
     RangeNode,
     TabulatedMapNode,
 )
+from pyop3.loopexpr import INC, READ, RW, WRITE, FunctionCall, Loop
 from pyop3.multiaxis import (
     AffineLayoutFunction,
     AxisPart,
@@ -75,22 +75,8 @@ class CodegenTarget(enum.Enum):
     C = enum.auto()
 
 
-def compile(expr, *, target):
-    if target == CodegenTarget.LOOPY:
-        return to_loopy(expr)
-    elif target == CodegenTarget.C:
-        return to_c(expr)
-    else:
-        raise ValueError
-
-
-def to_loopy(expr):
+def compile(expr):
     return _make_loopy_kernel(expr)
-
-
-def to_c(expr):
-    program = to_loopy(expr)
-    return lp.generate_code_v2(program).device_code()
 
 
 class LoopyKernelBuilder:
@@ -143,7 +129,7 @@ class LoopyKernelBuilder:
     @_build.register
     def _(
         self,
-        loop: pyop3.loop.Loop,
+        loop: Loop,
         within_indices=None,
         within_inames=frozenset(),
         depends_on=frozenset(),
@@ -575,7 +561,7 @@ class LoopyKernelBuilder:
     @_build.register
     def _(
         self,
-        call: pyop3.loop.FunctionCall,
+        call: FunctionCall,
         within_indices,
         within_inames,
         depends_on,
@@ -596,24 +582,24 @@ class LoopyKernelBuilder:
         """
 
         temporaries = {}
-        for arg in call.arguments:
+        for arg, spec in checked_zip(call.arguments, call.argspec):
             # create an appropriate temporary
             # we need the indices here because the temporary shape needs to be indexed
             # by the same indices as the original array
             # is this definitely true??? think so. because it gives us the right loops
             # but we only really need it to determine "within" or not...
-            if not isinstance(arg.tensor.data, MultiArray):
+            if not isinstance(arg.data, MultiArray):
                 # think PetscMat etc
                 raise NotImplementedError(
                     "Need to handle indices to create temp shape differently"
                 )
-            axes = self._axes_from_index_tree(arg.tensor.index, within_indices)
+            axes = self._axes_from_index_tree(arg.index, within_indices)
             temporary = MultiArray(
                 axes,
                 name=self._temp_name_generator.next(),
-                dtype=arg.tensor.data.dtype,
+                dtype=arg.data.dtype,
             )
-            temporaries[arg] = temporary[...]
+            temporaries[arg] = (temporary[...], spec.access)
 
         gathers = self.make_gathers(temporaries)
         newcall = self.make_function_call(
@@ -653,36 +639,37 @@ class LoopyKernelBuilder:
 
     def make_gathers(self, temporaries, **kwargs):
         return tuple(
-            self.make_gather(arg, temp, **kwargs) for arg, temp in temporaries.items()
+            self.make_gather(arg, temp, access, **kwargs)
+            for arg, (temp, access) in temporaries.items()
         )
 
-    def make_gather(self, argument, temporary, **kwargs):
+    def make_gather(self, argument, temporary, access, **kwargs):
         # TODO cleanup the ids
-        if argument.access in {pyop3.loop.READ, pyop3.loop.RW}:
-            return tlang.Read(argument.tensor, temporary, **kwargs)
-        elif argument.access in {pyop3.loop.WRITE, pyop3.loop.INC}:
-            return tlang.Zero(argument.tensor, temporary, **kwargs)
+        if access in {READ, RW}:
+            return tlang.Read(argument, temporary, **kwargs)
+        elif access in {WRITE, INC}:
+            return tlang.Zero(argument, temporary, **kwargs)
         else:
             raise NotImplementedError
 
     def make_function_call(self, call, temporaries, **kwargs):
-        assert all(
-            arg.access
-            in {pyop3.loop.READ, pyop3.loop.WRITE, pyop3.loop.INC, pyop3.loop.RW}
-            for arg in call.arguments
-        )
+        # assert all(
+        #     arg.access
+        #     in {READ, WRITE, INC, RW}
+        #     for arg in call.arguments
+        # )
 
         reads = tuple(
             # temporaries[arg] for arg in call.arguments
             temp
-            for arg, temp in temporaries.items()
-            if arg.access in {pyop3.loop.READ, pyop3.loop.INC, pyop3.loop.RW}
+            for arg, (temp, access) in temporaries.items()
+            if access in {READ, INC, RW}
         )
         writes = tuple(
             temp
-            for arg, temp in temporaries.items()
+            for arg, (temp, access) in temporaries.items()
             # temporaries[arg] for arg in call.arguments
-            if arg.access in {pyop3.loop.WRITE, pyop3.loop.INC, pyop3.loop.RW}
+            if access in {WRITE, INC, RW}
         )
         return tlang.FunctionCall(call.function, reads, writes, **kwargs)
 
@@ -691,19 +678,19 @@ class LoopyKernelBuilder:
             filter(
                 None,
                 (
-                    self.make_scatter(arg, temp, **kwargs)
-                    for arg, temp in temporaries.items()
+                    self.make_scatter(arg, temp, access, **kwargs)
+                    for arg, (temp, access) in temporaries.items()
                 ),
             )
         )
 
-    def make_scatter(self, argument, temporary, **kwargs):
-        if argument.access == pyop3.loop.READ:
+    def make_scatter(self, argument, temporary, access, **kwargs):
+        if access == READ:
             return None
-        elif argument.access in {pyop3.loop.WRITE, pyop3.loop.RW}:
-            return tlang.Write(argument.tensor, temporary, **kwargs)
-        elif argument.access == pyop3.loop.INC:
-            return tlang.Increment(argument.tensor, temporary, **kwargs)
+        elif access in {WRITE, RW}:
+            return tlang.Write(argument, temporary, **kwargs)
+        elif access == INC:
+            return tlang.Increment(argument, temporary, **kwargs)
         else:
             raise AssertionError
 

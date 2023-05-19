@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import abc
 import bisect
 import collections
@@ -28,7 +30,7 @@ from pyop3.index import (
     RangeNode,
     TabulatedMapNode,
 )
-from pyop3.tree import LabelledNode, LabelledTree, Node, previsit
+from pyop3.tree import LabelledNode, LabelledTree, Node, postvisit, previsit
 from pyop3.utils import NameGenerator  # TODO delete
 from pyop3.utils import (
     PrettyTuple,
@@ -37,6 +39,7 @@ from pyop3.utils import (
     checked_zip,
     has_unique_entries,
     just_one,
+    merge_dicts,
     single_valued,
     strict_int,
     strictly_all,
@@ -491,6 +494,14 @@ class MultiAxis(LabelledNode):
 MultiAxisNode = MultiAxis
 
 
+def _collect_datamap(axis, *subdatamaps, axes):
+    datamap = {}
+    for component in axis.components:
+        # FIXME: I need to look for the right things here
+        pass
+    return {} | merge_dicts(subdatamaps)
+
+
 class MultiAxisTree(LabelledTree):
     """
     static_layout
@@ -512,6 +523,10 @@ class MultiAxisTree(LabelledTree):
         self.shared_sf = shared_sf
 
         self._layouts = {}
+
+    @functools.cached_property
+    def datamap(self) -> dict[str:DistributedArray]:
+        return postvisit(self, _collect_datamap, axes=self)
 
     @property
     def part(self):
