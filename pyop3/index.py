@@ -3,7 +3,7 @@ from __future__ import annotations
 import abc
 import collections
 import functools
-from typing import Hashable, Sequence
+from typing import Any, Hashable, Sequence
 
 import pytools
 
@@ -21,26 +21,35 @@ class IndexTree(LabelledTree):
 IndexLabel = collections.namedtuple("IndexLabel", ["axis", "component"])
 
 
-class MultiIndex(LabelledNode):
+class Index(LabelledNode):
     fields = LabelledNode.fields | {"indices"}
 
-    def __init__(self, indices: Sequence["IndexNode"], **kwargs):
+    def __init__(self, indices: Sequence[Index], **kwargs):
         super().__init__(degree=len(indices), **kwargs)
         self.indices = tuple(indices)
 
-    def index(self, x: "IndexNode") -> int:
+    def index(self, x: Index) -> int:
         return self.indices.index(x)
 
 
-# FIXME: not a node any more
-class IndexNode(pytools.ImmutableRecord, abc.ABC):
+# alias
+MultiIndex = Index
+
+
+class IndexComponent(pytools.ImmutableRecord, abc.ABC):
     fields = {"path", "id"}
 
     _lazy_id_generator = None
 
-    def __init__(self, path, *, id: Hashable | None = None):
+    def __init__(
+        self, path: Sequence[Hashable, int] | Hashable, *, id: Hashable | None = None
+    ) -> None:
         super().__init__()
-        self.path = path
+
+        if isinstance(path, Sequence) and len(path) == 2 and isinstance(path[1], int):
+            self.path = path
+        else:
+            self.path = (path, 0)
         self.id = id or next(self._id_generator)
 
     @classmethod
@@ -51,14 +60,10 @@ class IndexNode(pytools.ImmutableRecord, abc.ABC):
         return cls._lazy_id_generator
 
 
-# alias, better?
-Index = IndexNode
-
-
-class RangeNode(IndexNode):
+class Range(IndexComponent):
     # TODO: Gracefully handle start, stop, step
     # fields = IndexNode.fields | {"label", "start", "stop", "step"}
-    fields = IndexNode.fields | {"stop"}
+    fields = IndexComponent.fields | {"stop"}
 
     def __init__(self, path, stop, **kwargs):
         super().__init__(path, **kwargs)
@@ -78,8 +83,8 @@ class RangeNode(IndexNode):
         return 1  # TODO
 
 
-class MapNode(IndexNode):
-    fields = IndexNode.fields | {"from_labels", "to_labels", "arity"}
+class Map(IndexComponent):
+    fields = IndexComponent.fields | {"from_labels", "to_labels", "arity"}
 
     # in theory we can have a selector function here too so to_labels is actually bigger?
     # means we have multiple children?
@@ -96,15 +101,15 @@ class MapNode(IndexNode):
         return self.arity
 
 
-class TabulatedMapNode(MapNode):
-    fields = MapNode.fields | {"data"}
+class TabulatedMap(Map):
+    fields = Map.fields | {"data"}
 
     def __init__(self, from_labels, to_labels, arity, data, **kwargs):
         self.data = data
         super().__init__(from_labels, to_labels, arity, **kwargs)
 
 
-class IdentityMapNode(MapNode):
+class IdentityMap(Map):
     pass
 
     # TODO is this strictly needed?
@@ -114,8 +119,8 @@ class IdentityMapNode(MapNode):
     #     return self.to_labels[0]
 
 
-class AffineMapNode(MapNode):
-    fields = MapNode.fields | {"expr"}
+class AffineMap(Map):
+    fields = Map.fields | {"expr"}
 
     def __init__(self, from_labels, to_labels, arity, expr, **kwargs):
         """
@@ -131,3 +136,23 @@ class AffineMapNode(MapNode):
 
         self.expr = expr
         super().__init__(from_labels, to_labels, arity, **kwargs)
+
+
+@functools.singledispatch
+def as_index_tree(arg: Any) -> IndexTree:
+    raise TypeError
+
+
+@as_index_tree.register
+def _(arg: IndexTree) -> IndexTree:
+    return arg
+
+
+@as_index_tree.register
+def _(arg: Index) -> IndexTree:
+    return IndexTree(arg)
+
+
+@as_index_tree.register
+def _(arg: IndexComponent) -> IndexTree:
+    return IndexTree(Index([arg]))

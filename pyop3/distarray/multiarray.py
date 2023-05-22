@@ -9,24 +9,21 @@ import threading
 from typing import Any, Optional, Sequence, Tuple, Union
 
 import numpy as np
-import pymbolic as pym
-import pytools
 from mpi4py import MPI
 from petsc4py import PETSc
 
 from pyop3 import utils
-from pyop3.distarray.base import DistributedArray
-from pyop3.dtypes import IntType, get_mpi_dtype
-from pyop3.index import RangeNode, TabulatedMapNode
-from pyop3.multiaxis import (
-    MultiAxis,
-    MultiAxisComponent,
-    MultiAxisNode,
-    MultiAxisTree,
+from pyop3.axis import (
+    Axis,
+    AxisComponent,
+    as_axis_tree,
     expand_indices_to_fill_empty_shape,
     fill_shape,
     get_bottom_part,
 )
+from pyop3.distarray.base import DistributedArray
+from pyop3.dtypes import IntType, get_mpi_dtype
+from pyop3.index import Range, TabulatedMap, as_index_tree
 from pyop3.utils import (
     MultiNameGenerator,
     NameGenerator,
@@ -64,9 +61,7 @@ class MultiArray(DistributedArray):
         max_value=32,
         sf=None,
     ):
-        # likely not already done - we could have a cached_property layouts
-        # instead to avoid this
-        dim.set_up()
+        dim = as_axis_tree(dim)
 
         super().__init__()
         name = name or self.name_generator.next(prefix or self.prefix)
@@ -124,8 +119,8 @@ class MultiArray(DistributedArray):
 
         flat = np.array(flat, dtype=dtype)
 
-        axis = MultiAxisNode(
-            [MultiAxisComponent(count)],
+        axis = Axis(
+            [AxisComponent(count)],
             label=names_and_labels[-1][0],
         )
         if isinstance(count, MultiArray):
@@ -135,11 +130,11 @@ class MultiArray(DistributedArray):
             newax.add_node(axis, (base_axis, base_component.label))
         else:
             newax = MultiAxisTree()
-            newax.add_node(axis)
+            newax = newax.place_node(axis)
 
         assert newax.depth == len(names_and_labels)
 
-        return cls(newax.set_up(), name=f"{name}_{inc}", data=flat, dtype=dtype)
+        return cls(newax, name=f"{name}_{inc}", data=flat, dtype=dtype)
 
     @classmethod
     def _get_count_data(cls, data):
@@ -264,15 +259,17 @@ class MultiArray(DistributedArray):
     def root(self):
         return self.dim
 
-    def __getitem__(self, indices: IndexTree):
+    def __getitem__(self, index: IndexTree | Index | IndexComponent):
         from pyop3.distarray.indexed import IndexedMultiArray
 
         # lets you do myarray[...]
-        if indices is Ellipsis:
-            indices = fill_shape(self.axes)
+        if index is Ellipsis:
+            index = fill_shape(self.axes)
         else:
-            indices = expand_indices_to_fill_empty_shape(self.axes, indices)
-        return IndexedMultiArray(self, indices)
+            index = as_index_tree(index)
+            index = expand_indices_to_fill_empty_shape(self.axes, index)
+
+        return IndexedMultiArray(self, index)
 
     def select_axes(self, indices):
         selected = []
@@ -363,7 +360,7 @@ def make_sparsity(
                 "iteration sets that have multiple indices (e.g. extruded cells)"
             )
 
-        if not isinstance(iterindex, RangeNode):
+        if not isinstance(iterindex, Range):
             raise NotImplementedError(
                 "Need to think about whether maps are reasonable here"
             )
@@ -386,7 +383,7 @@ def make_sparsity(
                 sparsity[labels].update(indices)
         return sparsity
     elif lmap:
-        if not isinstance(lmap, TabulatedMapNode):
+        if not isinstance(lmap, TabulatedMap):
             raise NotImplementedError("Need to think about other index types")
         if len(lmap.children) not in [0, 1]:
             raise NotImplementedError("Need to think about maps forking")
@@ -412,7 +409,7 @@ def make_sparsity(
                 sparsity[labels].update(indices)
         return sparsity
     elif rmap:
-        if not isinstance(rmap, TabulatedMapNode):
+        if not isinstance(rmap, TabulatedMap):
             raise NotImplementedError("Need to think about other index types")
         if len(rmap.children) not in [0, 1]:
             raise NotImplementedError("Need to think about maps forking")

@@ -22,15 +22,15 @@ from petsc4py import PETSc
 from pyop3 import utils
 from pyop3.dtypes import IntType, PointerType, get_mpi_dtype
 from pyop3.index import (
-    AffineMapNode,
+    AffineMap,
     Index,
     IndexTree,
-    MapNode,
+    Map,
     MultiIndex,
-    RangeNode,
-    TabulatedMapNode,
+    Range,
+    TabulatedMap,
 )
-from pyop3.tree import LabelledNode, LabelledTree, Node, postvisit, previsit
+from pyop3.tree import LabelledNode, LabelledTree, postvisit, previsit
 from pyop3.utils import NameGenerator  # TODO delete
 from pyop3.utils import (
     PrettyTuple,
@@ -46,9 +46,6 @@ from pyop3.utils import (
     unique,
 )
 
-# old alias
-NewNode = Node
-
 DEFAULT_PRIORITY = 100
 
 
@@ -56,14 +53,14 @@ class InvalidConstraintsException(Exception):
     pass
 
 
-class ConstrainedMultiAxis(pytools.ImmutableRecord):
+class ConstrainedAxis(pytools.ImmutableRecord):
     fields = {"axis", "priority", "within_labels"}
     # TODO We could use 'label' to set the priority
     # via commandline options
 
     def __init__(
         self,
-        axis: "MultiAxis",
+        axis: Axis,
         *,
         priority: int = DEFAULT_PRIORITY,
         within_labels: FrozenSet[Hashable] = frozenset(),
@@ -474,26 +471,6 @@ class Sparsity:
         raise NotImplementedError
 
 
-class MultiAxis(LabelledNode):
-    fields = LabelledNode.fields - {"degree"} | {"components"}
-
-    def __init__(
-        self,
-        components: Sequence["MultiAxisComponent"],
-        label: Hashable | None = None,
-        **kwargs,
-    ):
-        super().__init__(label, degree=len(components), **kwargs)
-        self.components = tuple(components)
-
-    def __str__(self) -> str:
-        return f"{self.__class__.__name__}([{', '.join(str(cpt) for cpt in self.components)}], label={self.label})"
-
-
-# old alias
-MultiAxisNode = MultiAxis
-
-
 def _collect_datamap(axis, *subdatamaps, axes):
     datamap = {}
     for component in axis.components:
@@ -502,7 +479,7 @@ def _collect_datamap(axis, *subdatamaps, axes):
     return {} | merge_dicts(subdatamaps)
 
 
-class MultiAxisTree(LabelledTree):
+class AxisTree(LabelledTree):
     """
     static_layout
         Flag indicating whether or not the tree structure is fixed (``True``) or
@@ -885,7 +862,7 @@ class MultiAxisTree(LabelledTree):
             numb = np.arange(start, stop, dtype=PointerType)
             # don't set up to avoid recursion (should be able to use affine anyway)
             myaxes = MultiAxisTree()
-            myaxes.register_node(MultiAxisNode([MultiAxisComponent(len(numb))]))
+            myaxes.register_node(Axis([AxisComponent(len(numb))]))
             myaxes.set_up()  # ???
             numb = MultiArray(
                 dim=myaxes,
@@ -1221,6 +1198,22 @@ of a single label value if that label is unique in the whole tree.
             return MultiAxis(*args)
 
 
+class Axis(LabelledNode):
+    fields = LabelledNode.fields - {"degree"} | {"components"}
+
+    def __init__(
+        self,
+        components: Sequence["MultiAxisComponent"],
+        label: Hashable | None = None,
+        **kwargs,
+    ):
+        super().__init__(label, degree=len(components), **kwargs)
+        self.components = tuple(components)
+
+    def __str__(self) -> str:
+        return f"{self.__class__.__name__}([{', '.join(str(cpt) for cpt in self.components)}], label={self.label})"
+
+
 def get_slice_bounds(array, indices):
     from pyop3.distarray import MultiArray
 
@@ -1290,7 +1283,7 @@ def has_constant_step(axtree, node, part, component_index):
         return True
 
 
-class MultiAxisComponent(pytools.ImmutableRecord):
+class AxisComponent(pytools.ImmutableRecord):
     """
     Parameters
     ----------
@@ -1505,10 +1498,6 @@ class MultiAxisComponent(pytools.ImmutableRecord):
             return self.copy(subaxis=self.subaxis.add_subaxis(part_id, subaxis))
 
 
-# what's the best name?
-AxisPart = MultiAxisComponent
-
-
 @dataclasses.dataclass(frozen=True)
 class Path:
     # TODO Make a persistent dict?
@@ -1583,7 +1572,7 @@ def fill_shape(axes, axis_path=None, prev_indices=PrettyTuple()):
         else:
             count = component.count
 
-        new_index = RangeNode((axis.label, i), count)
+        new_index = Range((axis.label, i), count)
         indices.append(new_index)
 
         new_axis_path = dict(axis_path) | {axis.label: i}
@@ -1620,10 +1609,10 @@ def expand_indices_to_fill_empty_shape(
     subnodes = {}
     for i, index in enumerate(multi_index.indices):
         # TODO: this bit is very similar to myinnerfunc in loopy.py
-        if isinstance(index, RangeNode):
+        if isinstance(index, Range):
             path = path | index.path
         else:
-            assert isinstance(index, MapNode)
+            assert isinstance(index, Map)
             path = path[: -len(index.from_labels)] + index.to_labels
 
         if submidx := itree.find_node((multi_index.id, i)):
@@ -1644,9 +1633,6 @@ def expand_indices_to_fill_empty_shape(
 
 
 def create_lgmap(axes):
-    # TODO: Fix imports
-    from pyop3.multiaxis import Owned, Shared
-
     if len(axes.children(axes.root)) > 1:
         raise NotImplementedError
     axes_part = just_one(axes.children(axes.root))
@@ -1772,3 +1758,29 @@ def _insert_axis(
                     path | {current_axis.label: cpt.label},
                 )
         return inserted
+
+
+# aliases
+MultiAxisTree = AxisTree
+MultiAxis = Axis
+MultiAxisComponent = AxisComponent
+
+
+@functools.singledispatch
+def as_axis_tree(arg: Any):
+    raise TypeError
+
+
+@as_axis_tree.register
+def _(arg: AxisTree):
+    return arg
+
+
+@as_axis_tree.register
+def _(arg: Axis):
+    return AxisTree(arg)
+
+
+@as_axis_tree.register
+def _(arg: AxisComponent):
+    return AxisTree(Axis([arg]))

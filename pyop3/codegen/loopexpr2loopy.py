@@ -16,25 +16,24 @@ import pymbolic as pym
 import pytools
 
 from pyop3 import tlang, utils
-from pyop3.distarray.multiarray import MultiArray
-from pyop3.index import (
-    AffineMapNode,
-    IdentityMapNode,
-    IndexTree,
-    MapNode,
-    MultiIndex,
-    RangeNode,
-    TabulatedMapNode,
-)
-from pyop3.loopexpr import INC, READ, RW, WRITE, FunctionCall, Loop
-from pyop3.multiaxis import (
+from pyop3.axis import (
     AffineLayoutFunction,
-    AxisPart,
     IndirectLayoutFunction,
     MultiAxis,
     MultiAxisComponent,
     MultiAxisTree,
 )
+from pyop3.distarray.multiarray import MultiArray
+from pyop3.index import (
+    AffineMap,
+    IdentityMap,
+    Index,
+    IndexTree,
+    Map,
+    Range,
+    TabulatedMap,
+)
+from pyop3.loopexpr import INC, READ, RW, WRITE, FunctionCall, Loop
 from pyop3.utils import (
     MultiNameGenerator,
     NameGenerator,
@@ -173,7 +172,7 @@ class LoopyKernelBuilder:
 
         Tree visitor approach is nice. Pass some callable to execute right at the bottom.
         """
-        if isinstance(index, MapNode) and index.selector:
+        if isinstance(index, Map) and index.selector:
             raise NotImplementedError
 
         path = path or {}
@@ -249,7 +248,7 @@ class LoopyKernelBuilder:
         # breakpoint()
         if index.id in within_indices:
             labels, jnames = within_indices[index.id]
-            if isinstance(index, RangeNode):
+            if isinstance(index, Range):
                 index_insns = []
                 new_labels = existing_labels + labels
                 new_jnames = existing_jnames + jnames
@@ -270,7 +269,7 @@ class LoopyKernelBuilder:
                 jnames = "not used"
                 new_within = {}
 
-        elif isinstance(index, RangeNode):
+        elif isinstance(index, Range):
             jname = self._namer.next("j")
             self._temp_kernel_data.append(
                 lp.TemporaryVariable(jname, shape=(), dtype=np.uintp)
@@ -290,14 +289,14 @@ class LoopyKernelBuilder:
             jnames = (jname,)
             new_within = {index.id: ((index.path,), (jname,))}
 
-        elif isinstance(index, IdentityMapNode):
+        elif isinstance(index, IdentityMap):
             index_insns = []
             new_labels = existing_labels
             new_jnames = existing_jnames
             jnames = ()
             new_within = {}
 
-        elif isinstance(index, AffineMapNode):
+        elif isinstance(index, AffineMap):
             jname = self._namer.next("j")
             self._temp_kernel_data.append(
                 lp.TemporaryVariable(jname, shape=(), dtype=np.uintp)
@@ -338,7 +337,7 @@ class LoopyKernelBuilder:
             jnames = (jname,)
             new_within = {index.id: ((to_label,), (jname,))}
 
-        elif isinstance(index, TabulatedMapNode):
+        elif isinstance(index, TabulatedMap):
             # NOTE: some maps can produce multiple jnames (but not this one)
             jname = self._namer.next("j")
             self._temp_kernel_data.append(
@@ -869,7 +868,7 @@ class LoopyKernelBuilder:
         """
         TODO
         """
-        layout_fn = axes._layouts[axis_part]
+        layout_fn = axes.layouts[axis_part]
 
         if layout_fn == "null layout":
             return frozenset()

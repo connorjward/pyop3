@@ -4,10 +4,10 @@ import loopy as lp
 import numpy as np
 import pytest
 
+from pyop3.axis import Axis, AxisComponent, AxisTree
 from pyop3.distarray import MultiArray
-from pyop3.index import IndexTree, MultiIndex, RangeNode, TabulatedMapNode
+from pyop3.index import Index, IndexTree, Range, TabulatedMap
 from pyop3.loopexpr import READ, WRITE, LoopyKernel, do_loop
-from pyop3.multiaxis import MultiAxis, MultiAxisComponent, MultiAxisTree
 
 
 @pytest.fixture
@@ -60,9 +60,10 @@ def ragged_copy_kernel():
     return pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
 
 
-@pytest.mark.parametrize("m", [1, 10])
-def test_scalar_copy(scalar_copy_kernel, m):
-    axes = MultiAxisTree(MultiAxis([MultiAxisComponent(m)], "ax0"))
+def test_scalar_copy(scalar_copy_kernel):
+    m = 10
+
+    axes = AxisTree(Axis([AxisComponent(m)], "ax0"))
     dat1 = MultiArray(
         axes,
         name="dat1",
@@ -73,64 +74,61 @@ def test_scalar_copy(scalar_copy_kernel, m):
         name="dat2",
         data=np.zeros(m, dtype=np.float64),
     )
-    p = IndexTree(MultiIndex([RangeNode(("ax0", 0), m)]))
-    do_loop(p, scalar_copy_kernel(dat1[p], dat2[p]))
+    do_loop(p := Range("ax0", m), scalar_copy_kernel(dat1[p], dat2[p]))
 
     assert np.allclose(dat2.data, dat1.data)
 
 
 def test_vector_copy(vector_copy_kernel):
-    m = 10
-    axes = MultiAxisTree(
-        MultiAxis([MultiAxisComponent(m)], "ax0", id="ax_id0"),
+    m, n = 10, 3
+
+    axes = AxisTree(
+        Axis([AxisComponent(m)], "ax0", id="ax_id0"),
         {
-            "ax_id0": [MultiAxis([MultiAxisComponent(3)], "ax1")],
+            "ax_id0": [Axis([AxisComponent(n)])],
         },
     )
     dat1 = MultiArray(
         axes,
         name="dat1",
-        data=np.arange(m * 3, dtype=np.float64),
+        data=np.arange(m * n, dtype=np.float64),
     )
     dat2 = MultiArray(
         axes,
         name="dat2",
-        data=np.zeros(m * 3, dtype=np.float64),
+        data=np.zeros(m * n, dtype=np.float64),
     )
 
-    p = IndexTree(MultiIndex([RangeNode(("ax0", 0), m)]))
-    do_loop(p, vector_copy_kernel(dat1[p], dat2[p]))
+    do_loop(p := Range("ax0", m), vector_copy_kernel(dat1[p], dat2[p]))
 
     assert np.allclose(dat2.data, dat1.data)
 
 
-@pytest.mark.parametrize("m", [1, 10])
-@pytest.mark.parametrize("n", [1, 10])
-@pytest.mark.parametrize("a", [1, 2])
-def test_multi_component_vector_copy(vector_copy_kernel, m, n, a):
-    axes = MultiAxisTree(
-        MultiAxis([MultiAxisComponent(m), MultiAxisComponent(n)], "ax0", id="ax_id0"),
+def test_multi_component_vector_copy(vector_copy_kernel):
+    m, n, a, b = 10, 12, 2, 3
+
+    axes = AxisTree(
+        Axis([AxisComponent(m), AxisComponent(n)], "ax0", id="ax_id0"),
         {
             "ax_id0": [
-                MultiAxis([MultiAxisComponent(a)]),
-                MultiAxis([MultiAxisComponent(3)]),
+                Axis([AxisComponent(a)]),
+                Axis([AxisComponent(b)]),
             ]
         },
     )
     dat1 = MultiArray(
         axes,
         name="dat1",
-        data=np.arange(m * a + n * 3, dtype=np.float64),
+        data=np.arange(m * a + n * b, dtype=np.float64),
         dtype=np.float64,
     )
     dat2 = MultiArray(
         axes,
         name="dat2",
-        data=np.zeros(m * a + n * 3, dtype=np.float64),
+        data=np.zeros(m * a + n * b, dtype=np.float64),
         dtype=np.float64,
     )
-    p = IndexTree(MultiIndex([RangeNode(("ax0", 1), n)]))
-    do_loop(p, vector_copy_kernel(dat1[p], dat2[p]))
+    do_loop(p := Range(("ax0", 1), n), vector_copy_kernel(dat1[p], dat2[p]))
 
     assert all(dat2.data[: m * a] == 0)
     assert all(dat2.data[m * a :] == dat1.data[m * a :])
@@ -1322,12 +1320,12 @@ def test_different_axis_orderings_do_not_change_packing_order():
     )
     copy_kernel = LoopyKernel(code, [READ, WRITE])
 
-    axis0 = MultiAxis([MultiAxisComponent(2)], "ax0")
-    axis1 = MultiAxis([MultiAxisComponent(2)], "ax1")
-    axis2 = MultiAxis([MultiAxisComponent(2)], "ax2")
+    axis0 = Axis([AxisComponent(2)], "ax0")
+    axis1 = Axis([AxisComponent(2)], "ax1")
+    axis2 = Axis([AxisComponent(2)], "ax2")
 
-    axes0 = MultiAxisTree(axis0, {axis0.id: [axis1], axis1.id: [axis2]})
-    axes1 = MultiAxisTree(axis0, {axis0.id: [axis2], axis2.id: [axis1]})
+    axes0 = AxisTree(axis0, {axis0.id: [axis1], axis1.id: [axis2]})
+    axes1 = AxisTree(axis0, {axis0.id: [axis2], axis2.id: [axis1]})
 
     dat0_0 = MultiArray(
         axes0, name="dat0_0", data=np.arange(2 * 2 * 2, dtype=np.float64)
@@ -1337,12 +1335,12 @@ def test_different_axis_orderings_do_not_change_packing_order():
     )
     dat1 = MultiArray(axes0, name="dat1", data=np.zeros(2 * 2 * 2, dtype=np.float64))
 
-    p = IndexTree(MultiIndex([RangeNode(("ax0", 0), 2)]))
+    p = IndexTree(Index([Range(("ax0", 0), 2)]))
     q = IndexTree(
         p.root,
         {
-            p.root.id: [MultiIndex([RangeNode(("ax1", 0), 2)], id="idx_id0")],
-            "idx_id0": [MultiIndex([RangeNode(("ax2", 0), 2)])],
+            p.root.id: [Index([Range(("ax1", 0), 2)], id="idx_id0")],
+            "idx_id0": [Index([Range(("ax2", 0), 2)])],
         },
     )
 

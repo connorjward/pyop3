@@ -1,7 +1,7 @@
 from pyop3.distarray import *  # noqa: F401
 from pyop3.distarray import MultiArray  # noqa: F401
 from pyop3.dtypes import *  # noqa: F401
-from pyop3.index import IndexTree, MultiIndex, RangeNode  # noqa: F401
+from pyop3.index import IndexTree, MultiIndex, Range  # noqa: F401
 from pyop3.loopexpr import (  # noqa: F401
     INC,
     MAX,

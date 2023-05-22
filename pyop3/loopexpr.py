@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import abc
 import collections
 import dataclasses
@@ -11,6 +13,7 @@ import numpy as np
 import pytools
 
 from pyop3.distarray import DistributedArray, MultiArray
+from pyop3.index import as_index_tree
 from pyop3.utils import NameGenerator, as_tuple, merge_dicts
 
 
@@ -51,19 +54,23 @@ class LoopExpr(pytools.ImmutableRecord, abc.ABC):
 
 
 class Loop(LoopExpr):
-    fields = LoopExpr.fields | {"indices", "statements", "id", "depends_on"}
+    fields = LoopExpr.fields | {"index", "statements", "id", "depends_on"}
 
     id_generator = NameGenerator("loop")
 
     def __init__(
-        self, indices, statements: Sequence[LoopExpr], id=None, depends_on=frozenset()
+        self,
+        index: IndexTree | Index | IndexComponent,
+        statements: Sequence[LoopExpr],
+        id=None,
+        depends_on=frozenset(),
     ):
         # FIXME
         # assert isinstance(index, pyop3.tensors.Indexed)
         if not id:
             id = self.id_generator.next()
 
-        self.indices = indices
+        self.index = as_index_tree(index)
         self.statements = as_tuple(statements)
         self.id = id
         self.depends_on = depends_on
@@ -73,11 +80,6 @@ class Loop(LoopExpr):
     @functools.cached_property
     def datamap(self):
         return merge_dicts(stmt.datamap for stmt in self.statements)
-
-    @property
-    def index(self):
-        # deprecated alias for indices
-        return self.indices
 
     def __str__(self):
         return f"for {self.index} ∊ {self.index.point_set}"

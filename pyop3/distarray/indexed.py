@@ -8,7 +8,6 @@ from pyop3.distarray.base import DistributedArray
 from pyop3.distarray.multiarray import MultiArray
 from pyop3.distarray.petsc import PetscMat
 from pyop3.index import IndexTree
-from pyop3.multiaxis import fill_shape
 from pyop3.utils import just_one, merge_dicts
 
 
