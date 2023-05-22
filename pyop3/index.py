@@ -8,7 +8,7 @@ from typing import Any, Hashable, Sequence
 import pytools
 
 from pyop3.tree import LabelledNode, LabelledTree
-from pyop3.utils import UniqueNameGenerator
+from pyop3.utils import UniqueNameGenerator, as_tuple
 
 
 class IndexTree(LabelledTree):
@@ -22,14 +22,21 @@ IndexLabel = collections.namedtuple("IndexLabel", ["axis", "component"])
 
 
 class Index(LabelledNode):
-    fields = LabelledNode.fields | {"indices"}
+    fields = LabelledNode.fields | {"components"}
 
-    def __init__(self, indices: Sequence[Index], **kwargs):
-        super().__init__(degree=len(indices), **kwargs)
-        self.indices = tuple(indices)
+    def __init__(self, components: Sequence[IndexComponent] | IndexComponent, **kwargs):
+        components = as_tuple(components)
+
+        super().__init__(degree=len(components), **kwargs)
+        self.components = components
 
     def index(self, x: Index) -> int:
-        return self.indices.index(x)
+        return self.components.index(x)
+
+    # old alias
+    @property
+    def indices(self):
+        return self.components
 
 
 # alias

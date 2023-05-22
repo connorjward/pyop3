@@ -480,13 +480,6 @@ def _collect_datamap(axis, *subdatamaps, axes):
 
 
 class AxisTree(LabelledTree):
-    """
-    static_layout
-        Flag indicating whether or not the tree structure is fixed (``True``) or
-        configurable at runtime (``False``). If the latter then the tree must be
-        fully indexed to avoid variability in the shape of the final temporary.
-    """
-
     def __init__(
         self,
         root: MultiAxis | None = None,
@@ -863,7 +856,6 @@ class AxisTree(LabelledTree):
             # don't set up to avoid recursion (should be able to use affine anyway)
             myaxes = MultiAxisTree()
             myaxes.register_node(Axis([AxisComponent(len(numb))]))
-            myaxes.set_up()  # ???
             numb = MultiArray(
                 dim=myaxes,
                 name=f"ord{self._tmp_axis_namer}",
@@ -878,7 +870,6 @@ class AxisTree(LabelledTree):
                 numb = np.arange(start, stop, dtype=PointerType)
                 myaxes = MultiAxisTree()
                 myaxes.register_node(MultiAxis([MultiAxisComponent(len(numb))]))
-                myaxes.set_up()  # ???
                 numb = MultiArray(
                     dim=myaxes,
                     name=f"ord{self._tmp_axis_namer}_{i}",
@@ -1183,32 +1174,20 @@ of a single label value if that label is unique in the whole tree.
         else:
             return self
 
-    @staticmethod
-    def _parse_part(*args):
-        if len(args) == 1 and isinstance(args[0], AxisPart):
-            return args[0]
-        else:
-            return AxisPart(*args)
-
-    @staticmethod
-    def _parse_multiaxis(*args):
-        if len(args) == 1 and isinstance(args[0], MultiAxis):
-            return args[0]
-        else:
-            return MultiAxis(*args)
-
 
 class Axis(LabelledNode):
     fields = LabelledNode.fields - {"degree"} | {"components"}
 
     def __init__(
         self,
-        components: Sequence["MultiAxisComponent"],
+        components: Sequence[AxisComponent] | AxisComponent | int,
         label: Hashable | None = None,
         **kwargs,
     ):
+        components = tuple(_as_axis_component(cpt) for cpt in as_tuple(components))
+
         super().__init__(label, degree=len(components), **kwargs)
-        self.components = tuple(components)
+        self.components = components
 
     def __str__(self) -> str:
         return f"{self.__class__.__name__}([{', '.join(str(cpt) for cpt in self.components)}], label={self.label})"
@@ -1313,7 +1292,7 @@ class AxisComponent(pytools.ImmutableRecord):
         "id",
         "count",
         "name",
-        "permutation",
+        "numbering",
         "max_count",
         "overlap",
         "indexed",
@@ -1329,7 +1308,7 @@ class AxisComponent(pytools.ImmutableRecord):
         *,
         name: str | None = None,
         indices=None,
-        permutation=None,
+        numbering=None,
         max_count=None,
         overlap=None,
         indexed=False,
@@ -1368,7 +1347,7 @@ class AxisComponent(pytools.ImmutableRecord):
         self.count = count
         self.name = name
         self.indices = indices
-        self.permutation = permutation
+        self.numbering = numbering
         self.max_count = max_count
         self.overlap = overlap
         self.indexed = indexed
@@ -1423,9 +1402,10 @@ class AxisComponent(pytools.ImmutableRecord):
         return isinstance(self.count, MultiArray)
 
     # deprecated alias
+    # I think that permutation implies a complete numbering, here we only have part
     @property
-    def numbering(self):
-        return self.permutation
+    def permutation(self):
+        return self.numbering
 
     # TODO this is just a traversal - clean up
     def alloc_size(self, axtree, axis, component_index):
@@ -1784,3 +1764,18 @@ def _(arg: Axis):
 @as_axis_tree.register
 def _(arg: AxisComponent):
     return AxisTree(Axis([arg]))
+
+
+@functools.singledispatch
+def _as_axis_component(arg: Any) -> AxisComponent:
+    raise TypeError
+
+
+@_as_axis_component.register
+def _(arg: AxisComponent) -> AxisComponent:
+    return arg
+
+
+@_as_axis_component.register
+def _(arg: int) -> AxisComponent:
+    return AxisComponent(arg)

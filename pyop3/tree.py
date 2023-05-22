@@ -7,11 +7,13 @@ import pytools
 
 from pyop3.utils import (
     UniqueNameGenerator,
+    as_tuple,
     flatten,
     has_unique_entries,
     just_one,
     some_but_not_all,
     strictly_all,
+    unique,
 )
 
 
@@ -41,44 +43,45 @@ class Node(pytools.ImmutableRecord):
 
 
 class FixedAryTree:
-    node_class = Node
-
     def __init__(
         self, root: Node | None = None, parent_to_children: dict | None = None
     ) -> None:
-        parent_to_children = parent_to_children or {}
+        if root:
+            if parent_to_children:
+                parent_to_children = {
+                    parent_id: as_tuple(children)
+                    for parent_id, children in parent_to_children.items()
+                }
 
-        if parent_to_children and not root:
-            raise ValueError("Tree has no root")
-        for node in filter(None, flatten(parent_to_children.values())):
-            if not isinstance(node, self.node_class):
-                raise TypeError(
-                    f"All tree nodes must inherit from {self.node_class.__name__}"
-                )
-        # node_ids = {child.id for children in parent_to_children.values() for child in children}
-        # if not has_unique_entries(node_ids):
-        #     raise ValueError("Nodes with duplicate IDs found")
-        # if any(parent_id not in node_ids | {None} for parent_id in parent_to_children.keys()):
-        #     raise ValueError("Parent ID not found")
-        # if any(node.id in parent_to_children and len(parent_to_children[node.id]) != node.degree
-        #        for nodes in parent_to_children.values() for node in nodes):
-        #     raise ValueError("Node has the wrong number of children")
+                parent_to_children |= {
+                    node.id: (None,) * node.degree
+                    for node in filter(None, flatten(parent_to_children.values()))
+                    if node.id not in parent_to_children
+                }
 
-        if not parent_to_children and root:
-            parent_to_children = {root.id: (None,) * root.degree}
-
-        parent_to_children_ = {
-            parent_id: tuple(children)
-            for parent_id, children in parent_to_children.items()
-        }
-        for children in parent_to_children.values():
-            for child in filter(None, children):
-                if child.id not in parent_to_children:
-                    parent_to_children_[child.id] = (None,) * child.degree
+                node_ids = [
+                    node.id
+                    for node in filter(None, flatten(parent_to_children.values()))
+                ] + [root.id]
+                if not has_unique_entries(node_ids):
+                    raise ValueError("Nodes with duplicate IDs found")
+                if any(parent_id not in node_ids for parent_id in parent_to_children):
+                    raise ValueError("Parent ID not found")
+                if any(
+                    len(parent_to_children[node.id]) != node.degree
+                    for node in filter(None, flatten(parent_to_children.values()))
+                ):
+                    raise ValueError("Node found with the wrong number of children")
+            else:
+                parent_to_children = {root.id: (None,) * root.degree}
+        else:
+            if parent_to_children:
+                raise ValueError("Tree cannot have children without a root")
+            else:
+                parent_to_children = {}
 
         self.root = root
-        # TODO pyrsistent pmap?
-        self.parent_to_children = parent_to_children_
+        self.parent_to_children = parent_to_children
 
     # old alias
     @property
