@@ -210,3 +210,16 @@ def strict_cast(obj, cast):
 
 def strict_int(num):
     return strict_cast(num, int)
+
+
+def apply_at(func, iterable, index):
+    if index < 0 or index >= len(iterable):
+        raise IndexError
+
+    result = []
+    for i, item in enumerate(iterable):
+        if i == index:
+            result.append(func(item))
+        else:
+            result.append(item)
+    return tuple(result)

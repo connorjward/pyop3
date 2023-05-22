@@ -118,7 +118,7 @@ class LoopyKernelBuilder:
             options=lp.Options(check_dep_resolution=False),
         )
         tu = lp.merge((translation_unit, *self.subkernels))
-        # import pdb; pdb.set_trace()
+        # breakpoint()
         return tu.with_entrypoints("mykernel")
 
     @functools.singledispatchmethod

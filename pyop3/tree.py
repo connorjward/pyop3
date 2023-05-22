@@ -8,6 +8,7 @@ import pytools
 
 from pyop3.utils import (
     UniqueNameGenerator,
+    apply_at,
     as_tuple,
     flatten,
     has_unique_entries,
@@ -350,6 +351,7 @@ class FixedAryTree(pytools.ImmutableRecord):
             return nodestr
 
 
+# FIXME Components should live here I think
 class LabelledNode(Node):
     fields = Node.fields | {"label"}
 
@@ -358,6 +360,20 @@ class LabelledNode(Node):
     def __init__(self, label: Hashable | None = None, **kwargs) -> None:
         super().__init__(**kwargs)
         self.label = label or next(self._label_generator)
+
+    def with_modified_component(self, component_index: int | None = None, **kwargs):
+        if component_index is None:
+            if self.degree == 1:
+                component_index = 0
+            else:
+                raise ValueError(
+                    "Must specify a component index for multi-component nodes"
+                )
+
+        new_components = apply_at(
+            lambda c: c.copy(**kwargs), self.components, component_index
+        )
+        return self.copy(components=new_components)
 
     @classmethod
     @property
@@ -373,21 +389,10 @@ NodePath = dict[Hashable, Hashable]
 
 
 class LabelledTree(FixedAryTree):
-    node_class = LabelledNode
-
     def with_modified_component(self, node, component_index=None, **kwargs):
-        if component_index is None:
-            if node.degree == 1:
-                component_index = 0
-            else:
-                raise ValueError(
-                    "Must specify a component index for multi-component nodes"
-                )
-
-        new_components = list(node.components)
-        new_components[component_index] = new_components[component_index].copy(**kwargs)
-        new_node = node.copy(components=new_components)
-        return self.replace_node(new_node)
+        return self.replace_node(
+            node.with_modified_component(component_index, **kwargs)
+        )
 
     def put_node(
         self,

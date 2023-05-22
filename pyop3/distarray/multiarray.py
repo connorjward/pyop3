@@ -64,28 +64,30 @@ class MultiArray(DistributedArray):
     ):
         dim = as_axis_tree(dim)
 
+        if isinstance(data, np.ndarray):
+            if dtype:
+                data = np.asarray(data, dtype=dtype)
+            else:
+                dtype = data.dtype
+        elif isinstance(data, Sequence):
+            data = np.asarray(data, dtype=dtype)
+            dtype = data.dtype
+        else:
+            if not dtype:
+                raise ValueError("Must either specify a dtype or provide an array")
+            dtype = np.dtype(dtype)
+
         super().__init__()
         name = name or self.name_generator.next(prefix or self.prefix)
 
-        if not dtype:
-            if data is None:
-                raise ValueError("need to specify dtype or provide an array")
-            dtype = data.dtype
-        else:
-            if data is not None and data.dtype != dtype:
-                raise ValueError("dtypes must match")
-
-        # TODO raise NotImplementedError if the multi-axis contains multiple parallel axes
-
         self.data = data
+        self.dtype = dtype
         self.params = {}
         self._param_namer = NameGenerator(f"{name}_p")
-        assert dtype is not None
 
         self.name = name
         self.dim = dim
 
-        self.dtype = np.dtype(dtype)  # since np.float64 is not actually the right thing
         self.max_value = max_value
         self.sf = sf
 
@@ -102,13 +104,6 @@ class MultiArray(DistributedArray):
     @property
     def alloc_size(self):
         return self.axes.alloc_size() if self.axes else 1
-
-    @classmethod
-    def compute_part_size(cls, part):
-        size = 0
-        if isinstance(part.size, numbers.Integral):
-            return part.size
-        return size
 
     @classmethod
     def from_list(cls, data, axis_labels, name, dtype, inc=0):

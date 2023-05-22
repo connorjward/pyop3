@@ -6,6 +6,7 @@ import pytest
 
 from pyop3.axis import Axis, AxisComponent, AxisTree
 from pyop3.distarray import MultiArray
+from pyop3.dtypes import IntType, ScalarType
 from pyop3.index import Index, IndexTree, Range, TabulatedMap
 from pyop3.loopexpr import READ, WRITE, LoopyKernel, do_loop
 
@@ -168,7 +169,7 @@ def test_multi_component_scalar_copy_with_two_outer_loops(scalar_copy_kernel):
 
 def test_permuted_vector_copy(vector_copy_kernel):
     m, n = 6, 3
-    perm = np.asarray([3, 5, 2, 0, 4, 1], dtype=np.int32)
+    perm = np.asarray([3, 2, 0, 5, 4, 1], dtype=np.int32)
 
     numaxes = AxisTree(Axis(m, "ax_label0"))
     num0 = MultiArray(numaxes, name="num0", data=perm)
@@ -179,9 +180,11 @@ def test_permuted_vector_copy(vector_copy_kernel):
         numbering=num0,
     )
     dat0 = MultiArray(
-        permuted_axes, name="dat0", data=np.arange(m * n, dtype=np.float64)
+        ordered_axes, name="dat0", data=np.arange(m * n, dtype=ScalarType)
     )
-    dat1 = MultiArray(ordered_axes, name="dat1", data=np.zeros(m * n, dtype=np.float64))
+    dat1 = MultiArray(
+        permuted_axes, name="dat1", data=np.zeros(m * n, dtype=ScalarType)
+    )
 
     do_loop(p := Range("ax_label0", m), vector_copy_kernel(dat0[p], dat1[p]))
 
@@ -189,46 +192,45 @@ def test_permuted_vector_copy(vector_copy_kernel):
 
 
 def test_permuted_twice(vector_copy_kernel):
-    axes = MultiAxisTree.from_dict(
+    a, b, c = 4, 2, 3
+    numdata0 = [3, 1, 0, 2]
+    numdata1 = [1, 0]
+
+    axis0 = Axis(a, "ax_label0")
+    axis1 = Axis(b, "ax_label1")
+
+    num0 = MultiArray(axis0, name="num0", data=numdata0, dtype=IntType)
+    num1 = MultiArray(axis1, name="num1", data=numdata1, dtype=IntType)
+
+    paxis0 = axis0.with_modified_component(numbering=num0)
+    paxis1 = axis1.with_modified_component(numbering=num1)
+
+    axes = AxisTree(
+        axis0,
         {
-            MultiAxis(
-                [MultiAxisComponent(3, "cpt0", numbering=("ax0", [1, 0, 2]))],
-                "ax0",
-                id="axid0",
-            ): None,
-            MultiAxis(
-                [MultiAxisComponent(3, "cpt0", numbering=("ax1", [2, 0, 1]))],
-                "ax1",
-                id="axid1",
-            ): ("axid0", "cpt0"),
-            MultiAxis([MultiAxisComponent(3)]): ("axid1", "cpt0"),
+            axis0.id: axis1,
+            axis1.id: Axis(c),
         },
-        set_up=True,
     )
-
-    dat1 = MultiArray(axes, name="dat1", data=np.ones(3 * 3 * 3, dtype=np.float64))
-    dat2 = MultiArray(axes, name="dat2", data=np.zeros(3 * 3 * 3, dtype=np.float64))
-
-    p = IndexTree.from_dict(
+    paxes = AxisTree(
+        paxis0,
         {
-            RangeNode(("ax0", "cpt0"), 3, id="x"): IndexTree.ROOT,
-            RangeNode(("ax1", "cpt0"), 3): "x",
-        }
+            paxis0.id: paxis1,
+            paxis1.id: Axis(c),
+        },
     )
-    expr = pyop3.Loop(p, vector_copy_kernel(dat1[p], dat2[p]))
 
-    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-    dll = compilemythings(exe)
-    fn = getattr(dll, "mykernel")
+    dat0 = MultiArray(axes, name="dat0", data=np.arange(a * b * c, dtype=ScalarType))
+    dat1 = MultiArray(paxes, name="dat1", data=np.zeros(a * b * c, dtype=ScalarType))
 
-    sec0 = dat1.dim.node("axid0").components[0].layout_fn.data
-    sec1 = dat1.dim.node("axid1").components[0].layout_fn.data
+    p = IndexTree(
+        root := Index(Range("ax_label0", a)), {root.id: Index(Range("ax_label1", b))}
+    )
+    do_loop(p, vector_copy_kernel(dat0[p], dat1[p]))
 
-    args = [dat1.data, sec0.data, sec1.data, dat2.data]
-    fn.argtypes = (ctypes.c_voidp,) * len(args)
-    fn(*(d.ctypes.data for d in args))
-
-    assert all(dat2.data == dat1.data)
+    assert np.allclose(
+        dat1.data.reshape((a, b, c))[numdata0][:, numdata1].flatten(), dat0.data
+    )
 
 
 def test_somewhat_permuted():

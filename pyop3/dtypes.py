@@ -4,6 +4,7 @@ from petsc4py import PETSc
 __all__ = []
 
 
+ScalarType = PETSc.ScalarType
 IntType = PETSc.IntType
 PointerType = PETSc.IntType
 
