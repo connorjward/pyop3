@@ -191,7 +191,7 @@ def test_permuted_vector_copy(vector_copy_kernel):
     assert np.allclose(dat1.data.reshape((m, n))[perm].flatten(), dat0.data)
 
 
-def test_permuted_twice(vector_copy_kernel):
+def test_permuted_twice_vector_copy(vector_copy_kernel):
     a, b, c = 4, 2, 3
     numdata0 = [3, 1, 0, 2]
     numdata1 = [1, 0]
@@ -233,48 +233,33 @@ def test_permuted_twice(vector_copy_kernel):
     )
 
 
-def test_somewhat_permuted():
-    ax1 = MultiAxis([MultiAxisComponent(2, "a", id="ax1")])
-    ax2 = ax1.add_subaxis(
-        "ax1", [MultiAxisComponent(3, "b", id="ax2", numbering=[2, 0, 1])]
-    )
-    ax3 = ax2.add_subaxis("ax2", [MultiAxisComponent(2)]).set_up()
+def test_vector_copy_with_permuted_inner_axis(vector_copy_kernel):
+    a, b, c = 5, 4, 3
+    numdata = [3, 1, 0, 2]
 
-    dat1 = MultiArray(ax3, name="dat1", data=np.arange(12, dtype=np.float64))
-    dat2 = MultiArray(ax3, name="dat2", data=np.zeros(12, dtype=np.float64))
+    inner_axis = Axis(AxisComponent(b))
+    num0 = MultiArray(inner_axis, name="num0", data=numdata, dtype=IntType)
+    inner_paxis = inner_axis.with_modified_component(numbering=num0)
 
-    code = lp.make_kernel(
-        "{ [i]: 0 <= i < 2 }",
-        "y[i] = x[i]",
-        [
-            lp.GlobalArg("x", np.float64, (2,), is_input=True, is_output=False),
-            lp.GlobalArg("y", np.float64, (2,), is_input=False, is_output=True),
-        ],
-        target=lp.CTarget(),
-        name="mylocalkernel",
-        lang_version=(2018, 2),
+    axes = AxisTree(
+        root := Axis(a, "ax_label0"), {root.id: inner_axis, inner_axis.id: Axis(c)}
     )
-    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-    p = IndexTree.from_dict(
+    paxes = AxisTree(
+        root := Axis(a, "ax_label0"), {root.id: inner_paxis, inner_paxis.id: Axis(c)}
+    )
+
+    dat0 = MultiArray(axes, name="dat0", data=np.arange(a * b * c, dtype=ScalarType))
+    dat1 = MultiArray(paxes, name="dat1", data=np.zeros(a * b * c, dtype=ScalarType))
+
+    p = IndexTree(
+        root := Index(Range("ax_label0", a)),
         {
-            IndexTree.ROOT: ("x",),
-            RangeNode("a", 2, id="x"): ("y",),
-            RangeNode("b", 3, id="y"): (),
-        }
+            root.id: Index(Range(inner_axis.label, b)),
+        },
     )
-    expr = pyop3.Loop(p, kernel(dat1[p], dat2[p]))
+    do_loop(p, vector_copy_kernel(dat0[p], dat1[p]))
 
-    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-    dll = compilemythings(exe)
-    fn = getattr(dll, "mykernel")
-
-    sec0 = dat1.dim.node("ax2").layout_fn.data
-
-    args = [sec0.data, dat1.data, dat2.data]
-    fn.argtypes = (ctypes.c_voidp,) * len(args)
-    fn(*(d.ctypes.data for d in args))
-
-    assert all(dat2.data == dat1.data)
+    assert np.allclose(dat1.data.reshape((a, b, c))[:, numdata].flatten(), dat0.data)
 
 
 def test_compute_double_loop_permuted_mixed():
