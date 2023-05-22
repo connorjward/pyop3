@@ -1113,10 +1113,6 @@ class AxisTree(LabelledTree):
                 parts=[self.part.copy(subaxis=self.part.subaxis.drop_last())]
             )
 
-    def without_numbering(self):
-        assert False, "dont touch?"
-        return self.copy(parts=[pt.without_numbering() for pt in self.parts])
-
     @property
     def is_linear(self):
         """Return ``True`` if the multi-axis contains no branches at any level."""
@@ -1245,7 +1241,7 @@ class AxisComponent(pytools.ImmutableRecord):
     fields = {
         "count",
         "name",
-        "numbering",
+        "permutation",
         "max_count",
         "overlap",
         "indexed",
@@ -1259,7 +1255,7 @@ class AxisComponent(pytools.ImmutableRecord):
         *,
         name: str | None = None,
         indices=None,
-        numbering: MultiArray | None = None,
+        permutation: MultiArray | None = None,
         max_count=None,
         overlap=None,
         indexed=False,
@@ -1278,7 +1274,7 @@ class AxisComponent(pytools.ImmutableRecord):
         self.count = count
         self.name = name
         self.indices = indices
-        self.numbering = numbering
+        self.permutation = permutation
         self.max_count = max_count
         self.overlap = overlap
         self.indexed = indexed
@@ -1312,23 +1308,17 @@ class AxisComponent(pytools.ImmutableRecord):
     def has_integer_count(self):
         return isinstance(self.count, numbers.Integral)
 
-    def without_numbering(self):
-        if self.subaxis:
-            return self.copy(numbering=None, subaxis=self.subaxis.without_numbering())
-        else:
-            return self.copy(numbering=None)
-
     @property
     def is_ragged(self):
         from pyop3.distarray import MultiArray
 
         return isinstance(self.count, MultiArray)
 
-    # deprecated alias
-    # I think that permutation implies a complete numbering, here we only have part
+    # deprecated alias, permutation is a better name as it is easier to reason
+    # about sending points vs where they map to.
     @property
-    def permutation(self):
-        return self.numbering
+    def numbering(self):
+        return self.permutation
 
     # TODO this is just a traversal - clean up
     def alloc_size(self, axtree, axis, component_index):

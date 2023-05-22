@@ -177,7 +177,7 @@ def test_permuted_vector_copy(vector_copy_kernel):
     ordered_axes = numaxes.add_subaxis(Axis(n), numaxes.root)
     permuted_axes = ordered_axes.with_modified_component(
         ordered_axes.root,
-        numbering=num0,
+        permutation=num0,
     )
     dat0 = MultiArray(
         ordered_axes, name="dat0", data=np.arange(m * n, dtype=ScalarType)
@@ -202,8 +202,8 @@ def test_permuted_twice_vector_copy(vector_copy_kernel):
     num0 = MultiArray(axis0, name="num0", data=numdata0, dtype=IntType)
     num1 = MultiArray(axis1, name="num1", data=numdata1, dtype=IntType)
 
-    paxis0 = axis0.with_modified_component(numbering=num0)
-    paxis1 = axis1.with_modified_component(numbering=num1)
+    paxis0 = axis0.with_modified_component(permutation=num0)
+    paxis1 = axis1.with_modified_component(permutation=num1)
 
     axes = AxisTree(
         axis0,
@@ -239,7 +239,7 @@ def test_vector_copy_with_permuted_inner_axis(vector_copy_kernel):
 
     inner_axis = Axis(AxisComponent(b))
     num0 = MultiArray(inner_axis, name="num0", data=numdata, dtype=IntType)
-    inner_paxis = inner_axis.with_modified_component(numbering=num0)
+    inner_paxis = inner_axis.with_modified_component(permutation=num0)
 
     axes = AxisTree(
         root := Axis(a, "ax_label0"), {root.id: inner_axis, inner_axis.id: Axis(c)}
