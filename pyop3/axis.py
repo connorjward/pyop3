@@ -133,7 +133,7 @@ def part_is_set_up(axtree, axis, component, component_index):
         axtree, subaxis
     ):
         return False
-    if component not in axtree._layouts:
+    if (axis.id, component_index) not in axtree._layouts:
         return False
     return True
 
@@ -472,11 +472,17 @@ class Sparsity:
 
 
 def _collect_datamap(axis, *subdatamaps, axes):
+    from pyop3.distarray import MultiArray
+
     datamap = {}
-    for component in axis.components:
-        # FIXME: I need to look for the right things here
-        pass
-    return {} | merge_dicts(subdatamaps)
+    for cidx, component in enumerate(axis.components):
+        layout = axes.layouts[(axis.id, cidx)]
+        if isinstance(layout, AffineLayoutFunction):
+            if isinstance(layout.start, MultiArray):
+                datamap[layout.start.name] = layout.start
+        elif isinstance(layout, IndirectLayoutFunction):
+            datamap[layout.data.name] = layout.data
+    return datamap | merge_dicts(subdatamaps)
 
 
 class AxisTree(LabelledTree):
@@ -742,7 +748,7 @@ class AxisTree(LabelledTree):
             layout = layouts[pth]
             if subaxis := self.find_node((axis.id, cidx)):
                 self.apply_layouts(layouts, pth, subaxis)
-            self._layouts[part] = layout
+            self._layouts[(axis.id, cidx)] = layout
 
     def finish_off_layouts(
         self, layouts, offset, path=PrettyTuple(), layout_path=PrettyTuple(), axis=None
@@ -760,7 +766,7 @@ class AxisTree(LabelledTree):
             )
             for cidx, cpt in enumerate(axis.components)
         )
-        test2 = any(cpt.permutation for cpt in axis.components)
+        test2 = any(cpt.permutation is not None for cpt in axis.components)
 
         # fixme very hard to read - the conditions above aren't quite right
         test3 = path not in layouts or layouts[path] != "null layout"
@@ -838,7 +844,7 @@ class AxisTree(LabelledTree):
                 and part.numbering is None
             ):
                 new_layouts[path | (axis.name, part.label)] = (layout_path, myoff)
-                found.add(part.label)
+                found.add(i)
 
             if not has_fixed_size(self, axis, part, i):
                 # can't do any more as things to the right of this will also move around
@@ -848,7 +854,7 @@ class AxisTree(LabelledTree):
 
         # if no numbering is provided create one
         # TODO should probably just set an affine one by default so we can mix these up
-        if not strictly_all(cpt.numbering for cpt in axis.components):
+        if not strictly_all(cpt.numbering is not None for cpt in axis.components):
             axis_numbering = []
             start = 0
             stop = start + axis.components[0].find_integer_count(indices)
@@ -880,15 +886,18 @@ class AxisTree(LabelledTree):
                 start = stop
             self._tmp_axis_namer += 1
         else:
-            axis_numbering = [
-                MultiArray.from_list(
-                    cpt.numbering,
-                    [(axis, cidx)],
-                    name=f"ord{self._tmp_axis_namer}_{i}",
-                    dtype=PointerType,
-                )
-                for (cidx, cpt) in enumerate(axis.components)
-            ]
+            axis_numbering = []
+            for cidx, component in enumerate(axis.components):
+                if isinstance(component.numbering, MultiArray):
+                    num = component.numbering
+                else:
+                    num = MultiArray.from_list(
+                        component.numbering,
+                        [(axis, cidx)],
+                        name=f"ord{self._tmp_axis_namer}_{i}",
+                        dtype=PointerType,
+                    )
+                axis_numbering.append(num)
 
         assert all(isinstance(num, MultiArray) for num in axis_numbering)
 
@@ -898,59 +907,72 @@ class AxisTree(LabelledTree):
 
             # find the right axis part and index thereof for the current 'global' numbering
             selected_part = None
-            selected_part_label = None
+            selected_component_index = None
             selected_index = None
             for part_num, axis_part in enumerate(axis.components):
                 try:
                     # is the current global index found in the numbering of this axis part?
                     if axis_numbering[part_num].axes.depth > 1:
+                        """
+                        this will entail some sort of inverse lookup. This is
+                        straightforward for the flat case but harder for the nested one.
+                        I think a hierarchy of inverted lookups might be what's needed.
+                        Not sure. Needs a diagram
+                        """
                         raise NotImplementedError("Need better indexing approach")
                     selected_index = list(axis_numbering[part_num].data).index(i)
                     selected_part = axis_part
-                    selected_part_num = part_num
-                    selected_part_label = axis_part.label
+                    selected_component_index = part_num
                 except ValueError:
                     continue
             if selected_part is None or selected_index is None:
                 raise ValueError(f"{i} not found in any numberings")
 
             # skip those where we just set start and return an integer
-            if selected_part_label in found:
+            if selected_component_index in found:
                 offset += step_size(
                     self,
                     axis,
                     selected_part,
-                    selected_part_num,
+                    selected_component_index,
                     indices | selected_index,
                 )
                 continue
 
-            if has_independently_indexed_subaxis_parts(self, axis, selected_part):
+            if has_independently_indexed_subaxis_parts(
+                self, axis, selected_part, selected_component_index
+            ):
                 # the layout is indirect and requires the current axis part if there only
                 # if there is numbering
                 if selected_part.numbering is not None:
-                    new_layouts[path | (axis.name, selected_part_label)][
+                    new_layouts[path | (axis.label, selected_component_index)][
                         selected_index
                     ] = (
-                        layout_path | (axis.name, selected_part_label),
+                        layout_path | (axis.label, selected_component_index),
                         offset.value,
                     )
                 else:
-                    new_layouts[path | (axis.name, selected_part_label)][
+                    new_layouts[path | (axis.label, selected_component_index)][
                         selected_index
                     ] = (
                         layout_path,
                         offset.value,
                     )
                 # FIXME
-                offset += step_size(self, axis, selected_part, indices | selected_index)
+                offset += step_size(
+                    self,
+                    axis,
+                    selected_part,
+                    selected_component_index,
+                    indices | selected_index,
+                )
                 # offset += step_size(self, selected_part, indices | selected_index)
             else:
                 subaxis = self.child_by_label(axis, selected_part.label)
                 assert subaxis
                 subdata = self.create_layout_lists(
-                    path | (axis.name, selected_part_label),
-                    layout_path | (axis.name, selected_part_label),
+                    path | (axis.label, selected_component_index),
+                    layout_path | (axis.label, selected_component_index),
                     offset,
                     subaxis,
                     indices | selected_index,
@@ -1025,16 +1047,29 @@ class AxisTree(LabelledTree):
                 if isinstance(layout, tuple):
                     layout_path, layout = layout
                     name = self._my_layout_namer.next()
+
+                    # layout_path contains component indices, we don't want those here
+                    # so drop them
+                    layout_path = [layout[0] for layout in layout_path]
+
                     starts = MultiArray.from_list(
                         layout, layout_path, name, PointerType
                     )
                     step = step_size(self, axis, part)
                     layouts[path] = AffineLayoutFunction(step, starts)
+                else:
+                    # FIXME weird code structure
+                    assert isinstance(layout, AffineLayoutFunction)
             else:
                 if layout == "null layout":
                     continue
                 layout_path, layout = layout
                 name = self._my_layout_namer.next()
+
+                # layout_path contains component indices, we don't want those here
+                # so drop them
+                layout_path = [layout[0] for layout in layout_path]
+
                 data = MultiArray.from_list(layout, layout_path, name, PointerType)
                 layouts[path] = IndirectLayoutFunction(data)
 
@@ -1289,7 +1324,6 @@ class AxisComponent(pytools.ImmutableRecord):
     """
 
     fields = {
-        "id",
         "count",
         "name",
         "numbering",
@@ -1300,20 +1334,17 @@ class AxisComponent(pytools.ImmutableRecord):
         "lgmap",
     }
 
-    _lazy_id_generator = None
-
     def __init__(
         self,
         count,
         *,
         name: str | None = None,
         indices=None,
-        numbering=None,
+        numbering: MultiArray | None = None,
         max_count=None,
         overlap=None,
         indexed=False,
         lgmap=None,
-        id=None,
     ):
         from pyop3.distarray import MultiArray
 
@@ -1322,25 +1353,6 @@ class AxisComponent(pytools.ImmutableRecord):
             max_count = count
         elif not max_count:
             max_count = max(count.data)
-
-        # if numbering is not None and not isinstance(numbering, MultiArray):
-        #     # FIXME: This is an excellent argument for why the numbering should
-        #     # be a property of the multi-axis, not the particular component
-        #     # this name attribute, needed for indexing, is very nasty to determine here
-        #     assert isinstance(numbering, tuple) and len(numbering) == 2
-        #     axis_name, numbering = numbering
-        #
-        #     if isinstance(numbering, np.ndarray):
-        #         numbering = list(numbering)
-        #
-        #     if isinstance(numbering, collections.abc.Sequence):
-        #         numbering = MultiArray.from_list(
-        #             numbering,
-        #             [(axis_name, label)],
-        #             name=f"{axis_name}_{label}_num",
-        #             dtype=PointerType,
-        #         )
-        # FIXME: what if nested etc? what do we label things as?
 
         super().__init__()
 
@@ -1352,7 +1364,6 @@ class AxisComponent(pytools.ImmutableRecord):
         self.overlap = overlap
         self.indexed = indexed
         self.lgmap = lgmap
-        self.id = id or next(self._id_generator)
         """
         this property is required because we can hit situations like the following:
 
@@ -1370,13 +1381,6 @@ class AxisComponent(pytools.ImmutableRecord):
         This effectively means that we need to zero the offset as we traverse the
         tree to produce the layout. This is why we need this ``indexed`` flag.
         """
-
-    @classmethod
-    @property
-    def _id_generator(cls):
-        if not cls._lazy_id_generator:
-            cls._lazy_id_generator = UniqueNameGenerator(f"_{cls.__name__}_id")
-        return cls._lazy_id_generator
 
     def __str__(self) -> str:
         return f"{{count={self.count}}}"

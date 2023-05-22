@@ -845,6 +845,7 @@ class LoopyKernelBuilder:
                     axes,
                     axis,
                     component,
+                    component_index,
                     offset,
                     labels_to_jnames,
                     within_inames,
@@ -860,6 +861,7 @@ class LoopyKernelBuilder:
         axes,
         axis,
         axis_part,
+        component_index,
         offset_var,
         labels_to_jnames,
         within_inames,
@@ -868,7 +870,7 @@ class LoopyKernelBuilder:
         """
         TODO
         """
-        layout_fn = axes.layouts[axis_part]
+        layout_fn = axes.layouts[(axis.id, component_index)]
 
         if layout_fn == "null layout":
             return frozenset()

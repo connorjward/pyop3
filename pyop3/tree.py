@@ -126,12 +126,36 @@ class FixedAryTree:
     # alias
     put_node = place_node
 
+    def replace_node(self, node: Node, loc=None):
+        loc = loc or node.id
+
+        if loc not in self.node_ids:
+            raise ValueError
+
+        parent = self.parent(loc)
+
+        new_parent_to_children = self.parent_to_children.copy()
+        if parent:  # ie not root
+            node_index = [
+                child.id for child in self.parent_to_children[parent.id]
+            ].index(node)
+            new_children = list(self.parent_to_children[parent.id])
+            new_children[node_index] = node
+            new_parent_to_children[parent.id] = new_children
+            return type(self)(self.root, new_parent_to_children)
+        else:
+            # this won't work if we tinker with IDs
+            return type(self)(node, self.parent_to_children.copy())
+
     def find_node(self, loc: tuple[Node | Hashable, int] | None = None) -> Node:
         if not loc:
             return self.root
-        else:
+
+        if isinstance(loc, tuple):
             parent_id, component_index = loc
             return self._parent_to_children[parent_id][component_index]
+        else:
+            return self.id_to_node[loc]
 
     # def as_node
     # """Return the node from the tree matching the provided ``id``.
@@ -146,6 +170,18 @@ class FixedAryTree:
     @functools.cached_property
     def node_ids(self) -> frozenset[Hashable]:
         return frozenset(node.id for node in self.nodes)
+
+    @functools.cached_property
+    def child_to_parent(self):
+        return {
+            child: self.id_to_node[parent_id]
+            for parent_id, children in self.parent_to_children.items()
+            for child in children
+        }
+
+    @functools.cached_property
+    def id_to_node(self):
+        return {node.id: node for node in self.nodes}
 
     @functools.cached_property
     def nodes(self) -> frozenset[Node]:
@@ -165,12 +201,13 @@ class FixedAryTree:
             raise NodeNotFoundException(f"{node_id} is not present in the tree")
         return node_id
 
-    def parent(self, node: Node | str) -> Node | None:
-        if self._as_existing_node_id(node) == self._root_id:
+    def parent(self, node: Node | Hashable) -> Node | None:
+        node = self._as_existing_node(node)
+
+        if node == self.root:
             return None
-        node_id = self._as_existing_node_id(node)
-        parent_id = self._child_to_parent[node_id]
-        return self._ids_to_nodes[parent_id]
+        else:
+            return self.child_to_parent[node]
 
     def pop_subtree(self, subroot: Node | str) -> "Tree":
         subroot = self._as_node(subroot)

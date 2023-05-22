@@ -16,6 +16,7 @@ from pyop3 import utils
 from pyop3.axis import (
     Axis,
     AxisComponent,
+    AxisTree,
     as_axis_tree,
     expand_indices_to_fill_empty_shape,
     fill_shape,
@@ -110,31 +111,34 @@ class MultiArray(DistributedArray):
         return size
 
     @classmethod
-    def from_list(cls, data, names_and_labels, name, dtype, inc=0):
-        """Return a (linear) multi-array formed from a list of lists."""
+    def from_list(cls, data, axis_labels, name, dtype, inc=0):
+        """Return a multi-array formed from a list of lists.
+
+        The returned array must have one axis component per axis. These are
+        permitted to be ragged.
+
+        """
         flat, count = cls._get_count_data(data)
-
-        if isinstance(count, list):
-            count = cls.from_list(count, names_and_labels[:-1], name, dtype, inc + 1)
-
         flat = np.array(flat, dtype=dtype)
 
-        axis = Axis(
-            [AxisComponent(count)],
-            label=names_and_labels[-1][0],
-        )
-        if isinstance(count, MultiArray):
-            base_axis = get_bottom_part(count.root)
-            base_component = just_one(base_axis.components)
-            newax = count.root.copy()
-            newax.add_node(axis, (base_axis, base_component.label))
+        if isinstance(count, list):
+            raise NotImplementedError
+            count = cls.from_list(count, axis_labels[:-1], name, dtype, inc + 1)
+            axis = Axis(
+                [AxisComponent(count)],
+                axis_labels[-1],
+            )
+            if isinstance(count, MultiArray):
+                raise NotImplementedError
+                base_axis = get_bottom_part(count.root)
+                base_component = just_one(base_axis.components)
+                newax = count.root.copy()
+                newax.add_node(axis, (base_axis, base_component.label))
         else:
-            newax = MultiAxisTree()
-            newax = newax.place_node(axis)
+            axes = AxisTree(Axis(count, axis_labels[-1]))
 
-        assert newax.depth == len(names_and_labels)
-
-        return cls(newax, name=f"{name}_{inc}", data=flat, dtype=dtype)
+        assert axes.depth == len(axis_labels)
+        return cls(axes, data=flat, dtype=dtype)
 
     @classmethod
     def _get_count_data(cls, data):
