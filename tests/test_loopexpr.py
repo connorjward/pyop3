@@ -168,22 +168,16 @@ def test_multi_component_scalar_copy_with_two_outer_loops(scalar_copy_kernel):
 
 def test_permuted_vector_copy(vector_copy_kernel):
     m, n = 6, 3
-    permdata = np.asarray([3, 5, 2, 0, 4, 1], dtype=np.int32)
+    perm = np.asarray([3, 5, 2, 0, 4, 1], dtype=np.int32)
 
     numaxes = AxisTree(Axis(m, "ax_label0"))
-    num0 = MultiArray(numaxes, name="num0", data=permdata)
+    num0 = MultiArray(numaxes, name="num0", data=perm)
 
-    ordered_axes = AxisTree(
-        root := Axis(AxisComponent(m, numbering=None), "ax_label0"),
-        {
-            root.id: Axis(n),
-        },
-    )
-    permuted_axes = AxisTree(
-        root := Axis(AxisComponent(m, numbering=num0), "ax_label0"),
-        {
-            root.id: Axis(n),
-        },
+    # ordered_axes = numaxes.add_subaxis(Axis(n), numaxes.root)
+    ordered_axes = numaxes.put_node(Axis(n), (numaxes.root, 0))
+    permuted_axes = ordered_axes.with_modified_component(
+        (ordered_axes.root, 0),  # TODO could just be root
+        numbering=num0,
     )
     dat0 = MultiArray(
         permuted_axes, name="dat0", data=np.arange(m * n, dtype=np.float64)
@@ -192,7 +186,7 @@ def test_permuted_vector_copy(vector_copy_kernel):
 
     do_loop(p := Range("ax_label0", m), vector_copy_kernel(dat0[p], dat1[p]))
 
-    assert np.allclose(dat1.data.reshape((m, n))[permdata].flatten(), dat0.data)
+    assert np.allclose(dat1.data.reshape((m, n))[perm].flatten(), dat0.data)
 
 
 def test_permuted_twice(vector_copy_kernel):

@@ -113,7 +113,8 @@ class FixedAryTree:
         if loc is None:
             if self.root:
                 raise ValueError("Cannot add multiple roots")
-            return type(self)({None: [node]})
+            raise NotImplementedError("need to swap roots")
+            return type(self)(node)
         else:
             parent, component_index = loc
             parent_id = self._as_existing_node_id(parent)
@@ -121,7 +122,7 @@ class FixedAryTree:
             new_children = list(self._parent_to_children[parent_id])
             new_children[component_index] = node
             new_parent_to_children[parent_id] = new_children
-            return type(self)(new_parent_to_children)
+            return type(self)(self.root, new_parent_to_children)
 
     # alias
     put_node = place_node
@@ -366,6 +367,18 @@ NodePath = dict[Hashable, Hashable]
 
 class LabelledTree(FixedAryTree):
     node_class = LabelledNode
+
+    def with_modified_component(self, loc, **kwargs):
+        node, component_index = loc
+        new_components = []
+        for cidx, component in enumerate(node.components):
+            if cidx == component_index:
+                new_component = component.copy(**kwargs)
+            else:
+                new_component = component
+            new_components.append(new_component)
+        new_node = node.copy(components=new_components)
+        return self.replace_node(new_node)
 
     def put_node(
         self,
