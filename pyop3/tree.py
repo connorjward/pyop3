@@ -3,6 +3,7 @@ import functools
 from collections.abc import Hashable, Sequence
 from typing import Any, Mapping
 
+import pyrsistent
 import pytools
 
 from pyop3.utils import (
@@ -42,9 +43,13 @@ class Node(pytools.ImmutableRecord):
         return cls._lazy_id_generator
 
 
-class FixedAryTree:
+class FixedAryTree(pytools.ImmutableRecord):
+    fields = {"root", "parent_to_children"}
+
     def __init__(
-        self, root: Node | None = None, parent_to_children: dict | None = None
+        self,
+        root: Node | None = None,
+        parent_to_children: Mapping[Hashable, Node] | None = None,
     ) -> None:
         if root:
             if parent_to_children:
@@ -81,12 +86,7 @@ class FixedAryTree:
                 parent_to_children = {}
 
         self.root = root
-        self.parent_to_children = parent_to_children
-
-    # old alias
-    @property
-    def _parent_to_children(self):
-        return self.parent_to_children
+        self.parent_to_children = pyrsistent.freeze(parent_to_children)
 
     def __str__(self):
         return self._stringify()
@@ -96,36 +96,43 @@ class FixedAryTree:
 
     def children(self, node: Node | str) -> tuple[Node]:
         node_id = self._as_existing_node_id(node)
-        return self._parent_to_children[node_id]
+        return self.parent_to_children[node_id]
 
-    def place_node(
+    def put_node(
         self,
         node: Node,
-        loc: tuple[Node | Hashable, int] | None = None,
+        parent: Node | Hashable | None = None,
+        component_index: int | None = None,
         uniquify: bool = False,
     ) -> None:
-        if node in self:
-            if uniquify:
-                node = node.copy(id=self._first_unique_id(node.id))
-            else:
-                raise ValueError("Cannot insert a node with the same ID")
-
-        if loc is None:
+        if parent is None:
+            if component_index is not None:
+                raise ValueError("Cannot specify a component index when adding a root")
             if self.root:
                 raise ValueError("Cannot add multiple roots")
-            raise NotImplementedError("need to swap roots")
-            return type(self)(node)
+            assert not self.parent_to_children
+            return self.copy(root=node)
         else:
-            parent, component_index = loc
+            if node in self:
+                if uniquify:
+                    node = node.copy(id=self._first_unique_id(node.id))
+                else:
+                    raise ValueError("Cannot insert a node with the same ID")
+
+            if component_index is None:
+                if parent.degree == 1:
+                    component_index = 0
+                else:
+                    raise ValueError(
+                        "Must specify a component index for axes with multiple components"
+                    )
+
             parent_id = self._as_existing_node_id(parent)
-            new_parent_to_children = self._parent_to_children.copy()
-            new_children = list(self._parent_to_children[parent_id])
+            new_parent_to_children = dict(self.parent_to_children)
+            new_children = list(new_parent_to_children[parent_id])
             new_children[component_index] = node
             new_parent_to_children[parent_id] = new_children
-            return type(self)(self.root, new_parent_to_children)
-
-    # alias
-    put_node = place_node
+            return self.copy(parent_to_children=new_parent_to_children)
 
     def replace_node(self, node: Node, loc=None):
         loc = loc or node.id
@@ -154,7 +161,7 @@ class FixedAryTree:
 
         if isinstance(loc, tuple):
             parent_id, component_index = loc
-            return self._parent_to_children[parent_id][component_index]
+            return self.parent_to_children[parent_id][component_index]
         else:
             return self.id_to_node[loc]
 
@@ -187,7 +194,7 @@ class FixedAryTree:
     @functools.cached_property
     def nodes(self) -> frozenset[Node]:
         return frozenset({self.root}) | {
-            node for node in filter(None, flatten(self._parent_to_children.values()))
+            node for node in filter(None, flatten(self.parent_to_children.values()))
         }
 
     def _as_existing_node(self, node: Node | str) -> Node:
@@ -233,9 +240,9 @@ class FixedAryTree:
                 subtree.add_node(node, parent)
             del self._ids_to_nodes[node.id]
             del self._child_to_parent[node.id]
-            self._parent_to_children[parent.id] = tuple(
+            self.parent_to_children[parent.id] = tuple(
                 child
-                for child in self._parent_to_children[parent.id]
+                for child in self.parent_to_children[parent.id]
                 if child != node.id
             )
 
@@ -274,7 +281,7 @@ class FixedAryTree:
         return tuple(
             node
             for nid, node in self._ids_to_nodes.items()
-            if not self._parent_to_children[nid]
+            if not self.parent_to_children[nid]
         )
 
     @property
@@ -284,7 +291,7 @@ class FixedAryTree:
     def is_leaf(self, node: Node | str) -> bool:
         node = self._as_node(node)
         self._check_exists(node)
-        return len(self._parent_to_children[node.id]) == 0
+        return len(self.parent_to_children[node.id]) == 0
 
     @property
     def is_empty(self) -> bool:
@@ -368,59 +375,49 @@ NodePath = dict[Hashable, Hashable]
 class LabelledTree(FixedAryTree):
     node_class = LabelledNode
 
-    def with_modified_component(self, loc, **kwargs):
-        node, component_index = loc
-        new_components = []
-        for cidx, component in enumerate(node.components):
-            if cidx == component_index:
-                new_component = component.copy(**kwargs)
+    def with_modified_component(self, node, component_index=None, **kwargs):
+        if component_index is None:
+            if node.degree == 1:
+                component_index = 0
             else:
-                new_component = component
-            new_components.append(new_component)
+                raise ValueError(
+                    "Must specify a component index for multi-component nodes"
+                )
+
+        new_components = list(node.components)
+        new_components[component_index] = new_components[component_index].copy(**kwargs)
         new_node = node.copy(components=new_components)
         return self.replace_node(new_node)
 
     def put_node(
         self,
         node: Node,
-        loc: tuple[Node | Hashable, int] | None = None,
+        parent: Mapping[Node | Hashable, int] | Node | Hashable | None = None,
+        component_index: int | None = None,
         uniquify: bool = False,
     ) -> None:
-        # TODO don't repeat this
-        if node in self:
-            if uniquify:
-                node = node.copy(id=self._first_unique_id(node.id))
-            else:
-                raise ValueError("Cannot insert a node with the same ID")
+        if isinstance(parent, Mapping):
+            parent = self._node_from_path(parent)
+        return super().put_node(node, parent, component_index, uniquify)
 
-        if isinstance(loc, Mapping):
-            loc = self._parent_id_and_component_index(loc)
-        return super().put_node(node, loc, uniquify)
-
-    # alias
-    place_node = put_node
-
-    def _parent_id_and_component_index(self, path):
+    def _node_from_path(self, path: Mapping[Node | Hashable, int]) -> Node:
         if not path:
-            return None, 0
+            return self.root
 
         path_ = path.copy()
-        parent = self.root
-        while True:
-            component_index = path_.pop(parent.label)
-            if path_:
-                parent = self._parent_to_children[parent.id][component_index]
-            else:
-                return parent.id, component_index
+        node = self.root
+        while path_:
+            component_index = path_.pop(node.label)
+            node = self.parent_to_children[node.id][component_index]
+        return node
 
     def find_node(
         self, loc: Mapping[Hashable, int] | tuple[Node | Hashable, int] | None = None
     ) -> LabelledNode:
-        if not loc:
-            return self.root
         if isinstance(loc, Mapping):
-            loc = self._parent_id_and_component_index(loc)
-        return super().find_node(loc)
+            return self._node_from_path(loc)
+        else:
+            return super().find_node(loc)
 
     def path(self, node: Node | Hashable):
         path_ = {}
@@ -447,46 +444,6 @@ class LabelledTree(FixedAryTree):
             return (child,) if child else ()
         else:
             return super().children(node)
-
-    # def add_node(
-    #     self,
-    #     node: LabelledNode,
-    #     parent: LabelledNode | Hashable | NodePath | None = None,
-    # ):
-    #     return self.copy(node_to_parent=self.node_to_parent | {node: parent})
-    #     if not parent:
-    #         super().add_node(node)
-    #         self._node_to_path[node.id] = {}
-    #     else:
-    #         if isinstance(parent, tuple):
-    #             parent_id, parent_component_label = parent
-    #             myparent = self._as_node(parent_id)
-    #             self._node_to_path[node.id] = self._node_to_path[parent_id] | {
-    #                 myparent.label: parent_component_label
-    #             }
-    #         else:
-    #             assert isinstance(parent, Mapping)
-    #             parent_id, parent_component_label = self._node_from_path(parent)
-    #             self._node_to_path[node.id] = parent
-    #         parent = self._as_node(parent_id)
-    #         if self._parent_and_label_to_child.get(
-    #             (parent.id, parent_component_label), None
-    #         ):
-    #             raise ValueError("already exists")
-    #         super().add_node(node, parent)
-    #
-    #         self._parent_and_label_to_child[
-    #             (parent.id, parent_component_label)
-    #         ] = node.id
-    #         self._child_to_parent_and_label[node.id] = (
-    #             parent.id,
-    #             parent_component_label,
-    #         )
-    #
-    #     for component in node.components:
-    #         self._parent_and_label_to_child[(node.id, component.label)] = None
-    #
-    #     return self
 
     def add_subtree(
         self,
@@ -548,9 +505,9 @@ class LabelledTree(FixedAryTree):
                 subtree.add_node(node, parent)
             del self._ids_to_nodes[node.id]
             del self._child_to_parent[node.id]
-            self._parent_to_children[parent_id] = tuple(
+            self.parent_to_children[parent_id] = tuple(
                 child
-                for child in self._parent_to_children[parent_id]
+                for child in self.parent_to_children[parent_id]
                 if child != node.id
             )
 
@@ -561,18 +518,6 @@ class LabelledTree(FixedAryTree):
                 del self._parent_and_label_to_child[(node.id, component.label)]
 
         return subtree
-
-    def _node_from_path(self, path: NodePath) -> tuple[Node, Hashable]:
-        # breakpoint()
-
-        node = self.root
-        path = path.copy()
-        while True:
-            label = path.pop(node.label)
-
-            if not path:
-                return node, label
-            node = self.child_by_label(node, label)
 
     def child_by_label(self, node: LabelledNode | Hashable, label: Hashable):
         node_id = self._as_existing_node_id(node)

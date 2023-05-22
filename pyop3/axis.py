@@ -1125,89 +1125,8 @@ class AxisTree(LabelledTree):
         else:
             return False
 
-    def add_part(self, axis_id, *args):
-        assert False, "dont touch?"
-        if axis_id not in self._all_axis_ids:
-            raise ValueError
-
-        part = self._parse_part(*args)
-        return self._add_part(axis_id, part)
-
-    # old syntax - keep? add_subaxes?
-    def add_subaxis(self, part_id, subaxes):
-        self.add_nodes(subaxes, part_id)
-        return self
-        # return self._add_subaxis(part_id, subaxis)
-
-    @property
-    def _all_axis_ids(self):
-        all_ids = [self.id]
-        for part in self.parts:
-            if part.subaxis:
-                all_ids.extend(part.subaxis._all_axis_ids)
-
-        if not has_unique_entries(all_ids):
-            # TODO if duplicate entries exist
-            raise NotImplementedError(
-                """
-Need to handle the case where axes have duplicated labels.
-
-This can happen for example with matrices where the inner dimension can also be "cells",
-"edges" etc. To get around this we should require that the label 'path' be specified
-by the user as a tuple. E.g. ("cells", "edges"). We should only allow the syntactic sugar
-of a single label value if that label is unique in the whole tree.
-"""
-            )
-        return frozenset(all_ids)
-
-    @property
-    def _all_part_ids(self):
-        all_ids = []
-        for part in self.parts:
-            if part.id is not None:
-                all_ids.append(part.id)
-            if part.subaxis:
-                all_ids.extend(part.subaxis._all_part_ids)
-
-        if len(unique(all_ids)) != len(all_ids):
-            raise RuntimeError("ids must be unique")
-        return frozenset(all_ids)
-
-    def _add_part(self, axis_id, part):
-        if axis_id == self.id:
-            return self.copy(parts=self.parts + (part,))
-        elif axis_id not in self._all_axis_ids:
-            return self
-        else:
-            new_parts = []
-            for pt in self.parts:
-                if pt.subaxis:
-                    new_subaxis = pt.subaxis._add_part(axis_id, part)
-                    new_parts.append(pt.copy(subaxis=new_subaxis))
-                else:
-                    new_parts.append(pt)
-            return self.copy(parts=new_parts)
-
-    def _add_subaxis(self, part_id, subaxis):
-        # TODO clean this up
-        if part_id in self._all_part_ids:
-            new_parts = []
-            for part in self.parts:
-                if part.id == part_id:
-                    if part.subaxis:
-                        raise RuntimeError("Already has a subaxis")
-                    new_part = part.copy(subaxis=subaxis)
-                else:
-                    if part.subaxis:
-                        new_part = part.copy(
-                            subaxis=part.subaxis._add_subaxis(part_id, subaxis)
-                        )
-                    else:
-                        new_part = part
-                new_parts.append(new_part)
-            return self.copy(parts=new_parts)
-        else:
-            return self
+    def add_subaxis(self, subaxis, loc):
+        return self.put_node(subaxis, loc)
 
 
 class Axis(LabelledNode):
@@ -1472,15 +1391,6 @@ class AxisComponent(pytools.ImmutableRecord):
         # alias, what is the best name?
         return self.num_owned
 
-    def add_subaxis(self, part_id, subaxis):
-        if part_id == self.id and self.subaxis:
-            raise RuntimeError
-
-        if part_id == self.id:
-            return self.copy(subaxis=subaxis)
-        else:
-            return self.copy(subaxis=self.subaxis.add_subaxis(part_id, subaxis))
-
 
 @dataclasses.dataclass(frozen=True)
 class Path:
@@ -1573,7 +1483,7 @@ def fill_shape(axes, axis_path=None, prev_indices=PrettyTuple()):
     ]
     others = functools.reduce(
         operator.or_,
-        [sit._parent_to_children if sit else {} for sit in subindex_trees],
+        [dict(sit.parent_to_children) if sit else {} for sit in subindex_trees],
         {},
     )
 

@@ -147,7 +147,7 @@ def test_multi_component_scalar_copy_with_two_outer_loops(scalar_copy_kernel):
         ),
         {
             root.id: [
-                Axis(a, "ax_label1"),
+                Axis(a),
                 Axis(b, "ax_label1"),
             ]
         },
@@ -173,10 +173,9 @@ def test_permuted_vector_copy(vector_copy_kernel):
     numaxes = AxisTree(Axis(m, "ax_label0"))
     num0 = MultiArray(numaxes, name="num0", data=perm)
 
-    # ordered_axes = numaxes.add_subaxis(Axis(n), numaxes.root)
-    ordered_axes = numaxes.put_node(Axis(n), (numaxes.root, 0))
+    ordered_axes = numaxes.add_subaxis(Axis(n), numaxes.root)
     permuted_axes = ordered_axes.with_modified_component(
-        (ordered_axes.root, 0),  # TODO could just be root
+        ordered_axes.root,
         numbering=num0,
     )
     dat0 = MultiArray(
