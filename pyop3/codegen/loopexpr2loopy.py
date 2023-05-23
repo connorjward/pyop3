@@ -23,7 +23,7 @@ from pyop3.axis import (
     MultiAxisComponent,
     MultiAxisTree,
 )
-from pyop3.distarray.multiarray import MultiArray
+from pyop3.distarray import IndexedMultiArray, MultiArray
 from pyop3.index import (
     AffineMap,
     IdentityMap,
@@ -877,37 +877,20 @@ class LoopyKernelBuilder:
 
         # TODO singledispatch!
         if isinstance(layout_fn, IndirectLayoutFunction):
-            # we can either index with just the lowest index or all of them
-            # if layout_fn.data.axes.rootless_depth == 1:
-            #     mylabels = part_labels[-1:]
-            #     myjnames = jnames[-1:]
-            # else:
-            #     assert layout_fn.data.axes.rootless_depth == utils.single_valued(
-            #         map(len, [part_labels, jnames])
-            #     )
-            #     mylabels = part_labels
-            #     myjnames = jnames
-
             layout_var = self.register_scalar_assignment(
                 layout_fn.data, labels_to_jnames, within_inames, depends_on
             )
             expr = pym.var(offset_var) + layout_var
-
-            # register the data
-            # done in register_scalar_assignment?
-            # layout_arg = lp.GlobalArg(layout_fn.data.name, np.uintp, (None,), is_input=True, is_output=False)
-            # self._tensor_data[layout_fn.data.name] = layout_arg
         elif isinstance(layout_fn, AffineLayoutFunction):
             start = layout_fn.start
             step = layout_fn.step
 
             if isinstance(start, MultiArray):
+                assert False, "dropping support for this"
                 # drop the last jname
                 start = self.register_scalar_assignment(
                     layout_fn.start,
                     labels_to_jnames,
-                    # part_labels[:-1],
-                    # jnames[:-1],
                     within_inames,
                     depends_on,
                 )
@@ -990,22 +973,20 @@ class LoopyKernelBuilder:
         return tuple(state)
 
     def register_extent(self, extent, within_indices, within_inames, depends_on):
-        if isinstance(extent, MultiArray):
+        if isinstance(extent, IndexedMultiArray):
             labels, jnames = [], []
-            index = just_one(extent.indices.children(extent.indices.root))
-            while True:
-                new_labels, new_jnames = within_indices[index.id]
+            index = extent.index.root
+            while index:
+                component = just_one(index.components)
+                new_labels, new_jnames = within_indices[component.id]
                 labels.extend(new_labels)
                 jnames.extend(new_jnames)
-                if children := extent.indices.children(index):
-                    index = just_one(children)  # must be linear
-                else:
-                    break
+                index = extent.index.find_node((index.id, 0))
 
             labels_to_jnames = dict(checked_zip(labels, jnames))
 
             temp_var = self.register_scalar_assignment(
-                extent, labels_to_jnames, within_inames, depends_on
+                extent.data, labels_to_jnames, within_inames, depends_on
             )
             return str(temp_var)
         else:

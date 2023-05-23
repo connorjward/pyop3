@@ -143,11 +143,11 @@ class FixedAryTree(pytools.ImmutableRecord):
 
         parent = self.parent(loc)
 
-        new_parent_to_children = self.parent_to_children.copy()
+        new_parent_to_children = dict(self.parent_to_children)
         if parent:  # ie not root
             node_index = [
                 child.id for child in self.parent_to_children[parent.id]
-            ].index(node)
+            ].index(node.id)
             new_children = list(self.parent_to_children[parent.id])
             new_children[node_index] = node
             new_parent_to_children[parent.id] = new_children
@@ -281,8 +281,8 @@ class FixedAryTree(pytools.ImmutableRecord):
     def leaves(self) -> tuple[Node]:
         return tuple(
             node
-            for nid, node in self._ids_to_nodes.items()
-            if not self.parent_to_children[nid]
+            for node in self.nodes
+            if all(child is None for child in self.parent_to_children[node.id])
         )
 
     @property
@@ -389,6 +389,9 @@ NodePath = dict[Hashable, Hashable]
 
 
 class LabelledTree(FixedAryTree):
+    def with_modified_node(self, node, **kwargs):
+        return self.replace_node(node.copy(**kwargs))
+
     def with_modified_component(self, node, component_index=None, **kwargs):
         return self.replace_node(
             node.with_modified_component(component_index, **kwargs)

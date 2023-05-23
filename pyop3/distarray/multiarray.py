@@ -23,7 +23,7 @@ from pyop3.axis import (
     get_bottom_part,
 )
 from pyop3.distarray.base import DistributedArray
-from pyop3.dtypes import IntType, get_mpi_dtype
+from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
 from pyop3.index import Range, TabulatedMap, as_index_tree
 from pyop3.utils import (
     MultiNameGenerator,
@@ -106,7 +106,7 @@ class MultiArray(DistributedArray):
         return self.axes.alloc_size() if self.axes else 1
 
     @classmethod
-    def from_list(cls, data, axis_labels, name, dtype, inc=0):
+    def from_list(cls, data, axis_labels, name=None, dtype=ScalarType, inc=0):
         """Return a multi-array formed from a list of lists.
 
         The returned array must have one axis component per axis. These are
@@ -116,19 +116,10 @@ class MultiArray(DistributedArray):
         flat, count = cls._get_count_data(data)
         flat = np.array(flat, dtype=dtype)
 
-        if isinstance(count, list):
-            raise NotImplementedError
+        if isinstance(count, Sequence):
             count = cls.from_list(count, axis_labels[:-1], name, dtype, inc + 1)
-            axis = Axis(
-                [AxisComponent(count)],
-                axis_labels[-1],
-            )
-            if isinstance(count, MultiArray):
-                raise NotImplementedError
-                base_axis = get_bottom_part(count.root)
-                base_component = just_one(base_axis.components)
-                newax = count.root.copy()
-                newax.add_node(axis, (base_axis, base_component.label))
+            subaxis = Axis(count, axis_labels[-1])
+            axes = count.axes.add_subaxis(subaxis, count.axes.leaf)
         else:
             axes = AxisTree(Axis(count, axis_labels[-1]))
 
