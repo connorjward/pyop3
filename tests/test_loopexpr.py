@@ -243,49 +243,29 @@ def test_vector_copy_with_permuted_inner_axis(vector_copy_kernel):
     assert np.allclose(dat1.data.reshape((a, b, c))[:, perm].flatten(), dat0.data)
 
 
-def test_compute_double_loop_permuted_mixed():
-    axes = (
-        MultiAxis(
-            [
-                MultiAxisComponent(4, id="p1", label=0, numbering=[4, 6, 2, 0]),
-                MultiAxisComponent(3, id="p2", label=1, numbering=[5, 3, 1]),
-            ]
-        )
-        .add_subaxis("p1", [MultiAxisComponent(1)])
-        .add_subaxis("p2", [MultiAxisComponent(2)])
-    ).set_up()
+def test_vector_copy_with_permuted_multi_component_axes(vector_copy_kernel):
+    m, n, a, b = 3, 2, 2, 3
+    perm = [4, 2, 0, 3, 1]
 
-    dat1 = MultiArray(axes, name="dat1", data=np.arange(10, dtype=np.float64))
-    dat2 = MultiArray(axes, name="dat2", data=np.zeros(10, dtype=np.float64))
-
-    code = lp.make_kernel(
-        "{ [i]: 0 <= i < 2 }",
-        "y[i] = x[i] + 1",
-        [
-            lp.GlobalArg("x", np.float64, (2,), is_input=True, is_output=False),
-            lp.GlobalArg("y", np.float64, (2,), is_input=False, is_output=True),
-        ],
-        target=lp.CTarget(),
-        name="mylocalkernel",
-        lang_version=(2018, 2),
+    fullperm = (
+        [10, 11] + [5, 6] + [0, 1] + [7, 8, 9] + [2, 3, 4]  # 4  # 2  # 0  # 3  # 1
     )
-    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-    p = IndexTree([RangeNode(1, 3)])
-    expr = pyop3.Loop(p, kernel(dat1[p], dat2[p]))
 
-    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+    axes = AxisTree(root := Axis([m, n]), {root.id: [Axis(a), Axis(b)]})
+    paxes = axes.with_modified_node(axes.root, permutation=perm)
 
-    dll = compilemythings(code)
-    fn = getattr(dll, "mykernel")
+    dat0 = MultiArray(
+        axes, name="dat0", data=np.arange(m * a + n * b, dtype=ScalarType)
+    )
+    dat1 = MultiArray(
+        paxes, name="dat1", data=np.zeros(m * a + n * b, dtype=ScalarType)
+    )
 
-    # import pdb; pdb.set_trace()
-    sec1 = dat1.dim.children("root")[1].layout_fn.data
+    p = IndexTree(Index(Range((axes.root.label, 1), n)))
+    do_loop(p, vector_copy_kernel(dat0[p], dat1[p]))
 
-    args = [sec1.data, dat1.data, dat2.data]
-    fn.argtypes = (ctypes.c_voidp,) * len(args)
-    fn(*(d.ctypes.data for d in args))
-
-    assert all(dat2.data == [0.0, 2.0, 3.0, 0.0, 5.0, 6.0, 0.0, 8.0, 9.0, 0.0])
+    assert np.allclose(dat1.data[fullperm][: m * a], 0)
+    assert np.allclose(dat1.data[fullperm][m * a :], dat0.data[m * a :])
 
 
 def test_ragged_loop(scalar_copy_kernel):

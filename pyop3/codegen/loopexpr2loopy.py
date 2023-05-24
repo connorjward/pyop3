@@ -118,7 +118,6 @@ class LoopyKernelBuilder:
             options=lp.Options(check_dep_resolution=False),
         )
         tu = lp.merge((translation_unit, *self.subkernels))
-        # breakpoint()
         return tu.with_entrypoints("mykernel")
 
     @functools.singledispatchmethod
@@ -841,13 +840,18 @@ class LoopyKernelBuilder:
                     if (axis.label, i) in labels_to_jnames
                 )
 
+                # set the component index to always 0 for the inner linear layout
+                linear_labels_to_jnames = {
+                    (label, 0): jname for (label, _), jname in labels_to_jnames.items()
+                }
+
                 deps = self.emit_layout_insns(
                     axes,
                     axis,
                     component,
                     component_index,
                     offset,
-                    labels_to_jnames,
+                    linear_labels_to_jnames,
                     within_inames,
                     depends_on,
                 )
@@ -895,9 +899,7 @@ class LoopyKernelBuilder:
                     depends_on,
                 )
 
-            jname = pym.var(
-                labels_to_jnames[(axis.label, axis.components.index(axis_part))]
-            )
+            jname = pym.var(labels_to_jnames[(axis.label, 0)])
             expr = pym.var(offset_var) + jname * step + start
         else:
             raise NotImplementedError
@@ -983,7 +985,9 @@ class LoopyKernelBuilder:
                 jnames.extend(new_jnames)
                 index = extent.index.find_node((index.id, 0))
 
-            labels_to_jnames = dict(checked_zip(labels, jnames))
+            labels_to_jnames = {
+                (label, 0): jname for ((label, _), jname) in checked_zip(labels, jnames)
+            }
 
             temp_var = self.register_scalar_assignment(
                 extent.data, labels_to_jnames, within_inames, depends_on

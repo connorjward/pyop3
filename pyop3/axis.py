@@ -520,7 +520,8 @@ class AxisTree(LabelledTree):
 
     @functools.cached_property
     def layouts(self):
-        self.set_up()
+        if not self._layouts:
+            self.set_up()
         return self._layouts
 
     def find_part(self, label):
@@ -769,20 +770,24 @@ class AxisTree(LabelledTree):
     ):
         from pyop3.distarray import MultiArray
 
+        offset = IntRef(0)
         layouts = {}
         axis = axis or self.root
         existing_layouts = existing_layouts or frozenset()
 
+        # breakpoint()
         for cidx, component in enumerate(axis.components):
-            if (axis.id, cidx) not in existing_layouts:
+            if (axis.id, cidx) not in existing_layouts | layouts.keys():
                 if has_constant_step(self, axis, component, cidx):
                     # elif has_independently_indexed_subaxis_parts(self, axis, component, cidx):
                     step = step_size(self, axis, component, cidx)
                     if axis.permutation is None:
                         # affine stuff
                         layouts[(axis.id, cidx)] = AffineLayout(step, offset.value)
+                        offset += component.calc_size(self, axis, cidx)
                     else:
                         # I dont want to recurse here really, just want to do the top level one
+                        # breakpoint()
                         new_tree = self.make_ragged_tree(path, layout_path, axis)
                         assert new_tree.depth == 1
                         # breakpoint()
@@ -823,9 +828,10 @@ class AxisTree(LabelledTree):
 
             # next bit, recurse
             if subaxis := self.find_node((axis.id, cidx)):
-                if (axis.id, cidx) in layouts:
-                    saved_offset = offset.value
-                    offset.value = 0
+                # if (axis.id, cidx) in existing_layouts | set(layouts.keys()):
+                if has_independently_indexed_subaxis_parts(self, axis, component, cidx):
+                    # saved_offset = offset.value
+                    # offset.value = 0
                     layouts |= self.finish_off_layouts(
                         offset,
                         path | (axis.label, cidx),
@@ -833,8 +839,9 @@ class AxisTree(LabelledTree):
                         subaxis,
                         existing_layouts | set(layouts.keys()),
                     )
-                    offset += saved_offset
-                    offset += component.calc_size(self, axis, cidx)
+                    # offset += saved_offset
+                    # not sure about this...
+                    # offset += component.calc_size(self, axis, cidx)
                 else:
                     layouts |= self.finish_off_layouts(
                         offset,
@@ -844,6 +851,7 @@ class AxisTree(LabelledTree):
                         existing_layouts | set(layouts.keys()),
                     )
 
+        # breakpoint()
         return layouts
 
     @classmethod
@@ -904,6 +912,14 @@ class AxisTree(LabelledTree):
                 # layout_bits[(axis.id, selected_component_id)][0][
                 #     selected_component_num
                 # ] = offset.value
+                # breakpoint()
+                assert (
+                    mynode.data[selected_component_id][1].get_value(
+                        indices | selected_component_num,
+                    )
+                    == -1
+                )
+                # breakpoint()
                 mynode.data[selected_component_id][1].set_value(
                     indices | selected_component_num, offset.value
                 )
