@@ -783,22 +783,19 @@ class AxisTree(LabelledTree):
                         layouts[(axis.id, cidx)] = AffineLayout(step, offset.value)
                     else:
                         # I dont want to recurse here really, just want to do the top level one
-                        layout_labels = self.determine_layout_axis_labels(
-                            path, layout_path, axis
-                        )
-                        sublayout_bits = self.create_layout_lists(
+                        new_tree = self.make_ragged_tree(path, layout_path, axis)
+                        assert new_tree.depth == 1
+                        # breakpoint()
+                        self.create_layout_lists(
                             path,
                             PrettyTuple(),
                             offset,
                             axis,
-                            layout_labels,
+                            new_tree,
                         )
-                        for labels, (loc, (layout_data, _)) in checked_zip(
-                            layout_labels, sublayout_bits.items()
-                        ):
-                            layout_data = MultiArray.from_list(
-                                layout_data, labels, dtype=IntType
-                            )
+                        # breakpoint()
+
+                        for loc, layout_data in new_tree.root.data:
                             layouts[loc] = TabulatedLayout(layout_data)
                 else:
                     # we must be ragged

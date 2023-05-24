@@ -167,7 +167,7 @@ def test_multi_component_scalar_copy_with_two_outer_loops(scalar_copy_kernel):
     assert all(dat1.data[m * a :] == dat0.data[m * a :])
 
 
-def test_permuted_vector_copy(vector_copy_kernel):
+def test_vector_copy_with_permuted_axis(vector_copy_kernel):
     m, n = 6, 3
     perm = np.asarray([3, 2, 0, 5, 4, 1], dtype=IntType)
 
@@ -184,7 +184,7 @@ def test_permuted_vector_copy(vector_copy_kernel):
     assert np.allclose(dat1.data.reshape((m, n))[perm].flatten(), dat0.data)
 
 
-def test_permuted_twice_vector_copy(vector_copy_kernel):
+def test_vector_copy_with_two_permuted_axes(vector_copy_kernel):
     a, b, c = 4, 2, 3
     perm0 = [3, 1, 0, 2]
     perm1 = [1, 0]
@@ -326,8 +326,6 @@ def test_two_ragged_loops(scalar_copy_kernel):
         name="nnz1",
         data=nnzdata1,
     )
-
-    # breakpoint()
 
     axes = nnzaxes1.add_subaxis(Axis(nnz1, "ax2"), nnzaxes1.leaf)
     dat0 = MultiArray(axes, name="dat0", data=np.arange(npoints, dtype=ScalarType))
