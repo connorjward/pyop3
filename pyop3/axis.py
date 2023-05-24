@@ -30,7 +30,14 @@ from pyop3.index import (
     Range,
     TabulatedMap,
 )
-from pyop3.tree import LabelledNode, LabelledTree, postvisit, previsit
+from pyop3.tree import (
+    FixedAryTree,
+    LabelledNode,
+    LabelledTree,
+    Node,
+    postvisit,
+    previsit,
+)
 from pyop3.utils import NameGenerator  # TODO delete
 from pyop3.utils import (
     PrettyTuple,
@@ -477,15 +484,10 @@ def _collect_datamap(axis, *subdatamaps, axes):
 
     datamap = {}
     for cidx, component in enumerate(axis.components):
-        layout = axes.layouts[(axis.id, cidx)]
-        # if isinstance(layout, AffineLayoutFunction):
-        #     if isinstance(layout.start, MultiArray):
-        #         datamap[layout.start.name] = layout.start
-        if isinstance(layout, IndirectLayoutFunction):
-            datamap[layout.data.name] = layout.data
-
+        if isinstance(layout := axes.layouts[(axis.id, cidx)], IndirectLayoutFunction):
+            datamap |= layout.data.datamap
         if isinstance(count := component.count, MultiArray):
-            datamap[count.name] = count
+            datamap |= count.datamap
     return datamap | merge_dicts(subdatamaps)
 
 
@@ -758,66 +760,73 @@ class AxisTree(LabelledTree):
             self._layouts[(axis.id, cidx)] = layout
 
     def finish_off_layouts(
-        self, offset, path=PrettyTuple(), layout_path=PrettyTuple(), axis=None
+        self,
+        offset,
+        path=PrettyTuple(),
+        layout_path=PrettyTuple(),
+        axis=None,
+        existing_layouts=None,
     ):
         from pyop3.distarray import MultiArray
 
         layouts = {}
         axis = axis or self.root
+        existing_layouts = existing_layouts or frozenset()
 
         for cidx, component in enumerate(axis.components):
-            # skip if the thing would be set by create_layout_lists
-            # if some_condition
-            #     continue
-            # elif not has_constant_step(self, axis, component, cidx):
-            # ...
-
-            # we have null layouts whenever the step is non-const (the variability
-            # is captured by
-            # the start property of the affine layout below it).
-            if has_constant_step(self, axis, component, cidx):
-                # elif has_independently_indexed_subaxis_parts(self, axis, component, cidx):
-                step = step_size(self, axis, component, cidx)
-                if axis.permutation is None:
-                    # affine stuff
-                    layouts[(axis.id, cidx)] = AffineLayout(step, offset.value)
-                else:
-                    # I dont want to recurse here really, just want to do the top level one
-                    layout_labels = self.determine_layout_axis_labels(
-                        path, layout_path, axis
-                    )
-                    sublayout_bits = self.create_layout_lists(
-                        path, PrettyTuple(), offset, axis
-                    )
-                    for labels, (loc, (layout_data, _)) in checked_zip(
-                        layout_labels, sublayout_bits.items()
-                    ):
-                        layout_data = MultiArray.from_list(
-                            layout_data, labels, dtype=IntType
+            if (axis.id, cidx) not in existing_layouts:
+                if has_constant_step(self, axis, component, cidx):
+                    # elif has_independently_indexed_subaxis_parts(self, axis, component, cidx):
+                    step = step_size(self, axis, component, cidx)
+                    if axis.permutation is None:
+                        # affine stuff
+                        layouts[(axis.id, cidx)] = AffineLayout(step, offset.value)
+                    else:
+                        # I dont want to recurse here really, just want to do the top level one
+                        layout_labels = self.determine_layout_axis_labels(
+                            path, layout_path, axis
                         )
-                        layouts[loc] = TabulatedLayout(layout_data)
-            else:
-                # we must be ragged
-                layout_labels = self.determine_layout_axis_labels(
-                    path, layout_path, axis
-                )
-                sublayout_bits = self.create_layout_lists(
-                    path, PrettyTuple(), offset, axis
-                )
-
-                for labels, (loc, (layout_data, _)) in checked_zip(
-                    layout_labels, sublayout_bits.items()
-                ):
-                    layout_data = MultiArray.from_list(
-                        layout_data, labels, dtype=IntType
+                        sublayout_bits = self.create_layout_lists(
+                            path,
+                            PrettyTuple(),
+                            offset,
+                            axis,
+                            layout_labels,
+                        )
+                        for labels, (loc, (layout_data, _)) in checked_zip(
+                            layout_labels, sublayout_bits.items()
+                        ):
+                            layout_data = MultiArray.from_list(
+                                layout_data, labels, dtype=IntType
+                            )
+                            layouts[loc] = TabulatedLayout(layout_data)
+                else:
+                    # we must be ragged
+                    new_tree = self.make_ragged_tree(path, layout_path, axis)
+                    # breakpoint()
+                    self.create_layout_lists(
+                        path,
+                        PrettyTuple(),
+                        offset,
+                        axis,
+                        new_tree,
                     )
-                    layouts[loc] = TabulatedLayout(layout_data)
-                # breakpoint()
-                pass
+                    # breakpoint()
+
+                    # also insert intermediary bits into layouts
+
+                    for node in new_tree.nodes:
+                        for loc, layout_data in node.data:
+                            if layout_data is not None:
+                                layouts[loc] = TabulatedLayout(layout_data)
+                            else:
+                                layouts[loc] = None
+
+            # breakpoint()
 
             # next bit, recurse
             if subaxis := self.find_node((axis.id, cidx)):
-                if layouts[(axis.id, cidx)] is not None:
+                if (axis.id, cidx) in layouts:
                     saved_offset = offset.value
                     offset.value = 0
                     layouts |= self.finish_off_layouts(
@@ -825,6 +834,7 @@ class AxisTree(LabelledTree):
                         path | (axis.label, cidx),
                         PrettyTuple(),
                         subaxis,
+                        existing_layouts | set(layouts.keys()),
                     )
                     offset += saved_offset
                     offset += component.calc_size(self, axis, cidx)
@@ -834,6 +844,7 @@ class AxisTree(LabelledTree):
                         path | (axis.label, cidx),
                         layout_path | (axis.label, cidx),
                         subaxis,
+                        existing_layouts | set(layouts.keys()),
                     )
 
         return layouts
@@ -843,10 +854,18 @@ class AxisTree(LabelledTree):
         return order_axes(layout)
 
     def create_layout_lists(
-        self, path, layout_path, offset, axis, indices=PrettyTuple()
+        self,
+        path,
+        layout_path,
+        offset,
+        axis,
+        layout_tree,
+        mynode=None,
+        indices=PrettyTuple(),
     ):
+        mynode = mynode or layout_tree.root
+        layout_data = []
         layout_bits = {}
-        # breakpoint()
 
         npoints = 0
         for part in axis.components:
@@ -874,7 +893,8 @@ class AxisTree(LabelledTree):
                 point = permutation[pos + i]
                 point_to_component_id[point] = cidx
                 point_to_component_num[point] = i
-            layout_bits[(axis.id, cidx)] = [np.empty(csize, dtype=object), None]
+            # layout_bits[(target[0], cidx)] = [np.empty(csize, dtype=object), None]
+            # layout_data.append(np.empty(csize, dtype=object))
             pos += csize
 
         for pt in range(npoints):
@@ -882,13 +902,17 @@ class AxisTree(LabelledTree):
             selected_component = axis.components[selected_component_id]
             selected_component_num = point_to_component_num[pt]
 
-            # if has_independently_indexed_subaxis_parts(
-            #     self, axis, selected_component, selected_component_id,
-            # ):
-            if has_fixed_size(self, axis, selected_component, selected_component_id):
-                layout_bits[(axis.id, selected_component_id)][0][
-                    selected_component_num
-                ] = offset.value
+            # if axis.id == mynode.data[0]:
+            if mynode in layout_tree.leaves:
+                # layout_bits[(axis.id, selected_component_id)][0][
+                #     selected_component_num
+                # ] = offset.value
+                mynode.data[selected_component_id][1].set_value(
+                    indices | selected_component_num, offset.value
+                )
+                # layout_data[selected_component_id][
+                #     selected_component_num
+                # ] = offset.value
                 offset += step_size(
                     self,
                     axis,
@@ -897,23 +921,38 @@ class AxisTree(LabelledTree):
                     indices | selected_component_num,
                 )
             else:
+                # subaxis = self.find_node((axis.id, selected_component_id))
+                # if all(has_constant_step(self, subaxis, subcomponent, subcidx) for (subcidx, subcomponent) in enumerate(subaxis.components)) :
+                #     layout_bits[(axis.id, selected_component_id)][0][
+                #         selected_component_num
+                #     ] = offset.value
+                #     offset += step_size(
+                #         self,
+                #         axis,
+                #         selected_component,
+                #         selected_component_id,
+                #         indices | selected_component_num,
+                #     )
+                # else:
                 subaxis = self.find_node((axis.id, selected_component_id))
                 assert subaxis
-                subdata = self.create_layout_lists(
+                self.create_layout_lists(
                     path | (axis.label, selected_component_id),
                     layout_path | axis.label,
                     offset,
                     subaxis,
+                    layout_tree,
+                    layout_tree.find_node((mynode.id, selected_component_id)),
                     indices | selected_component_num,
                 )
 
                 # breakpoint()
 
-                for subloc, (sublayout_data, sublayout_path) in subdata.items():
-                    layout_bits[(axis.id, selected_component_id)][0][
-                        selected_component_num
-                    ] = sublayout_data
-                    # layout_bits[(axis.id, selected_component_id)][1] = sublayout_path
+                # for subloc, (sublayout_data, sublayout_path) in subdata.items():
+                #     layout_bits[(axis.id, selected_component_id)][0][
+                #         selected_component_num
+                #     ] = sublayout_data
+                # layout_bits[(axis.id, selected_component_id)][1] = sublayout_path
 
         # catch zero-sized sub-bits
         # for n in range(self.nparts):
@@ -925,46 +964,60 @@ class AxisTree(LabelledTree):
         #                 new_layouts[path_][i] = []
 
         # breakpoint()
-
-        # for cidx, component in enumerate(axis.components):
-        #     # the layout is indirect and requires the current axis part if there only
-        #     # if there is numbering
-        #     if axis.permutation is not None:
-        #         layout_bits[(axis.id, cidx)][1] = layout_bits[(axis.id, cidx)][1] | axis.label
-        #     else:
-        #         layout_bits[(axis.id, cidx)][1] = layout_path | layout_bits[(axis.id, cidx)][1]
+        # return layout_data
         #
-        return layout_bits
+        # return layout_bits
 
-    def determine_layout_axis_labels(self, path, layout_path, axis):
-        labels = []
+    def make_ragged_tree(self, path, layout_path, axis, sizes=PrettyTuple()):
+        from pyop3.distarray import MultiArray
+
+        root_id = next(MyNode._id_generator)
+        nodedata = []
+        subtrees = []
 
         for cidx, component in enumerate(axis.components):
-            if has_fixed_size(
-                self,
-                axis,
-                component,
-                cidx,
+            mylayout_path = layout_path | axis.label
+            mysizes = sizes | component.count
+
+            subaxis = self.find_node((axis.id, cidx))
+            if all(
+                has_constant_step(self, subaxis, subcomponent, subcidx)
+                for (subcidx, subcomponent) in enumerate(subaxis.components)
             ):
-                # i dont think below (commented) holds any more
-                # the layout is indirect and requires the current axis part if there only
-                # if there is numbering
-                # if axis.permutation is not None:
-                #     labels.append(layout_path | axis.label)
-                # else:
-                #     labels.append(layout_path)
-                labels.append(layout_path | axis.label)
+                # make a multiarray here from the given sizes
+                axes = [
+                    Axis(count, label)
+                    for (count, label) in checked_zip(mysizes, mylayout_path)
+                ]
+                root = axes[0]
+                parent_to_children = {}
+                for parent, child in zip(axes, axes[1:]):
+                    parent_to_children[parent.id] = child
+                axtree = AxisTree(root, parent_to_children)
+                countarray = MultiArray(
+                    axtree,
+                    data=np.full(axtree.calc_size(axtree.root), -1, dtype=IntType),
+                )
+                nodedata.append(((axis.id, cidx), countarray))
             else:
                 subaxis = self.find_node((axis.id, cidx))
                 assert subaxis
-                sublabels = self.determine_layout_axis_labels(
+                subtree = self.make_ragged_tree(
                     path | (axis.label, cidx),
-                    layout_path | axis.label,
+                    mylayout_path,
                     subaxis,
+                    mysizes,
                 )
-                labels.extend(sublabels)
+                nodedata.append(((axis.id, cidx), None))
+                subtrees.append(subtree)
 
-        return labels
+        parent_to_children = {}
+        for subtree in subtrees:
+            parent_to_children |= {root_id: subtree.root} | dict(
+                subtree.parent_to_children
+            )
+        root = MyNode(data=tuple(nodedata), degree=len(axis.components), id=root_id)
+        return FixedAryTree(root, parent_to_children)
 
     # TODO this is just a regular tree search
     def get_part_from_path(self, path, axis=None):
@@ -1105,6 +1158,14 @@ class Axis(LabelledNode):
         return f"{self.__class__.__name__}([{', '.join(str(cpt) for cpt in self.components)}], label={self.label})"
 
 
+class MyNode(Node):
+    fields = Node.fields | {"data"}
+
+    def __init__(self, data=None, **kwargs):
+        super().__init__(**kwargs)
+        self.data = data
+
+
 def get_slice_bounds(array, indices):
     from pyop3.distarray import MultiArray
 
@@ -1164,12 +1225,12 @@ def numbering_requires_external_index(
     return False
 
 
-def has_constant_step(axtree, node, part, component_index):
+def has_constant_step(axtree, node, part, component_index, depth=0):
     # we have a constant step if none of the internal dimensions need to index themselves
     # with the current index (numbering doesn't matter here)
     if child := axtree.find_node((node.id, component_index)):
         return all(
-            not size_requires_external_index(axtree, child, cpt, i)
+            not size_requires_external_index(axtree, child, cpt, i, depth)
             for i, cpt in enumerate(child.components)
         )
     else:

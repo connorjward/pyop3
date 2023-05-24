@@ -872,7 +872,7 @@ class LoopyKernelBuilder:
         """
         layout_fn = axes.layouts[(axis.id, component_index)]
 
-        if layout_fn == "null layout":
+        if layout_fn is None:
             return frozenset()
 
         # TODO singledispatch!

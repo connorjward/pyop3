@@ -61,13 +61,13 @@ class FixedAryTree(pytools.ImmutableRecord):
 
                 parent_to_children |= {
                     node.id: (None,) * node.degree
-                    for node in filter(None, flatten(parent_to_children.values()))
+                    for node in filter(None, flatten(list(parent_to_children.values())))
                     if node.id not in parent_to_children
                 }
 
                 node_ids = [
                     node.id
-                    for node in filter(None, flatten(parent_to_children.values()))
+                    for node in filter(None, flatten(list(parent_to_children.values())))
                 ] + [root.id]
                 if not has_unique_entries(node_ids):
                     raise ValueError("Nodes with duplicate IDs found")
@@ -75,7 +75,7 @@ class FixedAryTree(pytools.ImmutableRecord):
                     raise ValueError("Parent ID not found")
                 if any(
                     len(parent_to_children[node.id]) != node.degree
-                    for node in filter(None, flatten(parent_to_children.values()))
+                    for node in filter(None, flatten(list(parent_to_children.values())))
                 ):
                     raise ValueError("Node found with the wrong number of children")
             else:
@@ -195,7 +195,8 @@ class FixedAryTree(pytools.ImmutableRecord):
     @functools.cached_property
     def nodes(self) -> frozenset[Node]:
         return frozenset({self.root}) | {
-            node for node in filter(None, flatten(self.parent_to_children.values()))
+            node
+            for node in filter(None, flatten(list(self.parent_to_children.values())))
         }
 
     def _as_existing_node(self, node: Node | str) -> Node:

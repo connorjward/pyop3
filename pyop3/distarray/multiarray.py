@@ -31,6 +31,7 @@ from pyop3.utils import (
     PrettyTuple,
     just_one,
     single_valued,
+    strict_int,
     strictly_all,
 )
 
@@ -239,6 +240,10 @@ class MultiArray(DistributedArray):
     def get_value(self, indices):
         offset = self.root.get_offset(indices)
         return self.data[int(offset)]
+
+    def set_value(self, indices, value):
+        offset = strict_int(self.root.get_offset(indices))
+        self.data[offset] = value
 
     # aliases
     @property

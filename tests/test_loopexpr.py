@@ -307,71 +307,39 @@ def test_ragged_loop(scalar_copy_kernel):
     assert np.allclose(dat1.data, dat0.data)
 
 
-def test_doubly_ragged():
-    ax1 = MultiAxis([MultiAxisComponent(3, "a", id="p1")])
+def test_two_ragged_loops(scalar_copy_kernel):
+    m = 3
+    nnzdata0 = np.asarray([3, 1, 2], dtype=IntType)
+    nnzdata1 = np.asarray([1, 1, 5, 4, 2, 3], dtype=IntType)
+    npoints = sum(nnzdata1)
+
+    nnzaxes0 = AxisTree(Axis(m, "ax0"))
+    nnz0 = MultiArray(
+        nnzaxes0,
+        name="nnz0",
+        data=nnzdata0,
+    )
+
+    nnzaxes1 = nnzaxes0.add_subaxis(Axis(nnz0, "ax1"), nnzaxes0.root)
     nnz1 = MultiArray(
-        ax1.set_up(),
+        nnzaxes1,
         name="nnz1",
-        max_value=3,
-        data=np.array([3, 1, 2], dtype=np.int32),
+        data=nnzdata1,
     )
 
-    ax2 = ax1.copy()
-    ax2.add_subaxis("p1", [MultiAxisComponent(nnz1, "b", id="p2", max_count=3)])
-    nnz2 = MultiArray(
-        ax2.set_up(),
-        name="nnz2",
-        max_value=5,
-        data=np.array([1, 1, 5, 4, 2, 3], dtype=np.int32),
-    )
+    # breakpoint()
 
-    ax3 = ax2.copy()
-    ax3 = ax3.add_subaxis(
-        "p2", [MultiAxisComponent(nnz2, "c", max_count=5, id="p3")]
-    ).set_up()
-    dat1 = MultiArray(ax3, name="dat1", data=np.arange(16, dtype=np.float64))
-    dat2 = MultiArray(ax3, name="dat2", data=np.zeros(16, dtype=np.float64))
+    axes = nnzaxes1.add_subaxis(Axis(nnz1, "ax2"), nnzaxes1.leaf)
+    dat0 = MultiArray(axes, name="dat0", data=np.arange(npoints, dtype=ScalarType))
+    dat1 = MultiArray(axes, name="dat1", data=np.zeros(npoints, dtype=ScalarType))
 
-    code = lp.make_kernel(
-        "{ [i]: 0 <= i < 1 }",
-        "y[i] = x[i] + 1",
-        [
-            lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
-            lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),
-        ],
-        target=lp.CTarget(),
-        name="mylocalkernel",
-        lang_version=(2018, 2),
-    )
-    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+    p = IndexTree(Index(Range("ax0", 3)))
+    p = p.put_node(Index(Range("ax1", nnz0[p])), p.leaf)
+    p = p.put_node(Index(Range("ax2", nnz1[p])), p.leaf)
 
-    p = IndexTree([RangeNode("a", 3, id="p0")])
-    p.add_node(RangeNode("b", nnz1[p.copy()], id="p1"), "p0")
-    p.add_node(RangeNode("c", nnz2[p.copy()]), "p1")
+    do_loop(p, scalar_copy_kernel(dat0[p], dat1[p]))
 
-    expr = pyop3.Loop(p, kernel(dat1[p], dat2[p]))
-    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-    dll = compilemythings(code)
-    fn = getattr(dll, "mykernel")
-
-    # void mykernel(nnz1, layout_0_0, nnz2, layout_2_0, layout_1_0, dat1, dat2)
-    layout0_0 = nnz2.root.node("p2").layout_fn.start
-    layout1_0 = dat1.root.node("p3").layout_fn.start
-    layout2_0 = layout1_0.dim.leaves[0].layout_fn.start
-    args = [
-        nnz1.data,
-        layout0_0.data,
-        nnz2.data,
-        layout2_0.data,
-        layout1_0.data,
-        dat1.data,
-        dat2.data,
-    ]
-    fn.argtypes = (ctypes.c_voidp,) * len(args)
-
-    fn(*(d.ctypes.data for d in args))
-
-    assert all(dat2.data == dat1.data + 1)
+    assert np.allclose(dat1.data, dat0.data)
 
 
 def test_interleaved_ragged(scalar_copy_kernel):
@@ -486,6 +454,9 @@ def test_ragged_inside_two_standard_loops(scalar_inc_kernel):
 
 
 def test_compute_double_loop_ragged_inner(ragged_copy_kernel):
+    raise NotImplementedError(
+        "I want to only need to use max_count here and raise an error, dont default"
+    )
     ax1 = MultiAxis([MultiAxisComponent(5, label="a", id="p1")])
     nnz = MultiArray(
         ax1.set_up(),

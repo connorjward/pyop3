@@ -130,7 +130,7 @@ def is_sequence(item):
 
 def flatten(iterable):
     """Recursively flatten a nested iterable."""
-    if not isinstance(iterable, collections.abc.Iterable):
+    if not isinstance(iterable, (list, tuple)):
         return (iterable,)
     return tuple(item_ for item in iterable for item_ in flatten(item))
 
