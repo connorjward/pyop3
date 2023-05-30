@@ -833,6 +833,7 @@ class LoopyKernelBuilder:
         if not scalar:
             axes = array_axes
             axis = axes.root
+            path = PrettyTuple()
             while axis:
                 component, component_index = just_one(
                     (cpt, i)
@@ -840,23 +841,26 @@ class LoopyKernelBuilder:
                     if (axis.label, i) in labels_to_jnames
                 )
 
+                path |= component_index
+
                 # set the component index to always 0 for the inner linear layout
                 linear_labels_to_jnames = {
                     (label, 0): jname for (label, _), jname in labels_to_jnames.items()
                 }
-
-                deps = self.emit_layout_insns(
-                    axes,
-                    axis,
-                    component,
-                    component_index,
-                    offset,
-                    linear_labels_to_jnames,
-                    within_inames,
-                    depends_on,
-                )
-                depends_on |= deps
                 axis = axes.find_node((axis.id, component_index))
+
+            deps = self.emit_layout_insns(
+                axes,
+                axis,
+                component,
+                component_index,
+                offset,
+                linear_labels_to_jnames,
+                within_inames,
+                depends_on,
+                path,
+            )
+            depends_on |= deps
 
         return offset, depends_on
 
@@ -870,39 +874,43 @@ class LoopyKernelBuilder:
         labels_to_jnames,
         within_inames,
         depends_on,
+        path,
     ):
         """
         TODO
         """
-        layout_fn = axes.layouts[(axis.id, component_index)]
-
-        if layout_fn is None:
-            return frozenset()
-
-        # TODO singledispatch!
-        if isinstance(layout_fn, IndirectLayoutFunction):
-            layout_var = self.register_scalar_assignment(
-                layout_fn.data, labels_to_jnames, within_inames, depends_on
-            )
-            expr = pym.var(offset_var) + layout_var
-        elif isinstance(layout_fn, AffineLayoutFunction):
-            start = layout_fn.start
-            step = layout_fn.step
-
-            if isinstance(start, MultiArray):
-                assert False, "dropping support for this"
-                # drop the last jname
-                start = self.register_scalar_assignment(
-                    layout_fn.start,
-                    labels_to_jnames,
-                    within_inames,
-                    depends_on,
+        expr = pym.var(offset_var)
+        remaining_labels = set(x for x, y in labels_to_jnames.keys())
+        for layout_fn in axes.layouts[path]:
+            # TODO singledispatch!
+            if isinstance(layout_fn, IndirectLayoutFunction):
+                layout_var = self.register_scalar_assignment(
+                    layout_fn.data, labels_to_jnames, within_inames, depends_on
                 )
+                expr += layout_var
+            elif isinstance(layout_fn, AffineLayoutFunction):
+                start = layout_fn.start
+                step = layout_fn.step
 
-            jname = pym.var(labels_to_jnames[(axis.label, 0)])
-            expr = pym.var(offset_var) + jname * step + start
-        else:
-            raise NotImplementedError
+                if isinstance(start, MultiArray):
+                    assert False, "dropping support for this"
+                    # drop the last jname
+                    start = self.register_scalar_assignment(
+                        layout_fn.start,
+                        labels_to_jnames,
+                        within_inames,
+                        depends_on,
+                    )
+
+                jname = pym.var(labels_to_jnames[(layout_fn.consumed_label, 0)])
+                expr += jname * step + start
+            else:
+                raise NotImplementedError
+
+            remaining_labels -= layout_fn.consumed_labels
+
+        # sometimes we have more labels than we want - I should probably stop that from happening
+        # assert len(remaining_labels) == 0
 
         insn = lp.Assignment(
             offset_var,

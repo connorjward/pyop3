@@ -107,7 +107,11 @@ is_single_valued = pytools.is_single_valued
 
 
 def merge_dicts(dicts):
-    return functools.reduce(operator.or_, dicts, {})
+    merged = {}
+    for dict_ in dicts:
+        merged.update(dict_)
+    return merged
+    # return functools.reduce(operator.or_, dicts, {})
 
 
 def unique(iterable):

@@ -307,7 +307,7 @@ class FixedAryTree(pytools.ImmutableRecord):
         return postvisit(self, count)
 
     def _check_exists(self, node: Node | str) -> None:
-        if (node_id := self._as_node(node).id) not in self._node_ids:
+        if (node_id := self._as_node(node).id) not in self.node_ids:
             raise NodeNotFoundException(f"{node_id} is not present in the tree")
 
     def _first_unique_id(self, node: Node | Hashable, sep: str = "_") -> str:
