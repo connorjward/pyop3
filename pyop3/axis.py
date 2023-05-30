@@ -711,7 +711,6 @@ class AxisTree(LabelledTree):
 
         layouts, _, _ = _compute_layouts(self, self.root)
         layoutsnew = _collect_at_leaves(self, layouts)
-        # breakpoint()
         # self.apply_layouts(layouts)
         self._layouts = pyrsistent.freeze(dict(layoutsnew))
         # assert is_set_up(self)
@@ -759,7 +758,6 @@ class AxisTree(LabelledTree):
                     else:
                         # we must be ragged
                         new_tree = self.make_ragged_tree(path, layout_path, axis)
-                        # breakpoint()
                         self.create_layout_lists(
                             path,
                             PrettyTuple(),
@@ -767,7 +765,6 @@ class AxisTree(LabelledTree):
                             axis,
                             new_tree,
                         )
-                        # breakpoint()
 
                         # also insert intermediary bits into layouts
 
@@ -780,8 +777,6 @@ class AxisTree(LabelledTree):
                                 else:
                                     layouts[loc] = None
 
-                # breakpoint()
-
         else:
             for cidx, component in enumerate(axis.components):
                 if (axis.id, cidx) not in existing_layouts | layouts.keys():
@@ -789,10 +784,8 @@ class AxisTree(LabelledTree):
                         # elif has_independently_indexed_subaxis_parts(self, axis, component, cidx):
                         step = step_size(self, axis, component, cidx)
                         # I dont want to recurse here really, just want to do the top level one
-                        # breakpoint()
                         new_tree = self.make_ragged_tree(path, layout_path, axis)
                         assert new_tree.depth == 1
-                        # breakpoint()
                         self.create_layout_lists(
                             path,
                             PrettyTuple(),
@@ -800,14 +793,12 @@ class AxisTree(LabelledTree):
                             axis,
                             new_tree,
                         )
-                        # breakpoint()
 
                         for loc, layout_data in new_tree.root.data:
                             layouts[loc] = TabulatedLayout(layout_data)
                     else:
                         # we must be ragged
                         new_tree = self.make_ragged_tree(path, layout_path, axis)
-                        # breakpoint()
                         self.create_layout_lists(
                             path,
                             PrettyTuple(),
@@ -815,7 +806,6 @@ class AxisTree(LabelledTree):
                             axis,
                             new_tree,
                         )
-                        # breakpoint()
 
                         # also insert intermediary bits into layouts
 
@@ -825,8 +815,6 @@ class AxisTree(LabelledTree):
                                     layouts[loc] = TabulatedLayout(layout_data)
                                 else:
                                     layouts[loc] = None
-
-                # breakpoint()
 
         for cidx, component in enumerate(axis.components):
             if subaxis := self.find_node((axis.id, cidx)):
@@ -853,7 +841,6 @@ class AxisTree(LabelledTree):
                         existing_layouts | set(layouts.keys()),
                     )
 
-        # breakpoint()
         return layouts
 
     @classmethod
@@ -1615,7 +1602,7 @@ def _compute_layouts(
                 cparent_to_children = {}
             ctree = FixedAryTree(croot, cparent_to_children)
 
-            fulltree = _create_count_array_tree(ctree, path)
+            fulltree = _create_count_array_tree(ctree)
 
             # now populate fulltree
             offset = IntRef(0)
@@ -1654,7 +1641,9 @@ def _compute_layouts(
 
 
 # I don't think that this actually needs to be a tree, just return a dict
-def _create_count_array_tree(ctree, fullpath, current_node=None, counts=PrettyTuple()):
+def _create_count_array_tree(
+    ctree, current_node=None, counts=PrettyTuple(), component_path=PrettyTuple()
+):
     from pyop3.distarray import MultiArray
 
     current_node = current_node or ctree.root
@@ -1677,10 +1666,10 @@ def _create_count_array_tree(ctree, fullpath, current_node=None, counts=PrettyTu
                 axtree,
                 data=np.full(axtree.calc_size(axtree.root), -1, dtype=IntType),
             )
-            arrays[fullpath | cidx] = countarray
+            arrays[component_path | cidx] = countarray
         else:
             arrays |= _create_count_array_tree(
-                ctree, fullpath | cidx, child, counts | current_node.counts[cidx]
+                ctree, child, counts | current_node.counts[cidx], component_path | cidx
             )
 
     return arrays
@@ -1728,9 +1717,6 @@ def _tabulate_count_array_tree(
         selected_component = axis.components[selected_component_id]
         selected_component_num = point_to_component_num[pt]
 
-        # if axes.depth == 3:
-        #     breakpoint()
-        #     pass
         if path | selected_component_id in count_arrays:
             count_arrays[path | selected_component_id].set_value(
                 indices | selected_component_num, offset.value
@@ -1767,6 +1753,8 @@ def _collect_at_leaves(
     for cidx in range(axis.degree):
         if component_path | cidx in values:
             prior_ = prior | values[component_path | cidx]
+        else:
+            prior_ = prior
         if subaxis := axes.find_node((axis.id, cidx)):
             acc |= _collect_at_leaves(
                 axes, values, subaxis, component_path | cidx, prior_
