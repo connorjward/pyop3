@@ -1563,6 +1563,33 @@ def _compute_layouts(
             csubtrees.append(None)
             sublayoutss.append(collections.defaultdict(list))
 
+    """
+    There are two conditions that we need to worry about:
+        1. does the axis have a fixed size (not ragged)?
+            If so then we should emit a layout function and handle any inner bits.
+            We don't need any external indices to fully index the array. In fact,
+            if we were the use the external indices too then the resulting layout
+            array would be much larger than it has to be (each index is basically
+            a new dimension in the array).
+
+        2. Does the axis have fixed size steps?
+
+        If we have constant steps then we should index things using an affine layout.
+
+    Care needs to be taken with the interplay of these options:
+
+        fixed size x fixed step : affine - great
+        fixed size x variable step : need to tabulate with the current axis and
+                                     everything below that isn't yet handled
+        variable size x fixed step : emit an affine layout but we need to tabulate above
+        variable size x variable step : add an axis to the "count" tree but do nothing else
+                                        not ready for tabulation as not fully indexed
+
+    We only ever care about axes as a whole. If individual components are ragged but
+    others not then we still need to index them separately as the steps are still not
+    a fixed size even for the non-ragged components.
+    """
+
     # 1. do we need to pass further up?
     if not all(has_fixed_size(axes, axis, cidx) for cidx in range(axis.degree)):
         if all(has_constant_step(axes, axis, cidx) for cidx in range(axis.degree)):
@@ -1615,8 +1642,6 @@ def _compute_layouts(
                     labels.append(axis_.label)
                     axis_ = axes.find_node((axis_.id, cidx))
 
-                # but dont tie to component???
-                # much easier to post-process
                 layouts[path + subpath] = TabulatedLayout(labels, offset_data)
             ctree = None
             steps = {path: axes.calc_size(axis)}
