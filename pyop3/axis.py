@@ -1766,12 +1766,12 @@ def _collect_at_leaves(
 
     for cidx in range(axis.degree):
         if component_path | cidx in values:
-            prior |= values[component_path | cidx]
+            prior_ = prior | values[component_path | cidx]
         if subaxis := axes.find_node((axis.id, cidx)):
             acc |= _collect_at_leaves(
-                axes, values, subaxis, component_path | cidx, prior
+                axes, values, subaxis, component_path | cidx, prior_
             )
         else:
-            acc[component_path | cidx] = prior
+            acc[component_path | cidx] = prior_
 
     return acc
