@@ -9,6 +9,7 @@ from pyop3.distarray import MultiArray
 from pyop3.dtypes import IntType, ScalarType
 from pyop3.index import Index, IndexTree, Range, TabulatedMap
 from pyop3.loopexpr import READ, WRITE, LoopyKernel, do_loop
+from pyop3.utils import flatten
 
 
 @pytest.fixture
@@ -320,77 +321,34 @@ def test_two_ragged_loops(scalar_copy_kernel):
     assert np.allclose(dat1.data, dat0.data)
 
 
-def test_interleaved_ragged(scalar_copy_kernel):
-    """Two data layout types are possible: constant or consistent-ragged.
-
-    The latter means that any ragged bits inside *must* obey all of the shape stuff outside of it.
-
-    For instance it doesn't make sense to have 3 -> [1, 2, 2, 3] so neither does it
-    make sense to have 2 -> [1, 2] -> [2, 3] (instead you want [[2], [3, 1]] or something).
-
-    Therefore this test makes sure that we can have
-
-    2 -> [1, 2] -> 2 -> [[[a, b]], [[c, d], [e, f]]]
-    """
-    ax1 = MultiAxis([MultiAxisComponent(3, "a", id="p1")])
-    nnz1 = MultiArray(
-        ax1.set_up(),
-        name="nnz1",
-        max_value=3,
-        data=np.array([1, 3, 2], dtype=np.int32),
+def test_two_ragged_loops_with_fixed_loop_between(scalar_copy_kernel):
+    m, n = 3, 2
+    nnzdata0 = np.asarray([1, 3, 2], dtype=IntType)
+    nnzdata1 = np.asarray(
+        flatten([[[1, 2]], [[2, 1], [1, 1], [1, 1]], [[2, 3], [3, 1]]]), dtype=IntType
     )
-    ax2 = ax1.copy().add_subaxis("p1", [MultiAxisComponent(nnz1, "b", id="p2")])
-    ax3 = ax2.add_subaxis("p2", [MultiAxisComponent(2, "c", id="p3")])
-    nnz2 = MultiArray(
-        ax3.set_up(),
-        name="nnz2",
-        max_value=3,
-        data=np.array(
-            utils.flatten([[[1, 2]], [[2, 1], [1, 1], [1, 1]], [[2, 3], [3, 1]]]),
-            dtype=np.int32,
-        ),
-    )
-    ax4 = ax3.copy().add_subaxis("p3", [MultiAxisComponent(nnz2, "d", id="p4")])
+    npoints = sum(nnzdata1)
 
-    root = ax4.set_up()
+    nnzaxes0 = AxisTree(Axis(m, "ax0"))
+    nnz0 = MultiArray(nnzaxes0, name="nnz0", data=nnzdata0)
 
-    dat1 = MultiArray(root, name="dat1", data=np.ones(19, dtype=np.float64))
-    dat2 = MultiArray(root, name="dat2", data=np.zeros(19, dtype=np.float64))
+    nnzaxes1 = nnzaxes0.add_subaxis(
+        subaxis := Axis(nnz0, "ax1"), nnzaxes0.leaf
+    ).add_subaxis(Axis(n, "ax2"), subaxis)
+    nnz1 = MultiArray(nnzaxes1, name="nnz1", data=nnzdata1)
 
-    p = IndexTree([RangeNode("a", 3, id="i0")])
-    p.add_node(RangeNode("b", nnz1[p.copy()], id="i1"), "i0")
-    p.add_node(RangeNode("c", 2, id="i2"), "i1")
-    p.add_node(RangeNode("d", nnz2[p.copy()]), "i2")
-    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[p], dat2[p]))
+    axes = nnzaxes1.add_subaxis(Axis(nnz1, "ax3"), nnzaxes1.leaf)
+    dat0 = MultiArray(axes, name="dat0", data=np.arange(npoints, dtype=ScalarType))
+    dat1 = MultiArray(axes, name="dat1", data=np.zeros(npoints, dtype=ScalarType))
 
-    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
+    p = IndexTree(Index(Range("ax0", m)))
+    p = p.put_node(Index(Range("ax1", nnz0[p])), p.leaf)
+    p = p.put_node(Index(Range("ax2", n)), p.leaf)
+    p = p.put_node(Index(Range("ax3", nnz1[p])), p.leaf)
 
-    dll = compilemythings(code)
-    fn = getattr(dll, "mykernel")
+    do_loop(p, scalar_copy_kernel(dat0[p], dat1[p]))
 
-    # void mykernel(nnz1, layout0_0, nnz2, layout4_0, layout3_0, layout1_0, dat1, dat2)
-
-    layout0_0 = nnz2.root.node("p2").layout_fn.start
-    # yes, I'm well aware this is insane
-    layout1_0 = dat1.root.node("p4").layout_fn.start
-    layout3_0 = layout1_0.dim.leaf.layout_fn.start
-    layout4_0 = layout3_0.root.leaf.layout_fn.start
-
-    args = [
-        nnz1.data,
-        layout0_0.data,
-        nnz2.data,
-        layout4_0.data,
-        layout3_0.data,
-        layout1_0.data,
-        dat1.data,
-        dat2.data,
-    ]
-    fn.argtypes = (ctypes.c_voidp,) * len(args)
-
-    fn(*(d.ctypes.data for d in args))
-
-    assert np.allclose(dat1.data, dat2.data)
+    assert np.allclose(dat0.data, dat1.data)
 
 
 def test_ragged_inside_two_standard_loops(scalar_inc_kernel):
