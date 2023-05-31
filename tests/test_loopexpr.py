@@ -348,45 +348,32 @@ def test_two_ragged_loops_with_fixed_loop_between(scalar_copy_kernel):
 
     do_loop(p, scalar_copy_kernel(dat0[p], dat1[p]))
 
-    assert np.allclose(dat0.data, dat1.data)
+    assert np.allclose(dat1.data, dat0.data)
 
 
-def test_ragged_inside_two_standard_loops(scalar_inc_kernel):
-    ax1 = MultiAxis([MultiAxisComponent(2, "a", id="p1")])
-    ax2 = ax1.add_subaxis("p1", [MultiAxisComponent(2, "b", id="p2")])
+def test_ragged_loop_inside_two_fixed_loops(scalar_copy_kernel):
+    m, n = 2, 2
+    nnzdata = np.asarray(flatten([[1, 2], [1, 2]]), dtype=IntType)
+    npoints = sum(nnzdata)
+
+    nnzaxes = AxisTree(root := Axis(m, "ax0"), {root.id: Axis(n, "ax1")})
     nnz = MultiArray(
-        ax2.set_up(),
+        nnzaxes,
         name="nnz",
-        max_value=2,
-        data=np.array([1, 2, 1, 2], dtype=np.int32),
+        data=nnzdata,
     )
-    ax3 = ax2.copy().add_subaxis("p2", [MultiAxisComponent(nnz, "c", id="p3")])
 
-    root = ax3.set_up()
-    dat1 = MultiArray(root, name="dat1", data=np.ones(6, dtype=np.float64))
-    dat2 = MultiArray(root, name="dat2", data=np.zeros(6, dtype=np.float64))
+    axes = nnzaxes.add_subaxis(Axis(nnz, "ax2"), nnzaxes.leaf)
+    dat0 = MultiArray(axes, name="dat0", data=np.arange(npoints, dtype=ScalarType))
+    dat1 = MultiArray(axes, name="dat1", data=np.zeros(npoints, dtype=ScalarType))
 
-    p = IndexTree([RangeNode("a", 2, id="a")])
-    p.add_node(RangeNode("b", 2, id="b"), "a")
-    p.add_node(RangeNode("c", nnz[p.copy()]), "b")
+    p = IndexTree(Index(Range("ax0", m)))
+    p = p.put_node(Index(Range("ax1", n)), p.leaf)
+    p = p.put_node(Index(Range("ax2", nnz[p])), p.leaf)
 
-    expr = pyop3.Loop(p, scalar_inc_kernel(dat1[p], dat2[p]))
-    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-    dll = compilemythings(code)
-    fn = getattr(dll, "mykernel")
+    do_loop(p, scalar_copy_kernel(dat0[p], dat1[p]))
 
-    # void mykernel(nnz, layout1_0, layout0_0, dat1, dat2)
-    layout0_0 = root.node("p3").layout_fn.start
-
-    # TODO: this is affine here, should it generally be?
-    layout1_0 = layout0_0.dim.leaf.layout_fn.start
-
-    args = [nnz.data, layout1_0.data, layout0_0.data, dat1.data, dat2.data]
-    fn.argtypes = (ctypes.c_voidp,) * len(args)
-
-    fn(*(d.ctypes.data for d in args))
-
-    assert all(dat2.data == dat1.data + 1)
+    assert np.allclose(dat1.data, dat0.data)
 
 
 def test_compute_double_loop_ragged_inner(ragged_copy_kernel):
