@@ -927,7 +927,7 @@ class AxisTree(LabelledTree):
 
 
 class Axis(LabelledNode):
-    fields = LabelledNode.fields - {"degree"} | {"components", "permutation"}
+    fields = LabelledNode.fields - {"degree"} | {"components", "permutation", "indexed"}
 
     def __init__(
         self,
@@ -935,6 +935,7 @@ class Axis(LabelledNode):
         label: Hashable | None = None,
         *,
         permutation: Sequence[int] | None = None,
+        indexed: bool = False,
         **kwargs,
     ):
         components = tuple(_as_axis_component(cpt) for cpt in as_tuple(components))
@@ -952,6 +953,7 @@ class Axis(LabelledNode):
 
         # FIXME: permutation should be something hashable but not quite like this...
         self.permutation = tuple(permutation) if permutation is not None else None
+        self.indexed = indexed
 
     def __str__(self) -> str:
         return f"{self.__class__.__name__}([{', '.join(str(cpt) for cpt in self.components)}], label={self.label})"
@@ -1064,7 +1066,6 @@ class AxisComponent(pytools.ImmutableRecord):
     fields = {
         "count",
         "name",
-        "max_count",
         "overlap",
         "indexed",
         "indices",
@@ -1077,25 +1078,15 @@ class AxisComponent(pytools.ImmutableRecord):
         *,
         name: str | None = None,
         indices=None,
-        max_count=None,
         overlap=None,
         indexed=False,
         lgmap=None,
     ):
-        from pyop3.distarray import MultiArray
-
-        if isinstance(count, numbers.Integral):
-            assert not max_count or max_count == count
-            max_count = count
-        elif not max_count:
-            max_count = max(count.data)
-
         super().__init__()
 
         self.count = count
         self.name = name
         self.indices = indices
-        self.max_count = max_count
         self.overlap = overlap
         self.indexed = indexed
         self.lgmap = lgmap
@@ -1142,20 +1133,20 @@ class AxisComponent(pytools.ImmutableRecord):
 
     # TODO this is just a traversal - clean up
     def alloc_size(self, axtree, axis, component_index):
-        # TODO This should probably raise an exception if we do weird things with maps
-        # (as in fix the layouts for reduced data movement)
-        # if self.count == -1:  # scalar thing
-        #     count = 1
-        # elif not self.indexed:
-        #     count = self.max_count
-        # else:
-        #     count = 1
-        # i dont think i need the above any more
-        count = self.max_count
-        if subaxis := axtree.find_node((axis.id, component_index)):
-            return count * axtree.alloc_size(subaxis)
+        from pyop3.distarray import IndexedMultiArray, MultiArray
+
+        if isinstance(self.count, MultiArray):
+            npoints = self.count.max_value
+        elif isinstance(self.count, IndexedMultiArray):
+            npoints = self.count.data.max_value
         else:
-            return count
+            assert isinstance(self.count, numbers.Integral)
+            npoints = self.count
+
+        if subaxis := axtree.find_node((axis.id, component_index)):
+            return npoints * axtree.alloc_size(subaxis)
+        else:
+            return npoints
 
     # TODO make a free function or something - this is horrible
     def calc_size(self, axtree, axis, component_index, indices=PrettyTuple()):
@@ -1282,6 +1273,8 @@ def fill_shape(axes, axis_path=None, prev_indices=PrettyTuple()):
     subindex_trees = []
     for i, component in enumerate(axis.components):
         if isinstance(component.count, MultiArray):
+            breakpoint()
+            # assert False, "should probably just fully index, not clear which indices we want to index with"
             # turn prev_indices into a tree
             assert len(prev_indices) > 0
             mynewtree = IndexTree()
@@ -1290,6 +1283,8 @@ def fill_shape(axes, axis_path=None, prev_indices=PrettyTuple()):
                 mynewtree = mynewtree.add_node(prev_idx, parent=parent)
                 parent = (prev_idx.id, 0)
             count = component.count[mynewtree]
+            # I don't think that we should need to index the thing here???
+            # count = component.count
         else:
             count = component.count
 
@@ -1349,8 +1344,7 @@ def expand_indices_to_fill_empty_shape(
         else:
             subroots.append(None)
 
-    root = MultiIndex(multi_index.indices)
-    return IndexTree(root, {root.id: subroots} | subnodes)
+    return IndexTree(multi_index, {multi_index.id: subroots} | subnodes)
 
 
 def create_lgmap(axes):

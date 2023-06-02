@@ -60,7 +60,7 @@ class MultiArray(DistributedArray):
         name: str = None,
         prefix: str = None,
         data=None,
-        max_value=32,
+        max_value=None,
         sf=None,
     ):
         dim = as_axis_tree(dim)

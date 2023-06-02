@@ -18,6 +18,8 @@ import pytools
 from pyop3 import tlang, utils
 from pyop3.axis import (
     AffineLayoutFunction,
+    Axis,
+    AxisTree,
     IndirectLayoutFunction,
     MultiAxis,
     MultiAxisComponent,
@@ -431,8 +433,18 @@ class LoopyKernelBuilder:
         iname = None
         # size = utils.single_valued([lindex.size, rindex.size])
         # now need to catch one-sized things here
-        lsize = lindex.size if lindex.id not in within_indices else 1
-        rsize = rindex.size if rindex.id not in within_indices else 1
+        if lindex.id in within_indices:
+            lsize = 1
+        elif isinstance(lindex.size, IndexedMultiArray):
+            lsize = lindex.size.data.max_value
+        else:
+            lsize = lindex.size
+        if rindex.id in within_indices:
+            rsize = 1
+        elif isinstance(rindex.size, IndexedMultiArray):
+            rsize = rindex.size.data.max_value
+        else:
+            rsize = rindex.size
         size = utils.single_valued([lsize, rsize])
 
         iname = self._namer.next("i")
@@ -615,8 +627,11 @@ class LoopyKernelBuilder:
         subroots = []
         bits = {}
         multi_index = index_tree.find_node(index_path)
-        for i, index in enumerate(multi_index.indices):
-            size = 1 if index.id in within_indices else index.size
+        for i, index in enumerate(multi_index.components):
+            if index.id in within_indices:
+                size = 1
+            else:
+                size = index.size
 
             # axis labels do not matter, that's not the point of the indices
             components.append(MultiAxisComponent(size))
@@ -632,8 +647,8 @@ class LoopyKernelBuilder:
             else:
                 subroots.append(None)
 
-        root = MultiAxis(components)
-        return MultiAxisTree(root, {root.id: subroots} | bits)
+        root = Axis(components, label=multi_index.label)
+        return AxisTree(root, {root.id: subroots} | bits)
 
     def make_gathers(self, temporaries, **kwargs):
         return tuple(
@@ -742,12 +757,13 @@ class LoopyKernelBuilder:
     def collect_extents(
         self, itree, multi_index, index, within_indices, within_inames, depends_on
     ):
+        # breakpoint()
         extents = {}
 
-        if isinstance(index.size, MultiArray):
+        if isinstance(index.size, IndexedMultiArray):
             # TODO This will overwrite if we have duplicates
             extent = self.register_extent(
-                index.size, within_indices, within_inames, depends_on
+                index.size.data, within_indices, within_inames, depends_on
             )
             extents[index.size] = pym.var(extent)
 
