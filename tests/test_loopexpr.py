@@ -66,19 +66,19 @@ def test_scalar_copy(scalar_copy_kernel):
     m = 10
 
     axis = Axis(m)
+    dat0 = MultiArray(
+        axis,
+        name="dat0",
+        data=np.arange(m, dtype=ScalarType),
+    )
     dat1 = MultiArray(
         axis,
         name="dat1",
-        data=np.arange(m, dtype=np.float64),
+        data=np.zeros(m, dtype=ScalarType),
     )
-    dat2 = MultiArray(
-        axis,
-        name="dat2",
-        data=np.zeros(m, dtype=np.float64),
-    )
-    do_loop(p := Range(axis.label, m), scalar_copy_kernel(dat1[p], dat2[p]))
+    do_loop(p := Index(Range(axis.label, m)), scalar_copy_kernel(dat0[p], dat1[p]))
 
-    assert np.allclose(dat2.data, dat1.data)
+    assert np.allclose(dat1.data, dat0.data)
 
 
 def test_vector_copy(vector_copy_kernel):
@@ -101,7 +101,7 @@ def test_vector_copy(vector_copy_kernel):
         data=np.zeros(m * n, dtype=np.float64),
     )
 
-    do_loop(p := Range(axes.root.label, m), vector_copy_kernel(dat1[p], dat2[p]))
+    do_loop(p := Index(Range(axes.root.label, m)), vector_copy_kernel(dat1[p], dat2[p]))
 
     assert np.allclose(dat2.data, dat1.data)
 
@@ -130,7 +130,9 @@ def test_multi_component_vector_copy(vector_copy_kernel):
         data=np.zeros(m * a + n * b, dtype=np.float64),
         dtype=np.float64,
     )
-    do_loop(p := Range((axes.root.label, 1), n), vector_copy_kernel(dat0[p], dat1[p]))
+    do_loop(
+        p := Index(Range((axes.root.label, 1), n)), vector_copy_kernel(dat0[p], dat1[p])
+    )
 
     assert all(dat1.data[: m * a] == 0)
     assert all(dat1.data[m * a :] == dat0.data[m * a :])
@@ -180,7 +182,7 @@ def test_vector_copy_with_permuted_axis(vector_copy_kernel):
     dat0 = MultiArray(axes, name="dat0", data=np.arange(m * n, dtype=ScalarType))
     dat1 = MultiArray(paxes, name="dat1", data=np.zeros(m * n, dtype=ScalarType))
 
-    do_loop(p := Range(axes.root.label, m), vector_copy_kernel(dat0[p], dat1[p]))
+    do_loop(p := Index(Range(axes.root.label, m)), vector_copy_kernel(dat0[p], dat1[p]))
 
     assert np.allclose(dat1.data.reshape((m, n))[perm].flatten(), dat0.data)
 

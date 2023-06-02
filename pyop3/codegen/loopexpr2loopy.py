@@ -247,8 +247,8 @@ class LoopyKernelBuilder:
         new_within = None
 
         # breakpoint()
-        if index.id in within_indices:
-            labels, jnames = within_indices[index.id]
+        if multi_index.label in within_indices:
+            labels, jnames = within_indices[multi_index.label]
             if isinstance(index, Range):
                 index_insns = []
                 new_labels = existing_labels + labels
@@ -288,7 +288,7 @@ class LoopyKernelBuilder:
             new_labels = existing_labels | index.path
             new_jnames = existing_jnames | jname
             jnames = (jname,)
-            new_within = {index.id: ((index.path,), (jname,))}
+            new_within = {multi_index.label: ((index.path,), (jname,))}
 
         elif isinstance(index, IdentityMap):
             index_insns = []
@@ -336,7 +336,7 @@ class LoopyKernelBuilder:
             new_labels = PrettyTuple(temp_labels) | to_label
             new_jnames = PrettyTuple(temp_jnames) | jname
             jnames = (jname,)
-            new_within = {index.id: ((to_label,), (jname,))}
+            new_within = {multi_index.label: ((to_label,), (jname,))}
 
         elif isinstance(index, TabulatedMap):
             # NOTE: some maps can produce multiple jnames (but not this one)
@@ -390,7 +390,7 @@ class LoopyKernelBuilder:
             new_labels = PrettyTuple(temp_labels) | to_label
             new_jnames = PrettyTuple(temp_jnames) | jname
             jnames = (jname,)
-            new_within = {index.id: ((to_label,), (jname,))}
+            new_within = {multi_index.label: ((to_label,), (jname,))}
         else:
             raise AssertionError
 
@@ -433,13 +433,13 @@ class LoopyKernelBuilder:
         iname = None
         # size = utils.single_valued([lindex.size, rindex.size])
         # now need to catch one-sized things here
-        if lindex.id in within_indices:
+        if lmulti_index.label in within_indices:
             lsize = 1
         elif isinstance(lindex.size, IndexedMultiArray):
             lsize = lindex.size.data.max_value
         else:
             lsize = lindex.size
-        if rindex.id in within_indices:
+        if rmulti_index.label in within_indices:
             rsize = 1
         elif isinstance(rindex.size, IndexedMultiArray):
             rsize = rindex.size.data.max_value
@@ -628,7 +628,7 @@ class LoopyKernelBuilder:
         bits = {}
         multi_index = index_tree.find_node(index_path)
         for i, index in enumerate(multi_index.components):
-            if index.id in within_indices:
+            if multi_index.label in within_indices:
                 size = 1
             else:
                 size = index.size
@@ -1004,7 +1004,7 @@ class LoopyKernelBuilder:
             index = extent.index.root
             while index:
                 component = just_one(index.components)
-                new_labels, new_jnames = within_indices[component.id]
+                new_labels, new_jnames = within_indices[index.label]
                 labels.extend(new_labels)
                 jnames.extend(new_jnames)
                 index = extent.index.find_node((index.id, 0))

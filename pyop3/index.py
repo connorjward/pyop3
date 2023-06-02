@@ -158,8 +158,3 @@ def _(arg: IndexTree) -> IndexTree:
 @as_index_tree.register
 def _(arg: Index) -> IndexTree:
     return IndexTree(arg)
-
-
-@as_index_tree.register
-def _(arg: IndexComponent) -> IndexTree:
-    return IndexTree(Index([arg]))
