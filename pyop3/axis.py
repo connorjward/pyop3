@@ -1143,6 +1143,8 @@ class AxisComponent(pytools.ImmutableRecord):
             assert isinstance(self.count, numbers.Integral)
             npoints = self.count
 
+        assert npoints is not None
+
         if subaxis := axtree.find_node((axis.id, component_index)):
             return npoints * axtree.alloc_size(subaxis)
         else:
@@ -1285,6 +1287,8 @@ def fill_shape(axes, axis_path=None, prev_indices=PrettyTuple()):
             count = component.count[mynewtree]
             # I don't think that we should need to index the thing here???
             # count = component.count
+        elif axis.indexed:
+            count = 1
         else:
             count = component.count
 
@@ -1584,8 +1588,12 @@ def _compute_layouts(
     a fixed size even for the non-ragged components.
     """
 
+    # 0. We ignore things if they are indexed. They don't contribute
+    if axis.indexed:
+        return layouts | merge_dicts(sublayoutss), None, steps
+
     # 1. do we need to pass further up?
-    if not all(has_fixed_size(axes, axis, cidx) for cidx in range(axis.degree)):
+    elif not all(has_fixed_size(axes, axis, cidx) for cidx in range(axis.degree)):
         if all(has_constant_step(axes, axis, cidx) for cidx in range(axis.degree)):
             # we must be at the bottom of a ragged patch - therefore don't
             # add to shape of things

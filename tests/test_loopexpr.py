@@ -277,7 +277,7 @@ def test_scalar_copy_with_ragged_axis(scalar_copy_kernel):
     npoints = sum(nnzdata)
 
     nnzaxes = AxisTree(Axis(5, "ax_label0"))
-    nnz = MultiArray(nnzaxes, name="nnz", data=nnzdata)
+    nnz = MultiArray(nnzaxes, name="nnz", data=nnzdata, max_value=3)
 
     axes = nnzaxes.add_subaxis(Axis(AxisComponent(nnz), "ax_label1"), nnzaxes.root)
     dat0 = MultiArray(axes, name="dat0", data=np.arange(npoints, dtype=ScalarType))
@@ -301,14 +301,11 @@ def test_scalar_copy_with_two_ragged_axes(scalar_copy_kernel):
         nnzaxes0,
         name="nnz0",
         data=nnzdata0,
+        max_value=3,
     )
 
     nnzaxes1 = nnzaxes0.add_subaxis(Axis(nnz0, "ax1"), nnzaxes0.root)
-    nnz1 = MultiArray(
-        nnzaxes1,
-        name="nnz1",
-        data=nnzdata1,
-    )
+    nnz1 = MultiArray(nnzaxes1, name="nnz1", data=nnzdata1, max_value=5)
 
     axes = nnzaxes1.add_subaxis(Axis(nnz1, "ax2"), nnzaxes1.leaf)
     dat0 = MultiArray(axes, name="dat0", data=np.arange(npoints, dtype=ScalarType))
@@ -332,12 +329,12 @@ def test_scalar_copy_two_ragged_loops_with_fixed_loop_between(scalar_copy_kernel
     npoints = sum(nnzdata1)
 
     nnzaxes0 = AxisTree(Axis(m, "ax0"))
-    nnz0 = MultiArray(nnzaxes0, name="nnz0", data=nnzdata0)
+    nnz0 = MultiArray(nnzaxes0, name="nnz0", data=nnzdata0, max_value=3)
 
     nnzaxes1 = nnzaxes0.add_subaxis(
         subaxis := Axis(nnz0, "ax1"), nnzaxes0.leaf
     ).add_subaxis(Axis(n, "ax2"), subaxis)
-    nnz1 = MultiArray(nnzaxes1, name="nnz1", data=nnzdata1)
+    nnz1 = MultiArray(nnzaxes1, name="nnz1", data=nnzdata1, max_value=3)
 
     axes = nnzaxes1.add_subaxis(Axis(nnz1, "ax3"), nnzaxes1.leaf)
     dat0 = MultiArray(axes, name="dat0", data=np.arange(npoints, dtype=ScalarType))
@@ -363,6 +360,7 @@ def test_scalar_copy_ragged_axis_inside_two_fixed_axes(scalar_copy_kernel):
         nnzaxes,
         name="nnz",
         data=nnzdata,
+        max_value=2,
     )
 
     axes = nnzaxes.add_subaxis(Axis(nnz, "ax2"), nnzaxes.leaf)
