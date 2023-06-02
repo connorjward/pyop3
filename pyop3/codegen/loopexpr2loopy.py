@@ -120,7 +120,6 @@ class LoopyKernelBuilder:
             options=lp.Options(check_dep_resolution=False),
         )
         tu = lp.merge((translation_unit, *self.subkernels))
-        breakpoint()
         return tu.with_entrypoints("mykernel")
 
     @functools.singledispatchmethod

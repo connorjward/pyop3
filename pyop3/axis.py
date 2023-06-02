@@ -1140,7 +1140,9 @@ class AxisComponent(pytools.ImmutableRecord):
     def alloc_size(self, axtree, axis, component_index):
         from pyop3.distarray import IndexedMultiArray, MultiArray
 
-        if isinstance(self.count, MultiArray):
+        if axis.indexed:
+            npoints = 1
+        elif isinstance(self.count, MultiArray):
             npoints = self.count.max_value
         elif isinstance(self.count, IndexedMultiArray):
             npoints = self.count.data.max_value
