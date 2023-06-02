@@ -385,8 +385,8 @@ def test_ragged_copy(ragged_copy_kernel):
     nnz = MultiArray(
         nnzaxes,
         name="nnz",
-        max_value=3,
         data=nnzdata,
+        max_value=3,
     )
 
     axes = nnzaxes.add_subaxis(Axis(nnz, "ax1"), nnzaxes.leaf)
@@ -412,6 +412,7 @@ def test_scalar_copy_of_ragged_component_in_multi_component_axis(scalar_copy_ker
         nnzaxes,
         name="nnz",
         data=nnzdata,
+        max_value=3,
     )
 
     axes = AxisTree(
@@ -420,7 +421,8 @@ def test_scalar_copy_of_ragged_component_in_multi_component_axis(scalar_copy_ker
                 m0,
                 m1,
                 m2,
-            ]
+            ],
+            "ax0",
         ),
         {
             root.id: [Axis(n0), Axis(nnz, "ax1"), Axis(n1)],
@@ -429,16 +431,22 @@ def test_scalar_copy_of_ragged_component_in_multi_component_axis(scalar_copy_ker
     dat0 = MultiArray(axes, name="dat0", data=np.arange(npoints, dtype=ScalarType))
     dat1 = MultiArray(axes, name="dat1", data=np.zeros(npoints, dtype=ScalarType))
 
-    p = IndexTree(Index(Range(("ax0", 1), m1)))
-    p = p.put_node(Index(Range("ax1", nnz)), p.leaf)
+    # TODO cleanup
+    # Need to make sure that we index things with the same label here
+    range0 = Range(("ax0", 0), m1)
+    range1 = Range(("ax0", 1), m1)
+    idx0 = Index(range0)
+    idx1 = idx0.copy(components=range1)
+
+    p = IndexTree(idx1)
+    p = p.put_node(Index(Range("ax1", nnz[idx0])), p.leaf)
 
     do_loop(p, scalar_copy_kernel(dat0[p], dat1[p]))
 
-    offsets = np.cumsum([m0 * n0, sum(nnzdata), m2 * n1])
-    breakpoint()
-    assert np.allclose(dat1.data[: offsets[1]], 0)
-    assert np.allclose(dat1.data[m0 * n0 : 13], dat0.data[4:13])
-    assert np.allclose(dat1.data[13:], 0)
+    off = np.cumsum([m0 * n0, sum(nnzdata), m2 * n1])
+    assert np.allclose(dat1.data[: off[0]], 0)
+    assert np.allclose(dat1.data[off[0] : off[1]], dat0.data[off[0] : off[1]])
+    assert np.allclose(dat1.data[off[1] :], 0)
 
 
 def test_compute_ragged_permuted(scalar_copy_kernel):

@@ -120,6 +120,7 @@ class LoopyKernelBuilder:
             options=lp.Options(check_dep_resolution=False),
         )
         tu = lp.merge((translation_unit, *self.subkernels))
+        breakpoint()
         return tu.with_entrypoints("mykernel")
 
     @functools.singledispatchmethod
@@ -435,14 +436,10 @@ class LoopyKernelBuilder:
         # now need to catch one-sized things here
         if lmulti_index.label in within_indices:
             lsize = 1
-        elif isinstance(lindex.size, IndexedMultiArray):
-            lsize = lindex.size.data.max_value
         else:
             lsize = lindex.size
         if rmulti_index.label in within_indices:
             rsize = 1
-        elif isinstance(rindex.size, IndexedMultiArray):
-            rsize = rindex.size.data.max_value
         else:
             rsize = rindex.size
         size = utils.single_valued([lsize, rsize])
@@ -758,7 +755,7 @@ class LoopyKernelBuilder:
         if isinstance(index.size, IndexedMultiArray):
             # TODO This will overwrite if we have duplicates
             extent = self.register_extent(
-                index.size.data, within_indices, within_inames, depends_on
+                index.size, within_indices, within_inames, depends_on
             )
             extents[index.size] = pym.var(extent)
 
@@ -1013,6 +1010,7 @@ class LoopyKernelBuilder:
             )
             return str(temp_var)
         else:
+            assert isinstance(extent, numbers.Integral)
             return extent
 
     def register_scalar_assignment(

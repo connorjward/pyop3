@@ -999,8 +999,13 @@ def requires_external_index(axtree, axis, component_index):
 
 
 def size_requires_external_index(axes, axis, component_index, depth=0):
+    from pyop3.distarray import IndexedMultiArray
+
     component = axis.components[component_index]
-    if not component.has_integer_count and component.count.dim.depth > depth:
+    count = component.count
+    if isinstance(count, IndexedMultiArray):
+        count = count.data
+    if not component.has_integer_count and count.axes.depth > depth:
         return True
     else:
         if child := axes.find_node((axis.id, component_index)):

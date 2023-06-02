@@ -22,7 +22,7 @@ IndexLabel = collections.namedtuple("IndexLabel", ["axis", "component"])
 
 
 class Index(LabelledNode):
-    fields = LabelledNode.fields | {"components"}
+    fields = LabelledNode.fields - {"degree"} | {"components"}
 
     def __init__(self, components: Sequence[IndexComponent] | IndexComponent, **kwargs):
         components = as_tuple(components)
