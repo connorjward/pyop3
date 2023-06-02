@@ -250,9 +250,7 @@ def test_vector_copy_with_permuted_multi_component_axes(vector_copy_kernel):
     m, n, a, b = 3, 2, 2, 3
     perm = [4, 2, 0, 3, 1]
 
-    fullperm = (
-        [10, 11] + [5, 6] + [0, 1] + [7, 8, 9] + [2, 3, 4]  # 4  # 2  # 0  # 3  # 1
-    )
+    fullperm = [10, 11] + [5, 6] + [0, 1] + [7, 8, 9] + [2, 3, 4]
 
     axes = AxisTree(root := Axis([m, n]), {root.id: [Axis(a), Axis(b)]})
     paxes = axes.with_modified_node(axes.root, permutation=perm)
@@ -449,38 +447,35 @@ def test_scalar_copy_of_ragged_component_in_multi_component_axis(scalar_copy_ker
     assert np.allclose(dat1.data[off[1] :], 0)
 
 
-def test_compute_ragged_permuted(scalar_copy_kernel):
+def test_scalar_copy_permuted_axis_with_ragged_inner_axis(scalar_copy_kernel):
+    m = 3
+    nnzdata = np.asarray([2, 0, 4], dtype=IntType)
+    npoints = sum(nnzdata)
+    perm = np.asarray([2, 1, 0], dtype=IntType)
+
+    fullperm = [4, 5] + [] + [0, 1, 2, 3]
+    assert len(fullperm) == npoints
+
+    nnzaxis = Axis(m, "ax0")
     nnz = MultiArray(
-        MultiAxis([MultiAxisComponent(6, "a")]).set_up(),
+        nnzaxis,
         name="nnz",
-        data=np.array([3, 2, 0, 1, 3, 2], dtype=np.int32),
+        data=nnzdata,
+        max_value=4,
     )
 
-    axes = (
-        MultiAxis(
-            [MultiAxisComponent(6, id="p1", label="a", numbering=[3, 2, 5, 0, 4, 1])]
-        ).add_subaxis("p1", [MultiAxisComponent(nnz, label="b")])
-    ).set_up()
+    axes = AxisTree(root := nnzaxis, {root.id: Axis(nnz, "ax1")})
+    paxes = axes.with_modified_node(axes.root, permutation=perm)
 
-    dat1 = MultiArray(axes, name="dat1", data=np.ones(11, dtype=np.float64))
-    dat2 = MultiArray(axes, name="dat2", data=np.zeros(11, dtype=np.float64))
+    dat0 = MultiArray(axes, name="dat0", data=np.arange(npoints, dtype=ScalarType))
+    dat1 = MultiArray(paxes, name="dat1", data=np.zeros(npoints, dtype=ScalarType))
 
-    p = IndexTree([RangeNode("a", 6, id="i0")])
-    p.add_node(RangeNode("b", nnz[p.copy()]), "i0")
+    p = IndexTree(root := Index(Range("ax0", m)))
+    p = p.put_node(Index(Range("ax1", nnz[p])), p.leaf)
 
-    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[p], dat2[p]))
-    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-    dll = compilemythings(code)
-    fn = getattr(dll, "mykernel")
+    do_loop(p, scalar_copy_kernel(dat0[p], dat1[p]))
 
-    # void mykernel(nnz, layout0_0, dat1, dat2)
-    layout0_0 = dat1.root.leaf.layout_fn.start
-    args = [nnz.data, layout0_0.data, dat1.data, dat2.data]
-    fn.argtypes = (ctypes.c_voidp,) * len(args)
-
-    fn(*(d.ctypes.data for d in args))
-
-    assert np.allclose(dat1.data, dat2.data)
+    assert np.allclose(dat1.data[fullperm], dat0.data)
 
 
 def test_permuted_ragged_permuted(scalar_copy_kernel):
