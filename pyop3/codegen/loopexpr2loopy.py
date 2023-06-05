@@ -712,11 +712,11 @@ class LoopyKernelBuilder:
         # we need to pass sizes through if they are only known at runtime (ragged)
         extents = {}
         for temp in utils.unique(itertools.chain(call.reads, call.writes)):
-            for index in temp.index.root.indices:
+            for cidx in range(temp.index.root.degree):
                 extents |= self.collect_extents(
                     temp.index,
                     temp.index.root,
-                    index,
+                    cidx,
                     within_indices,
                     within_inames,
                     depends_on,
@@ -747,22 +747,22 @@ class LoopyKernelBuilder:
         self.subkernels.append(call.function.code)
 
     def collect_extents(
-        self, itree, multi_index, index, within_indices, within_inames, depends_on
+        self, itree, index, component_index, within_indices, within_inames, depends_on
     ):
-        # breakpoint()
+        component = index.components[component_index]
         extents = {}
 
-        if isinstance(index.size, IndexedMultiArray):
+        if isinstance(component.size, IndexedMultiArray):
             # TODO This will overwrite if we have duplicates
             extent = self.register_extent(
-                index.size, within_indices, within_inames, depends_on
+                component.size, within_indices, within_inames, depends_on
             )
-            extents[index.size] = pym.var(extent)
+            extents[component.size] = pym.var(extent)
 
-        if child := itree.find_node((multi_index.id, multi_index.index(index))):
-            for subidx in child.indices:
+        if subidx := itree.find_node((index.id, component_index)):
+            for cidx in range(subidx.degree):
                 extents |= self.collect_extents(
-                    itree, child, subidx, within_indices, within_inames, depends_on
+                    itree, subidx, cidx, within_indices, within_inames, depends_on
                 )
 
         return extents

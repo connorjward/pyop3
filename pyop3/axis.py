@@ -1166,9 +1166,11 @@ class AxisComponent(pytools.ImmutableRecord):
             return extent
 
     def find_integer_count(self, indices=PrettyTuple()):
-        from pyop3.distarray import MultiArray
+        from pyop3.distarray import IndexedMultiArray, MultiArray
 
-        if isinstance(self.count, MultiArray):
+        if isinstance(self.count, IndexedMultiArray):
+            return self.count.data.get_value(indices)
+        elif isinstance(self.count, MultiArray):
             return self.count.get_value(indices)
         else:
             assert isinstance(self.count, numbers.Integral)
@@ -1514,10 +1516,10 @@ def _(arg: AxisComponent):
 
 @functools.singledispatch
 def _as_axis_component(arg: Any) -> AxisComponent:
-    from pyop3.distarray import MultiArray
+    from pyop3.distarray import IndexedMultiArray, MultiArray
 
     # Needed to avoid cyclic import
-    if isinstance(arg, MultiArray):
+    if isinstance(arg, (IndexedMultiArray, MultiArray)):
         return AxisComponent(arg)
     else:
         raise TypeError
@@ -1595,13 +1597,12 @@ def _compute_layouts(
     a fixed size even for the non-ragged components.
     """
 
-    # 0. We ignore things if they are indexed. They don't contribute
-    if axis.indexed:
-        return layouts | merge_dicts(sublayoutss), None, steps
-
     # 1. do we need to pass further up?
-    elif not all(has_fixed_size(axes, axis, cidx) for cidx in range(axis.degree)):
-        if all(has_constant_step(axes, axis, cidx) for cidx in range(axis.degree)):
+    if not all(has_fixed_size(axes, axis, cidx) for cidx in range(axis.degree)):
+        # 0. We ignore things if they are indexed. They don't contribute
+        if axis.indexed:
+            ctree = None
+        elif all(has_constant_step(axes, axis, cidx) for cidx in range(axis.degree)):
             # we must be at the bottom of a ragged patch - therefore don't
             # add to shape of things
             # in theory if we are ragged and permuted then we do want to include this level
@@ -1629,6 +1630,10 @@ def _compute_layouts(
         if axis.permutation is not None or not all(
             has_constant_step(axes, axis, cidx) for cidx in range(axis.degree)
         ):
+            # If this axis is indexed and there is no inner shape to index then do nothing
+            if axis.indexed and strictly_all(sub is None for sub in csubtrees):
+                return layouts | merge_dicts(sublayoutss), None, steps
+
             croot = CustomNode([(cpt.count, axis.label) for cpt in axis.components])
             if strictly_all(sub is not None for sub in csubtrees):
                 cparent_to_children = {
@@ -1659,6 +1664,10 @@ def _compute_layouts(
 
         # must therefore be affine
         else:
+            # 0. We ignore things if they are indexed. They don't contribute
+            if axis.indexed:
+                return layouts | merge_dicts(sublayoutss), None, steps
+            ctree = None
             layouts = {}
             steps = [step_size(axes, axis, cidx) for cidx in range(axis.degree)]
             start = 0
@@ -1717,12 +1726,17 @@ def _tabulate_count_array_tree(
     path=PrettyTuple(),
     indices=PrettyTuple(),
 ):
+    from pyop3.distarray import IndexedMultiArray, MultiArray
+
     npoints = 0
     for component in axis.components:
-        if component.has_integer_count:
-            count = component.count
-        else:
+        if isinstance(component.count, IndexedMultiArray):
+            count = strict_int(component.count.data.get_value(indices))
+        elif isinstance(component.count, MultiArray):
             count = strict_int(component.count.get_value(indices))
+        else:
+            assert isinstance(component.count, numbers.Integral)
+            count = component.count
         npoints += count
 
     permutation = (
@@ -1735,10 +1749,13 @@ def _tabulate_count_array_tree(
     point_to_component_num = np.empty(npoints, dtype=PointerType)
     pos = 0
     for cidx, component in enumerate(axis.components):
-        if component.has_integer_count:
-            csize = component.count
-        else:
+        if isinstance(component.count, IndexedMultiArray):
+            csize = strict_int(component.count.data.get_value(indices))
+        elif isinstance(component.count, MultiArray):
             csize = strict_int(component.count.get_value(indices))
+        else:
+            assert isinstance(component.count, numbers.Integral)
+            csize = component.count
 
         for i in range(csize):
             point = permutation[pos + i]
@@ -1748,20 +1765,23 @@ def _tabulate_count_array_tree(
 
     for pt in range(npoints):
         selected_component_id = point_to_component_id[pt]
-        selected_component = axis.components[selected_component_id]
         selected_component_num = point_to_component_num[pt]
 
         if path | selected_component_id in count_arrays:
             count_arrays[path | selected_component_id].set_value(
                 indices | selected_component_num, offset.value
             )
-            offset += step_size(
-                axes,
-                axis,
-                selected_component_id,
-                indices | selected_component_num,
-            )
+            if not axis.indexed:
+                offset += step_size(
+                    axes,
+                    axis,
+                    selected_component_id,
+                    indices | selected_component_num,
+                )
         else:
+            if axis.indexed:
+                saved_offset = offset.value
+
             subaxis = axes.find_node((axis.id, selected_component_id))
             assert subaxis
             _tabulate_count_array_tree(
@@ -1772,6 +1792,9 @@ def _tabulate_count_array_tree(
                 path | selected_component_id,
                 indices | selected_component_num,
             )
+
+            if axis.indexed:
+                offset.value = saved_offset
 
 
 def _collect_at_leaves(

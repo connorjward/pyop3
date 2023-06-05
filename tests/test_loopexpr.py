@@ -62,6 +62,30 @@ def ragged_copy_kernel():
     return LoopyKernel(code, [READ, WRITE])
 
 
+@pytest.fixture
+def nested_dependent_ragged_copy_kernel():
+    code = lp.make_kernel(
+        [
+            "{ [i]: 0 <= i < n0 }",
+            "{ [j]: 0 <= j < layout0[n0] }",
+        ],
+        "y[i*n1+j] = x[i*n1+j]",
+        [
+            lp.GlobalArg("x", ScalarType, shape=None, is_input=True, is_output=False),
+            lp.GlobalArg("y", ScalarType, shape=None, is_input=False, is_output=True),
+            lp.GlobalArg(
+                "layout0", IntType, shape=None, is_input=True, is_output=False
+            ),
+            lp.ValueArg("n0", dtype=IntType),
+        ],
+        assumptions="n0 <= 3 and n1 <= 3",
+        target=lp.CTarget(),
+        name="ragged_copy",
+        lang_version=(2018, 2),
+    )
+    return LoopyKernel(code, [READ, WRITE])
+
+
 def test_scalar_copy(scalar_copy_kernel):
     m = 10
 
@@ -399,6 +423,81 @@ def test_ragged_copy(ragged_copy_kernel):
     assert np.allclose(dat1.data, dat0.data)
 
 
+@pytest.mark.xfail(reason="complex ragged temporary logic not implemented")
+def test_nested_ragged_copy_with_independent_subaxes(nested_ragged_copy_kernel):
+    m = 3
+    nnzdata0 = np.asarray([3, 2, 1], dtype=IntType)
+    nnzdata1 = np.asarray([2, 1, 2], dtype=IntType)
+    npoints = sum(a * b for a, b in zip(nnzdata0, nnzdata1))
+
+    nnzaxes = AxisTree(Axis(m, "ax0"))
+    nnz0 = MultiArray(
+        nnzaxes,
+        name="nnz0",
+        data=nnzdata0,
+        max_value=3,
+    )
+    nnz1 = MultiArray(
+        nnzaxes,
+        name="nnz1",
+        data=nnzdata1,
+        max_value=2,
+    )
+
+    axes = AxisTree(Axis(m, "ax0"))
+    axes = axes.add_subaxis(Axis(nnz0, "ax1"), axes.leaf)
+    axes = axes.add_subaxis(Axis(nnz1, "ax2"), axes.leaf)
+
+    dat0 = MultiArray(axes, name="dat0", data=np.arange(npoints, dtype=ScalarType))
+    dat1 = MultiArray(axes, name="dat1", data=np.zeros(npoints, dtype=ScalarType))
+
+    p = IndexTree(Index(Range("ax0", m)))
+    q = p.copy()
+    q = q.put_node(Index(Range("ax1", nnz0[p])), q.leaf)
+    q = q.put_node(Index(Range("ax2", nnz1[p])), q.leaf)
+
+    do_loop(p, nested_ragged_copy_kernel(dat0[q], dat1[q]))
+
+    assert np.allclose(dat1.data, dat0.data)
+
+
+@pytest.mark.xfail(reason="need to pass layout function through to the local kernel")
+def test_nested_ragged_copy_with_dependent_subaxes(nested_dependent_ragged_copy_kernel):
+    m = 3
+    nnzdata0 = np.asarray([2, 0, 1], dtype=IntType)
+    nnzdata1 = np.asarray(flatten([[2, 1], [], [2]]), dtype=IntType)
+    npoints = sum(nnzdata1)
+
+    nnzaxes0 = AxisTree(Axis(m, "ax0"))
+    nnz0 = MultiArray(
+        nnzaxes0,
+        name="nnz0",
+        data=nnzdata0,
+        max_value=3,
+    )
+
+    nnzaxes1 = nnzaxes0.add_subaxis(Axis(nnz0, "ax1"), nnzaxes0.leaf)
+    nnz1 = MultiArray(
+        nnzaxes1,
+        name="nnz1",
+        data=nnzdata1,
+        max_value=2,
+    )
+
+    axes = nnzaxes1.add_subaxis(Axis(nnz1, "ax2"), nnzaxes1.leaf)
+    dat0 = MultiArray(axes, name="dat0", data=np.arange(npoints, dtype=ScalarType))
+    dat1 = MultiArray(axes, name="dat1", data=np.zeros(npoints, dtype=ScalarType))
+
+    p = IndexTree(Index(Range("ax0", m)))
+    q = p.copy()
+    q = q.put_node(Index(Range("ax1", nnz0[q])), q.leaf)
+    q = q.put_node(Index(Range("ax2", nnz1[q])), q.leaf)
+
+    do_loop(p, nested_dependent_ragged_copy_kernel(dat0[q], dat1[q]))
+
+    assert np.allclose(dat1.data, dat0.data)
+
+
 def test_scalar_copy_of_ragged_component_in_multi_component_axis(scalar_copy_kernel):
     m0, m1, m2 = 4, 5, 6
     n0, n1 = 1, 2
@@ -447,7 +546,7 @@ def test_scalar_copy_of_ragged_component_in_multi_component_axis(scalar_copy_ker
     assert np.allclose(dat1.data[off[1] :], 0)
 
 
-def test_scalar_copy_permuted_axis_with_ragged_inner_axis(scalar_copy_kernel):
+def test_scalar_copy_of_permuted_axis_with_ragged_inner_axis(scalar_copy_kernel):
     m = 3
     nnzdata = np.asarray([2, 0, 4], dtype=IntType)
     npoints = sum(nnzdata)
@@ -478,44 +577,42 @@ def test_scalar_copy_permuted_axis_with_ragged_inner_axis(scalar_copy_kernel):
     assert np.allclose(dat1.data[fullperm], dat0.data)
 
 
-def test_permuted_ragged_permuted(scalar_copy_kernel):
+def test_scalar_copy_of_permuted_then_ragged_then_permuted_axes(scalar_copy_kernel):
+    m, n = 3, 2
+    nnzdata = np.asarray([2, 1, 3], dtype=IntType)
+    perm0 = np.asarray([2, 1, 0], dtype=IntType)
+    perm1 = np.asarray([1, 0], dtype=IntType)
+    npoints = sum(nnzdata) * n
+
+    fullperm = [9, 8, 11, 10] + [7, 6] + [1, 0, 3, 2, 5, 4]
+    assert len(fullperm) == npoints
+
+    nnzaxes = AxisTree(Axis(m, "ax0"))
     nnz = MultiArray(
-        MultiAxis([MultiAxisComponent(6, label="a")]).set_up(),
+        nnzaxes,
         name="nnz",
-        data=np.array([3, 2, 0, 1, 3, 2], dtype=np.int32),
+        data=nnzdata,
+        max_value=3,
     )
 
-    axes = (
-        MultiAxis(
-            [MultiAxisComponent(6, id="p1", label="a", numbering=[3, 2, 5, 0, 4, 1])]
-        )
-        .add_subaxis("p1", [MultiAxisComponent(nnz, id="p2", label="b")])
-        .add_subaxis(
-            "p2", [MultiAxisComponent(2, numbering=[1, 0], id="p3", label="c")]
-        )
-    ).set_up()
+    axes = nnzaxes.copy()
+    axes = axes.add_subaxis(Axis(nnz, "ax1"), axes.leaf)
+    axes = axes.add_subaxis(Axis(n, "ax2"), axes.leaf)
 
-    dat1 = MultiArray(axes, name="dat1", data=np.ones(22, dtype=np.float64))
-    dat2 = MultiArray(axes, name="dat2", data=np.zeros(22, dtype=np.float64))
+    paxes = axes.copy()
+    paxes = paxes.with_modified_node(paxes.root, permutation=perm0)
+    paxes = paxes.with_modified_node(paxes.leaf, permutation=perm1)
 
-    p = IndexTree([RangeNode("a", 6, id="i0")])
-    p.add_node(RangeNode("b", nnz[p.copy()], id="i1"), "i0")
-    p.add_node(RangeNode("c", 2), "i1")
-    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[p], dat2[p]))
+    dat0 = MultiArray(axes, name="dat0", data=np.arange(npoints, dtype=ScalarType))
+    dat1 = MultiArray(paxes, name="dat1", data=np.zeros(npoints, dtype=ScalarType))
 
-    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-    dll = compilemythings(code)
-    fn = getattr(dll, "mykernel")
+    p = IndexTree(Index(Range("ax0", m)))
+    p = p.put_node(Index(Range("ax1", nnz[p])), p.leaf)
+    p = p.put_node(Index(Range("ax2", n)), p.leaf)
 
-    # void mykernel(nnz, layout0_0, layout1_0, dat1, dat2)
-    layout0_0 = axes.node("p2").layout_fn.start
-    layout1_0 = axes.node("p3").layout_fn.data
+    do_loop(p, scalar_copy_kernel(dat0[p], dat1[p]))
 
-    args = [nnz.data, layout0_0.data, layout1_0.data, dat1.data, dat2.data]
-    fn.argtypes = (ctypes.c_voidp,) * len(args)
-    fn(*(d.ctypes.data for d in args))
-
-    assert np.allclose(dat1.data, dat2.data)
+    assert np.allclose(dat1.data[fullperm], dat0.data)
 
 
 def test_permuted_inner_and_ragged(scalar_copy_kernel):
