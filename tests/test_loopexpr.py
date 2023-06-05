@@ -2,12 +2,13 @@ import ctypes
 
 import loopy as lp
 import numpy as np
+import pymbolic as pym
 import pytest
 
 from pyop3.axis import Axis, AxisComponent, AxisTree
 from pyop3.distarray import MultiArray
 from pyop3.dtypes import IntType, ScalarType
-from pyop3.index import Index, IndexTree, Range, TabulatedMap
+from pyop3.index import AffineMap, IdentityMap, Index, IndexTree, Range, TabulatedMap
 from pyop3.loopexpr import INC, READ, WRITE, LoopyKernel, do_loop
 from pyop3.utils import flatten
 
@@ -671,7 +672,7 @@ def test_scalar_copy_of_subset(scalar_copy_kernel):
     assert np.allclose(dat1.data[untouched], 0)
 
 
-def test_tabulated_map(vector_inc_kernel):
+def test_inc_from_tabulated_map(vector_inc_kernel):
     m, n = 4, 3
     mapdata = np.asarray([[1, 2, 0], [2, 0, 1], [3, 2, 3], [2, 0, 1]], dtype=IntType)
 
@@ -699,149 +700,86 @@ def test_tabulated_map(vector_inc_kernel):
     assert np.allclose(dat1.data, np.sum(mapdata, axis=1))
 
 
-def test_closure_ish():
-    axes1 = MultiAxis(
-        [MultiAxisComponent(3, label="p1"), MultiAxisComponent(4, label="p2")]
-    ).set_up()
-    dat1 = MultiArray(axes1, name="dat1", data=np.arange(7, dtype=np.float64))
-    axes2 = MultiAxis([MultiAxisComponent(3, label="p1")]).set_up()
-    dat2 = MultiArray(axes2, name="dat2", data=np.zeros(3, dtype=np.float64))
+def test_inc_from_multi_component_temporary(vector_inc_kernel):
+    m, n = 3, 4
+    arity = 2
+    mapdata = np.asarray([[1, 2], [0, 1], [3, 2]], dtype=IntType)
 
-    # create a map from each cell to 2 edges
-    axes3 = (
-        MultiAxis([MultiAxisComponent(3, id="p1", label="p1")])
-        .add_subaxis("p1", [MultiAxisComponent(2)])
-        .set_up()
-    )
-    map1 = MultiArray(
-        axes3, name="map1", data=np.array([1, 2, 0, 1, 3, 2], dtype=np.int32)
-    )
+    axes0 = AxisTree(Axis([m, n], "ax0"))
+    axes1 = AxisTree(Axis(m, "ax0"))
 
-    # we have a loop of size 3 here because the temporary has 1 cell DoF and 2 edge DoFs
-    code = lp.make_kernel(
-        "{ [i]: 0 <= i < 3 }",
-        "y[0] = y[0] + x[i]",
-        [
-            lp.GlobalArg("x", np.float64, (3,), is_input=True, is_output=False),
-            lp.GlobalArg("y", np.float64, (1,), is_input=True, is_output=True),
-        ],
-        target=lp.CTarget(),
-        name="mylocalkernel",
-        lang_version=(2018, 2),
-    )
-    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.INC])
+    dat0 = MultiArray(axes0, name="dat0", data=np.arange(m + n, dtype=ScalarType))
+    dat1 = MultiArray(axes1, name="dat1", data=np.zeros(m, dtype=ScalarType))
 
-    p0 = IndexTree([RangeNode("p1", 3, id="i0")])
-    p1 = p0.copy()
-    p1.add_node(IdentityMapNode(("p1",), ("p1",), arity=1), "i0")
-    p1.add_node(TabulatedMapNode(("p1",), ("p2",), arity=2, data=map1[p0]), "i0")
+    maxes = AxisTree(root := Axis(m, "ax0"), {root.id: Axis(arity)})
+    map0 = MultiArray(maxes, name="map0", data=mapdata.flatten())
 
-    expr = pyop3.Loop(p0, kernel(dat1[p1], dat2[p0]))
-
-    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-    dll = compilemythings(exe)
-    fn = getattr(dll, "mykernel")
-
-    args = [dat1.data, map1.data, dat2.data]
-    fn.argtypes = (ctypes.c_voidp,) * len(args)
-
-    fn(*(d.ctypes.data for d in args))
-
-    # from [1, 2, 0, 1, 3, 2] (-> [4, 5, 3, 4, 6, 5]) and [0, 1, 2]
-    assert all(dat2.data == np.array([4 + 5 + 0, 3 + 4 + 1, 6 + 5 + 2], dtype=np.int32))
-
-
-def test_multipart_inner():
-    axes = MultiAxis([MultiAxisComponent(5, label="p1", id="p1")])
-    axes.add_nodes(
-        [MultiAxisComponent(3, label="p2_0"), MultiAxisComponent(2, label="p2_1")], "p1"
+    p = IndexTree(Index(Range("ax0", m)))
+    q = p.put_node(
+        Index(
+            [
+                IdentityMap([("ax0", 0)], [("ax0", 0)], arity=1),
+                TabulatedMap([("ax0", 0)], [("ax0", 1)], arity=arity, data=map0[p]),
+            ]
+        ),
+        p.leaf,
     )
 
-    axes.set_up()
+    do_loop(p, vector_inc_kernel(dat0[q], dat1[p]))
 
-    dat1 = MultiArray(axes, name="dat1", data=np.ones(25, dtype=np.float64))
-    dat2 = MultiArray(axes, name="dat2", data=np.zeros(25, dtype=np.float64))
-
-    code = lp.make_kernel(
-        "{ [i]: 0 <= i < 5 }",
-        "y[i] = x[i]",
-        [
-            lp.GlobalArg("x", np.float64, (5,), is_input=True, is_output=False),
-            lp.GlobalArg("y", np.float64, (5,), is_input=False, is_output=True),
-        ],
-        target=lp.CTarget(),
-        name="mylocalkernel",
-        lang_version=(2018, 2),
-    )
-    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-
-    p = IndexTree([RangeNode("p1", 5)])
-    expr = pyop3.Loop(p, kernel(dat1[p], dat2[p]))
-
-    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-    dll = compilemythings(code)
-    fn = getattr(dll, "mykernel")
-
-    args = [dat1.data, dat2.data]
-    fn.argtypes = (ctypes.c_voidp,) * len(args)
-    fn(*(d.ctypes.data for d in args))
-
-    assert np.allclose(dat1.data, dat2.data)
+    # The expected value is the current index (from the identity map), plus the values
+    # from the map. Since the indices in the map are offset in the actual array we
+    # also need to add this.
+    assert np.allclose(dat1.data, np.arange(m) + np.sum(mapdata + m, axis=1))
 
 
-def test_index_function():
-    """Imagine an interval mesh:
+def test_copy_multi_component_temporary(vector_copy_kernel):
+    m = 4
+    n0, n1 = 2, 1
+    npoints = m * n0 + m * n1
 
-    3 0 4 1 5 2 6
-    x---x---x---x
-    """
-    axes1 = MultiAxis(
-        [MultiAxisComponent(3, label="p1"), MultiAxisComponent(4, label="p2")]
-    ).set_up()
-    dat1 = MultiArray(axes1, name="dat1", data=np.arange(7, dtype=np.float64))
-    axes2 = MultiAxis([MultiAxisComponent(3, label="p1")]).set_up()
-    dat2 = MultiArray(axes2, name="dat2", data=np.zeros(3, dtype=np.float64))
+    axes = AxisTree(root := Axis(m, "ax0"), {root.id: Axis([n0, n1], "ax1")})
+    dat0 = MultiArray(axes, name="dat0", data=np.arange(npoints, dtype=ScalarType))
+    dat1 = MultiArray(axes, name="dat1", data=np.zeros(npoints, dtype=ScalarType))
 
-    code = lp.make_kernel(
-        "{ [i]: 0 <= i < 3 }",
-        "y[0] = y[0] + x[i]",
-        [
-            lp.GlobalArg("x", np.float64, (3,), is_input=True, is_output=False),
-            lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),
-        ],
-        target=lp.CTarget(),
-        name="mylocalkernel",
-        lang_version=(2018, 2),
-    )
-    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+    p = IndexTree(Index(Range("ax0", m)))
+    q = p.put_node(Index([Range(("ax1", 0), n0), Range(("ax1", 1), n1)]), p.leaf)
 
-    # import pdb; pdb.set_trace()
+    do_loop(p, vector_copy_kernel(dat0[q], dat1[q]))
 
-    # basically here we have "target multi-index is self and self+1"
-    mapexpr = ((j0 := pym.var("j0"), j1 := pym.var("j1")), j0 + j1)
+    assert np.allclose(dat1.data, dat0.data)
 
-    i1 = IndexTree([RangeNode("p1", 3, id="i0")])  # loop over "cells"
-    i2 = i1.copy()
-    i2.add_nodes(
-        [
-            IdentityMapNode(("p1",), ("p1",), arity=1),  # "cell" data
-            AffineMapNode(("p1",), ("p2",), arity=2, expr=mapexpr),  # "vert" data
-        ],
-        "i0",
+
+def test_inc_from_index_function(vector_inc_kernel):
+    m, n = 3, 4
+
+    axes0 = AxisTree(Axis([m, n], "ax0"))
+    axes1 = AxisTree(Axis(m, "ax0"))
+
+    dat0 = MultiArray(axes0, name="dat0", data=np.arange(m + n, dtype=ScalarType))
+    dat1 = MultiArray(axes1, name="dat1", data=np.zeros(m, dtype=ScalarType))
+
+    j0 = pym.var("j0")
+    j1 = pym.var("j1")
+    vars = (j0, j1)
+    mapexpr = (vars, j0 + j1)
+
+    p = IndexTree(Index(Range("ax0", m)))
+    q = p.put_node(
+        Index(
+            [
+                IdentityMap([("ax0", 0)], [("ax0", 0)], arity=1),
+                AffineMap([("ax0", 0)], [("ax0", 1)], arity=2, expr=mapexpr),
+            ]
+        ),
+        p.leaf,
     )
 
-    expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
+    do_loop(p, vector_inc_kernel(dat0[q], dat1[p]))
 
-    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-    dll = compilemythings(code)
-    fn = getattr(dll, "mykernel")
-
-    args = [dat1.data, dat2.data]
-    fn.argtypes = (ctypes.c_voidp,) * len(args)
-    fn(*(d.ctypes.data for d in args))
-
-    # [0, 1, 2] + [3+4, 4+5, 5+6]
-    assert np.allclose(dat2.data, [0 + 3 + 4, 1 + 4 + 5, 2 + 5 + 6])
+    bit0 = np.arange(m)  # from the identity map
+    bit1 = np.arange(m, m + n - 1) + np.arange(m + 1, m + n)  # from the affine map
+    assert np.allclose(dat1.data, bit0 + bit1)
 
 
 def test_multimap():
