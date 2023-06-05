@@ -80,6 +80,24 @@ def ragged_copy_kernel():
 
 
 @pytest.fixture
+def ragged_inc_kernel():
+    code = lp.make_kernel(
+        "{ [i]: 0 <= i < n }",
+        "y[0] = y[0] + x[i]",
+        [
+            lp.GlobalArg("x", ScalarType, shape=None, is_input=True, is_output=False),
+            lp.GlobalArg("y", ScalarType, shape=(1,), is_input=True, is_output=True),
+            lp.ValueArg("n", dtype=IntType),
+        ],
+        assumptions="n <= 3",
+        target=lp.CTarget(),
+        name="ragged_inc",
+        lang_version=(2018, 2),
+    )
+    return LoopyKernel(code, [READ, INC])
+
+
+@pytest.fixture
 def nested_dependent_ragged_copy_kernel():
     code = lp.make_kernel(
         [
@@ -782,305 +800,201 @@ def test_inc_from_index_function(vector_inc_kernel):
     assert np.allclose(dat1.data, bit0 + bit1)
 
 
-def test_multimap():
-    axes = MultiAxis([MultiAxisComponent(5, label="p1", id="p1")]).set_up()
-    dat1 = MultiArray(axes, name="dat1", data=np.arange(5, dtype=np.float64))
-    dat2 = MultiArray(axes, name="dat2", data=np.zeros(5, dtype=np.float64))
+def test_inc_with_multiple_maps(vector_inc_kernel):
+    m = 5
+    arity0, arity1 = 2, 1
+    mapdata0 = np.asarray([[1, 2], [0, 2], [0, 1], [3, 4], [2, 1]], dtype=IntType)
+    mapdata1 = np.asarray([[1], [1], [3], [0], [2]], dtype=IntType)
 
-    mapaxes = axes.copy().add_subaxis("p1", [MultiAxisComponent(2)]).set_up()
+    axes = AxisTree(Axis(m, "ax0"))
+    dat0 = MultiArray(axes, name="dat0", data=np.arange(m, dtype=ScalarType))
+    dat1 = MultiArray(axes, name="dat1", data=np.zeros(m, dtype=ScalarType))
+
+    maxes0 = axes.add_subaxis(Axis(arity0), axes.leaf)
+    maxes1 = axes.add_subaxis(Axis(arity1), axes.leaf)
+
     map0 = MultiArray(
-        mapaxes,
+        maxes0,
         name="map0",
-        data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32),
+        data=mapdata0.flatten(),
     )
     map1 = MultiArray(
-        mapaxes,
+        maxes1,
         name="map1",
-        data=np.array([1, 1, 3, 0, 2, 1, 4, 3, 0, 1], dtype=np.int32),
+        data=mapdata1.flatten(),
     )
 
-    code = lp.make_kernel(
-        "{ [i]: 0 <= i < 4 }",
-        "y[0] = y[0] + x[i]",
-        [
-            lp.GlobalArg("x", np.float64, (4,), is_input=True, is_output=False),
-            lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),
-        ],
-        target=lp.CTarget(),
-        name="mylocalkernel",
-        lang_version=(2018, 2),
-    )
-    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-
-    i1 = IndexTree([RangeNode("p1", 5, id="i1")])
-    i2 = i1.copy()
-    i2.add_node(TabulatedMapNode(("p1",), ("p1",), arity=2, data=map0[i1]), "i1")
-    i2.add_node(TabulatedMapNode(("p1",), ("p1",), arity=2, data=map1[i1]), "i1")
-    expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
-
-    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-    dll = compilemythings(code)
-    fn = getattr(dll, "mykernel")
-
-    args = [map0.data, dat1.data, map1.data, dat2.data]
-    fn.argtypes = (ctypes.c_voidp,) * len(args)
-
-    fn(*(d.ctypes.data for d in args))
-
-    # from [1, 2, 0, 2, 0, 1, 3, 4, 2, 1]
-    # and [1, 1, 3, 0, 2, 1, 4, 3, 0, 1]
-    assert all(
-        dat2.data
-        == np.array(
-            [1 + 2 + 1 + 1, 0 + 2 + 3 + 0, 0 + 1 + 2 + 1, 3 + 4 + 4 + 3, 2 + 1 + 0 + 1],
-            dtype=np.int32,
-        )
+    p = IndexTree(Index(Range("ax0", m)))
+    q = p.put_node(
+        Index(
+            [
+                TabulatedMap([("ax0", 0)], [("ax0", 0)], arity=arity0, data=map0[p]),
+                TabulatedMap([("ax0", 0)], [("ax0", 0)], arity=arity1, data=map1[p]),
+            ]
+        ),
+        p.leaf,
     )
 
+    do_loop(p, vector_inc_kernel(dat0[q], dat1[p]))
 
-def test_multimap_with_scalar():
-    axes = MultiAxis([MultiAxisComponent(5, id="p1", label="p1")]).set_up()
-    dat1 = MultiArray(axes, name="dat1", data=np.arange(5, dtype=np.float64))
-    dat2 = MultiArray(axes, name="dat2", data=np.zeros(5, dtype=np.float64))
+    assert np.allclose(dat1.data, np.sum(mapdata0, axis=1) + np.sum(mapdata1, axis=1))
 
-    mapaxes = axes.copy().add_subaxis("p1", [MultiAxisComponent(2)]).set_up()
+
+def test_inc_with_map_composition(vector_inc_kernel):
+    m = 5
+    arity0, arity1 = 1, 3
+    mapdata0 = np.asarray([[2], [3], [1], [0], [0]], dtype=IntType)
+    mapdata1 = np.asarray(
+        [[0, 4, 1], [2, 1, 3], [4, 2, 4], [0, 1, 2], [4, 2, 3]], dtype=IntType
+    )
+
+    axes = AxisTree(Axis(m, "ax0"))
+    dat0 = MultiArray(axes, name="dat0", data=np.arange(m, dtype=ScalarType))
+    dat1 = MultiArray(axes, name="dat1", data=np.zeros(m, dtype=ScalarType))
+
+    maxes0 = axes.add_subaxis(Axis(arity0), axes.root)
+    maxes1 = axes.add_subaxis(Axis(arity1), axes.root)
+
+    map0 = MultiArray(maxes0, name="map0", data=mapdata0.flatten())
+    map1 = MultiArray(maxes1, name="map1", data=mapdata1.flatten())
+
+    p = IndexTree(Index(Range("ax0", m)))
+
+    q = p.copy()
+    q = q.put_node(
+        Index(TabulatedMap([("ax0", 0)], [("ax0", 0)], arity=arity0, data=map0[q])),
+        q.leaf,
+    )
+    q = q.put_node(
+        Index(TabulatedMap([("ax0", 0)], [("ax0", 0)], arity=arity1, data=map1[q])),
+        q.leaf,
+    )
+
+    do_loop(p, vector_inc_kernel(dat0[q], dat1[p]))
+
+    expected = np.sum(np.sum(np.arange(m)[mapdata1], axis=1)[mapdata0], axis=1)
+    assert np.allclose(dat1.data, expected)
+
+
+def test_inc_with_variable_arity_map(ragged_inc_kernel):
+    m = 3
+    nnzdata = np.asarray([3, 2, 1], dtype=IntType)
+    mapdata = [[2, 1, 0], [2, 1], [2]]
+
+    axes = AxisTree(Axis(m, "ax0"))
+    dat0 = MultiArray(axes, name="dat0", data=np.arange(m, dtype=ScalarType))
+    dat1 = MultiArray(axes, name="dat1", data=np.zeros(m, dtype=ScalarType))
+
+    nnz = MultiArray(axes, name="nnz", data=nnzdata, max_value=3)
+
+    maxes = axes.add_subaxis(Axis(nnz, "ax1"), axes.leaf)
+    map0 = MultiArray(
+        maxes, name="map0", data=np.asarray(flatten(mapdata), dtype=IntType)
+    )
+
+    p = IndexTree(Index(Range("ax0", m)))
+    q = p.put_node(
+        Index(TabulatedMap([("ax0", 0)], [("ax0", 0)], arity=nnz[p], data=map0[p])),
+        p.leaf,
+    )
+
+    do_loop(p, ragged_inc_kernel(dat0[q], dat1[p]))
+
+    assert np.allclose(dat1.data, [sum(xs) for xs in mapdata])
+
+
+def test_loop_over_map(vector_inc_kernel):
+    m = 5
+    arity0 = 2
+    arity1 = 3
+    mapdata0 = np.asarray([[1, 2], [0, 2], [0, 1], [3, 4], [2, 1]], dtype=IntType)
+    mapdata1 = np.asarray(
+        [[3, 2, 4], [0, 2, 3], [3, 0, 2], [1, 4, 2], [1, 1, 3]], dtype=IntType
+    )
+
+    axes = AxisTree(Axis(m, "ax0"))
+    dat0 = MultiArray(axes, name="dat0", data=np.arange(m, dtype=ScalarType))
+    dat1 = MultiArray(axes, name="dat1", data=np.zeros(m, dtype=ScalarType))
+
+    maxes0 = axes.add_subaxis(Axis(arity0), axes.leaf)
+    maxes1 = axes.add_subaxis(Axis(arity1), axes.leaf)
+
+    map0 = MultiArray(
+        maxes0,
+        name="map0",
+        data=mapdata0.flatten(),
+    )
     map1 = MultiArray(
-        mapaxes,
+        maxes1,
         name="map1",
-        data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32),
+        data=mapdata1.flatten(),
     )
 
-    code = lp.make_kernel(
-        "{ [i]: 0 <= i < 3 }",
-        "y[0] = y[0] + x[i]",
-        [
-            lp.GlobalArg("x", np.float64, (3,), is_input=True, is_output=False),
-            lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),
-        ],
-        target=lp.CTarget(),
-        name="mylocalkernel",
-        lang_version=(2018, 2),
-    )
-    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-
-    i1 = IndexTree([RangeNode("p1", 5, id="i1")])
-    i2 = i1.copy()
-    i2.add_node(IdentityMapNode(("p1",), ("p1",), arity=1), "i1")
-    i2.add_node(TabulatedMapNode(("p1",), ("p1",), arity=2, data=map1[i1]), "i1")
-    expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
-
-    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-    dll = compilemythings(code)
-    fn = getattr(dll, "mykernel")
-
-    args = [dat1.data, map1.data, dat2.data]
-    fn.argtypes = (ctypes.c_voidp,) * len(args)
-
-    fn(*(d.ctypes.data for d in args))
-
-    # from [1, 2, 0, 2, 0, 1, 3, 4, 2, 1] and [0, 1, 2, 3, 4]
-    assert all(
-        dat2.data
-        == np.array(
-            [1 + 2 + 0, 0 + 2 + 1, 0 + 1 + 2, 3 + 4 + 3, 2 + 1 + 4], dtype=np.int32
-        )
+    p = IndexTree(Index(Range("ax0", m)))
+    p = p.put_node(
+        Index(TabulatedMap([("ax0", 0)], [("ax0", 0)], arity=arity0, data=map0[p])),
+        p.leaf,
     )
 
-
-def test_map_composition():
-    axes = MultiAxis([MultiAxisComponent(5, id="p1", label="p1")]).set_up()
-    dat1 = MultiArray(axes, name="dat1", data=np.arange(5, dtype=np.float64))
-    dat2 = MultiArray(axes, name="dat2", data=np.zeros(5, dtype=np.float64))
-
-    mapaxes = axes.copy().add_subaxis("p1", [MultiAxisComponent(2)]).set_up()
-    map1 = MultiArray(
-        mapaxes,
-        name="map1",
-        data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32),
-    )
-    map2 = MultiArray(
-        mapaxes,
-        name="map2",
-        data=np.array([3, 2, 4, 1, 0, 2, 4, 2, 1, 3], dtype=np.int32),
+    q = p.put_node(
+        Index(TabulatedMap([("ax0", 0)], [("ax0", 0)], arity=arity1, data=map1[p])),
+        p.leaf,
     )
 
-    code = lp.make_kernel(
-        "{ [i]: 0 <= i < 4 }",
-        "y[0] = y[0] + x[i]",
-        [
-            lp.GlobalArg("x", np.float64, shape=(4,), is_input=True, is_output=False),
-            lp.GlobalArg("y", np.float64, shape=(1,), is_input=False, is_output=True),
-        ],
-        target=lp.CTarget(),
-        name="mylocalkernel",
-        lang_version=(2018, 2),
-    )
-    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+    do_loop(p, vector_inc_kernel(dat0[q], dat1[p]))
 
-    i1 = IndexTree([RangeNode("p1", 5, id="i1")])
-    i2 = i1.copy()
-    i2.add_node(
-        TabulatedMapNode(("p1",), ("p1",), arity=2, data=map1[i1], id="i2"), "i1"
-    )
-    i3 = i2.copy()
-    i3.add_node(TabulatedMapNode(("p1",), ("p1",), arity=2, data=map2[i2]), "i2")
-
-    expr = pyop3.Loop(i1, kernel(dat1[i3], dat2[i1]))
-
-    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-    dll = compilemythings(code)
-    fn = getattr(dll, "mykernel")
-
-    args = [map1.data, map2.data, dat1.data, dat2.data]
-    fn.argtypes = (ctypes.c_voidp,) * len(args)
-
-    fn(*(d.ctypes.data for d in args))
-
-    ans = [4 + 1 + 0 + 2, 3 + 2 + 0 + 2, 3 + 2 + 4 + 1, 4 + 2 + 1 + 3, 0 + 2 + 4 + 1]
-    assert all(dat2.data == np.array(ans, dtype=np.int32))
+    expected = np.zeros(m)
+    for i0 in range(m):
+        for i1 in range(arity0):
+            expected[mapdata0[i0, i1]] += sum(dat0.data[mapdata1[mapdata0[i0, i1]]])
+    assert np.allclose(dat1.data, expected)
 
 
-def test_mixed_arity_map():
-    axes = MultiAxis([MultiAxisComponent(3, id="p1", label="p1")]).set_up()
-    dat1 = MultiArray(axes, name="dat1", data=np.arange(1, 4, dtype=np.float64))
-    dat2 = MultiArray(axes, name="dat2", data=np.zeros(3, dtype=np.float64))
+def test_inc_with_shared_global_value():
+    m0, m1 = 5, 1
+    n = 2
+    npoints = m0 * n + m1
 
-    nnz = MultiArray(
-        axes, name="nnz", data=np.array([3, 2, 1], dtype=np.int32), max_value=3
-    )
+    arity = 1
+    mapdata = np.asarray([[3], [2], [1], [4], [1]], dtype=IntType)
 
-    mapaxes = axes.copy().add_subaxis("p1", [MultiAxisComponent(nnz)]).set_up()
-    map1 = MultiArray(
-        mapaxes, name="map1", data=np.array([2, 1, 0, 2, 1, 2], dtype=np.int32)
-    )
+    axes = AxisTree(root := Axis([m0, m1], "ax0"), {root.id: [Axis(n), None]})
+    dat0 = MultiArray(axes, name="dat0", data=np.zeros(npoints, dtype=ScalarType))
 
-    code = lp.make_kernel(
-        "{ [i]: 0 <= i < n }",
-        "y[0] = y[0] + x[i]",
-        [
-            lp.GlobalArg("x", np.float64, shape=None, is_input=True, is_output=False),
-            lp.GlobalArg("y", np.float64, shape=None, is_input=False, is_output=True),
-            lp.ValueArg("n", dtype=np.int32),
-        ],
-        assumptions="n <= 3",
-        target=lp.CTarget(),
-        name="mylocalkernel",
-        lang_version=(2018, 2),
-    )
-    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
+    maxes = AxisTree(root := Axis(m0, "ax0"), {root.id: Axis(arity)})
+    map0 = MultiArray(maxes, name="map0", data=mapdata.flatten())
 
-    i1 = IndexTree([RangeNode("p1", 3, id="i1")])
-    i2 = i1.copy()
-    i2.add_node(TabulatedMapNode(("p1",), ("p1",), arity=nnz[i1], data=map1[i1]), "i1")
-
-    expr = pyop3.Loop(i1, kernel(dat1[i2], dat2[i1]))
-
-    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-    dll = compilemythings(code)
-    fn = getattr(dll, "mykernel")
-
-    # import pdb; pdb.set_trace()
-
-    layout0_0 = map1.axes.leaf.layout_fn.start
-    args = [nnz.data, layout0_0.data, map1.data, dat1.data, dat2.data]
-    fn.argtypes = (ctypes.c_voidp,) * len(args)
-
-    fn(*(d.ctypes.data for d in args))
-
-    assert all(dat2.data == np.array([1 + 2 + 3, 2 + 3, 3], dtype=np.int32))
-
-
-def test_iter_map_composition():
-    axes = MultiAxis([MultiAxisComponent(5, label="p1", id="p1")]).set_up()
-    dat1 = MultiArray(axes, name="dat1", data=np.arange(5, dtype=np.float64))
-    dat2 = MultiArray(axes, name="dat2", data=np.zeros(5, dtype=np.float64))
-
-    mapaxes = axes.copy().add_subaxis("p1", [MultiAxisComponent(2)]).set_up()
-    map1 = MultiArray(
-        mapaxes,
-        name="map1",
-        data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32),
-    )
-    map2 = MultiArray(
-        mapaxes,
-        name="map2",
-        data=np.array([3, 2, 2, 3, 0, 2, 1, 2, 1, 3], dtype=np.int32),
-    )
-
-    code = lp.make_kernel(
-        "{ [i]: 0 <= i < 1 }",
-        "y[i] = y[i] + x[i]",
-        [
-            lp.GlobalArg("x", np.float64, (1,), is_input=True, is_output=False),
-            lp.GlobalArg("y", np.float64, (1,), is_input=False, is_output=True),
-        ],
-        target=lp.CTarget(),
-        name="mylocalkernel",
-        lang_version=(2018, 2),
-    )
-    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.WRITE])
-
-    p = IndexTree([RangeNode("p1", 5, id="i1")])
-    p.add_node(
-        TabulatedMapNode(("p1",), ("p1",), arity=2, data=map1[p.copy()], id="i2"), "i1"
-    )
-    p.add_node(TabulatedMapNode(("p1",), ("p1",), arity=2, data=map2[p.copy()]), "i2")
-    expr = pyop3.Loop(p, kernel(dat1[p], dat2[p]))
-
-    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-    dll = compilemythings(code)
-    fn = getattr(dll, "mykernel")
-
-    args = [map1.data, map2.data, dat1.data, dat2.data]
-    fn.argtypes = (ctypes.c_voidp,) * len(args)
-    fn(*(d.ctypes.data for d in args))
-
-    # data is just written to itself (but not the final one because it's not in map1)
-    ans = [0, 1, 2, 3, 0]
-    assert all(dat2.data == np.array(ans, dtype=np.int32))
-
-
-def test_mixed_real_loop():
-    axes = MultiAxis(
-        [
-            MultiAxisComponent(3, label="p1", id="p1"),  # regular part
-            MultiAxisComponent(1, label="p2"),  # "real" part
-        ]
-    )
-    axes.add_node(MultiAxisComponent(2), "p1")
-
-    axes.set_up()
-    dat1 = MultiArray(axes, name="dat1", data=np.zeros(7))
-
-    lpknl = lp.make_kernel(
+    knl = lp.make_kernel(
         "{ [i]: 0 <= i < 3 }",
         "x[i]  = x[i] + 1",
-        [lp.GlobalArg("x", np.float64, (2,), is_input=True, is_output=True)],
+        [lp.GlobalArg("x", ScalarType, (3,), is_input=True, is_output=True)],
         target=lp.CTarget(),
-        name="mylocalkernel",
+        name="plus_one",
         lang_version=(2018, 2),
     )
-    kernel = pyop3.LoopyKernel(lpknl, [pyop3.INC])
+    plus_one = LoopyKernel(knl, [INC])
 
-    i1 = IndexTree([RangeNode("p1", 3, id="i1")])
-    i2 = i1.copy()
-    i2.add_node(IdentityMapNode(("p1",), ("p1",), arity=1), "i1")
-    # it's a map from everything to zero
-    i2.add_node(
-        AffineMapNode(("p1",), ("p2",), arity=1, expr=(pym.variables("x y"), 0)), "i1"
+    p = IndexTree(Index(Range("ax0", m0)))
+
+    mapexpr = (tuple(pym.variables("x y")), 0)  # always yield 0
+    q = p.put_node(
+        Index(
+            [
+                TabulatedMap([("ax0", 0)], [("ax0", 0)], arity=arity, data=map0[p]),
+                AffineMap([("ax0", 0)], [("ax0", 1)], arity=1, expr=mapexpr),
+            ]
+        ),
+        p.leaf,
     )
 
-    expr = pyop3.Loop(i1, kernel(dat1[i2]))
+    do_loop(p, plus_one(dat0[q]))
 
-    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-    dll = compilemythings(code)
-    fn = getattr(dll, "mykernel")
-
-    args = [dat1.data]
-    fn.argtypes = (ctypes.c_voidp,) * len(args)
-    fn(*(d.ctypes.data for d in args))
-
-    assert np.allclose(dat1.data, [1, 1, 1, 1, 1, 1, 3])
+    expected = np.zeros(npoints)
+    for i0 in range(m0):
+        for i1 in range(n):
+            expected[mapdata[i0] * n + i1] += 1
+        expected[m0 * n :] += 1
+    assert np.allclose(dat0.data, expected)
 
 
 def test_different_axis_orderings_do_not_change_packing_order():

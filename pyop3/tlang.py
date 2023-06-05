@@ -67,8 +67,16 @@ class Write(Assignment):
         return self.temporary
 
 
-class Increment(Write):
+class Increment(Assignment):
     id_generator = NameGenerator("inc")
+
+    @property
+    def lhs(self):
+        return self.tensor
+
+    @property
+    def rhs(self):
+        return self.temporary
 
 
 class Zero(Assignment):

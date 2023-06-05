@@ -1284,18 +1284,16 @@ def fill_shape(axes, axis_path=None, prev_indices=PrettyTuple()):
     subindex_trees = []
     for i, component in enumerate(axis.components):
         if isinstance(component.count, MultiArray):
-            breakpoint()
-            # assert False, "should probably just fully index, not clear which indices we want to index with"
             # turn prev_indices into a tree
             assert len(prev_indices) > 0
-            mynewtree = IndexTree()
-            parent = (None, 0)
-            for prev_idx in prev_indices:
-                mynewtree = mynewtree.add_node(prev_idx, parent=parent)
-                parent = (prev_idx.id, 0)
+            root = Index(prev_indices[0])
+            mynewtree = IndexTree(root)
+            parent = root
+            for prev_idx in prev_indices[1:]:
+                toinsert = Index(prev_idx)
+                mynewtree = mynewtree.put_node(toinsert, parent=parent)
+                parent = (toinsert.id, 0)
             count = component.count[mynewtree]
-            # I don't think that we should need to index the thing here???
-            # count = component.count
         elif axis.indexed:
             count = 1
         else:
