@@ -8,7 +8,7 @@ from pyop3.axis import Axis, AxisComponent, AxisTree
 from pyop3.distarray import MultiArray
 from pyop3.dtypes import IntType, ScalarType
 from pyop3.index import Index, IndexTree, Range, TabulatedMap
-from pyop3.loopexpr import READ, WRITE, LoopyKernel, do_loop
+from pyop3.loopexpr import INC, READ, WRITE, LoopyKernel, do_loop
 from pyop3.utils import flatten
 
 
@@ -42,6 +42,22 @@ def vector_copy_kernel():
         lang_version=(2018, 2),
     )
     return LoopyKernel(code, [READ, WRITE])
+
+
+@pytest.fixture
+def vector_inc_kernel():
+    code = lp.make_kernel(
+        "{ [i]: 0 <= i < 3 }",
+        "y[0] = y[0] + x[i]",
+        [
+            lp.GlobalArg("x", ScalarType, (3,), is_input=True, is_output=False),
+            lp.GlobalArg("y", ScalarType, (1,), is_input=True, is_output=True),
+        ],
+        target=lp.CTarget(),
+        name="vector_inc",
+        lang_version=(2018, 2),
+    )
+    return LoopyKernel(code, [READ, INC])
 
 
 @pytest.fixture
@@ -655,50 +671,32 @@ def test_scalar_copy_of_subset(scalar_copy_kernel):
     assert np.allclose(dat1.data[untouched], 0)
 
 
-def test_map():
-    axes = MultiAxis([MultiAxisComponent(5, "a", id="p1")]).set_up()
-    dat1 = MultiArray(axes, name="dat1", data=np.arange(5, dtype=np.float64))
-    dat2 = MultiArray(axes, name="dat2", data=np.zeros(5, dtype=np.float64))
+def test_tabulated_map(vector_inc_kernel):
+    m, n = 4, 3
+    mapdata = np.asarray([[1, 2, 0], [2, 0, 1], [3, 2, 3], [2, 0, 1]], dtype=IntType)
 
-    map_axes = axes.copy().add_subaxis("p1", [MultiAxisComponent(2, "b")]).set_up()
-    map_array = MultiArray(
-        map_axes,
-        name="map1",
-        data=np.array([1, 2, 0, 2, 0, 1, 3, 4, 2, 1], dtype=np.int32),
+    axes = AxisTree(Axis(m, "ax0"))
+    dat0 = MultiArray(axes, name="dat0", data=np.arange(m, dtype=ScalarType))
+    dat1 = MultiArray(axes, name="dat1", data=np.zeros(m, dtype=ScalarType))
+
+    maxes = axes.add_subaxis(Axis(n), axes.leaf)
+    map0 = MultiArray(
+        maxes,
+        name="map0",
+        data=mapdata.flatten(),
     )
 
-    code = lp.make_kernel(
-        "{ [i]: 0 <= i < 2 }",
-        "y[0] = y[0] + x[i]",
-        [
-            lp.GlobalArg("x", np.float64, (2,), is_input=True, is_output=False),
-            lp.GlobalArg("y", np.float64, (1,), is_input=True, is_output=True),
-        ],
-        target=lp.CTarget(),
-        name="mylocalkernel",
-        lang_version=(2018, 2),
+    p = IndexTree(Index(Range("ax0", m)))
+    q = p.put_node(
+        Index(TabulatedMap([("ax0", 0)], [("ax0", 0)], arity=n, data=map0[p])), p.leaf
     )
-    kernel = pyop3.LoopyKernel(code, [pyop3.READ, pyop3.INC])
 
-    p0 = IndexTree([RangeNode("a", 5, id="i0")])
-    p1 = p0.copy()
-    p1.add_node(TabulatedMapNode(("a",), ("a",), arity=2, data=map_array[p0]), "i0")
+    do_loop(p, vector_inc_kernel(dat0[q], dat1[p]))
 
-    expr = pyop3.Loop(p0, kernel(dat1[p1], dat2[p0]))
-
-    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-    dll = compilemythings(code)
-    fn = getattr(dll, "mykernel")
-
-    args = [map_array.data, dat1.data, dat2.data]
-    fn.argtypes = (ctypes.c_voidp,) * len(args)
-
-    fn(*(d.ctypes.data for d in args))
-
-    # from [1, 2, 0, 2, 0, 1, 3, 4, 2, 1]
-    assert all(
-        dat2.data == np.array([1 + 2, 0 + 2, 0 + 1, 3 + 4, 2 + 1], dtype=np.int32)
-    )
+    # Since dat0.data is simply arange, accessing index i of it will also just be i.
+    # Therefore, accessing multiple entries and storing the sum of them is
+    # equivalent to summing the indices from the map.
+    assert np.allclose(dat1.data, np.sum(mapdata, axis=1))
 
 
 def test_closure_ish():
