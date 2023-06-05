@@ -346,25 +346,11 @@ class LoopyKernelBuilder:
                 lp.TemporaryVariable(jname, shape=(), dtype=np.uintp)
             )
 
-            # import pdb; pdb.set_trace()
-
-            # find the right target label for the map (assume can't be multi-part)
-            mapaxis = index.data.axes
-            mappartid = NullRootNode.ID
-            for l in existing_labels:
-                (_part_,) = [pt for pt in mapaxis.children(mappartid) if l == pt.label]
-                mappartid = _part_.id
-            # not sure about this check
-            # assert mapaxis.nparts == 1
-            # assert not mapaxis.children(mappartid)
-            (mypart,) = mapaxis.children(mappartid)
-            map_labels = existing_labels | mypart.label
+            map_labels = existing_labels | (index.data.data.axes.leaf.label, 0)
             map_jnames = existing_jnames | iname
             expr = self.register_scalar_assignment(
-                index.data,
+                index.data.data,
                 dict(checked_zip(map_labels, map_jnames)),
-                # map_labels,
-                # map_jnames,
                 within_inames | {iname},
                 depends_on,
             )

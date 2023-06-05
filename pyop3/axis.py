@@ -482,11 +482,11 @@ class Sparsity:
 
 
 def _collect_datamap(axis, *subdatamaps, axes):
-    from pyop3.distarray import MultiArray
+    from pyop3.distarray import IndexedMultiArray, MultiArray
 
     datamap = {}
     for cidx, component in enumerate(axis.components):
-        if isinstance(count := component.count, MultiArray):
+        if isinstance(count := component.count, (IndexedMultiArray, MultiArray)):
             datamap |= count.datamap
 
     return datamap | merge_dicts(subdatamaps)

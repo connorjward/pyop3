@@ -615,118 +615,44 @@ def test_scalar_copy_of_permuted_then_ragged_then_permuted_axes(scalar_copy_kern
     assert np.allclose(dat1.data[fullperm], dat0.data)
 
 
-def test_permuted_inner_and_ragged(scalar_copy_kernel):
-    # N.B. Do not try to modify the axis labels here, they are supposed to match
-    # this demonstrates that naming the multi-axis nodes does the right thing
-    axes = MultiAxisTree.from_dict(
-        {
-            MultiAxis([MultiAxisComponent(2, "x")], "ax1", id="ax1"): None,
-            MultiAxis([MultiAxisComponent(2, "x")], "ax2"): ("ax1", "x"),
-        }
-    )
-    # breakpoint()
-    nnz = MultiArray(
-        axes.copy().set_up(),
-        name="nnz",
-        data=np.array([3, 2, 1, 1], dtype=np.int32),
-    )
+def test_scalar_copy_with_permuted_inner_axis(scalar_copy_kernel):
+    m, n = 4, 3
+    perm = np.asarray([2, 0, 1], dtype=IntType)
+    npoints = m * n
 
-    # we currently need to do this because ragged things admit no numbering
-    # probably want a .without_numbering() method or similar
-    # also, we might want to store the numbering per MultiAxisNode instead of per
-    # component. That would then match DMPlex.
-    axes = MultiAxisTree.from_dict(
-        {
-            MultiAxis([MultiAxisComponent(2, "x")], "ax1", id="ax1"): None,
-            MultiAxis(
-                [MultiAxisComponent(2, "x", numbering=("ax2", [1, 0]))],
-                "ax2",
-                id="ax2",
-            ): (
-                "ax1",
-                "x",
-            ),
-            MultiAxisNode([MultiAxisComponent(nnz, "z")], "ax3"): ("ax2", "x"),
-        }
-    )
-    axes.set_up()
+    axes = AxisTree(root := Axis(m, "ax0"), {root.id: Axis(n, "ax1", permutation=perm)})
+    dat0 = MultiArray(axes, name="dat0", data=np.arange(npoints, dtype=ScalarType))
+    dat1 = MultiArray(axes, name="dat1", data=np.zeros(npoints, dtype=ScalarType))
 
-    dat1 = MultiArray(axes, name="dat1", data=np.ones(7, dtype=np.float64))
-    dat2 = MultiArray(axes, name="dat2", data=np.zeros(7, dtype=np.float64))
+    p = IndexTree(root := Index(Range("ax0", m)), {root.id: Index(Range("ax1", n))})
+    do_loop(p, scalar_copy_kernel(dat0[p], dat1[p]))
 
-    p = IndexTree([RangeNode(("ax1", "x"), 2, id="i0")])
-    p.add_node(RangeNode(("ax2", "x"), 2, id="i1"), "i0")
-    p.add_node(RangeNode(("ax3", "z"), nnz[p.copy()]), "i1")
-    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[p], dat2[p]))
-
-    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-    dll = compilemythings(code)
-    fn = getattr(dll, "mykernel")
-
-    layout0_0 = dat1.dim.leaf.components[0].layout_fn.start
-    layout1_0 = layout0_0.root.leaf.components[0].layout_fn.start
-    args = [nnz.data, layout1_0.data, layout0_0.data, dat1.data, dat2.data]
-    fn.argtypes = (ctypes.c_voidp,) * len(args)
-    fn(*(d.ctypes.data for d in args))
-
-    assert np.allclose(dat1.data, dat2.data)
+    assert np.allclose(dat0.data, dat1.data)
 
 
-def test_permuted_inner(scalar_copy_kernel):
-    axes = (
-        MultiAxis([MultiAxisComponent(4, "a", id="p1")]).add_subaxis(
-            "p1", [MultiAxisComponent(3, "b", numbering=[2, 0, 1])]
-        )
-    ).set_up()
+def test_scalar_copy_of_subset(scalar_copy_kernel):
+    m, n = 6, 4
+    sdata = np.asarray([2, 3, 5, 0], dtype=IntType)
+    untouched = [1, 4]
 
-    dat1 = MultiArray(axes, name="dat1", data=np.ones(12, dtype=np.float64))
-    dat2 = MultiArray(axes, name="dat2", data=np.zeros(12, dtype=np.float64))
+    axes = AxisTree(Axis(m, "ax0"))
+    dat0 = MultiArray(axes, name="dat0", data=np.arange(m, dtype=ScalarType))
+    dat1 = MultiArray(axes, name="dat1", data=np.zeros(m, dtype=ScalarType))
 
-    p = IndexTree([RangeNode("a", 4, id="i0")])
-    p.add_node(RangeNode("b", 3), "i0")
-    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[p], dat2[p]))
+    # a subset is really a map from a small set into a larger one
+    saxes = AxisTree(root := Axis(n, "sax0"), {root.id: Axis(1)})
+    subset = MultiArray(saxes, name="subset0", data=sdata)
 
-    code = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-    dll = compilemythings(code)
-    fn = getattr(dll, "mykernel")
-
-    layout0_0 = dat1.root.leaf.layout_fn.data
-    args = [layout0_0.data, dat1.data, dat2.data]
-    fn.argtypes = (ctypes.c_voidp,) * len(args)
-    fn(*(d.ctypes.data for d in args))
-
-    assert np.allclose(dat1.data, dat2.data)
-
-
-def test_subset(scalar_copy_kernel):
-    axes = MultiAxis([MultiAxisComponent(6, "a")]).set_up()
-    dat1 = MultiArray(axes, name="dat1", data=np.ones(6, dtype=np.float64))
-    dat2 = MultiArray(axes, name="dat2", data=np.zeros(6, dtype=np.float64))
-
-    # a subset is really a map
-    subset_axes = MultiAxis([MultiAxisComponent(4, "b", id="p1")])
-    subset_axes.add_node(MultiAxisComponent(1, "c"), "p1")
-    subset_axes.set_up()
-    subset_array = MultiArray(
-        subset_axes, prefix="subset", data=np.array([2, 3, 5, 0], dtype=np.int32)
+    p = IndexTree(Index(Range("sax0", n)))
+    p = p.put_node(
+        Index(TabulatedMap([("sax0", 0)], [("ax0", 0)], arity=1, data=subset[p])),
+        p.leaf,
     )
 
-    p = IndexTree([RangeNode("b", 4, id="i0")])
-    p.add_node(
-        TabulatedMapNode(("b",), ("a",), arity=1, data=subset_array[p.copy()]), "i0"
-    )
-    expr = pyop3.Loop(p, scalar_copy_kernel(dat1[p], dat2[p]))
+    do_loop(p, scalar_copy_kernel(dat0[p], dat1[p]))
 
-    exe = pyop3.codegen.compile(expr, target=pyop3.codegen.CodegenTarget.C)
-    dll = compilemythings(exe)
-    fn = getattr(dll, "mykernel")
-
-    args = [subset_array.data, dat1.data, dat2.data]
-    fn.argtypes = (ctypes.c_voidp,) * len(args)
-    fn(*(d.ctypes.data for d in args))
-
-    assert np.allclose(dat2.data[[2, 3, 5, 0]], 1)
-    assert np.allclose(dat2.data[[1, 4]], 0)
+    assert np.allclose(dat1.data[sdata], dat0.data[sdata])
+    assert np.allclose(dat1.data[untouched], 0)
 
 
 def test_map():
