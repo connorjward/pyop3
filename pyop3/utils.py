@@ -73,6 +73,10 @@ def as_tuple(item):
         return (item,)
 
 
+def split_at(iterable, index):
+    return iterable[:index], iterable[index:]
+
+
 class PrettyTuple(tuple):
     """Implement a tuple with nice syntax for recursive functions. Like set notation."""
 

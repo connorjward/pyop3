@@ -525,7 +525,13 @@ class LoopyKernelBuilder:
 
             array = assignment.array.data
             temporary = assignment.temporary.data
-            temp_expr = pym.subscript(pym.var(temporary.name), pym.var(temp_offset))
+
+            # hack to handle the fact that temporaries can have shape but we want to
+            # linearly index it here
+            extra_indices = (0,) * (len(assignment.shape) - 1)
+            temp_expr = pym.subscript(
+                pym.var(temporary.name), extra_indices + (pym.var(temp_offset),)
+            )
             array_expr = pym.subscript(pym.var(array.name), pym.var(array_offset))
 
             if isinstance(assignment, tlang.Read):
@@ -607,13 +613,6 @@ class LoopyKernelBuilder:
                 dtype=arg.data.dtype,
             )
             indexed_temp = temporary[...]
-            temporaries[arg] = (indexed_temp, spec.access)
-
-            # Register data
-            if arg.data.name not in self._tensor_data:
-                self._tensor_data[arg.data.name] = lp.GlobalArg(
-                    arg.data.name, dtype=arg.data.dtype, shape=None
-                )
 
             if loopy_arg.shape is None:
                 shape = (temporary.alloc_size,)
@@ -621,6 +620,14 @@ class LoopyKernelBuilder:
                 if np.prod(loopy_arg.shape, dtype=int) != temporary.alloc_size:
                     raise RuntimeError("Shape mismatch between inner and outer kernels")
                 shape = loopy_arg.shape
+
+            temporaries[arg] = (indexed_temp, spec.access, shape)
+
+            # Register data
+            if arg.data.name not in self._tensor_data:
+                self._tensor_data[arg.data.name] = lp.GlobalArg(
+                    arg.data.name, dtype=arg.data.dtype, shape=None
+                )
 
             self._temp_kernel_data.append(
                 lp.TemporaryVariable(temporary.name, shape=shape)
@@ -718,16 +725,16 @@ class LoopyKernelBuilder:
 
     def make_gathers(self, temporaries, **kwargs):
         return tuple(
-            self.make_gather(arg, temp, access, **kwargs)
-            for arg, (temp, access) in temporaries.items()
+            self.make_gather(arg, temp, shape, access, **kwargs)
+            for arg, (temp, access, shape) in temporaries.items()
         )
 
-    def make_gather(self, argument, temporary, access, **kwargs):
+    def make_gather(self, argument, temporary, shape, access, **kwargs):
         # TODO cleanup the ids
         if access in {READ, RW}:
-            return tlang.Read(argument, temporary, **kwargs)
+            return tlang.Read(argument, temporary, shape, **kwargs)
         elif access in {WRITE, INC}:
-            return tlang.Zero(argument, temporary, **kwargs)
+            return tlang.Zero(argument, temporary, shape, **kwargs)
         else:
             raise NotImplementedError
 
@@ -736,19 +743,19 @@ class LoopyKernelBuilder:
             filter(
                 None,
                 (
-                    self.make_scatter(arg, temp, access, **kwargs)
-                    for arg, (temp, access) in temporaries.items()
+                    self.make_scatter(arg, temp, shape, access, **kwargs)
+                    for arg, (temp, access, shape) in temporaries.items()
                 ),
             )
         )
 
-    def make_scatter(self, argument, temporary, access, **kwargs):
+    def make_scatter(self, argument, temporary, shape, access, **kwargs):
         if access == READ:
             return None
         elif access in {WRITE, RW}:
-            return tlang.Write(argument, temporary, **kwargs)
+            return tlang.Write(argument, temporary, shape, **kwargs)
         elif access == INC:
-            return tlang.Increment(argument, temporary, **kwargs)
+            return tlang.Increment(argument, temporary, shape, **kwargs)
         else:
             raise AssertionError
 
@@ -1059,12 +1066,6 @@ def _get_arguments_per_instruction(instruction):
 def _(assignment: tlang.Assignment):
     raise NotImplementedError
     return data, maps, parameters
-
-
-def as_subarrayref(temporary, iname):
-    """Register an argument to a function."""
-    index = (pym.var(iname),)
-    return lp.symbolic.SubArrayRef(index, pym.subscript(pym.var(temporary.name), index))
 
 
 def resolve(instruction, *args):
