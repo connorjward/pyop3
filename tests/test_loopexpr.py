@@ -998,18 +998,6 @@ def test_inc_with_shared_global_value():
 
 
 def test_different_axis_orderings_do_not_change_packing_order():
-    # FIXME
-    # code = lp.make_kernel(
-    #     "{ [i, j]: 0 <= i, j < 2 }",
-    #     "y[i, j] = x[i, j]",
-    #     [
-    #         lp.GlobalArg("x", np.float64, (2, 2), is_input=True, is_output=False),
-    #         lp.GlobalArg("y", np.float64, (2, 2), is_input=False, is_output=True),
-    #     ],
-    #     target=lp.CTarget(),
-    #     name="copy",
-    #     lang_version=(2018, 2),
-    # )
     m0, m1, m2 = 5, 2, 2
     npoints = m0 * m1 * m2
 
