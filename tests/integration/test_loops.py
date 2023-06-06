@@ -1002,16 +1002,27 @@ def test_different_axis_orderings_do_not_change_packing_order():
     npoints = m0 * m1 * m2
 
     code = lp.make_kernel(
-        f"{{ [i]: 0 <= i < {m1*m2} }}",
-        "y[i] = x[i]",
+        [f"{{ [i]: 0 <= i < {m1} }}", f"{{ [j]: 0 <= j < {m2} }}"],
+        "y[i, j] = x[i, j]",
         [
-            lp.GlobalArg("x", ScalarType, (m1 * m2,), is_input=True, is_output=False),
-            lp.GlobalArg("y", ScalarType, (m1 * m2,), is_input=False, is_output=True),
+            lp.GlobalArg("x", np.float64, (m1, m2), is_input=True, is_output=False),
+            lp.GlobalArg("y", np.float64, (m1, m2), is_input=False, is_output=True),
         ],
         target=lp.CTarget(),
         name="copy",
         lang_version=(2018, 2),
     )
+    # code = lp.make_kernel(
+    #     f"{{ [i]: 0 <= i < {m1*m2} }}",
+    #     "y[i] = x[i]",
+    #     [
+    #         lp.GlobalArg("x", ScalarType, (m1*m2,), is_input=True, is_output=False),
+    #         lp.GlobalArg("y", ScalarType, (m1*m2,), is_input=False, is_output=True),
+    #     ],
+    #     target=lp.CTarget(),
+    #     name="copy",
+    #     lang_version=(2018, 2),
+    # )
     copy_kernel = LoopyKernel(code, [READ, WRITE])
 
     axis0 = Axis(m0, "ax0")

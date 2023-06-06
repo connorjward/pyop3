@@ -547,7 +547,11 @@ class LoopyKernelBuilder:
                 lexpr,
                 rexpr,
                 assignment.id,
-                depends_on=depends_on | extra_deps | array_deps | temp_deps,
+                depends_on=depends_on
+                | assignment.depends_on
+                | extra_deps
+                | array_deps
+                | temp_deps,
                 within_inames=within_inames | extra_inames,
             )
 
@@ -561,21 +565,30 @@ class LoopyKernelBuilder:
     ):
         # I think I'd prefer to do this in a separate earlier pass?
         # when we construct the function call?
-        insns = self.expand_function_call(call, within_indices, depends_on)
+        insns = self.expand_function_call(
+            call, within_indices, within_inames, depends_on
+        )
 
         for insn in insns:
             self._make_instruction_context(
                 insn, within_indices, within_inames, depends_on
             )
 
-    def expand_function_call(self, call, within_indices, depends_on):
+    def expand_function_call(self, call, within_indices, within_inames, depends_on):
         """
         Turn an exprs.FunctionCall into a series of assignment instructions etc.
         Handles packing/accessor logic.
         """
 
         temporaries = {}
-        for arg, spec in checked_zip(call.arguments, call.argspec):
+        subarrayrefs = {}
+        extents = {}
+
+        # loopy args can contain ragged params too
+        loopy_args = call.function.code.default_entrypoint.args[: len(call.arguments)]
+        for loopy_arg, arg, spec in checked_zip(
+            loopy_args, call.arguments, call.argspec
+        ):
             # create an appropriate temporary
             # we need the indices here because the temporary shape needs to be indexed
             # by the same indices as the original array
@@ -586,21 +599,96 @@ class LoopyKernelBuilder:
                 raise NotImplementedError(
                     "Need to handle indices to create temp shape differently"
                 )
+
             axes = self._axes_from_index_tree(arg.index, within_indices)
             temporary = MultiArray(
                 axes,
                 name=self._temp_name_generator.next(),
                 dtype=arg.data.dtype,
             )
-            temporaries[arg] = (temporary[...], spec.access)
+            indexed_temp = temporary[...]
+            temporaries[arg] = (indexed_temp, spec.access)
 
-        gathers = self.make_gathers(temporaries)
-        newcall = self.make_function_call(
-            call, temporaries, depends_on=frozenset(gather.id for gather in gathers)
+            # Register data
+            if arg.data.name not in self._tensor_data:
+                self._tensor_data[arg.data.name] = lp.GlobalArg(
+                    arg.data.name, dtype=arg.data.dtype, shape=None
+                )
+
+            if loopy_arg.shape is None:
+                shape = (temporary.alloc_size,)
+            else:
+                if np.prod(loopy_arg.shape, dtype=int) != temporary.alloc_size:
+                    raise RuntimeError("Shape mismatch between inner and outer kernels")
+                shape = loopy_arg.shape
+
+            self._temp_kernel_data.append(
+                lp.TemporaryVariable(temporary.name, shape=shape)
+            )
+
+            # subarrayref nonsense/magic
+            indices = []
+            for s in shape:
+                iname = self._namer.next("i")
+                indices.append(pym.var(iname))
+                self.domains.append(f"{{ [{iname}]: 0 <= {iname} < {s} }}")
+            indices = tuple(indices)
+
+            subarrayrefs[arg] = lp.symbolic.SubArrayRef(
+                indices, pym.subscript(pym.var(temporary.name), indices)
+            )
+
+            # we need to pass sizes through if they are only known at runtime (ragged)
+            # NOTE: If we register an extent to pass through loopy will complain
+            # unless we register it as an assumption of the local kernel (e.g. "n <= 3")
+            for cidx in range(indexed_temp.index.root.degree):
+                extents |= self.collect_extents(
+                    indexed_temp.index,
+                    indexed_temp.index.root,
+                    cidx,
+                    within_indices,
+                    within_inames,
+                    depends_on,
+                )
+
+        assignees = tuple(
+            subarrayrefs[arg]
+            for arg, spec in checked_zip(call.arguments, call.argspec)
+            if spec.access in {WRITE, RW, INC}
         )
-        scatters = self.make_scatters(temporaries, depends_on=frozenset({newcall.id}))
+        expression = pym.primitives.Call(
+            pym.var(call.function.code.default_entrypoint.name),
+            tuple(
+                subarrayrefs[arg]
+                for arg, spec in checked_zip(call.arguments, call.argspec)
+                if spec.access in {READ, RW, INC}
+            )
+            + tuple(extents.values()),
+        )
 
-        return (*gathers, newcall, *scatters)
+        # TODO Refactor this
+        gathers = self.make_gathers(temporaries)
+
+        insn_id = self._namer.next(call.name)
+        deps = frozenset({f"{gather.id}_*" for gather in gathers}) | depends_on
+
+        call_insn = lp.CallInstruction(
+            assignees,
+            expression,
+            id=insn_id,
+            within_inames=within_inames,
+            within_inames_is_final=True,
+            depends_on=deps,
+        )
+
+        self.instructions.append(call_insn)
+        self.subkernels.append(call.function.code)
+
+        scatters = self.make_scatters(
+            temporaries, depends_on=depends_on | frozenset({insn_id})
+        )
+
+        return (*gathers, *scatters)
 
     # TODO This algorithm is pretty much identical to fill_shape
     def _axes_from_index_tree(self, index_tree, within_indices, index_path=None):
@@ -643,19 +731,6 @@ class LoopyKernelBuilder:
         else:
             raise NotImplementedError
 
-    def make_function_call(self, call, temporaries, **kwargs):
-        reads = tuple(
-            temp
-            for arg, (temp, access) in temporaries.items()
-            if access in {READ, INC, RW}
-        )
-        writes = tuple(
-            temp
-            for arg, (temp, access) in temporaries.items()
-            if access in {WRITE, INC, RW}
-        )
-        return tlang.FunctionCall(call.function, reads, writes, **kwargs)
-
     def make_scatters(self, temporaries, **kwargs):
         return tuple(
             filter(
@@ -682,55 +757,6 @@ class LoopyKernelBuilder:
         self, instruction: tlang.Instruction, *args, **kwargs
     ):
         raise TypeError
-
-    @_make_instruction_context.register
-    def _(self, call: tlang.FunctionCall, within_indices, within_inames, depends_on):
-        # import pdb; pdb.set_trace()
-
-        subarrayrefs = {}
-        for temp in utils.unique(itertools.chain(call.reads, call.writes)):
-            temp_size = temp.data.alloc_size
-            iname = self._namer.next("i")
-            subarrayrefs[temp] = as_subarrayref(temp.data, iname)
-            self.domains.append(f"{{ [{iname}]: 0 <= {iname} < {temp_size} }}")
-            assert temp.data.name in [d.name for d in self._temp_kernel_data]
-
-        # we need to pass sizes through if they are only known at runtime (ragged)
-        extents = {}
-        for temp in utils.unique(itertools.chain(call.reads, call.writes)):
-            for cidx in range(temp.index.root.degree):
-                extents |= self.collect_extents(
-                    temp.index,
-                    temp.index.root,
-                    cidx,
-                    within_indices,
-                    within_inames,
-                    depends_on,
-                )
-
-        # NOTE: If we register an extent to pass through loopy will complain
-        # unless we register it as an assumption of the local kernel (e.g. "n <= 3")
-
-        assignees = tuple(subarrayrefs[var] for var in call.writes)
-        expression = pym.primitives.Call(
-            pym.var(call.function.code.default_entrypoint.name),
-            tuple(subarrayrefs[var] for var in call.reads) + tuple(extents.values()),
-        )
-
-        insn_id = f"{call.id}_0"
-        depends_on = frozenset({f"{id}_*" for id in call.depends_on})
-
-        call_insn = lp.CallInstruction(
-            assignees,
-            expression,
-            id=insn_id,
-            within_inames=within_inames,
-            within_inames_is_final=True,
-            depends_on=depends_on,
-        )
-
-        self.instructions.append(call_insn)
-        self.subkernels.append(call.function.code)
 
     def collect_extents(
         self, itree, index, component_index, within_indices, within_inames, depends_on
@@ -760,22 +786,6 @@ class LoopyKernelBuilder:
         if not isinstance(assignment.tensor.data, MultiArray):
             raise NotImplementedError(
                 "probably want to dispatch here if we hit a PetscMat etc"
-            )
-
-        # Register data
-        # TODO should only do once at a higher point
-        indexed = assignment.tensor.data
-        unindexed = assignment.temporary.data
-        if indexed.name not in self._tensor_data:
-            self._tensor_data[indexed.name] = lp.GlobalArg(
-                indexed.name, dtype=indexed.dtype, shape=None
-            )
-
-        # import pdb; pdb.set_trace()
-        if unindexed.name not in [d.name for d in self._temp_kernel_data]:
-            shape = (unindexed.alloc_size,)
-            self._temp_kernel_data.append(
-                lp.TemporaryVariable(unindexed.name, shape=shape)
             )
 
         for mycounter, (lindex, rindex) in enumerate(
