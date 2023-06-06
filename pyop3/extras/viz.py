@@ -43,18 +43,10 @@ from pyop3.utils import PrettyTuple, strict_int
 #     return label
 
 
-mybadcolormap = [
-    "#011959",
-    "#103F60",
-    "#1C5A62",
-    "#3C6D56",
-    "#687B3E",
-    "#9D892B",
-    "#D29343",
-    "#F8A17B",
-    "#FDB7BC",
-    "#FACCFA",
-]
+mybadcolormap = {
+    1: ["white"],
+    2: ["red", "lightblue"],
+}
 
 
 # TODO This is just the same tree visitor as we have for computing layouts
@@ -90,7 +82,7 @@ def _view_axis_tree(dag, axes, axis, indices=PrettyTuple()):
         component_id = point_to_component_id[pt]
         component_num = point_to_component_num[pt]
 
-        color = mybadcolormap[component_id]
+        color = mybadcolormap[axis.degree][component_id]
         cells.append(f"<TD PORT='x{pt}' BGCOLOR='{color}'>{component_num}</TD>")
 
     label = (
