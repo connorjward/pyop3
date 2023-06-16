@@ -4,7 +4,7 @@ import pytest
 from pyop3.axis import AffineLayout, Axis, AxisComponent, AxisTree, TabulatedLayout
 from pyop3.distarray import MultiArray
 from pyop3.dtypes import IntType
-from pyop3.utils import flatten
+from pyop3.utils import flatten, just_one
 
 # TODO make axis a subpackage and layouts a submodule
 
@@ -21,9 +21,9 @@ def check_invalid_indices(axes, indicess):
 
 
 def test_1d_affine_layout():
-    axes = AxisTree(Axis(5, id="id0"))
+    axes = AxisTree(Axis(5))
 
-    layout0 = axes.layouts["id0", 0]
+    layout0 = just_one(axes.layouts[(0,)])
     assert isinstance(layout0, AffineLayout)
     assert layout0.start == 0
     assert layout0.step == 1
@@ -36,27 +36,20 @@ def test_1d_affine_layout():
             ([2], 2),
             ([3], 3),
             ([4], 4),
-            ([5], 5),
         ],
     )
-    check_invalid_indices(
-        axes,
-        [
-            [-1],
-            [6],
-        ],
-    )
+    check_invalid_indices(axes, [[5]])
 
 
 def test_2d_affine_layout():
-    axes = AxisTree(root := Axis(3, id="id0"), {root.id: Axis(2, id="id1")})
+    axes = AxisTree(root := Axis(3), {root.id: Axis(2)})
 
-    layout0 = axes.layouts["id0", 0]
+    layout0, layout1 = axes.layouts[(0, 0)]
+
     assert isinstance(layout0, AffineLayout)
     assert layout0.start == 0
     assert layout0.step == 2
 
-    layout1 = axes.layouts["id1", 0]
     assert isinstance(layout1, AffineLayout)
     assert layout1.start == 0
     assert layout1.step == 1
@@ -72,18 +65,18 @@ def test_2d_affine_layout():
             ([2, 1], 5),
         ],
     )
-    check_invalid_indices(axes, [[-1, 0], [3, 0], [0, -1], [0, 2]])
+    check_invalid_indices(axes, [[3, 0], [0, 2], [1, 2], [2, 2]])
 
 
 def test_1d_multi_component_layout():
-    axes = AxisTree(Axis([AxisComponent(3), AxisComponent(2)], "ax0", id="id0"))
+    axes = AxisTree(Axis([3, 2], "ax0"))
 
-    layout0 = axes.layouts["id0", 0]
+    layout0 = just_one(axes.layouts[(0,)])
     assert isinstance(layout0, AffineLayout)
     assert layout0.start == 0
     assert layout0.step == 1
 
-    layout1 = axes.layouts["id0", 1]
+    layout1 = just_one(axes.layouts[(1,)])
     assert isinstance(layout1, AffineLayout)
     assert layout1.start == 3
     assert layout1.step == 1
@@ -91,20 +84,22 @@ def test_1d_multi_component_layout():
     check_offsets(
         axes,
         [
-            ([(("ax0", 0), 0)], 0),
-            ([(("ax0", 0), 1)], 1),
-            ([(("ax0", 0), 2)], 2),
-            ([(("ax0", 1), 0)], 3),
-            ([(("ax0", 1), 1)], 4),
+            ([(0, 0)], 0),
+            ([(0, 1)], 1),
+            ([(0, 2)], 2),
+            ([(1, 0)], 3),
+            ([(1, 1)], 4),
         ],
     )
     check_invalid_indices(
         axes,
         [
-            [(("ax0", 0), -1)],
-            [(("ax0", 0), 3)],
-            [(("ax0", 1), -1)],
-            [(("ax0", 1), 2)],
+            [],
+            [(0, -1)],
+            [(0, 3)],
+            [(1, -1)],
+            [(1, 2)],
+            [(0, 0), 0],
         ],
     )
 
@@ -168,6 +163,116 @@ def test_1d_multi_component_permuted_layout():
             [(("ax0", 0), 3)],
             [(("ax0", 1), -1)],
             [(("ax0", 1), 2)],
+        ],
+    )
+
+
+def test_1d_zero_sized_layout():
+    axes = AxisTree(Axis(0))
+
+    layout0 = just_one(axes.layouts[(0,)])
+    assert isinstance(layout0, AffineLayout)
+    assert layout0.start == 0
+    assert layout0.step == 0
+
+    check_invalid_indices(axes, [[], [0]])
+
+
+def test_2d_zero_sized_layout():
+    axes = AxisTree(root := Axis(5), {root.id: Axis(0)})
+
+    breakpoint()
+    axes.layouts
+
+
+def test_multi_component_layout_with_zero_sized_subaxis():
+    axes = AxisTree(
+        root := Axis([2, 1], label="ax0"),
+        {
+            root.id: [Axis(0), Axis(3)],
+        },
+    )
+
+    assert axes.calc_size(axes.root) == 3
+
+    layout00, layout01 = axes.layouts[(0, 0)]
+    assert isinstance(layout00, AffineLayout)
+    assert layout00.start == 0
+    assert layout00.step == 0
+    assert isinstance(layout01, AffineLayout)
+    assert layout01.start == 0
+    assert layout01.step == 1
+
+    layout10, layout11 = axes.layouts[(1, 0)]
+    assert isinstance(layout10, AffineLayout)
+    assert layout10.start == 0
+    assert layout10.step == 3
+    assert isinstance(layout11, AffineLayout)
+    assert layout11.start == 0
+    assert layout11.step == 1
+
+    check_offsets(
+        axes,
+        [
+            ([(1, 0), 0], 0),
+            ([(1, 0), 1], 1),
+            ([(1, 0), 2], 2),
+        ],
+    )
+    check_invalid_indices(
+        axes,
+        [
+            [],
+            [(0, 0), 0],
+            [(1, 0), 3],
+            [(1, 0), 0, 0],
+        ],
+    )
+
+
+def test_permuted_multi_component_layout_with_zero_sized_subaxis():
+    axes = AxisTree(
+        root := Axis([3, 2], label="ax0", permutation=[3, 1, 4, 2, 0]),
+        {
+            root.id: [Axis(0), Axis(3)],
+        },
+    )
+
+    assert axes.calc_size(axes.root) == 6
+
+    layout00, layout01 = axes.layouts[(0, 0)]
+    assert isinstance(layout00, TabulatedLayout)
+    assert (layout00.data.data == [6, 3, 6]).all()
+    assert isinstance(layout01, AffineLayout)
+    assert layout01.start == 0
+    assert layout01.step == 1
+
+    layout10, layout11 = axes.layouts[(1, 0)]
+    assert isinstance(layout10, TabulatedLayout)
+    assert (layout10.data.data == [3, 0]).all()
+    assert isinstance(layout11, AffineLayout)
+    assert layout11.start == 0
+    assert layout11.step == 1
+
+    check_offsets(
+        axes,
+        [
+            ([(1, 0), 0], 3),
+            ([(1, 0), 1], 4),
+            ([(1, 0), 2], 5),
+            ([(1, 1), 0], 0),
+            ([(1, 1), 1], 1),
+            ([(1, 1), 2], 2),
+        ],
+    )
+    check_invalid_indices(
+        axes,
+        [
+            [(0, 0), 0],
+            [(1, 0)],
+            [(1, 2), 0],
+            [(1, 0), 3],
+            [(1, 0), 0, 0],
         ],
     )
 

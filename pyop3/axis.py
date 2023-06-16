@@ -56,33 +56,6 @@ from pyop3.utils import (
     unique,
 )
 
-DEFAULT_PRIORITY = 100
-
-
-class InvalidConstraintsException(Exception):
-    pass
-
-
-class ConstrainedAxis(pytools.ImmutableRecord):
-    fields = {"axis", "priority", "within_labels"}
-    # TODO We could use 'label' to set the priority
-    # via commandline options
-
-    def __init__(
-        self,
-        axis: Axis,
-        *,
-        priority: int = DEFAULT_PRIORITY,
-        within_labels: FrozenSet[Hashable] = frozenset(),
-    ):
-        self.axis = axis
-        self.priority = priority
-        self.within_labels = frozenset(within_labels)
-        super().__init__()
-
-    def __str__(self) -> str:
-        return f"{self.__class__.__name__}(axis=({', '.join(str(axis_cpt) for axis_cpt in self.axis)}), priority={self.priority}, within_labels={self.within_labels})"
-
 
 def is_distributed(axtree, axis=None):
     """Return ``True`` if any part of a :class:`MultiAxis` is distributed across ranks."""
@@ -500,10 +473,12 @@ class AxisTree(LabelledTree):
         *,
         sf=None,
         shared_sf=None,
+        comm=None,
     ):
         super().__init__(root, parent_to_children)
         self.sf = sf
         self.shared_sf = shared_sf
+        self.comm = comm  # FIXME DTRT with internal comms
 
         self._layouts = {}
 
@@ -532,24 +507,50 @@ class AxisTree(LabelledTree):
     def find_part(self, label):
         return self._parts_by_label[label]
 
+    # TODO indices can be either a list of integers, a list of 2-tuples (cidx, idx), or
+    # a mapping from axis label to (cidx, idx) (or just integers I guess)
     def get_offset(self, indices):
         from pyop3.distarray import MultiArray
 
-        # use layout functions to access the right thing
-        # indices here are integers, so this will only work for multi-arrays that
-        # are not multi-part
-        # if self.is_multi_part:
-        #   raise Exception("cannot index with integers here")
-        # accumulate offsets from the layout functions
+        # parse the indices to get the right path and do some bounds checking
         offset = 0
         depth = 0
         axis = self.root
-        remaining_labels = set()
-        while axis:
-            remaining_labels.add(axis.label)
-            axis = self.find_node((axis.id, 0))
+        path = []
+        new_indices = []
+        # TODO if indices is not ordered then we should traverse the axis tree instead
+        # else we would not be able to index ragged things if the indices were:
+        # [nnz, outer]
+        for index in indices:
+            if axis is None:
+                raise IndexError("Too many indices provided")
+            if isinstance(index, numbers.Integral):
+                if axis.degree > 1:
+                    raise IndexError(
+                        "Cannot index multi-component array with integers, a "
+                        "2-tuple of (component index, index value) is needed"
+                    )
+                cidx = 0
+            else:
+                cidx, index = index
 
-        layouts = self.layouts[(0,) * len(indices)]
+            if index < 0:
+                # In theory we could still get this to work...
+                raise IndexError("Cannot use negative indices")
+            # TODO need to pass indices here for ragged things
+            if index >= axis.components[cidx].find_integer_count():
+                raise IndexError("Index is too large")
+
+            new_indices.append(index)
+            path.append(cidx)
+            axis = self.find_node((axis.id, cidx))
+
+        if axis is not None:
+            raise IndexError("Insufficient number of indices given")
+
+        indices = new_indices
+
+        layouts = self.layouts[tuple(path)]
         remaining_indices = list(indices)
         for layout in layouts:
             if isinstance(layout, IndirectLayoutFunction):
@@ -1391,101 +1392,6 @@ def create_lgmap(axes):
     return indices
 
 
-def order_axes(layout):
-    axes = MultiAxisTree()
-    layout = list(layout)
-    axis_to_constraint = {}
-    history = set()
-    while layout:
-        if tuple(layout) in history:
-            raise ValueError("Seen this before, cyclic")
-        history.add(tuple(layout))
-
-        constrained_axis = layout.pop(0)
-        inserted = _insert_axis(axes, constrained_axis, axes.root, axis_to_constraint)
-        if not inserted:
-            layout.append(constrained_axis)
-    return axes
-
-
-def _insert_axis(
-    axes: MultiAxisTree,
-    new_caxis: ConstrainedMultiAxis,
-    current_axis: MultiAxis,
-    axis_to_caxis: dict[MultiAxis, ConstrainedMultiAxis],
-    path: dict[Hashable] | None = None,
-):
-    path = path or {}
-
-    within_labels = set(path.items())
-
-    # alias - remove
-    axis_to_constraint = axis_to_caxis
-
-    if new_caxis.axis not in axis_to_constraint:
-        axis_to_constraint[new_caxis.axis.label] = new_caxis
-
-    if not axes.root:
-        if not new_caxis.within_labels:
-            axes.add_node(new_caxis.axis)
-            return True
-        else:
-            return False
-
-    # current_axis = current_axis or axes.root
-    current_caxis = axis_to_constraint[current_axis.label]
-
-    if new_caxis.priority < current_caxis.priority:
-        if new_caxis.within_labels <= within_labels:
-            # diagram or something?
-            parent_axis = axes.parent(current_axis)
-            subtree = axes.pop_subtree(current_axis)
-            betterid = new_caxis.axis.copy(id=next(MultiAxis._id_generator))
-            if not parent_axis:
-                axes.add_node(betterid)
-            else:
-                axes.add_node(betterid, path)
-
-            # must already obey the constraints - so stick  back in for all sub components
-            for comp in betterid.components:
-                stree = subtree.copy()
-                # stree.replace_node(stree.root.copy(id=next(MultiAxis._id_generator)))
-                mypath = (axes._node_to_path[betterid.id] or {}) | {
-                    betterid.label: comp.label
-                }
-                axes.add_subtree(stree, mypath, uniquify=True)
-                axes._parent_and_label_to_child[(betterid, comp.label)] = stree.root.id
-                # need to register the right parent label
-            return True
-        else:
-            # The priority is less so the axes should definitely
-            # not be inserted below here - do not recurse
-            return False
-    elif axes.is_leaf(current_axis):
-        assert new_caxis.priority >= current_caxis.priority
-        for cpt in current_axis.components:
-            if new_caxis.within_labels <= within_labels | {
-                (current_axis.label, cpt.label)
-            }:
-                betterid = new_caxis.axis.copy(id=next(MultiAxis._id_generator))
-                axes.add_node(betterid, path | {current_axis.label: cpt.label})
-        return True
-    else:
-        inserted = False
-        for cpt in current_axis.components:
-            subaxis = axes.child_by_label(current_axis, cpt.label)
-            # if not subaxis then we dont insert here
-            if subaxis:
-                inserted = inserted or _insert_axis(
-                    axes,
-                    new_caxis,
-                    subaxis,
-                    axis_to_constraint,
-                    path | {current_axis.label: cpt.label},
-                )
-        return inserted
-
-
 # aliases
 MultiAxisTree = AxisTree
 MultiAxis = Axis
@@ -1529,7 +1435,7 @@ def _(arg: AxisComponent) -> AxisComponent:
 
 
 @_as_axis_component.register
-def _(arg: int) -> AxisComponent:
+def _(arg: numbers.Integral) -> AxisComponent:
     return AxisComponent(arg)
 
 

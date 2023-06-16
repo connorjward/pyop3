@@ -293,7 +293,7 @@ class FixedAryTree(pytools.ImmutableRecord):
     def is_leaf(self, node: Node | str) -> bool:
         node = self._as_node(node)
         self._check_exists(node)
-        return len(self.parent_to_children[node.id]) == 0
+        return all(child is None for child in self.parent_to_children[node.id])
 
     @property
     def is_empty(self) -> bool:
@@ -402,7 +402,7 @@ class LabelledTree(FixedAryTree):
         self,
         node: Node,
         parent: Mapping[Node | Hashable, int] | Node | Hashable | None = None,
-        component_index: int | None = None,
+        component_index=None,
         uniquify: bool = False,
     ) -> None:
         if isinstance(parent, Mapping):
