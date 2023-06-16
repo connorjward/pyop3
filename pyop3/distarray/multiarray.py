@@ -63,6 +63,8 @@ class MultiArray(DistributedArray):
         max_value=None,
         sf=None,
     ):
+        if name and prefix:
+            raise ValueError("Can only specify one of name and prefix")
         dim = as_axis_tree(dim)
 
         if isinstance(data, np.ndarray):
@@ -73,10 +75,13 @@ class MultiArray(DistributedArray):
         elif isinstance(data, Sequence):
             data = np.asarray(data, dtype=dtype)
             dtype = data.dtype
-        else:
+        elif data is None:
             if not dtype:
                 raise ValueError("Must either specify a dtype or provide an array")
             dtype = np.dtype(dtype)
+            data = np.zeros(dim.calc_size(dim.root), dtype=dtype)
+        else:
+            raise TypeError("data argument not recognised")
 
         super().__init__()
         name = name or self.name_generator.next(prefix or self.prefix)

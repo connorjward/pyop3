@@ -6,6 +6,7 @@ import pymbolic as pym
 import pytest
 
 from pyop3.axis import Axis, AxisComponent, AxisTree
+from pyop3.codegen import LOOPY_TARGET
 from pyop3.distarray import MultiArray
 from pyop3.dtypes import IntType, ScalarType
 from pyop3.index import AffineMap, IdentityMap, Index, IndexTree, Range, TabulatedMap
@@ -22,7 +23,7 @@ def scalar_copy_kernel():
             lp.GlobalArg("x", ScalarType, (1,), is_input=True, is_output=False),
             lp.GlobalArg("y", ScalarType, (1,), is_input=False, is_output=True),
         ],
-        target=lp.CTarget(),
+        target=LOOPY_TARGET,
         name="scalar_copy",
         lang_version=(2018, 2),
     )
@@ -38,7 +39,7 @@ def vector_copy_kernel():
             lp.GlobalArg("x", ScalarType, (3,), is_input=True, is_output=False),
             lp.GlobalArg("y", ScalarType, (3,), is_input=False, is_output=True),
         ],
-        target=lp.CTarget(),
+        target=LOOPY_TARGET,
         name="vector_copy",
         lang_version=(2018, 2),
     )
@@ -54,7 +55,7 @@ def vector_inc_kernel():
             lp.GlobalArg("x", ScalarType, (3,), is_input=True, is_output=False),
             lp.GlobalArg("y", ScalarType, (1,), is_input=True, is_output=True),
         ],
-        target=lp.CTarget(),
+        target=LOOPY_TARGET,
         name="vector_inc",
         lang_version=(2018, 2),
     )
@@ -72,7 +73,7 @@ def ragged_copy_kernel():
             lp.ValueArg("n", dtype=IntType),
         ],
         assumptions="n <= 3",
-        target=lp.CTarget(),
+        target=LOOPY_TARGET,
         name="ragged_copy",
         lang_version=(2018, 2),
     )
@@ -90,7 +91,7 @@ def ragged_inc_kernel():
             lp.ValueArg("n", dtype=IntType),
         ],
         assumptions="n <= 3",
-        target=lp.CTarget(),
+        target=LOOPY_TARGET,
         name="ragged_inc",
         lang_version=(2018, 2),
     )
@@ -114,7 +115,7 @@ def nested_dependent_ragged_copy_kernel():
             lp.ValueArg("n0", dtype=IntType),
         ],
         assumptions="n0 <= 3 and n1 <= 3",
-        target=lp.CTarget(),
+        target=LOOPY_TARGET,
         name="ragged_copy",
         lang_version=(2018, 2),
     )
@@ -968,7 +969,7 @@ def test_inc_with_shared_global_value():
         "{ [i]: 0 <= i < 3 }",
         "x[i]  = x[i] + 1",
         [lp.GlobalArg("x", ScalarType, (3,), is_input=True, is_output=True)],
-        target=lp.CTarget(),
+        target=LOOPY_TARGET,
         name="plus_one",
         lang_version=(2018, 2),
     )
@@ -1008,21 +1009,10 @@ def test_different_axis_orderings_do_not_change_packing_order():
             lp.GlobalArg("x", np.float64, (m1, m2), is_input=True, is_output=False),
             lp.GlobalArg("y", np.float64, (m1, m2), is_input=False, is_output=True),
         ],
-        target=lp.CTarget(),
+        target=LOOPY_TARGET,
         name="copy",
         lang_version=(2018, 2),
     )
-    # code = lp.make_kernel(
-    #     f"{{ [i]: 0 <= i < {m1*m2} }}",
-    #     "y[i] = x[i]",
-    #     [
-    #         lp.GlobalArg("x", ScalarType, (m1*m2,), is_input=True, is_output=False),
-    #         lp.GlobalArg("y", ScalarType, (m1*m2,), is_input=False, is_output=True),
-    #     ],
-    #     target=lp.CTarget(),
-    #     name="copy",
-    #     lang_version=(2018, 2),
-    # )
     copy_kernel = LoopyKernel(code, [READ, WRITE])
 
     axis0 = Axis(m0, "ax0")

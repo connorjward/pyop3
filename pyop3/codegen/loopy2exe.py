@@ -54,7 +54,7 @@ from pyop3.log import INFO, debug, progress, warning
 
 
 @mpi.collective
-def compile_loopy(kernel, **kwargs):
+def compile_loopy(kernel, *, stop_at_c=False, **kwargs):
     """Build a shared library and return a function pointer from it.
 
     :arg jitmodule: The JIT Module which can generate the code to compile, or
@@ -72,6 +72,8 @@ def compile_loopy(kernel, **kwargs):
         rank 0 compiles code) (defaults to pyop2.mpi.COMM_WORLD).
     """
     code = lp.generate_code_v2(kernel).device_code()
+    if stop_at_c:
+        return code
     argtypes = [ctypes.c_voidp for _ in kernel.default_entrypoint.args]
     restype = None
     return compile_c(code, kernel.default_entrypoint.name, argtypes, restype, **kwargs)

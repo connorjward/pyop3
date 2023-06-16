@@ -67,7 +67,9 @@ def merge_bins(bin1, bin2):
     return new_bin
 
 
-LOOPY_TARGET = lp.CTarget()
+# FIXME this needs to be synchronised with TSFC, tricky
+# shared base package?
+LOOPY_TARGET = lp.CWithGNULibcTarget()
 LOOPY_LANG_VERSION = (2018, 2)
 
 
@@ -348,9 +350,18 @@ class LoopyKernelBuilder:
 
             map_labels = existing_labels | (index.data.data.axes.leaf.label, 0)
             map_jnames = existing_jnames | iname
+
+            # here we assume that maps are single component. Set the cidx to always
+            # 0 since using other indices wouldn't work as they don't exist in the
+            # map multi-array.
+            # same as in register_extent, generalise
+            labels_to_jnames = {
+                (label, 0): jname
+                for ((label, _), jname) in checked_zip(map_labels, map_jnames)
+            }
             expr = self.register_scalar_assignment(
                 index.data.data,
-                dict(checked_zip(map_labels, map_jnames)),
+                labels_to_jnames,
                 within_inames | {iname},
                 depends_on,
             )
@@ -998,7 +1009,6 @@ class LoopyKernelBuilder:
             labels, jnames = [], []
             index = extent.index.root
             while index:
-                component = just_one(index.components)
                 new_labels, new_jnames = within_indices[index.label]
                 labels.extend(new_labels)
                 jnames.extend(new_jnames)

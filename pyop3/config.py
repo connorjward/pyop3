@@ -88,7 +88,7 @@ class Configuration(dict):
         "cxxflags": ("PYOP2_CXXFLAGS", str, ""),
         "ldflags": ("PYOP2_LDFLAGS", str, ""),
         "simd_width": ("PYOP2_SIMD_WIDTH", int, 4),
-        "debug": ("PYOP2_DEBUG", bool, False),
+        "debug": ("PYOP3_DEBUG", bool, False),
         "compute_kernel_flops": ("PYOP2_COMPUTE_KERNEL_FLOPS", bool, False),
         "type_check": ("PYOP2_TYPE_CHECK", bool, True),
         "check_src_hashes": ("PYOP2_CHECK_SRC_HASHES", bool, True),

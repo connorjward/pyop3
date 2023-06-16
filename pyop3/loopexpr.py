@@ -9,12 +9,13 @@ import operator
 from typing import Iterable, Sequence, Tuple
 from weakref import WeakValueDictionary
 
+import loopy as lp
 import numpy as np
 import pytools
 
 from pyop3.distarray import DistributedArray, MultiArray
 from pyop3.index import as_index_tree
-from pyop3.utils import NameGenerator, as_tuple, merge_dicts
+from pyop3.utils import NameGenerator, as_tuple, checked_zip, merge_dicts
 
 
 class AccessDescriptor(enum.Enum):
@@ -85,20 +86,32 @@ class Loop(LoopExpr):
         return f"for {self.index} ∊ {self.index.point_set}"
 
     def __call__(self, **kwargs):
-        from pyop3.codegen.loopexpr2loopy import compile
-        from pyop3.codegen.loopy2exe import compile_loopy
-
-        kernel = compile(self)
-        exe = compile_loopy(kernel)
-
         args = [
             _as_pointer(self.datamap[arg.name])
-            for arg in kernel.default_entrypoint.args
+            for arg in self.loopy_code.default_entrypoint.args
         ]
 
         # TODO parse kwargs
 
-        exe(*args)
+        self.executable(*args)
+
+    @functools.cached_property
+    def loopy_code(self):
+        from pyop3.codegen.loopexpr2loopy import compile
+
+        return compile(self)
+
+    @functools.cached_property
+    def c_code(self):
+        from pyop3.codegen.loopy2exe import compile_loopy
+
+        return compile_loopy(self.loopy_code, stop_at_c=True)
+
+    @functools.cached_property
+    def executable(self):
+        from pyop3.codegen.loopy2exe import compile_loopy
+
+        return compile_loopy(self.loopy_code)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -137,7 +150,7 @@ class LoopyKernel:
     """A callable function."""
 
     def __init__(self, loopy_kernel, access_descrs):
-        self.code = loopy_kernel
+        self.code = fix_intents(loopy_kernel, access_descrs)
         self._access_descrs = access_descrs
 
     def __call__(self, *args):
@@ -232,3 +245,23 @@ def _as_pointer(array: DistributedArray) -> int:
 @_as_pointer.register
 def _(array: MultiArray):
     return array.data.ctypes.data
+
+
+def fix_intents(tunit, accesses):
+    """
+
+    The local kernel has underspecified accessors (is_input, is_output).
+    Here coerce them to match the access descriptors provided.
+
+    This should arguably be done properly in TSFC.
+
+    """
+    kernel = tunit.default_entrypoint
+    new_args = []
+    for arg, access in checked_zip(kernel.args, accesses):
+        assert access in {READ, WRITE, RW, INC}
+        is_input = access in {READ, RW, INC}
+        is_output = access in {WRITE, RW, INC}
+        new_args.append(arg.copy(is_input=is_input, is_output=is_output))
+
+    return tunit.with_kernel(kernel.copy(args=new_args))
