@@ -21,16 +21,13 @@ class Dat:
         self._data = data
 
     def __getitem__(self, indices: IndexTree) -> IndexedMultiArray:
-        if not is_fully_indexed(self.array.axes, indices):
-            raise ValueError("Dats must be fully indexed")
-        return self.array[indices]
+        # TODO fail if we don't fully index the dat, this is because spaces can have
+        # variable orderings so the resulting temporary would have undefined shape
+        # if not is_fully_indexed(self.array.axes, indices):
+        #     raise ValueError("Dats must be fully indexed")
+        return self._data[indices]
 
     # TODO: Use darray as the name of the property for the underlying data structure.
     @property
     def data(self):
         return self._data.data
-
-
-def create_dat(mesh, axes) -> Dat:
-    # axes is a list of multi-axes with additional constraint information
-    pass

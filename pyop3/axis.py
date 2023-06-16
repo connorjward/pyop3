@@ -133,7 +133,7 @@ def has_independently_indexed_subaxis_parts(axtree, axis, component, component_i
     """
     if child := axtree.find_node((axis.id, component_index)):
         return not any(
-            requires_external_index(axtree, child, cpt, i)
+            requires_external_index(axtree, child, i)
             for i, cpt in enumerate(child.components)
         )
     else:
@@ -681,17 +681,6 @@ class AxisTree(LabelledTree):
             cpt.alloc_size(self, axis, i) for i, cpt in enumerate(axis.components)
         )
 
-    @property
-    def count(self):
-        """Return the total number of entries in the axis across all axis parts.
-        Will fail if axis parts do not have integer counts.
-        """
-        if self.nparts == 1:
-            return self.part.count
-        if not all(isinstance(pt.count, numbers.Integral) for pt in self.parts):
-            raise RuntimeError("non-int counts present, cannot sum")
-        return sum(pt.count for pt in self.parts)
-
     # TODO ultimately remove this as it leads to duplication of data
     layout_namer = NameGenerator("layout")
 
@@ -958,6 +947,15 @@ class Axis(LabelledNode):
 
     def __str__(self) -> str:
         return f"{self.__class__.__name__}([{', '.join(str(cpt) for cpt in self.components)}], label={self.label})"
+
+    @property
+    def count(self):
+        """Return the total number of entries in the axis across all axis parts.
+        Will fail if axis parts do not have integer counts.
+        """
+        if not all(cpt.has_integer_count for cpt in self.components):
+            raise RuntimeError("non-int counts present, cannot sum")
+        return sum(cpt.find_integer_count() for cpt in self.components)
 
 
 class MyNode(Node):

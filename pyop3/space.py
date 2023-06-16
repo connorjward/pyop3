@@ -1,10 +1,11 @@
 import functools
 from typing import Hashable
 
+import numpy as np
 import pytools
 from petsc4py import PETSc
 
-from pyop3.axis import Axis, AxisTree
+from pyop3.axis import Axis, AxisTree, has_independently_indexed_subaxis_parts
 
 DEFAULT_AXIS_PRIORITY = 100
 
@@ -87,36 +88,74 @@ class Space:
         # get them to work the numbering would need to be flattened.
         # Ephemeral meshes would probably be rather helpful here.
 
-        # FIXME! this is failing because we are treating zeros as ones when we compute
-        # the layouts. Also we need to fix the section computation below I think. At least
-        # we could use SectionSetPermutation instead of using our own layout calculations?
-        # figure out the right interplay.
-        raise NotImplementedError("currently broken")
-
         # this algorithm is basically equivalent to get_global_numbering
-        if self.axes.depth == 2 and self.axes.root.label == "mesh":
-            # section = self._shared_data.global_numbering
+        # we are allowed to do this if the inner size is always fixed. This is
+        # regardless of any depth considerations from vector shape etc.
+        if self.axes.root.label == "mesh" and all(
+            has_independently_indexed_subaxis_parts(
+                self.axes, self.axes.root, cpt, cidx
+            )
+            for cidx, cpt in enumerate(self.axes.root.components)
+        ):
             section = PETSc.Section().create(comm=self._comm)
-            tdim = self.mesh.plex.getDimension()
-            entity_counts = [self.mesh.num_entities(d) for d in range(tdim + 1)]
-            section.setChart(0, sum(entity_counts) - 1)
-            for d in range(tdim + 1):
-                layout = self.axes.layouts[(d,)]
+            section.setChart(0, self.axes.root.count)
+            for d in range(self.mesh.dimension + 1):
                 # in pyop3 points per tdim are counted from zero
-                counter = 0
-                for pt in range(*self.mesh.plex.getDepthStratum(d)):
-                    section.setOffset(pt, layout.get_value((counter,)))
-                    counter += 1
-            section.setUp()
-            sf = (self.mesh.plex.getPointSF(),)
+                # i.e. cell0, vertex0 instead of all cells being < all vertices
+                subaxis = self.axes.find_node((self.axes.root.id, d))
+                ndofs = self.axes.calc_size(subaxis)
+                if ndofs > 0:
+                    for idx, pt in enumerate(range(*self.mesh.plex.getDepthStratum(d))):
+                        # get the offset for the zeroth sub axis element
+                        indices = [(d, idx)] + [0] * (self.axes.depth - 1)
+                        offset = self.axes.get_offset(indices)
+                        section.setOffset(pt, offset)
+                        section.setDof(pt, ndofs)
+                else:
+                    for pt in range(*self.mesh.plex.getDepthStratum(d)):
+                        section.setDof(pt, 0)
+                        section.setOffset(pt, 0)
+
+            sf = self.mesh.plex.getPointSF()
         else:
             section = None
             sf = None
 
         dmhooks.attach_hooks(dm, level=level, section=section, sf=sf)
-        # Remember the function space so we can get from DM back to FunctionSpace.
-        dmhooks.set_function_space(dm, self)
         return dm
+
+        """note the following code reproduces the same thing as the current
+        "global_numbering" section from Firedrake. But, I don't see why this should
+        be correct. I already handle the permutation when I compute the offsets.
+
+                if self.axes.depth == 2 and self.axes.root.label == "mesh":
+            section = PETSc.Section().create(comm=self._comm)
+            section.setChart(0, self.axes.root.count)
+            for d in range(self.mesh.dimension + 1):
+                # in pyop3 points per tdim are counted from zero
+                # i.e. cell0, vertex0 instead of all cells being < all vertices
+                subaxis = self.axes.find_node((self.axes.root.id, d))
+                dof = self.axes.calc_size(subaxis)
+                for pt in range(*self.mesh.plex.getDepthStratum(d)):
+                    section.setDof(pt, dof)
+                else:
+                    for pt in range(*self.mesh.plex.getDepthStratum(d)):
+                        section.setDof(pt, 0)
+
+            #TODO could make this a property
+            iset = PETSc.IS().createGeneral(self.mesh.axes.root.permutation, comm=self._comm)
+            section.setPermutation(iset)
+            section.setUp()
+
+            sf = self.mesh.plex.getPointSF()
+        else:
+            section = None
+            sf = None
+
+        dmhooks.attach_hooks(dm, level=level, section=section, sf=sf)
+        return dm
+
+        """
 
 
 def order_axes(layout):
@@ -189,19 +228,10 @@ def _insert_axis(
             # The priority is less so the axes should definitely
             # not be inserted below here - do not recurse
             return False
-    elif axes.is_leaf(current_axis):
-        assert new_caxis.priority >= current_caxis.priority
-        for cidx, cpt in enumerate(current_axis.components):
-            if new_caxis.within_labels <= within_labels | {(current_axis.label, cidx)}:
-                # bad uniquify
-                betterid = new_caxis.axis.copy(id=next(Axis._id_generator))
-                axes = axes.put_node(betterid, current_axis.id, cidx)
-        return axes, True
     else:
         inserted = False
         for cidx, cpt in enumerate(current_axis.components):
             subaxis = axes.children(current_axis)[cidx]
-            # if not subaxis then we dont insert here
             if subaxis:
                 # axes can be unchanged
                 axes, now_inserted = _insert_axis(
@@ -211,5 +241,15 @@ def _insert_axis(
                     axis_to_constraint,
                     path | {current_axis.label: cidx},
                 )
-                inserted = inserted or now_inserted
+            else:
+                assert new_caxis.priority >= current_caxis.priority
+                if new_caxis.within_labels <= within_labels | {
+                    (current_axis.label, cidx)
+                }:
+                    # bad uniquify
+                    betterid = new_caxis.axis.copy(id=next(Axis._id_generator))
+                    axes = axes.put_node(betterid, current_axis.id, cidx)
+                now_inserted = True
+
+            inserted = inserted or now_inserted
         return axes, inserted
