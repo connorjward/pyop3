@@ -34,6 +34,7 @@ def make_sparsity_extension():
 
 
 if __name__ == "__main__":
-    sparsity_ext = make_sparsity_extension()
+    # sparsity_ext = make_sparsity_extension()
 
-    setup(ext_modules=[sparsity_ext])
+    # setup(ext_modules=[sparsity_ext])
+    setup()
