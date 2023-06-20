@@ -6,6 +6,7 @@ import pytools
 
 from pyop3.axis import Axis, AxisTree
 from pyop3.distarray import MultiArray
+from pyop3.meshdata.base import MeshDataCarrier
 
 # from pyop3.tree import Node, Tree, previsit
 from pyop3.utils import UniqueNameGenerator, checked_zip, just_one
@@ -13,21 +14,29 @@ from pyop3.utils import UniqueNameGenerator, checked_zip, just_one
 __all__ = ["Dat"]
 
 
-class Dat:
-    def __init__(self, space, dtype=None, *, data=None, name=None):
-        data = MultiArray(space.axes, name=name, data=data, dtype=dtype)
+class Dat(MeshDataCarrier):
+    def __init__(self, space, data=None, *, dtype=None, name=None):
+        array = MultiArray(space.axes, data=data, dtype=dtype, name=name)
 
         self.space = space
-        self._data = data
+        self._array = array
 
-    def __getitem__(self, indices: IndexTree) -> IndexedMultiArray:
-        # TODO fail if we don't fully index the dat, this is because spaces can have
-        # variable orderings so the resulting temporary would have undefined shape
-        # if not is_fully_indexed(self.array.axes, indices):
-        #     raise ValueError("Dats must be fully indexed")
-        return self._data[indices]
+    @property
+    def array(self):
+        return self._array
 
-    # TODO: Use darray as the name of the property for the underlying data structure.
+    @property
+    def name(self):
+        return self.array.name
+
     @property
     def data(self):
-        return self._data.data
+        return self.array.data
+
+    @property
+    def comm(self):
+        return self.space.comm
+
+    @property
+    def internal_comm(self):
+        return self.space.internal_comm

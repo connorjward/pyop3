@@ -1,11 +1,13 @@
 import functools
-from typing import Hashable
+import numbers
+from typing import Any, Hashable
 
 import numpy as np
 import pytools
 from petsc4py import PETSc
 
 from pyop3.axis import Axis, AxisTree, has_independently_indexed_subaxis_parts
+from pyop3.utils import as_tuple
 
 DEFAULT_AXIS_PRIORITY = 100
 
@@ -160,7 +162,7 @@ class Space:
 
 def order_axes(layout):
     axes = AxisTree()
-    layout = list(layout)
+    layout = list(map(as_constrained_axis, as_tuple(layout)))
     axis_to_constraint = {caxis.axis.label: caxis for caxis in layout}
     history = set()
     while layout:
@@ -253,3 +255,23 @@ def _insert_axis(
 
             inserted = inserted or now_inserted
         return axes, inserted
+
+
+@functools.singledispatch
+def as_constrained_axis(arg: Any):
+    raise TypeError
+
+
+@as_constrained_axis.register
+def _(arg: ConstrainedAxis):
+    return arg
+
+
+@as_constrained_axis.register
+def _(arg: Axis):
+    return ConstrainedAxis(arg)
+
+
+@as_constrained_axis.register
+def _(arg: numbers.Integral):
+    return ConstrainedAxis(Axis([arg]))

@@ -86,7 +86,7 @@ class MultiArray(DistributedArray):
         super().__init__()
         name = name or self.name_generator.next(prefix or self.prefix)
 
-        self.data = data
+        self._data = data
         self.dtype = dtype
         self.params = {}
         self._param_namer = NameGenerator(f"{name}_p")
@@ -102,6 +102,26 @@ class MultiArray(DistributedArray):
         self._halo_valid = True
 
         self._sync_thread = None
+
+    @property
+    def data(self):
+        import warnings
+        warnings.warn("deprecate this")
+        return self.data_rw
+
+    @property
+    def data_rw(self):
+        return self._data
+
+    @property
+    def data_ro(self):
+        #TODO
+        return self._data
+
+    @property
+    def data_wo(self):
+        #TODO
+        return self._data
 
     @functools.cached_property
     def datamap(self) -> dict[str:DistributedArray]:
