@@ -18,21 +18,27 @@ from pyop3.index import as_index_tree
 from pyop3.utils import NameGenerator, as_tuple, checked_zip, merge_dicts
 
 
-class AccessDescriptor(enum.Enum):
+#TODO I don't think that this belongs in this file, it belongs to the kernel?
+# create a kernel.py file?
+class Access(enum.Enum):
     READ = "read"
     WRITE = "write"
     RW = "rw"
     INC = "inc"
-    MIN = "min"
-    MAX = "max"
+    MIN_WRITE = "min_write"
+    MIN_RW = "min_rw"
+    MAX_WRITE = "max_write"
+    MAX_RW = "max_rw"
 
 
-READ = AccessDescriptor.READ
-WRITE = AccessDescriptor.WRITE
-INC = AccessDescriptor.INC
-RW = AccessDescriptor.RW
-MIN = AccessDescriptor.MIN
-MAX = AccessDescriptor.MAX
+READ = Access.READ
+WRITE = Access.WRITE
+INC = Access.INC
+RW = Access.RW
+MIN_RW = Access.MIN_RW
+MIN_WRITE = Access.MIN_WRITE
+MAX_RW = Access.MAX_RW
+MAX_WRITE = Access.MAX_WRITE
 
 
 class LoopExpr(pytools.ImmutableRecord, abc.ABC):
@@ -116,7 +122,7 @@ class Loop(LoopExpr):
 
 @dataclasses.dataclass(frozen=True)
 class ArgumentSpec:
-    access: AccessDescriptor
+    access: Intent
     dtype: np.dtype
     space: Tuple[int]
 
@@ -133,7 +139,7 @@ class FunctionArgument:
         return self.tensor.name
 
     @property
-    def access(self) -> AccessDescriptor:
+    def access(self) -> Intent:
         return self.spec.access
 
     @property
@@ -150,6 +156,13 @@ class LoopyKernel:
     """A callable function."""
 
     def __init__(self, loopy_kernel, access_descrs):
+        lpy_args = loopy_kernel.default_entrypoint.args
+        if len(lpy_args) != len(access_descrs):
+            raise ValueError("Wrong number of access descriptors given")
+        for lpy_arg, access in zip(lpy_args, access_descrs):
+            if access in {MIN_RW, MIN_WRITE, MAX_RW, MAX_WRITE} and lpy_arg.shape != (1,):
+                raise ValueError("Reduction operations are only valid for scalars")
+
         self.code = fix_intents(loopy_kernel, access_descrs)
         self._access_descrs = access_descrs
 
@@ -202,31 +215,31 @@ class FunctionCall(Terminal):
     def argspec(self):
         return self.function.argspec
 
-    @property
-    def inputs(self):
-        return tuple(
-            arg
-            for arg, spec in zip(self.arguments, self.argspec)
-            if spec.access == AccessDescriptor.READ
-        )
+    # @property
+    # def inputs(self):
+    #     return tuple(
+    #         arg
+    #         for arg, spec in zip(self.arguments, self.argspec)
+    #         if spec.access == READ
+    #     )
+    #
+    # @property
+    # def outputs(self):
+    #     return tuple(
+    #         arg
+    #         for arg, spec in zip(self.arguments, self.argspec)
+    #         if spec.access in {AccessDescriptor.WRITE, AccessDescriptor.INC}
+    #     )
 
-    @property
-    def outputs(self):
-        return tuple(
-            arg
-            for arg, spec in zip(self.arguments, self.argspec)
-            if spec.access in {AccessDescriptor.WRITE, AccessDescriptor.INC}
-        )
-
-    @property
-    def output_specs(self):
-        return tuple(
-            filter(
-                lambda spec: spec.access
-                in {AccessDescriptor.WRITE, AccessDescriptor.INC},
-                self.argspec,
-            )
-        )
+    # @property
+    # def output_specs(self):
+    #     return tuple(
+    #         filter(
+    #             lambda spec: spec.access
+    #             in {AccessDescriptor.WRITE, AccessDescriptor.INC},
+    #             self.argspec,
+    #         )
+    #     )
 
 
 def loop(*args, **kwargs):
@@ -255,13 +268,15 @@ def fix_intents(tunit, accesses):
 
     This should arguably be done properly in TSFC.
 
+    Note that even if this isn't done in TSFC we need to guard against this properly
+    as the default error is very unclear.
+
     """
     kernel = tunit.default_entrypoint
     new_args = []
     for arg, access in checked_zip(kernel.args, accesses):
-        assert access in {READ, WRITE, RW, INC}
-        is_input = access in {READ, RW, INC}
-        is_output = access in {WRITE, RW, INC}
+        assert access in {READ, WRITE, RW, INC, MIN_RW, MIN_WRITE, MAX_RW, MAX_WRITE}
+        is_input = access in {READ, RW, INC, MIN_RW, MAX_RW}
+        is_output = access in {WRITE, RW, INC, MIN_RW, MIN_WRITE, MAX_WRITE, MAX_RW}
         new_args.append(arg.copy(is_input=is_input, is_output=is_output))
-
     return tunit.with_kernel(kernel.copy(args=new_args))

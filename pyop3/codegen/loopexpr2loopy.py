@@ -35,7 +35,7 @@ from pyop3.index import (
     Range,
     TabulatedMap,
 )
-from pyop3.loopexpr import INC, READ, RW, WRITE, FunctionCall, Loop
+from pyop3.loopexpr import INC, READ, RW, WRITE, MIN_RW, MIN_WRITE, MAX_RW, MAX_WRITE, FunctionCall, Loop
 from pyop3.utils import (
     MultiNameGenerator,
     NameGenerator,
@@ -249,7 +249,6 @@ class LoopyKernelBuilder:
         jnames = None
         new_within = None
 
-        # breakpoint()
         if multi_index.label in within_indices:
             labels, jnames = within_indices[multi_index.label]
             if isinstance(index, Range):
@@ -359,7 +358,7 @@ class LoopyKernelBuilder:
                 (label, 0): jname
                 for ((label, _), jname) in checked_zip(map_labels, map_jnames)
             }
-            expr = self.register_scalar_assignment(
+            expr, _ = self.register_scalar_assignment(
                 index.data.data,
                 labels_to_jnames,
                 within_inames | {iname},
@@ -470,10 +469,11 @@ class LoopyKernelBuilder:
         lchild = assignment.lhs.index.find_node((lmulti_index.id, mycounter))
         rchild = assignment.rhs.index.find_node((rmulti_index.id, mycounter))
         if strictly_all([lchild, rchild]):
+            alldeps = set()
             for mynewcounter, (lsubindex, rsubindex) in enumerate(
                 checked_zip(lchild.indices, rchild.indices)
             ):
-                self.build_assignment(
+                alldeps |= self.build_assignment(
                     assignment,
                     lchild,
                     rchild,
@@ -490,6 +490,7 @@ class LoopyKernelBuilder:
                     lindex_path | {lmulti_index.label: mycounter},
                     rindex_path | {rmulti_index.label: mycounter},
                 )
+            return frozenset(alldeps)
 
         else:
             lhs_part_labels, lhs_jnames = lthings[0], lthings[1]
@@ -560,7 +561,7 @@ class LoopyKernelBuilder:
             else:
                 raise NotImplementedError
 
-            self.generate_assignment_insn_inner(
+            new_deps = self.generate_assignment_insn_inner(
                 lexpr,
                 rexpr,
                 assignment.id,
@@ -572,6 +573,8 @@ class LoopyKernelBuilder:
                 within_inames=within_inames | extra_inames,
             )
 
+            return new_deps
+
     @_build.register
     def _(
         self,
@@ -580,16 +583,9 @@ class LoopyKernelBuilder:
         within_inames,
         depends_on,
     ):
-        # I think I'd prefer to do this in a separate earlier pass?
-        # when we construct the function call?
         insns = self.expand_function_call(
             call, within_indices, within_inames, depends_on
         )
-
-        for insn in insns:
-            self._make_instruction_context(
-                insn, within_indices, within_inames, depends_on
-            )
 
     def expand_function_call(self, call, within_indices, within_inames, depends_on):
         """
@@ -669,26 +665,31 @@ class LoopyKernelBuilder:
                     depends_on,
                 )
 
+        # TODO this is pretty much the same as what I do in fix_intents in loopexpr.py
+        # probably best to combine them - could add a sensible check there too.
         assignees = tuple(
             subarrayrefs[arg]
             for arg, spec in checked_zip(call.arguments, call.argspec)
-            if spec.access in {WRITE, RW, INC}
+            if spec.access in {WRITE, RW, INC, MIN_RW, MIN_WRITE, MAX_RW, MAX_WRITE}
         )
         expression = pym.primitives.Call(
             pym.var(call.function.code.default_entrypoint.name),
             tuple(
                 subarrayrefs[arg]
                 for arg, spec in checked_zip(call.arguments, call.argspec)
-                if spec.access in {READ, RW, INC}
+                if spec.access in {READ, RW, INC, MIN_RW, MAX_RW}
             )
             + tuple(extents.values()),
         )
 
-        # TODO Refactor this
-        gathers = self.make_gathers(temporaries)
+        deps = frozenset(depends_on)
+
+        for gather in self.make_gathers(temporaries, depends_on=depends_on):
+            deps |= self._make_instruction_context(
+                gather, within_indices, within_inames, depends_on
+            )
 
         insn_id = self._namer.next(call.name)
-        deps = frozenset({f"{gather.id}_*" for gather in gathers}) | depends_on
 
         call_insn = lp.CallInstruction(
             assignees,
@@ -698,15 +699,16 @@ class LoopyKernelBuilder:
             within_inames_is_final=True,
             depends_on=deps,
         )
+        deps |= {call_insn.id}
 
         self.instructions.append(call_insn)
         self.subkernels.append(call.function.code)
 
-        scatters = self.make_scatters(
-            temporaries, depends_on=depends_on | frozenset({insn_id})
-        )
-
-        return (*gathers, *scatters)
+        nextdeps = frozenset()
+        for scatter in self.make_scatters(temporaries, depends_on=deps):
+            nextdeps |= self._make_instruction_context(
+                scatter, within_indices, within_inames, deps
+            )
 
     # TODO This algorithm is pretty much identical to fill_shape
     def _axes_from_index_tree(self, index_tree, within_indices, index_path=None):
@@ -742,12 +744,12 @@ class LoopyKernelBuilder:
 
     def make_gather(self, argument, temporary, shape, access, **kwargs):
         # TODO cleanup the ids
-        if access in {READ, RW}:
+        if access in {READ, RW, MIN_RW, MAX_RW}:
             return tlang.Read(argument, temporary, shape, **kwargs)
-        elif access in {WRITE, INC}:
+        elif access in {WRITE, INC, MIN_WRITE, MAX_WRITE}:
             return tlang.Zero(argument, temporary, shape, **kwargs)
         else:
-            raise NotImplementedError
+            raise ValueError("Access descriptor not recognised")
 
     def make_scatters(self, temporaries, **kwargs):
         return tuple(
@@ -763,12 +765,12 @@ class LoopyKernelBuilder:
     def make_scatter(self, argument, temporary, shape, access, **kwargs):
         if access == READ:
             return None
-        elif access in {WRITE, RW}:
+        elif access in {WRITE, RW, MIN_RW, MIN_WRITE, MAX_RW, MAX_WRITE}:
             return tlang.Write(argument, temporary, shape, **kwargs)
         elif access == INC:
             return tlang.Increment(argument, temporary, shape, **kwargs)
         else:
-            raise AssertionError
+            raise ValueError("Access descriptor not recognised")
 
     @functools.singledispatchmethod
     def _make_instruction_context(
@@ -806,13 +808,15 @@ class LoopyKernelBuilder:
                 "probably want to dispatch here if we hit a PetscMat etc"
             )
 
+        new_deps = set()
+
         for mycounter, (lindex, rindex) in enumerate(
             checked_zip(
                 assignment.lhs.index.root.indices,
                 assignment.rhs.index.root.indices,
             )
         ):
-            self.build_assignment(
+            new_deps |= self.build_assignment(
                 assignment,
                 assignment.lhs.index.root,
                 assignment.rhs.index.root,
@@ -821,12 +825,14 @@ class LoopyKernelBuilder:
                 mycounter,
                 within_indices,
                 within_inames,
-                depends_on,
+                depends_on | assignment.depends_on,
                 (),
                 (),
                 (),
                 (),
             )
+
+        return new_deps
 
     def emit_assignment_insn(
         self,
@@ -906,7 +912,7 @@ class LoopyKernelBuilder:
         for layout_fn in axes.layouts[path]:
             # TODO singledispatch!
             if isinstance(layout_fn, IndirectLayoutFunction):
-                layout_var = self.register_scalar_assignment(
+                layout_var, _ = self.register_scalar_assignment(
                     layout_fn.data, labels_to_jnames, within_inames, depends_on
                 )
                 expr += layout_var
@@ -917,7 +923,7 @@ class LoopyKernelBuilder:
                 if isinstance(start, MultiArray):
                     assert False, "dropping support for this"
                     # drop the last jname
-                    start = self.register_scalar_assignment(
+                    start, _ = self.register_scalar_assignment(
                         layout_fn.start,
                         labels_to_jnames,
                         within_inames,
@@ -967,9 +973,11 @@ class LoopyKernelBuilder:
             within_inames=frozenset(within_inames),
             within_inames_is_final=True,
             depends_on=depends_on,
+            depends_on_is_final=True,
             no_sync_with=no_sync_with,
         )
         self.instructions.append(assign_insn)
+        return depends_on | {insn_id}
 
     def generate_index_insns(
         self,
@@ -1018,7 +1026,7 @@ class LoopyKernelBuilder:
                 (label, 0): jname for ((label, _), jname) in checked_zip(labels, jnames)
             }
 
-            temp_var = self.register_scalar_assignment(
+            temp_var, _ = self.register_scalar_assignment(
                 extent.data, labels_to_jnames, within_inames, depends_on
             )
             return str(temp_var)
@@ -1050,7 +1058,7 @@ class LoopyKernelBuilder:
         lexpr = pym.var(temp_name)
         rexpr = pym.subscript(pym.var(array.name), pym.var(array_offset))
 
-        self.generate_assignment_insn_inner(
+        new_deps = self.generate_assignment_insn_inner(
             lexpr,
             rexpr,
             self._namer.next("_scalar_assign"),
@@ -1058,7 +1066,7 @@ class LoopyKernelBuilder:
             within_inames=within_inames,
         )
 
-        return pym.var(temp_name)
+        return pym.var(temp_name), new_deps
 
 
 def _make_loopy_kernel(tlang_kernel):
