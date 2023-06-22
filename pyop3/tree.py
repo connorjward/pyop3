@@ -254,6 +254,7 @@ class FixedAryTree(pytools.ImmutableRecord):
         self,
         subtree: "Tree",
         parent: Node | str | None = None,
+        component_index=None,
         uniquify: bool = False,
     ) -> None:
         """
@@ -266,24 +267,31 @@ class FixedAryTree(pytools.ImmutableRecord):
             will raise an exception. If ``True``, the ``ids`` will be changed
             to avoid the clash.
         """
-        if parent:
-            parent = self._as_node(parent)
-            self._check_exists(parent)
+        if uniquify:
+            raise NotImplementedError("TODO")
 
-        def add_subtree_node(node, parent_id):
-            if uniquify:
-                node = node.copy(id=self._first_unique_id(node))
-            self.add_node(node, parent_id)
-            return node.id
+        if not parent:
+            if component_index is not None:
+                raise ValueError("not possible")
+            # no point in adding things to an empty tree
+            return subtree
+        else:
+            parent_id = self._as_existing_node_id(parent)
 
-        previsit(subtree, add_subtree_node, None, parent.id)
+            new_parent_to_children = dict(self.parent_to_children)
+            new_children = list(new_parent_to_children[parent_id])
+            new_children[component_index] = subtree.root
+            new_parent_to_children[parent_id] = new_children
+
+            return self.copy(parent_to_children=new_parent_to_children)
 
     @property
     def leaves(self) -> tuple[Node]:
         return tuple(
-            node
+            (node, cidx)
             for node in self.nodes
-            if all(child is None for child in self.parent_to_children[node.id])
+            for cidx in range(node.degree)
+            if self.parent_to_children[node.id][cidx] is None
         )
 
     @property
@@ -454,41 +462,41 @@ class LabelledTree(FixedAryTree):
         else:
             return super().children(node)
 
-    def add_subtree(
-        self,
-        subtree: "Tree",
-        parent: NodePath = None,
-        uniquify: bool = False,
-    ) -> None:
-        """
-        Parameters
-        ----------
-        etc
-            ...
-        uniquify
-            If ``False``, duplicate ``ids`` between the tree and subtree
-            will raise an exception. If ``True``, the ``ids`` will be changed
-            to avoid the clash.
-        """
-        if parent:
-            myparent, parentlabel = self._node_from_path(parent)
-            self._check_exists(myparent)
-            myouterpath = self._node_to_path[myparent.id] or {}
-            myouterpath |= {myparent.label: parentlabel}
-        else:
-            myouterpath = {}
-
-        def add_subtree_node(node, parent_id):
-            if parent_id == myparent.id:
-                path = myouterpath
-            else:
-                path = myouterpath | subtree._node_to_path[parent_id]
-            if uniquify:
-                node = node.copy(id=self._first_unique_id(node))
-            self.add_node(node, path)
-            return node.id
-
-        previsit(subtree, add_subtree_node, None, myparent.id)
+    # def add_subtree(
+    #     self,
+    #     subtree: "Tree",
+    #     parent: NodePath = None,
+    #     uniquify: bool = False,
+    # ) -> None:
+    #     """
+    #     Parameters
+    #     ----------
+    #     etc
+    #         ...
+    #     uniquify
+    #         If ``False``, duplicate ``ids`` between the tree and subtree
+    #         will raise an exception. If ``True``, the ``ids`` will be changed
+    #         to avoid the clash.
+    #     """
+    #     if parent:
+    #         myparent, parentlabel = self._node_from_path(parent)
+    #         self._check_exists(myparent)
+    #         myouterpath = self._node_to_path[myparent.id] or {}
+    #         myouterpath |= {myparent.label: parentlabel}
+    #     else:
+    #         myouterpath = {}
+    #
+    #     def add_subtree_node(node, parent_id):
+    #         if parent_id == myparent.id:
+    #             path = myouterpath
+    #         else:
+    #             path = myouterpath | subtree._node_to_path[parent_id]
+    #         if uniquify:
+    #             node = node.copy(id=self._first_unique_id(node))
+    #         self.add_node(node, path)
+    #         return node.id
+    #
+    #     previsit(subtree, add_subtree_node, None, myparent.id)
 
     def pop_subtree(self, subroot: Node | str) -> "Tree":
         subroot = self._as_node(subroot)

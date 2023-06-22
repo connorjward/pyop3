@@ -62,6 +62,7 @@ class MultiArray(DistributedArray):
         data=None,
         max_value=None,
         sf=None,
+        index=None,
     ):
         if name and prefix:
             raise ValueError("Can only specify one of name and prefix")
@@ -90,6 +91,13 @@ class MultiArray(DistributedArray):
         self.dtype = dtype
         self.params = {}
         self._param_namer = NameGenerator(f"{name}_p")
+
+        if index is None:
+            index = fill_shape(dim)
+        else:
+            index = as_index_tree(index)
+            index = expand_indices_to_fill_empty_shape(dim, index)
+        self.index = index
 
         self.name = name
         self.dim = dim
@@ -280,16 +288,11 @@ class MultiArray(DistributedArray):
         return self.dim
 
     def __getitem__(self, index: IndexTree | Index | IndexComponent):
-        from pyop3.distarray.indexed import IndexedMultiArray
-
-        # lets you do myarray[...]
-        if index is Ellipsis:
-            index = fill_shape(self.axes)
-        else:
-            index = as_index_tree(index)
-            index = expand_indices_to_fill_empty_shape(self.axes, index)
-
-        return IndexedMultiArray(self, index)
+        # the new index is formed by adding the existing index tree as a subtree of the new one
+        new_index = as_index_tree(index)
+        for leaf, cidx in new_index.leaves:
+            new_index = new_index.add_subtree(self.index, leaf, cidx)
+        return self.copy(index=new_index)
 
     def select_axes(self, indices):
         selected = []

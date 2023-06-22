@@ -60,6 +60,7 @@ class IndexComponent(pytools.ImmutableRecord, abc.ABC):
         return cls._lazy_id_generator
 
 
+# FIXME this is not a valid index - should provide an index method returning a ScalarIndex
 class Range(IndexComponent):
     # TODO: Gracefully handle start, stop, step
     # fields = IndexNode.fields | {"label", "start", "stop", "step"}
@@ -86,6 +87,32 @@ class Range(IndexComponent):
     @property
     def step(self):
         return 1  # TODO
+
+
+class Slice(IndexComponent):
+    # FIXME size is just temporary, it's tricky but possible to infer
+    fields = IndexComponent.fields | {"start", "stop", "step", "size"}
+
+    def __init__(self, *args, size, **kwargs):
+        nargs = len(args)
+        if nargs == 0:
+            start, stop, step = None, None, None
+        elif nargs == 1:
+            start, stop, step = None, args[0], None
+        elif nargs == 2:
+            start, stop, step = args[0], args[1], None
+        elif nargs == 3:
+            start, stop, step = args[0], args[1], args[2]
+        else:
+            raise ValueError("More than 3 arguments passed to Slice constructor")
+
+        super().__init__(**kwargs)
+        self.start = start
+        self.stop = stop
+        self.step = step
+
+        #FIXME delete when possible
+        self.size = size
 
 
 class Map(IndexComponent):
