@@ -26,6 +26,7 @@ from pyop3.index import (
     AffineMap,
     Index,
     IndexTree,
+    Slice,
     Map,
     MultiIndex,
     Range,
@@ -481,6 +482,9 @@ class AxisTree(LabelledTree):
         self.comm = comm  # FIXME DTRT with internal comms
 
         self._layouts = {}
+
+        # FIXME this is probably silly as an attribute
+        self.index = fill_shape(self)
 
     @functools.cached_property
     def datamap(self) -> dict[str:DistributedArray]:
@@ -1273,86 +1277,79 @@ class SyncStatus:
 
 
 # TODO This algorithm is pretty much identical to _axes_from_index_tree
-def fill_shape(axes, axis_path=None, prev_indices=PrettyTuple()):
+def fill_shape(axes, visited=None, current_axis=None):
     from pyop3.distarray import MultiArray
 
-    axis_path = axis_path or {}
+    current_axis = current_axis or axes.root
+    visited = visited or {}
 
-    axis = axes.find_node(dict(axis_path))
     indices = []
     subindex_trees = []
-    for i, component in enumerate(axis.components):
-        if isinstance(component.count, MultiArray):
-            # turn prev_indices into a tree
-            assert len(prev_indices) > 0
-            root = Index(prev_indices[0])
-            mynewtree = IndexTree(root)
-            parent = root
-            for prev_idx in prev_indices[1:]:
-                toinsert = Index(prev_idx)
-                mynewtree = mynewtree.put_node(toinsert, parent=parent)
-                parent = (toinsert.id, 0)
-            count = component.count[mynewtree]
-        elif axis.indexed:
-            count = 1
+
+    # register a full slice if we haven't indexed it yet.
+    if current_axis.label not in visited:
+        for cidx, component in enumerate(current_axis.components):
+            new_visited = visited.copy()
+            new_visited[current_axis.label] = cidx
+
+            indices.append(Slice((current_axis.label, cidx), None))
+
+            if subaxis := axes.find_node((current_axis.id, cidx)):
+                subindex_tree = fill_shape(axes, visited, subaxis)
+                subindex_trees.append(subindex_tree)
+            else:
+                subindex_trees.append(None)
+
+        root = MultiIndex(indices)
+        subroots = [
+            subindex_tree.root if subindex_tree else None
+            for subindex_tree in subindex_trees
+        ]
+        others = functools.reduce(
+            operator.or_,
+            [dict(sit.parent_to_children) if sit else {} for sit in subindex_trees],
+            {},
+        )
+
+        return IndexTree(root, {root.id: subroots} | others)
+
+    else:
+        cidx = visited[current_axis.label]
+        if axes.find_node((current_axis.id, cidx)):
+            return fill_shape(axes, new_axis_path, prev_indices | new_index)
         else:
-            count = component.count
+            return IndexTree(None)
 
-        new_index = Range((axis.label, i), count)
-        indices.append(new_index)
-
-        new_axis_path = dict(axis_path) | {axis.label: i}
-        if axes.find_node(new_axis_path):
-            subindex_tree = fill_shape(axes, new_axis_path, prev_indices | new_index)
-            subindex_trees.append(subindex_tree)
-        else:
-            subindex_trees.append(None)
-
-    root = MultiIndex(indices)
-    subroots = [
-        subindex_tree.root if subindex_tree else None
-        for subindex_tree in subindex_trees
-    ]
-    others = functools.reduce(
-        operator.or_,
-        [dict(sit.parent_to_children) if sit else {} for sit in subindex_trees],
-        {},
-    )
-
-    return IndexTree(root, {root.id: subroots} | others)
 
 
 def expand_indices_to_fill_empty_shape(
     axis,
     itree,
     multi_index=None,
-    path=PrettyTuple(),
-    prev_indices=PrettyTuple(),
+    visited=None,
 ):
     multi_index = multi_index or itree.root
+
+    visited = visited or {}
 
     subroots = []
     subnodes = {}
     for i, index in enumerate(multi_index.indices):
         # TODO: this bit is very similar to myinnerfunc in loopy.py
-        if isinstance(index, Range):
-            path = path | index.path
-        else:
-            assert isinstance(index, Map)
-            path = path[: -len(index.from_labels)] + index.to_labels
+        new_visited = visited.copy()
+        new_visited.pop(index.from_axis[0], None)
+        new_visited[index.from_axis[0]] = index.from_axis[1]
 
         if submidx := itree.find_node((multi_index.id, i)):
             subitree = expand_indices_to_fill_empty_shape(
-                axis, itree, submidx, path, prev_indices | index
+                axis, itree, submidx, new_visited,
             )
             subroots.append(subitree.root)
             subnodes |= subitree.parent_to_children
-        elif axis.find_node(dict(path)):
-            subitree = fill_shape(axis, path, prev_indices | index)
+        else:
+            subitree = fill_shape(axis, new_visited)
             subroots.append(subitree.root)
             subnodes |= subitree.parent_to_children
-        else:
-            subroots.append(None)
 
     return IndexTree(multi_index, {multi_index.id: subroots} | subnodes)
 
@@ -1388,12 +1385,6 @@ def create_lgmap(axes):
 
     # return PETSc.LGMap().create(indices, comm=axes.sf.comm)
     return indices
-
-
-# aliases
-MultiAxisTree = AxisTree
-MultiAxis = Axis
-MultiAxisComponent = AxisComponent
 
 
 @functools.singledispatch

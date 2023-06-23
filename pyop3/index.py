@@ -43,13 +43,15 @@ MultiIndex = Index
 
 
 class IndexComponent(pytools.ImmutableRecord, abc.ABC):
-    fields = {"id"}
+    fields = {"from_axis", "to_axis", "id"}
 
     _lazy_id_generator = None
 
-    def __init__(self, *, id: Hashable | None = None) -> None:
+    def __init__(self, from_axis, to_axis, *, id: Hashable | None = None) -> None:
         super().__init__()
 
+        self.from_axis = from_axis
+        self.to_axis = to_axis
         self.id = id or next(self._id_generator)
 
     @classmethod
@@ -64,15 +66,15 @@ class IndexComponent(pytools.ImmutableRecord, abc.ABC):
 class Range(IndexComponent):
     # TODO: Gracefully handle start, stop, step
     # fields = IndexNode.fields | {"label", "start", "stop", "step"}
-    fields = IndexComponent.fields | {"path", "stop"}
+    fields = IndexComponent.fields | {"stop"}
 
     def __init__(self, path, stop, **kwargs):
-        super().__init__(**kwargs)
+        super().__init__(path, path, **kwargs)
 
-        if isinstance(path, Sequence) and len(path) == 2 and isinstance(path[1], int):
-            self.path = path
-        else:
-            self.path = (path, 0)
+        # if isinstance(path, Sequence) and len(path) == 2 and isinstance(path[1], int):
+        #     self.path = path
+        # else:
+        #     self.path = (path, 0)
         self.stop = stop
 
     # TODO: This is temporary
@@ -89,11 +91,11 @@ class Range(IndexComponent):
         return 1  # TODO
 
 
+#TODO is it better to specify axis and component separately?
 class Slice(IndexComponent):
-    # FIXME size is just temporary, it's tricky but possible to infer
-    fields = IndexComponent.fields | {"start", "stop", "step", "size"}
+    fields = IndexComponent.fields | {"start", "stop", "step"}
 
-    def __init__(self, *args, size, **kwargs):
+    def __init__(self, axis, *args, **kwargs):
         nargs = len(args)
         if nargs == 0:
             start, stop, step = None, None, None
@@ -106,17 +108,14 @@ class Slice(IndexComponent):
         else:
             raise ValueError("More than 3 arguments passed to Slice constructor")
 
-        super().__init__(**kwargs)
-        self.start = start
+        super().__init__(axis, axis, **kwargs)
+        self.start = start or 0
         self.stop = stop
-        self.step = step
-
-        #FIXME delete when possible
-        self.size = size
+        self.step = step or 1
 
 
 class Map(IndexComponent):
-    fields = IndexComponent.fields | {"from_labels", "to_labels", "arity"}
+    fields = IndexComponent.fields | {"arity"}
 
     # in theory we can have a selector function here too so to_labels is actually bigger?
     # means we have multiple children?

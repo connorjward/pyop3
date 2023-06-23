@@ -47,7 +47,7 @@ class MultiArray(DistributedArray):
 
     """
 
-    fields = {"dim", "dtype", "name", "data", "max_value", "sf"}
+    fields = DistributedArray.fields | {"dim", "dtype", "name", "data", "max_value", "sf", "index"}
 
     name_generator = MultiNameGenerator()
     prefix = "ten"
@@ -288,10 +288,10 @@ class MultiArray(DistributedArray):
         return self.dim
 
     def __getitem__(self, index: IndexTree | Index | IndexComponent):
-        # the new index is formed by adding the existing index tree as a subtree of the new one
-        new_index = as_index_tree(index)
+        index = as_index_tree(index)
+        new_index = self.index
         for leaf, cidx in new_index.leaves:
-            new_index = new_index.add_subtree(self.index, leaf, cidx)
+            new_index = new_index.add_subtree(index, leaf, cidx)
         return self.copy(index=new_index)
 
     def select_axes(self, indices):
