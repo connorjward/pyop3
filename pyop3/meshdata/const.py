@@ -1,8 +1,9 @@
 from mpi4py import MPI
-from pyop3.mpi import internal_comm
-from pyop3.space import order_axes
+
 from pyop3.distarray import MultiArray
 from pyop3.meshdata.base import MeshDataCarrier
+from pyop3.mpi import internal_comm
+from pyop3.space import order_axes
 
 
 class Const(MeshDataCarrier):

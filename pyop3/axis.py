@@ -26,10 +26,10 @@ from pyop3.index import (
     AffineMap,
     Index,
     IndexTree,
-    Slice,
     Map,
     MultiIndex,
     Range,
+    Slice,
     TabulatedMap,
 )
 from pyop3.tree import (
@@ -1321,7 +1321,6 @@ def fill_shape(axes, visited=None, current_axis=None):
             return IndexTree(None)
 
 
-
 def expand_indices_to_fill_empty_shape(
     axis,
     itree,
@@ -1342,7 +1341,10 @@ def expand_indices_to_fill_empty_shape(
 
         if submidx := itree.find_node((multi_index.id, i)):
             subitree = expand_indices_to_fill_empty_shape(
-                axis, itree, submidx, new_visited,
+                axis,
+                itree,
+                submidx,
+                new_visited,
             )
             subroots.append(subitree.root)
             subnodes |= subitree.parent_to_children

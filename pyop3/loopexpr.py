@@ -18,7 +18,7 @@ from pyop3.index import as_index_tree
 from pyop3.utils import NameGenerator, as_tuple, checked_zip, merge_dicts
 
 
-#TODO I don't think that this belongs in this file, it belongs to the kernel?
+# TODO I don't think that this belongs in this file, it belongs to the kernel?
 # create a kernel.py file?
 class Access(enum.Enum):
     READ = "read"
@@ -73,6 +73,7 @@ class Loop(LoopExpr):
         depends_on=frozenset(),
     ):
         from pyop3.axis import as_axis_tree
+
         # FIXME
         # assert isinstance(index, pyop3.tensors.Indexed)
         if not id:
@@ -161,7 +162,9 @@ class LoopyKernel:
         if len(lpy_args) != len(access_descrs):
             raise ValueError("Wrong number of access descriptors given")
         for lpy_arg, access in zip(lpy_args, access_descrs):
-            if access in {MIN_RW, MIN_WRITE, MAX_RW, MAX_WRITE} and lpy_arg.shape != (1,):
+            if access in {MIN_RW, MIN_WRITE, MAX_RW, MAX_WRITE} and lpy_arg.shape != (
+                1,
+            ):
                 raise ValueError("Reduction operations are only valid for scalars")
 
         self.code = fix_intents(loopy_kernel, access_descrs)

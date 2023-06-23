@@ -1,1 +1,1 @@
-from .loopexpr2loopy import LOOPY_TARGET, LOOPY_LANG_VERSION  # noqa: F401
+from .loopexpr2loopy import LOOPY_LANG_VERSION, LOOPY_TARGET  # noqa: F401

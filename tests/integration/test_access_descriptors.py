@@ -1,9 +1,23 @@
+import loopy as lp
 import pytest
 
-import loopy as lp
-
-from pyop3 import AxisTree, Axis, READ, MIN_RW, MIN_WRITE, MAX_RW, MAX_WRITE, ScalarType, MultiArray, LoopyKernel, IndexTree, Index, Range, do_loop
-from pyop3.codegen import LOOPY_TARGET, LOOPY_LANG_VERSION
+from pyop3 import (
+    MAX_RW,
+    MAX_WRITE,
+    MIN_RW,
+    MIN_WRITE,
+    READ,
+    Axis,
+    AxisTree,
+    Index,
+    IndexTree,
+    LoopyKernel,
+    MultiArray,
+    Range,
+    ScalarType,
+    do_loop,
+)
+from pyop3.codegen import LOOPY_LANG_VERSION, LOOPY_TARGET
 
 
 # NOTE: It is only meaningful to test min/max in parallel as otherwise they behave the

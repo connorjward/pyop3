@@ -91,7 +91,7 @@ class Range(IndexComponent):
         return 1  # TODO
 
 
-#TODO is it better to specify axis and component separately?
+# TODO is it better to specify axis and component separately?
 class Slice(IndexComponent):
     fields = IndexComponent.fields | {"start", "stop", "step"}
 

@@ -47,7 +47,15 @@ class MultiArray(DistributedArray):
 
     """
 
-    fields = DistributedArray.fields | {"dim", "dtype", "name", "data", "max_value", "sf", "index"}
+    fields = DistributedArray.fields | {
+        "dim",
+        "dtype",
+        "name",
+        "data",
+        "max_value",
+        "sf",
+        "index",
+    }
 
     name_generator = MultiNameGenerator()
     prefix = "ten"
@@ -114,6 +122,7 @@ class MultiArray(DistributedArray):
     @property
     def data(self):
         import warnings
+
         warnings.warn("deprecate this")
         return self.data_rw
 
@@ -123,12 +132,12 @@ class MultiArray(DistributedArray):
 
     @property
     def data_ro(self):
-        #TODO
+        # TODO
         return self._data
 
     @property
     def data_wo(self):
-        #TODO
+        # TODO
         return self._data
 
     @functools.cached_property

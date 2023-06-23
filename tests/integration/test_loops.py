@@ -6,7 +6,7 @@ import pymbolic as pym
 import pytest
 
 from pyop3.axis import Axis, AxisComponent, AxisTree
-from pyop3.codegen import LOOPY_TARGET, LOOPY_LANG_VERSION
+from pyop3.codegen import LOOPY_LANG_VERSION, LOOPY_TARGET
 from pyop3.distarray import MultiArray
 from pyop3.dtypes import IntType, ScalarType
 from pyop3.index import AffineMap, IdentityMap, Index, IndexTree, Range, TabulatedMap

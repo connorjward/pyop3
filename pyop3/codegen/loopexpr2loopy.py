@@ -8,43 +8,54 @@ import itertools
 import numbers
 import operator
 from typing import Any, Dict, FrozenSet, Optional, Sequence, Tuple
-from pyrsistent import pmap
 
 import loopy as lp
 import loopy.symbolic
 import numpy as np
 import pymbolic as pym
 import pytools
+from pyrsistent import pmap
 
 from pyop3 import tlang, utils
 from pyop3.axis import (
     AffineLayoutFunction,
     Axis,
+    AxisComponent,
     AxisTree,
     IndirectLayoutFunction,
-    AxisComponent,
 )
 from pyop3.distarray import IndexedMultiArray, MultiArray
 from pyop3.index import (
     AffineMap,
-    Slice,
     IdentityMap,
     Index,
     IndexTree,
     Map,
     Range,
+    Slice,
     TabulatedMap,
 )
-from pyop3.loopexpr import INC, READ, RW, WRITE, MIN_RW, MIN_WRITE, MAX_RW, MAX_WRITE, FunctionCall, Loop
+from pyop3.loopexpr import (
+    INC,
+    MAX_RW,
+    MAX_WRITE,
+    MIN_RW,
+    MIN_WRITE,
+    READ,
+    RW,
+    WRITE,
+    FunctionCall,
+    Loop,
+)
 from pyop3.utils import (
     MultiNameGenerator,
-    single_valued,
-    merge_dicts,
     NameGenerator,
     PrettyTuple,
     StrictlyUniqueSet,
     checked_zip,
     just_one,
+    merge_dicts,
+    single_valued,
     strictly_all,
 )
 
@@ -132,12 +143,8 @@ class LoopyKernelBuilder:
         raise TypeError
 
     @_build.register
-    def _(
-        self,
-        loop: Loop,
-        **kwargs
-    ):
-        #FIXME I want this loop over components *inside* the function, more consistent
+    def _(self, loop: Loop, **kwargs):
+        # FIXME I want this loop over components *inside* the function, more consistent
         # in other circumstances (where we build other axes) this matters
         for index in loop.iterset.index.root.components:
             self.build_loop(
@@ -180,15 +187,13 @@ class LoopyKernelBuilder:
         # NOTE: currently maps only map between components of the same axis.
 
         if index.from_axis[0] in path:
-            path = path.discard(index.from_axis[0]).set(*index.from_axis) 
+            path = path.discard(index.from_axis[0]).set(*index.from_axis)
         else:
             path = path.set(*index.from_axis)
 
         index_path |= index
 
-        if child := itree.find_node(
-            (multi_index.id, multi_index.index(index))
-        ):
+        if child := itree.find_node((multi_index.id, multi_index.index(index))):
             for subindex in child.components:
                 self.build_loop(
                     loop,
@@ -255,7 +260,7 @@ class LoopyKernelBuilder:
                     new_depends_on,
                 )
 
-    #TODO I think that I should probably be traversing this function in reverse
+    # TODO I think that I should probably be traversing this function in reverse
     def myinnerfunc(
         self,
         iname,
@@ -451,12 +456,18 @@ class LoopyKernelBuilder:
             new_rindex_path = rindex_path
 
             if lindex_component.from_axis[0] in new_laxis_path:
-                assert new_laxis_path[lindex_component.from_axis[0]] == lindex_component.from_axis[1]
+                assert (
+                    new_laxis_path[lindex_component.from_axis[0]]
+                    == lindex_component.from_axis[1]
+                )
                 new_laxis_path = new_laxis_path.discard(lindex_component.from_axis[0])
             new_laxis_path = new_laxis_path.set(*lindex_component.to_axis)
 
             if rindex_component.from_axis[0] in new_raxis_path:
-                assert new_raxis_path[rindex_component.from_axis[0]] == rindex_component.from_axis[1]
+                assert (
+                    new_raxis_path[rindex_component.from_axis[0]]
+                    == rindex_component.from_axis[1]
+                )
                 new_raxis_path = new_raxis_path.discard(rindex_component.from_axis[0])
             new_raxis_path = new_raxis_path.set(*rindex_component.to_axis)
 
@@ -488,8 +499,12 @@ class LoopyKernelBuilder:
 
                 # map from axes to sizes, components? maps always target the same axis
                 # so should be fine.
-                lextents = collect_extents(assignment.lhs.axes, new_laxis_path, new_lindex_path)
-                rextents = collect_extents(assignment.rhs.axes, new_raxis_path, new_rindex_path)
+                lextents = collect_extents(
+                    assignment.lhs.axes, new_laxis_path, new_lindex_path
+                )
+                rextents = collect_extents(
+                    assignment.rhs.axes, new_raxis_path, new_rindex_path
+                )
 
                 assert lextents.values() == rextents.values()
                 breakpoint()
@@ -514,7 +529,9 @@ class LoopyKernelBuilder:
                 new_within_indices = within_indices
                 new_depends_on = depends_on
                 for index in reversed(index_path):
-                    jname = jnames.pop(index.to_axis[0])  # I think this is what I want...
+                    jname = jnames.pop(
+                        index.to_axis[0]
+                    )  # I think this is what I want...
                     new_jname, insns = self.myinnerfunc(
                         jname,
                         multi_index,
@@ -731,7 +748,7 @@ class LoopyKernelBuilder:
                 name=self._temp_name_generator.next(),
                 dtype=arg.dtype,
             )
-            #FIXME not needed any more
+            # FIXME not needed any more
             # indexed_temp = temporary[...]
             indexed_temp = temporary
 
@@ -770,7 +787,7 @@ class LoopyKernelBuilder:
             # NOTE: If we register an extent to pass through loopy will complain
             # unless we register it as an assumption of the local kernel (e.g. "n <= 3")
 
-            #FIXME ragged is broken since I commented this out! determining shape of
+            # FIXME ragged is broken since I commented this out! determining shape of
             # ragged things requires thought!
             # for cidx in range(indexed_temp.index.root.degree):
             #     extents |= self.collect_extents(
@@ -1279,13 +1296,17 @@ def find_axis(axes, path, target, current_axis=None):
         return find_axis(axes, path, target, subaxis)
 
 
-#TODO maybe this function should also register the loops and just return the inames?
+# TODO maybe this function should also register the loops and just return the inames?
 def collect_extents(axes, path, index_path):
-    extents = {} 
+    extents = {}
     for index in index_path:
         if isinstance(index, Slice):
             assert index.from_axis == index.to_axis
-            stop = index.stop or extents.get(index.from_axis[0]) or find_axis(axes, path, index.from_axis[0]).count
+            stop = (
+                index.stop
+                or extents.get(index.from_axis[0])
+                or find_axis(axes, path, index.from_axis[0]).count
+            )
             new_extent = (stop - index.start) // index.step
             extents[index.to_axis[0]] = new_extent
         else:
@@ -1311,7 +1332,10 @@ def temporary_axes(
         new_index_path = index_path
 
         if index_component.from_axis[0] in new_axis_path:
-            assert new_axis_path[index_component.from_axis[0]] == index_component.from_axis[1]
+            assert (
+                new_axis_path[index_component.from_axis[0]]
+                == index_component.from_axis[1]
+            )
             new_axis_path = new_axis_path.discard(index_component.from_axis[0])
         new_axis_path = new_axis_path.set(*index_component.to_axis)
 
@@ -1344,8 +1368,7 @@ def temporary_axes(
 
     # convert the subtrees to a full one
     root = Axis([1] * index.degree, index.label)
-    parent_to_children = (
-        {root.id: [subtree.root] for subtree in subtrees}
-        | merge_dicts([subtree.parent_to_children for subtree in subtrees])
-    )
+    parent_to_children = {
+        root.id: [subtree.root] for subtree in subtrees
+    } | merge_dicts([subtree.parent_to_children for subtree in subtrees])
     return AxisTree(root, parent_to_children)

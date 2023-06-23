@@ -1,7 +1,9 @@
 from __future__ import annotations
-import abc
-class MeshDataCarrier(abc.ABC):
 
+import abc
+
+
+class MeshDataCarrier(abc.ABC):
     def __getitem__(self, indices: IndexTree) -> IndexedMultiArray:
         # TODO fail if we don't fully index the dat, this is because spaces can have
         # variable orderings so the resulting temporary would have undefined shape

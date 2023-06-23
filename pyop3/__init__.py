@@ -1,7 +1,7 @@
 from pyop3.axis import Axis, AxisTree  # noqa: F401
 from pyop3.distarray import MultiArray  # noqa: F401
 from pyop3.dtypes import ScalarType  # noqa: F401
-from pyop3.index import Index, IndexTree, Range, TabulatedMap, Slice  # noqa: F401
+from pyop3.index import Index, IndexTree, Range, Slice, TabulatedMap  # noqa: F401
 from pyop3.loopexpr import (  # noqa: F401
     INC,
     MAX_RW,
