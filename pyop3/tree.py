@@ -44,6 +44,23 @@ class Node(pytools.ImmutableRecord):
         return cls._lazy_id_generator
 
 
+#TODO should probably have label attribute too
+class NodeComponent(pytools.ImmutableRecord):
+    fields = {"id"}
+
+    _lazy_id_generator = None
+
+    def __init__(self, id: Hashable | None = None):
+        self.id = id or next(self._id_generator)
+
+    @classmethod
+    @property
+    def _id_generator(cls):
+        if not cls._lazy_id_generator:
+            cls._lazy_id_generator = UniqueNameGenerator(f"_id_{cls.__name__}")
+        return cls._lazy_id_generator
+
+
 class FixedAryTree(pytools.ImmutableRecord):
     fields = {"root", "parent_to_children"}
 
@@ -285,14 +302,14 @@ class FixedAryTree(pytools.ImmutableRecord):
 
             return self.copy(parent_to_children=new_parent_to_children)
 
-    @property
-    def leaves(self) -> tuple[Node]:
-        return tuple(
-            (node, cidx)
-            for node in self.nodes
-            for cidx in range(node.degree)
-            if self.parent_to_children[node.id][cidx] is None
-        )
+    # @property
+    # def leaves(self) -> tuple[Node]:
+    #     return tuple(
+    #         (node, cidx)
+    #         for node in self.nodes
+    #         for cidx in range(node.degree)
+    #         if self.parent_to_children[node.id][cidx] is None
+    #     )
 
     @property
     def leaf(self) -> Node:
@@ -575,22 +592,74 @@ class LabelledTree(FixedAryTree):
 
         return tree
 
+    @functools.cached_property
+    def _paths(self):
+        def paths_fn(node, component_index, prev):
+            prev = prev or []
+            new_path = prev + [(node, component_index)]
+            paths_[node, component_index] = new_path
+            return new_path
+
+        paths_ = {}
+        previsit(self, paths_fn)
+        return pyrsistent.freeze(paths_)
+
+    @functools.cached_property
+    def leaves(self):
+        """Return the leaves of the tree.
+
+        The leaves will be returned as ``(node_id, component_label)`` 2-tuples.
+
+        This operation is cached so future calls will be fast.
+
+        """
+        def leaves_fn(node, component_index, prev):
+            if not self.find_node((node.id, component_index)):
+                leaves_.append((node, component_index))
+
+        leaves_ = []
+        previsit(self, leaves_fn)
+        return tuple(leaves_)
+
+    def ancestors(self, node, component_index):
+        """Return the ancestors of a ``(node_id, component_label)`` 2-tuple."""
+        return self.path(node, component_index)[:-1]
+
+    def path(self, node, component_index):
+        return self._paths[node, component_index]
+
+
+
 
 # better alias?
 MultiTree = LabelledTree
 
 
+# def previsit(
+#     tree, fn, current_node: Node | None = None, prev_result: Any | None = None
+# ) -> Any:
+#     if tree.is_empty:
+#         raise RuntimeError("Cannot traverse an empty tree")
+#
+#     current_node = current_node or tree.root
+#
+#     result = fn(current_node, prev_result)
+#     for child in tree.children(current_node):
+#         previsit(tree, fn, child, result)
+#
+#
 def previsit(
-    tree, fn, current_node: Node | None = None, prev_result: Any | None = None
+    tree, fn, current_node: Node | None = None, prev=None,
 ) -> Any:
     if tree.is_empty:
         raise RuntimeError("Cannot traverse an empty tree")
 
     current_node = current_node or tree.root
 
-    result = fn(current_node, prev_result)
-    for child in tree.children(current_node):
-        previsit(tree, fn, child, result)
+    for cidx in range(current_node.degree):
+        next = fn(current_node, cidx, prev)
+        if subnode := tree.find_node((current_node.id, cidx)):
+            previsit(tree, fn, subnode, next)
 
 
 def postvisit(tree, fn, current_node: Node | None = None, **kwargs) -> Any:
@@ -618,3 +687,5 @@ def postvisit(tree, fn, current_node: Node | None = None, **kwargs) -> Any:
         ),
         **kwargs,
     )
+
+

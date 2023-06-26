@@ -34,6 +34,7 @@ from pyop3.index import (
 )
 from pyop3.tree import (
     FixedAryTree,
+    NodeComponent,
     LabelledNode,
     LabelledTree,
     Node,
@@ -1045,7 +1046,7 @@ def has_constant_step(axes: AxisTree, axis, component_index, depth=0):
         return True
 
 
-class AxisComponent(pytools.ImmutableRecord):
+class AxisComponent(NodeComponent):
     """
     Parameters
     ----------
@@ -1071,7 +1072,7 @@ class AxisComponent(pytools.ImmutableRecord):
 
     """
 
-    fields = {
+    fields = NodeComponent.fields | {
         "count",
         "name",
         "overlap",

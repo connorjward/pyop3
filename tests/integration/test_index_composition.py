@@ -45,8 +45,7 @@ def test_1d_slice_composition(copy_kernel):
     # equivalent to dat1[...] = dat0[::2][1:3] (== [2, 4])
 
     # we have no outer iteration so just have a loop with extent 1
-    # do_loop(
-    l = loop(
+    do_loop(
         AxisTree(
             Axis(1, "any")
         ),  # like a range, could be called "p" and used to index sub-bits
@@ -57,9 +56,5 @@ def test_1d_slice_composition(copy_kernel):
             dat1[Index(Slice(("ax1", 0), 2))],
         ),
     )
-
-    from pyop3.codegen.loopexpr2loopy import compile
-
-    compile(l)
 
     assert np.allclose(dat1.data, dat0.data[::2][1:3])

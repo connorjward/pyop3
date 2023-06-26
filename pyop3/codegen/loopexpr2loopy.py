@@ -143,34 +143,7 @@ class LoopyKernelBuilder:
         raise TypeError
 
     @_build.register
-    def _(self, loop: Loop, **kwargs):
-        # FIXME I want this loop over components *inside* the function, more consistent
-        # in other circumstances (where we build other axes) this matters
-        for index in loop.iterset.index.root.components:
-            self.build_loop(
-                loop,
-                loop.iterset.index,
-                loop.iterset.index.root,
-                index,
-                **kwargs,
-            )
-
-    def build_loop(
-        self,
-        loop,
-        itree,
-        multi_index,
-        index,
-        within_indices=pmap(),
-        within_inames=frozenset(),
-        depends_on=frozenset(),
-        existing_labels=pmap(),
-        path=pmap(),
-        index_path=PrettyTuple(),
-    ):
-        if isinstance(index, Map) and index.selector:
-            raise NotImplementedError
-
+    def _(self, loop: Loop, within_inames=frozenset(), depends_on=frozenset(), within_indices=pmap(), existing_labels=pmap()):
         # this is a map from axis labels to extents, if we hit an index over a new thing
         # then we get the size from the array, else we can modify the sizes provided
         # how do maps impact this? just like a slice I think, "consume" the prior index
@@ -186,35 +159,22 @@ class LoopyKernelBuilder:
 
         # NOTE: currently maps only map between components of the same axis.
 
-        if index.from_axis[0] in path:
-            path = path.discard(index.from_axis[0]).set(*index.from_axis)
-        else:
-            path = path.set(*index.from_axis)
+        for leaf, cidx in loop.iterset.index.leaves:
 
-        index_path |= index
+            index_path = [node.components[nodecidx] for node, nodecidx in loop.iterset.index.path(leaf, cidx)]
+            axis_path = {}
+            for icomponent in index_path:
+                if icomponent.from_axis[0] in axis_path:
+                    axis_path.discard(icomponent.from_axis[0])
+                axis_path |= dict([icomponent.to_axis])
 
-        if child := itree.find_node((multi_index.id, multi_index.index(index))):
-            for subindex in child.components:
-                self.build_loop(
-                    loop,
-                    itree,
-                    child,
-                    subindex,
-                    within_indices | new_within,
-                    within_inames | {iname},
-                    depends_on | new_deps,
-                    new_labels,
-                    path,
-                    index_path,
-                )
-        else:
             # register loops. this must be done at the bottom of the tree because we
             # only know now how big the emitted loops need to be. For example repeated
             # slices of the same axis will result in a single, smaller, loop.
 
             # map from axes to sizes, components? maps always target the same axis
             # so should be fine.
-            extents = collect_extents(loop.iterset, path, index_path)
+            extents = collect_extents(loop.iterset, axis_path, index_path)
 
             # now generate loops for each of these extents, keep the same mapping from
             # axis labels to, now, inames
@@ -235,13 +195,14 @@ class LoopyKernelBuilder:
 
             new_within_indices = within_indices
             new_depends_on = depends_on
-            for index in reversed(index_path):
-                jname = jnames.pop(index.to_axis[0])  # I think this is what I want...
+            for multi_index, index_cidx in reversed(loop.iterset.index.path(leaf, cidx)):
+                index = multi_index.components[index_cidx]
+                jname = jnames.pop(index.to_axis)  # I think this is what I want...
                 new_jname, insns = self.myinnerfunc(
                     jname,
                     multi_index,
                     index,
-                    existing_labels,
+                    existing_labels,  # can probably delete this
                     within_indices,
                     within_inames,
                     new_depends_on,
@@ -260,7 +221,6 @@ class LoopyKernelBuilder:
                     new_depends_on,
                 )
 
-    # TODO I think that I should probably be traversing this function in reverse
     def myinnerfunc(
         self,
         iname,
@@ -273,7 +233,8 @@ class LoopyKernelBuilder:
     ):
         # set these below (singledispatch me)
         index_insns = None
-        new_labels = existing_labels.discard(index.from_axis[0]) + dict([index.to_axis])
+        new_labels = existing_labels  # not needed? I handle this sort of thing outside this fn now
+        # new_labels = existing_labels.pop(index.from_axis[0]) + dict([index.to_axis])
         jnames = None
         new_within = None
 
@@ -309,7 +270,7 @@ class LoopyKernelBuilder:
                 pym.var(jname),
                 pym.var(iname) * index.step + index.start,
                 id=self._namer.next("myid_"),
-                within_inames=within_inames | {iname},
+                within_inames=within_inames,
                 depends_on=depends_on,
             )
             self.instructions.append(index_insn)
@@ -432,209 +393,124 @@ class LoopyKernelBuilder:
     def build_assignment(
         self,
         assignment,
-        lindex,
-        rindex,
         within_indices,
         within_inames,
         depends_on,
-        laxis_path=pmap(),
-        raxis_path=pmap(),
-        lindex_path=PrettyTuple(),
-        rindex_path=PrettyTuple(),
     ):
-        # NEXT 23/06
-        # so the final extents are the same but the number of indices differs
-        # what happens if the indices have degree >1? We need to visit all the tree
-        # leaves together. I suppose I could gather the leaves and loop over each in turn.
-        for index_cidx in range(single_valued([lindex.degree, rindex.degree])):
-            lindex_component = lindex.components[index_cidx]
-            rindex_component = rindex.components[index_cidx]
+        for (lleaf, lcidx), (rleaf, rcidx) in checked_zip(assignment.lhs.index.leaves, assignment.rhs.index.leaves):
+            # copied from build_loop
+            lindex_path = [node.components[nodecidx] for node, nodecidx in assignment.lhs.index.path(lleaf, lcidx)]
+            laxis_path = {}
+            for cpt in lindex_path:
+                if cpt.from_axis[0] in laxis_path:
+                    laxis_path.pop(cpt.from_axis[0])
+                laxis_path |= dict([cpt.to_axis])
 
-            new_laxis_path = laxis_path
-            new_raxis_path = raxis_path
-            new_lindex_path = lindex_path
-            new_rindex_path = rindex_path
+            rindex_path = [node.components[nodecidx] for node, nodecidx in assignment.rhs.index.path(rleaf, rcidx)]
+            raxis_path = {}
+            for cpt in rindex_path:
+                if cpt.from_axis[0] in raxis_path:
+                    raxis_path.pop(cpt.from_axis[0])
+                raxis_path |= dict([cpt.to_axis])
 
-            if lindex_component.from_axis[0] in new_laxis_path:
-                assert (
-                    new_laxis_path[lindex_component.from_axis[0]]
-                    == lindex_component.from_axis[1]
-                )
-                new_laxis_path = new_laxis_path.discard(lindex_component.from_axis[0])
-            new_laxis_path = new_laxis_path.set(*lindex_component.to_axis)
+            # at the bottom, now emit the loops and assignment
 
-            if rindex_component.from_axis[0] in new_raxis_path:
-                assert (
-                    new_raxis_path[rindex_component.from_axis[0]]
-                    == rindex_component.from_axis[1]
-                )
-                new_raxis_path = new_raxis_path.discard(rindex_component.from_axis[0])
-            new_raxis_path = new_raxis_path.set(*rindex_component.to_axis)
+            # register loops. this must be done at the bottom of the tree because we
+            # only know now how big the emitted loops need to be. For example repeated
+            # slices of the same axis will result in a single, smaller, loop.
 
-            new_lindex_path |= lindex_component
-            new_rindex_path |= rindex_component
+            # map from axes to sizes, components? maps always target the same axis
+            # so should be fine.
+            lextents = collect_extents(
+                assignment.lhs.axes, laxis_path, lindex_path
+            )
+            rextents = collect_extents(
+                assignment.rhs.axes, raxis_path, rindex_path
+            )
 
-            lsubindex = assignment.lhs.index.find_node((lindex.id, index_cidx))
-            rsubindex = assignment.rhs.index.find_node((rindex.id, index_cidx))
-            if strictly_all([lsubindex, rsubindex]):
-                self.build_assignment(
-                    assignment,
-                    lsubindex,
-                    rsubindex,
-                    within_indices,
-                    within_inames,
-                    depends_on,
-                    new_laxis_path,
-                    new_raxis_path,
-                    new_lindex_path,
-                    new_rindex_path,
-                )
+            liter = iter(lextents.items())
+            riter = iter(rextents.items())
 
-            else:
-                # at the bottom, now emit the loops and assignment
+            ljnames = {}
+            rjnames = {}
+            new_within_inames = within_inames
+            try:
+                while True:
+                    lnext = next(liter)
+                    while lnext[1] == 1:
+                        # don't actually register a domain if it has size 1
+                        iname = self._namer.next("i")
+                        domain_str = f"{{ [{iname}]: 0 <= {iname} < 1 }}"
+                        self.domains.append(domain_str)
+                        ljnames[lnext[0]] = iname
+                        new_within_inames |= {iname}
+                        lnext = next(liter)
+                    rnext = next(riter)
+                    while rnext[1] == 1:
+                        iname = self._namer.next("i")
+                        domain_str = f"{{ [{iname}]: 0 <= {iname} < 1 }}"
+                        self.domains.append(domain_str)
+                        rjnames[rnext[0]] = iname
+                        new_within_inames |= {iname}
+                        rnext = next(riter)
 
-                # register loops. this must be done at the bottom of the tree because we
-                # only know now how big the emitted loops need to be. For example repeated
-                # slices of the same axis will result in a single, smaller, loop.
-
-                # map from axes to sizes, components? maps always target the same axis
-                # so should be fine.
-                lextents = collect_extents(
-                    assignment.lhs.axes, new_laxis_path, new_lindex_path
-                )
-                rextents = collect_extents(
-                    assignment.rhs.axes, new_raxis_path, new_rindex_path
-                )
-
-                assert lextents.values() == rextents.values()
-                breakpoint()
-
-                # now generate loops for each of these extents, keep the same mapping from
-                # axis labels to, now, inames
-                jnames = {}
-                new_within_inames = within_inames
-                for axis_label, extent in extents.items():
                     iname = self._namer.next("i")
                     extent = self.register_extent(
-                        extent, within_indices, within_inames, depends_on
+                        single_valued([lnext[1], rnext[1]]), within_indices, within_inames, depends_on
                     )
                     domain_str = f"{{ [{iname}]: 0 <= {iname} < {extent} }}"
                     self.domains.append(domain_str)
-                    jnames[axis_label] = iname
+                    ljnames[lnext[0]] = iname
+                    rjnames[rnext[0]] = iname
                     new_within_inames |= {iname}
+            except StopIteration:
+                try:
+                    next(riter)
+                    raise AssertionError("iterator should also be consumed")
+                except StopIteration:
+                    pass
 
-                # now traverse the slices in reverse, transforming the inames to jnames and
-                # the right index expressions
+            # now traverse the slices in reverse, transforming the inames to jnames and
+            # the right index expressions
 
-                new_within_indices = within_indices
-                new_depends_on = depends_on
-                for index in reversed(index_path):
-                    jname = jnames.pop(
-                        index.to_axis[0]
-                    )  # I think this is what I want...
-                    new_jname, insns = self.myinnerfunc(
-                        jname,
-                        multi_index,
-                        index,
-                        existing_labels,
-                        within_indices,
-                        within_inames,
-                        new_depends_on,
-                    )
-                    assert index.from_axis[0] not in jnames
-                    jnames[index.from_axis[0]] = new_jname
-                    new_within_indices += {index: new_jname}
-                    new_depends_on |= {insn.id for insn in insns}
+            new_depends_on = depends_on
 
-                # The loop indices have been registered, now handle the loop statements
-                for stmt in loop.statements:
-                    self._build(
-                        stmt,
-                        new_within_indices,
-                        new_within_inames,
-                        new_depends_on,
-                    )
-
-        ###
-
-        iname = None
-        # size = utils.single_valued([lindex.size, rindex.size])
-        # now need to catch one-sized things here
-        # this should go away if I reason correctly about slices
-        if lmulti_index.label in within_indices:
-            lsize = 1
-        else:
-            lsize = lindex.size
-        if rmulti_index.label in within_indices:
-            rsize = 1
-        else:
-            rsize = rindex.size
-        size = utils.single_valued([lsize, rsize])
-
-        iname = self._namer.next("i")
-        extent = self.register_extent(size, within_indices, within_inames, depends_on)
-        domain_str = f"{{ [{iname}]: 0 <= {iname} < {extent} }}"
-        self.domains.append(domain_str)
-
-        lthings = self.myinnerfunc(
-            iname,
-            lmulti_index,
-            lindex,
-            llabels_,
-            within_indices,
-            within_inames,
-            depends_on,
-        )
-        rthings = self.myinnerfunc(
-            iname,
-            rmulti_index,
-            rindex,
-            rlabels_,
-            within_indices,
-            within_inames,
-            depends_on,
-        )
-
-        lchild = assignment.lhs.index.find_node((lmulti_index.id, mycounter))
-        rchild = assignment.rhs.index.find_node((rmulti_index.id, mycounter))
-        if strictly_all([lchild, rchild]):
-            alldeps = set()
-            for mynewcounter, (lsubindex, rsubindex) in enumerate(
-                checked_zip(lchild.indices, rchild.indices)
-            ):
-                alldeps |= self.build_assignment(
-                    assignment,
-                    lchild,
-                    rchild,
-                    lsubindex,
-                    rsubindex,
-                    mynewcounter,  # FIXME do the loop at the top of this function, not "outside"
-                    within_indices | lthings[2] | rthings[2],
-                    within_inames | {iname},
-                    depends_on | lthings[3] | rthings[3],
-                    lthings[0],
-                    rthings[0],
-                    lindex_path | {lmulti_index.label: mycounter},
-                    rindex_path | {rmulti_index.label: mycounter},
+            # LHS
+            for multi_index, index_cidx in reversed(assignment.lhs.index.path(lleaf, lcidx)):
+                index = multi_index.components[index_cidx]
+                jname = ljnames.pop(index.to_axis)
+                new_jname, insns = self.myinnerfunc(
+                    jname,
+                    multi_index,
+                    index,
+                    ljnames,
+                    within_indices,
+                    new_within_inames,
+                    new_depends_on,
                 )
-            return frozenset(alldeps)
+                assert index.from_axis not in ljnames
+                ljnames[index.from_axis] = new_jname
+                new_depends_on |= {insn.id for insn in insns}
 
-        else:
-            breakpoint()
-            lhs_part_labels, lhs_jnames = lthings[0], lthings[1]
-            rhs_part_labels, rhs_jnames = rthings[0], rthings[1]
+            # RHS
+            for multi_index, index_cidx in reversed(assignment.rhs.index.path(rleaf, rcidx)):
+                index = multi_index.components[index_cidx]
+                jname = rjnames.pop(index.to_axis)
+                new_jname, insns = self.myinnerfunc(
+                    jname,
+                    multi_index,
+                    index,
+                    rjnames,
+                    within_indices,
+                    new_within_inames,
+                    new_depends_on,
+                )
+                assert index.from_axis not in rjnames
+                rjnames[index.from_axis] = new_jname
+                new_depends_on |= {insn.id for insn in insns}
 
-            # refactoring - part labels always match jnames - tie together?
-            # map part label to jname?
-            assert len(lhs_part_labels) == len(lhs_jnames)
-            assert len(rhs_part_labels) == len(rhs_jnames)
-
-            lhs_labels_to_jnames = {
-                l: j for l, j in checked_zip(lhs_part_labels, lhs_jnames)
-            }
-            rhs_labels_to_jnames = {
-                l: j for l, j in checked_zip(rhs_part_labels, rhs_jnames)
-            }
+            lhs_labels_to_jnames = ljnames
+            rhs_labels_to_jnames = rjnames
 
             if assignment.lhs is assignment.array:
                 array_labels_to_jnames = lhs_labels_to_jnames
@@ -649,22 +525,22 @@ class LoopyKernelBuilder:
             ###
 
             array_offset, array_deps = self.emit_assignment_insn(
-                assignment.array.data.name,
-                assignment.array.data.axes,
+                assignment.array.name,
+                assignment.array.axes,
                 array_labels_to_jnames,
-                within_inames | extra_inames,
+                new_within_inames | extra_inames,
                 depends_on | extra_deps,
             )
             temp_offset, temp_deps = self.emit_assignment_insn(
-                assignment.temporary.data.name,
-                assignment.temporary.data.axes,
+                assignment.temporary.name,
+                assignment.temporary.axes,
                 temp_labels_to_jnames,
-                within_inames | extra_inames,
+                new_within_inames | extra_inames,
                 depends_on | extra_deps,
             )
 
-            array = assignment.array.data
-            temporary = assignment.temporary.data
+            array = assignment.array
+            temporary = assignment.temporary
 
             # hack to handle the fact that temporaries can have shape but we want to
             # linearly index it here
@@ -933,6 +809,7 @@ class LoopyKernelBuilder:
 
         return extents
 
+    #FIXME can likely merge with build_assignment, this function is now irrelevant
     @_make_instruction_context.register
     def _(
         self, assignment: tlang.Assignment, within_indices, within_inames, depends_on
@@ -944,8 +821,6 @@ class LoopyKernelBuilder:
 
         new_deps = self.build_assignment(
             assignment,
-            assignment.lhs.index.root,
-            assignment.rhs.index.root,
             within_indices,
             within_inames,
             depends_on | assignment.depends_on,
@@ -1297,18 +1172,20 @@ def find_axis(axes, path, target, current_axis=None):
 
 
 # TODO maybe this function should also register the loops and just return the inames?
+# don't think so. This would be bad for iterating over the array and temporary together
 def collect_extents(axes, path, index_path):
     extents = {}
     for index in index_path:
         if isinstance(index, Slice):
             assert index.from_axis == index.to_axis
+            # the stop is either provided by the index, already registered, or, lastly, the axis size
             stop = (
                 index.stop
-                or extents.get(index.from_axis[0])
-                or find_axis(axes, path, index.from_axis[0]).count
+                or extents.get(index.from_axis)
+                or find_axis(axes, path, index.from_axis[0]).components[index.from_axis[1]].count
             )
             new_extent = (stop - index.start) // index.step
-            extents[index.to_axis[0]] = new_extent
+            extents[index.to_axis] = new_extent
         else:
             raise NotImplementedError("TODO")
     return extents
