@@ -18,13 +18,12 @@ from pyop3.axis import (
     AxisComponent,
     AxisTree,
     as_axis_tree,
-    expand_indices_to_fill_empty_shape,
     fill_shape,
     get_bottom_part,
 )
 from pyop3.distarray.base import DistributedArray
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
-from pyop3.index import Range, TabulatedMap, as_index_tree
+from pyop3.index import Range, TabulatedMap, as_index_tree, IndexTree
 from pyop3.utils import (
     MultiNameGenerator,
     NameGenerator,
@@ -100,11 +99,6 @@ class MultiArray(DistributedArray):
         self.params = {}
         self._param_namer = NameGenerator(f"{name}_p")
 
-        if index is None:
-            index = fill_shape(dim)
-        else:
-            index = as_index_tree(index)
-            index = expand_indices_to_fill_empty_shape(dim, index)
         self.index = index
 
         self.name = name
@@ -287,7 +281,7 @@ class MultiArray(DistributedArray):
         offset = strict_int(self.root.get_offset(indices))
         self.data[offset] = value
 
-    # aliases
+    # aliases, this is preferred to dim
     @property
     def axes(self):
         return self.dim
@@ -297,10 +291,27 @@ class MultiArray(DistributedArray):
         return self.dim
 
     def __getitem__(self, index: IndexTree | Index | IndexComponent):
-        index = as_index_tree(index)
-        new_index = self.index
-        for leaf, cidx in new_index.leaves:
-            new_index = new_index.add_subtree(index, leaf, cidx)
+        if index is Ellipsis:
+            new_index = fill_shape(self.axes, self.index)
+        else:
+            index = as_index_tree(index)
+            if not self.index:
+                new_index = fill_shape(self.axes, index)
+            else:
+                #TODO add_subtree is broken but would be a nice alternative here
+                root = self.index.root
+                # convert children to a list so I can mutate it
+                parent_to_children = {k: list(v) for k, v in self.index.parent_to_children.items()}
+
+                #FIXME uniquify
+                if len(self.index.leaves) > 1:
+                    raise NotImplementedError("need to uniquify")
+
+                for leaf, cidx in self.index.leaves:
+                    parent_to_children[leaf.id][cidx] = index.root
+                    parent_to_children |= index.parent_to_children
+
+                new_index = IndexTree(root, parent_to_children)
         return self.copy(index=new_index)
 
     def select_axes(self, indices):

@@ -485,6 +485,10 @@ class AxisTree(LabelledTree):
         self._layouts = {}
 
         # FIXME this is probably silly as an attribute
+        # NOTE: this attribute provides a set of slices that we can use to *loop over*
+        # something. It is unindexed shape. By contrast we use the same attribute to described
+        # *indexed shape* for multi-arrays. This is bad. Probably best to have array.indices
+        # instead of array.index. That follows my (bad) convention for axis trees being called axes
         self.index = fill_shape(self)
 
     @functools.cached_property
@@ -669,16 +673,21 @@ class AxisTree(LabelledTree):
             )
         return self.copy(parts=[new_part])
 
-    def calc_size(self, axis, indices=PrettyTuple()) -> int:
+    def calc_size(self, axis=None, indices=PrettyTuple()) -> int:
         """Return the size of a multi-axis by summing the sizes of its components."""
         # NOTE: this works because the size array cannot be multi-part, therefore integer
         # indices (as opposed to typed ones) are valid.
+        axis = axis or self.root
         if not isinstance(indices, PrettyTuple):
             indices = PrettyTuple(indices)
         return sum(
             cpt.calc_size(self, axis, i, indices)
             for i, cpt in enumerate(axis.components)
         )
+
+    @property
+    def size(self):
+        return self.calc_size()
 
     def alloc_size(self, axis=None):
         axis = axis or self.root
@@ -1277,84 +1286,77 @@ class SyncStatus:
     halo_modified: bool = False
 
 
-# TODO This algorithm is pretty much identical to _axes_from_index_tree
-def fill_shape(axes, visited=None, current_axis=None):
-    from pyop3.distarray import MultiArray
+# TODO This algorithm is pretty much identical to quite a few others
+def fill_shape(axes, indices=None):
+    if not indices:
+        return fill_missing_shape(axes, {})
 
+    new_indices = indices
+    for leaf_index, leaf_cidx in indices.leaves:
+        axis_path = {}
+        for idx, cidx in indices.path(leaf_index, leaf_cidx):
+            icomponent = idx.components[cidx]
+            if icomponent.from_axis[0] in axis_path:
+                axis_path.pop(icomponent.from_axis[0])
+            axis_path |= dict([icomponent.to_axis])
+
+        extra_slices = fill_missing_shape(axes, axis_path)
+
+        if extra_slices:
+            new_indices = new_indices.add_subtree(extra_slices, leaf_index, leaf_cidx)
+    return new_indices
+
+
+def fill_missing_shape(axes: AxisTree, indexed: dict[Hashable, int], current_axis:Axis|None=None) -> IndexTree | None:
+    """Return the indices required to fully index the axes.
+
+    Parameters
+    ----------
+    axes
+        The axis tree requiring indexing.
+    indexed
+        Mapping from axis labels to axis components. These axes have already
+        been indexed so encountering them will not produce a new slice.
+
+    Returns
+    -------
+    indices
+        Tree of indices required to fully index ``axes``. `None` if axes is
+        already fully indexed.
+
+    """
     current_axis = current_axis or axes.root
-    visited = visited or {}
 
-    indices = []
-    subindex_trees = []
+    # 1. Axis is already indexed, select the appropriate subaxis and continue
+    if current_axis.label in indexed:
+        subaxis = axes.find_node((current_axis.id, indexed[current_axis.label]))
+        if subaxis:
+            return fill_missing_shape(axes, indexed, subaxis)
+        else:
+            return None
 
-    # register a full slice if we haven't indexed it yet.
-    if current_axis.label not in visited:
-        for cidx, component in enumerate(current_axis.components):
-            new_visited = visited.copy()
-            new_visited[current_axis.label] = cidx
-
-            indices.append(Slice((current_axis.label, cidx), None))
-
-            if subaxis := axes.find_node((current_axis.id, cidx)):
-                subindex_tree = fill_shape(axes, visited, subaxis)
-                subindex_trees.append(subindex_tree)
-            else:
-                subindex_trees.append(None)
-
-        root = MultiIndex(indices)
-        subroots = [
-            subindex_tree.root if subindex_tree else None
-            for subindex_tree in subindex_trees
-        ]
-        others = functools.reduce(
-            operator.or_,
-            [dict(sit.parent_to_children) if sit else {} for sit in subindex_trees],
-            {},
-        )
-
-        return IndexTree(root, {root.id: subroots} | others)
-
+    # 2. Axis is not indexed, emit slices for each component
     else:
-        cidx = visited[current_axis.label]
-        if axes.find_node((current_axis.id, cidx)):
-            return fill_shape(axes, new_axis_path, prev_indices | new_index)
-        else:
-            return IndexTree(None)
+        components = []
+        subtrees = []
+        for cidx in range(current_axis.degree):
+            components.append(Slice((current_axis.label, cidx)))
+            subaxis = axes.find_node((current_axis.id, cidx))
+            if subaxis:
+                subtree = fill_missing_shape(axes, indexed, subaxis)
+            else:
+                subtree = None
+            subtrees.append(subtree)
 
-
-def expand_indices_to_fill_empty_shape(
-    axis,
-    itree,
-    multi_index=None,
-    visited=None,
-):
-    multi_index = multi_index or itree.root
-
-    visited = visited or {}
-
-    subroots = []
-    subnodes = {}
-    for i, index in enumerate(multi_index.indices):
-        # TODO: this bit is very similar to myinnerfunc in loopy.py
-        new_visited = visited.copy()
-        new_visited.pop(index.from_axis[0], None)
-        new_visited[index.from_axis[0]] = index.from_axis[1]
-
-        if submidx := itree.find_node((multi_index.id, i)):
-            subitree = expand_indices_to_fill_empty_shape(
-                axis,
-                itree,
-                submidx,
-                new_visited,
-            )
-            subroots.append(subitree.root)
-            subnodes |= subitree.parent_to_children
-        else:
-            subitree = fill_shape(axis, new_visited)
-            subroots.append(subitree.root)
-            subnodes |= subitree.parent_to_children
-
-    return IndexTree(multi_index, {multi_index.id: subroots} | subnodes)
+        root = Index(components)
+        parent_to_children = collections.defaultdict(list)
+        for subtree in subtrees:
+            if subtree:
+                parent_to_children[root.id].append(subtree.root)
+                parent_to_children |= subtree.parent_to_children
+            else:
+                parent_to_children[root.id].append(None)
+        return IndexTree(root, parent_to_children)
 
 
 def create_lgmap(axes):

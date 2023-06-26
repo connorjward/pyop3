@@ -428,6 +428,8 @@ class LoopyKernelBuilder:
                 assignment.rhs.axes, raxis_path, rindex_path
             )
 
+            # breakpoint()
+
             liter = iter(lextents.items())
             riter = iter(rextents.items())
 
@@ -465,7 +467,15 @@ class LoopyKernelBuilder:
                     new_within_inames |= {iname}
             except StopIteration:
                 try:
-                    next(riter)
+                    #FIXME what if rhs throws the exception instead of lhs?
+                    rnext = next(riter)
+                    while rnext[1] == 1:
+                        iname = self._namer.next("i")
+                        domain_str = f"{{ [{iname}]: 0 <= {iname} < 1 }}"
+                        self.domains.append(domain_str)
+                        rjnames[rnext[0]] = iname
+                        new_within_inames |= {iname}
+                        rnext = next(riter)
                     raise AssertionError("iterator should also be consumed")
                 except StopIteration:
                     pass
@@ -519,7 +529,6 @@ class LoopyKernelBuilder:
                 temp_labels_to_jnames = lhs_labels_to_jnames
                 array_labels_to_jnames = rhs_labels_to_jnames
 
-            extra_inames = {iname} if iname else set()
             extra_deps = frozenset({f"{id}_*" for id in assignment.depends_on})
 
             ###
@@ -528,15 +537,15 @@ class LoopyKernelBuilder:
                 assignment.array.name,
                 assignment.array.axes,
                 array_labels_to_jnames,
-                new_within_inames | extra_inames,
-                depends_on | extra_deps,
+                new_within_inames,
+                depends_on | new_depends_on | extra_deps,
             )
             temp_offset, temp_deps = self.emit_assignment_insn(
                 assignment.temporary.name,
                 assignment.temporary.axes,
                 temp_labels_to_jnames,
-                new_within_inames | extra_inames,
-                depends_on | extra_deps,
+                new_within_inames,
+                depends_on | new_depends_on | extra_deps,
             )
 
             array = assignment.array
@@ -569,12 +578,12 @@ class LoopyKernelBuilder:
                 lexpr,
                 rexpr,
                 assignment.id,
-                depends_on=depends_on
+                depends_on=new_depends_on
                 | assignment.depends_on
                 | extra_deps
                 | array_deps
                 | temp_deps,
-                within_inames=within_inames | extra_inames,
+                within_inames=new_within_inames,
             )
 
             return new_deps
@@ -624,9 +633,7 @@ class LoopyKernelBuilder:
                 name=self._temp_name_generator.next(),
                 dtype=arg.dtype,
             )
-            # FIXME not needed any more
-            # indexed_temp = temporary[...]
-            indexed_temp = temporary
+            indexed_temp = temporary[...]
 
             if loopy_arg.shape is None:
                 shape = (temporary.alloc_size,)
@@ -939,7 +946,9 @@ class LoopyKernelBuilder:
             expr,
             id=self._namer.next("insn"),
             within_inames=within_inames,
+            within_inames_is_final=True,
             depends_on=depends_on,
+            depends_on_is_final=True,
         )
 
         self.instructions.append(insn)
@@ -1201,6 +1210,7 @@ def temporary_axes(
     index = index or indices.root
     # TODO copied from build_loop, refactor into a tree traversal
     # also copied from build_assignment - convergence!
+    # also the same as fill_shape
     subtrees = []
     for index_cidx in range(index.degree):
         index_component = index.components[index_cidx]
@@ -1223,8 +1233,8 @@ def temporary_axes(
                 axes,
                 indices,
                 subindex,
-                axis_path,
-                index_path,
+                new_axis_path,
+                new_index_path,
             )
             subtrees.append(subtree)
         else:

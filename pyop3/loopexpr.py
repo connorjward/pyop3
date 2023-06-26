@@ -199,7 +199,7 @@ class Terminal(LoopExpr):
 class FunctionCall(Terminal):
     def __init__(self, function, arguments):
         self.function = function
-        self.arguments = arguments
+        self.arguments = tuple(arg if arg.index else arg[...] for arg in arguments)
 
     @functools.cached_property
     def datamap(self) -> dict[str, DistributedArray]:

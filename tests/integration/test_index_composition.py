@@ -8,6 +8,7 @@ from pyop3 import (
     Axis,
     AxisTree,
     Index,
+    IndexTree,
     LoopyKernel,
     MultiArray,
     Range,
@@ -58,3 +59,27 @@ def test_1d_slice_composition(copy_kernel):
     )
 
     assert np.allclose(dat1.data, dat0.data[::2][1:3])
+
+
+def test_2d_slice_composition(copy_kernel):
+    m, n = 10, 3
+
+    axes0 = AxisTree(Axis(m, "ax0", id="root"), {"root": Axis(n, "ax1")})
+    axes1 = AxisTree(Axis(2, "ax2"))
+
+    dat0 = MultiArray(axes0, name="dat0", data=np.arange(axes0.size))
+    dat1 = MultiArray(axes1, name="dat1", dtype=dat0.dtype)
+
+    # equivalent to dat0.data[::2, 1:][2:4, 1]
+    p0 = IndexTree(Index(Slice(("ax0", 0), None, None, 2), id="idx0"), {"idx0": Index(Slice(("ax1", 0), 1, None))})
+    p1 = IndexTree(Index(Slice(("ax0", 0), 2, 4), id="idx1"), {"idx1": Index(Slice(("ax1", 0), 1, 2))})
+
+    do_loop(
+        Axis(1),  # for _ in range(1)
+        copy_kernel(
+            dat0[p0][p1],
+            dat1[...],
+        ),
+    )
+
+    assert np.allclose(dat1.data, dat0.data.reshape((m, n))[::2, 1:][2:4, 1])
