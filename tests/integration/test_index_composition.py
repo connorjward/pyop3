@@ -71,8 +71,14 @@ def test_2d_slice_composition(copy_kernel):
     dat1 = MultiArray(axes1, name="dat1", dtype=dat0.dtype)
 
     # equivalent to dat0.data[::2, 1:][2:4, 1]
-    p0 = IndexTree(Index(Slice(("ax0", 0), None, None, 2), id="idx0"), {"idx0": Index(Slice(("ax1", 0), 1, None))})
-    p1 = IndexTree(Index(Slice(("ax0", 0), 2, 4), id="idx1"), {"idx1": Index(Slice(("ax1", 0), 1, 2))})
+    p0 = IndexTree(
+        Index(Slice(("ax0", 0), None, None, 2), id="idx0"),
+        {"idx0": Index(Slice(("ax1", 0), 1, None))},
+    )
+    p1 = IndexTree(
+        Index(Slice(("ax0", 0), 2, 4), id="idx1"),
+        {"idx1": Index(Slice(("ax1", 0), 1, 2))},
+    )
 
     do_loop(
         Axis(1),  # for _ in range(1)

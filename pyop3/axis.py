@@ -34,10 +34,10 @@ from pyop3.index import (
 )
 from pyop3.tree import (
     FixedAryTree,
-    NodeComponent,
     LabelledNode,
     LabelledTree,
     Node,
+    NodeComponent,
     postvisit,
     previsit,
 )
@@ -1307,7 +1307,9 @@ def fill_shape(axes, indices=None):
     return new_indices
 
 
-def fill_missing_shape(axes: AxisTree, indexed: dict[Hashable, int], current_axis:Axis|None=None) -> IndexTree | None:
+def fill_missing_shape(
+    axes: AxisTree, indexed: dict[Hashable, int], current_axis: Axis | None = None
+) -> IndexTree | None:
     """Return the indices required to fully index the axes.
 
     Parameters

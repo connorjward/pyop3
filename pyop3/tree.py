@@ -44,7 +44,7 @@ class Node(pytools.ImmutableRecord):
         return cls._lazy_id_generator
 
 
-#TODO should probably have label attribute too
+# TODO should probably have label attribute too
 class NodeComponent(pytools.ImmutableRecord):
     fields = {"id"}
 
@@ -613,6 +613,7 @@ class LabelledTree(FixedAryTree):
         This operation is cached so future calls will be fast.
 
         """
+
         def leaves_fn(node, component_index, prev):
             if not self.find_node((node.id, component_index)):
                 leaves_.append((node, component_index))
@@ -627,8 +628,6 @@ class LabelledTree(FixedAryTree):
 
     def path(self, node, component_index):
         return self._paths[node, component_index]
-
-
 
 
 # better alias?
@@ -649,7 +648,10 @@ MultiTree = LabelledTree
 #
 #
 def previsit(
-    tree, fn, current_node: Node | None = None, prev=None,
+    tree,
+    fn,
+    current_node: Node | None = None,
+    prev=None,
 ) -> Any:
     if tree.is_empty:
         raise RuntimeError("Cannot traverse an empty tree")
@@ -687,5 +689,3 @@ def postvisit(tree, fn, current_node: Node | None = None, **kwargs) -> Any:
         ),
         **kwargs,
     )
-
-

@@ -143,7 +143,14 @@ class LoopyKernelBuilder:
         raise TypeError
 
     @_build.register
-    def _(self, loop: Loop, within_inames=frozenset(), depends_on=frozenset(), within_indices=pmap(), existing_labels=pmap()):
+    def _(
+        self,
+        loop: Loop,
+        within_inames=frozenset(),
+        depends_on=frozenset(),
+        within_indices=pmap(),
+        existing_labels=pmap(),
+    ):
         # this is a map from axis labels to extents, if we hit an index over a new thing
         # then we get the size from the array, else we can modify the sizes provided
         # how do maps impact this? just like a slice I think, "consume" the prior index
@@ -160,8 +167,10 @@ class LoopyKernelBuilder:
         # NOTE: currently maps only map between components of the same axis.
 
         for leaf, cidx in loop.iterset.index.leaves:
-
-            index_path = [node.components[nodecidx] for node, nodecidx in loop.iterset.index.path(leaf, cidx)]
+            index_path = [
+                node.components[nodecidx]
+                for node, nodecidx in loop.iterset.index.path(leaf, cidx)
+            ]
             axis_path = {}
             for icomponent in index_path:
                 if icomponent.from_axis[0] in axis_path:
@@ -195,7 +204,9 @@ class LoopyKernelBuilder:
 
             new_within_indices = within_indices
             new_depends_on = depends_on
-            for multi_index, index_cidx in reversed(loop.iterset.index.path(leaf, cidx)):
+            for multi_index, index_cidx in reversed(
+                loop.iterset.index.path(leaf, cidx)
+            ):
                 index = multi_index.components[index_cidx]
                 jname = jnames.pop(index.to_axis)  # I think this is what I want...
                 new_jname, insns = self.myinnerfunc(
@@ -397,16 +408,24 @@ class LoopyKernelBuilder:
         within_inames,
         depends_on,
     ):
-        for (lleaf, lcidx), (rleaf, rcidx) in checked_zip(assignment.lhs.index.leaves, assignment.rhs.index.leaves):
+        for (lleaf, lcidx), (rleaf, rcidx) in checked_zip(
+            assignment.lhs.index.leaves, assignment.rhs.index.leaves
+        ):
             # copied from build_loop
-            lindex_path = [node.components[nodecidx] for node, nodecidx in assignment.lhs.index.path(lleaf, lcidx)]
+            lindex_path = [
+                node.components[nodecidx]
+                for node, nodecidx in assignment.lhs.index.path(lleaf, lcidx)
+            ]
             laxis_path = {}
             for cpt in lindex_path:
                 if cpt.from_axis[0] in laxis_path:
                     laxis_path.pop(cpt.from_axis[0])
                 laxis_path |= dict([cpt.to_axis])
 
-            rindex_path = [node.components[nodecidx] for node, nodecidx in assignment.rhs.index.path(rleaf, rcidx)]
+            rindex_path = [
+                node.components[nodecidx]
+                for node, nodecidx in assignment.rhs.index.path(rleaf, rcidx)
+            ]
             raxis_path = {}
             for cpt in rindex_path:
                 if cpt.from_axis[0] in raxis_path:
@@ -421,12 +440,8 @@ class LoopyKernelBuilder:
 
             # map from axes to sizes, components? maps always target the same axis
             # so should be fine.
-            lextents = collect_extents(
-                assignment.lhs.axes, laxis_path, lindex_path
-            )
-            rextents = collect_extents(
-                assignment.rhs.axes, raxis_path, rindex_path
-            )
+            lextents = collect_extents(assignment.lhs.axes, laxis_path, lindex_path)
+            rextents = collect_extents(assignment.rhs.axes, raxis_path, rindex_path)
 
             # breakpoint()
 
@@ -458,7 +473,10 @@ class LoopyKernelBuilder:
 
                     iname = self._namer.next("i")
                     extent = self.register_extent(
-                        single_valued([lnext[1], rnext[1]]), within_indices, within_inames, depends_on
+                        single_valued([lnext[1], rnext[1]]),
+                        within_indices,
+                        within_inames,
+                        depends_on,
                     )
                     domain_str = f"{{ [{iname}]: 0 <= {iname} < {extent} }}"
                     self.domains.append(domain_str)
@@ -467,7 +485,7 @@ class LoopyKernelBuilder:
                     new_within_inames |= {iname}
             except StopIteration:
                 try:
-                    #FIXME what if rhs throws the exception instead of lhs?
+                    # FIXME what if rhs throws the exception instead of lhs?
                     rnext = next(riter)
                     while rnext[1] == 1:
                         iname = self._namer.next("i")
@@ -486,7 +504,9 @@ class LoopyKernelBuilder:
             new_depends_on = depends_on
 
             # LHS
-            for multi_index, index_cidx in reversed(assignment.lhs.index.path(lleaf, lcidx)):
+            for multi_index, index_cidx in reversed(
+                assignment.lhs.index.path(lleaf, lcidx)
+            ):
                 index = multi_index.components[index_cidx]
                 jname = ljnames.pop(index.to_axis)
                 new_jname, insns = self.myinnerfunc(
@@ -503,7 +523,9 @@ class LoopyKernelBuilder:
                 new_depends_on |= {insn.id for insn in insns}
 
             # RHS
-            for multi_index, index_cidx in reversed(assignment.rhs.index.path(rleaf, rcidx)):
+            for multi_index, index_cidx in reversed(
+                assignment.rhs.index.path(rleaf, rcidx)
+            ):
                 index = multi_index.components[index_cidx]
                 jname = rjnames.pop(index.to_axis)
                 new_jname, insns = self.myinnerfunc(
@@ -816,7 +838,7 @@ class LoopyKernelBuilder:
 
         return extents
 
-    #FIXME can likely merge with build_assignment, this function is now irrelevant
+    # FIXME can likely merge with build_assignment, this function is now irrelevant
     @_make_instruction_context.register
     def _(
         self, assignment: tlang.Assignment, within_indices, within_inames, depends_on
@@ -1191,7 +1213,9 @@ def collect_extents(axes, path, index_path):
             stop = (
                 index.stop
                 or extents.get(index.from_axis)
-                or find_axis(axes, path, index.from_axis[0]).components[index.from_axis[1]].count
+                or find_axis(axes, path, index.from_axis[0])
+                .components[index.from_axis[1]]
+                .count
             )
             new_extent = (stop - index.start) // index.step
             extents[index.to_axis] = new_extent

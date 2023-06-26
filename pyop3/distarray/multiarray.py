@@ -23,7 +23,7 @@ from pyop3.axis import (
 )
 from pyop3.distarray.base import DistributedArray
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
-from pyop3.index import Range, TabulatedMap, as_index_tree, IndexTree
+from pyop3.index import IndexTree, Range, TabulatedMap, as_index_tree
 from pyop3.utils import (
     MultiNameGenerator,
     NameGenerator,
@@ -298,12 +298,14 @@ class MultiArray(DistributedArray):
             if not self.index:
                 new_index = fill_shape(self.axes, index)
             else:
-                #TODO add_subtree is broken but would be a nice alternative here
+                # TODO add_subtree is broken but would be a nice alternative here
                 root = self.index.root
                 # convert children to a list so I can mutate it
-                parent_to_children = {k: list(v) for k, v in self.index.parent_to_children.items()}
+                parent_to_children = {
+                    k: list(v) for k, v in self.index.parent_to_children.items()
+                }
 
-                #FIXME uniquify
+                # FIXME uniquify
                 if len(self.index.leaves) > 1:
                     raise NotImplementedError("need to uniquify")
 
