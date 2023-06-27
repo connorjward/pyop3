@@ -614,21 +614,3 @@ def overlap_axes(ax1, ax2, sparsity=None):
         new_parts.append(new_part)
 
     return MultiAxis(new_parts).set_up(with_sf=False)
-
-
-def index(indices):
-    """wrap all slices and maps in loop index objs."""
-    # cannot be multiple sets of indices if we are shoving this into a loop
-    if isinstance(indices[0], collections.abc.Sequence):
-        (indices,) = indices
-    return tuple(_index(idx) for idx in indices)
-
-
-def _index(idx):
-    if isinstance(idx, NonAffineMap):
-        return idx.copy(
-            is_loop_index=True,
-            tensor=idx.tensor.copy(indicess=(index(idx.tensor.indices),)),
-        )
-    else:
-        return idx.copy(is_loop_index=True)

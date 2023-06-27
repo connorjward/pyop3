@@ -67,24 +67,29 @@ class Loop(LoopExpr):
 
     def __init__(
         self,
-        iterset: AxisTree,
+        index: IndexTree,  # this could be a different LoopIndex type
         statements: Sequence[LoopExpr],
         id=None,
         depends_on=frozenset(),
     ):
-        from pyop3.axis import as_axis_tree
+        if not index.axes:
+            raise ValueError("Provided loop index does not reference an iteration set")
 
         # FIXME
         # assert isinstance(index, pyop3.tensors.Indexed)
         if not id:
             id = self.id_generator.next()
 
-        self.iterset = as_axis_tree(iterset)
+        self.index = index
         self.statements = as_tuple(statements)
         self.id = id
         self.depends_on = depends_on
 
         super().__init__()
+
+    @property
+    def axes(self):
+        return self.index.axes
 
     @functools.cached_property
     def datamap(self):

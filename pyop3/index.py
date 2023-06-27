@@ -12,6 +12,12 @@ from pyop3.utils import UniqueNameGenerator, as_tuple, merge_dicts
 
 
 class IndexTree(LabelledTree):
+    fields = LabelledTree.fields | {"axes"}
+
+    def __init__(self, *args, axes=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.axes = axes
+
     @functools.cached_property
     def datamap(self) -> dict[str:DistributedArray]:
         return postvisit(self, _collect_datamap, itree=self)
@@ -42,8 +48,8 @@ class Index(LabelledNode):
 MultiIndex = Index
 
 
-class IndexComponent(pytools.ImmutableRecord, abc.ABC):
-    fields = {"from_axis", "to_axis", "id"}
+class IndexComponent(NodeComponent, abc.ABC):
+    fields = {"from_axis", "to_axis", "from_cpt", "to_cpt", "id"}
 
     _lazy_id_generator = None
 
@@ -62,40 +68,10 @@ class IndexComponent(pytools.ImmutableRecord, abc.ABC):
         return cls._lazy_id_generator
 
 
-# FIXME this is not a valid index - should provide an index method returning a ScalarIndex
-class Range(IndexComponent):
-    # TODO: Gracefully handle start, stop, step
-    # fields = IndexNode.fields | {"label", "start", "stop", "step"}
-    fields = IndexComponent.fields | {"stop"}
-
-    def __init__(self, path, stop, **kwargs):
-        super().__init__(path, path, **kwargs)
-
-        # if isinstance(path, Sequence) and len(path) == 2 and isinstance(path[1], int):
-        #     self.path = path
-        # else:
-        #     self.path = (path, 0)
-        self.stop = stop
-
-    # TODO: This is temporary
-    @property
-    def size(self):
-        return self.stop
-
-    @property
-    def start(self):
-        return 0  # TODO
-
-    @property
-    def step(self):
-        return 1  # TODO
-
-
-# TODO is it better to specify axis and component separately?
 class Slice(IndexComponent):
     fields = IndexComponent.fields | {"start", "stop", "step"}
 
-    def __init__(self, axis, *args, **kwargs):
+    def __init__(self, *args, axis=None, cpt=None, **kwargs):
         nargs = len(args)
         if nargs == 0:
             start, stop, step = None, None, None

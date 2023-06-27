@@ -10,7 +10,7 @@ from pyop3.codegen import LOOPY_LANG_VERSION, LOOPY_TARGET
 from pyop3.distarray import MultiArray
 from pyop3.dtypes import IntType, ScalarType
 from pyop3.index import AffineMap, IdentityMap, Index, IndexTree, Range, TabulatedMap
-from pyop3.loopexpr import INC, READ, WRITE, LoopyKernel, do_loop
+from pyop3.loopexpr import INC, READ, WRITE, LoopyKernel, do_loop, loop
 from pyop3.utils import flatten
 
 
@@ -137,9 +137,7 @@ def test_scalar_copy(scalar_copy_kernel):
         data=np.zeros(m, dtype=ScalarType),
     )
 
-    iterset = AxisTree(Axis(m, axis.label))
-    p = iterset.index
-    do_loop(iterset, scalar_copy_kernel(dat0[p], dat1[p]))
+    do_loop(p := axis.index, scalar_copy_kernel(dat0[p], dat1[p]))
 
     assert np.allclose(dat1.data, dat0.data)
 
@@ -164,7 +162,7 @@ def test_vector_copy(vector_copy_kernel):
         data=np.zeros(m * n, dtype=np.float64),
     )
 
-    do_loop(p := Index(Range(axes.root.label, m)), vector_copy_kernel(dat1[p], dat2[p]))
+    do_loop(p := axes.root.index, vector_copy_kernel(dat1[p], dat2[p]))
 
     assert np.allclose(dat2.data, dat1.data)
 
@@ -193,9 +191,15 @@ def test_multi_component_vector_copy(vector_copy_kernel):
         data=np.zeros(m * a + n * b, dtype=np.float64),
         dtype=np.float64,
     )
+
+    # TODO cleanup, component labels?
+    iterset = Axis(n, axes.root.label)  # needs to be component index 1!
     do_loop(
-        p := Index(Range((axes.root.label, 1), n)), vector_copy_kernel(dat0[p], dat1[p])
+        p := axes.root[Slice(("ax0", 1))].index, vector_copy_kernel(dat0[p], dat1[p])
     )
+    # do_loop(
+    #     p := iterset.index, vector_copy_kernel(dat0[p], dat1[p])
+    # )
 
     assert all(dat1.data[: m * a] == 0)
     assert all(dat1.data[m * a :] == dat0.data[m * a :])

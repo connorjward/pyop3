@@ -81,7 +81,7 @@ def merge_bins(bin1, bin2):
 
 
 # FIXME this needs to be synchronised with TSFC, tricky
-# shared base package?
+# shared base package? or both set by Firedrake - better solution
 LOOPY_TARGET = lp.CWithGNULibcTarget()
 LOOPY_LANG_VERSION = (2018, 2)
 
@@ -166,10 +166,10 @@ class LoopyKernelBuilder:
 
         # NOTE: currently maps only map between components of the same axis.
 
-        for leaf, cidx in loop.iterset.index.leaves:
+        for leaf, cidx in loop.index.leaves:
             index_path = [
                 node.components[nodecidx]
-                for node, nodecidx in loop.iterset.index.path(leaf, cidx)
+                for node, nodecidx in loop.index.path(leaf, cidx)
             ]
             axis_path = {}
             for icomponent in index_path:
@@ -183,9 +183,7 @@ class LoopyKernelBuilder:
 
             # map from axes to sizes, components? maps always target the same axis
             # so should be fine.
-            extents = collect_extents(
-                loop.iterset, axis_path, index_path, within_indices
-            )
+            extents = collect_extents(loop.axes, axis_path, index_path, within_indices)
 
             # now generate loops for each of these extents, keep the same mapping from
             # axis labels to, now, inames
@@ -206,9 +204,7 @@ class LoopyKernelBuilder:
 
             new_within_indices = within_indices
             new_depends_on = depends_on
-            for multi_index, index_cidx in reversed(
-                loop.iterset.index.path(leaf, cidx)
-            ):
+            for multi_index, index_cidx in reversed(loop.index.path(leaf, cidx)):
                 index = multi_index.components[index_cidx]
                 jname = jnames.pop(index.to_axis)  # I think this is what I want...
                 new_jname, insns = self.myinnerfunc(

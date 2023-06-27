@@ -484,12 +484,9 @@ class AxisTree(LabelledTree):
 
         self._layouts = {}
 
-        # FIXME this is probably silly as an attribute
-        # NOTE: this attribute provides a set of slices that we can use to *loop over*
-        # something. It is unindexed shape. By contrast we use the same attribute to described
-        # *indexed shape* for multi-arrays. This is bad. Probably best to have array.indices
-        # instead of array.index. That follows my (bad) convention for axis trees being called axes
-        self.index = fill_shape(self)
+    @property
+    def index(self):
+        return fill_shape(self)
 
     @functools.cached_property
     def datamap(self) -> dict[str:DistributedArray]:
@@ -963,6 +960,10 @@ class Axis(LabelledNode):
         return f"{self.__class__.__name__}([{', '.join(str(cpt) for cpt in self.components)}], label={self.label})"
 
     @property
+    def index(self):
+        return as_axis_tree(self).index
+
+    @property
     def count(self):
         """Return the total number of entries in the axis across all axis parts.
         Will fail if axis parts do not have integer counts.
@@ -1304,7 +1305,9 @@ def fill_shape(axes, indices=None):
 
         if extra_slices:
             new_indices = new_indices.add_subtree(extra_slices, leaf_index, leaf_cidx)
-    return new_indices
+
+    # attach the axes to the index tree so we can use it later
+    return new_indices.copy(axes=axes)
 
 
 def fill_missing_shape(
@@ -1358,7 +1361,8 @@ def fill_missing_shape(
                 parent_to_children |= subtree.parent_to_children
             else:
                 parent_to_children[root.id].append(None)
-        return IndexTree(root, parent_to_children)
+        # attach the axes to the index tree so we can use it later
+        return IndexTree(root, parent_to_children, axes=axes)
 
 
 def create_lgmap(axes):
