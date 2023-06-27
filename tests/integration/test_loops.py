@@ -136,7 +136,10 @@ def test_scalar_copy(scalar_copy_kernel):
         name="dat1",
         data=np.zeros(m, dtype=ScalarType),
     )
-    do_loop(p := Index(Range(axis.label, m)), scalar_copy_kernel(dat0[p], dat1[p]))
+
+    iterset = AxisTree(Axis(m, axis.label))
+    p = iterset.index
+    do_loop(iterset, scalar_copy_kernel(dat0[p], dat1[p]))
 
     assert np.allclose(dat1.data, dat0.data)
 

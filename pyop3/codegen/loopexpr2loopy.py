@@ -183,7 +183,9 @@ class LoopyKernelBuilder:
 
             # map from axes to sizes, components? maps always target the same axis
             # so should be fine.
-            extents = collect_extents(loop.iterset, axis_path, index_path)
+            extents = collect_extents(
+                loop.iterset, axis_path, index_path, within_indices
+            )
 
             # now generate loops for each of these extents, keep the same mapping from
             # axis labels to, now, inames
@@ -258,18 +260,19 @@ class LoopyKernelBuilder:
             raise AssertionError("not valid anymore, probably want a slice")
 
         if index in within_indices:
-            raise NotImplementedError
-            labels, jnames = within_indices[multi_index.label]
-            if isinstance(index, Slice):
-                index_insns = []
-                new_jnames = existing_jnames + jnames
-                jnames = "not used"
-                new_within = {}
-            else:
-                index_insns = []
-                new_jnames = PrettyTuple(temp_jnames) + jnames
-                jnames = "not used"
-                new_within = {}
+            return within_indices[index], []
+
+            # labels, jnames = within_indices[multi_index.label]
+            # if isinstance(index, Slice):
+            #     index_insns = []
+            #     new_jnames = existing_jnames + jnames
+            #     jnames = "not used"
+            #     new_within = {}
+            # else:
+            #     index_insns = []
+            #     new_jnames = PrettyTuple(temp_jnames) + jnames
+            #     jnames = "not used"
+            #     new_within = {}
 
         elif isinstance(index, Slice):
             jname = self._namer.next("j")
@@ -440,8 +443,12 @@ class LoopyKernelBuilder:
 
             # map from axes to sizes, components? maps always target the same axis
             # so should be fine.
-            lextents = collect_extents(assignment.lhs.axes, laxis_path, lindex_path)
-            rextents = collect_extents(assignment.rhs.axes, raxis_path, rindex_path)
+            lextents = collect_extents(
+                assignment.lhs.axes, laxis_path, lindex_path, within_indices
+            )
+            rextents = collect_extents(
+                assignment.rhs.axes, raxis_path, rindex_path, within_indices
+            )
 
             # breakpoint()
 
@@ -649,7 +656,7 @@ class LoopyKernelBuilder:
                 )
 
             # axes = self._axes_from_index_tree(arg.index, within_indices)
-            axes = temporary_axes(arg.axes, arg.index)
+            axes = temporary_axes(arg.axes, arg.index, within_indices)
             temporary = MultiArray(
                 axes,
                 name=self._temp_name_generator.next(),
@@ -1204,29 +1211,33 @@ def find_axis(axes, path, target, current_axis=None):
 
 # TODO maybe this function should also register the loops and just return the inames?
 # don't think so. This would be bad for iterating over the array and temporary together
-def collect_extents(axes, path, index_path):
+def collect_extents(axes, path, index_path, loop_indices):
     extents = {}
     for index in index_path:
-        if isinstance(index, Slice):
-            assert index.from_axis == index.to_axis
-            # the stop is either provided by the index, already registered, or, lastly, the axis size
-            stop = (
-                index.stop
-                or extents.get(index.from_axis)
-                or find_axis(axes, path, index.from_axis[0])
-                .components[index.from_axis[1]]
-                .count
-            )
-            new_extent = (stop - index.start) // index.step
-            extents[index.to_axis] = new_extent
+        if index in loop_indices:
+            extents[index.to_axis] = 1
         else:
-            raise NotImplementedError("TODO")
+            if isinstance(index, Slice):
+                assert index.from_axis == index.to_axis
+                # the stop is either provided by the index, already registered, or, lastly, the axis size
+                stop = (
+                    index.stop
+                    or extents.get(index.from_axis)
+                    or find_axis(axes, path, index.from_axis[0])
+                    .components[index.from_axis[1]]
+                    .count
+                )
+                new_extent = (stop - index.start) // index.step
+                extents[index.to_axis] = new_extent
+            else:
+                raise NotImplementedError("TODO")
     return extents
 
 
 def temporary_axes(
     axes,
     indices,
+    loop_indices,
     index=None,
     axis_path=pmap(),
     index_path=PrettyTuple(),
@@ -1235,6 +1246,8 @@ def temporary_axes(
     # TODO copied from build_loop, refactor into a tree traversal
     # also copied from build_assignment - convergence!
     # also the same as fill_shape
+    # I can just loop over the leaves at the base? sorta, need to build the tree
+    # FIXME need to handle within_indices
     subtrees = []
     for index_cidx in range(index.degree):
         index_component = index.components[index_cidx]
@@ -1263,7 +1276,7 @@ def temporary_axes(
             subtrees.append(subtree)
         else:
             # at the bottom, build the axes
-            extents = collect_extents(axes, new_axis_path, new_index_path)
+            extents = collect_extents(axes, new_axis_path, new_index_path, loop_indices)
 
             root = None
             parent_to_children = {}
