@@ -11,7 +11,7 @@ import itertools
 import numbers
 import operator
 import threading
-from typing import Any, FrozenSet, Hashable, Optional, Sequence, Tuple, Union
+from typing import Any, FrozenSet, Hashable, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pymbolic as pym
@@ -24,7 +24,6 @@ from pyop3 import utils
 from pyop3.dtypes import IntType, PointerType, get_mpi_dtype
 from pyop3.index import AffineMap, Index, IndexTree, Map, Slice, TabulatedMap
 from pyop3.tree import (
-    FixedAryTree,
     LabelledNode,
     LabelledTree,
     Node,
@@ -182,44 +181,6 @@ def can_be_affine(axtree, axis, component, component_index):
         )
         and component.permutation is None
     )
-
-
-def handle_const_starts(
-    axtree,
-    layouts,
-    path=PrettyTuple(),
-    outer_axes_are_all_indexed=True,
-    axis=None,
-):
-    axis = axis or axtree.root
-    offset = 0
-    for i, part in enumerate(axis.components):
-        # catch already set null layouts
-        if layouts[path | (axis.label, i)] is not None:
-            continue
-        # need to track if ragged permuted below
-        # check for None here in case we have already set this to a null layout
-        if can_be_affine(axtree, axis, part, i) and has_constant_start(
-            axtree, axis, part, i, outer_axes_are_all_indexed
-        ):
-            step = step_size(axtree, axis, part, i)
-            layouts[path | (axis.label, i)] = AffineLayoutFunction(step, offset)
-
-        if not has_fixed_size(axtree, axis, part, i):
-            # can't do any more as things to the right of this will also move around
-            break
-        else:
-            offset += part.calc_size(axtree, axis, i)
-
-    for i, part in enumerate(axis.components):
-        if child := axtree.child(axis, part):
-            handle_const_starts(
-                axtree,
-                layouts,
-                path | (axis.label, i),
-                outer_axes_are_all_indexed and (part.indexed or part.count == 1),
-                child,
-            )
 
 
 def has_constant_start(
@@ -502,91 +463,73 @@ class AxisTree(LabelledTree):
     # TODO indices can be either a list of integers, a list of 2-tuples (cidx, idx), or
     # a mapping from axis label to (cidx, idx) (or just integers I guess)
     def get_offset(self, indices):
-        from pyop3.distarray import MultiArray
+        if isinstance(indices, Mapping):
+            # indices may be unordered
+            raise NotImplementedError
+        else:
+            # assume that indices track axes in order
 
-        # parse the indices to get the right path and do some bounds checking
-        offset = 0
-        depth = 0
-        axis = self.root
-        path = []
-        new_indices = []
-        # TODO if indices is not ordered then we should traverse the axis tree instead
-        # else we would not be able to index ragged things if the indices were:
-        # [nnz, outer]
-        for index in indices:
-            if axis is None:
-                raise IndexError("Too many indices provided")
-            if isinstance(index, numbers.Integral):
-                if axis.degree > 1:
-                    raise IndexError(
-                        "Cannot index multi-component array with integers, a "
-                        "2-tuple of (component index, index value) is needed"
-                    )
-                cpt_label = axis.components[0].label
-            else:
-                cpt_label, index = index
+            from pyop3.distarray import MultiArray
 
-            cpt_index = [c.label for c in axis.components].index(cpt_label)
-
-            if index < 0:
-                # In theory we could still get this to work...
-                raise IndexError("Cannot use negative indices")
-            # TODO need to pass indices here for ragged things
-            if index >= axis.components[cpt_index].find_integer_count():
-                raise IndexError("Index is too large")
-
-            new_indices.append(index)
-            path.append(cpt_label)
-            axis = self.child(axis, cpt_label)
-
-        if axis is not None:
-            raise IndexError("Insufficient number of indices given")
-
-        indices = new_indices
-
-        layouts = self.layouts[tuple(path)]
-        remaining_indices = list(indices)
-        for layout in layouts:
-            if isinstance(layout, IndirectLayoutFunction):
-                # if component.indices:
-                #     raise NotImplementedError(
-                #         "Does not make sense for indirect layouts to have sparsity "
-                #         "(I think) since the the indices must be ordered..."
-                #     )
-                offset += layout.data.get_value(indices[: depth + 1])
-            else:
-                assert isinstance(layout, AffineLayoutFunction)
-
-                prior_indices = PrettyTuple(indices[:depth])
-                last_index = indices[depth]
-
-                if isinstance(layout.start, MultiArray):
-                    start = layout.start.get_value(prior_indices)
+            # parse the indices to get the right path and do some bounds checking
+            axis = self.root
+            path = []
+            indices_map = {}  # map from (axis, component) to integer
+            # TODO if indices is not ordered then we should traverse the axis tree instead
+            # else we would not be able to index ragged things if the indices were:
+            # [nnz, outer]
+            for index in indices:
+                if axis is None:
+                    raise IndexError("Too many indices provided")
+                if isinstance(index, numbers.Integral):
+                    if axis.degree > 1:
+                        raise IndexError(
+                            "Cannot index multi-component array with integers, a "
+                            "2-tuple of (component index, index value) is needed"
+                        )
+                    cpt_label = axis.components[0].label
                 else:
+                    cpt_label, index = index
+
+                cpt_index = [c.label for c in axis.components].index(cpt_label)
+
+                if index < 0:
+                    # In theory we could still get this to work...
+                    raise IndexError("Cannot use negative indices")
+                # TODO need to pass indices here for ragged things
+                if index >= axis.components[cpt_index].find_integer_count():
+                    raise IndexError("Index is too large")
+
+                indices_map[axis.label, cpt_label] = index
+                path.append(cpt_label)
+                axis = self.child(axis, cpt_label)
+
+            if axis is not None:
+                raise IndexError("Insufficient number of indices given")
+
+            offset = 0
+            layouts = self.layouts[tuple(path)]
+            for layout in layouts:
+                if isinstance(layout, TabulatedLayout):
+                    offset += layout.data.get_value(indices_map)
+                else:
+                    assert isinstance(layout, AffineLayout)
+
+                    index = indices_map[layout.axis, layout.cpt]
                     start = layout.start
 
-                # handle sparsity
-                # if component.indices is not None:
-                #     bstart, bend = get_slice_bounds(component.indices, prior_indices)
-                #
-                #     last_index = bisect.bisect_left(
-                #         component.indices.data, last_index, bstart, bend
-                #     )
-                #     last_index -= bstart
+                    # handle sparsity
+                    # if component.indices is not None:
+                    #     bstart, bend = get_slice_bounds(component.indices, prior_indices)
+                    #
+                    #     last_index = bisect.bisect_left(
+                    #         component.indices.data, last_index, bstart, bend
+                    #     )
+                    #     last_index -= bstart
 
-                offset += last_index * layout.step + start
+                    offset += index * layout.step + start
 
-                # update indices to include the modications for sparsity
-                indices = PrettyTuple(
-                    prior_indices + (last_index,) + tuple(indices[depth + 1 :])
-                )
-
-            remaining_indices = remaining_indices[len(layout.consumed_labels) :]
-            # delete please
-            depth += len(layout.consumed_labels)
-
-        assert not remaining_indices
-        return strict_int(offset)
+            return strict_int(offset)
 
     def mul(self, other, sparsity=None):
         """Compute the outer product with another :class:`MultiAxis`.
@@ -675,9 +618,6 @@ class AxisTree(LabelledTree):
         axis = axis or self.root
         return sum(cpt.alloc_size(self, axis) for cpt in axis.components)
 
-    # TODO ultimately remove this as it leads to duplication of data
-    layout_namer = NameGenerator("layout")
-
     def _check_labels(self):
         def check(node, prev_labels):
             if node == self.root:
@@ -718,115 +658,6 @@ class AxisTree(LabelledTree):
         # new_axis = attach_owned_star_forest(new_axis)
         return self
 
-    def finish_off_layouts(
-        self,
-        path=PrettyTuple(),
-        layout_path=PrettyTuple(),
-        axis=None,
-    ):
-        from pyop3.distarray import MultiArray
-
-        layouts = {}
-        axis = axis or self.root
-
-        # if the axes are not permuted then they are stored contiguously
-        if axis.permutation is None:
-            for cidx, component in enumerate(axis.components):
-                if (axis.id, cidx) not in existing_layouts | layouts.keys():
-                    if has_constant_step(self, axis, component, cidx):
-                        # elif has_independently_indexed_subaxis_parts(self, axis, component, cidx):
-                        step = step_size(self, axis, component, cidx)
-                        # affine stuff
-                        layouts[(axis.id, cidx)] = AffineLayout(step, offset.value)
-                        offset += component.calc_size(self, axis, cidx)
-                    else:
-                        # we must be ragged
-                        new_tree = self.make_ragged_tree(path, layout_path, axis)
-                        self.create_layout_lists(
-                            path,
-                            PrettyTuple(),
-                            offset,
-                            axis,
-                            new_tree,
-                        )
-
-                        # also insert intermediary bits into layouts
-
-                        # but step is for the inner dimension - I am making the wrong tree
-                        raise NotImplementedError
-                        for node in new_tree.nodes:
-                            for loc, layout_data in node.data:
-                                if layout_data is not None:
-                                    layouts[loc] = AffineLayout(step, start=layout_data)
-                                else:
-                                    layouts[loc] = None
-
-        else:
-            for cidx, component in enumerate(axis.components):
-                if (axis.id, cidx) not in existing_layouts | layouts.keys():
-                    if has_constant_step(self, axis, component, cidx):
-                        # elif has_independently_indexed_subaxis_parts(self, axis, component, cidx):
-                        step = step_size(self, axis, component, cidx)
-                        # I dont want to recurse here really, just want to do the top level one
-                        new_tree = self.make_ragged_tree(path, layout_path, axis)
-                        assert new_tree.depth == 1
-                        self.create_layout_lists(
-                            path,
-                            PrettyTuple(),
-                            offset,
-                            axis,
-                            new_tree,
-                        )
-
-                        for loc, layout_data in new_tree.root.data:
-                            layouts[loc] = TabulatedLayout(layout_data)
-                    else:
-                        # we must be ragged
-                        new_tree = self.make_ragged_tree(path, layout_path, axis)
-                        self.create_layout_lists(
-                            path,
-                            PrettyTuple(),
-                            offset,
-                            axis,
-                            new_tree,
-                        )
-
-                        # also insert intermediary bits into layouts
-
-                        for node in new_tree.nodes:
-                            for loc, layout_data in node.data:
-                                if layout_data is not None:
-                                    layouts[loc] = TabulatedLayout(layout_data)
-                                else:
-                                    layouts[loc] = None
-
-        for cidx, component in enumerate(axis.components):
-            if subaxis := self.child(axis, component):
-                # if (axis.id, cidx) in existing_layouts | set(layouts.keys()):
-                if has_independently_indexed_subaxis_parts(self, axis, component, cidx):
-                    # saved_offset = offset.value
-                    # offset.value = 0
-                    layouts |= self.finish_off_layouts(
-                        offset,
-                        path | (axis.label, cidx),
-                        PrettyTuple(),
-                        subaxis,
-                        existing_layouts | set(layouts.keys()),
-                    )
-                    # offset += saved_offset
-                    # not sure about this...
-                    # offset += component.calc_size(self, axis, cidx)
-                else:
-                    layouts |= self.finish_off_layouts(
-                        offset,
-                        path | (axis.label, cidx),
-                        layout_path | (axis.label, cidx),
-                        subaxis,
-                        existing_layouts | set(layouts.keys()),
-                    )
-
-        return layouts
-
     @classmethod
     def from_layout(cls, layout: Sequence[ConstrainedMultiAxis]) -> Any:  # TODO
         return order_axes(layout)
@@ -848,45 +679,6 @@ class AxisTree(LabelledTree):
             return self.get_part_from_path(sublabels, self.child(axis, component))
         else:
             return axis, component
-
-    _my_layout_namer = NameGenerator("layout")
-
-    def turn_lists_into_layout_functions(self, layouts):
-        assert False, "dont touch"
-        from pyop3.distarray import MultiArray
-
-        for path, layout in layouts.items():
-            axis, part = self.get_part_from_path(path)
-            component_index = axis.components.index(part)
-            if can_be_affine(self, axis, part, component_index):
-                if isinstance(layout, tuple):
-                    layout_path, layout = layout
-                    name = self._my_layout_namer.next()
-
-                    # layout_path contains component indices, we don't want those here
-                    # so drop them
-                    layout_path = [layout[0] for layout in layout_path]
-
-                    starts = MultiArray.from_list(
-                        layout, layout_path, name, PointerType
-                    )
-                    step = step_size(self, axis, part)
-                    layouts[path] = AffineLayoutFunction(step, starts)
-                else:
-                    # FIXME weird code structure
-                    assert isinstance(layout, AffineLayoutFunction)
-            else:
-                if layout == "null layout":
-                    continue
-                layout_path, layout = layout
-                name = self._my_layout_namer.next()
-
-                # layout_path contains component indices, we don't want those here
-                # so drop them
-                layout_path = [layout[0] for layout in layout_path]
-
-                data = MultiArray.from_list(layout, layout_path, name, PointerType)
-                layouts[path] = IndirectLayoutFunction(data)
 
     def drop_last(self):
         """Remove the last subaxis"""
@@ -1204,13 +996,10 @@ class Path:
 
 
 # i.e. maps and layouts (that take in indices and write to things)
+# In theory we don't need to track the component here as layouts only expect
+# a particular component per axis
 class IndexFunction(pytools.ImmutableRecord, abc.ABC):
-    fields = {"axis", "cpt"}
-
-    def __init__(self, axis, cpt):
-        super().__init__()
-        self.axis = axis
-        self.cpt = cpt
+    fields = set()
 
 
 # from indices to offsets
@@ -1219,21 +1008,23 @@ class LayoutFunction(IndexFunction, abc.ABC):
 
 
 class AffineLayout(LayoutFunction):
-    fields = LayoutFunction.fields | {"step", "start"}
+    fields = {"axis", "cpt", "step", "start"}
 
     def __init__(self, axis, cpt, step, start=0):
-        super().__init__(axis, cpt)
+        super().__init__()
+        self.axis = axis
+        self.cpt = cpt
         self.step = step
         self.start = start
 
 
+# FIXME I don't think that layout functions generically need to record which axes
+# they work over (we do for affine) since the map already knows.
 class TabulatedLayout(LayoutFunction):
-    fields = LayoutFunction.fields | {"data"}
+    fields = {"data"}
 
-    def __init__(self, consumed_components, data):
-        if len(consumed_components) != data.axes.depth:
-            raise ValueError
-        super().__init__(consumed_components)
+    def __init__(self, data):
+        super().__init__()
         self.data = data
 
 
@@ -1482,7 +1273,7 @@ def _compute_layouts(
                 } | merge_dicts(sub.parent_to_children for sub in csubtrees)
             else:
                 cparent_to_children = {}
-            ctree = FixedAryTree(croot, cparent_to_children)
+            ctree = LabelledTree(croot, cparent_to_children)
 
         # layouts and steps are just propagated from below
         return layouts | merge_dicts(sublayoutss), ctree, steps
@@ -1497,14 +1288,17 @@ def _compute_layouts(
             if axis.indexed and strictly_all(sub is None for sub in csubtrees):
                 return layouts | merge_dicts(sublayoutss), None, steps
 
-            croot = CustomNode([(cpt.count, axis.label) for cpt in axis.components])
+            # super ick
+            croot = CustomNode(
+                [(cpt.count, axis.label, cpt.label) for cpt in axis.components]
+            )
             if strictly_all(sub is not None for sub in csubtrees):
                 cparent_to_children = {
                     croot.id: [sub.root for sub in csubtrees]
                 } | merge_dicts(sub.parent_to_children for sub in csubtrees)
             else:
                 cparent_to_children = {}
-            ctree = FixedAryTree(croot, cparent_to_children)
+            ctree = LabelledTree(croot, cparent_to_children)
 
             fulltree = _create_count_array_tree(ctree)
 
@@ -1515,12 +1309,11 @@ def _compute_layouts(
             for subpath, offset_data in fulltree.items():
                 axis_ = axis
                 labels = []
-                for cidx in subpath:
+                for cpt in subpath:
                     labels.append(axis_.label)
-                    raise NotImplementedError("FIXME cidx")
-                    axis_ = axes.child(axis_, cidx)
+                    axis_ = axes.child(axis_, cpt)
 
-                layouts[path + subpath] = TabulatedLayout(labels, offset_data)
+                layouts[path + subpath] = TabulatedLayout(offset_data)
             ctree = None
             steps = {path: axes.calc_size(axis)}
 
@@ -1549,6 +1342,7 @@ def _compute_layouts(
 
 
 # I don't think that this actually needs to be a tree, just return a dict
+# TODO I need to clean this up a lot now I'm using component labels
 def _create_count_array_tree(
     ctree, current_node=None, counts=PrettyTuple(), component_path=PrettyTuple()
 ):
@@ -1558,12 +1352,13 @@ def _create_count_array_tree(
     arrays = {}
 
     for cidx in range(current_node.degree):
+        cpt_label = current_node.counts[cidx][2]
         child = ctree.children(current_node)[cidx]
         if child is None:
             # make a multiarray here from the given sizes
             axes = [
-                Axis(count, label)
-                for (count, label) in counts | current_node.counts[cidx]
+                Axis([(count, cpt_label)], axis_label)
+                for (count, axis_label, cpt_label) in counts | current_node.counts[cidx]
             ]
             root = axes[0]
             parent_to_children = {}
@@ -1574,10 +1369,13 @@ def _create_count_array_tree(
                 axtree,
                 data=np.full(axtree.calc_size(axtree.root), -1, dtype=IntType),
             )
-            arrays[component_path | cidx] = countarray
+            arrays[component_path | cpt_label] = countarray
         else:
             arrays |= _create_count_array_tree(
-                ctree, child, counts | current_node.counts[cidx], component_path | cidx
+                ctree,
+                child,
+                counts | current_node.counts[cidx],
+                component_path | cpt_label,
             )
 
     return arrays
@@ -1633,15 +1431,15 @@ def _tabulate_count_array_tree(
         selected_component_num = point_to_component_num[pt]
         selected_component = axis.components[selected_component_id]
 
-        if path | selected_component_id in count_arrays:
-            count_arrays[path | selected_component_id].set_value(
+        if path | selected_component.label in count_arrays:
+            count_arrays[path | selected_component.label].set_value(
                 indices | selected_component_num, offset.value
             )
             if not axis.indexed:
                 offset += step_size(
                     axes,
                     axis,
-                    selected_component_id,
+                    selected_component,
                     indices | selected_component_num,
                 )
         else:
@@ -1655,7 +1453,7 @@ def _tabulate_count_array_tree(
                 subaxis,
                 count_arrays,
                 offset,
-                path | selected_component_id,
+                path | selected_component.label,
                 indices | selected_component_num,
             )
 

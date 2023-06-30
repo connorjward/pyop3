@@ -240,15 +240,21 @@ def test_vector_copy_with_permuted_axis(vector_copy_kernel):
     m, n = 6, 3
     perm = np.asarray([3, 2, 0, 5, 4, 1], dtype=IntType)
 
-    axes = AxisTree(root := Axis(m), {root.id: Axis(n)})
+    axes = AxisTree(Axis(m, id="root"), {"root": Axis(n)})
     paxes = axes.with_modified_node(
         axes.root,
         permutation=perm,
     )
     dat0 = MultiArray(axes, name="dat0", data=np.arange(m * n, dtype=ScalarType))
-    dat1 = MultiArray(paxes, name="dat1", data=np.zeros(m * n, dtype=ScalarType))
+    dat1 = MultiArray(paxes, name="dat1", dtype=ScalarType)
 
-    do_loop(p := Index(Range(axes.root.label, m)), vector_copy_kernel(dat0[p], dat1[p]))
+    # do_loop(p := axes.root.index, vector_copy_kernel(dat0[p], dat1[p]))
+    l = loop(p := axes.root.index, vector_copy_kernel(dat0[p], dat1[p]))
+
+    from pyop3.codegen.loopexpr2loopy import compile
+
+    compile(l)
+    l()
 
     assert np.allclose(dat1.data.reshape((m, n))[perm].flatten(), dat0.data)
 
@@ -258,8 +264,8 @@ def test_vector_copy_with_two_permuted_axes(vector_copy_kernel):
     perm0 = [3, 1, 0, 2]
     perm1 = [1, 0]
 
-    axis0 = Axis(a, "ax_label0")
-    axis1 = Axis(b, "ax_label1")
+    axis0 = Axis(a, "ax0")
+    axis1 = Axis(b, "ax1")
     axes = AxisTree(
         axis0,
         {
@@ -271,13 +277,11 @@ def test_vector_copy_with_two_permuted_axes(vector_copy_kernel):
         axis1, permutation=perm1
     )
 
-    dat0 = MultiArray(axes, name="dat0", data=np.arange(a * b * c, dtype=ScalarType))
-    dat1 = MultiArray(paxes, name="dat1", data=np.zeros(a * b * c, dtype=ScalarType))
+    dat0 = MultiArray(axes, name="dat0", data=np.arange(axes.size, dtype=ScalarType))
+    dat1 = MultiArray(paxes, name="dat1", dtype=ScalarType)
 
-    p = IndexTree(
-        root := Index(Range("ax_label0", a)), {root.id: Index(Range("ax_label1", b))}
-    )
-    do_loop(p, vector_copy_kernel(dat0[p], dat1[p]))
+    iterset = AxisTree(axis0, {axis0.id: axis1})
+    do_loop(p := iterset.index, vector_copy_kernel(dat0[p], dat1[p]))
 
     assert np.allclose(
         dat1.data.reshape((a, b, c))[perm0][:, perm1].flatten(), dat0.data

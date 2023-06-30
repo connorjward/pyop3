@@ -12,6 +12,7 @@ from pyop3.utils import (
     UniqueNameGenerator,
     apply_at,
     as_tuple,
+    checked_zip,
     flatten,
     has_unique_entries,
     just_one,
@@ -64,18 +65,18 @@ class NodeComponent(pytools.ImmutableRecord):
     @property
     def _label_generator(cls):
         if not cls._lazy_label_generator:
-            cls._lazy_label_generator = UniqueNameGenerator(f"_label_{cls.__name__}")
+            cls._lazy_label_generator = UniqueNameGenerator(f"_{cls.__name__}_label")
         return cls._lazy_label_generator
 
     @classmethod
     @property
     def _id_generator(cls):
         if not cls._lazy_id_generator:
-            cls._lazy_id_generator = UniqueNameGenerator(f"_id_{cls.__name__}")
+            cls._lazy_id_generator = UniqueNameGenerator(f"_{cls.__name__}_id")
         return cls._lazy_id_generator
 
 
-class FixedAryTree(pytools.ImmutableRecord):
+class LabelledTree(pytools.ImmutableRecord):
     fields = {"root", "parent_to_children"}
 
     def __init__(
@@ -117,6 +118,7 @@ class FixedAryTree(pytools.ImmutableRecord):
             else:
                 parent_to_children = {}
 
+        super().__init__()
         self.root = root
         self.parent_to_children = pyrsistent.freeze(parent_to_children)
 
@@ -127,7 +129,7 @@ class FixedAryTree(pytools.ImmutableRecord):
         return self._as_node(node) in self.nodes
 
     def children(self, node: Node | str) -> tuple[Node]:
-        node_id = self._as_existing_node_id(node)
+        node_id = self._as_node_id(node)
         return self.parent_to_children[node_id]
 
     def put_node(
@@ -159,33 +161,29 @@ class FixedAryTree(pytools.ImmutableRecord):
                         "Must specify a component index for axes with multiple components"
                     )
 
-            parent_id = self._as_existing_node_id(parent)
+            parent_id = self._as_node_id(parent)
             new_parent_to_children = dict(self.parent_to_children)
             new_children = list(new_parent_to_children[parent_id])
             new_children[component_index] = node
             new_parent_to_children[parent_id] = new_children
             return self.copy(parent_to_children=new_parent_to_children)
 
-    # def replace_node(self, node: Node, loc=None):
-    #     loc = loc or node.id
-    #
-    #     if loc not in self.node_ids:
-    #         raise ValueError
-    #
-    #     parent = self.parent(loc)
-    #
-    #     new_parent_to_children = dict(self.parent_to_children)
-    #     if parent:  # ie not root
-    #         node_index = [
-    #             child.id for child in self.parent_to_children[parent.id]
-    #         ].index(node.id)
-    #         new_children = list(self.parent_to_children[parent.id])
-    #         new_children[node_index] = node
-    #         new_parent_to_children[parent.id] = new_children
-    #         return type(self)(self.root, new_parent_to_children)
-    #     else:
-    #         # this won't work if we tinker with IDs
-    #         return type(self)(node, self.parent_to_children.copy())
+    def with_node(self, existing: Node | Id, new: Node) -> LabelledTree:
+        existing = self._as_node(existing)
+        new_root = self.root
+        new_parent_to_children = {
+            k: list(v) for k, v in self.parent_to_children.items()
+        }
+        new_parent_to_children[new.id] = new_parent_to_children.pop(existing.id)
+        if existing == self.root:
+            new_root = new
+        else:
+            parent_node, parent_cpt = self.parent(existing)
+            parent_cpt_index = [c.label for c in parent_node.components].index(
+                parent_cpt.label
+            )
+            new_parent_to_children[parent_node.id][parent_cpt_index] = new
+        return self.copy(root=new_root, parent_to_children=new_parent_to_children)
 
     def child(self, parent, cpt) -> Node:
         parent = self._as_node(parent)
@@ -208,12 +206,15 @@ class FixedAryTree(pytools.ImmutableRecord):
         return frozenset(node.id for node in self.nodes)
 
     @functools.cached_property
-    def child_to_parent(self):
-        return {
-            child: self.id_to_node[parent_id]
-            for parent_id, children in self.parent_to_children.items()
-            for child in children
-        }
+    def child_to_parent(self) -> dict[Node, tuple[Node, NodeComponent]]:
+        child_to_parent_ = {}
+        for parent_id, children in self.parent_to_children.items():
+            parent = self._as_node(parent_id)
+            for cpt, child in checked_zip(parent.components, children):
+                if child is None:
+                    continue
+                child_to_parent_[child] = (parent, cpt)
+        return child_to_parent_
 
     @functools.cached_property
     def id_to_node(self):
@@ -226,17 +227,17 @@ class FixedAryTree(pytools.ImmutableRecord):
             for node in filter(None, flatten(list(self.parent_to_children.values())))
         }
 
-    def _as_existing_node(self, node: Node | str) -> Node:
-        node = node if isinstance(node, Node) else self.find_node(node)
-        if node.id not in self.node_ids:
-            raise NodeNotFoundException(f"{node.id} is not present in the tree")
-        return node
-
-    def _as_existing_node_id(self, node: Node | Id) -> Id:
-        node_id = node.id if isinstance(node, Node) else node
-        if node_id not in self.node_ids:
-            raise NodeNotFoundException(f"{node_id} is not present in the tree")
-        return node_id
+    # def _as_existing_node(self, node: Node | str) -> Node:
+    #     node = node if isinstance(node, Node) else self.find_node(node)
+    #     if node.id not in self.node_ids:
+    #         raise NodeNotFoundException(f"{node.id} is not present in the tree")
+    #     return node
+    #
+    # def _as_existing_node_id(self, node: Node | Id) -> Id:
+    #     node_id = node.id if isinstance(node, Node) else node
+    #     if node_id not in self.node_ids:
+    #         raise NodeNotFoundException(f"{node_id} is not present in the tree")
+    #     return node_id
 
     def _as_component_label(self, cpt: NodeComponent | Label) -> Label:
         if isinstance(cpt, NodeComponent):
@@ -244,9 +245,8 @@ class FixedAryTree(pytools.ImmutableRecord):
         else:
             return cpt
 
-    def parent(self, node: Node | Id) -> Node | None:
-        node = self._as_existing_node(node)
-
+    def parent(self, node: Node | Id) -> tuple[Node, NodeComponent] | None:
+        node = self._as_node(node)
         if node == self.root:
             return None
         else:
@@ -368,10 +368,10 @@ class FixedAryTree(pytools.ImmutableRecord):
             node_id = f"{orig_node_id}{sep}{counter}"
         return node_id
 
-    def _as_node(self, node: Node | Hashable) -> Node:
-        return node if isinstance(node, Node) else self.find_node(node)
+    def _as_node(self, node: Node | Id) -> Node:
+        return node if isinstance(node, Node) else self.id_to_node[node]
 
-    def _as_node_id(self, node: Node | Hashable) -> Hashable:
+    def _as_node_id(self, node: Node | Id) -> Id:
         return node.id if isinstance(node, Node) else node
 
     def _stringify(
@@ -397,47 +397,9 @@ class FixedAryTree(pytools.ImmutableRecord):
         else:
             return nodestr
 
-
-# FIXME Components should live here I think
-class LabelledNode(Node):
-    fields = Node.fields | {"label"}
-
-    _lazy_label_generator = None
-
-    def __init__(self, label: Hashable | None = None, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self.label = label or next(self._label_generator)
-
-    def with_modified_component(self, component_index: int | None = None, **kwargs):
-        if component_index is None:
-            if self.degree == 1:
-                component_index = 0
-            else:
-                raise ValueError(
-                    "Must specify a component index for multi-component nodes"
-                )
-
-        new_components = apply_at(
-            lambda c: c.copy(**kwargs), self.components, component_index
-        )
-        return self.copy(components=new_components)
-
-    @classmethod
-    @property
-    def _label_generator(cls):
-        if not cls._lazy_label_generator:
-            cls._lazy_label_generator = UniqueNameGenerator(f"_{cls.__name__}_label")
-        return cls._lazy_label_generator
-
-
-NodePath = dict[Hashable, Hashable]
-"""Mapping from axis labels to component labels."""
-# wrong now
-
-
-class LabelledTree(FixedAryTree):
-    def with_modified_node(self, node, **kwargs):
-        return self.replace_node(node.copy(**kwargs))
+    def with_modified_node(self, node: Node | Id, **kwargs):
+        node = self._as_node(node)
+        return self.with_node(node, node.copy(**kwargs))
 
     def with_modified_component(self, node, component_index=None, **kwargs):
         return self.replace_node(
@@ -556,7 +518,7 @@ class LabelledTree(FixedAryTree):
         return subtree
 
     def child_by_label(self, node: LabelledNode | Hashable, label: Hashable):
-        node_id = self._as_existing_node_id(node)
+        node_id = self._as_node_id(node)
         child = self._parent_and_label_to_child[node_id, label]
         if child is not None:
             return self._as_node(child)
@@ -624,6 +586,43 @@ class LabelledTree(FixedAryTree):
 
     def path(self, node, component_index):
         return self._paths[node, component_index]
+
+
+# FIXME Components should live here I think
+class LabelledNode(Node):
+    fields = Node.fields | {"label"}
+
+    _lazy_label_generator = None
+
+    def __init__(self, label: Hashable | None = None, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.label = label or next(self._label_generator)
+
+    def with_modified_component(self, component_index: int | None = None, **kwargs):
+        if component_index is None:
+            if self.degree == 1:
+                component_index = 0
+            else:
+                raise ValueError(
+                    "Must specify a component index for multi-component nodes"
+                )
+
+        new_components = apply_at(
+            lambda c: c.copy(**kwargs), self.components, component_index
+        )
+        return self.copy(components=new_components)
+
+    @classmethod
+    @property
+    def _label_generator(cls):
+        if not cls._lazy_label_generator:
+            cls._lazy_label_generator = UniqueNameGenerator(f"_{cls.__name__}_label")
+        return cls._lazy_label_generator
+
+
+NodePath = dict[Hashable, Hashable]
+"""Mapping from axis labels to component labels."""
+# wrong now
 
 
 # better alias?
