@@ -137,7 +137,13 @@ def test_scalar_copy(scalar_copy_kernel):
         data=np.zeros(m, dtype=ScalarType),
     )
 
-    do_loop(p := axis.index, scalar_copy_kernel(dat0[p], dat1[p]))
+    # do_loop(p := axis.index, scalar_copy_kernel(dat0[p], dat1[p]))
+
+    l = loop(p := axis.index, scalar_copy_kernel(dat0[p], dat1[p]))
+    from pyop3.codegen.loopexpr2loopy import compile
+
+    compile(l)
+    l()
 
     assert np.allclose(dat1.data, dat0.data)
 
@@ -162,7 +168,13 @@ def test_vector_copy(vector_copy_kernel):
         dtype=ScalarType,
     )
 
-    do_loop(p := axes.root.index, vector_copy_kernel(dat0[p], dat1[p]))
+    # do_loop(p := axes.root.index, vector_copy_kernel(dat0[p], dat1[p]))
+
+    l = loop(p := axes.root.index, vector_copy_kernel(dat0[p], dat1[p]))
+    from pyop3.codegen.loopexpr2loopy import compile
+
+    compile(l)
+    l()
 
     assert np.allclose(dat1.data, dat0.data)
 
@@ -248,13 +260,7 @@ def test_vector_copy_with_permuted_axis(vector_copy_kernel):
     dat0 = MultiArray(axes, name="dat0", data=np.arange(m * n, dtype=ScalarType))
     dat1 = MultiArray(paxes, name="dat1", dtype=ScalarType)
 
-    # do_loop(p := axes.root.index, vector_copy_kernel(dat0[p], dat1[p]))
-    l = loop(p := axes.root.index, vector_copy_kernel(dat0[p], dat1[p]))
-
-    from pyop3.codegen.loopexpr2loopy import compile
-
-    compile(l)
-    l()
+    do_loop(p := axes.root.index, vector_copy_kernel(dat0[p], dat1[p]))
 
     assert np.allclose(dat1.data.reshape((m, n))[perm].flatten(), dat0.data)
 
@@ -292,26 +298,18 @@ def test_vector_copy_with_permuted_inner_axis(vector_copy_kernel):
     a, b, c = 5, 4, 3
     perm = [3, 1, 0, 2]
 
+    root = Axis(a, "ax0")
     inner_axis = Axis(b)
     inner_paxis = inner_axis.copy(permutation=perm)
 
-    axes = AxisTree(
-        root := Axis(a, "ax_label0"), {root.id: inner_axis, inner_axis.id: Axis(c)}
-    )
-    paxes = AxisTree(
-        root := Axis(a, "ax_label0"), {root.id: inner_paxis, inner_paxis.id: Axis(c)}
-    )
+    axes = AxisTree(root, {root.id: inner_axis, inner_axis.id: Axis(c)})
+    paxes = AxisTree(root, {root.id: inner_paxis, inner_paxis.id: Axis(c)})
 
-    dat0 = MultiArray(axes, name="dat0", data=np.arange(a * b * c, dtype=ScalarType))
-    dat1 = MultiArray(paxes, name="dat1", data=np.zeros(a * b * c, dtype=ScalarType))
+    dat0 = MultiArray(axes, name="dat0", data=np.arange(axes.size, dtype=ScalarType))
+    dat1 = MultiArray(paxes, name="dat1", dtype=ScalarType)
 
-    p = IndexTree(
-        root := Index(Range("ax_label0", a)),
-        {
-            root.id: Index(Range(inner_axis.label, b)),
-        },
-    )
-    do_loop(p, vector_copy_kernel(dat0[p], dat1[p]))
+    iterset = AxisTree(root, {root.id: inner_axis})
+    do_loop(p := iterset.index, vector_copy_kernel(dat0[p], dat1[p]))
 
     assert np.allclose(dat1.data.reshape((a, b, c))[:, perm].flatten(), dat0.data)
 
@@ -322,18 +320,15 @@ def test_vector_copy_with_permuted_multi_component_axes(vector_copy_kernel):
 
     fullperm = [10, 11] + [5, 6] + [0, 1] + [7, 8, 9] + [2, 3, 4]
 
-    axes = AxisTree(root := Axis([m, n]), {root.id: [Axis(a), Axis(b)]})
+    root = Axis([m, n])
+    axes = AxisTree(root, {root.id: [Axis(a), Axis(b)]})
     paxes = axes.with_modified_node(axes.root, permutation=perm)
 
-    dat0 = MultiArray(
-        axes, name="dat0", data=np.arange(m * a + n * b, dtype=ScalarType)
-    )
-    dat1 = MultiArray(
-        paxes, name="dat1", data=np.zeros(m * a + n * b, dtype=ScalarType)
-    )
+    dat0 = MultiArray(axes, name="dat0", data=np.arange(axes.size, dtype=ScalarType))
+    dat1 = MultiArray(paxes, name="dat1", dtype=ScalarType)
 
-    p = IndexTree(Index(Range((axes.root.label, 1), n)))
-    do_loop(p, vector_copy_kernel(dat0[p], dat1[p]))
+    iterset = AxisTree(Axis([root.components[1]], root.label))
+    do_loop(p := iterset.index, vector_copy_kernel(dat0[p], dat1[p]))
 
     assert np.allclose(dat1.data[fullperm][: m * a], 0)
     assert np.allclose(dat1.data[fullperm][m * a :], dat0.data[m * a :])
@@ -342,18 +337,21 @@ def test_vector_copy_with_permuted_multi_component_axes(vector_copy_kernel):
 def test_scalar_copy_with_ragged_axis(scalar_copy_kernel):
     m = 5
     nnzdata = np.array([3, 2, 1, 3, 2], dtype=IntType)
-    npoints = sum(nnzdata)
 
-    nnzaxes = AxisTree(Axis(5, "ax_label0"))
-    nnz = MultiArray(nnzaxes, name="nnz", data=nnzdata, max_value=3)
+    root = Axis(m)
+    nnz = MultiArray(root, name="nnz", data=nnzdata, max_value=3)
 
-    axes = nnzaxes.add_subaxis(Axis(AxisComponent(nnz), "ax_label1"), nnzaxes.root)
-    dat0 = MultiArray(axes, name="dat0", data=np.arange(npoints, dtype=ScalarType))
-    dat1 = MultiArray(axes, name="dat1", data=np.zeros(npoints, dtype=ScalarType))
+    axes = AxisTree(root, {root.id: Axis(nnz)})
+    dat0 = MultiArray(axes, name="dat0", data=np.arange(axes.size, dtype=ScalarType))
+    dat1 = MultiArray(axes, name="dat1", dtype=ScalarType)
 
-    p = IndexTree(Index(Range("ax_label0", m)))
-    p = p.put_node(Index(Range("ax_label1", nnz[p])), p.root)
-    do_loop(p, scalar_copy_kernel(dat0[p], dat1[p]))
+    # do_loop(p := axes.index, scalar_copy_kernel(dat0[p], dat1[p]))
+
+    l = loop(p := axes.index, scalar_copy_kernel(dat0[p], dat1[p]))
+    from pyop3.codegen.loopexpr2loopy import compile
+
+    compile(l)
+    l()
 
     assert np.allclose(dat1.data, dat0.data)
 
@@ -362,9 +360,8 @@ def test_scalar_copy_with_two_ragged_axes(scalar_copy_kernel):
     m = 3
     nnzdata0 = np.asarray([3, 1, 2], dtype=IntType)
     nnzdata1 = np.asarray([1, 1, 5, 4, 2, 3], dtype=IntType)
-    npoints = sum(nnzdata1)
 
-    nnzaxes0 = AxisTree(Axis(m, "ax0"))
+    nnzaxes0 = AxisTree(Axis(m))
     nnz0 = MultiArray(
         nnzaxes0,
         name="nnz0",
@@ -372,18 +369,14 @@ def test_scalar_copy_with_two_ragged_axes(scalar_copy_kernel):
         max_value=3,
     )
 
-    nnzaxes1 = nnzaxes0.add_subaxis(Axis(nnz0, "ax1"), nnzaxes0.root)
+    nnzaxes1 = nnzaxes0.add_subaxis(Axis(nnz0), nnzaxes0.root)
     nnz1 = MultiArray(nnzaxes1, name="nnz1", data=nnzdata1, max_value=5)
 
     axes = nnzaxes1.add_subaxis(Axis(nnz1, "ax2"), nnzaxes1.leaf)
     dat0 = MultiArray(axes, name="dat0", data=np.arange(npoints, dtype=ScalarType))
     dat1 = MultiArray(axes, name="dat1", data=np.zeros(npoints, dtype=ScalarType))
 
-    p = IndexTree(Index(Range("ax0", 3)))
-    p = p.put_node(Index(Range("ax1", nnz0[p])), p.leaf)
-    p = p.put_node(Index(Range("ax2", nnz1[p])), p.leaf)
-
-    do_loop(p, scalar_copy_kernel(dat0[p], dat1[p]))
+    do_loop(p := axes.index, scalar_copy_kernel(dat0[p], dat1[p]))
 
     assert np.allclose(dat1.data, dat0.data)
 

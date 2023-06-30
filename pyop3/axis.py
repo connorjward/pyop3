@@ -1263,7 +1263,7 @@ def _compute_layouts(
             ctree = None
             for c in axis.components:
                 step = step_size(axes, axis, c)
-                layouts |= {path | c.label: AffineLayout(axis.label, step)}
+                layouts |= {path | c.label: AffineLayout(axis.label, c.label, step)}
 
         else:
             croot = CustomNode([(cpt.count, axis.label) for cpt in axis.components])
