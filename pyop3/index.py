@@ -7,17 +7,11 @@ from typing import Any, Hashable, Sequence
 
 import pytools
 
-from pyop3.tree import LabelledNode, LabelledTree, postvisit
+from pyop3.tree import LabelledNode, LabelledTree, NodeComponent, postvisit
 from pyop3.utils import UniqueNameGenerator, as_tuple, merge_dicts
 
 
 class IndexTree(LabelledTree):
-    fields = LabelledTree.fields | {"axes"}
-
-    def __init__(self, *args, axes=None, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.axes = axes
-
     @functools.cached_property
     def datamap(self) -> dict[str:DistributedArray]:
         return postvisit(self, _collect_datamap, itree=self)
@@ -44,28 +38,24 @@ class Index(LabelledNode):
         return self.components
 
 
-# alias
-MultiIndex = Index
-
-
 class IndexComponent(NodeComponent, abc.ABC):
-    fields = {"from_axis", "to_axis", "from_cpt", "to_cpt", "id"}
+    fields = NodeComponent.fields | {"from_axis", "from_cpt", "to_axis", "to_cpt"}
 
-    _lazy_id_generator = None
-
-    def __init__(self, from_axis, to_axis, *, id: Hashable | None = None) -> None:
-        super().__init__()
-
+    def __init__(self, from_axis, from_cpt, to_axis, to_cpt, **kwargs) -> None:
+        super().__init__(**kwargs)
         self.from_axis = from_axis
+        self.from_cpt = from_cpt
         self.to_axis = to_axis
-        self.id = id or next(self._id_generator)
+        self.to_cpt = to_cpt
 
-    @classmethod
+    # TODO this is quite ugly
     @property
-    def _id_generator(cls):
-        if not cls._lazy_id_generator:
-            cls._lazy_id_generator = UniqueNameGenerator(f"_{cls.__name__}_id")
-        return cls._lazy_id_generator
+    def from_tuple(self):
+        return (self.from_axis, self.from_cpt)
+
+    @property
+    def to_tuple(self):
+        return (self.to_axis, self.to_cpt)
 
 
 class Slice(IndexComponent):
@@ -82,9 +72,9 @@ class Slice(IndexComponent):
         elif nargs == 3:
             start, stop, step = args[0], args[1], args[2]
         else:
-            raise ValueError("More than 3 arguments passed to Slice constructor")
+            raise ValueError("Too many arguments")
 
-        super().__init__(axis, axis, **kwargs)
+        super().__init__(axis, cpt, axis, cpt, **kwargs)
         self.start = start or 0
         self.stop = stop
         self.step = step or 1
@@ -147,7 +137,13 @@ class AffineMap(Map):
 
 @functools.singledispatch
 def as_index_tree(arg: Any) -> IndexTree:
-    raise TypeError
+    from pyop3.loopexpr import LoopIndex
+
+    # cyclic import
+    if isinstance(arg, LoopIndex):
+        return arg.indices
+    else:
+        raise TypeError
 
 
 @as_index_tree.register

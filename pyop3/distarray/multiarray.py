@@ -23,7 +23,7 @@ from pyop3.axis import (
 )
 from pyop3.distarray.base import DistributedArray
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
-from pyop3.index import IndexTree, Range, TabulatedMap, as_index_tree
+from pyop3.index import IndexTree, TabulatedMap, as_index_tree
 from pyop3.utils import (
     MultiNameGenerator,
     NameGenerator,

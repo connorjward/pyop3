@@ -13,7 +13,6 @@ from pyop3 import (
     IndexTree,
     LoopyKernel,
     MultiArray,
-    Range,
     ScalarType,
     do_loop,
 )

@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import collections
 import functools
 from collections.abc import Hashable, Sequence
@@ -18,6 +20,10 @@ from pyop3.utils import (
     unique,
 )
 
+# can I declare this as more obviously a type?
+Id = Hashable
+Label = Hashable
+
 
 class NodeNotFoundException(Exception):
     pass
@@ -32,7 +38,7 @@ class Node(pytools.ImmutableRecord):
 
     _lazy_id_generator = None
 
-    def __init__(self, degree: int, id: Hashable | None = None):
+    def __init__(self, degree: int, id: Id | None = None):
         self.degree = degree
         self.id = id or next(self._id_generator)
 
@@ -44,14 +50,22 @@ class Node(pytools.ImmutableRecord):
         return cls._lazy_id_generator
 
 
-# TODO should probably have label attribute too
 class NodeComponent(pytools.ImmutableRecord):
-    fields = {"id"}
+    fields = {"label", "id"}
 
+    _lazy_label_generator = None
     _lazy_id_generator = None
 
-    def __init__(self, id: Hashable | None = None):
-        self.id = id or next(self._id_generator)
+    def __init__(self, label: Label | None = None, id: Id | None = None):
+        self.label = label if label is not None else next(self._label_generator)
+        self.id = id if id is not None else next(self._id_generator)
+
+    @classmethod
+    @property
+    def _label_generator(cls):
+        if not cls._lazy_label_generator:
+            cls._lazy_label_generator = UniqueNameGenerator(f"_label_{cls.__name__}")
+        return cls._lazy_label_generator
 
     @classmethod
     @property
@@ -67,7 +81,7 @@ class FixedAryTree(pytools.ImmutableRecord):
     def __init__(
         self,
         root: Node | None = None,
-        parent_to_children: Mapping[Hashable, Node] | None = None,
+        parent_to_children: Mapping[Id, Node] | None = None,
     ) -> None:
         if root:
             if parent_to_children:
@@ -119,7 +133,7 @@ class FixedAryTree(pytools.ImmutableRecord):
     def put_node(
         self,
         node: Node,
-        parent: Node | Hashable | None = None,
+        parent: Node | Id | None = None,
         component_index: int | None = None,
         uniquify: bool = False,
     ) -> None:
@@ -152,36 +166,32 @@ class FixedAryTree(pytools.ImmutableRecord):
             new_parent_to_children[parent_id] = new_children
             return self.copy(parent_to_children=new_parent_to_children)
 
-    def replace_node(self, node: Node, loc=None):
-        loc = loc or node.id
+    # def replace_node(self, node: Node, loc=None):
+    #     loc = loc or node.id
+    #
+    #     if loc not in self.node_ids:
+    #         raise ValueError
+    #
+    #     parent = self.parent(loc)
+    #
+    #     new_parent_to_children = dict(self.parent_to_children)
+    #     if parent:  # ie not root
+    #         node_index = [
+    #             child.id for child in self.parent_to_children[parent.id]
+    #         ].index(node.id)
+    #         new_children = list(self.parent_to_children[parent.id])
+    #         new_children[node_index] = node
+    #         new_parent_to_children[parent.id] = new_children
+    #         return type(self)(self.root, new_parent_to_children)
+    #     else:
+    #         # this won't work if we tinker with IDs
+    #         return type(self)(node, self.parent_to_children.copy())
 
-        if loc not in self.node_ids:
-            raise ValueError
-
-        parent = self.parent(loc)
-
-        new_parent_to_children = dict(self.parent_to_children)
-        if parent:  # ie not root
-            node_index = [
-                child.id for child in self.parent_to_children[parent.id]
-            ].index(node.id)
-            new_children = list(self.parent_to_children[parent.id])
-            new_children[node_index] = node
-            new_parent_to_children[parent.id] = new_children
-            return type(self)(self.root, new_parent_to_children)
-        else:
-            # this won't work if we tinker with IDs
-            return type(self)(node, self.parent_to_children.copy())
-
-    def find_node(self, loc: tuple[Node | Hashable, int] | None = None) -> Node:
-        if not loc:
-            return self.root
-
-        if isinstance(loc, tuple):
-            parent_id, component_index = loc
-            return self.parent_to_children[parent_id][component_index]
-        else:
-            return self.id_to_node[loc]
+    def child(self, parent, cpt) -> Node:
+        parent = self._as_node(parent)
+        cpt_label = self._as_component_label(cpt)
+        cpt_index = [c.label for c in parent.components].index(cpt_label)
+        return self.parent_to_children[parent.id][cpt_index]
 
     # def as_node
     # """Return the node from the tree matching the provided ``id``.
@@ -194,7 +204,7 @@ class FixedAryTree(pytools.ImmutableRecord):
     #         raise NodeNotFoundException(f"{node_id} is not present in the tree")
 
     @functools.cached_property
-    def node_ids(self) -> frozenset[Hashable]:
+    def node_ids(self) -> frozenset[Id]:
         return frozenset(node.id for node in self.nodes)
 
     @functools.cached_property
@@ -222,13 +232,19 @@ class FixedAryTree(pytools.ImmutableRecord):
             raise NodeNotFoundException(f"{node.id} is not present in the tree")
         return node
 
-    def _as_existing_node_id(self, node: Node | Hashable) -> Hashable:
+    def _as_existing_node_id(self, node: Node | Id) -> Id:
         node_id = node.id if isinstance(node, Node) else node
         if node_id not in self.node_ids:
             raise NodeNotFoundException(f"{node_id} is not present in the tree")
         return node_id
 
-    def parent(self, node: Node | Hashable) -> Node | None:
+    def _as_component_label(self, cpt: NodeComponent | Label) -> Label:
+        if isinstance(cpt, NodeComponent):
+            return cpt.label
+        else:
+            return cpt
+
+    def parent(self, node: Node | Id) -> Node | None:
         node = self._as_existing_node(node)
 
         if node == self.root:
@@ -269,9 +285,9 @@ class FixedAryTree(pytools.ImmutableRecord):
 
     def add_subtree(
         self,
-        subtree: "Tree",
-        parent: Node | str | None = None,
-        component_index=None,
+        subtree: LabelledTree,
+        parent: Node | Id | None = None,
+        component: NodeComponent | Label | None = None,
         uniquify: bool = False,
     ) -> None:
         """
@@ -287,20 +303,25 @@ class FixedAryTree(pytools.ImmutableRecord):
         if uniquify:
             raise NotImplementedError("TODO")
 
+        if some_but_not_all([parent, component]):
+            raise ValueError("Both parent and component must be defined")
+
         if not parent:
-            if component_index is not None:
-                raise ValueError("not possible")
-            # no point in adding things to an empty tree
             return subtree
         else:
-            parent_id = self._as_existing_node_id(parent)
-
-            new_parent_to_children = dict(self.parent_to_children)
-            new_children = list(new_parent_to_children[parent_id])
-            new_children[component_index] = subtree.root
-            new_parent_to_children[parent_id] = new_children
-
+            parent = self._as_node(parent)
+            cpt_label = self._as_component_label(component)
+            cpt_index = [c.label for c in parent.components].index(cpt_label)
+            new_parent_to_children = {
+                p: list(ch) for p, ch in self.parent_to_children.items()
+            }
+            new_parent_to_children[parent.id][cpt_index] = subtree.root
+            new_parent_to_children |= subtree.parent_to_children
             return self.copy(parent_to_children=new_parent_to_children)
+
+    # alias, better?
+    def _to_node_id(self, arg):
+        return self._as_node_id(arg)
 
     # @property
     # def leaves(self) -> tuple[Node]:
@@ -445,39 +466,20 @@ class LabelledTree(FixedAryTree):
             node = self.parent_to_children[node.id][component_index]
         return node
 
-    def find_node(
-        self, loc: Mapping[Hashable, int] | tuple[Node | Hashable, int] | None = None
-    ) -> LabelledNode:
-        if isinstance(loc, Mapping):
-            return self._node_from_path(loc)
-        else:
-            return super().find_node(loc)
+    # def find_node(
+    #     self, loc: Mapping[Hashable, int] | tuple[Node | Hashable, int] | None = None
+    # ) -> LabelledNode:
+    #     if isinstance(loc, Mapping):
+    #         return self._node_from_path(loc)
+    #     else:
+    #         return super().find_node(loc)
 
-    def path(self, node: Node | Hashable):
-        path_ = {}
-        parent_id, label = self._child_to_parent_and_label[self._as_node_id(node)]
-        while parent_id:
-            path_[parent_id] = label
-            parent_id, label = self._child_to_parent_and_label[parent_id]
-        return path_
-
-    def from_path(self, path):
-        node = self.root
-        while path:
-            label = path.pop(node.label)
-            if node_id := self._parent_and_label_to_child[node.id, label]:
-                node = self._as_node(node)
-            else:
-                assert not path
-                node = None
-        return node
-
-    def children(self, node: LabelledNode | Hashable | NodePath) -> tuple[Node]:
-        if isinstance(node, Mapping):
-            child = self.from_path(node)
-            return (child,) if child else ()
-        else:
-            return super().children(node)
+    # def children(self, node: LabelledNode | Hashable | NodePath) -> tuple[Node]:
+    #     if isinstance(node, Mapping):
+    #         child = self.from_path(node)
+    #         return (child,) if child else ()
+    #     else:
+    #         return super().children(node)
 
     # def add_subtree(
     #     self,
@@ -605,18 +607,12 @@ class LabelledTree(FixedAryTree):
         return pyrsistent.freeze(paths_)
 
     @functools.cached_property
-    def leaves(self):
-        """Return the leaves of the tree.
+    def leaves(self) -> tuple[tuple[Node, NodeComponent]]:
+        """Return the leaves of the tree."""
 
-        The leaves will be returned as ``(node_id, component_label)`` 2-tuples.
-
-        This operation is cached so future calls will be fast.
-
-        """
-
-        def leaves_fn(node, component_index, prev):
-            if not self.find_node((node.id, component_index)):
-                leaves_.append((node, component_index))
+        def leaves_fn(node, cpt, prev):
+            if not self.child(node, cpt):
+                leaves_.append((node, cpt))
 
         leaves_ = []
         previsit(self, leaves_fn)
@@ -657,10 +653,9 @@ def previsit(
         raise RuntimeError("Cannot traverse an empty tree")
 
     current_node = current_node or tree.root
-
-    for cidx in range(current_node.degree):
-        next = fn(current_node, cidx, prev)
-        if subnode := tree.find_node((current_node.id, cidx)):
+    for cpt in current_node.components:
+        next = fn(current_node, cpt, prev)
+        if subnode := tree.child(current_node, cpt):
             previsit(tree, fn, subnode, next)
 
 

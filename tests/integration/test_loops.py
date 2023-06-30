@@ -9,7 +9,7 @@ from pyop3.axis import Axis, AxisComponent, AxisTree
 from pyop3.codegen import LOOPY_LANG_VERSION, LOOPY_TARGET
 from pyop3.distarray import MultiArray
 from pyop3.dtypes import IntType, ScalarType
-from pyop3.index import AffineMap, IdentityMap, Index, IndexTree, Range, TabulatedMap
+from pyop3.index import AffineMap, IdentityMap, Index, IndexTree, Slice, TabulatedMap
 from pyop3.loopexpr import INC, READ, WRITE, LoopyKernel, do_loop, loop
 from pyop3.utils import flatten
 
@@ -151,27 +151,27 @@ def test_vector_copy(vector_copy_kernel):
             root.id: Axis(n),
         },
     )
+    dat0 = MultiArray(
+        axes,
+        name="dat0",
+        data=np.arange(m * n, dtype=ScalarType),
+    )
     dat1 = MultiArray(
         axes,
         name="dat1",
-        data=np.arange(m * n, dtype=np.float64),
-    )
-    dat2 = MultiArray(
-        axes,
-        name="dat2",
-        data=np.zeros(m * n, dtype=np.float64),
+        dtype=ScalarType,
     )
 
-    do_loop(p := axes.root.index, vector_copy_kernel(dat1[p], dat2[p]))
+    do_loop(p := axes.root.index, vector_copy_kernel(dat0[p], dat1[p]))
 
-    assert np.allclose(dat2.data, dat1.data)
+    assert np.allclose(dat1.data, dat0.data)
 
 
 def test_multi_component_vector_copy(vector_copy_kernel):
     m, n, a, b = 4, 6, 2, 3
 
     axes = AxisTree(
-        root := Axis([m, n]),
+        root := Axis([(m, "cpt0"), (n, "cpt1")], "ax0"),
         {
             root.id: [
                 Axis(a),
@@ -192,14 +192,11 @@ def test_multi_component_vector_copy(vector_copy_kernel):
         dtype=np.float64,
     )
 
-    # TODO cleanup, component labels?
-    iterset = Axis(n, axes.root.label)  # needs to be component index 1!
-    do_loop(
-        p := axes.root[Slice(("ax0", 1))].index, vector_copy_kernel(dat0[p], dat1[p])
-    )
-    # do_loop(
-    #     p := iterset.index, vector_copy_kernel(dat0[p], dat1[p])
-    # )
+    # TODO It would be nice to express this as a loop over
+    # p := axes.root[Slice(axis="ax0", cpt=1)].index
+    # but this needs axis slicing to work first.
+    iterset = Axis([(n, "cpt1")], "ax0")
+    do_loop(p := iterset.index, vector_copy_kernel(dat0[p], dat1[p]))
 
     assert all(dat1.data[: m * a] == 0)
     assert all(dat1.data[m * a :] == dat0.data[m * a :])
@@ -209,17 +206,18 @@ def test_multi_component_scalar_copy_with_two_outer_loops(scalar_copy_kernel):
     m, n, a, b = 8, 6, 2, 3
 
     axes = AxisTree(
-        root := Axis(
+        Axis(
             [
-                m,
-                n,
+                (m, 0),
+                (n, 1),
             ],
-            "ax_label0",
+            "ax0",
+            id="root",
         ),
         {
-            root.id: [
+            "root": [
                 Axis(a),
-                Axis(b, "ax_label1"),
+                Axis([(b, 0)], "ax1"),
             ]
         },
     )
@@ -227,11 +225,12 @@ def test_multi_component_scalar_copy_with_two_outer_loops(scalar_copy_kernel):
         axes, name="dat0", data=np.arange(m * a + n * b, dtype=np.float64)
     )
     dat1 = MultiArray(axes, name="dat1", data=np.zeros(m * a + n * b, dtype=np.float64))
-    p = IndexTree(
-        root := Index(Range(("ax_label0", 1), n)),
-        {root.id: Index(Range("ax_label1", b))},
+
+    iterset = AxisTree(
+        Axis([(n, 1)], "ax0", id="root"),
+        {"root": Axis([(b, 0)], "ax1")},
     )
-    do_loop(p, scalar_copy_kernel(dat0[p], dat1[p]))
+    do_loop(p := iterset.index, scalar_copy_kernel(dat0[p], dat1[p]))
 
     assert all(dat1.data[: m * a] == 0)
     assert all(dat1.data[m * a :] == dat0.data[m * a :])

@@ -22,16 +22,7 @@ from petsc4py import PETSc
 
 from pyop3 import utils
 from pyop3.dtypes import IntType, PointerType, get_mpi_dtype
-from pyop3.index import (
-    AffineMap,
-    Index,
-    IndexTree,
-    Map,
-    MultiIndex,
-    Range,
-    Slice,
-    TabulatedMap,
-)
+from pyop3.index import AffineMap, Index, IndexTree, Map, Slice, TabulatedMap
 from pyop3.tree import (
     FixedAryTree,
     LabelledNode,
@@ -58,18 +49,17 @@ from pyop3.utils import (
     unique,
 )
 
-
-def is_distributed(axtree, axis=None):
-    """Return ``True`` if any part of a :class:`MultiAxis` is distributed across ranks."""
-    axis = axis or axtree.root
-    for cidx, cpt in enumerate(axis.components):
-        if (
-            cpt.is_distributed
-            or (subaxis := axtree.find_node((axis.id, cidx)))
-            and is_distributed(axtree, subaxis)
-        ):
-            return True
-    return False
+# def is_distributed(axtree, axis=None):
+#     """Return ``True`` if any part of a :class:`MultiAxis` is distributed across ranks."""
+#     axis = axis or axtree.root
+#     for cpt in axis.components:
+#         if (
+#             cpt.is_distributed
+#             or (subaxis := axtree.child(axis, cpt))
+#             and is_distributed(axtree, subaxis)
+#         ):
+#             return True
+#     return False
 
 
 class IntRef:
@@ -97,33 +87,29 @@ def as_multiaxis(axis):
         raise TypeError
 
 
-def compute_offsets(sizes):
-    return np.concatenate([[0], np.cumsum(sizes)[:-1]], dtype=np.int32)
+# def is_set_up(axtree, axis=None):
+#     """Return ``True`` if all parts (recursively) of the multi-axis have an associated
+#     layout function.
+#     """
+#     axis = axis or axtree.root
+#     return all(
+#         part_is_set_up(axtree, axis, cpt, cidx)
+#         for cidx, cpt in enumerate(axis.components)
+#     )
 
 
-def is_set_up(axtree, axis=None):
-    """Return ``True`` if all parts (recursively) of the multi-axis have an associated
-    layout function.
-    """
-    axis = axis or axtree.root
-    return all(
-        part_is_set_up(axtree, axis, cpt, cidx)
-        for cidx, cpt in enumerate(axis.components)
-    )
+# # this would be an easy place to start with writing a tree visitor instead
+# def part_is_set_up(axtree, axis, cpt):
+#     if (subaxis := axtree.child(axis, cpt)) and not is_set_up(
+#         axtree, subaxis
+#     ):
+#         return False
+#     if (axis.id, component_index) not in axtree._layouts:
+#         return False
+#     return True
 
 
-# this would be an easy place to start with writing a tree visitor instead
-def part_is_set_up(axtree, axis, component, component_index):
-    if (subaxis := axtree.find_node((axis.id, component_index))) and not is_set_up(
-        axtree, subaxis
-    ):
-        return False
-    if (axis.id, component_index) not in axtree._layouts:
-        return False
-    return True
-
-
-def has_independently_indexed_subaxis_parts(axtree, axis, component, component_index):
+def has_independently_indexed_subaxis_parts(axes, axis, cpt):
     """
     subaxis parts are independently indexed if they don't depend on the index from
     ``part``.
@@ -133,10 +119,9 @@ def has_independently_indexed_subaxis_parts(axtree, axis, component, component_i
 
     Note that we need to consider both ragged sizes and permutations here
     """
-    if child := axtree.find_node((axis.id, component_index)):
+    if subaxis := axes.child(axis, cpt):
         return not any(
-            requires_external_index(axtree, child, i)
-            for i, cpt in enumerate(child.components)
+            requires_external_index(axes, subaxis, c) for c in subaxis.components
         )
     else:
         return True
@@ -152,20 +137,19 @@ def only_linear(func):
     return wrapper
 
 
-def prepare_layouts(axtree, axis, component, component_index, path=None):
+def prepare_layouts(axtree, axis, component, path=None):
     """Make a magic nest of dictionaries for storing intermediate results."""
     # path is a tuple key for holding the different axis parts
     if not path:
-        path = ((axis.label, component_index),)
-    # path += ((axis.name, component.label),)
+        path = ((axis.label, component.label),)
 
     # import pdb; pdb.set_trace()
     layouts = {path: None}
 
-    if child := axtree.find_node((axis.id, component_index)):
+    if child := axtree.child(axis, component):
         for i, subcpt in enumerate(child.components):
             layouts |= prepare_layouts(
-                axtree, child, subcpt, i, path + ((child.label, i),)
+                axtree, child, subcpt, path + ((child.label, subcpt.label),)
             )
 
     return layouts
@@ -180,14 +164,14 @@ def set_null_layouts(layouts, axtree, path=(), axis=None):
     temporaries.
     """
     axis = axis or axtree.root
-    for i, part in enumerate(axis.components):
-        new_path = path + ((axis.label, i),)
+    for cpt in axis.components:
+        new_path = path + ((axis.label, cpt.label),)
         if (
-            not has_constant_step(axtree, axis, part, i) or part.indexed
+            not has_constant_step(axtree, axis, part) or part.indexed
         ):  # I think indexed is gone
             layouts[new_path] = "null layout"
 
-        if child := axtree.find_node((axis.id, i)):
+        if child := axtree.child(axis, cpt):
             set_null_layouts(layouts, axtree, new_path, child)
 
 
@@ -228,7 +212,7 @@ def handle_const_starts(
             offset += part.calc_size(axtree, axis, i)
 
     for i, part in enumerate(axis.components):
-        if child := axtree.find_node((axis.id, i)):
+        if child := axtree.child(axis, part):
             handle_const_starts(
                 axtree,
                 layouts,
@@ -249,18 +233,18 @@ def has_constant_start(
     return isinstance(component.count, numbers.Integral) or outer_axes_are_all_indexed
 
 
-def has_fixed_size(axes, axis, component_index):
-    return not size_requires_external_index(axes, axis, component_index)
+def has_fixed_size(axes, axis, component):
+    return not size_requires_external_index(axes, axis, component)
 
 
-def step_size(axtree, axis, component_index, indices=PrettyTuple()):
+def step_size(axtree, axis, component, indices=PrettyTuple()):
     """Return the size of step required to stride over a multi-axis component.
 
     Non-constant strides will raise an exception.
     """
-    if not has_constant_step(axtree, axis, component_index) and not indices:
+    if not has_constant_step(axtree, axis, component) and not indices:
         raise ValueError
-    if subaxis := axtree.find_node((axis.id, component_index)):
+    if subaxis := axtree.child(axis, component):
         return axtree.calc_size(subaxis, indices)
     else:
         return 1
@@ -486,7 +470,9 @@ class AxisTree(LabelledTree):
 
     @property
     def index(self):
-        return fill_shape(self)
+        from pyop3.loopexpr import LoopIndex
+
+        return LoopIndex(self, fill_shape(self))
 
     @functools.cached_property
     def datamap(self) -> dict[str:DistributedArray]:
@@ -536,20 +522,22 @@ class AxisTree(LabelledTree):
                         "Cannot index multi-component array with integers, a "
                         "2-tuple of (component index, index value) is needed"
                     )
-                cidx = 0
+                cpt_label = axis.components[0].label
             else:
-                cidx, index = index
+                cpt_label, index = index
+
+            cpt_index = [c.label for c in axis.components].index(cpt_label)
 
             if index < 0:
                 # In theory we could still get this to work...
                 raise IndexError("Cannot use negative indices")
             # TODO need to pass indices here for ragged things
-            if index >= axis.components[cidx].find_integer_count():
+            if index >= axis.components[cpt_index].find_integer_count():
                 raise IndexError("Index is too large")
 
             new_indices.append(index)
-            path.append(cidx)
-            axis = self.find_node((axis.id, cidx))
+            path.append(cpt_label)
+            axis = self.child(axis, cpt_label)
 
         if axis is not None:
             raise IndexError("Insufficient number of indices given")
@@ -677,10 +665,7 @@ class AxisTree(LabelledTree):
         axis = axis or self.root
         if not isinstance(indices, PrettyTuple):
             indices = PrettyTuple(indices)
-        return sum(
-            cpt.calc_size(self, axis, i, indices)
-            for i, cpt in enumerate(axis.components)
-        )
+        return sum(cpt.calc_size(self, axis, indices) for cpt in axis.components)
 
     @property
     def size(self):
@@ -688,9 +673,7 @@ class AxisTree(LabelledTree):
 
     def alloc_size(self, axis=None):
         axis = axis or self.root
-        return sum(
-            cpt.alloc_size(self, axis, i) for i, cpt in enumerate(axis.components)
-        )
+        return sum(cpt.alloc_size(self, axis) for cpt in axis.components)
 
     # TODO ultimately remove this as it leads to duplication of data
     layout_namer = NameGenerator("layout")
@@ -818,7 +801,7 @@ class AxisTree(LabelledTree):
                                     layouts[loc] = None
 
         for cidx, component in enumerate(axis.components):
-            if subaxis := self.find_node((axis.id, cidx)):
+            if subaxis := self.child(axis, component):
                 # if (axis.id, cidx) in existing_layouts | set(layouts.keys()):
                 if has_independently_indexed_subaxis_parts(self, axis, component, cidx):
                     # saved_offset = offset.value
@@ -862,15 +845,14 @@ class AxisTree(LabelledTree):
             ]
         )
         if sublabels:
-            return self.get_part_from_path(
-                sublabels, self.find_node((axis.id, component_index))
-            )
+            return self.get_part_from_path(sublabels, self.child(axis, component))
         else:
             return axis, component
 
     _my_layout_namer = NameGenerator("layout")
 
     def turn_lists_into_layout_functions(self, layouts):
+        assert False, "dont touch"
         from pyop3.distarray import MultiArray
 
         for path, layout in layouts.items():
@@ -982,6 +964,7 @@ class MyNode(Node):
 
 
 def get_slice_bounds(array, indices):
+    assert False, "not touched"
     from pyop3.distarray import MultiArray
 
     part = just_one(array.axes.children(array.axes.root))
@@ -1009,48 +992,32 @@ def requires_external_index(axtree, axis, component_index):
     """
     return size_requires_external_index(
         axtree, axis, component_index
-    ) or numbering_requires_external_index(axtree, axis, component_index)
+    )  # or numbering_requires_external_index(axtree, axis, component_index)
 
 
-def size_requires_external_index(axes, axis, component_index, depth=0):
+def size_requires_external_index(axes, axis, component, depth=0):
     from pyop3.distarray import IndexedMultiArray
 
-    component = axis.components[component_index]
     count = component.count
     if isinstance(count, IndexedMultiArray):
         count = count.data
     if not component.has_integer_count and count.axes.depth > depth:
         return True
     else:
-        if child := axes.find_node((axis.id, component_index)):
-            for i, cpt in enumerate(child.components):
-                if size_requires_external_index(axes, child, i, depth + 1):
+        if subaxis := axes.child(axis, component):
+            for c in subaxis.components:
+                if size_requires_external_index(axes, subaxis, c, depth + 1):
                     return True
     return False
 
 
-def numbering_requires_external_index(axtree, axis, component_index, depth=1):
-    # I don't allow this
-    return False
-    if component.numbering is not None and component.numbering.dim.depth > depth:
-        return True
-    else:
-        if subaxis := axtree.find_node((axis.id, component_index)):
-            for i, cpt in enumerate(subaxis.components):
-                if numbering_requires_external_index(
-                    axtree, subaxis, cpt, i, depth + 1
-                ):
-                    return True
-    return False
-
-
-def has_constant_step(axes: AxisTree, axis, component_index, depth=0):
+def has_constant_step(axes: AxisTree, axis, cpt, depth=0):
     # we have a constant step if none of the internal dimensions need to index themselves
     # with the current index (numbering doesn't matter here)
-    if child := axes.find_node((axis.id, component_index)):
+    if subaxis := axes.child(axis, cpt):
         return all(
-            not size_requires_external_index(axes, child, i, depth)
-            for i, cpt in enumerate(child.components)
+            not size_requires_external_index(axes, subaxis, c, depth)
+            for c in subaxis.components
         )
     else:
         return True
@@ -1084,7 +1051,6 @@ class AxisComponent(NodeComponent):
 
     fields = NodeComponent.fields | {
         "count",
-        "name",
         "overlap",
         "indexed",
         "indices",
@@ -1094,17 +1060,16 @@ class AxisComponent(NodeComponent):
     def __init__(
         self,
         count,
+        label: Hashable | None = None,
         *,
-        name: str | None = None,
         indices=None,
         overlap=None,
         indexed=False,
         lgmap=None,
+        **kwargs,
     ):
-        super().__init__()
-
+        super().__init__(label, **kwargs)
         self.count = count
-        self.name = name
         self.indices = indices
         self.overlap = overlap
         self.indexed = indexed
@@ -1151,7 +1116,7 @@ class AxisComponent(NodeComponent):
         return self.permutation
 
     # TODO this is just a traversal - clean up
-    def alloc_size(self, axtree, axis, component_index):
+    def alloc_size(self, axtree, axis):
         from pyop3.distarray import IndexedMultiArray, MultiArray
 
         if axis.indexed:
@@ -1166,15 +1131,15 @@ class AxisComponent(NodeComponent):
 
         assert npoints is not None
 
-        if subaxis := axtree.find_node((axis.id, component_index)):
+        if subaxis := axtree.child(axis, self):
             return npoints * axtree.alloc_size(subaxis)
         else:
             return npoints
 
     # TODO make a free function or something - this is horrible
-    def calc_size(self, axtree, axis, component_index, indices=PrettyTuple()):
+    def calc_size(self, axtree, axis, indices=PrettyTuple()):
         extent = self.find_integer_count(indices)
-        if subaxis := axtree.find_node((axis.id, component_index)):
+        if subaxis := axtree.child(axis, self):
             return sum(axtree.calc_size(subaxis, indices | i) for i in range(extent))
         else:
             return extent
@@ -1240,11 +1205,12 @@ class Path:
 
 # i.e. maps and layouts (that take in indices and write to things)
 class IndexFunction(pytools.ImmutableRecord, abc.ABC):
-    fields = {"consumed_labels"}
+    fields = {"axis", "cpt"}
 
-    def __init__(self, consumed_labels):
+    def __init__(self, axis, cpt):
         super().__init__()
-        self.consumed_labels = frozenset(consumed_labels)
+        self.axis = axis
+        self.cpt = cpt
 
 
 # from indices to offsets
@@ -1252,20 +1218,16 @@ class LayoutFunction(IndexFunction, abc.ABC):
     pass
 
 
-class AffineLayoutFunction(LayoutFunction):
+class AffineLayout(LayoutFunction):
     fields = LayoutFunction.fields | {"step", "start"}
 
-    def __init__(self, consumed_label, step, start=0):
-        super().__init__({consumed_label})
+    def __init__(self, axis, cpt, step, start=0):
+        super().__init__(axis, cpt)
         self.step = step
         self.start = start
 
-    @property
-    def consumed_label(self):
-        return just_one(self.consumed_labels)
 
-
-class IndirectLayoutFunction(LayoutFunction):
+class TabulatedLayout(LayoutFunction):
     fields = LayoutFunction.fields | {"data"}
 
     def __init__(self, consumed_components, data):
@@ -1273,11 +1235,6 @@ class IndirectLayoutFunction(LayoutFunction):
             raise ValueError
         super().__init__(consumed_components)
         self.data = data
-
-
-# aliases
-AffineLayout = AffineLayoutFunction
-TabulatedLayout = IndirectLayoutFunction
 
 
 @dataclasses.dataclass
@@ -1293,21 +1250,19 @@ def fill_shape(axes, indices=None):
         return fill_missing_shape(axes, {})
 
     new_indices = indices
-    for leaf_index, leaf_cidx in indices.leaves:
+    for leaf_index, leaf_cpt in indices.leaves:
         axis_path = {}
-        for idx, cidx in indices.path(leaf_index, leaf_cidx):
-            icomponent = idx.components[cidx]
-            if icomponent.from_axis[0] in axis_path:
-                axis_path.pop(icomponent.from_axis[0])
-            axis_path |= dict([icomponent.to_axis])
+        for idx, cpt in indices.path(leaf_index, leaf_cpt):
+            if cpt.from_axis in axis_path:
+                axis_path.pop(cpt.from_axis)
+            axis_path |= {cpt.to_axis: cpt.to_cpt}
 
         extra_slices = fill_missing_shape(axes, axis_path)
 
         if extra_slices:
-            new_indices = new_indices.add_subtree(extra_slices, leaf_index, leaf_cidx)
+            new_indices = new_indices.add_subtree(extra_slices, leaf_index, leaf_cpt)
 
-    # attach the axes to the index tree so we can use it later
-    return new_indices.copy(axes=axes)
+    return new_indices
 
 
 def fill_missing_shape(
@@ -1334,7 +1289,7 @@ def fill_missing_shape(
 
     # 1. Axis is already indexed, select the appropriate subaxis and continue
     if current_axis.label in indexed:
-        subaxis = axes.find_node((current_axis.id, indexed[current_axis.label]))
+        subaxis = axes.child(current_axis, indexed[current_axis.label])
         if subaxis:
             return fill_missing_shape(axes, indexed, subaxis)
         else:
@@ -1344,9 +1299,9 @@ def fill_missing_shape(
     else:
         components = []
         subtrees = []
-        for cidx in range(current_axis.degree):
-            components.append(Slice((current_axis.label, cidx)))
-            subaxis = axes.find_node((current_axis.id, cidx))
+        for cpt in current_axis.components:
+            components.append(Slice(axis=current_axis.label, cpt=cpt.label))
+            subaxis = axes.child(current_axis, cpt)
             if subaxis:
                 subtree = fill_missing_shape(axes, indexed, subaxis)
             else:
@@ -1361,8 +1316,7 @@ def fill_missing_shape(
                 parent_to_children |= subtree.parent_to_children
             else:
                 parent_to_children[root.id].append(None)
-        # attach the axes to the index tree so we can use it later
-        return IndexTree(root, parent_to_children, axes=axes)
+        return IndexTree(root, parent_to_children)
 
 
 def create_lgmap(axes):
@@ -1439,6 +1393,11 @@ def _(arg: numbers.Integral) -> AxisComponent:
     return AxisComponent(arg)
 
 
+@_as_axis_component.register
+def _(arg: tuple) -> AxisComponent:
+    return AxisComponent(*arg)
+
+
 # use this to build a tree of sizes that we use to construct
 # the right count arrays
 class CustomNode(Node):
@@ -1462,10 +1421,10 @@ def _compute_layouts(
     # make sure to catch children that are None
     csubtrees = []
     sublayoutss = []
-    for cidx, subaxis in enumerate(axes.children(axis)):
-        if subaxis is not None:
+    for cpt in axis.components:
+        if subaxis := axes.child(axis, cpt):
             sublayouts, csubtree, substeps = _compute_layouts(
-                axes, subaxis, path | cidx
+                axes, subaxis, path | cpt.label
             )
             sublayoutss.append(sublayouts)
             csubtrees.append(csubtree)
@@ -1502,18 +1461,18 @@ def _compute_layouts(
     """
 
     # 1. do we need to pass further up?
-    if not all(has_fixed_size(axes, axis, cidx) for cidx in range(axis.degree)):
+    if not all(has_fixed_size(axes, axis, cpt) for cpt in axis.components):
         # 0. We ignore things if they are indexed. They don't contribute
         if axis.indexed:
             ctree = None
-        elif all(has_constant_step(axes, axis, cidx) for cidx in range(axis.degree)):
+        elif all(has_constant_step(axes, axis, c) for c in axis.components):
             # we must be at the bottom of a ragged patch - therefore don't
             # add to shape of things
             # in theory if we are ragged and permuted then we do want to include this level
             ctree = None
-            for cidx in range(axis.degree):
-                step = step_size(axes, axis, cidx)
-                layouts |= {path | cidx: AffineLayout(axis.label, step)}
+            for c in axis.components:
+                step = step_size(axes, axis, c)
+                layouts |= {path | c.label: AffineLayout(axis.label, step)}
 
         else:
             croot = CustomNode([(cpt.count, axis.label) for cpt in axis.components])
@@ -1532,7 +1491,7 @@ def _compute_layouts(
     else:
         # 1. do we need to tabulate anything?
         if axis.permutation is not None or not all(
-            has_constant_step(axes, axis, cidx) for cidx in range(axis.degree)
+            has_constant_step(axes, axis, c) for c in axis.components
         ):
             # If this axis is indexed and there is no inner shape to index then do nothing
             if axis.indexed and strictly_all(sub is None for sub in csubtrees):
@@ -1558,7 +1517,8 @@ def _compute_layouts(
                 labels = []
                 for cidx in subpath:
                     labels.append(axis_.label)
-                    axis_ = axes.find_node((axis_.id, cidx))
+                    raise NotImplementedError("FIXME cidx")
+                    axis_ = axes.child(axis_, cidx)
 
                 layouts[path + subpath] = TabulatedLayout(labels, offset_data)
             ctree = None
@@ -1573,14 +1533,15 @@ def _compute_layouts(
                 return layouts | merge_dicts(sublayoutss), None, steps
             ctree = None
             layouts = {}
-            steps = [step_size(axes, axis, cidx) for cidx in range(axis.degree)]
+            steps = [step_size(axes, axis, c) for c in axis.components]
             start = 0
             for cidx, step in enumerate(steps):
+                mycomponent = axis.components[cidx]
                 sublayouts = sublayoutss[cidx].copy()
 
-                new_layout = AffineLayout(axis.label, step, start)
-                sublayouts[path | cidx] = new_layout
-                start += axis.components[cidx].calc_size(axes, axis, cidx)
+                new_layout = AffineLayout(axis.label, mycomponent.label, step, start)
+                sublayouts[path | mycomponent.label] = new_layout
+                start += mycomponent.calc_size(axes, axis)
 
                 layouts |= sublayouts
             steps = {path: axes.calc_size(axis)}
@@ -1670,6 +1631,7 @@ def _tabulate_count_array_tree(
     for pt in range(npoints):
         selected_component_id = point_to_component_id[pt]
         selected_component_num = point_to_component_num[pt]
+        selected_component = axis.components[selected_component_id]
 
         if path | selected_component_id in count_arrays:
             count_arrays[path | selected_component_id].set_value(
@@ -1686,7 +1648,7 @@ def _tabulate_count_array_tree(
             if axis.indexed:
                 saved_offset = offset.value
 
-            subaxis = axes.find_node((axis.id, selected_component_id))
+            subaxis = axes.child(axis, selected_component)
             assert subaxis
             _tabulate_count_array_tree(
                 axes,
@@ -1711,16 +1673,16 @@ def _collect_at_leaves(
     axis = axis or axes.root
     acc = {}
 
-    for cidx in range(axis.degree):
-        if component_path | cidx in values:
-            prior_ = prior | values[component_path | cidx]
+    for cpt in axis.components:
+        if component_path | cpt.label in values:
+            prior_ = prior | values[component_path | cpt.label]
         else:
             prior_ = prior
-        if subaxis := axes.find_node((axis.id, cidx)):
+        if subaxis := axes.child(axis, cpt):
             acc |= _collect_at_leaves(
-                axes, values, subaxis, component_path | cidx, prior_
+                axes, values, subaxis, component_path | cpt.label, prior_
             )
         else:
-            acc[component_path | cidx] = prior_
+            acc[component_path | cpt.label] = prior_
 
     return acc

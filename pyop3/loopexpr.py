@@ -41,6 +41,15 @@ MAX_RW = Access.MAX_RW
 MAX_WRITE = Access.MAX_WRITE
 
 
+class LoopIndex(pytools.ImmutableRecord):
+    fields = {"axes", "indices"}
+
+    def __init__(self, axes, indices):
+        super().__init__()
+        self.axes = axes
+        self.indices = indices
+
+
 class LoopExpr(pytools.ImmutableRecord, abc.ABC):
     fields = set()
 
@@ -67,29 +76,33 @@ class Loop(LoopExpr):
 
     def __init__(
         self,
-        index: IndexTree,  # this could be a different LoopIndex type
+        index: LoopIndex,
         statements: Sequence[LoopExpr],
         id=None,
         depends_on=frozenset(),
     ):
-        if not index.axes:
-            raise ValueError("Provided loop index does not reference an iteration set")
+        assert isinstance(index, LoopIndex)
 
         # FIXME
         # assert isinstance(index, pyop3.tensors.Indexed)
         if not id:
             id = self.id_generator.next()
 
+        super().__init__()
         self.index = index
         self.statements = as_tuple(statements)
         self.id = id
+        # I think this can go if I generate code properly
         self.depends_on = depends_on
 
-        super().__init__()
-
+    # maybe these should not exist? backwards compat
     @property
     def axes(self):
         return self.index.axes
+
+    @property
+    def indices(self):
+        return self.index.indices
 
     @functools.cached_property
     def datamap(self):

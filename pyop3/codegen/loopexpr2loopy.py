@@ -17,13 +17,7 @@ import pytools
 from pyrsistent import pmap
 
 from pyop3 import tlang, utils
-from pyop3.axis import (
-    AffineLayoutFunction,
-    Axis,
-    AxisComponent,
-    AxisTree,
-    IndirectLayoutFunction,
-)
+from pyop3.axis import AffineLayout, Axis, AxisComponent, AxisTree, TabulatedLayout
 from pyop3.distarray import IndexedMultiArray, MultiArray
 from pyop3.index import (
     AffineMap,
@@ -31,7 +25,6 @@ from pyop3.index import (
     Index,
     IndexTree,
     Map,
-    Range,
     Slice,
     TabulatedMap,
 )
@@ -165,17 +158,16 @@ class LoopyKernelBuilder:
         # to reconstruct the path at the bottom.
 
         # NOTE: currently maps only map between components of the same axis.
+        # I don't know if this is a strict limitation or just untested.
 
-        for leaf, cidx in loop.index.leaves:
-            index_path = [
-                node.components[nodecidx]
-                for node, nodecidx in loop.index.path(leaf, cidx)
-            ]
+        for leaf_index, leaf_cpt in loop.index.indices.leaves:
+            index_path = loop.index.indices.path(leaf_index, leaf_cpt)
+
             axis_path = {}
-            for icomponent in index_path:
-                if icomponent.from_axis[0] in axis_path:
-                    axis_path.discard(icomponent.from_axis[0])
-                axis_path |= dict([icomponent.to_axis])
+            for index, cpt in index_path:
+                if cpt.from_axis in axis_path:
+                    axis_path.pop(cpt.from_axis)
+                axis_path |= {cpt.to_axis: cpt.to_cpt}
 
             # register loops. this must be done at the bottom of the tree because we
             # only know now how big the emitted loops need to be. For example repeated
@@ -204,21 +196,20 @@ class LoopyKernelBuilder:
 
             new_within_indices = within_indices
             new_depends_on = depends_on
-            for multi_index, index_cidx in reversed(loop.index.path(leaf, cidx)):
-                index = multi_index.components[index_cidx]
-                jname = jnames.pop(index.to_axis)  # I think this is what I want...
+            for index, cpt in reversed(loop.index.indices.path(leaf_index, leaf_cpt)):
+                jname = jnames.pop(cpt.to_tuple)
                 new_jname, insns = self.myinnerfunc(
                     jname,
-                    multi_index,
                     index,
-                    existing_labels,  # can probably delete this
+                    cpt,
+                    existing_labels,  # can probably delete this, same as within_indices?
                     within_indices,
-                    within_inames,
+                    new_within_inames,
                     new_depends_on,
                 )
-                assert index.from_axis[0] not in jnames
-                jnames[index.from_axis[0]] = new_jname
-                new_within_indices += {index: new_jname}
+                assert cpt.from_tuple not in jnames
+                jnames[cpt.from_tuple] = new_jname
+                new_within_indices += {cpt: new_jname}
                 new_depends_on |= {insn.id for insn in insns}
 
             # The loop indices have been registered, now handle the loop statements
@@ -252,9 +243,6 @@ class LoopyKernelBuilder:
         #   indices to index our array).
         # * I need a map from axis to component labels
 
-        if isinstance(index, Range):
-            raise AssertionError("not valid anymore, probably want a slice")
-
         if index in within_indices:
             return within_indices[index], []
 
@@ -279,8 +267,9 @@ class LoopyKernelBuilder:
             index_insn = lp.Assignment(
                 pym.var(jname),
                 pym.var(iname) * index.step + index.start,
-                id=self._namer.next("myid_"),
+                id=self._namer.next("myid"),
                 within_inames=within_inames,
+                within_inames_is_final=True,
                 depends_on=depends_on,
             )
             self.instructions.append(index_insn)
@@ -317,8 +306,9 @@ class LoopyKernelBuilder:
             index_insn = lp.Assignment(
                 pym.var(jname),
                 expr,
-                id=self._namer.next("myid_"),
+                id=self._namer.next("myid"),
                 within_inames=within_inames | {iname},
+                within_inames_is_final=True,
                 depends_on=depends_on,
                 # no_sync_with=no_sync_with,
             )
@@ -366,8 +356,9 @@ class LoopyKernelBuilder:
             index_insn = lp.Assignment(
                 pym.var(jname),
                 expr,
-                id=self._namer.next("myid_"),
+                id=self._namer.next("myid"),
                 within_inames=within_inames | {iname},
+                within_inames_is_final=True,
                 depends_on=depends_on,
             )
 
@@ -411,25 +402,19 @@ class LoopyKernelBuilder:
             assignment.lhs.index.leaves, assignment.rhs.index.leaves
         ):
             # copied from build_loop
-            lindex_path = [
-                node.components[nodecidx]
-                for node, nodecidx in assignment.lhs.index.path(lleaf, lcidx)
-            ]
+            lindex_path = assignment.lhs.index.path(lleaf, lcidx)
             laxis_path = {}
-            for cpt in lindex_path:
-                if cpt.from_axis[0] in laxis_path:
-                    laxis_path.pop(cpt.from_axis[0])
-                laxis_path |= dict([cpt.to_axis])
+            for _, cpt in lindex_path:
+                if cpt.from_axis in laxis_path:
+                    laxis_path.pop(cpt.from_axis)
+                laxis_path |= {cpt.to_axis: cpt.to_cpt}
 
-            rindex_path = [
-                node.components[nodecidx]
-                for node, nodecidx in assignment.rhs.index.path(rleaf, rcidx)
-            ]
+            rindex_path = assignment.rhs.index.path(rleaf, rcidx)
             raxis_path = {}
-            for cpt in rindex_path:
-                if cpt.from_axis[0] in raxis_path:
-                    raxis_path.pop(cpt.from_axis[0])
-                raxis_path |= dict([cpt.to_axis])
+            for _, cpt in rindex_path:
+                if cpt.from_axis in raxis_path:
+                    raxis_path.pop(cpt.from_axis)
+                raxis_path |= {cpt.to_axis: cpt.to_cpt}
 
             # at the bottom, now emit the loops and assignment
 
@@ -507,11 +492,8 @@ class LoopyKernelBuilder:
             new_depends_on = depends_on
 
             # LHS
-            for multi_index, index_cidx in reversed(
-                assignment.lhs.index.path(lleaf, lcidx)
-            ):
-                index = multi_index.components[index_cidx]
-                jname = ljnames.pop(index.to_axis)
+            for multi_index, index in reversed(assignment.lhs.index.path(lleaf, lcidx)):
+                jname = ljnames.pop(index.to_tuple)
                 new_jname, insns = self.myinnerfunc(
                     jname,
                     multi_index,
@@ -521,16 +503,13 @@ class LoopyKernelBuilder:
                     new_within_inames,
                     new_depends_on,
                 )
-                assert index.from_axis not in ljnames
-                ljnames[index.from_axis] = new_jname
+                assert index.from_tuple not in ljnames
+                ljnames[index.from_tuple] = new_jname
                 new_depends_on |= {insn.id for insn in insns}
 
             # RHS
-            for multi_index, index_cidx in reversed(
-                assignment.rhs.index.path(rleaf, rcidx)
-            ):
-                index = multi_index.components[index_cidx]
-                jname = rjnames.pop(index.to_axis)
+            for multi_index, index in reversed(assignment.rhs.index.path(rleaf, rcidx)):
+                jname = rjnames.pop(index.to_tuple)
                 new_jname, insns = self.myinnerfunc(
                     jname,
                     multi_index,
@@ -540,8 +519,8 @@ class LoopyKernelBuilder:
                     new_within_inames,
                     new_depends_on,
                 )
-                assert index.from_axis not in rjnames
-                rjnames[index.from_axis] = new_jname
+                assert index.from_tuple not in rjnames
+                rjnames[index.from_tuple] = new_jname
                 new_depends_on |= {insn.id for insn in insns}
 
             lhs_labels_to_jnames = ljnames
@@ -820,27 +799,6 @@ class LoopyKernelBuilder:
     ):
         raise TypeError
 
-    def collect_extents(
-        self, itree, index, component_index, within_indices, within_inames, depends_on
-    ):
-        component = index.components[component_index]
-        extents = {}
-
-        if isinstance(component.size, IndexedMultiArray):
-            # TODO This will overwrite if we have duplicates
-            extent = self.register_extent(
-                component.size, within_indices, within_inames, depends_on
-            )
-            extents[component.size] = pym.var(extent)
-
-        if subidx := itree.find_node((index.id, component_index)):
-            for cidx in range(subidx.degree):
-                extents |= self.collect_extents(
-                    itree, subidx, cidx, within_indices, within_inames, depends_on
-                )
-
-        return extents
-
     # FIXME can likely merge with build_assignment, this function is now irrelevant
     @_make_instruction_context.register
     def _(
@@ -879,6 +837,7 @@ class LoopyKernelBuilder:
             0,
             id=self._namer.next("insn"),
             within_inames=within_inames,
+            within_inames_is_final=True,
             depends_on=depends_on,
         )
         self.instructions.append(array_offset_insn)
@@ -889,27 +848,18 @@ class LoopyKernelBuilder:
             axis = axes.root
             path = PrettyTuple()
             while axis:
-                component, component_index = just_one(
-                    (cpt, i)
-                    for i, cpt in enumerate(axis.components)
-                    if (axis.label, i) in labels_to_jnames
+                cpt = just_one(
+                    c
+                    for c in axis.components
+                    if (axis.label, c.label) in labels_to_jnames
                 )
-
-                path |= component_index
-
-                # set the component index to always 0 for the inner linear layout
-                linear_labels_to_jnames = {
-                    (label, 0): jname for (label, _), jname in labels_to_jnames.items()
-                }
-                axis = axes.find_node((axis.id, component_index))
+                path |= cpt.label
+                axis = axes.child(axis, cpt)
 
             deps = self.emit_layout_insns(
                 axes,
-                axis,
-                component,
-                component_index,
                 offset,
-                linear_labels_to_jnames,
+                labels_to_jnames,
                 within_inames,
                 depends_on,
                 path,
@@ -921,9 +871,6 @@ class LoopyKernelBuilder:
     def emit_layout_insns(
         self,
         axes,
-        axis,
-        axis_part,
-        component_index,
         offset_var,
         labels_to_jnames,
         within_inames,
@@ -933,16 +880,16 @@ class LoopyKernelBuilder:
         """
         TODO
         """
+        # breakpoint()
         expr = pym.var(offset_var)
-        remaining_labels = set(x for x, y in labels_to_jnames.keys())
         for layout_fn in axes.layouts[path]:
             # TODO singledispatch!
-            if isinstance(layout_fn, IndirectLayoutFunction):
+            if isinstance(layout_fn, TabulatedLayout):
                 layout_var, _ = self.register_scalar_assignment(
                     layout_fn.data, labels_to_jnames, within_inames, depends_on
                 )
                 expr += layout_var
-            elif isinstance(layout_fn, AffineLayoutFunction):
+            elif isinstance(layout_fn, AffineLayout):
                 start = layout_fn.start
                 step = layout_fn.step
 
@@ -956,15 +903,10 @@ class LoopyKernelBuilder:
                         depends_on,
                     )
 
-                jname = pym.var(labels_to_jnames[(layout_fn.consumed_label, 0)])
+                jname = pym.var(labels_to_jnames[(layout_fn.axis, layout_fn.cpt)])
                 expr += jname * step + start
             else:
                 raise NotImplementedError
-
-            remaining_labels -= layout_fn.consumed_labels
-
-        # sometimes we have more labels than we want - I should probably stop that from happening
-        # assert len(remaining_labels) == 0
 
         insn = lp.Assignment(
             offset_var,
@@ -1200,31 +1142,28 @@ def find_axis(axes, path, target, current_axis=None):
     if current_axis.label == target:
         return current_axis
     else:
-        cidx = path[current_axis.label]
-        subaxis = axes.find_node((current_axis.id, cidx))
+        subaxis = axes.child(current_axis, path[current_axis.label])
         return find_axis(axes, path, target, subaxis)
 
 
-# TODO maybe this function should also register the loops and just return the inames?
-# don't think so. This would be bad for iterating over the array and temporary together
 def collect_extents(axes, path, index_path, loop_indices):
     extents = {}
-    for index in index_path:
-        if index in loop_indices:
-            extents[index.to_axis] = 1
+    for index, cpt in index_path:
+        if cpt in loop_indices:
+            extents[cpt.to_tuple] = 1
         else:
-            if isinstance(index, Slice):
-                assert index.from_axis == index.to_axis
+            if isinstance(cpt, Slice):
                 # the stop is either provided by the index, already registered, or, lastly, the axis size
-                stop = (
-                    index.stop
-                    or extents.get(index.from_axis)
-                    or find_axis(axes, path, index.from_axis[0])
-                    .components[index.from_axis[1]]
-                    .count
-                )
-                new_extent = (stop - index.start) // index.step
-                extents[index.to_axis] = new_extent
+                if cpt.stop:
+                    stop = cpt.stop
+                elif cpt.from_axis in extents:
+                    stop = extents[cpt.from_tuple]
+                else:
+                    axis = find_axis(axes, path, cpt.from_axis)
+                    cpt_index = [c.label for c in axis.components].index(cpt.from_cpt)
+                    stop = axis.components[cpt_index].count
+                new_extent = (stop - cpt.start) // cpt.step
+                extents[cpt.to_tuple] = new_extent
             else:
                 raise NotImplementedError("TODO")
     return extents
@@ -1243,28 +1182,25 @@ def temporary_axes(
     # also copied from build_assignment - convergence!
     # also the same as fill_shape
     # I can just loop over the leaves at the base? sorta, need to build the tree
+    # If I track the leaves I can still reconstruct at the base
     # FIXME need to handle within_indices
     subtrees = []
-    for index_cidx in range(index.degree):
-        index_component = index.components[index_cidx]
-
+    for index_cpt in index.components:
         new_axis_path = axis_path
         new_index_path = index_path
 
-        if index_component.from_axis[0] in new_axis_path:
-            assert (
-                new_axis_path[index_component.from_axis[0]]
-                == index_component.from_axis[1]
-            )
-            new_axis_path = new_axis_path.discard(index_component.from_axis[0])
-        new_axis_path = new_axis_path.set(*index_component.to_axis)
+        if index_cpt.from_axis in new_axis_path:
+            assert new_axis_path[index_cpt.from_axis] == index_cpt.from_cpt
+            new_axis_path = new_axis_path.discard(index_cpt.from_axis)
+        new_axis_path |= {index_cpt.to_axis: index_cpt.to_cpt}
 
-        new_index_path |= index_component
+        new_index_path |= (index, index_cpt)
 
-        if subindex := indices.find_node((index.id, index_cidx)):
+        if subindex := indices.child(index, index_cpt):
             subtree = temporary_axes(
                 axes,
                 indices,
+                loop_indices,
                 subindex,
                 new_axis_path,
                 new_index_path,
