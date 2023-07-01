@@ -8,7 +8,7 @@ from typing import Any, Hashable, Sequence
 import pytools
 
 from pyop3.tree import LabelledNode, LabelledTree, NodeComponent, postvisit
-from pyop3.utils import UniqueNameGenerator, as_tuple, merge_dicts
+from pyop3.utils import as_tuple, merge_dicts
 
 
 class IndexTree(LabelledTree):

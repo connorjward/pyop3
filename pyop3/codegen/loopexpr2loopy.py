@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import abc
 import collections
+import contextlib
 import copy
 import dataclasses
 import enum
@@ -19,6 +22,7 @@ from pyrsistent import pmap
 from pyop3 import tlang, utils
 from pyop3.axis import AffineLayout, Axis, AxisComponent, AxisTree, TabulatedLayout
 from pyop3.distarray import IndexedMultiArray, MultiArray
+from pyop3.dtypes import IntType
 from pyop3.index import (
     AffineMap,
     IdentityMap,
@@ -41,8 +45,6 @@ from pyop3.loopexpr import (
     Loop,
 )
 from pyop3.utils import (
-    MultiNameGenerator,
-    NameGenerator,
     PrettyTuple,
     StrictlyUniqueSet,
     checked_zip,
@@ -52,476 +54,440 @@ from pyop3.utils import (
     strictly_all,
 )
 
-
-class VariableCollector(pym.mapper.Collector):
-    def map_variable(self, expr, *args, **kwargs):
-        return {expr}
-
-
-# @dataclasses.dataclass(frozen=True)
-# class CodegenContext:
-#     indices:
-
-
-def merge_bins(bin1, bin2):
-    new_bin = bin1.copy()
-    for k, v in bin2.items():
-        if k in bin1:
-            new_bin[k].extend(v)
-        else:
-            new_bin[k] = v
-    return new_bin
-
-
 # FIXME this needs to be synchronised with TSFC, tricky
 # shared base package? or both set by Firedrake - better solution
 LOOPY_TARGET = lp.CWithGNULibcTarget()
 LOOPY_LANG_VERSION = (2018, 2)
 
 
-class CodegenTarget(enum.Enum):
-    LOOPY = enum.auto()
-    C = enum.auto()
+class CodegenContext(abc.ABC):
+    pass
 
 
-def compile(expr):
-    return _make_loopy_kernel(expr)
-
-
-class LoopyKernelBuilder:
+class LoopyCodegenContext(CodegenContext):
     def __init__(self):
-        self._namer = MultiNameGenerator()
-        self.domains = []
-        self.instructions = []
-        self._tensor_data = {}
-        self._section_data = []
-        self._temp_kernel_data = []
-        self.subkernels = []
-        # self._within_inames = {}
-        self.extents = {}
-        self.assumptions = []
+        # should/could these be sets?
+        self._domains = []
+        self._insns = []
+        self._args = []
+        self._subkernels = []
 
-        self._part_id_namer = NameGenerator("mypartid")
+        self._loop_indices = {}
+        self._within_inames = frozenset()
+        self._last_insn_id = None
 
-        self._temp_name_generator = NameGenerator("t")
+        self.name_generator = pytools.UniqueNameGenerator()
 
     @property
-    def kernel_data(self):
-        return (
-            list(self._tensor_data.values())
-            + self._section_data
-            + self._temp_kernel_data
+    def domains(self):
+        return tuple(self._domains)
+
+    @property
+    def instructions(self):
+        return tuple(self._insns)
+
+    @property
+    def arguments(self):
+        return tuple(self._args)
+
+    @property
+    def subkernels(self):
+        return tuple(self._subkernels)
+
+    def add_domain(self, *args):
+        nargs = len(args)
+        if nargs == 1:
+            start, stop = 0, args[0]
+        else:
+            assert nargs == 2
+            start, stop = args[0], args[1]
+
+        iname = self.name_generator("i")
+        self._domains.append(f"{{ [{iname}]: {start} <= {iname} < {stop} }}")
+        return iname
+
+    def add_assignment(self, assignee, expression, prefix="insn"):
+        insn = lp.Assignment(
+            assignee,
+            expression,
+            id=self.name_generator(prefix),
+            within_inames=self._within_inames,
+            within_inames_is_final=True,
+            depends_on=self._depends_on,
+            depends_on_is_final=True,
         )
+        self._add_instruction(insn)
 
-    def build(self, tlang_expr):
-        self._namer.reset()
-        self._build(tlang_expr)
-
-        translation_unit = lp.make_kernel(
-            self.domains,
-            self.instructions,
-            self.kernel_data,
-            assumptions=",".join(self.assumptions),
-            target=LOOPY_TARGET,
-            lang_version=LOOPY_LANG_VERSION,
-            name="mykernel",
-            options=lp.Options(check_dep_resolution=False),
+    def add_function_call(self, assignees, expression, prefix="insn"):
+        insn = lp.CallInstruction(
+            assignees,
+            expression,
+            id=self.name_generator(prefix),
+            within_inames=self._within_inames,
+            within_inames_is_final=True,
+            depends_on=self._depends_on,
+            depends_on_is_final=True,
         )
-        tu = lp.merge((translation_unit, *self.subkernels))
-        # breakpoint()
-        return tu.with_entrypoints("mykernel")
+        self._add_instruction(insn)
 
-    @functools.singledispatchmethod
-    def _build(self, expr, *args, **kwargs):
-        raise TypeError
+    def add_argument(self, name, dtype):
+        arg = lp.GlobalArg(name, dtype=dtype, shape=None)
+        self._args.append(arg)
 
-    @_build.register
-    def _(
-        self,
-        loop: Loop,
-        within_inames=frozenset(),
-        depends_on=frozenset(),
-        within_indices=pmap(),
-        existing_labels=pmap(),
-    ):
-        # this is a map from axis labels to extents, if we hit an index over a new thing
-        # then we get the size from the array, else we can modify the sizes provided
-        # how do maps impact this? just like a slice I think, "consume" the prior index
-        # and yield a new one with size arity? no. it wouldn't modify the input set, a slice does
+    def add_temporary(self, name, dtype, shape):
+        temp = lp.TemporaryVariable(name, dtype=dtype, shape=shape)
+        self._args.append(temp)
 
-        # I need to think about how I traverse the iterset since I only want one path at a time,
-        # but some loops are reused!
+    def add_parameter(self, prefix="n"):
+        name = self.name_generator(prefix)
+        param = lp.TemporaryVariable(name, shape=(), dtype=IntType)
+        self._args.append(param)
+        return name
 
-        # we should definitely do some of the this at the bottom of the traversal, that way we
-        # know which axes are getting looped over? tricky if we have duplicate axis labels on
-        # different paths. collect axes and components as we go down and then find the right ones
-        # to reconstruct the path at the bottom.
+    def add_subkernel(self, subkernel):
+        self._subkernels.append(subkernel)
 
-        # NOTE: currently maps only map between components of the same axis.
-        # I don't know if this is a strict limitation or just untested.
+    @contextlib.contextmanager
+    def within_inames(self, inames):
+        self._within_inames |= inames
+        yield
+        self._within_inames -= inames
 
-        for leaf_index, leaf_cpt in loop.index.indices.leaves:
-            index_path = loop.index.indices.path(leaf_index, leaf_cpt)
+    @property
+    def _depends_on(self):
+        return frozenset({self._last_insn_id}) - {None}
 
-            axis_path = {}
-            for index, cpt in index_path:
-                if cpt.from_axis in axis_path:
-                    axis_path.pop(cpt.from_axis)
-                axis_path |= {cpt.to_axis: cpt.to_cpt}
+    def _add_instruction(self, insn):
+        self._insns.append(insn)
+        self._last_insn_id = insn.id
 
-            # register loops. this must be done at the bottom of the tree because we
-            # only know now how big the emitted loops need to be. For example repeated
-            # slices of the same axis will result in a single, smaller, loop.
 
-            # map from axes to sizes, components? maps always target the same axis
-            # so should be fine.
-            extents = collect_extents(loop.axes, axis_path, index_path, within_indices)
+def compile(expr: LoopExpr, name="mykernel"):
+    ctx = LoopyCodegenContext()
+    _compile(expr, {}, ctx)
 
-            # now generate loops for each of these extents, keep the same mapping from
-            # axis labels to, now, inames
-            jnames = {}
-            new_within_inames = within_inames
-            for axis_label, extent in extents.items():
-                iname = self._namer.next("i")
-                extent = self.register_extent(
-                    extent, within_indices, within_inames, depends_on
-                )
-                domain_str = f"{{ [{iname}]: 0 <= {iname} < {extent} }}"
-                self.domains.append(domain_str)
-                jnames[axis_label] = iname
-                new_within_inames |= {iname}
+    translation_unit = lp.make_kernel(
+        ctx.domains,
+        ctx.instructions,
+        ctx.arguments,
+        name=name,
+        target=LOOPY_TARGET,
+        lang_version=LOOPY_LANG_VERSION,
+        # options=lp.Options(check_dep_resolution=False),
+    )
+    tu = lp.merge((translation_unit, *ctx.subkernels))
+    # breakpoint()
+    return tu.with_entrypoints("mykernel")
 
+
+@functools.singledispatch
+def _compile(expr: Any, ctx: LoopyCodegenContext) -> None:
+    raise TypeError
+
+
+@_compile.register
+def _(loop: Loop, loop_indices, ctx: LoopyCodegenContext) -> None:
+    # this is a map from axis labels to extents, if we hit an index over a new thing
+    # then we get the size from the array, else we can modify the sizes provided
+    # how do maps impact this? just like a slice I think, "consume" the prior index
+    # and yield a new one with size arity? no. it wouldn't modify the input set, a slice does
+
+    # I need to think about how I traverse the iterset since I only want one path at a time,
+    # but some loops are reused!
+
+    # we should definitely do some of the this at the bottom of the traversal, that way we
+    # know which axes are getting looped over? tricky if we have duplicate axis labels on
+    # different paths. collect axes and components as we go down and then find the right ones
+    # to reconstruct the path at the bottom.
+
+    # NOTE: currently maps only map between components of the same axis.
+    # I don't know if this is a strict limitation or just untested.
+
+    for leaf_index, leaf_cpt in loop.index.indices.leaves:
+        index_path = loop.index.indices.path(leaf_index, leaf_cpt)
+
+        axis_path = {}
+        for index, cpt in index_path:
+            if cpt.from_axis in axis_path:
+                axis_path.pop(cpt.from_axis)
+            axis_path |= {cpt.to_axis: cpt.to_cpt}
+
+        # register loops. this must be done at the bottom of the tree because we
+        # only know now how big the emitted loops need to be. For example repeated
+        # slices of the same axis will result in a single, smaller, loop.
+
+        # map from axes to sizes, components? maps always target the same axis
+        # so should be fine.
+        extents = collect_extents(loop.axes, axis_path, index_path, loop_indices)
+
+        # now generate loops for each of these extents, keep the same mapping from
+        # axis labels to, now, inames
+        new_inames = set()
+        jnames = {}
+        for axis_label, extent in extents.items():
+            extent = register_extent(
+                extent,
+                loop_indices,
+                ctx,
+            )
+            iname = ctx.add_domain(extent)
+            jnames[axis_label] = iname
+            new_inames.add(iname)
+
+        with ctx.within_inames(new_inames):
             # now traverse the slices in reverse, transforming the inames to jnames and
             # the right index expressions
-
-            new_within_indices = within_indices
-            new_depends_on = depends_on
-            for index, cpt in reversed(loop.index.indices.path(leaf_index, leaf_cpt)):
+            new_loop_indices = {}
+            for index, icpt in reversed(loop.index.indices.path(leaf_index, leaf_cpt)):
                 jname = jnames.pop(cpt.to_tuple)
-                new_jname, insns = self.myinnerfunc(
+                new_jname = myinnerfunc(
                     jname,
                     index,
-                    cpt,
-                    existing_labels,  # can probably delete this, same as within_indices?
-                    within_indices,
-                    new_within_inames,
-                    new_depends_on,
+                    icpt,
+                    jnames,
+                    new_loop_indices,
+                    ctx,
                 )
-                assert cpt.from_tuple not in jnames
-                jnames[cpt.from_tuple] = new_jname
-                new_within_indices += {cpt: new_jname}
-                new_depends_on |= {insn.id for insn in insns}
+                assert icpt.from_tuple not in jnames
+                jnames[icpt.from_tuple] = new_jname
+                new_loop_indices |= {icpt: new_jname}
 
             # The loop indices have been registered, now handle the loop statements
             for stmt in loop.statements:
-                self._build(
-                    stmt,
-                    new_within_indices,
-                    new_within_inames,
-                    new_depends_on,
-                )
+                _compile(stmt, new_loop_indices, ctx)
 
-    def myinnerfunc(
-        self,
-        iname,
-        multi_index,
-        index,
-        existing_labels,
-        within_indices,
-        within_inames,
-        depends_on,
-    ):
-        # set these below (singledispatch me)
-        index_insns = None
-        new_labels = existing_labels  # not needed? I handle this sort of thing outside this fn now
-        # new_labels = existing_labels.pop(index.from_axis[0]) + dict([index.to_axis])
-        jnames = None
-        new_within = None
 
-        # thoughts 23/06
-        # * I need a map from indices to jnames (used if we want to use external loop
-        #   indices to index our array).
-        # * I need a map from axis to component labels
+@_compile.register
+def _(call: FunctionCall, loop_indices, ctx: LoopyCodegenContext) -> None:
+    """
+    Turn an exprs.FunctionCall into a series of assignment instructions etc.
+    Handles packing/accessor logic.
+    """
 
-        if index in within_indices:
-            return within_indices[index], []
+    temporaries = []
+    subarrayrefs = {}
+    extents = {}
 
-            # labels, jnames = within_indices[multi_index.label]
-            # if isinstance(index, Slice):
-            #     index_insns = []
-            #     new_jnames = existing_jnames + jnames
-            #     jnames = "not used"
-            #     new_within = {}
-            # else:
-            #     index_insns = []
-            #     new_jnames = PrettyTuple(temp_jnames) + jnames
-            #     jnames = "not used"
-            #     new_within = {}
-
-        elif isinstance(index, Slice):
-            jname = self._namer.next("j")
-            self._temp_kernel_data.append(
-                lp.TemporaryVariable(jname, shape=(), dtype=np.uintp)
+    # loopy args can contain ragged params too
+    loopy_args = call.function.code.default_entrypoint.args[: len(call.arguments)]
+    for loopy_arg, arg, spec in checked_zip(loopy_args, call.arguments, call.argspec):
+        # create an appropriate temporary
+        # we need the indices here because the temporary shape needs to be indexed
+        # by the same indices as the original array
+        # is this definitely true??? think so. because it gives us the right loops
+        # but we only really need it to determine "within" or not...
+        if not isinstance(arg, MultiArray):
+            # think PetscMat etc
+            raise NotImplementedError(
+                "Need to handle indices to create temp shape differently"
             )
 
-            index_insn = lp.Assignment(
-                pym.var(jname),
-                pym.var(iname) * index.step + index.start,
-                id=self._namer.next("myid"),
-                within_inames=within_inames,
-                within_inames_is_final=True,
-                depends_on=depends_on,
-            )
-            self.instructions.append(index_insn)
-            return jname, [index_insn]
-            # index_insns = [index_insn]
-            # new_jnames = "deprecated"
-            # jnames = (jname,)
-            # new_within = {multi_index: jname}
+        axes = temporary_axes(arg.axes, arg.index, loop_indices)
+        temporary = MultiArray(
+            axes,
+            name=ctx.name_generator("t"),
+            dtype=arg.dtype,
+        )
+        indexed_temp = temporary[...]
 
-        elif isinstance(index, IdentityMap):
-            index_insns = []
-            new_labels = existing_labels
-            new_jnames = existing_jnames
-            jnames = ()
-            new_within = {}
-
-        elif isinstance(index, AffineMap):
-            jname = self._namer.next("j")
-            self._temp_kernel_data.append(
-                lp.TemporaryVariable(jname, shape=(), dtype=np.uintp)
-            )
-
-            subst_rules = {
-                var: pym.var(j)
-                for var, j in checked_zip(
-                    index.expr[0][:-1],
-                    existing_jnames[-len(index.from_labels) :],
-                )
-            }
-            subst_rules |= {index.expr[0][-1]: pym.var(iname)}
-
-            expr = pym.substitute(index.expr[1], subst_rules)
-
-            index_insn = lp.Assignment(
-                pym.var(jname),
-                expr,
-                id=self._namer.next("myid"),
-                within_inames=within_inames | {iname},
-                within_inames_is_final=True,
-                depends_on=depends_on,
-                # no_sync_with=no_sync_with,
-            )
-            index_insns = [index_insn]
-
-            temp_labels = list(existing_labels)
-            temp_jnames = list(existing_jnames)
-            assert len(index.from_labels) == 1
-            assert len(index.to_labels) == 1
-            for label in index.from_labels:
-                assert temp_labels.pop() == label
-                temp_jnames.pop()
-
-            (to_label,) = index.to_labels
-            new_labels = PrettyTuple(temp_labels) | to_label
-            new_jnames = PrettyTuple(temp_jnames) | jname
-            jnames = (jname,)
-            new_within = {multi_index.label: ((to_label,), (jname,))}
-
-        elif isinstance(index, TabulatedMap):
-            # NOTE: some maps can produce multiple jnames (but not this one)
-            jname = self._namer.next("j")
-            self._temp_kernel_data.append(
-                lp.TemporaryVariable(jname, shape=(), dtype=np.uintp)
-            )
-
-            map_labels = existing_labels | (index.data.data.axes.leaf.label, 0)
-            map_jnames = existing_jnames | iname
-
-            # here we assume that maps are single component. Set the cidx to always
-            # 0 since using other indices wouldn't work as they don't exist in the
-            # map multi-array.
-            # same as in register_extent, generalise
-            labels_to_jnames = {
-                (label, 0): jname
-                for ((label, _), jname) in checked_zip(map_labels, map_jnames)
-            }
-            expr, _ = self.register_scalar_assignment(
-                index.data.data,
-                labels_to_jnames,
-                within_inames | {iname},
-                depends_on,
-            )
-
-            index_insn = lp.Assignment(
-                pym.var(jname),
-                expr,
-                id=self._namer.next("myid"),
-                within_inames=within_inames | {iname},
-                within_inames_is_final=True,
-                depends_on=depends_on,
-            )
-
-            index_insns = [index_insn]
-
-            temp_labels = list(existing_labels)
-            temp_jnames = list(existing_jnames)
-            assert len(index.from_labels) == 1
-            assert len(index.to_labels) == 1
-            for label in index.from_labels:
-                assert temp_labels.pop() == label
-                temp_jnames.pop()
-
-            (to_label,) = index.to_labels
-            new_labels = PrettyTuple(temp_labels) | to_label
-            new_jnames = PrettyTuple(temp_jnames) | jname
-            jnames = (jname,)
-            new_within = {multi_index.label: ((to_label,), (jname,))}
+        if loopy_arg.shape is None:
+            shape = (temporary.alloc_size,)
         else:
-            raise AssertionError
+            if np.prod(loopy_arg.shape, dtype=int) != temporary.alloc_size:
+                raise RuntimeError("Shape mismatch between inner and outer kernels")
+            shape = loopy_arg.shape
 
-        assert index_insns is not None
-        assert new_labels is not None
-        assert new_jnames is not None
-        assert jnames is not None
-        assert new_within is not None
-        self.instructions.extend(index_insns)
-        new_deps = frozenset({insn.id for insn in index_insns})
+        temporaries.append((arg, indexed_temp, spec.access, shape))
 
-        return new_labels, new_jnames, new_within, new_deps
+        # Register data
+        ctx.add_argument(arg.name, arg.dtype)
+        ctx.add_temporary(temporary.name, temporary.dtype, shape)
 
-    # FIXME this is practically identical to what we do in build_loop
-    def build_assignment(
-        self,
-        assignment,
-        within_indices,
-        within_inames,
-        depends_on,
+        # subarrayref nonsense/magic
+        indices = []
+        for s in shape:
+            iname = ctx.add_domain(s)
+            indices.append(pym.var(iname))
+        indices = tuple(indices)
+
+        subarrayrefs[arg.name] = lp.symbolic.SubArrayRef(
+            indices, pym.subscript(pym.var(temporary.name), indices)
+        )
+
+        # we need to pass sizes through if they are only known at runtime (ragged)
+        # NOTE: If we register an extent to pass through loopy will complain
+        # unless we register it as an assumption of the local kernel (e.g. "n <= 3")
+
+        # FIXME ragged is broken since I commented this out! determining shape of
+        # ragged things requires thought!
+        # for cidx in range(indexed_temp.index.root.degree):
+        #     extents |= self.collect_extents(
+        #         indexed_temp.index,
+        #         indexed_temp.index.root,
+        #         cidx,
+        #         within_indices,
+        #         within_inames,
+        #         depends_on,
+        #     )
+
+    # TODO this is pretty much the same as what I do in fix_intents in loopexpr.py
+    # probably best to combine them - could add a sensible check there too.
+    assignees = tuple(
+        subarrayrefs[arg.name]
+        for arg, spec in checked_zip(call.arguments, call.argspec)
+        if spec.access in {WRITE, RW, INC, MIN_RW, MIN_WRITE, MAX_RW, MAX_WRITE}
+    )
+    expression = pym.primitives.Call(
+        pym.var(call.function.code.default_entrypoint.name),
+        tuple(
+            subarrayrefs[arg.name]
+            for arg, spec in checked_zip(call.arguments, call.argspec)
+            if spec.access in {READ, RW, INC, MIN_RW, MAX_RW}
+        )
+        + tuple(extents.values()),
+    )
+
+    # TODO get rid of tlang entirely
+    # gathers
+    for arg, temp, access, shape in temporaries:
+        if access in {READ, RW, MIN_RW, MAX_RW}:
+            gather = tlang.Read(arg, temp, shape)
+        else:
+            assert access in {WRITE, INC, MIN_WRITE, MAX_WRITE}
+            gather = tlang.Zero(arg, temp, shape)
+        build_assignment(gather, loop_indices, ctx)
+
+    ctx.add_function_call(assignees, expression)
+    ctx.add_subkernel(call.function.code)
+
+    # scatters
+    for arg, temp, access, shape in temporaries:
+        if access == READ:
+            continue
+        elif access in {WRITE, RW, MIN_RW, MIN_WRITE, MAX_RW, MAX_WRITE}:
+            scatter = tlang.Write(arg, temp, shape)
+        else:
+            assert access == INC
+            scatter = tlang.Increment(arg, temp, shape)
+        build_assignment(scatter, loop_indices, ctx)
+
+
+# FIXME this is practically identical to what we do in build_loop
+def build_assignment(assignment, loop_indices, ctx):
+    for (lleaf, lcidx), (rleaf, rcidx) in checked_zip(
+        assignment.lhs.index.leaves, assignment.rhs.index.leaves
     ):
-        for (lleaf, lcidx), (rleaf, rcidx) in checked_zip(
-            assignment.lhs.index.leaves, assignment.rhs.index.leaves
-        ):
-            # copied from build_loop
-            lindex_path = assignment.lhs.index.path(lleaf, lcidx)
-            laxis_path = {}
-            for _, cpt in lindex_path:
-                if cpt.from_axis in laxis_path:
-                    laxis_path.pop(cpt.from_axis)
-                laxis_path |= {cpt.to_axis: cpt.to_cpt}
+        # copied from build_loop
+        lindex_path = assignment.lhs.index.path(lleaf, lcidx)
+        laxis_path = {}
+        for _, cpt in lindex_path:
+            if cpt.from_axis in laxis_path:
+                laxis_path.pop(cpt.from_axis)
+            laxis_path |= {cpt.to_axis: cpt.to_cpt}
 
-            rindex_path = assignment.rhs.index.path(rleaf, rcidx)
-            raxis_path = {}
-            for _, cpt in rindex_path:
-                if cpt.from_axis in raxis_path:
-                    raxis_path.pop(cpt.from_axis)
-                raxis_path |= {cpt.to_axis: cpt.to_cpt}
+        rindex_path = assignment.rhs.index.path(rleaf, rcidx)
+        raxis_path = {}
+        for _, cpt in rindex_path:
+            if cpt.from_axis in raxis_path:
+                raxis_path.pop(cpt.from_axis)
+            raxis_path |= {cpt.to_axis: cpt.to_cpt}
 
-            # at the bottom, now emit the loops and assignment
+        # at the bottom, now emit the loops and assignment
 
-            # register loops. this must be done at the bottom of the tree because we
-            # only know now how big the emitted loops need to be. For example repeated
-            # slices of the same axis will result in a single, smaller, loop.
+        # register loops. this must be done at the bottom of the tree because we
+        # only know now how big the emitted loops need to be. For example repeated
+        # slices of the same axis will result in a single, smaller, loop.
 
-            # map from axes to sizes, components? maps always target the same axis
-            # so should be fine.
-            lextents = collect_extents(
-                assignment.lhs.axes, laxis_path, lindex_path, within_indices
-            )
-            rextents = collect_extents(
-                assignment.rhs.axes, raxis_path, rindex_path, within_indices
-            )
+        # map from axes to sizes, components? maps always target the same axis
+        # so should be fine.
+        lextents = collect_extents(
+            assignment.lhs.axes,
+            laxis_path,
+            lindex_path,
+            loop_indices,
+        )
+        rextents = collect_extents(
+            assignment.rhs.axes,
+            raxis_path,
+            rindex_path,
+            loop_indices,
+        )
 
-            # breakpoint()
+        # breakpoint()
 
-            liter = iter(lextents.items())
-            riter = iter(rextents.items())
+        liter = iter(lextents.items())
+        riter = iter(rextents.items())
 
-            ljnames = {}
-            rjnames = {}
-            new_within_inames = within_inames
-            try:
-                while True:
-                    lnext = next(liter)
-                    while lnext[1] == 1:
-                        # don't actually register a domain if it has size 1
-                        iname = self._namer.next("i")
-                        domain_str = f"{{ [{iname}]: 0 <= {iname} < 1 }}"
-                        self.domains.append(domain_str)
-                        ljnames[lnext[0]] = iname
-                        new_within_inames |= {iname}
-                        lnext = next(liter)
-                    rnext = next(riter)
-                    while rnext[1] == 1:
-                        iname = self._namer.next("i")
-                        domain_str = f"{{ [{iname}]: 0 <= {iname} < 1 }}"
-                        self.domains.append(domain_str)
-                        rjnames[rnext[0]] = iname
-                        new_within_inames |= {iname}
-                        rnext = next(riter)
-
-                    iname = self._namer.next("i")
-                    extent = self.register_extent(
-                        single_valued([lnext[1], rnext[1]]),
-                        within_indices,
-                        within_inames,
-                        depends_on,
-                    )
-                    domain_str = f"{{ [{iname}]: 0 <= {iname} < {extent} }}"
-                    self.domains.append(domain_str)
+        ljnames = {}
+        rjnames = {}
+        new_within_inames = set()
+        try:
+            while True:
+                lnext = next(liter)
+                while lnext[1] == 1:
+                    iname = ctx.add_domain(1)
                     ljnames[lnext[0]] = iname
+                    new_within_inames |= {iname}
+                    lnext = next(liter)
+                rnext = next(riter)
+                while rnext[1] == 1:
+                    iname = ctx.add_domain(1)
                     rjnames[rnext[0]] = iname
                     new_within_inames |= {iname}
-            except StopIteration:
-                try:
-                    # FIXME what if rhs throws the exception instead of lhs?
                     rnext = next(riter)
-                    while rnext[1] == 1:
-                        iname = self._namer.next("i")
-                        domain_str = f"{{ [{iname}]: 0 <= {iname} < 1 }}"
-                        self.domains.append(domain_str)
-                        rjnames[rnext[0]] = iname
-                        new_within_inames |= {iname}
-                        rnext = next(riter)
-                    raise AssertionError("iterator should also be consumed")
-                except StopIteration:
-                    pass
 
+                extent = self.register_extent(
+                    single_valued([lnext[1], rnext[1]]),
+                    loop_indices,
+                    ctx,
+                )
+                iname = ctx.add_domain(extent)
+                ljnames[lnext[0]] = iname
+                rjnames[rnext[0]] = iname
+                new_within_inames |= {iname}
+        except StopIteration:
+            try:
+                # FIXME what if rhs throws the exception instead of lhs?
+                rnext = next(riter)
+                while rnext[1] == 1:
+                    iname = ctx.add_domain(1)
+                    rjnames[rnext[0]] = iname
+                    new_within_inames |= {iname}
+                    rnext = next(riter)
+                raise AssertionError("iterator should also be consumed")
+            except StopIteration:
+                pass
+
+        with ctx.within_inames(new_within_inames):
             # now traverse the slices in reverse, transforming the inames to jnames and
             # the right index expressions
-
-            new_depends_on = depends_on
-
             # LHS
             for multi_index, index in reversed(assignment.lhs.index.path(lleaf, lcidx)):
                 jname = ljnames.pop(index.to_tuple)
-                new_jname, insns = self.myinnerfunc(
+                new_jname = myinnerfunc(
                     jname,
                     multi_index,
                     index,
                     ljnames,
-                    within_indices,
-                    new_within_inames,
-                    new_depends_on,
+                    loop_indices,
+                    ctx,
                 )
                 assert index.from_tuple not in ljnames
                 ljnames[index.from_tuple] = new_jname
-                new_depends_on |= {insn.id for insn in insns}
 
             # RHS
             for multi_index, index in reversed(assignment.rhs.index.path(rleaf, rcidx)):
                 jname = rjnames.pop(index.to_tuple)
-                new_jname, insns = self.myinnerfunc(
+                new_jname = myinnerfunc(
                     jname,
                     multi_index,
                     index,
                     rjnames,
-                    within_indices,
-                    new_within_inames,
-                    new_depends_on,
+                    loop_indices,
+                    ctx,
                 )
                 assert index.from_tuple not in rjnames
                 rjnames[index.from_tuple] = new_jname
-                new_depends_on |= {insn.id for insn in insns}
 
             lhs_labels_to_jnames = ljnames
             rhs_labels_to_jnames = rjnames
@@ -533,23 +499,19 @@ class LoopyKernelBuilder:
                 temp_labels_to_jnames = lhs_labels_to_jnames
                 array_labels_to_jnames = rhs_labels_to_jnames
 
-            extra_deps = frozenset({f"{id}_*" for id in assignment.depends_on})
-
             ###
 
-            array_offset, array_deps = self.emit_assignment_insn(
+            array_offset = emit_assignment_insn(
                 assignment.array.name,
                 assignment.array.axes,
                 array_labels_to_jnames,
-                new_within_inames,
-                depends_on | new_depends_on | extra_deps,
+                ctx,
             )
-            temp_offset, temp_deps = self.emit_assignment_insn(
+            temp_offset = emit_assignment_insn(
                 assignment.temporary.name,
                 assignment.temporary.axes,
                 temp_labels_to_jnames,
-                new_within_inames,
-                depends_on | new_depends_on | extra_deps,
+                ctx,
             )
 
             array = assignment.array
@@ -578,558 +540,237 @@ class LoopyKernelBuilder:
             else:
                 raise NotImplementedError
 
-            new_deps = self.generate_assignment_insn_inner(
-                lexpr,
-                rexpr,
-                assignment.id,
-                depends_on=new_depends_on
-                | assignment.depends_on
-                | extra_deps
-                | array_deps
-                | temp_deps,
-                within_inames=new_within_inames,
-            )
+            ctx.add_assignment(lexpr, rexpr)
 
-            return new_deps
 
-    @_build.register
-    def _(
-        self,
-        call: FunctionCall,
-        within_indices,
-        within_inames,
-        depends_on,
-    ):
-        insns = self.expand_function_call(
-            call, within_indices, within_inames, depends_on
-        )
+# loop indices and jnames are very similar...
+def myinnerfunc(iname, multi_index, index, jnames, loop_indices, ctx):
+    if index in loop_indices:
+        return loop_indices[index]
+    elif isinstance(index, Slice):
+        jname = ctx.add_parameter("j")
+        ctx.add_assignment(pym.var(jname), pym.var(iname) * index.step + index.start)
+        return jname
 
-    def expand_function_call(self, call, within_indices, within_inames, depends_on):
-        """
-        Turn an exprs.FunctionCall into a series of assignment instructions etc.
-        Handles packing/accessor logic.
-        """
+    elif isinstance(index, IdentityMap):
+        index_insns = []
+        new_labels = existing_labels
+        new_jnames = existing_jnames
+        jnames = ()
+        new_within = {}
 
-        temporaries = []
-        subarrayrefs = {}
-        extents = {}
-
-        # loopy args can contain ragged params too
-        loopy_args = call.function.code.default_entrypoint.args[: len(call.arguments)]
-        for loopy_arg, arg, spec in checked_zip(
-            loopy_args, call.arguments, call.argspec
-        ):
-            # create an appropriate temporary
-            # we need the indices here because the temporary shape needs to be indexed
-            # by the same indices as the original array
-            # is this definitely true??? think so. because it gives us the right loops
-            # but we only really need it to determine "within" or not...
-            if not isinstance(arg, MultiArray):
-                # think PetscMat etc
-                raise NotImplementedError(
-                    "Need to handle indices to create temp shape differently"
-                )
-
-            # axes = self._axes_from_index_tree(arg.index, within_indices)
-            axes = temporary_axes(arg.axes, arg.index, within_indices)
-            temporary = MultiArray(
-                axes,
-                name=self._temp_name_generator.next(),
-                dtype=arg.dtype,
-            )
-            indexed_temp = temporary[...]
-
-            if loopy_arg.shape is None:
-                shape = (temporary.alloc_size,)
-            else:
-                if np.prod(loopy_arg.shape, dtype=int) != temporary.alloc_size:
-                    raise RuntimeError("Shape mismatch between inner and outer kernels")
-                shape = loopy_arg.shape
-
-            temporaries.append((arg, indexed_temp, spec.access, shape))
-
-            # Register data
-            if arg.name not in self._tensor_data:
-                self._tensor_data[arg.name] = lp.GlobalArg(
-                    arg.name, dtype=arg.dtype, shape=None
-                )
-
-            self._temp_kernel_data.append(
-                lp.TemporaryVariable(temporary.name, shape=shape)
-            )
-
-            # subarrayref nonsense/magic
-            indices = []
-            for s in shape:
-                iname = self._namer.next("i")
-                indices.append(pym.var(iname))
-                self.domains.append(f"{{ [{iname}]: 0 <= {iname} < {s} }}")
-            indices = tuple(indices)
-
-            subarrayrefs[arg.name] = lp.symbolic.SubArrayRef(
-                indices, pym.subscript(pym.var(temporary.name), indices)
-            )
-
-            # we need to pass sizes through if they are only known at runtime (ragged)
-            # NOTE: If we register an extent to pass through loopy will complain
-            # unless we register it as an assumption of the local kernel (e.g. "n <= 3")
-
-            # FIXME ragged is broken since I commented this out! determining shape of
-            # ragged things requires thought!
-            # for cidx in range(indexed_temp.index.root.degree):
-            #     extents |= self.collect_extents(
-            #         indexed_temp.index,
-            #         indexed_temp.index.root,
-            #         cidx,
-            #         within_indices,
-            #         within_inames,
-            #         depends_on,
-            #     )
-
-        # TODO this is pretty much the same as what I do in fix_intents in loopexpr.py
-        # probably best to combine them - could add a sensible check there too.
-        assignees = tuple(
-            subarrayrefs[arg.name]
-            for arg, spec in checked_zip(call.arguments, call.argspec)
-            if spec.access in {WRITE, RW, INC, MIN_RW, MIN_WRITE, MAX_RW, MAX_WRITE}
-        )
-        expression = pym.primitives.Call(
-            pym.var(call.function.code.default_entrypoint.name),
-            tuple(
-                subarrayrefs[arg.name]
-                for arg, spec in checked_zip(call.arguments, call.argspec)
-                if spec.access in {READ, RW, INC, MIN_RW, MAX_RW}
-            )
-            + tuple(extents.values()),
-        )
-
-        deps = frozenset(depends_on)
-
-        for gather in self.make_gathers(temporaries, depends_on=depends_on):
-            deps |= self._make_instruction_context(
-                gather, within_indices, within_inames, depends_on
-            )
-
-        insn_id = self._namer.next(call.name)
-
-        call_insn = lp.CallInstruction(
-            assignees,
-            expression,
-            id=insn_id,
-            within_inames=within_inames,
-            within_inames_is_final=True,
-            depends_on=deps,
-        )
-        deps |= {call_insn.id}
-
-        self.instructions.append(call_insn)
-        self.subkernels.append(call.function.code)
-
-        nextdeps = frozenset()
-        for scatter in self.make_scatters(temporaries, depends_on=deps):
-            nextdeps |= self._make_instruction_context(
-                scatter, within_indices, within_inames, deps
-            )
-
-    # TODO This algorithm is pretty much identical to fill_shape
-    def _axes_from_index_tree(self, index_tree, within_indices, index_path=None):
-        index_path = index_path or {}
-
-        components = []
-        subroots = []
-        bits = {}
-        multi_index = index_tree.find_node(index_path)
-        indexed = multi_index.label in within_indices
-        for i, index in enumerate(multi_index.components):
-            components.append(AxisComponent(index.size))
-
-            if index_tree.find_node(index_path | {multi_index.label: i}):
-                subaxes = self._axes_from_index_tree(
-                    index_tree,
-                    within_indices,
-                    index_path | {multi_index.label: i},
-                )
-                subroots.append(subaxes.root)
-                bits |= subaxes.parent_to_children
-            else:
-                subroots.append(None)
-
-        root = Axis(components, label=multi_index.label, indexed=indexed)
-        return AxisTree(root, {root.id: subroots} | bits)
-
-    def make_gathers(self, temporaries, **kwargs):
-        return tuple(
-            self.make_gather(arg, temp, shape, access, **kwargs)
-            for arg, temp, access, shape in temporaries
-        )
-
-    def make_gather(self, argument, temporary, shape, access, **kwargs):
-        # TODO cleanup the ids
-        if access in {READ, RW, MIN_RW, MAX_RW}:
-            return tlang.Read(argument, temporary, shape, **kwargs)
-        elif access in {WRITE, INC, MIN_WRITE, MAX_WRITE}:
-            return tlang.Zero(argument, temporary, shape, **kwargs)
-        else:
-            raise ValueError("Access descriptor not recognised")
-
-    def make_scatters(self, temporaries, **kwargs):
-        return tuple(
-            filter(
-                None,
-                (
-                    self.make_scatter(arg, temp, shape, access, **kwargs)
-                    for arg, temp, access, shape in temporaries
-                ),
-            )
-        )
-
-    def make_scatter(self, argument, temporary, shape, access, **kwargs):
-        if access == READ:
-            return None
-        elif access in {WRITE, RW, MIN_RW, MIN_WRITE, MAX_RW, MAX_WRITE}:
-            return tlang.Write(argument, temporary, shape, **kwargs)
-        elif access == INC:
-            return tlang.Increment(argument, temporary, shape, **kwargs)
-        else:
-            raise ValueError("Access descriptor not recognised")
-
-    @functools.singledispatchmethod
-    def _make_instruction_context(
-        self, instruction: tlang.Instruction, *args, **kwargs
-    ):
-        raise TypeError
-
-    # FIXME can likely merge with build_assignment, this function is now irrelevant
-    @_make_instruction_context.register
-    def _(
-        self, assignment: tlang.Assignment, within_indices, within_inames, depends_on
-    ):
-        if not isinstance(assignment.tensor, MultiArray):
-            raise NotImplementedError(
-                "probably want to dispatch here if we hit a PetscMat etc"
-            )
-
-        new_deps = self.build_assignment(
-            assignment,
-            within_indices,
-            within_inames,
-            depends_on | assignment.depends_on,
-        )
-
-        return new_deps
-
-    def emit_assignment_insn(
-        self,
-        array_name,
-        array_axes,  # can be None
-        labels_to_jnames,
-        within_inames,
-        depends_on,
-        scalar=False,
-    ):
-        # layout instructions - must be emitted innermost to make sense (reset appropriately)
-        offset = self._namer.next(f"{array_name}_ptr")
+    elif isinstance(index, AffineMap):
+        jname = self._namer.next("j")
         self._temp_kernel_data.append(
-            lp.TemporaryVariable(offset, shape=(), dtype=np.uintp)
+            lp.TemporaryVariable(jname, shape=(), dtype=np.uintp)
         )
-        array_offset_insn = lp.Assignment(
-            pym.var(offset),
-            0,
-            id=self._namer.next("insn"),
-            within_inames=within_inames,
-            within_inames_is_final=True,
-            depends_on=depends_on,
-        )
-        self.instructions.append(array_offset_insn)
-        depends_on |= {array_offset_insn.id}
 
-        if not scalar:
-            axes = array_axes
-            axis = axes.root
-            path = PrettyTuple()
-            while axis:
-                cpt = just_one(
-                    c
-                    for c in axis.components
-                    if (axis.label, c.label) in labels_to_jnames
-                )
-                path |= cpt.label
-                axis = axes.child(axis, cpt)
-
-            deps = self.emit_layout_insns(
-                axes,
-                offset,
-                labels_to_jnames,
-                within_inames,
-                depends_on,
-                path,
+        subst_rules = {
+            var: pym.var(j)
+            for var, j in checked_zip(
+                index.expr[0][:-1],
+                existing_jnames[-len(index.from_labels) :],
             )
-            depends_on |= deps
+        }
+        subst_rules |= {index.expr[0][-1]: pym.var(iname)}
 
-        return offset, depends_on
+        expr = pym.substitute(index.expr[1], subst_rules)
 
-    def emit_layout_insns(
-        self,
-        axes,
-        offset_var,
-        labels_to_jnames,
-        within_inames,
-        depends_on,
-        path,
-    ):
-        """
-        TODO
-        """
-        # breakpoint()
-        expr = pym.var(offset_var)
-        for layout_fn in axes.layouts[path]:
-            # TODO singledispatch!
-            if isinstance(layout_fn, TabulatedLayout):
-                layout_var, _ = self.register_scalar_assignment(
-                    layout_fn.data, labels_to_jnames, within_inames, depends_on
-                )
-                expr += layout_var
-            elif isinstance(layout_fn, AffineLayout):
-                start = layout_fn.start
-                step = layout_fn.step
-
-                if isinstance(start, MultiArray):
-                    assert False, "dropping support for this"
-                    # drop the last jname
-                    start, _ = self.register_scalar_assignment(
-                        layout_fn.start,
-                        labels_to_jnames,
-                        within_inames,
-                        depends_on,
-                    )
-
-                jname = pym.var(labels_to_jnames[(layout_fn.axis, layout_fn.cpt)])
-                expr += jname * step + start
-            else:
-                raise NotImplementedError
-
-        insn = lp.Assignment(
-            offset_var,
+        index_insn = lp.Assignment(
+            pym.var(jname),
             expr,
-            id=self._namer.next("insn"),
-            within_inames=within_inames,
+            id=self._namer.next("myid"),
+            within_inames=within_inames | {iname},
             within_inames_is_final=True,
             depends_on=depends_on,
-            depends_on_is_final=True,
+        )
+        index_insns = [index_insn]
+
+        temp_labels = list(existing_labels)
+        temp_jnames = list(existing_jnames)
+        assert len(index.from_labels) == 1
+        assert len(index.to_labels) == 1
+        for label in index.from_labels:
+            assert temp_labels.pop() == label
+            temp_jnames.pop()
+
+        (to_label,) = index.to_labels
+        new_labels = PrettyTuple(temp_labels) | to_label
+        new_jnames = PrettyTuple(temp_jnames) | jname
+        jnames = (jname,)
+        new_within = {multi_index.label: ((to_label,), (jname,))}
+
+    elif isinstance(index, TabulatedMap):
+        # NOTE: some maps can produce multiple jnames (but not this one)
+        jname = self._namer.next("j")
+        self._temp_kernel_data.append(
+            lp.TemporaryVariable(jname, shape=(), dtype=np.uintp)
         )
 
-        self.instructions.append(insn)
+        map_labels = existing_labels | (index.data.data.axes.leaf.label, 0)
+        map_jnames = existing_jnames | iname
 
-        return frozenset({insn.id})
+        # here we assume that maps are single component. Set the cidx to always
+        # 0 since using other indices wouldn't work as they don't exist in the
+        # map multi-array.
+        # same as in register_extent, generalise
+        labels_to_jnames = {
+            (label, 0): jname
+            for ((label, _), jname) in checked_zip(map_labels, map_jnames)
+        }
+        expr, _ = self.register_scalar_assignment(
+            index.data.data,
+            labels_to_jnames,
+            within_inames | {iname},
+            depends_on,
+        )
 
-    def generate_assignment_insn_inner(
-        self,
-        lexpr,
-        rexpr,
-        assignment_id,  # FIXME
-        depends_on,
-        within_inames,
-    ):
-        insn_id = self._namer.next(f"{assignment_id}_")
-
-        # there are no ordering restrictions between assignments to the
-        # same temporary
-        # FIXME I don't think this would be the case if I tracked gathers etc properly
-        # with a codegen context bag
-        no_sync_with = frozenset({(f"{assignment_id}*", "any")})
-
-        assign_insn = lp.Assignment(
-            lexpr,
-            rexpr,
-            id=insn_id,
-            within_inames=frozenset(within_inames),
+        index_insn = lp.Assignment(
+            pym.var(jname),
+            expr,
+            id=self._namer.next("myid"),
+            within_inames=within_inames | {iname},
             within_inames_is_final=True,
             depends_on=depends_on,
-            depends_on_is_final=True,
-            no_sync_with=no_sync_with,
-        )
-        self.instructions.append(assign_insn)
-        return depends_on | {insn_id}
-
-    def generate_index_insns(
-        self,
-        indicess,  # iterable of an iterable of multi-index groups
-        within_multi_index_groups,
-        depends_on,
-    ):
-        if not utils.is_single_valued(len(idxs) for idxs in indicess):
-            raise NotImplementedError(
-                "Need to be clever about having different lengths"
-                "of indices for LHS and RHS"
-            )
-
-        # this is a zip
-        current_index_groups = []
-        later_index_groupss = []
-        for indices in indicess:
-            current_group, *later_groups = indices
-            current_index_groups.append(current_group)
-            later_index_groupss.append(later_groups)
-
-        state = []
-        expansion = self.expand_multi_index_group(
-            current_index_groups, within_multi_index_groups, depends_on
-        )
-        for updated_within_migs, updated_deps in expansion:
-            subresult = self.generate_index_insns(
-                later_index_groupss,
-                updated_within_migs,
-                updated_deps,
-            )
-            state.extend(subresult)
-        return tuple(state)
-
-    def register_extent(self, extent, within_indices, within_inames, depends_on):
-        if isinstance(extent, IndexedMultiArray):
-            labels, jnames = [], []
-            index = extent.index.root
-            while index:
-                new_labels, new_jnames = within_indices[index.label]
-                labels.extend(new_labels)
-                jnames.extend(new_jnames)
-                index = extent.index.find_node((index.id, 0))
-
-            labels_to_jnames = {
-                (label, 0): jname for ((label, _), jname) in checked_zip(labels, jnames)
-            }
-
-            temp_var, _ = self.register_scalar_assignment(
-                extent.data, labels_to_jnames, within_inames, depends_on
-            )
-            return str(temp_var)
-        else:
-            assert isinstance(extent, numbers.Integral)
-            return extent
-
-    def register_scalar_assignment(
-        self, array, array_labels_to_jnames, within_inames, depends_on
-    ):
-        # Register data
-        # TODO should only do once at a higher point
-        if array.name not in self._tensor_data:
-            self._tensor_data[array.name] = lp.GlobalArg(
-                array.name, dtype=array.dtype, shape=None
-            )
-
-        temp_name = self._namer.next("n")
-        self._temp_kernel_data.append(lp.TemporaryVariable(temp_name, shape=()))
-
-        array_offset, array_deps = self.emit_assignment_insn(
-            array.name, array.axes, array_labels_to_jnames, within_inames, depends_on
-        )
-        # TODO: Does this function even do anything when I use a scalar?
-        temp_offset, temp_deps = self.emit_assignment_insn(
-            temp_name, None, {}, within_inames, depends_on, scalar=True
         )
 
-        lexpr = pym.var(temp_name)
-        rexpr = pym.subscript(pym.var(array.name), pym.var(array_offset))
+        index_insns = [index_insn]
 
-        new_deps = self.generate_assignment_insn_inner(
-            lexpr,
-            rexpr,
-            self._namer.next("_scalar_assign"),
-            depends_on=depends_on | array_deps | temp_deps,
-            within_inames=within_inames,
-        )
+        temp_labels = list(existing_labels)
+        temp_jnames = list(existing_jnames)
+        assert len(index.from_labels) == 1
+        assert len(index.to_labels) == 1
+        for label in index.from_labels:
+            assert temp_labels.pop() == label
+            temp_jnames.pop()
 
-        return pym.var(temp_name), new_deps
-
-
-def _make_loopy_kernel(tlang_kernel):
-    return LoopyKernelBuilder().build(tlang_kernel)
-
-
-@functools.singledispatch
-def _get_arguments_per_instruction(instruction):
-    """Return a canonical collection of kernel arguments.
-    This can be used by both codegen and execution to get args in the right order."""
-    raise TypeError
-
-
-@_get_arguments_per_instruction.register
-def _(assignment: tlang.Assignment):
-    raise NotImplementedError
-    return data, maps, parameters
-
-
-def resolve(instruction, *args):
-    if isinstance(instruction, tlang.Read):
-        resolver = ReadAssignmentResolver(instruction, *args)
-    elif isinstance(instruction, tlang.Zero):
-        resolver = ZeroAssignmentResolver(instruction, *args)
-    elif isinstance(instruction, tlang.Write):
-        resolver = WriteAssignmentResolver(instruction, *args)
-    elif isinstance(instruction, tlang.Increment):
-        resolver = IncAssignmentResolver(instruction, *args)
+        (to_label,) = index.to_labels
+        new_labels = PrettyTuple(temp_labels) | to_label
+        new_jnames = PrettyTuple(temp_jnames) | jname
+        jnames = (jname,)
+        new_within = {multi_index.label: ((to_label,), (jname,))}
     else:
         raise AssertionError
-    return resolver.assignee, resolver.expression
+
+    assert index_insns is not None
+    assert new_labels is not None
+    assert new_jnames is not None
+    assert jnames is not None
+    assert new_within is not None
+    self.instructions.extend(index_insns)
+    return new_labels, new_jnames, new_within, new_deps
 
 
-class AssignmentResolver:
-    def __init__(self, instruction, global_idxs, local_idxs, local_offset):
-        self.instruction = instruction
-        self.global_idxs = global_idxs
-        self.local_idxs = local_idxs
-        self.local_offset = local_offset
+def emit_assignment_insn(
+    array_name,
+    array_axes,  # can be None
+    labels_to_jnames,
+    ctx,
+    scalar=False,
+):
+    offset = ctx.add_parameter()
+    ctx.add_assignment(pym.var(offset), 0)
 
-    @property
-    def global_expr(self):
-        return pym.subscript(pym.var(self.instruction.tensor.name), self.global_idxs)
+    if not scalar:
+        axes = array_axes
+        axis = axes.root
+        path = PrettyTuple()
+        while axis:
+            cpt = just_one(
+                c for c in axis.components if (axis.label, c.label) in labels_to_jnames
+            )
+            path |= cpt.label
+            axis = axes.child(axis, cpt)
 
-    @property
-    def local_expr(self):
-        name = pym.var(self.instruction.temporary.name)
-        if self.instruction.temporary.dim:
-            return pym.subscript(name, self.local_idxs + self.local_offset)
+        emit_layout_insns(
+            axes,
+            offset,
+            labels_to_jnames,
+            ctx,
+            path,
+        )
+    return offset
+
+
+def emit_layout_insns(
+    axes,
+    offset_var,
+    labels_to_jnames,
+    ctx,
+    path,
+):
+    """
+    TODO
+    """
+    # breakpoint()
+    expr = pym.var(offset_var)
+    for layout_fn in axes.layouts[path]:
+        # TODO singledispatch!
+        if isinstance(layout_fn, TabulatedLayout):
+            layout_var = register_scalar_assignment(
+                layout_fn.data,
+                labels_to_jnames,
+                ctx,
+            )
+            expr += layout_var
+        elif isinstance(layout_fn, AffineLayout):
+            start = layout_fn.start
+            step = layout_fn.step
+            jname = pym.var(labels_to_jnames[(layout_fn.axis, layout_fn.cpt)])
+            expr += jname * step + start
         else:
-            return name
+            raise NotImplementedError
+    ctx.add_assignment(offset_var, expr)
 
 
-class ReadAssignmentResolver(AssignmentResolver):
-    @property
-    def assignee(self):
-        return self.local_expr
+def register_extent(extent, loop_indices, ctx):
+    if isinstance(extent, IndexedMultiArray):
+        raise NotImplementedError("this stuff wont work atm")
+        labels, jnames = [], []
+        index = extent.index.root
+        while index:
+            new_labels, new_jnames = loop_indices[index.label]
+            labels.extend(new_labels)
+            jnames.extend(new_jnames)
+            index = extent.index.find_node((index.id, 0))
 
-    @property
-    def expression(self):
-        return self.global_expr
+        labels_to_jnames = {
+            (label, 0): jname for ((label, _), jname) in checked_zip(labels, jnames)
+        }
 
-
-class ZeroAssignmentResolver(AssignmentResolver):
-    @property
-    def assignee(self):
-        return self.local_expr
-
-    @property
-    def expression(self):
-        return 0
-
-
-class WriteAssignmentResolver(AssignmentResolver):
-    @property
-    def assignee(self):
-        return self.global_expr
-
-    @property
-    def expression(self):
-        return self.local_expr
+        temp_var, _ = register_scalar_assignment(
+            extent.data,
+            labels_to_jnames,
+            ctx,
+        )
+        return str(temp_var)
+    else:
+        assert isinstance(extent, numbers.Integral)
+        return extent
 
 
-class IncAssignmentResolver(AssignmentResolver):
-    @property
-    def assignee(self):
-        return self.global_expr
+def register_scalar_assignment(
+    array,
+    array_labels_to_jnames,
+    ctx,
+):
+    # Register data
+    ctx.add_argument(array.name, array.dtype)
+    temp_name = ctx.add_parameter()
 
-    @property
-    def expression(self):
-        return self.global_expr + self.local_expr
+    array_offset = emit_assignment_insn(
+        array.name,
+        array.axes,
+        array_labels_to_jnames,
+        ctx,
+    )
+    # TODO: Does this function even do anything when I use a scalar?
+    temp_offset = emit_assignment_insn(temp_name, None, {}, ctx, scalar=True)
+
+    lexpr = pym.var(temp_name)
+    rexpr = pym.subscript(pym.var(array.name), pym.var(array_offset))
+    ctx.add_assignment(lexpr, rexpr)
+    return pym.var(temp_name)
 
 
 def find_axis(axes, path, target, current_axis=None):

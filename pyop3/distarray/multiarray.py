@@ -9,6 +9,7 @@ import threading
 from typing import Any, Optional, Sequence, Tuple, Union
 
 import numpy as np
+import pytools
 from mpi4py import MPI
 from petsc4py import PETSc
 
@@ -24,15 +25,7 @@ from pyop3.axis import (
 from pyop3.distarray.base import DistributedArray
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
 from pyop3.index import IndexTree, TabulatedMap, as_index_tree
-from pyop3.utils import (
-    MultiNameGenerator,
-    NameGenerator,
-    PrettyTuple,
-    just_one,
-    single_valued,
-    strict_int,
-    strictly_all,
-)
+from pyop3.utils import PrettyTuple, just_one, single_valued, strict_int, strictly_all
 
 
 class MultiArray(DistributedArray):
@@ -56,8 +49,8 @@ class MultiArray(DistributedArray):
         "index",
     }
 
-    name_generator = MultiNameGenerator()
     prefix = "ten"
+    name_generator = pytools.UniqueNameGenerator()
 
     def __init__(
         self,
@@ -92,12 +85,10 @@ class MultiArray(DistributedArray):
             raise TypeError("data argument not recognised")
 
         super().__init__()
-        name = name or self.name_generator.next(prefix or self.prefix)
+        name = name or self.name_generator(prefix or self.prefix)
 
         self._data = data
         self.dtype = dtype
-        self.params = {}
-        self._param_namer = NameGenerator(f"{name}_p")
 
         self.index = index
 

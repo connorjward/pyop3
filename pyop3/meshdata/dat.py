@@ -9,7 +9,7 @@ from pyop3.distarray import MultiArray
 from pyop3.meshdata.base import MeshDataCarrier
 
 # from pyop3.tree import Node, Tree, previsit
-from pyop3.utils import UniqueNameGenerator, checked_zip, just_one
+from pyop3.utils import checked_zip, just_one
 
 __all__ = ["Dat"]
 

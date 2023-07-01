@@ -9,7 +9,6 @@ import pyrsistent
 import pytools
 
 from pyop3.utils import (
-    UniqueNameGenerator,
     apply_at,
     as_tuple,
     checked_zip,
@@ -41,13 +40,15 @@ class Node(pytools.ImmutableRecord):
 
     def __init__(self, degree: int, id: Id | None = None):
         self.degree = degree
-        self.id = id or next(self._id_generator)
+        self.id = id or self._id_generator()
 
     @classmethod
     @property
     def _id_generator(cls):
         if not cls._lazy_id_generator:
-            cls._lazy_id_generator = UniqueNameGenerator(f"_{cls.__name__}_id")
+            cls._lazy_id_generator = pytools.UniqueNameGenerator(
+                forced_prefix=f"_{cls.__name__}_id"
+            )
         return cls._lazy_id_generator
 
 
@@ -58,21 +59,25 @@ class NodeComponent(pytools.ImmutableRecord):
     _lazy_id_generator = None
 
     def __init__(self, label: Label | None = None, id: Id | None = None):
-        self.label = label if label is not None else next(self._label_generator)
-        self.id = id if id is not None else next(self._id_generator)
+        self.label = label if label is not None else self._label_generator()
+        self.id = id if id is not None else self._id_generator()
 
     @classmethod
     @property
     def _label_generator(cls):
         if not cls._lazy_label_generator:
-            cls._lazy_label_generator = UniqueNameGenerator(f"_{cls.__name__}_label")
+            cls._lazy_label_generator = pytools.UniqueNameGenerator(
+                forced_prefix=f"_{cls.__name__}_label"
+            )
         return cls._lazy_label_generator
 
     @classmethod
     @property
     def _id_generator(cls):
         if not cls._lazy_id_generator:
-            cls._lazy_id_generator = UniqueNameGenerator(f"_{cls.__name__}_id")
+            cls._lazy_id_generator = pytools.UniqueNameGenerator(
+                forced_prefix=f"_{cls.__name__}_id"
+            )
         return cls._lazy_id_generator
 
 
@@ -596,7 +601,7 @@ class LabelledNode(Node):
 
     def __init__(self, label: Hashable | None = None, **kwargs) -> None:
         super().__init__(**kwargs)
-        self.label = label or next(self._label_generator)
+        self.label = label or self._label_generator()
 
     def with_modified_component(self, component_index: int | None = None, **kwargs):
         if component_index is None:
@@ -616,7 +621,9 @@ class LabelledNode(Node):
     @property
     def _label_generator(cls):
         if not cls._lazy_label_generator:
-            cls._lazy_label_generator = UniqueNameGenerator(f"_{cls.__name__}_label")
+            cls._lazy_label_generator = pytools.UniqueNameGenerator(
+                forced_prefix=f"_{cls.__name__}_label"
+            )
         return cls._lazy_label_generator
 
 

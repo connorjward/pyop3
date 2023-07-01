@@ -31,10 +31,8 @@ from pyop3.tree import (
     postvisit,
     previsit,
 )
-from pyop3.utils import NameGenerator  # TODO delete
 from pyop3.utils import (
     PrettyTuple,
-    UniqueNameGenerator,
     as_tuple,
     checked_zip,
     flatten,

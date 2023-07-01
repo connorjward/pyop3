@@ -7,45 +7,6 @@ from typing import Any, Collection
 import pytools
 
 
-class MultiNameGenerator:
-    def __init__(self):
-        self._namers = {}
-
-    def next(self, prefix="", suffix=""):
-        key = prefix, suffix
-        try:
-            namer = self._namers[key]
-        except KeyError:
-            namer = self._namers.setdefault(key, NameGenerator(prefix, suffix))
-        return namer.next()
-
-    def reset(self):
-        self._namers = {}
-
-
-class NameGenerator:
-    def __init__(self, prefix="", suffix="", sep="_"):
-        if not (prefix or suffix):
-            raise ValueError
-
-        self._prefix = prefix
-        self._suffix = suffix
-        self._sep = sep
-        self._fullprefix = f"{self._prefix}{self._sep}" if self._prefix else ""
-        self._fullsuffix = f"{self._sep}{self._suffix}" if self._suffix else ""
-        self._counter = itertools.count()
-
-    def __next__(self):
-        return self.next()
-
-    def next(self):
-        return f"{self._fullprefix}{next(self._counter)}{self._fullsuffix}"
-
-
-# better alias?
-UniqueNameGenerator = NameGenerator
-
-
 class DuplicateInsertionException(Exception):
     pass
 

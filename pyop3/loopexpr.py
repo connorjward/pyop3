@@ -15,7 +15,7 @@ import pytools
 
 from pyop3.distarray import DistributedArray, MultiArray
 from pyop3.index import as_index_tree
-from pyop3.utils import NameGenerator, as_tuple, checked_zip, merge_dicts
+from pyop3.utils import as_tuple, checked_zip, merge_dicts
 
 
 # TODO I don't think that this belongs in this file, it belongs to the kernel?
@@ -72,7 +72,8 @@ class LoopExpr(pytools.ImmutableRecord, abc.ABC):
 class Loop(LoopExpr):
     fields = LoopExpr.fields | {"index", "statements", "id", "depends_on"}
 
-    id_generator = NameGenerator("loop")
+    # doubt that I need an ID here
+    id_generator = pytools.UniqueNameGenerator()
 
     def __init__(
         self,
@@ -86,7 +87,7 @@ class Loop(LoopExpr):
         # FIXME
         # assert isinstance(index, pyop3.tensors.Indexed)
         if not id:
-            id = self.id_generator.next()
+            id = self.id_generator("loop")
 
         super().__init__()
         self.index = index

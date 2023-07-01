@@ -13,20 +13,9 @@ from typing import Any
 
 import pytools
 
-from pyop3.utils import NameGenerator
-
 
 class Instruction(pytools.ImmutableRecord):
-    fields = {"id", "depends_on"}
-
-    def __init__(self, *, id=None, depends_on=frozenset()):
-        # import pdb; pdb.set_trace()
-        if not id:
-            id = self.id_generator.next()
-
-        self.id = id
-        self.depends_on = depends_on
-        super().__init__()
+    fields = set()
 
 
 class Assignment(Instruction):
@@ -45,8 +34,6 @@ class Assignment(Instruction):
 
 
 class Read(Assignment):
-    id_generator = NameGenerator("read")
-
     @property
     def lhs(self):
         return self.temporary
@@ -57,8 +44,6 @@ class Read(Assignment):
 
 
 class Write(Assignment):
-    id_generator = NameGenerator("write")
-
     @property
     def lhs(self):
         return self.tensor
@@ -69,8 +54,6 @@ class Write(Assignment):
 
 
 class Increment(Assignment):
-    id_generator = NameGenerator("inc")
-
     @property
     def lhs(self):
         return self.tensor
@@ -81,8 +64,6 @@ class Increment(Assignment):
 
 
 class Zero(Assignment):
-    id_generator = NameGenerator("zero")
-
     @property
     def lhs(self):
         return self.temporary
@@ -96,7 +77,6 @@ class Zero(Assignment):
 
 class FunctionCall(Instruction):
     fields = Instruction.fields | {"function", "reads", "writes"}
-    id_generator = NameGenerator("func")
 
     def __init__(self, function, reads, writes, **kwargs):
         self.function = function
