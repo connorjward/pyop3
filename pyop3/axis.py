@@ -411,16 +411,24 @@ def _collect_datamap(axis, *subdatamaps, axes):
 
 
 class AxisTree(LabelledTree):
+    fields = LabelledTree.fields | {"within_axes"}
+
     def __init__(
         self,
         root: MultiAxis | None = None,
         parent_to_children: dict | None = None,
         *,
+        within_axes=None,
         sf=None,
         shared_sf=None,
         comm=None,
     ):
         super().__init__(root, parent_to_children)
+
+        # this is a map from axis labels to their extents. This is useful for
+        # things like temporaries where the axis tree does not itself fully characterise
+        # the shapes of things
+        self.within_axes = within_axes or {}
         self.sf = sf
         self.shared_sf = shared_sf
         self.comm = comm  # FIXME DTRT with internal comms
@@ -429,9 +437,7 @@ class AxisTree(LabelledTree):
 
     @property
     def index(self):
-        from pyop3.loopexpr import LoopIndex
-
-        return LoopIndex(self, fill_shape(self))
+        return fill_shape(self, extra_kwargs={"axes": self})
 
     @functools.cached_property
     def datamap(self) -> dict[str:DistributedArray]:
@@ -1034,9 +1040,10 @@ class SyncStatus:
 
 
 # TODO This algorithm is pretty much identical to quite a few others
-def fill_shape(axes, indices=None):
+def fill_shape(axes, indices=None, extra_kwargs=None):
+    extra_kwargs = extra_kwargs or {}
     if not indices:
-        return fill_missing_shape(axes, {})
+        return fill_missing_shape(axes, {}).copy(**extra_kwargs)
 
     new_indices = indices
     for leaf_index, leaf_cpt in indices.leaves:
@@ -1051,7 +1058,7 @@ def fill_shape(axes, indices=None):
         if extra_slices:
             new_indices = new_indices.add_subtree(extra_slices, leaf_index, leaf_cpt)
 
-    return new_indices
+    return new_indices.copy(**extra_kwargs)
 
 
 def fill_missing_shape(

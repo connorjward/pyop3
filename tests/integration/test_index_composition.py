@@ -11,7 +11,6 @@ from pyop3 import (
     IndexTree,
     LoopyKernel,
     MultiArray,
-    Range,
     ScalarType,
     Slice,
     do_loop,
@@ -37,24 +36,22 @@ def copy_kernel():
 
 
 def test_1d_slice_composition(copy_kernel):
-    m = 10
+    m, n = 10, 2
     dat0 = MultiArray(
-        AxisTree(Axis(m, "ax0")), name="dat0", data=np.arange(m, dtype=ScalarType)
+        AxisTree(Axis([(m, "cpt0")], "ax0")),
+        name="dat0",
+        data=np.arange(m, dtype=ScalarType),
     )
-    dat1 = MultiArray(Axis(2, "ax1"), name="dat1", dtype=ScalarType)
+    dat1 = MultiArray(Axis([(n, "cpt0")], "ax0"), name="dat1", dtype=ScalarType)
 
     # equivalent to dat1[...] = dat0[::2][1:3] (== [2, 4])
-
-    # we have no outer iteration so just have a loop with extent 1
     do_loop(
-        AxisTree(
-            Axis(1, "any")
-        ),  # like a range, could be called "p" and used to index sub-bits
+        Axis(1).index,  # for _ in range(1)
         copy_kernel(
-            dat0[Index(Slice(("ax0", 0), None, None, 2))][
-                Index(Slice(("ax0", 0), 1, 3))
+            dat0[Index(Slice(None, None, 2, axis="ax0", cpt="cpt0"))][
+                Index(Slice(1, 3, axis="ax0", cpt="cpt0"))
             ],
-            dat1[Index(Slice(("ax1", 0), 2))],
+            dat1[Index(Slice(axis="ax0", cpt="cpt0"))],
         ),
     )
 
@@ -62,30 +59,32 @@ def test_1d_slice_composition(copy_kernel):
 
 
 def test_2d_slice_composition(copy_kernel):
-    m, n = 10, 3
+    m0, m1, n = 10, 3, 2
 
-    axes0 = AxisTree(Axis(m, "ax0", id="root"), {"root": Axis(n, "ax1")})
-    axes1 = AxisTree(Axis(2, "ax2"))
+    axes0 = AxisTree(
+        Axis([(m0, "cpt0")], "ax0", id="root"), {"root": Axis([(m1, "cpt0")], "ax1")}
+    )
+    axes1 = AxisTree(Axis([(n, "cpt0")], "ax0"))
 
-    dat0 = MultiArray(axes0, name="dat0", data=np.arange(axes0.size))
+    dat0 = MultiArray(axes0, name="dat0", data=np.arange(axes0.size, dtype=ScalarType))
     dat1 = MultiArray(axes1, name="dat1", dtype=dat0.dtype)
 
     # equivalent to dat0.data[::2, 1:][2:4, 1]
     p0 = IndexTree(
-        Index(Slice(("ax0", 0), None, None, 2), id="idx0"),
-        {"idx0": Index(Slice(("ax1", 0), 1, None))},
+        Index(Slice(None, None, 2, axis="ax0", cpt="cpt0"), id="idx0"),
+        {"idx0": Index(Slice(1, None, axis="ax1", cpt="cpt0"))},
     )
     p1 = IndexTree(
-        Index(Slice(("ax0", 0), 2, 4), id="idx1"),
-        {"idx1": Index(Slice(("ax1", 0), 1, 2))},
+        Index(Slice(2, 4, axis="ax0", cpt="cpt0"), id="idx1"),
+        {"idx1": Index(Slice(1, 2, axis="ax1", cpt="cpt0"))},
     )
 
     do_loop(
-        Axis(1),  # for _ in range(1)
+        Axis(1).index,  # for _ in range(1)
         copy_kernel(
             dat0[p0][p1],
             dat1[...],
         ),
     )
 
-    assert np.allclose(dat1.data, dat0.data.reshape((m, n))[::2, 1:][2:4, 1])
+    assert np.allclose(dat1.data, dat0.data.reshape((m0, m1))[::2, 1:][2:4, 1])

@@ -92,7 +92,7 @@ class Configuration(dict):
         "compute_kernel_flops": ("PYOP2_COMPUTE_KERNEL_FLOPS", bool, False),
         "type_check": ("PYOP2_TYPE_CHECK", bool, True),
         "check_src_hashes": ("PYOP2_CHECK_SRC_HASHES", bool, True),
-        "log_level": ("PYOP2_LOG_LEVEL", (str, int), "WARNING"),
+        "log_level": ("PYOP3_LOG_LEVEL", (str, int), "WARNING"),
         "cache_dir": ("PYOP2_CACHE_DIR", str, cache_dir),
         "node_local_compilation": ("PYOP2_NODE_LOCAL_COMPILATION", bool, True),
         "no_fork_available": ("PYOP2_NO_FORK_AVAILABLE", bool, False),

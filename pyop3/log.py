@@ -36,7 +36,7 @@
 import logging
 from contextlib import contextmanager
 
-logger = logging.getLogger("pyop2")
+logger = logging.getLogger("pyop3")
 handler = logging.StreamHandler()
 logger.addHandler(handler)
 

@@ -12,6 +12,12 @@ from pyop3.utils import as_tuple, merge_dicts
 
 
 class IndexTree(LabelledTree):
+    fields = LabelledTree.fields | {"axes"}
+
+    def __init__(self, *args, axes=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.axes = axes
+
     @functools.cached_property
     def datamap(self) -> dict[str:DistributedArray]:
         return postvisit(self, _collect_datamap, itree=self)
@@ -137,13 +143,7 @@ class AffineMap(Map):
 
 @functools.singledispatch
 def as_index_tree(arg: Any) -> IndexTree:
-    from pyop3.loopexpr import LoopIndex
-
-    # cyclic import
-    if isinstance(arg, LoopIndex):
-        return arg.indices
-    else:
-        raise TypeError
+    raise TypeError
 
 
 @as_index_tree.register

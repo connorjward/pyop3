@@ -32,6 +32,7 @@ from pyop3.index import (
     Slice,
     TabulatedMap,
 )
+from pyop3.log import logger
 from pyop3.loopexpr import (
     INC,
     MAX_RW,
@@ -66,17 +67,16 @@ class CodegenContext(abc.ABC):
 
 class LoopyCodegenContext(CodegenContext):
     def __init__(self):
-        # should/could these be sets?
         self._domains = []
         self._insns = []
         self._args = []
         self._subkernels = []
 
-        self._loop_indices = {}
         self._within_inames = frozenset()
+        self._saved_within_inames = []
         self._last_insn_id = None
 
-        self.name_generator = pytools.UniqueNameGenerator()
+        self._name_generator = pytools.UniqueNameGenerator()
 
     @property
     def domains(self):
@@ -88,29 +88,27 @@ class LoopyCodegenContext(CodegenContext):
 
     @property
     def arguments(self):
+        # TODO should renumber things here
         return tuple(self._args)
 
     @property
     def subkernels(self):
         return tuple(self._subkernels)
 
-    def add_domain(self, *args):
+    def add_domain(self, iname, *args):
         nargs = len(args)
         if nargs == 1:
             start, stop = 0, args[0]
         else:
             assert nargs == 2
             start, stop = args[0], args[1]
-
-        iname = self.name_generator("i")
         self._domains.append(f"{{ [{iname}]: {start} <= {iname} < {stop} }}")
-        return iname
 
     def add_assignment(self, assignee, expression, prefix="insn"):
         insn = lp.Assignment(
             assignee,
             expression,
-            id=self.name_generator(prefix),
+            id=self._name_generator(prefix),
             within_inames=self._within_inames,
             within_inames_is_final=True,
             depends_on=self._depends_on,
@@ -122,7 +120,7 @@ class LoopyCodegenContext(CodegenContext):
         insn = lp.CallInstruction(
             assignees,
             expression,
-            id=self.name_generator(prefix),
+            id=self._name_generator(prefix),
             within_inames=self._within_inames,
             within_inames_is_final=True,
             depends_on=self._depends_on,
@@ -131,27 +129,43 @@ class LoopyCodegenContext(CodegenContext):
         self._add_instruction(insn)
 
     def add_argument(self, name, dtype):
+        # FIXME if self._args is a set then we can add duplicates here provided
+        # that we canonically renumber at a later point
+        if name in [a.name for a in self._args]:
+            logger.debug(
+                f"Skipping adding {name} to the codegen context as it is already present"
+            )
+            return
         arg = lp.GlobalArg(name, dtype=dtype, shape=None)
         self._args.append(arg)
 
-    def add_temporary(self, name, dtype, shape):
+    def add_temporary(self, name, dtype=IntType, shape=()):
         temp = lp.TemporaryVariable(name, dtype=dtype, shape=shape)
         self._args.append(temp)
-
-    def add_parameter(self, prefix="n"):
-        name = self.name_generator(prefix)
-        param = lp.TemporaryVariable(name, shape=(), dtype=IntType)
-        self._args.append(param)
-        return name
 
     def add_subkernel(self, subkernel):
         self._subkernels.append(subkernel)
 
+    def unique_name(self, prefix):
+        # add prefix to the generator so names are generated starting with
+        # "prefix_0" instead of "prefix"
+        self._name_generator.add_name(prefix, conflicting_ok=True)
+        return self._name_generator(prefix)
+
+    def add_iname(self, iname: str) -> None:
+        self._within_inames |= {iname}
+
+    def save_within_inames(self) -> None:
+        self._saved_within_inames.append(self._within_inames)
+
+    def restore_within_inames(self) -> None:
+        self._within_inames = self._saved_within_inames.pop(-1)
+
     @contextlib.contextmanager
-    def within_inames(self, inames):
-        self._within_inames |= inames
+    def saved_within_inames(self) -> None:
+        self.save_within_inames()
         yield
-        self._within_inames -= inames
+        self.restore_within_inames()
 
     @property
     def _depends_on(self):
@@ -203,8 +217,8 @@ def _(loop: Loop, loop_indices, ctx: LoopyCodegenContext) -> None:
     # NOTE: currently maps only map between components of the same axis.
     # I don't know if this is a strict limitation or just untested.
 
-    for leaf_index, leaf_cpt in loop.index.indices.leaves:
-        index_path = loop.index.indices.path(leaf_index, leaf_cpt)
+    for leaf_index, leaf_cpt in loop.index.leaves:
+        index_path = loop.index.path(leaf_index, leaf_cpt)
 
         axis_path = {}
         for index, cpt in index_path:
@@ -218,28 +232,30 @@ def _(loop: Loop, loop_indices, ctx: LoopyCodegenContext) -> None:
 
         # map from axes to sizes, components? maps always target the same axis
         # so should be fine.
-        extents = collect_extents(loop.axes, axis_path, index_path, loop_indices)
+        extents = collect_extents(loop.index.axes, axis_path, index_path, loop_indices)
 
         # now generate loops for each of these extents, keep the same mapping from
         # axis labels to, now, inames
-        new_inames = set()
-        jnames = {}
-        for axis_label, extent in extents.items():
-            extent = register_extent(
-                extent,
-                loop_indices,
-                ctx,
-            )
-            iname = ctx.add_domain(extent)
-            jnames[axis_label] = iname
-            new_inames.add(iname)
+        with ctx.saved_within_inames():
+            new_inames = set()
+            jnames = {}
+            for axis_label, extent in extents.items():
+                extent = register_extent(
+                    extent,
+                    jnames,
+                    ctx,
+                )
+                iname = ctx.unique_name("i")
+                ctx.add_domain(iname, extent)
+                ctx.add_iname(iname)
+                jnames[axis_label] = iname
+                new_inames.add(iname)
 
-        with ctx.within_inames(new_inames):
             # now traverse the slices in reverse, transforming the inames to jnames and
             # the right index expressions
             new_loop_indices = {}
-            for index, icpt in reversed(loop.index.indices.path(leaf_index, leaf_cpt)):
-                jname = jnames.pop(cpt.to_tuple)
+            for index, icpt in reversed(loop.index.path(leaf_index, leaf_cpt)):
+                jname = jnames.pop(icpt.to_tuple)
                 new_jname = myinnerfunc(
                     jname,
                     index,
@@ -285,7 +301,7 @@ def _(call: FunctionCall, loop_indices, ctx: LoopyCodegenContext) -> None:
         axes = temporary_axes(arg.axes, arg.index, loop_indices)
         temporary = MultiArray(
             axes,
-            name=ctx.name_generator("t"),
+            name=ctx.unique_name("t"),
             dtype=arg.dtype,
         )
         indexed_temp = temporary[...]
@@ -306,7 +322,8 @@ def _(call: FunctionCall, loop_indices, ctx: LoopyCodegenContext) -> None:
         # subarrayref nonsense/magic
         indices = []
         for s in shape:
-            iname = ctx.add_domain(s)
+            iname = ctx.unique_name("i")
+            ctx.add_domain(iname, s)
             indices.append(pym.var(iname))
         indices = tuple(indices)
 
@@ -420,45 +437,48 @@ def build_assignment(assignment, loop_indices, ctx):
 
         ljnames = {}
         rjnames = {}
-        new_within_inames = set()
-        try:
-            while True:
-                lnext = next(liter)
-                while lnext[1] == 1:
-                    iname = ctx.add_domain(1)
-                    ljnames[lnext[0]] = iname
-                    new_within_inames |= {iname}
-                    lnext = next(liter)
-                rnext = next(riter)
-                while rnext[1] == 1:
-                    iname = ctx.add_domain(1)
-                    rjnames[rnext[0]] = iname
-                    new_within_inames |= {iname}
-                    rnext = next(riter)
-
-                extent = self.register_extent(
-                    single_valued([lnext[1], rnext[1]]),
-                    loop_indices,
-                    ctx,
-                )
-                iname = ctx.add_domain(extent)
-                ljnames[lnext[0]] = iname
-                rjnames[rnext[0]] = iname
-                new_within_inames |= {iname}
-        except StopIteration:
+        with ctx.saved_within_inames():
             try:
-                # FIXME what if rhs throws the exception instead of lhs?
-                rnext = next(riter)
-                while rnext[1] == 1:
-                    iname = ctx.add_domain(1)
-                    rjnames[rnext[0]] = iname
-                    new_within_inames |= {iname}
+                while True:
+                    lnext = next(liter)
+                    while lnext[1] == 1:
+                        iname = ctx.unique_name("i")
+                        ctx.add_domain(iname, 1)
+                        ljnames[lnext[0]] = iname
+                        ctx.add_iname(iname)
+                        lnext = next(liter)
                     rnext = next(riter)
-                raise AssertionError("iterator should also be consumed")
-            except StopIteration:
-                pass
+                    while rnext[1] == 1:
+                        iname = ctx.unique_name("i")
+                        ctx.add_domain(iname, 1)
+                        rjnames[rnext[0]] = iname
+                        ctx.add_iname(iname)
+                        rnext = next(riter)
 
-        with ctx.within_inames(new_within_inames):
+                    extent = register_extent(
+                        single_valued([lnext[1], rnext[1]]),
+                        loop_indices,
+                        ctx,
+                    )
+                    iname = ctx.unique_name("i")
+                    ctx.add_domain(iname, extent)
+                    ljnames[lnext[0]] = iname
+                    rjnames[rnext[0]] = iname
+                    ctx.add_iname(iname)
+            except StopIteration:
+                try:
+                    # FIXME what if rhs throws the exception instead of lhs?
+                    rnext = next(riter)
+                    while rnext[1] == 1:
+                        iname = ctx.unique_name("i")
+                        ctx.add_domain(iname, 1)
+                        rjnames[rnext[0]] = iname
+                        ctx.add_iname(iname)
+                        rnext = next(riter)
+                    raise AssertionError("iterator should also be consumed")
+                except StopIteration:
+                    pass
+
             # now traverse the slices in reverse, transforming the inames to jnames and
             # the right index expressions
             # LHS
@@ -548,7 +568,8 @@ def myinnerfunc(iname, multi_index, index, jnames, loop_indices, ctx):
     if index in loop_indices:
         return loop_indices[index]
     elif isinstance(index, Slice):
-        jname = ctx.add_parameter("j")
+        jname = ctx.unique_name("j")
+        ctx.add_temporary(jname, IntType)
         ctx.add_assignment(pym.var(jname), pym.var(iname) * index.step + index.start)
         return jname
 
@@ -560,6 +581,7 @@ def myinnerfunc(iname, multi_index, index, jnames, loop_indices, ctx):
         new_within = {}
 
     elif isinstance(index, AffineMap):
+        raise NotImplementedError
         jname = self._namer.next("j")
         self._temp_kernel_data.append(
             lp.TemporaryVariable(jname, shape=(), dtype=np.uintp)
@@ -602,6 +624,7 @@ def myinnerfunc(iname, multi_index, index, jnames, loop_indices, ctx):
 
     elif isinstance(index, TabulatedMap):
         # NOTE: some maps can produce multiple jnames (but not this one)
+        raise NotImplementedError
         jname = self._namer.next("j")
         self._temp_kernel_data.append(
             lp.TemporaryVariable(jname, shape=(), dtype=np.uintp)
@@ -668,7 +691,8 @@ def emit_assignment_insn(
     ctx,
     scalar=False,
 ):
-    offset = ctx.add_parameter()
+    offset = ctx.unique_name("off")
+    ctx.add_temporary(offset, IntType)
     ctx.add_assignment(pym.var(offset), 0)
 
     if not scalar:
@@ -712,7 +736,7 @@ def emit_layout_insns(
                 labels_to_jnames,
                 ctx,
             )
-            expr += layout_var
+            expr += pym.var(layout_var)
         elif isinstance(layout_fn, AffineLayout):
             start = layout_fn.start
             step = layout_fn.step
@@ -723,30 +747,48 @@ def emit_layout_insns(
     ctx.add_assignment(offset_var, expr)
 
 
-def register_extent(extent, loop_indices, ctx):
-    if isinstance(extent, IndexedMultiArray):
-        raise NotImplementedError("this stuff wont work atm")
-        labels, jnames = [], []
-        index = extent.index.root
-        while index:
-            new_labels, new_jnames = loop_indices[index.label]
-            labels.extend(new_labels)
-            jnames.extend(new_jnames)
-            index = extent.index.find_node((index.id, 0))
-
-        labels_to_jnames = {
-            (label, 0): jname for ((label, _), jname) in checked_zip(labels, jnames)
-        }
-
-        temp_var, _ = register_scalar_assignment(
-            extent.data,
-            labels_to_jnames,
-            ctx,
-        )
-        return str(temp_var)
-    else:
-        assert isinstance(extent, numbers.Integral)
+def register_extent(extent, jnames, ctx):
+    if isinstance(extent, numbers.Integral):
         return extent
+
+    # actually a pymbolic expression
+
+    # TODO
+    # * Traverse the pymbolic expression and generate a replace map for the multi-arrays
+
+    replace_map = {}
+    for array in collect_arrays(extent):
+        varname = register_scalar_assignment(array, jnames, ctx)
+        replace_map[array.name] = varname
+
+    varname = ctx.unique_name("p")
+    ctx.add_temporary(varname)
+    ctx.add_assignment(pym.var(varname), replace_variables(extent, replace_map))
+    return varname
+
+
+class MultiArrayCollector(pym.mapper.Collector):
+    def map_multi_array(self, expr):
+        return {expr}
+
+
+class VariableReplacer(pym.mapper.IdentityMapper):
+    def __init__(self, replace_map):
+        self._replace_map = replace_map
+
+    def map_variable(self, expr):
+        return self._replace_map.get(expr.name, expr)
+
+
+def collect_arrays(expr: pym.primitives.Expr):
+    collector = MultiArrayCollector()
+    return collector(expr)
+
+
+def replace_variables(
+    expr: pym.primitives.Expr, replace_map: dict[str, pym.primitives.Variable]
+):
+    return VariableReplacer(replace_map)(expr)
 
 
 def register_scalar_assignment(
@@ -756,7 +798,8 @@ def register_scalar_assignment(
 ):
     # Register data
     ctx.add_argument(array.name, array.dtype)
-    temp_name = ctx.add_parameter()
+    varname = ctx.unique_name("p")
+    ctx.add_temporary(varname)
 
     array_offset = emit_assignment_insn(
         array.name,
@@ -765,12 +808,11 @@ def register_scalar_assignment(
         ctx,
     )
     # TODO: Does this function even do anything when I use a scalar?
-    temp_offset = emit_assignment_insn(temp_name, None, {}, ctx, scalar=True)
+    # temp_offset = emit_assignment_insn(temp_name, None, {}, ctx, scalar=True)
 
-    lexpr = pym.var(temp_name)
     rexpr = pym.subscript(pym.var(array.name), pym.var(array_offset))
-    ctx.add_assignment(lexpr, rexpr)
-    return pym.var(temp_name)
+    ctx.add_assignment(pym.var(varname), rexpr)
+    return varname
 
 
 def find_axis(axes, path, target, current_axis=None):

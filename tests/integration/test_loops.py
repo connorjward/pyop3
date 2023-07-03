@@ -168,13 +168,7 @@ def test_vector_copy(vector_copy_kernel):
         dtype=ScalarType,
     )
 
-    # do_loop(p := axes.root.index, vector_copy_kernel(dat0[p], dat1[p]))
-
-    l = loop(p := axes.root.index, vector_copy_kernel(dat0[p], dat1[p]))
-    from pyop3.codegen.loopexpr2loopy import compile
-
-    compile(l)
-    l()
+    do_loop(p := axes.root.index, vector_copy_kernel(dat0[p], dat1[p]))
 
     assert np.allclose(dat1.data, dat0.data)
 
@@ -260,7 +254,13 @@ def test_vector_copy_with_permuted_axis(vector_copy_kernel):
     dat0 = MultiArray(axes, name="dat0", data=np.arange(m * n, dtype=ScalarType))
     dat1 = MultiArray(paxes, name="dat1", dtype=ScalarType)
 
-    do_loop(p := axes.root.index, vector_copy_kernel(dat0[p], dat1[p]))
+    # do_loop(p := axes.root.index, vector_copy_kernel(dat0[p], dat1[p]))
+
+    l = loop(p := axes.root.index, vector_copy_kernel(dat0[p], dat1[p]))
+    from pyop3.codegen.loopexpr2loopy import compile
+
+    compile(l)
+    l()
 
     assert np.allclose(dat1.data.reshape((m, n))[perm].flatten(), dat0.data)
 

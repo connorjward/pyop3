@@ -36,20 +36,18 @@ class FrozenTreeException(Exception):
 class Node(pytools.ImmutableRecord):
     fields = {"degree", "id"}
 
-    _lazy_id_generator = None
+    _id_generator = pytools.UniqueNameGenerator()
 
     def __init__(self, degree: int, id: Id | None = None):
         self.degree = degree
         self.id = id or self._id_generator()
 
-    @classmethod
-    @property
-    def _id_generator(cls):
-        if not cls._lazy_id_generator:
-            cls._lazy_id_generator = pytools.UniqueNameGenerator(
-                forced_prefix=f"_{cls.__name__}_id"
-            )
-        return cls._lazy_id_generator
+    # TODO this is a common pattern, could be a separate function taking type, suffix and the generator
+    def _unique_id(self):
+        prefix = f"_{type(self).__name__}_id"
+        # prevent prefix from being a valid name
+        self._id_generator.add_name(prefix, conflicting_ok=True)
+        return self._id_generator(prefix)
 
 
 class NodeComponent(pytools.ImmutableRecord):
@@ -597,11 +595,11 @@ class LabelledTree(pytools.ImmutableRecord):
 class LabelledNode(Node):
     fields = Node.fields | {"label"}
 
-    _lazy_label_generator = None
+    _label_generator = pytools.UniqueNameGenerator()
 
     def __init__(self, label: Hashable | None = None, **kwargs) -> None:
         super().__init__(**kwargs)
-        self.label = label or self._label_generator()
+        self.label = label or self._unique_label()
 
     def with_modified_component(self, component_index: int | None = None, **kwargs):
         if component_index is None:
@@ -617,23 +615,16 @@ class LabelledNode(Node):
         )
         return self.copy(components=new_components)
 
-    @classmethod
-    @property
-    def _label_generator(cls):
-        if not cls._lazy_label_generator:
-            cls._lazy_label_generator = pytools.UniqueNameGenerator(
-                forced_prefix=f"_{cls.__name__}_label"
-            )
-        return cls._lazy_label_generator
+    def _unique_label(self):
+        prefix = f"_{type(self).__name__}_label"
+        # prevent prefix from being a valid name
+        self._label_generator.add_name(prefix, conflicting_ok=True)
+        return self._label_generator(prefix)
 
 
 NodePath = dict[Hashable, Hashable]
 """Mapping from axis labels to component labels."""
 # wrong now
-
-
-# better alias?
-MultiTree = LabelledTree
 
 
 # def previsit(

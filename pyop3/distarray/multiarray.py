@@ -5,10 +5,12 @@ import functools
 import itertools
 import numbers
 import operator
+import sys
 import threading
 from typing import Any, Optional, Sequence, Tuple, Union
 
 import numpy as np
+import pymbolic as pym
 import pytools
 from mpi4py import MPI
 from petsc4py import PETSc
@@ -28,7 +30,7 @@ from pyop3.index import IndexTree, TabulatedMap, as_index_tree
 from pyop3.utils import PrettyTuple, just_one, single_valued, strict_int, strictly_all
 
 
-class MultiArray(DistributedArray):
+class MultiArray(DistributedArray, pym.primitives.Variable):
     """Multi-dimensional, hierarchical array.
 
     Parameters
@@ -48,6 +50,8 @@ class MultiArray(DistributedArray):
         "sf",
         "index",
     }
+
+    mapper_method = sys.intern("map_multi_array")
 
     prefix = "ten"
     name_generator = pytools.UniqueNameGenerator()
@@ -84,15 +88,19 @@ class MultiArray(DistributedArray):
         else:
             raise TypeError("data argument not recognised")
 
-        super().__init__()
+        # add prefix as an existing name so it is a true prefix
+        if prefix:
+            self.name_generator.add_name(prefix, conflicting_ok=True)
         name = name or self.name_generator(prefix or self.prefix)
+
+        DistributedArray.__init__(self, name)
+        pym.primitives.Variable.__init__(self, name)
 
         self._data = data
         self.dtype = dtype
 
         self.index = index
 
-        self.name = name
         self.dim = dim
 
         self.max_value = max_value
@@ -300,7 +308,8 @@ class MultiArray(DistributedArray):
                 if len(self.index.leaves) > 1:
                     raise NotImplementedError("need to uniquify")
 
-                for leaf, cidx in self.index.leaves:
+                for leaf, icpt in self.index.leaves:
+                    cidx = [c.label for c in leaf.components].index(icpt.label)
                     parent_to_children[leaf.id][cidx] = index.root
                     parent_to_children |= index.parent_to_children
 

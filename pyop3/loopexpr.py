@@ -41,15 +41,6 @@ MAX_RW = Access.MAX_RW
 MAX_WRITE = Access.MAX_WRITE
 
 
-class LoopIndex(pytools.ImmutableRecord):
-    fields = {"axes", "indices"}
-
-    def __init__(self, axes, indices):
-        super().__init__()
-        self.axes = axes
-        self.indices = indices
-
-
 class LoopExpr(pytools.ImmutableRecord, abc.ABC):
     fields = set()
 
@@ -77,13 +68,11 @@ class Loop(LoopExpr):
 
     def __init__(
         self,
-        index: LoopIndex,
+        index: IndexTree,
         statements: Sequence[LoopExpr],
         id=None,
         depends_on=frozenset(),
     ):
-        assert isinstance(index, LoopIndex)
-
         # FIXME
         # assert isinstance(index, pyop3.tensors.Indexed)
         if not id:
@@ -195,6 +184,11 @@ class LoopyKernel:
                 f"Wrong number of arguments provided, expected {len(self.argspec)} "
                 f"but received {len(args)}"
             )
+        if any(
+            spec.dtype.numpy_dtype != arg.dtype
+            for spec, arg in checked_zip(self.argspec, args)
+        ):
+            raise ValueError("Arguments to the kernel have the wrong dtype")
         return FunctionCall(self, args)
 
     @property
