@@ -192,3 +192,11 @@ def apply_at(func, iterable, index):
         else:
             result.append(item)
     return tuple(result)
+
+
+def map_when(func, when_func, iterable):
+    for item in iterable:
+        if when_func(item):
+            yield func(item)
+        else:
+            yield item

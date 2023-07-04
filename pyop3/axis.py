@@ -19,6 +19,7 @@ import pyrsistent
 import pytools
 from mpi4py import MPI
 from petsc4py import PETSc
+from pyrsistent import pmap
 
 from pyop3 import utils
 from pyop3.dtypes import IntType, PointerType, get_mpi_dtype
@@ -134,44 +135,6 @@ def only_linear(func):
     return wrapper
 
 
-def prepare_layouts(axtree, axis, component, path=None):
-    """Make a magic nest of dictionaries for storing intermediate results."""
-    # path is a tuple key for holding the different axis parts
-    if not path:
-        path = ((axis.label, component.label),)
-
-    # import pdb; pdb.set_trace()
-    layouts = {path: None}
-
-    if child := axtree.child(axis, component):
-        for i, subcpt in enumerate(child.components):
-            layouts |= prepare_layouts(
-                axtree, child, subcpt, path + ((child.label, subcpt.label),)
-            )
-
-    return layouts
-
-
-def set_null_layouts(layouts, axtree, path=(), axis=None):
-    """
-    we have null layouts whenever the step is non-const (the variability is captured by
-    the start property of the affine layout below it).
-
-    We also get them when the axis is "indexed", that is, not ever actually used by
-    temporaries.
-    """
-    axis = axis or axtree.root
-    for cpt in axis.components:
-        new_path = path + ((axis.label, cpt.label),)
-        if (
-            not has_constant_step(axtree, axis, part) or part.indexed
-        ):  # I think indexed is gone
-            layouts[new_path] = "null layout"
-
-        if child := axtree.child(axis, cpt):
-            set_null_layouts(layouts, axtree, new_path, child)
-
-
 def can_be_affine(axtree, axis, component, component_index):
     return (
         has_independently_indexed_subaxis_parts(
@@ -196,20 +159,27 @@ def has_fixed_size(axes, axis, component):
     return not size_requires_external_index(axes, axis, component)
 
 
-def step_size(axtree, axis, component, indices=PrettyTuple()):
+def step_size(
+    axes: AxisTree,
+    axis: Axis,
+    component: AxisComponent,
+    path=pmap(),
+    indices=PrettyTuple(),
+):
     """Return the size of step required to stride over a multi-axis component.
 
     Non-constant strides will raise an exception.
     """
-    if not has_constant_step(axtree, axis, component) and not indices:
+    if not has_constant_step(axes, axis, component) and not indices:
         raise ValueError
-    if subaxis := axtree.child(axis, component):
-        return axtree.calc_size(subaxis, indices)
+    if subaxis := axes.child(axis, component):
+        return _axis_size(axes, subaxis, path, indices)
     else:
         return 1
 
 
 def attach_star_forest(axis, with_halo_points=True):
+    raise NotImplementedError("TODO")
     comm = MPI.COMM_WORLD
 
     # 1. construct the point-to-point SF per axis part
@@ -464,159 +434,99 @@ class AxisTree(LabelledTree):
     def find_part(self, label):
         return self._parts_by_label[label]
 
-    # TODO indices can be either a list of integers, a list of 2-tuples (cidx, idx), or
-    # a mapping from axis label to (cidx, idx) (or just integers I guess)
-    def get_offset(self, indices):
-        if isinstance(indices, Mapping):
-            # indices may be unordered
-            raise NotImplementedError
+    def offset(self, *args, allow_unused=False):
+        nargs = len(args)
+        if nargs == 2:
+            path, indices = args[0], args[1]
         else:
-            # assume that indices track axes in order
+            assert nargs == 1
+            path, indices = _path_and_indices_from_index_tuple(self, args[0])
 
-            from pyop3.distarray import MultiArray
+        if allow_unused:
+            path = _trim_path(self, path)
 
-            # parse the indices to get the right path and do some bounds checking
-            axis = self.root
-            path = []
-            indices_map = {}  # map from (axis, component) to integer
-            # TODO if indices is not ordered then we should traverse the axis tree instead
-            # else we would not be able to index ragged things if the indices were:
-            # [nnz, outer]
-            for index in indices:
-                if axis is None:
-                    raise IndexError("Too many indices provided")
-                if isinstance(index, numbers.Integral):
-                    if axis.degree > 1:
-                        raise IndexError(
-                            "Cannot index multi-component array with integers, a "
-                            "2-tuple of (component index, index value) is needed"
-                        )
-                    cpt_label = axis.components[0].label
-                else:
-                    cpt_label, index = index
+        offset_ = 0
+        for layout in self.layouts[path]:
+            if isinstance(layout, TabulatedLayout):
+                offset_ += layout.data.get_value(path, indices, allow_unused=True)
+            else:
+                assert isinstance(layout, AffineLayout)
 
-                cpt_index = [c.label for c in axis.components].index(cpt_label)
+                index = indices[layout.axis]
+                start = layout.start
 
-                if index < 0:
-                    # In theory we could still get this to work...
-                    raise IndexError("Cannot use negative indices")
-                # TODO need to pass indices here for ragged things
-                if index >= axis.components[cpt_index].find_integer_count():
-                    raise IndexError("Index is too large")
+                # handle sparsity
+                # if component.indices is not None:
+                #     bstart, bend = get_slice_bounds(component.indices, prior_indices)
+                #
+                #     last_index = bisect.bisect_left(
+                #         component.indices.data, last_index, bstart, bend
+                #     )
+                #     last_index -= bstart
 
-                indices_map[axis.label, cpt_label] = index
-                path.append(cpt_label)
-                axis = self.child(axis, cpt_label)
+                offset_ += index * layout.step + start
+        return strict_int(offset_)
 
-            if axis is not None:
-                raise IndexError("Insufficient number of indices given")
+    # old alias
+    get_offset = offset
 
-            offset = 0
-            layouts = self.layouts[tuple(path)]
-            for layout in layouts:
-                if isinstance(layout, TabulatedLayout):
-                    offset += layout.data.get_value(indices_map)
-                else:
-                    assert isinstance(layout, AffineLayout)
+    # def mul(self, other, sparsity=None):
+    #     """Compute the outer product with another :class:`MultiAxis`.
+    #
+    #     Parameters
+    #     ----------
+    #     other : :class:`MultiAxis`
+    #         The other :class:`MultiAxis` used to compute the product.
+    #     sparsity : ???
+    #         The sparsity of the resulting product (produced by combining maps). If
+    #         ``None`` then the resulting axis will be dense.
+    #     """
+    #     # NOTE: As discussed in the message below, composing star forests is really hard.
+    #     # In particular it is difficult to prescibe the ownership of the points that are
+    #     # owned in one axis and halo in the other. This effectively corresponds to making
+    #     # the off-diagonal portions of the matrices stored on a process either share the
+    #     # row or the column.
+    #     # Simply making a policy decision here (of distributed along rows) is not enough
+    #     # because for the Real space we need to distribute the dense column between
+    #     # processes (so distributed along rows), but the dense row also needs to be
+    #     # distributed (so distribute along the columns).
+    #     # Once this works we can start implementing our own matrices in pyop3 which
+    #     # would be good for things like PCPATCH. We could also play around with COO and
+    #     # CSC layouts by swapping the axes around.
+    #     raise NotImplementedError(
+    #         "Computing the outer product of multi-axes is difficult in parallel "
+    #         "since we need to compose star forests and decide upon the ownership of the "
+    #         "off-diagonal components."
+    #     )
+    #
+    # def find_part_from_indices(self, indices):
+    #     """Traverse axis to find things
+    #
+    #     indices is a list of integers"""
+    #     index, *rest = indices
+    #
+    #     if not rest:
+    #         return self.parts[index]
+    #     else:
+    #         return self.parts[index].subaxis.find_part_from_indices(rest)
+    #
+    # # TODO I think I would prefer to subclass tuple here s.t. indexing with
+    # # None works iff len(self.parts) == 1
+    # def get_part(self, npart):
+    #     if npart is None:
+    #         if len(self.parts) != 1:
+    #             raise RuntimeError
+    #         return self.parts[0]
+    #     else:
+    #         return self.parts[npart]
+    #
+    # @property
+    # def nparts(self):
+    #     return len(self.parts)
 
-                    index = indices_map[layout.axis, layout.cpt]
-                    start = layout.start
-
-                    # handle sparsity
-                    # if component.indices is not None:
-                    #     bstart, bend = get_slice_bounds(component.indices, prior_indices)
-                    #
-                    #     last_index = bisect.bisect_left(
-                    #         component.indices.data, last_index, bstart, bend
-                    #     )
-                    #     last_index -= bstart
-
-                    offset += index * layout.step + start
-
-            return strict_int(offset)
-
-    def mul(self, other, sparsity=None):
-        """Compute the outer product with another :class:`MultiAxis`.
-
-        Parameters
-        ----------
-        other : :class:`MultiAxis`
-            The other :class:`MultiAxis` used to compute the product.
-        sparsity : ???
-            The sparsity of the resulting product (produced by combining maps). If
-            ``None`` then the resulting axis will be dense.
-        """
-        # NOTE: As discussed in the message below, composing star forests is really hard.
-        # In particular it is difficult to prescibe the ownership of the points that are
-        # owned in one axis and halo in the other. This effectively corresponds to making
-        # the off-diagonal portions of the matrices stored on a process either share the
-        # row or the column.
-        # Simply making a policy decision here (of distributed along rows) is not enough
-        # because for the Real space we need to distribute the dense column between
-        # processes (so distributed along rows), but the dense row also needs to be
-        # distributed (so distribute along the columns).
-        # Once this works we can start implementing our own matrices in pyop3 which
-        # would be good for things like PCPATCH. We could also play around with COO and
-        # CSC layouts by swapping the axes around.
-        raise NotImplementedError(
-            "Computing the outer product of multi-axes is difficult in parallel "
-            "since we need to compose star forests and decide upon the ownership of the "
-            "off-diagonal components."
-        )
-
-    def find_part_from_indices(self, indices):
-        """Traverse axis to find things
-
-        indices is a list of integers"""
-        index, *rest = indices
-
-        if not rest:
-            return self.parts[index]
-        else:
-            return self.parts[index].subaxis.find_part_from_indices(rest)
-
-    # TODO I think I would prefer to subclass tuple here s.t. indexing with
-    # None works iff len(self.parts) == 1
-    def get_part(self, npart):
-        if npart is None:
-            if len(self.parts) != 1:
-                raise RuntimeError
-            return self.parts[0]
-        else:
-            return self.parts[npart]
-
-    @property
-    def nparts(self):
-        return len(self.parts)
-
-    @property
-    def local_view(self):
-        assert False, "dont think i touch this"
-        if self.nparts > 1:
-            raise NotImplementedError
-        if not self.part.has_partitioned_halo:
-            raise NotImplementedError
-
-        if not self.part.is_distributed:
-            new_part = self.part.copy(overlap=None)
-        else:
-            new_part = self.part.copy(
-                count=self.part.num_owned, max_count=None, overlap=None
-            )
-        return self.copy(parts=[new_part])
-
-    def calc_size(self, axis=None, indices=PrettyTuple()) -> int:
-        """Return the size of a multi-axis by summing the sizes of its components."""
-        # NOTE: this works because the size array cannot be multi-part, therefore integer
-        # indices (as opposed to typed ones) are valid.
-        axis = axis or self.root
-        if not isinstance(indices, PrettyTuple):
-            indices = PrettyTuple(indices)
-        return sum(cpt.calc_size(self, axis, indices) for cpt in axis.components)
-
-    @property
+    @functools.cached_property
     def size(self):
-        return self.calc_size()
+        return axis_tree_size(self)
 
     def alloc_size(self, axis=None):
         axis = axis or self.root
@@ -701,8 +611,11 @@ class AxisTree(LabelledTree):
         else:
             return False
 
-    def add_subaxis(self, subaxis, loc):
-        return self.put_node(subaxis, loc)
+    def add_subaxis(self, subaxis, *loc):
+        import warnings
+
+        warnings.warn("deprecated")
+        return self.put_node(subaxis, *loc)
 
 
 class Axis(LabelledNode):
@@ -760,7 +673,7 @@ class MyNode(Node):
 
 
 def get_slice_bounds(array, indices):
-    assert False, "not touched"
+    raise NotImplementedError("used for sparse things I believe")
     from pyop3.distarray import MultiArray
 
     part = just_one(array.axes.children(array.axes.root))
@@ -932,25 +845,6 @@ class AxisComponent(NodeComponent):
         else:
             return npoints
 
-    # TODO make a free function or something - this is horrible
-    def calc_size(self, axtree, axis, indices=PrettyTuple()):
-        extent = self.find_integer_count(indices)
-        if subaxis := axtree.child(axis, self):
-            return sum(axtree.calc_size(subaxis, indices | i) for i in range(extent))
-        else:
-            return extent
-
-    def find_integer_count(self, indices=PrettyTuple()):
-        from pyop3.distarray import IndexedMultiArray, MultiArray
-
-        if isinstance(self.count, IndexedMultiArray):
-            return self.count.data.get_value(indices)
-        elif isinstance(self.count, MultiArray):
-            return self.count.get_value(indices)
-        else:
-            assert isinstance(self.count, numbers.Integral)
-            return self.count
-
     @property
     def has_partitioned_halo(self):
         if self.overlap is None:
@@ -1062,7 +956,7 @@ def fill_shape(axes, indices=None, extra_kwargs=None):
 
 
 def fill_missing_shape(
-    axes: AxisTree, indexed: dict[Hashable, int], current_axis: Axis | None = None
+    axes: AxisTree, indexed: Mapping[Label, Label], current_axis: Axis | None = None
 ) -> IndexTree | None:
     """Return the indices required to fully index the axes.
 
@@ -1207,7 +1101,7 @@ class CustomNode(Node):
 def _compute_layouts(
     axes: AxisTree,
     axis=None,
-    path=PrettyTuple(),
+    path=pmap(),
 ):
     axis = axis or axes.root
     layouts = {}
@@ -1220,7 +1114,7 @@ def _compute_layouts(
     for cpt in axis.components:
         if subaxis := axes.child(axis, cpt):
             sublayouts, csubtree, substeps = _compute_layouts(
-                axes, subaxis, path | cpt.label
+                axes, subaxis, path | {axis.label: cpt.label}
             )
             sublayoutss.append(sublayouts)
             csubtrees.append(csubtree)
@@ -1268,10 +1162,15 @@ def _compute_layouts(
             ctree = None
             for c in axis.components:
                 step = step_size(axes, axis, c)
-                layouts |= {path | c.label: AffineLayout(axis.label, c.label, step)}
+                layouts |= {
+                    path
+                    | {axis.label: c.label}: AffineLayout(axis.label, c.label, step)
+                }
 
         else:
-            croot = CustomNode([(cpt.count, axis.label) for cpt in axis.components])
+            croot = CustomNode(
+                [(cpt.count, axis.label, cpt.label) for cpt in axis.components]
+            )
             if strictly_all(sub is not None for sub in csubtrees):
                 cparent_to_children = {
                     croot.id: [sub.root for sub in csubtrees]
@@ -1312,15 +1211,9 @@ def _compute_layouts(
             _tabulate_count_array_tree(axes, axis, fulltree, offset)
 
             for subpath, offset_data in fulltree.items():
-                axis_ = axis
-                labels = []
-                for cpt in subpath:
-                    labels.append(axis_.label)
-                    axis_ = axes.child(axis_, cpt)
-
-                layouts[path + subpath] = TabulatedLayout(offset_data)
+                layouts[path | subpath] = TabulatedLayout(offset_data)
             ctree = None
-            steps = {path: axes.calc_size(axis)}
+            steps = {path: _axis_size(axes, axis)}
 
             return layouts | merge_dicts(sublayoutss), ctree, steps
 
@@ -1338,18 +1231,18 @@ def _compute_layouts(
                 sublayouts = sublayoutss[cidx].copy()
 
                 new_layout = AffineLayout(axis.label, mycomponent.label, step, start)
-                sublayouts[path | mycomponent.label] = new_layout
-                start += mycomponent.calc_size(axes, axis)
+                sublayouts[path | {axis.label: mycomponent.label}] = new_layout
+                start += _axis_component_size(axes, axis, mycomponent)
 
                 layouts |= sublayouts
-            steps = {path: axes.calc_size(axis)}
+            steps = {path: _axis_size(axes, axis)}
             return layouts, None, steps
 
 
 # I don't think that this actually needs to be a tree, just return a dict
 # TODO I need to clean this up a lot now I'm using component labels
 def _create_count_array_tree(
-    ctree, current_node=None, counts=PrettyTuple(), component_path=PrettyTuple()
+    ctree, current_node=None, counts=PrettyTuple(), path=pmap()
 ):
     from pyop3.distarray import MultiArray
 
@@ -1357,13 +1250,15 @@ def _create_count_array_tree(
     arrays = {}
 
     for cidx in range(current_node.degree):
-        cpt_label = current_node.counts[cidx][2]
+        count, axis_label, cpt_label = current_node.counts[cidx]
+
         child = ctree.children(current_node)[cidx]
+        new_path = path | {axis_label: cpt_label}
         if child is None:
             # make a multiarray here from the given sizes
             axes = [
-                Axis([(count, cpt_label)], axis_label)
-                for (count, axis_label, cpt_label) in counts | current_node.counts[cidx]
+                Axis([(ct, clabel)], axlabel)
+                for (ct, axlabel, clabel) in counts | current_node.counts[cidx]
             ]
             root = axes[0]
             parent_to_children = {}
@@ -1372,15 +1267,15 @@ def _create_count_array_tree(
             axtree = AxisTree(root, parent_to_children)
             countarray = MultiArray(
                 axtree,
-                data=np.full(axtree.calc_size(axtree.root), -1, dtype=IntType),
+                data=np.full(axis_tree_size(axtree), -1, dtype=IntType),
             )
-            arrays[component_path | cpt_label] = countarray
+            arrays[new_path] = countarray
         else:
             arrays |= _create_count_array_tree(
                 ctree,
                 child,
                 counts | current_node.counts[cidx],
-                component_path | cpt_label,
+                new_path,
             )
 
     return arrays
@@ -1391,22 +1286,10 @@ def _tabulate_count_array_tree(
     axis,
     count_arrays,
     offset,
-    path=PrettyTuple(),
-    indices=PrettyTuple(),
+    path=pmap(),
+    indices=pyrsistent.pmap(),
 ):
-    from pyop3.distarray import IndexedMultiArray, MultiArray
-
-    npoints = 0
-    for component in axis.components:
-        if isinstance(component.count, IndexedMultiArray):
-            count = strict_int(component.count.data.get_value(indices))
-        elif isinstance(component.count, MultiArray):
-            count = strict_int(component.count.get_value(indices))
-        else:
-            assert isinstance(component.count, numbers.Integral)
-            count = component.count
-        npoints += count
-
+    npoints = sum(_as_int(c.count, path, indices) for c in axis.components)
     permutation = (
         axis.permutation
         if axis.permutation is not None
@@ -1417,14 +1300,8 @@ def _tabulate_count_array_tree(
     point_to_component_num = np.empty(npoints, dtype=PointerType)
     pos = 0
     for cidx, component in enumerate(axis.components):
-        if isinstance(component.count, IndexedMultiArray):
-            csize = strict_int(component.count.data.get_value(indices))
-        elif isinstance(component.count, MultiArray):
-            csize = strict_int(component.count.get_value(indices))
-        else:
-            assert isinstance(component.count, numbers.Integral)
-            csize = component.count
-
+        # can determine this once above
+        csize = _as_int(component.count, path, indices)
         for i in range(csize):
             point = permutation[pos + i]
             point_to_component_id[point] = cidx
@@ -1436,16 +1313,17 @@ def _tabulate_count_array_tree(
         selected_component_num = point_to_component_num[pt]
         selected_component = axis.components[selected_component_id]
 
-        if path | selected_component.label in count_arrays:
-            count_arrays[path | selected_component.label].set_value(
-                indices | selected_component_num, offset.value
-            )
+        new_path = path | {axis.label: selected_component.label}
+        new_indices = indices | {axis.label: selected_component_num}
+        if new_path in count_arrays:
+            count_arrays[new_path].set_value(new_path, new_indices, offset.value)
             if not axis.indexed:
                 offset += step_size(
                     axes,
                     axis,
                     selected_component,
-                    indices | selected_component_num,
+                    new_path,
+                    new_indices,
                 )
         else:
             if axis.indexed:
@@ -1458,34 +1336,142 @@ def _tabulate_count_array_tree(
                 subaxis,
                 count_arrays,
                 offset,
-                path | selected_component.label,
-                indices | selected_component_num,
+                new_path,
+                new_indices,
             )
 
             if axis.indexed:
                 offset.value = saved_offset
 
 
+# TODO this whole function sucks, should accumulate earlier
 def _collect_at_leaves(
     axes,
     values,
     axis: Axis | None = None,
-    component_path=PrettyTuple(),
+    path=pmap(),
     prior=PrettyTuple(),
 ):
     axis = axis or axes.root
     acc = {}
 
     for cpt in axis.components:
-        if component_path | cpt.label in values:
-            prior_ = prior | values[component_path | cpt.label]
+        new_path = path | {axis.label: cpt.label}
+        if new_path in values:
+            prior_ = prior | values[new_path]
         else:
             prior_ = prior
         if subaxis := axes.child(axis, cpt):
-            acc |= _collect_at_leaves(
-                axes, values, subaxis, component_path | cpt.label, prior_
-            )
+            acc |= _collect_at_leaves(axes, values, subaxis, new_path, prior_)
         else:
-            acc[component_path | cpt.label] = prior_
+            acc[new_path] = prior_
 
     return acc
+
+
+def axis_tree_size(axes: AxisTree) -> int:
+    """Return the size of an axis tree.
+
+    The returned size represents the total number of entries in the array. For
+    example, an array with shape ``(10, 3)`` will have a size of 30.
+
+    """
+    return _axis_size(axes, axes.root, pmap(), pmap())
+
+
+def _axis_size(
+    axes: AxisTree,
+    axis: Axis,
+    path: pmap[tuple[Label, Label]] = pmap(),
+    indices: Mapping = pyrsistent.pmap(),
+) -> int:
+    return sum(
+        _axis_component_size(axes, axis, cpt, path, indices) for cpt in axis.components
+    )
+
+
+def _axis_component_size(
+    axes: AxisTree,
+    axis: Axis,
+    component: AxisComponent,
+    path=pmap(),
+    indices: Mapping = pyrsistent.pmap(),
+):
+    count = _as_int(component.count, path, indices)
+    if subaxis := axes.child(axis, component):
+        return sum(
+            _axis_size(
+                axes,
+                subaxis,
+                path | {axis.label: component.label},
+                indices | {axis.label: i},
+            )
+            for i in range(count)
+        )
+    else:
+        return count
+
+
+@functools.singledispatch
+def _as_int(arg: Any, path: Mapping, indices: Mapping):
+    from pyop3.distarray import MultiArray
+
+    # cyclic import
+    if isinstance(arg, MultiArray):
+        return arg.get_value(path, indices)
+    else:
+        raise TypeError
+
+
+@_as_int.register
+def _(arg: numbers.Real, path: Mapping, indices: Mapping):
+    return strict_int(arg)
+
+
+def _path_and_indices_from_index_tuple(
+    axes, index_tuple
+) -> tuple[pmap[Label, Label], pmap[Label, int]]:
+    path = pmap()
+    indices = pmap()
+    axis = axes.root
+    for index in index_tuple:
+        if axis is None:
+            raise IndexError("Too many indices provided")
+        if isinstance(index, numbers.Integral):
+            if axis.degree > 1:
+                raise IndexError(
+                    "Cannot index multi-component array with integers, a "
+                    "2-tuple of (component index, index value) is needed"
+                )
+            cpt_label = axis.components[0].label
+        else:
+            cpt_label, index = index
+
+        cpt_index = axis.component_index(cpt_label)
+
+        if index < 0:
+            # In theory we could still get this to work...
+            raise IndexError("Cannot use negative indices")
+        # TODO need to pass indices here for ragged things
+        if index >= _as_int(axis.components[cpt_index].count, path, indices):
+            raise IndexError("Index is too large")
+
+        indices |= {axis.label: index}
+        path |= {axis.label: cpt_label}
+        axis = axes.child(axis, cpt_label)
+
+    if axis is not None:
+        raise IndexError("Insufficient number of indices given")
+
+    return path, indices
+
+
+def _trim_path(axes: AxisTree, path: Mapping) -> pyrsistent.pmap:
+    """Drop unused axes from the axis path."""
+    new_path = {}
+    axis = axes.root
+    while axis:
+        cpt_label = path[axis.label]
+        new_path[axis.label] = cpt_label
+        axis = axes.child(axis, cpt_label)
+    return pyrsistent.pmap(new_path)

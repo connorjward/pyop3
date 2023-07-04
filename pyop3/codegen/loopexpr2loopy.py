@@ -623,55 +623,16 @@ def myinnerfunc(iname, multi_index, index, jnames, loop_indices, ctx):
         new_within = {multi_index.label: ((to_label,), (jname,))}
 
     elif isinstance(index, TabulatedMap):
-        # NOTE: some maps can produce multiple jnames (but not this one)
-        raise NotImplementedError
-        jname = self._namer.next("j")
-        self._temp_kernel_data.append(
-            lp.TemporaryVariable(jname, shape=(), dtype=np.uintp)
+        jname = ctx.unique_name("j")
+        ctx.add_temporary(jname, IntType)
+
+        varname = register_scalar_assignment(
+            index.data,
+            jnames | {index.from_tuple: iname},
+            ctx,
         )
-
-        map_labels = existing_labels | (index.data.data.axes.leaf.label, 0)
-        map_jnames = existing_jnames | iname
-
-        # here we assume that maps are single component. Set the cidx to always
-        # 0 since using other indices wouldn't work as they don't exist in the
-        # map multi-array.
-        # same as in register_extent, generalise
-        labels_to_jnames = {
-            (label, 0): jname
-            for ((label, _), jname) in checked_zip(map_labels, map_jnames)
-        }
-        expr, _ = self.register_scalar_assignment(
-            index.data.data,
-            labels_to_jnames,
-            within_inames | {iname},
-            depends_on,
-        )
-
-        index_insn = lp.Assignment(
-            pym.var(jname),
-            expr,
-            id=self._namer.next("myid"),
-            within_inames=within_inames | {iname},
-            within_inames_is_final=True,
-            depends_on=depends_on,
-        )
-
-        index_insns = [index_insn]
-
-        temp_labels = list(existing_labels)
-        temp_jnames = list(existing_jnames)
-        assert len(index.from_labels) == 1
-        assert len(index.to_labels) == 1
-        for label in index.from_labels:
-            assert temp_labels.pop() == label
-            temp_jnames.pop()
-
-        (to_label,) = index.to_labels
-        new_labels = PrettyTuple(temp_labels) | to_label
-        new_jnames = PrettyTuple(temp_jnames) | jname
-        jnames = (jname,)
-        new_within = {multi_index.label: ((to_label,), (jname,))}
+        ctx.add_assignment(pym.var(jname), pym.var(varname))
+        return jname
     else:
         raise AssertionError
 
@@ -698,12 +659,12 @@ def emit_assignment_insn(
     if not scalar:
         axes = array_axes
         axis = axes.root
-        path = PrettyTuple()
+        path = pmap()
         while axis:
             cpt = just_one(
                 c for c in axis.components if (axis.label, c.label) in labels_to_jnames
             )
-            path |= cpt.label
+            path |= {axis.label: cpt.label}
             axis = axes.child(axis, cpt)
 
         emit_layout_insns(
@@ -829,26 +790,38 @@ def find_axis(axes, path, target, current_axis=None):
         return find_axis(axes, path, target, subaxis)
 
 
+# FIXME I think that I may have to emit instructions here if I have maps
+# (esp. map composition). Also I should probably "consume" extents when I emit maps
 def collect_extents(axes, path, index_path, loop_indices):
     extents = {}
     for index, cpt in index_path:
         if cpt in loop_indices:
             extents[cpt.to_tuple] = 1
         else:
+            # TODO singledispatch
             if isinstance(cpt, Slice):
                 # the stop is either provided by the index, already registered, or, lastly, the axis size
                 if cpt.stop:
                     stop = cpt.stop
-                elif cpt.from_axis in extents:
-                    stop = extents[cpt.from_tuple]
+                elif cpt.from_tuple in extents:
+                    stop = extents.pop(cpt.from_tuple)
                 else:
+                    # TODO is this still required?
                     axis = find_axis(axes, path, cpt.from_axis)
-                    cpt_index = [c.label for c in axis.components].index(cpt.from_cpt)
+                    cpt_index = axis.component_index(cpt.from_cpt)
                     stop = axis.components[cpt_index].count
                 new_extent = (stop - cpt.start) // cpt.step
                 extents[cpt.to_tuple] = new_extent
             else:
-                raise NotImplementedError("TODO")
+                assert isinstance(cpt, TabulatedMap)
+                # maps do not declare a "stop" so we can only find the extent
+                # from prior calculations or from looking at the axes
+                # we don't actually care what this size is though I don't think
+                # because we always emit arity-many
+                if cpt.from_tuple in extents:
+                    extents.pop(cpt.from_tuple)
+                extents[cpt.to_tuple] = cpt.arity
+
     return extents
 
 

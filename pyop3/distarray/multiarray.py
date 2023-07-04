@@ -72,6 +72,9 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
             raise ValueError("Can only specify one of name and prefix")
         dim = as_axis_tree(dim)
 
+        # debug
+        dim.set_up()
+
         if isinstance(data, np.ndarray):
             if dtype:
                 data = np.asarray(data, dtype=dtype)
@@ -84,7 +87,11 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
             if not dtype:
                 raise ValueError("Must either specify a dtype or provide an array")
             dtype = np.dtype(dtype)
-            data = np.zeros(dim.calc_size(dim.root), dtype=dtype)
+            # debug
+            # data = np.zeros(dim.size, dtype=dtype)
+            from pyop3.axis import axis_tree_size
+
+            data = np.zeros(axis_tree_size(dim), dtype=dtype)
         else:
             raise TypeError("data argument not recognised")
 
@@ -272,13 +279,11 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
         self._pending_write_op = None
         self._halo_modified = False
 
-    def get_value(self, indices):
-        offset = self.root.get_offset(indices)
-        return self.data[int(offset)]
+    def get_value(self, *args, **kwargs):
+        return self.data[self.axes.get_offset(*args, **kwargs)]
 
-    def set_value(self, indices, value):
-        offset = strict_int(self.root.get_offset(indices))
-        self.data[offset] = value
+    def set_value(self, path, indices, value):
+        self.data[self.root.get_offset(path, indices)] = value
 
     # aliases, this is preferred to dim
     @property
@@ -289,6 +294,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
     def root(self):
         return self.dim
 
+    # maybe I could check types here and use instead of get_value?
     def __getitem__(self, index: IndexTree | Index | IndexComponent):
         if index is Ellipsis:
             new_index = fill_shape(self.axes, self.index)

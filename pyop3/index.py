@@ -89,26 +89,18 @@ class Slice(IndexComponent):
 class Map(IndexComponent):
     fields = IndexComponent.fields | {"arity"}
 
-    # in theory we can have a selector function here too so to_labels is actually bigger?
-    # means we have multiple children?
-
-    def __init__(self, from_labels, to_labels, arity, **kwargs):
-        self.from_labels = tuple(from_labels)
-        self.to_labels = tuple(to_labels)
+    def __init__(self, from_axis, from_cpt, to_axis, to_cpt, arity, **kwargs) -> None:
+        super().__init__(from_axis, from_cpt, to_axis, to_cpt, **kwargs)
         self.arity = arity
-        self.selector = None  # TODO
-        super().__init__(**kwargs)
-
-    @property
-    def size(self):
-        return self.arity
 
 
 class TabulatedMap(Map):
     fields = Map.fields | {"data"}
 
-    def __init__(self, from_labels, to_labels, arity, data, **kwargs):
-        super().__init__(from_labels, to_labels, arity, **kwargs)
+    def __init__(
+        self, from_axis, from_cpt, to_axis, to_cpt, arity, data, **kwargs
+    ) -> None:
+        super().__init__(from_axis, from_cpt, to_axis, to_cpt, arity, **kwargs)
         self.data = data
 
 

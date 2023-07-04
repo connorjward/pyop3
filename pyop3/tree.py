@@ -15,6 +15,7 @@ from pyop3.utils import (
     flatten,
     has_unique_entries,
     just_one,
+    map_when,
     some_but_not_all,
     strictly_all,
     unique,
@@ -29,10 +30,7 @@ class NodeNotFoundException(Exception):
     pass
 
 
-class FrozenTreeException(Exception):
-    pass
-
-
+# TODO merge with LabelledNode
 class Node(pytools.ImmutableRecord):
     fields = {"degree", "id"}
 
@@ -41,6 +39,10 @@ class Node(pytools.ImmutableRecord):
     def __init__(self, degree: int, id: Id | None = None):
         self.degree = degree
         self.id = id or self._id_generator()
+
+    def component_index(self, component: NodeComponent | Label):
+        cpt_label = _as_component_label(component)
+        return [c.label for c in self.components].index(cpt_label)
 
     # TODO this is a common pattern, could be a separate function taking type, suffix and the generator
     def _unique_id(self):
@@ -135,62 +137,76 @@ class LabelledTree(pytools.ImmutableRecord):
         node_id = self._as_node_id(node)
         return self.parent_to_children[node_id]
 
-    def put_node(
+    def add_node(
         self,
         node: Node,
         parent: Node | Id | None = None,
-        component_index: int | None = None,
+        parent_component: NodeComponent | Label | None = None,
         uniquify: bool = False,
     ) -> None:
         if parent is None:
-            if component_index is not None:
-                raise ValueError("Cannot specify a component index when adding a root")
             if self.root:
                 raise ValueError("Cannot add multiple roots")
+            if parent_component is not None:
+                raise ValueError("Cannot specify a component when adding a root")
             assert not self.parent_to_children
             return self.copy(root=node)
         else:
+            parent = self._as_node(parent)
+            if parent_component is None:
+                if len(parent.components) == 1:
+                    parent_cpt_label = parent.components[0].label
+                else:
+                    raise ValueError(
+                        "Must specify a component for parents with multiple components"
+                    )
+            else:
+                parent_cpt_label = _as_component_label(parent_component)
+
+            cpt_index = parent.component_index(parent_cpt_label)
+
+            if self.parent_to_children[parent.id][cpt_index] is not None:
+                raise ValueError("Node already exists at this location")
+
             if node in self:
                 if uniquify:
                     node = node.copy(id=self._first_unique_id(node.id))
                 else:
                     raise ValueError("Cannot insert a node with the same ID")
 
-            if component_index is None:
-                if parent.degree == 1:
-                    component_index = 0
-                else:
-                    raise ValueError(
-                        "Must specify a component index for axes with multiple components"
-                    )
-
-            parent_id = self._as_node_id(parent)
-            new_parent_to_children = dict(self.parent_to_children)
-            new_children = list(new_parent_to_children[parent_id])
-            new_children[component_index] = node
-            new_parent_to_children[parent_id] = new_children
+            new_parent_to_children = {
+                k: list(v) for k, v in self.parent_to_children.items()
+            }
+            new_parent_to_children[parent.id][cpt_index] = node
             return self.copy(parent_to_children=new_parent_to_children)
 
-    def with_node(self, existing: Node | Id, new: Node) -> LabelledTree:
-        existing = self._as_node(existing)
+    # old alias
+    put_node = add_node
+
+    def replace_node(self, old: Node | Id, new: Node) -> LabelledTree:
+        old = self._as_node(old)
+
         new_root = self.root
         new_parent_to_children = {
             k: list(v) for k, v in self.parent_to_children.items()
         }
-        new_parent_to_children[new.id] = new_parent_to_children.pop(existing.id)
-        if existing == self.root:
+        new_parent_to_children[new.id] = new_parent_to_children.pop(old.id)
+
+        if old == self.root:
             new_root = new
         else:
-            parent_node, parent_cpt = self.parent(existing)
-            parent_cpt_index = [c.label for c in parent_node.components].index(
-                parent_cpt.label
-            )
+            parent_node, parent_cpt = self.parent(old)
+            parent_cpt_index = parent_node.component_index(parent_cpt)
             new_parent_to_children[parent_node.id][parent_cpt_index] = new
+
         return self.copy(root=new_root, parent_to_children=new_parent_to_children)
+
+    # old alias
+    with_node = replace_node
 
     def child(self, parent, cpt) -> Node:
         parent = self._as_node(parent)
-        cpt_label = self._as_component_label(cpt)
+        cpt_label = _as_component_label(cpt)
         cpt_index = [c.label for c in parent.components].index(cpt_label)
         return self.parent_to_children[parent.id][cpt_index]
 
@@ -241,12 +257,6 @@ class LabelledTree(pytools.ImmutableRecord):
     #     if node_id not in self.node_ids:
     #         raise NodeNotFoundException(f"{node_id} is not present in the tree")
     #     return node_id
-
-    def _as_component_label(self, cpt: NodeComponent | Label) -> Label:
-        if isinstance(cpt, NodeComponent):
-            return cpt.label
-        else:
-            return cpt
 
     def parent(self, node: Node | Id) -> tuple[Node, NodeComponent] | None:
         node = self._as_node(node)
@@ -313,7 +323,7 @@ class LabelledTree(pytools.ImmutableRecord):
             return subtree
         else:
             parent = self._as_node(parent)
-            cpt_label = self._as_component_label(component)
+            cpt_label = _as_component_label(component)
             cpt_index = [c.label for c in parent.components].index(cpt_label)
             new_parent_to_children = {
                 p: list(ch) for p, ch in self.parent_to_children.items()
@@ -401,24 +411,14 @@ class LabelledTree(pytools.ImmutableRecord):
             return nodestr
 
     def with_modified_node(self, node: Node | Id, **kwargs):
-        node = self._as_node(node)
-        return self.with_node(node, node.copy(**kwargs))
+        return self.replace_node(node, node.copy(**kwargs))
 
-    def with_modified_component(self, node, component_index=None, **kwargs):
+    def with_modified_component(
+        self, node: Node, component: NodeComponent | Label | None = None, **kwargs
+    ):
         return self.replace_node(
-            node.with_modified_component(component_index, **kwargs)
+            node, node.with_modified_component(component, **kwargs)
         )
-
-    def put_node(
-        self,
-        node: Node,
-        parent: Mapping[Node | Hashable, int] | Node | Hashable | None = None,
-        component_index=None,
-        uniquify: bool = False,
-    ) -> None:
-        if isinstance(parent, Mapping):
-            parent = self._node_from_path(parent)
-        return super().put_node(node, parent, component_index, uniquify)
 
     def _node_from_path(self, path: Mapping[Node | Hashable, int]) -> Node:
         if not path:
@@ -601,17 +601,27 @@ class LabelledNode(Node):
         super().__init__(**kwargs)
         self.label = label or self._unique_label()
 
-    def with_modified_component(self, component_index: int | None = None, **kwargs):
-        if component_index is None:
+    def with_modified_component(
+        self, component: NodeComponent | Label | None = None, **kwargs
+    ):
+        if component is None:
             if self.degree == 1:
-                component_index = 0
+                component = self.components[0]
             else:
                 raise ValueError(
                     "Must specify a component index for multi-component nodes"
                 )
 
-        new_components = apply_at(
-            lambda c: c.copy(**kwargs), self.components, component_index
+        if not isinstance(component, NodeComponent):
+            raise NotImplementedError
+        # component = self._as_node_component(component)
+
+        new_components = tuple(
+            map_when(
+                lambda c: c.copy(**kwargs),
+                lambda c: c == component,
+                self.components,
+            )
         )
         return self.copy(components=new_components)
 
@@ -681,3 +691,18 @@ def postvisit(tree, fn, current_node: Node | None = None, **kwargs) -> Any:
         ),
         **kwargs,
     )
+
+
+@functools.singledispatch
+def _as_component_label(arg: Any):
+    raise TypeError
+
+
+@_as_component_label.register
+def _(arg: NodeComponent):
+    return arg.label
+
+
+@_as_component_label.register
+def _(arg: Label):
+    return arg
