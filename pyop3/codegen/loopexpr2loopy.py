@@ -72,8 +72,7 @@ class LoopyCodegenContext(CodegenContext):
         self._args = []
         self._subkernels = []
 
-        self._within_inames = frozenset()
-        self._saved_within_inames = []
+        self._within_inames_mut = set()
         self._last_insn_id = None
 
         self._name_generator = pytools.UniqueNameGenerator()
@@ -109,7 +108,7 @@ class LoopyCodegenContext(CodegenContext):
             assignee,
             expression,
             id=self._name_generator(prefix),
-            within_inames=self._within_inames,
+            within_inames=frozenset(self._within_inames),
             within_inames_is_final=True,
             depends_on=self._depends_on,
             depends_on_is_final=True,
@@ -152,20 +151,25 @@ class LoopyCodegenContext(CodegenContext):
         self._name_generator.add_name(prefix, conflicting_ok=True)
         return self._name_generator(prefix)
 
-    def add_iname(self, iname: str) -> None:
-        self._within_inames |= {iname}
-
-    def save_within_inames(self) -> None:
-        self._saved_within_inames.append(self._within_inames)
-
-    def restore_within_inames(self) -> None:
-        self._within_inames = self._saved_within_inames.pop(-1)
+    # def add_iname(self, iname: str) -> None:
+    #     self._within_inames |= {iname}
+    #
+    # def save_within_inames(self) -> None:
+    #     self._saved_within_inames.append(self._within_inames)
+    #
+    # def restore_within_inames(self) -> None:
+    #     self._within_inames = self._saved_within_inames.pop(-1)
 
     @contextlib.contextmanager
-    def saved_within_inames(self) -> None:
-        self.save_within_inames()
+    def within_inames(self, inames) -> None:
+        self._within_inames_mut |= inames
         yield
-        self.restore_within_inames()
+        for iname in inames:
+            self._within_inames_mut.remove(iname)
+
+    @property
+    def _within_inames(self):
+        return frozenset(self._within_inames_mut)
 
     @property
     def _depends_on(self):
@@ -178,7 +182,7 @@ class LoopyCodegenContext(CodegenContext):
 
 def compile(expr: LoopExpr, name="mykernel"):
     ctx = LoopyCodegenContext()
-    _compile(expr, {}, ctx)
+    _compile(expr, pmap(), ctx)
 
     translation_unit = lp.make_kernel(
         ctx.domains,
@@ -190,7 +194,7 @@ def compile(expr: LoopExpr, name="mykernel"):
         # options=lp.Options(check_dep_resolution=False),
     )
     tu = lp.merge((translation_unit, *ctx.subkernels))
-    # breakpoint()
+    breakpoint()
     return tu.with_entrypoints("mykernel")
 
 
@@ -200,77 +204,182 @@ def _compile(expr: Any, ctx: LoopyCodegenContext) -> None:
 
 
 @_compile.register
-def _(loop: Loop, loop_indices, ctx: LoopyCodegenContext) -> None:
-    # this is a map from axis labels to extents, if we hit an index over a new thing
-    # then we get the size from the array, else we can modify the sizes provided
-    # how do maps impact this? just like a slice I think, "consume" the prior index
-    # and yield a new one with size arity? no. it wouldn't modify the input set, a slice does
+def _(
+    loop: Loop,
+    loop_indices,
+    ctx: LoopyCodegenContext,
+    index=None,
+    path=pmap(),
+    loop_sizes=pmap(),
+    jnames=pmap(),
+    ipath=(),
+) -> None:
+    index = index or loop.index.root
 
-    # I need to think about how I traverse the iterset since I only want one path at a time,
-    # but some loops are reused!
+    for icpt in index.components:
+        new_loop_sizes = dict(loop_sizes)
+        new_ipath = ipath + ((index, icpt),)
+        new_jnames = dict(jnames)
+        new_loop_indices = dict(loop_indices)
 
-    # we should definitely do some of the this at the bottom of the traversal, that way we
-    # know which axes are getting looped over? tricky if we have duplicate axis labels on
-    # different paths. collect axes and components as we go down and then find the right ones
-    # to reconstruct the path at the bottom.
+        # is this needed?
+        new_path = dict(path)
+        new_path.pop(icpt.from_axis, None)
+        new_path.update({icpt.to_axis: icpt.to_cpt})
 
-    # NOTE: currently maps only map between components of the same axis.
-    # I don't know if this is a strict limitation or just untested.
+        # I don't have a clear distinction between jnames and loop indices, they both
+        # already exist - jnames refer to things above but within the axis hierarchy
+        # loop_indices are matched on the *specific* index component and come from elsewher
+        if icpt in loop_indices:
+            assert icpt.to_axis not in new_jnames
+            new_loop_sizes[icpt.to_axis] = 1
+        else:
+            # TODO singledispatch
+            if isinstance(icpt, Slice):
+                # the stop is either provided by the index, already registered, or, lastly, the axis size
+                if icpt.stop:
+                    stop = icpt.stop
+                elif icpt.from_axis in new_loop_sizes:
+                    stop = new_loop_sizes.pop(icpt.from_axis)
+                else:
+                    # TODO is this still required?
+                    axis = find_axis(loop.axes, path, icpt.from_axis)
+                    cpt_index = axis.component_index(icpt.from_cpt)
+                    stop = axis.components[cpt_index].count
+                # TODO add a remainder?
+                new_extent = (stop - icpt.start) // icpt.step
+                new_loop_sizes[icpt.to_axis] = new_extent
+                emit_domain = False
 
-    for leaf_index, leaf_cpt in loop.index.leaves:
-        index_path = loop.index.path(leaf_index, leaf_cpt)
+                # I want to emit a domain if the subtree doesn't index it further...
+                # this is how we get consistent trees for temporaries and indices
+                # start with the temporary dimension stuff
+                # what if it's only indexed in one subtree but not another?
+                """
+                Slice(ax0)
+                  -> Slice(ax1)
+                       -> Slice(ax0)
+                       -> Slice(ax1)  # but what if I do this?
+                  -> Slice(ax2)
 
-        axis_path = {}
-        for index, cpt in index_path:
-            if cpt.from_axis in axis_path:
-                axis_path.pop(cpt.from_axis)
-            axis_path |= {cpt.to_axis: cpt.to_cpt}
+                for the temporary this would mean that there is size for one component
+                but not another
 
-        # register loops. this must be done at the bottom of the tree because we
-        # only know now how big the emitted loops need to be. For example repeated
-        # slices of the same axis will result in a single, smaller, loop.
+                I think that we have to only emit shape at the bottom or when maps require
+                us to. This should still work for temporaries as the indices of the array
+                should still match the shape of the temporary.
+                """
+            else:
+                assert isinstance(cpt, TabulatedMap)
+                # maps do not declare a "stop" so we can only find the extent
+                # from prior calculations or from looking at the axes
+                # we don't actually care what this size is though I don't think
+                # because we always emit arity-many
+                if icpt.from_axis in new_loop_sizes:
+                    old_extent = new_loop_sizes.pop(icpt.from_axis)
+                else:
+                    # TODO is this still required?
+                    axis = find_axis(loop.axes, path, icpt.from_axis)
+                    cpt_index = axis.component_index(icpt.from_cpt)
+                    old_extent = axis.components[cpt_index].count
 
-        # map from axes to sizes, components? maps always target the same axis
-        # so should be fine.
-        extents = collect_extents(loop.index.axes, axis_path, index_path, loop_indices)
+                # now register a loop/iname for old_extent
+                # plus an appropriate jname
 
-        # now generate loops for each of these extents, keep the same mapping from
-        # axis labels to, now, inames
-        with ctx.saved_within_inames():
-            new_inames = set()
-            jnames = {}
-            for axis_label, extent in extents.items():
-                extent = register_extent(
-                    extent,
-                    jnames,
+                ###
+
+                # this is copied below for the bottom of the tree
+                extent_varname = register_extent(
+                    old_extent,
+                    new_jnames,
                     ctx,
                 )
-                iname = ctx.unique_name("i")
-                ctx.add_domain(iname, extent)
-                ctx.add_iname(iname)
-                jnames[axis_label] = iname
-                new_inames.add(iname)
+                new_iname = ctx.unique_name("i")
+                ctx.add_domain(new_iname, extent_varname)
+                new_jnames[icpt.to_axis] = new_iname
+                new_inames.add(new_iname)
 
-            # now traverse the slices in reverse, transforming the inames to jnames and
-            # the right index expressions
-            new_loop_indices = {}
-            for index, icpt in reversed(loop.index.path(leaf_index, leaf_cpt)):
-                jname = jnames.pop(icpt.to_tuple)
-                new_jname = myinnerfunc(
-                    jname,
-                    index,
-                    icpt,
-                    jnames,
-                    new_loop_indices,
-                    ctx,
-                )
-                assert icpt.from_tuple not in jnames
-                jnames[icpt.from_tuple] = new_jname
-                new_loop_indices |= {icpt: new_jname}
+                emit_domain = True
 
-            # The loop indices have been registered, now handle the loop statements
-            for stmt in loop.statements:
-                _compile(stmt, new_loop_indices, ctx)
+            # now generate loops for each of these extents, keep the same mapping from
+            # axis labels to, now, inames
+            new_within_inames = {new_iname} if emit_domain else set()
+            with ctx.within_inames(new_within_inames):
+                if emit_domain:
+                    # now traverse the slices in reverse, transforming the inames to jnames and
+                    # the right index expressions
+                    for index_, icpt_ in reversed(new_ipath):
+                        jname = new_jnames.pop(icpt_.to_axis)
+                        new_jname = myinnerfunc(
+                            jname,
+                            index_,
+                            icpt_,
+                            new_jnames,
+                            loop_indices,
+                            ctx,
+                        )
+                        assert icpt_.from_axis not in new_jnames
+                        new_jnames[icpt_.from_axis] = new_jname
+                        new_loop_indices[icpt_] = new_jname
+
+                    # now reset the index path
+                    # FIXME I think that this is wrong. We need to collect
+                    # slices over the same axis together and drop those. Some
+                    # prior indices might still be needed.
+                    new_loop_sizes[icpt.to_axis] = icpt.arity
+                    new_ipath = ()
+
+                if subidx := loop.index.child(index, icpt):
+                    # TODO make this a function that is specific to the loop. Would
+                    # make the recursion cleaner too
+                    # do I need new_path??
+                    _compile(
+                        loop,
+                        loop_indices,
+                        ctx,
+                        subidx,
+                        pmap(new_path),
+                        pmap(new_loop_sizes),
+                        pmap(new_jnames),
+                        new_ipath,
+                    )
+
+                # at the bottom, handle remaining sizes
+                else:
+                    # emit loops for any unhandled shape
+                    new_inames = set()
+                    for ax_label, size in new_loop_sizes.items():
+                        extent_varname = register_extent(
+                            size,
+                            new_jnames,
+                            ctx,
+                        )
+                        new_iname = ctx.unique_name("i")
+                        ctx.add_domain(new_iname, extent_varname)
+                        new_inames.add(new_iname)
+                        new_jnames[ax_label] = new_iname
+
+                    with ctx.within_inames(new_inames):
+                        # now traverse the slices in reverse, transforming the inames to jnames and
+                        # the right index expressions
+                        for index_, icpt_ in reversed(new_ipath):
+                            jname = new_jnames.pop(icpt_.to_axis)
+                            new_jname = myinnerfunc(
+                                jname,
+                                index_,
+                                icpt_,
+                                new_jnames,
+                                loop_indices,
+                                ctx,
+                            )
+                            assert icpt_.from_axis not in new_jnames
+                            new_jnames[icpt_.from_axis] = new_jname
+                            new_loop_indices[icpt_] = new_jname
+
+                        # here I need to handle whatever bits remain...
+                        # The loop indices have been registered, now handle the loop statements
+                        for stmt in loop.statements:
+                            _compile(stmt, pmap(new_loop_indices), ctx)
 
 
 @_compile.register
@@ -390,177 +499,237 @@ def _(call: FunctionCall, loop_indices, ctx: LoopyCodegenContext) -> None:
 
 
 # FIXME this is practically identical to what we do in build_loop
-def build_assignment(assignment, loop_indices, ctx):
-    for (lleaf, lcidx), (rleaf, rcidx) in checked_zip(
-        assignment.lhs.index.leaves, assignment.rhs.index.leaves
-    ):
-        # copied from build_loop
-        lindex_path = assignment.lhs.index.path(lleaf, lcidx)
-        laxis_path = {}
-        for _, cpt in lindex_path:
-            if cpt.from_axis in laxis_path:
-                laxis_path.pop(cpt.from_axis)
-            laxis_path |= {cpt.to_axis: cpt.to_cpt}
+def build_assignment(
+    assignment,
+    loop_indices,
+    ctx,
+    index=None,
+    path=pmap(),
+    loop_sizes=pmap(),
+    jnames=pmap(),
+    ipath=(),
+    temporary_jnames=pmap(),
+    temp_path=(),
+    taxis=None,
+):
+    # copied from build_loop
+    # breakpoint()
+    index = index or assignment.array.index.root
+    taxis = taxis or assignment.temporary.axes.root
 
-        rindex_path = assignment.rhs.index.path(rleaf, rcidx)
-        raxis_path = {}
-        for _, cpt in rindex_path:
-            if cpt.from_axis in raxis_path:
-                raxis_path.pop(cpt.from_axis)
-            raxis_path |= {cpt.to_axis: cpt.to_cpt}
+    for icpt, tcpt in checked_zip(index.components, taxis.components):
+        new_loop_sizes = dict(loop_sizes)
+        new_ipath = ipath + ((index, icpt),)
+        new_jnames = dict(jnames)
+        new_loop_indices = dict(loop_indices)
 
-        # at the bottom, now emit the loops and assignment
+        new_temp_path = temp_path + ((taxis.label, tcpt.label),)
+        new_temporary_jnames = dict(temporary_jnames)
 
-        # register loops. this must be done at the bottom of the tree because we
-        # only know now how big the emitted loops need to be. For example repeated
-        # slices of the same axis will result in a single, smaller, loop.
+        # is this needed?
+        new_path = dict(path)
+        new_path.pop(icpt.from_axis, None)
+        new_path.update({icpt.to_axis: icpt.to_cpt})
 
-        # map from axes to sizes, components? maps always target the same axis
-        # so should be fine.
-        lextents = collect_extents(
-            assignment.lhs.axes,
-            laxis_path,
-            lindex_path,
-            loop_indices,
-        )
-        rextents = collect_extents(
-            assignment.rhs.axes,
-            raxis_path,
-            rindex_path,
-            loop_indices,
-        )
+        # I don't have a clear distinction between jnames and loop indices, they both
+        # already exist - jnames refer to things above but within the axis hierarchy
+        # loop_indices are matched on the *specific* index component and come from elsewher
+        if icpt in loop_indices:
+            assert icpt.to_axis not in new_jnames
+            new_loop_sizes[icpt.to_axis] = 1
+            # awful hack
+            new_iname = ctx.unique_name("i")
+            ctx.add_temporary(new_iname)
+            ctx.add_assignment(pym.var(new_iname), 0)
+            new_temporary_jnames[taxis.label] = new_iname
+            emit_domain = False
+        else:
+            # TODO singledispatch
+            if isinstance(icpt, Slice):
+                # the stop is either provided by the index, already registered, or, lastly, the axis size
+                if icpt.stop:
+                    stop = icpt.stop
+                elif icpt.from_axis in new_loop_sizes:
+                    stop = new_loop_sizes.pop(icpt.from_axis)
+                else:
+                    # TODO is this still required?
+                    axis = find_axis(assignment.array.axes, path, icpt.from_axis)
+                    cpt_index = axis.component_index(icpt.from_cpt)
+                    stop = axis.components[cpt_index].count
+                # TODO add a remainder?
+                new_extent = (stop - icpt.start) // icpt.step
+                new_loop_sizes[icpt.to_axis] = new_extent
+                emit_domain = False
 
-        # breakpoint()
+            else:
+                assert isinstance(cpt, TabulatedMap)
+                # maps do not declare a "stop" so we can only find the extent
+                # from prior calculations or from looking at the axes
+                # we don't actually care what this size is though I don't think
+                # because we always emit arity-many
+                if icpt.from_axis in new_loop_sizes:
+                    old_extent = new_loop_sizes.pop(icpt.from_axis)
+                else:
+                    # TODO is this still required?
+                    axis = find_axis(assignment.array.axes, path, icpt.from_axis)
+                    cpt_index = axis.component_index(icpt.from_cpt)
+                    old_extent = axis.components[cpt_index].count
 
-        liter = iter(lextents.items())
-        riter = iter(rextents.items())
+                # now register a loop/iname for old_extent
+                # plus an appropriate jname
 
-        ljnames = {}
-        rjnames = {}
-        with ctx.saved_within_inames():
-            try:
-                while True:
-                    lnext = next(liter)
-                    while lnext[1] == 1:
-                        iname = ctx.unique_name("i")
-                        ctx.add_domain(iname, 1)
-                        ljnames[lnext[0]] = iname
-                        ctx.add_iname(iname)
-                        lnext = next(liter)
-                    rnext = next(riter)
-                    while rnext[1] == 1:
-                        iname = ctx.unique_name("i")
-                        ctx.add_domain(iname, 1)
-                        rjnames[rnext[0]] = iname
-                        ctx.add_iname(iname)
-                        rnext = next(riter)
+                ###
 
-                    extent = register_extent(
-                        single_valued([lnext[1], rnext[1]]),
+                # this is copied below for the bottom of the tree
+                extent_varname = register_extent(
+                    old_extent,
+                    new_jnames,
+                    ctx,
+                )
+                new_iname = ctx.unique_name("i")
+                ctx.add_domain(new_iname, extent_varname)
+                new_jnames[icpt.to_axis] = new_iname
+                new_inames.add(new_iname)
+                new_temporary_jnames[taxis.label] = new_iname
+
+                emit_domain = True
+
+        # now generate loops for each of these extents, keep the same mapping from
+        # axis labels to, now, inames
+        new_within_inames = {new_iname} if emit_domain else set()
+        with ctx.within_inames(new_within_inames):
+            if emit_domain:
+                # now traverse the slices in reverse, transforming the inames to jnames and
+                # the right index expressions
+                for index_, icpt_ in reversed(new_ipath):
+                    jname = new_jnames.pop(icpt_.to_axis)
+                    new_jname = myinnerfunc(
+                        jname,
+                        index_,
+                        icpt_,
+                        new_jnames,
                         loop_indices,
                         ctx,
                     )
-                    iname = ctx.unique_name("i")
-                    ctx.add_domain(iname, extent)
-                    ljnames[lnext[0]] = iname
-                    rjnames[rnext[0]] = iname
-                    ctx.add_iname(iname)
-            except StopIteration:
-                try:
-                    # FIXME what if rhs throws the exception instead of lhs?
-                    rnext = next(riter)
-                    while rnext[1] == 1:
-                        iname = ctx.unique_name("i")
-                        ctx.add_domain(iname, 1)
-                        rjnames[rnext[0]] = iname
-                        ctx.add_iname(iname)
-                        rnext = next(riter)
-                    raise AssertionError("iterator should also be consumed")
-                except StopIteration:
-                    pass
+                    assert icpt_.from_axis not in new_jnames
+                    new_jnames[icpt_.from_axis] = new_jname
+                    new_loop_indices[icpt_] = new_jname
 
-            # now traverse the slices in reverse, transforming the inames to jnames and
-            # the right index expressions
-            # LHS
-            for multi_index, index in reversed(assignment.lhs.index.path(lleaf, lcidx)):
-                jname = ljnames.pop(index.to_tuple)
-                new_jname = myinnerfunc(
-                    jname,
-                    multi_index,
-                    index,
-                    ljnames,
+                # now reset the index path
+                # FIXME I think that this is wrong. We need to collect
+                # slices over the same axis together and drop those. Some
+                # prior indices might still be needed.
+                new_loop_sizes[icpt.to_axis] = icpt.arity
+                new_ipath = ()
+
+            if subidx := assignment.array.index.child(index, icpt):
+                subtaxis = assignment.temporary.axes.child(taxis, tcpt)
+                # TODO make this a function that is specific to the loop. Would
+                # make the recursion cleaner too
+                # do I need new_path??
+                build_assignment(
+                    assignment,
                     loop_indices,
                     ctx,
+                    subidx,
+                    pmap(new_path),
+                    pmap(new_loop_sizes),
+                    pmap(new_jnames),
+                    new_ipath,
+                    pmap(new_temporary_jnames),
+                    new_temp_path,
+                    subtaxis,
                 )
-                assert index.from_tuple not in ljnames
-                ljnames[index.from_tuple] = new_jname
 
-            # RHS
-            for multi_index, index in reversed(assignment.rhs.index.path(rleaf, rcidx)):
-                jname = rjnames.pop(index.to_tuple)
-                new_jname = myinnerfunc(
-                    jname,
-                    multi_index,
-                    index,
-                    rjnames,
-                    loop_indices,
-                    ctx,
-                )
-                assert index.from_tuple not in rjnames
-                rjnames[index.from_tuple] = new_jname
-
-            lhs_labels_to_jnames = ljnames
-            rhs_labels_to_jnames = rjnames
-
-            if assignment.lhs is assignment.array:
-                array_labels_to_jnames = lhs_labels_to_jnames
-                temp_labels_to_jnames = rhs_labels_to_jnames
+            # at the bottom, handle remaining sizes
             else:
-                temp_labels_to_jnames = lhs_labels_to_jnames
-                array_labels_to_jnames = rhs_labels_to_jnames
+                # emit loops for any unhandled shape
+                new_inames = set()
+                for ax_label, size in new_loop_sizes.items():
+                    extent_varname = register_extent(
+                        size,
+                        new_jnames,
+                        ctx,
+                    )
+                    new_iname = ctx.unique_name("i")
+                    ctx.add_domain(new_iname, extent_varname)
+                    new_inames.add(new_iname)
+                    new_jnames[ax_label] = new_iname
+                    new_temporary_jnames[taxis.label] = new_iname
 
-            ###
+                    assert taxis.degree == 1
+                    tcpt = taxis.components[0]
+                    new_temp_path += ((taxis.label, tcpt.label),)
+                    taxis = assignment.temporary.axes.child(taxis, tcpt)
 
-            array_offset = emit_assignment_insn(
-                assignment.array.name,
-                assignment.array.axes,
-                array_labels_to_jnames,
-                ctx,
-            )
-            temp_offset = emit_assignment_insn(
-                assignment.temporary.name,
-                assignment.temporary.axes,
-                temp_labels_to_jnames,
-                ctx,
-            )
+                assert taxis is None
 
-            array = assignment.array
-            temporary = assignment.temporary
+                with ctx.within_inames(new_inames):
+                    # now traverse the slices in reverse, transforming the inames to jnames and
+                    # the right index expressions
+                    for index_, icpt_ in reversed(new_ipath):
+                        jname = new_jnames.pop(icpt_.to_axis)
+                        new_jname = myinnerfunc(
+                            jname,
+                            index_,
+                            icpt_,
+                            new_jnames,
+                            loop_indices,
+                            ctx,
+                        )
+                        assert icpt_.from_axis not in new_jnames
+                        new_jnames[icpt_.from_axis] = new_jname
+                        new_loop_indices[icpt_] = new_jname
 
-            # hack to handle the fact that temporaries can have shape but we want to
-            # linearly index it here
-            extra_indices = (0,) * (len(assignment.shape) - 1)
-            temp_expr = pym.subscript(
-                pym.var(temporary.name), extra_indices + (pym.var(temp_offset),)
-            )
-            array_expr = pym.subscript(pym.var(array.name), pym.var(array_offset))
+                    # here I need to handle whatever bits remain...
+                    # The loop indices have been registered, now handle the loop statements
 
-            if isinstance(assignment, tlang.Read):
-                lexpr = temp_expr
-                rexpr = array_expr
-            elif isinstance(assignment, tlang.Write):
-                lexpr = array_expr
-                rexpr = temp_expr
-            elif isinstance(assignment, tlang.Increment):
-                lexpr = array_expr
-                rexpr = array_expr + temp_expr
-            elif isinstance(assignment, tlang.Zero):
-                lexpr = temp_expr
-                rexpr = 0
-            else:
-                raise NotImplementedError
+                    ###
 
-            ctx.add_assignment(lexpr, rexpr)
+                    array_offset = emit_assignment_insn(
+                        assignment.array.name,
+                        assignment.array.axes,
+                        pmap(new_path),
+                        pmap(new_jnames),
+                        ctx,
+                    )
+                    temp_offset = emit_assignment_insn(
+                        assignment.temporary.name,
+                        assignment.temporary.axes,
+                        pmap(new_temp_path),
+                        pmap(new_temporary_jnames),
+                        ctx,
+                    )
+
+                    array = assignment.array
+                    temporary = assignment.temporary
+
+                    # hack to handle the fact that temporaries can have shape but we want to
+                    # linearly index it here
+                    extra_indices = (0,) * (len(assignment.shape) - 1)
+                    temp_expr = pym.subscript(
+                        pym.var(temporary.name), extra_indices + (pym.var(temp_offset),)
+                    )
+                    array_expr = pym.subscript(
+                        pym.var(array.name), pym.var(array_offset)
+                    )
+
+                    if isinstance(assignment, tlang.Read):
+                        lexpr = temp_expr
+                        rexpr = array_expr
+                    elif isinstance(assignment, tlang.Write):
+                        lexpr = array_expr
+                        rexpr = temp_expr
+                    elif isinstance(assignment, tlang.Increment):
+                        lexpr = array_expr
+                        rexpr = array_expr + temp_expr
+                    elif isinstance(assignment, tlang.Zero):
+                        lexpr = temp_expr
+                        rexpr = 0
+                    else:
+                        raise NotImplementedError
+
+                    ctx.add_assignment(lexpr, rexpr)
 
 
 # loop indices and jnames are very similar...
@@ -648,6 +817,7 @@ def myinnerfunc(iname, multi_index, index, jnames, loop_indices, ctx):
 def emit_assignment_insn(
     array_name,
     array_axes,  # can be None
+    path,
     labels_to_jnames,
     ctx,
     scalar=False,
@@ -659,14 +829,6 @@ def emit_assignment_insn(
     if not scalar:
         axes = array_axes
         axis = axes.root
-        path = pmap()
-        while axis:
-            cpt = just_one(
-                c for c in axis.components if (axis.label, c.label) in labels_to_jnames
-            )
-            path |= {axis.label: cpt.label}
-            axis = axes.child(axis, cpt)
-
         emit_layout_insns(
             axes,
             offset,
@@ -701,7 +863,7 @@ def emit_layout_insns(
         elif isinstance(layout_fn, AffineLayout):
             start = layout_fn.start
             step = layout_fn.step
-            jname = pym.var(labels_to_jnames[(layout_fn.axis, layout_fn.cpt)])
+            jname = pym.var(labels_to_jnames[layout_fn.axis])
             expr += jname * step + start
         else:
             raise NotImplementedError
@@ -832,6 +994,7 @@ def temporary_axes(
     index=None,
     axis_path=pmap(),
     index_path=PrettyTuple(),
+    sizes=pmap(),
 ):
     index = index or indices.root
     # TODO copied from build_loop, refactor into a tree traversal
@@ -840,36 +1003,73 @@ def temporary_axes(
     # I can just loop over the leaves at the base? sorta, need to build the tree
     # If I track the leaves I can still reconstruct at the base
     # FIXME need to handle within_indices
+    component_sizes = []
     subtrees = []
-    for index_cpt in index.components:
+    for icpt in index.components:
         new_axis_path = axis_path
-        new_index_path = index_path
+        new_index_path = index_path | (index, icpt)
+        new_sizes = dict(sizes)
 
-        if index_cpt.from_axis in new_axis_path:
-            assert new_axis_path[index_cpt.from_axis] == index_cpt.from_cpt
-            new_axis_path = new_axis_path.discard(index_cpt.from_axis)
-        new_axis_path |= {index_cpt.to_axis: index_cpt.to_cpt}
+        if icpt.from_axis in new_axis_path:
+            assert new_axis_path[icpt.from_axis] == icpt.from_cpt
+            new_axis_path = new_axis_path.discard(icpt.from_axis)
+        new_axis_path |= {icpt.to_axis: icpt.to_cpt}
 
-        new_index_path |= (index, index_cpt)
+        ### handle slices, maps etc
 
-        if subindex := indices.child(index, index_cpt):
+        if icpt in loop_indices:
+            assert icpt.to_axis not in sizes
+            component_sizes.append(1)
+        else:
+            # TODO singledispatch
+            if isinstance(icpt, Slice):
+                if icpt.stop:
+                    stop = icpt.stop
+                elif icpt.from_axis in new_sizes:
+                    stop = new_sizes.pop(icpt.from_axis)
+                else:
+                    # TODO is this still required?
+                    axis = find_axis(axes, axis_path, icpt.from_axis)
+                    cpt_index = axis.component_index(icpt.from_cpt)
+                    stop = axis.components[cpt_index].count
+                # TODO add a remainder?
+                new_extent = (stop - icpt.start) // icpt.step
+                new_sizes[icpt.to_axis] = new_extent
+                # slices are handled later
+                component_sizes.append(1)
+
+            else:
+                assert isinstance(cpt, TabulatedMap)
+                if icpt.from_axis in new_sizes:
+                    old_extent = new_sizes.pop(icpt.from_axis)
+                else:
+                    axis = find_axis(axes, axis_path, icpt.from_axis)
+                    cpt_index = axis.component_index(icpt.from_cpt)
+                    old_extent = axis.components[cpt_index].count
+                new_sizes[icpt.to_axis] = icpt.arity
+                component_sizes.append(old_extent)
+                # reset this
+                # FIXME I think that this is wrong - do per axis label
+                new_index_path = ()
+
+        ### now recurse
+
+        if subindex := indices.child(index, icpt):
             subtree = temporary_axes(
                 axes,
                 indices,
                 loop_indices,
                 subindex,
-                new_axis_path,
+                pmap(new_axis_path),
                 new_index_path,
             )
             subtrees.append(subtree)
         else:
             # at the bottom, build the axes
-            extents = collect_extents(axes, new_axis_path, new_index_path, loop_indices)
-
             root = None
             parent_to_children = {}
-            for axis_label, extent in extents.items():
-                new_axis = Axis(extent, axis_label)
+            for axis_label, size in new_sizes.items():
+                new_axis = Axis(size)
                 if root is None:
                     root = new_axis
                 else:
@@ -879,8 +1079,20 @@ def temporary_axes(
             subtrees.append(subtree)
 
     # convert the subtrees to a full one
-    root = Axis([1] * index.degree, index.label)
+    root = Axis(component_sizes)
     parent_to_children = {
         root.id: [subtree.root] for subtree in subtrees
     } | merge_dicts([subtree.parent_to_children for subtree in subtrees])
     return AxisTree(root, parent_to_children)
+
+
+def shared_preorder_indices():
+    # determine extents
+    pre_func(lhs_context)
+    pre_func(rhs_context)
+    # if a loop is needed, do a shared thing, could just be an assertion
+
+    post_func(lhs_context)
+    post_func(rhs_context)
+
+    # recurse or do final thing

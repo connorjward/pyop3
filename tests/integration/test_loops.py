@@ -171,7 +171,12 @@ def test_vector_copy(vector_copy_kernel):
         dtype=ScalarType,
     )
 
-    do_loop(p := axes.root.index, vector_copy_kernel(dat0[p], dat1[p]))
+    # do_loop(p := axes.root.index, vector_copy_kernel(dat0[p], dat1[p]))
+    l = loop(p := axes.root.index, vector_copy_kernel(dat0[p], dat1[p]))
+    from pyop3.codegen.loopexpr2loopy import compile
+
+    compile(l)
+    l()
 
     assert np.allclose(dat1.data, dat0.data)
 
@@ -667,12 +672,7 @@ def test_scalar_copy_of_subset(scalar_copy_kernel):
     )
     subset = MultiArray(saxes, name="subset0", data=sdata)
 
-    p = saxes.root.index
-    p = p.add_node(
-        Index(TabulatedMap("sax0", "scpt0", "ax0", "cpt0", arity=1, data=subset)),
-        *p.leaf,
-    )
-
+    p = (Index(TabulatedMap("sax0", "scpt0", "ax0", "cpt0", arity=1, data=subset)),)
     do_loop(p, scalar_copy_kernel(dat0[p], dat1[p]))
 
     assert np.allclose(dat1.data[sdata], dat0.data[sdata])
