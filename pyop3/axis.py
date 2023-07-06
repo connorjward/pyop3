@@ -708,8 +708,6 @@ def size_requires_external_index(axes, axis, component, depth=0):
     from pyop3.distarray import MultiArray
 
     count = component.count
-    if isinstance(count, MultiArray):
-        count = count.data
     if not component.has_integer_count and count.axes.depth > depth:
         return True
     else:

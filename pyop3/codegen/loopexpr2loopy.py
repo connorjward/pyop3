@@ -271,6 +271,7 @@ def _parse_loop(
 
             sizename = register_extent(
                 size,
+                pmap(new_path),
                 new_jnames,
                 ctx,
             )
@@ -521,6 +522,7 @@ def _parse_assignment_rec(
 
             extent_varname = register_extent(
                 extent,
+                pmap(new_path),
                 new_jnames,
                 ctx,
             )
@@ -751,7 +753,7 @@ def emit_layout_insns(
     ctx.add_assignment(offset_var, expr)
 
 
-def register_extent(extent, jnames, ctx):
+def register_extent(extent, path, jnames, ctx):
     if isinstance(extent, numbers.Integral):
         return extent
 
@@ -762,7 +764,20 @@ def register_extent(extent, jnames, ctx):
 
     replace_map = {}
     for array in collect_arrays(extent):
-        varname = register_scalar_assignment(array, jnames, ctx)
+        # trim path and labels so only existing axes are used
+        trimmed_path = {}
+        trimmed_jnames = {}
+        laxes = array.axes
+        laxis = laxes.root
+        while laxis:
+            trimmed_path[laxis.label] = path[laxis.label]
+            trimmed_jnames[laxis.label] = jnames[laxis.label]
+            lcpt = just_one(laxis.components)
+            laxis = laxes.child(laxis, lcpt)
+        trimmed_path = pmap(trimmed_path)
+        trimmed_jnames = pmap(trimmed_jnames)
+
+        varname = register_scalar_assignment(array, trimmed_path, trimmed_jnames, ctx)
         replace_map[array.name] = varname
 
     varname = ctx.unique_name("p")
