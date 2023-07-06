@@ -194,7 +194,7 @@ def compile(expr: LoopExpr, name="mykernel"):
         # options=lp.Options(check_dep_resolution=False),
     )
     tu = lp.merge((translation_unit, *ctx.subkernels))
-    breakpoint()
+    # breakpoint()
     return tu.with_entrypoints("mykernel")
 
 
@@ -226,7 +226,7 @@ def _parse_loop(
 ):
     for icpt in index.components:
         # TODO I hate that these are mutable
-        new_loop_indices = dict(loop_indices)
+        new_loop_indices = loop_indices
         # is this needed?
         new_path = dict(path)
         new_path.pop(icpt.from_axis, None)
@@ -242,25 +242,23 @@ def _parse_loop(
         if icpt.to_axis in loop_sizes and icpt.from_axis != icpt.to_axis:
             raise ValueError
 
-        # I am not sure if I need to track the sizes like this anymore, just
-        # emit the loops if they don't exist
-        # if icpt in new_loop_indices:
-        #     # basically do nothing
-        #     assert icpt.to_axis not in new_jnames
-        #     new_loop_sizes[icpt.to_axis] = 1
-        #
-        # else:
-
-        # might need to emit a loop over the original domain (fencepost thing)
         new_inames = set()
-        if icpt.from_axis not in new_loop_sizes:
+        if icpt in loop_indices:
+            assert icpt.to_axis not in new_jnames
+            new_loop_sizes[icpt.to_axis] = 1
+            new_jnames[icpt.to_axis] = loop_indices[icpt]
+
+        else:
             if isinstance(icpt, Slice):
                 # the stop is either provided by the index, already registered, or, lastly, the axis size
                 if icpt.stop:
                     stop = icpt.stop
+                elif icpt.from_axis in new_loop_sizes:
+                    # TODO always pop
+                    stop = new_loop_sizes.pop(icpt.from_axis)
                 else:
                     # TODO is this still required?
-                    axis = find_axis(loop.axes, path, icpt.to_axis)
+                    axis = find_axis(loop.axes, new_path, icpt.to_axis)
                     cpt_index = axis.component_index(icpt.to_cpt)
                     stop = axis.components[cpt_index].count
 
@@ -268,12 +266,8 @@ def _parse_loop(
                 size = (stop - icpt.start) // icpt.step
 
             else:
-                assert isinstance(cpt, Map)
-                # maps map a "from" axis to a "to" axis, "from" must already exist
-                # so emit a loop for "to" (i.e. arity)
-                axis = find_axis(loop.axes, path, icpt.from_axis)
-                cpt_index = axis.component_index(icpt.from_cpt)
-                size = axis.components[cpt_index].count
+                assert isinstance(icpt, Map)
+                size = icpt.arity
 
             sizename = register_extent(
                 size,
@@ -283,59 +277,47 @@ def _parse_loop(
             # should these be to_axis instead?
             new_iname = ctx.unique_name("i")
             ctx.add_domain(new_iname, sizename)
+
+            # I think maps might not want to store this variable here
             new_jnames[icpt.from_axis] = new_iname
             new_inames.add(new_iname)
             # do I even need this?
-            new_loop_sizes[icpt.from_axis] = (
+            new_loop_sizes[icpt.to_axis] = (
                 pym.var(sizename) if isinstance(sizename, str) else sizename
             )
 
         # now emit a loop for the target axis of the slice/map
         with ctx.within_inames(new_inames):
-            new_inames_ = set()
-            if isinstance(icpt, Map) and icpt.arity != 1:
-                # FIXME
-                sizename = register_extent(
-                    icpt.arity,
-                    new_jnames,
+            # maps transform jnames
+            jname = new_jnames.pop(icpt.from_axis)
+            new_jname = myinnerfunc(
+                jname,
+                index,
+                icpt,
+                new_jnames,
+                loop_indices,
+                ctx,
+            )
+            new_jnames[icpt.to_axis] = new_jname
+            new_loop_indices |= {icpt: new_jname}
+
+            if subidx := loop.index.child(index, icpt):
+                # do I need new_path??
+                _parse_loop(
+                    loop,
+                    new_loop_indices,
                     ctx,
+                    subidx,
+                    pmap(new_path),
+                    pmap(new_loop_sizes),
+                    pmap(new_jnames),
+                    new_ipath,
                 )
-                new_iname = ctx.unique_name("i")
-                ctx.add_domain(new_iname, sizename)
-                new_inames_.add(new_iname)
-                new_jnames[icpt.to_axis] = new_iname
 
-            with ctx.within_inames(new_inames_):
-                # maps transform jnames
-                jname = new_jnames.pop(icpt.from_axis)
-                new_jname = myinnerfunc(
-                    jname,
-                    index,
-                    icpt,
-                    new_jnames,
-                    loop_indices,
-                    ctx,
-                )
-                new_jnames[icpt.to_axis] = new_jname
-                new_loop_indices[icpt] = new_jname
-
-                if subidx := loop.index.child(index, icpt):
-                    # do I need new_path??
-                    _parse_loop(
-                        loop,
-                        loop_indices,
-                        ctx,
-                        subidx,
-                        pmap(new_path),
-                        pmap(new_loop_sizes),
-                        pmap(new_jnames),
-                        new_ipath,
-                    )
-
-                # at the bottom, handle remaining sizes
-                else:
-                    for stmt in loop.statements:
-                        _compile(stmt, pmap(new_loop_indices), ctx)
+            # at the bottom, handle remaining sizes
+            else:
+                for stmt in loop.statements:
+                    _compile(stmt, new_loop_indices, ctx)
 
 
 @_compile.register
@@ -537,7 +519,6 @@ def _parse_assignment_rec(
                 # FIXME
                 extent = icpt.arity
 
-            new_loop_sizes[icpt.to_axis] = extent
             extent_varname = register_extent(
                 extent,
                 new_jnames,
@@ -548,6 +529,11 @@ def _parse_assignment_rec(
             new_jnames[icpt.to_axis] = new_iname
             inames.add(new_iname)
             new_temporary_jnames[taxis.label] = new_iname
+            new_loop_sizes[icpt.to_axis] = (
+                pym.var(extent_varname)
+                if isinstance(extent_varname, str)
+                else extent_varname
+            )
 
         ###
 
@@ -735,9 +721,23 @@ def emit_layout_insns(
     for layout_fn in axes.layouts[path]:
         # TODO singledispatch!
         if isinstance(layout_fn, TabulatedLayout):
+            # trim path and labels so only existing axes are used
+            trimmed_path = {}
+            trimmed_jnames = {}
+            laxes = layout_fn.data.axes
+            laxis = laxes.root
+            while laxis:
+                trimmed_path[laxis.label] = path[laxis.label]
+                trimmed_jnames[laxis.label] = labels_to_jnames[laxis.label]
+                lcpt = just_one(laxis.components)
+                laxis = laxes.child(laxis, lcpt)
+            trimmed_path = pmap(trimmed_path)
+            trimmed_jnames = pmap(trimmed_jnames)
+
             layout_var = register_scalar_assignment(
                 layout_fn.data,
-                labels_to_jnames,
+                trimmed_path,
+                trimmed_jnames,
                 ctx,
             )
             expr += pym.var(layout_var)
@@ -797,6 +797,7 @@ def replace_variables(
 
 def register_scalar_assignment(
     array,
+    path,
     array_labels_to_jnames,
     ctx,
 ):
@@ -808,6 +809,7 @@ def register_scalar_assignment(
     array_offset = emit_assignment_insn(
         array.name,
         array.axes,
+        path,
         array_labels_to_jnames,
         ctx,
     )
