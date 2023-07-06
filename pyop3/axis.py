@@ -23,7 +23,7 @@ from pyrsistent import pmap
 
 from pyop3 import utils
 from pyop3.dtypes import IntType, PointerType, get_mpi_dtype
-from pyop3.index import AffineMap, Index, IndexTree, Map, Slice, TabulatedMap
+from pyop3.index import Index, IndexTree, Map, Slice, TabulatedMap
 from pyop3.tree import (
     LabelledNode,
     LabelledTree,
@@ -370,11 +370,11 @@ class Sparsity:
 
 
 def _collect_datamap(axis, *subdatamaps, axes):
-    from pyop3.distarray import IndexedMultiArray, MultiArray
+    from pyop3.distarray import MultiArray
 
     datamap = {}
     for cidx, component in enumerate(axis.components):
-        if isinstance(count := component.count, (IndexedMultiArray, MultiArray)):
+        if isinstance(count := component.count, MultiArray):
             datamap |= count.datamap
 
     return datamap | merge_dicts(subdatamaps)
@@ -705,10 +705,10 @@ def requires_external_index(axtree, axis, component_index):
 
 
 def size_requires_external_index(axes, axis, component, depth=0):
-    from pyop3.distarray import IndexedMultiArray
+    from pyop3.distarray import MultiArray
 
     count = component.count
-    if isinstance(count, IndexedMultiArray):
+    if isinstance(count, MultiArray):
         count = count.data
     if not component.has_integer_count and count.axes.depth > depth:
         return True
@@ -826,14 +826,12 @@ class AxisComponent(NodeComponent):
 
     # TODO this is just a traversal - clean up
     def alloc_size(self, axtree, axis):
-        from pyop3.distarray import IndexedMultiArray, MultiArray
+        from pyop3.distarray import MultiArray
 
         if axis.indexed:
             npoints = 1
         elif isinstance(self.count, MultiArray):
             npoints = self.count.max_value
-        elif isinstance(self.count, IndexedMultiArray):
-            npoints = self.count.data.max_value
         else:
             assert isinstance(self.count, numbers.Integral)
             npoints = self.count
@@ -1064,10 +1062,10 @@ def _(arg: AxisComponent):
 
 @functools.singledispatch
 def _as_axis_component(arg: Any) -> AxisComponent:
-    from pyop3.distarray import IndexedMultiArray, MultiArray
+    from pyop3.distarray import MultiArray
 
     # Needed to avoid cyclic import
-    if isinstance(arg, (IndexedMultiArray, MultiArray)):
+    if isinstance(arg, MultiArray):
         return AxisComponent(arg)
     else:
         raise TypeError

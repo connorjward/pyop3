@@ -64,34 +64,55 @@ class IndexComponent(NodeComponent, abc.ABC):
         return (self.to_axis, self.to_cpt)
 
 
-class Slice(IndexComponent):
-    fields = IndexComponent.fields | {"start", "stop", "step"}
-
-    def __init__(self, *args, axis=None, cpt=None, **kwargs):
-        nargs = len(args)
-        if nargs == 0:
-            start, stop, step = None, None, None
-        elif nargs == 1:
-            start, stop, step = None, args[0], None
-        elif nargs == 2:
-            start, stop, step = args[0], args[1], None
-        elif nargs == 3:
-            start, stop, step = args[0], args[1], args[2]
-        else:
-            raise ValueError("Too many arguments")
-
-        super().__init__(axis, cpt, axis, cpt, **kwargs)
-        self.start = start or 0
-        self.stop = stop
-        self.step = step or 1
-
-
 class Map(IndexComponent):
     fields = IndexComponent.fields | {"arity"}
 
     def __init__(self, from_axis, from_cpt, to_axis, to_cpt, arity, **kwargs) -> None:
         super().__init__(from_axis, from_cpt, to_axis, to_cpt, **kwargs)
         self.arity = arity
+
+
+class Slice(IndexComponent):
+    """
+
+    A slice can be thought of as a map from a smaller space to the target space.
+
+    """
+
+    fields = IndexComponent.fields | {"start", "stop", "step"}
+
+    def __init__(self, *args, axis=None, cpt=None, **kwargs):
+        # cyclic import
+        from pyop3.axis import Axis, AxisComponent
+
+        nargs = len(args)
+        if nargs == 0:
+            start, stop, step = 0, None, 1
+        elif nargs == 1:
+            start, stop, step = 0, args[0], 1
+        elif nargs == 2:
+            start, stop, step = args[0], args[1], 1
+        elif nargs == 3:
+            start, stop, step = args[0], args[1], args[2]
+        else:
+            raise ValueError("Too many arguments")
+
+        # the smaller space mapped from by the slice is "anonymous" so use
+        # something unique here
+        # FIXME this breaks copy
+        from_axis = Axis._unique_label()
+        from_cpt = AxisComponent._label_generator()
+
+        super().__init__(from_axis, from_cpt, axis, cpt, **kwargs)
+        self.start = start
+        self.stop = stop
+        self.step = step
+
+    # def __repr__(self) -> str:
+    #     return f"{type(self)}({self.start}, {self.stop}, {self.step}, axis={self.to_axis}, to_cpt={self.to_cpt})"
+
+    # def __str__(self) -> str:
+    # return f"{type(self)}({self.start}, {self.stop}, {self.step}, from_axis={self.from_axis}, from_cpt={self.from_cpt}, to_axis={self.to_axis}, to_cpt={self.to_cpt})"
 
 
 class TabulatedMap(Map):

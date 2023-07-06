@@ -139,8 +139,6 @@ def test_scalar_copy(scalar_copy_kernel):
         data=np.zeros(m, dtype=ScalarType),
     )
 
-    AxisTree(axis).set_up()
-
     # do_loop(p := axis.index, scalar_copy_kernel(dat0[p], dat1[p]))
     l = loop(p := axis.index, scalar_copy_kernel(dat0[p], dat1[p]))
     from pyop3.codegen.loopexpr2loopy import compile
@@ -244,7 +242,12 @@ def test_multi_component_scalar_copy_with_two_outer_loops(scalar_copy_kernel):
         Axis([(n, 1)], "ax0", id="root"),
         {"root": Axis([(b, 0)], "ax1")},
     )
-    do_loop(p := iterset.index, scalar_copy_kernel(dat0[p], dat1[p]))
+    # do_loop(p := iterset.index, scalar_copy_kernel(dat0[p], dat1[p]))
+    l = loop(p := iterset.index, scalar_copy_kernel(dat0[p], dat1[p]))
+    from pyop3.codegen.loopexpr2loopy import compile
+
+    compile(l)
+    l()
 
     assert all(dat1.data[: m * a] == 0)
     assert all(dat1.data[m * a :] == dat0.data[m * a :])

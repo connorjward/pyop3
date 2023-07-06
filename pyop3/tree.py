@@ -625,11 +625,12 @@ class LabelledNode(Node):
         )
         return self.copy(components=new_components)
 
-    def _unique_label(self):
-        prefix = f"_{type(self).__name__}_label"
+    @classmethod
+    def _unique_label(cls):
+        prefix = f"_{cls.__name__}_label"
         # prevent prefix from being a valid name
-        self._label_generator.add_name(prefix, conflicting_ok=True)
-        return self._label_generator(prefix)
+        cls._label_generator.add_name(prefix, conflicting_ok=True)
+        return cls._label_generator(prefix)
 
 
 NodePath = dict[Hashable, Hashable]
