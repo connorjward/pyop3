@@ -16,14 +16,7 @@ from mpi4py import MPI
 from petsc4py import PETSc
 
 from pyop3 import utils
-from pyop3.axis import (
-    Axis,
-    AxisComponent,
-    AxisTree,
-    as_axis_tree,
-    fill_shape,
-    get_bottom_part,
-)
+from pyop3.axis import Axis, AxisComponent, AxisTree, as_axis_tree, get_bottom_part
 from pyop3.distarray.base import DistributedArray
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
 from pyop3.index import IndexTree, TabulatedMap, as_index_tree
@@ -48,7 +41,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
         "data",
         "max_value",
         "sf",
-        "index",
+        "indicess",
     }
 
     mapper_method = sys.intern("map_multi_array")
@@ -66,14 +59,11 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
         data=None,
         max_value=None,
         sf=None,
-        index=None,
+        indicess=(),
     ):
         if name and prefix:
             raise ValueError("Can only specify one of name and prefix")
         dim = as_axis_tree(dim)
-
-        # debug
-        dim.set_up()
 
         if isinstance(data, np.ndarray):
             if dtype:
@@ -101,12 +91,14 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
         name = name or self.name_generator(prefix or self.prefix)
 
         DistributedArray.__init__(self, name)
+
+        # make a property instead? bit ugly like this
         pym.primitives.Variable.__init__(self, name)
 
         self._data = data
         self.dtype = dtype
 
-        self.index = index
+        self.indicess = indicess
 
         self.dim = dim
 
@@ -147,6 +139,11 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
     @property
     def alloc_size(self):
         return self.axes.alloc_size() if self.axes else 1
+
+    # ???
+    # @property
+    # def pym_var(self) -> pym.primitives.Variable:
+    #     return MultiArray
 
     @classmethod
     def from_list(cls, data, axis_labels, name=None, dtype=ScalarType, inc=0):
@@ -295,32 +292,10 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
         return self.dim
 
     # maybe I could check types here and use instead of get_value?
-    def __getitem__(self, index: IndexTree | Index | IndexComponent):
-        if index is Ellipsis:
-            new_index = fill_shape(self.axes, self.index)
-        else:
-            index = as_index_tree(index)
-            if not self.index:
-                new_index = fill_shape(self.axes, index)
-            else:
-                # TODO add_subtree is broken but would be a nice alternative here
-                root = self.index.root
-                # convert children to a list so I can mutate it
-                parent_to_children = {
-                    k: list(v) for k, v in self.index.parent_to_children.items()
-                }
-
-                # FIXME uniquify
-                if len(self.index.leaves) > 1:
-                    raise NotImplementedError("need to uniquify")
-
-                for leaf, icpt in self.index.leaves:
-                    cidx = [c.label for c in leaf.components].index(icpt.label)
-                    parent_to_children[leaf.id][cidx] = index.root
-                    parent_to_children |= index.parent_to_children
-
-                new_index = IndexTree(root, parent_to_children)
-        return self.copy(index=new_index)
+    def __getitem__(self, indices: IndexTree | Index | IndexComponent):
+        if indices is Ellipsis:
+            indices = IndexTree()
+        return self.copy(indicess=self.indicess + (indices,))
 
     def select_axes(self, indices):
         selected = []

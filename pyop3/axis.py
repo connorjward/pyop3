@@ -23,7 +23,8 @@ from pyrsistent import pmap
 
 from pyop3 import utils
 from pyop3.dtypes import IntType, PointerType, get_mpi_dtype
-from pyop3.index import Index, IndexTree, Map, Slice, TabulatedMap
+
+# from pyop3.index import Index, IndexTree, Map, Slice, TabulatedMap
 from pyop3.tree import (
     LabelledNode,
     LabelledTree,
@@ -405,9 +406,11 @@ class AxisTree(LabelledTree):
 
         self._layouts = {}
 
-    @property
     def index(self):
-        return fill_shape(self, extra_kwargs={"axes": self})
+        # cyclic import
+        from pyop3.index import LoopIndex
+
+        return LoopIndex(self)
 
     @functools.cached_property
     def datamap(self) -> dict[str:DistributedArray]:
@@ -650,9 +653,8 @@ class Axis(LabelledNode):
     def __str__(self) -> str:
         return f"{self.__class__.__name__}([{', '.join(str(cpt) for cpt in self.components)}], label={self.label})"
 
-    @property
     def index(self):
-        return as_axis_tree(self).index
+        return as_axis_tree(self).index()
 
     @property
     def count(self):
@@ -662,14 +664,6 @@ class Axis(LabelledNode):
         if not all(cpt.has_integer_count for cpt in self.components):
             raise RuntimeError("non-int counts present, cannot sum")
         return sum(cpt.find_integer_count() for cpt in self.components)
-
-
-class MyNode(Node):
-    fields = Node.fields | {"data"}
-
-    def __init__(self, data=None, **kwargs):
-        super().__init__(**kwargs)
-        self.data = data
 
 
 def get_slice_bounds(array, indices):
@@ -927,82 +921,6 @@ class SyncStatus:
     pending_write_op: Optional[Any] = None
     halo_valid: bool = True
     halo_modified: bool = False
-
-
-# TODO This algorithm is pretty much identical to quite a few others
-def fill_shape(axes, indices=None, extra_kwargs=None):
-    extra_kwargs = extra_kwargs or {}
-    if not indices:
-        return fill_missing_shape(axes, {}).copy(**extra_kwargs)
-
-    new_indices = indices
-    for leaf_index, leaf_cpt in indices.leaves:
-        axis_path = {}
-        for idx, cpt in indices.path(leaf_index, leaf_cpt):
-            if cpt.from_axis in axis_path:
-                axis_path.pop(cpt.from_axis)
-            axis_path |= {cpt.to_axis: cpt.to_cpt}
-
-        extra_slices = fill_missing_shape(axes, axis_path)
-
-        if extra_slices:
-            new_indices = new_indices.add_subtree(extra_slices, leaf_index, leaf_cpt)
-
-    return new_indices.copy(**extra_kwargs)
-
-
-def fill_missing_shape(
-    axes: AxisTree, indexed: Mapping[Label, Label], current_axis: Axis | None = None
-) -> IndexTree | None:
-    """Return the indices required to fully index the axes.
-
-    Parameters
-    ----------
-    axes
-        The axis tree requiring indexing.
-    indexed
-        Mapping from axis labels to axis components. These axes have already
-        been indexed so encountering them will not produce a new slice.
-
-    Returns
-    -------
-    indices
-        Tree of indices required to fully index ``axes``. `None` if axes is
-        already fully indexed.
-
-    """
-    current_axis = current_axis or axes.root
-
-    # 1. Axis is already indexed, select the appropriate subaxis and continue
-    if current_axis.label in indexed:
-        subaxis = axes.child(current_axis, indexed[current_axis.label])
-        if subaxis:
-            return fill_missing_shape(axes, indexed, subaxis)
-        else:
-            return None
-
-    # 2. Axis is not indexed, emit slices for each component
-    else:
-        components = []
-        subtrees = []
-        for cpt in current_axis.components:
-            components.append(Slice(axis=current_axis.label, cpt=cpt.label))
-            subaxis = axes.child(current_axis, cpt)
-            if subaxis:
-                subtree = fill_missing_shape(axes, indexed, subaxis)
-            else:
-                subtree = None
-            subtrees.append(subtree)
-
-        root = Index(components)
-        parent_to_children = collections.defaultdict(list)
-        for subtree in subtrees:
-            if subtree:
-                parent_to_children[root.id].append(subtree.root)
-                parent_to_children |= subtree.parent_to_children
-            else:
-                parent_to_children[root.id].append(None)
-        return IndexTree(root, parent_to_children)
 
 
 def create_lgmap(axes):
@@ -1471,3 +1389,50 @@ def _trim_path(axes: AxisTree, path: Mapping) -> pyrsistent.pmap:
         new_path[axis.label] = cpt_label
         axis = axes.child(axis, cpt_label)
     return pyrsistent.pmap(new_path)
+
+
+def loop_indices(axes: AxisTree) -> IndexTree:
+    """Return a loop nest over an axis tree."""
+    return _loop_indices_rec(axes, axes.root)
+
+
+def _loop_indices_rec(axes: AxisTree, axis: Axis) -> IndexTree:
+    # cyclic import
+    from pyop3.index import Index, IndexTree, LoopIndex
+
+    icpts = []
+    isubtrees = []
+    for cpt in axis.components:
+        icpts.append(LoopIndex(axis, cpt))
+        if subaxis := axes.child(axis, cpt):
+            isubtrees.append(_loop_indices_rec(axes, subaxis))
+        else:
+            isubtrees.append(IndexTree())
+
+    iroot = Index(icpts)
+    iparent_to_children = {iroot.id: [isubtree.root for isubtree in isubtrees]}
+    iparent_to_children |= merge_dicts(
+        [isubtree.parent_to_children for isubtree in isubtrees]
+    )
+    return IndexTree(iroot, iparent_to_children)
+
+
+def collect_sizes(axes: AxisTree) -> pmap:  # TODO value-type of returned pmap?
+    return _collect_sizes_rec(axes, axes.root)
+
+
+def _collect_sizes_rec(axes, axis) -> pmap:
+    sizes = {}
+    for cpt in axis.components:
+        sizes[axis.label, cpt.label] = cpt.count
+
+        if subaxis := axes.child(axis, cpt):
+            subsizes = _collect_sizes_rec(axes, subaxis)
+            for loc, size in subsizes.items():
+                # make sure that sizes always match for duplicates
+                if loc not in sizes:
+                    sizes[loc] = size
+                else:
+                    if sizes[loc] != size:
+                        raise RuntimeError
+    return pmap(sizes)

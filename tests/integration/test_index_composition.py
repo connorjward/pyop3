@@ -13,10 +13,12 @@ from pyop3 import (
     MultiArray,
     ScalarType,
     Slice,
+    TabulatedMap,
     do_loop,
     loop,
 )
 from pyop3.codegen import LOOPY_LANG_VERSION, LOOPY_TARGET
+from pyop3.utils import flatten
 
 
 @pytest.fixture
@@ -33,6 +35,21 @@ def copy_kernel():
         lang_version=LOOPY_LANG_VERSION,
     )
     return LoopyKernel(lpy_kernel, [READ, WRITE])
+
+
+@pytest.fixture
+def debug_kernel():
+    lpy_kernel = lp.make_kernel(
+        "{ [i]: 0 <= i < 2 }",
+        "",
+        [
+            lp.GlobalArg("x", ScalarType, (2,), is_input=True, is_output=False),
+        ],
+        name="debug",
+        target=LOOPY_TARGET,
+        lang_version=LOOPY_LANG_VERSION,
+    )
+    return LoopyKernel(lpy_kernel, [READ])
 
 
 def test_1d_slice_composition(copy_kernel):
@@ -88,3 +105,49 @@ def test_2d_slice_composition(copy_kernel):
     )
 
     assert np.allclose(dat1.data, dat0.data.reshape((m0, m1))[::2, 1:][2:4, 1])
+
+
+# def test_map_composition(copy_kernel):
+def test_map_composition(debug_kernel):
+    iterset = AxisTree(Axis([(2, "cpt0")]))
+    axes = AxisTree(Axis([(10, "cpt0")]))
+
+    mapaxes0 = iterset.add_node(Axis(3), *iterset.leaf)
+    mapdata0 = np.asarray(flatten([[2, 4, 0], [6, 7, 1]]), dtype=int)
+    maparray0 = MultiArray(mapaxes0, name="map0", data=mapdata0)
+    map0 = TabulatedMap(
+        from_axis=iterset.root.label,
+        from_cpt="cpt0",
+        to_axis=axes.root.label,
+        to_cpt="cpt0",
+        arity=3,  # this attr can be inferred
+        data=maparray0,
+    )
+
+    # this map targets the entries in mapdata0 so it can only contain 0s, 1s and 2s
+    mapaxes1 = iterset.add_node(Axis(2), *iterset.leaf)
+    mapdata1 = np.asarray(flatten([[0, 2], [2, 1]]), dtype=int)
+    maparray1 = MultiArray(mapaxes1, name="map1", data=mapdata1)
+    map1 = TabulatedMap(
+        from_axis=iterset.root.label,
+        from_cpt="cpt0",
+        to_axis=mapaxes0.leaf[0].label,
+        to_cpt=mapaxes0.leaf[1].label,
+        arity=2,  # this attr can be inferred
+        data=maparray1,
+    )
+
+    dat0 = MultiArray(axes, name="dat0", data=np.arange(axes.size, dtype=ScalarType))
+    dat1 = MultiArray(Axis(2), name="dat1", dtype=dat0.dtype)
+
+    # do_loop(p := iterset.index(), copy_kernel(dat0[map0(p)][map1(p)], dat1[...]))
+    do_loop(p := iterset.index(), debug_kernel(dat0[map0(p)][map1(p)]))
+
+    assert False, "TODO"
+
+
+def test_multi_map_composition():
+    raise NotImplementedError
+    mmap0 = MultiMap(maps0)
+    mmap1 = MultiMap(maps1)
+    do_loop(p := Axis(2).index(), copy_kernel(dat0[mmap0(p)][mmap1(p)], dat1[...]))

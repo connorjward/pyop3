@@ -7,6 +7,7 @@ from typing import Any, Hashable, Sequence
 
 import pytools
 
+from pyop3.axis import Axis, AxisComponent
 from pyop3.tree import LabelledNode, LabelledTree, NodeComponent, postvisit
 from pyop3.utils import as_tuple, merge_dicts
 
@@ -26,6 +27,7 @@ class IndexTree(LabelledTree):
 IndexLabel = collections.namedtuple("IndexLabel", ["axis", "component"])
 
 
+# This class is pretty irrelevant...
 class Index(LabelledNode):
     fields = LabelledNode.fields - {"degree"} | {"components"}
 
@@ -35,7 +37,11 @@ class Index(LabelledNode):
         super().__init__(degree=len(components), **kwargs)
         self.components = components
 
+    def __str__(self) -> str:
+        return f"{type(self).__name__}('{self.label}', [{', '.join(map(str, self.components))}])"
+
     def index(self, x: Index) -> int:
+        assert False, "bad API"
         return self.components.index(x)
 
     # old alias
@@ -47,6 +53,7 @@ class Index(LabelledNode):
 class IndexComponent(NodeComponent, abc.ABC):
     fields = NodeComponent.fields | {"from_axis", "from_cpt", "to_axis", "to_cpt"}
 
+    # FIXME I think that these are the wrong attributes
     def __init__(self, from_axis, from_cpt, to_axis, to_cpt, **kwargs) -> None:
         super().__init__(**kwargs)
         self.from_axis = from_axis
@@ -54,14 +61,22 @@ class IndexComponent(NodeComponent, abc.ABC):
         self.to_axis = to_axis
         self.to_cpt = to_cpt
 
-    # TODO this is quite ugly
-    @property
-    def from_tuple(self):
-        return (self.from_axis, self.from_cpt)
 
-    @property
-    def to_tuple(self):
-        return (self.to_axis, self.to_cpt)
+# TODO
+# class LoopIndex(pytools.ImmutableRecord):
+class LoopIndex:
+    """Object representing a set of indices of a loop nest.
+
+    FIXME More detail needed.
+
+    """
+
+    # TODO this needs an ID attribute so we can differentiate p := mesh.cells.index()
+    # with q := mesh.cells.index() for example.
+    # fields = {"iterset"}
+
+    def __init__(self, iterset):
+        self.iterset = iterset
 
 
 class Map(IndexComponent):
@@ -115,14 +130,45 @@ class Slice(IndexComponent):
     # return f"{type(self)}({self.start}, {self.stop}, {self.step}, from_axis={self.from_axis}, from_cpt={self.from_cpt}, to_axis={self.to_axis}, to_cpt={self.to_cpt})"
 
 
+class ScalarIndex(Slice):
+    """Index component representing a single scalar value.
+
+    This class is distinct from a `LoopIndex` because no loop needs to be emitted.
+    We also distinguish between it and a `Slice` (even though they are really the
+    same thing) because indexing with a scalar removes the axis from the resulting
+    indexed array.
+
+    """
+
+    def __init__(self, value):
+        # a scalar index is equivalent to a slice starting at value
+        # and stopping at value+1.
+        super().__init__(value, value + 1)
+
+
 class TabulatedMap(Map):
     fields = Map.fields | {"data"}
 
     def __init__(
-        self, from_axis, from_cpt, to_axis, to_cpt, arity, data, **kwargs
+        self,
+        from_axis,
+        from_cpt,
+        to_axis,
+        to_cpt,
+        arity,
+        data,
+        *,
+        from_index=None,
+        **kwargs,
     ) -> None:
         super().__init__(from_axis, from_cpt, to_axis, to_cpt, arity, **kwargs)
         self.data = data
+
+        # FIXME, called map is a different type to a non-called one
+        self.from_index = from_index
+
+    def __call__(self, index):
+        return self.copy(from_index=index)
 
 
 class IdentityMap(Map):
