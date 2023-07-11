@@ -487,6 +487,25 @@ def build_assignment(
         assignment, ctx
     )
 
+    """
+    The difference between iterating over map0(map1(p)).index() and axes.index()
+    is that the former may emit multiple loops but only a single jname is produced. For
+    the latter multiple jnames may result.
+
+    (This is not quite true. We produce multiple jnames but only a single "jname expr" that
+    gets used to index the "prior" thing)??? I suppose the distinction is between whether we
+    are indexing the thing (in which case we want the jnames), or using it to index something
+    else, where we would want the "jname expr". Maybe this can be thought of as a function from
+    jnames -> "jname expr" and we want to go backwards.
+
+    In both cases though the pattern is "loop over this object as if it were a tree".
+    I want to generalise this to both of these.
+
+    This seems like a natural thing to do. In the rest of this we maintain the concept of
+    "prior" things and transform between indexed axes. In these cases we do not have to. It
+    is equivalent to a single step of this mapping. Sort of.
+    """
+
     # each index tree transforms an axis tree into another and produces
     # one index instruction (jname) per index component
     axes = assignment.array.axes
@@ -548,10 +567,6 @@ def _parse_assignment_rec(
     Slices are basically maps from the current axis, so index.from_axis is undefined and
     we can't do the sort of recursion we can with maps.
     """
-    # indices is a tuple, not a tree. we concat the trees from the different indices
-    # and slices can also produce tree structures, the trick is let them target the
-    # different axis components
-    # not sure about this, how do I get things for real-space stuff then?
     # indices are some sort of conditional tree, only work for specific axis labels
     index, *subindices = indices
 
@@ -559,15 +574,7 @@ def _parse_assignment_rec(
 
     # loop over the leaves of the axis, jname combo from the maps?
     # indices are therefore a list of things that can turn into trees
-    """
-    This function turns an index into an axis tree that is added to the new shape.
-    For slices this yields a single axis, maps yield a proper tree and loop indices
-    return 'None'.
-
-    This is the next thing to solve.
-
-    Ah, a Map can (currently) only target a single jname. Loop indices can target multiple...
-    """
+    # This function turns an index into an axis tree that is added to the new shape.
     (
         iaxes,
         ijnames_per_cpt,
@@ -595,10 +602,9 @@ def _parse_assignment_rec(
         else:
             ileaf_key = None
 
-        # i dont use this atm???
         iinsns = iinsns_per_leaf[ileaf_key]
         ijname_expr = ijname_expr_per_leaf[ileaf_key]
-        itarget = ipath_per_leaf[ileaf_key]
+        ipath = ipath_per_leaf[ileaf_key]
 
         # I believe that this is always the case. Each index in the tree will
         # always target one axis in the input axes. Things like map composition
@@ -606,13 +612,13 @@ def _parse_assignment_rec(
         # of map1 is, map0 is just the input).
         # Even if we have complicated maps they do not matter here as they are
         # complicated for the input to the map, not the target.
-        new_path = path | itarget
+        new_path = path | ipath
         new_extra_insns = list(extra_insns) + list(iinsns)
 
-        # loop over these? Will I hit duplicates? no I wont since itarget is the *new*
+        # loop over these? Will I hit duplicates? no I wont since ipath is the *new*
         # set of axes that get touched by the index
         mypath = path
-        for myaxislabel, mycpt in itarget.items():
+        for myaxislabel, mycpt in ipath.items():
             axis = prior_axes._node_from_path(mypath)
             existing_jname = prior_jnames_per_axcpt[axis.id, mycpt]
             myexpr = ijname_expr[myaxislabel]
@@ -814,6 +820,13 @@ def _(index: CalledMap, axis, loop_indices, ctx):
 
             # materialise the jname_expr. When we are indexing arrays this jname
             # is provided externally, but not for index composition
+            # could I do this earlier to mirror what I do elsewhere?
+            # what jnames are required to index this axis?
+            # extra loop indices? generated first?
+            # need to convert index into jnames and path - materialise?
+
+            # map composition does sort of rely on emitting the prior loops. Only the final
+            # loop can be sliced? Not really, the whole resulting tree can be...
             myjnames = {}
             for myaxislabel in from_path:
                 myjname = ctx.unique_name("j")
@@ -835,6 +848,7 @@ def _(index: CalledMap, axis, loop_indices, ctx):
                 # where j0 comes from the from_index and j1 is advertised as the shape
                 # of the resulting axis (jname_per_cpt)
                 # j0 is now fixed but j1 can still be changed
+                # no. j0 can *still be modified*
                 inner_axis, inner_cpt = map_func.axes.leaf
                 insns_, jname_expr = _scalar_assignment(
                     map_func,
@@ -850,13 +864,14 @@ def _(index: CalledMap, axis, loop_indices, ctx):
             insns.append(myinsns)
             jname_exprs.append({to_axis: jname_expr})
 
-        # this is bad, need to look at getting maps to register the right thing
         axis = Axis(components, label=index.name)
         if axes:
             axes = axes.add_subaxis(axis, *from_leaf_key)
         else:
             axes = AxisTree(axis)
+
         for i, cpt in enumerate(components):
+            # hmm...
             leaf_key = (axis.id, cpt.label)
             jnames_per_cpt[leaf_key] = jnames[i]
             insns_per_leaf[leaf_key] = from_insns_per_leaf[from_leaf_key] + tuple(
