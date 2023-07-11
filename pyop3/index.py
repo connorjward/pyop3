@@ -82,11 +82,12 @@ class LoopIndex:
 # class Map(IndexComponent):
 class Map(pytools.ImmutableRecord):  # FIXME
     # FIXME, naturally this is a placeholder
-    fields = {"bits"}
+    fields = {"bits", "name"}
 
-    def __init__(self, bits, **kwargs) -> None:
+    def __init__(self, bits, name, **kwargs) -> None:
         super().__init__(**kwargs)
         self.bits = bits
+        self.name = name
 
     def __call__(self, index):
         return CalledMap(self, index)
@@ -188,6 +189,10 @@ class CalledMap:
     @property
     def bits(self):
         return self.map.bits
+
+    @property
+    def name(self):
+        return self.map.name
 
 
 class AffineMap(Map):

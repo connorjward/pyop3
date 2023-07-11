@@ -375,7 +375,7 @@ def _(call: FunctionCall, loop_indices, ctx: LoopyCodegenContext) -> None:
         # !!!!!!!!!!!!!!!!!!!!
         # FIXME hack for testing
         # axes = temporary_axes(arg.axes, indices, loop_indices)
-        axes = AxisTree(Axis([AxisComponent(2, "map1cpt0")], "map1ax0"))
+        axes = AxisTree(Axis([AxisComponent(2, "b")], "map1"))
         temporary = MultiArray(
             axes,
             name=ctx.unique_name("t"),
@@ -511,7 +511,6 @@ def build_assignment(
     # the intermediate index instructions
     # This will traverse the final axis tree, collecting jnames. At the bottom the
     # leaf insns will be emitted and the temp_expr will be assigned to the array one.
-    breakpoint()
     _parse_assignment_final(
         assignment, axes, jnames_per_cpt, insns_per_leaf, array_expr_per_leaf, ctx
     )
@@ -663,94 +662,20 @@ def _parse_assignment_rec(
 
     assert False, "old impl"
 
-    for icpt, tcpt in checked_zip(index.components, taxis.components):
-        new_loop_indices = dict(loop_indices)
-        new_loop_sizes = dict(loop_sizes)
-        new_ipath = ipath + ((index, icpt),)
-        new_jnames = dict(jnames)
-
-        new_temp_path = temp_path + ((taxis.label, tcpt.label),)
-        new_temporary_jnames = dict(temporary_jnames)
-
-        # is this needed?
-        new_path = dict(path)
-        new_path.pop(icpt.from_axis, None)
-        new_path.update({icpt.to_axis: icpt.to_cpt})
-
-        ### emit a loop if required
-
-        inames = set()
-        if icpt in loop_indices:
-            assert icpt.to_axis not in new_jnames
-            new_loop_sizes[icpt.to_axis] = 1
-            new_jnames[icpt.to_axis] = loop_indices[icpt]
-
-            # hack since temporaries generate layout functions for scalar axes
-            iname = ctx.unique_name("i")
-            ctx.add_domain(iname, 1)
-            inames.add(iname)
-            new_temporary_jnames[taxis.label] = iname
-
-        else:
-            if isinstance(icpt, Slice):
-                # the stop is either provided by the index, already registered, or, lastly, the axis size
-                if icpt.stop:
-                    stop = icpt.stop
-                elif icpt.from_axis in new_loop_sizes:
-                    # TODO always pop
-                    stop = new_loop_sizes.pop(icpt.from_axis)
-                else:
-                    # TODO is this still required?
-                    axis = find_axis(assignment.array.axes, new_path, icpt.to_axis)
-                    cpt_index = axis.component_index(icpt.to_cpt)
-                    stop = axis.components[cpt_index].count
-                # TODO add a remainder?
-                extent = (stop - icpt.start) // icpt.step
-
-            else:
-                assert isinstance(cpt, TabulatedMap)
-                # FIXME
-                extent = icpt.arity
-
-            extent_varname = register_extent(
-                extent,
-                pmap(new_path),
-                new_jnames,
-                ctx,
-            )
-            new_iname = ctx.unique_name("i")
-            ctx.add_domain(new_iname, extent_varname)
-            new_jnames[icpt.to_axis] = new_iname
-            inames.add(new_iname)
-            new_temporary_jnames[taxis.label] = new_iname
-            new_loop_sizes[icpt.to_axis] = (
-                pym.var(extent_varname)
-                if isinstance(extent_varname, str)
-                else extent_varname
-            )
-
-        ###
-
-        with ctx.within_inames(inames):
-            if subidx := assignment.array.index.child(index, icpt):
-                subtaxis = assignment.temporary.axes.child(taxis, tcpt)
-                _parse_assignment_rec(
-                    assignment,
-                    loop_indices,
-                    ctx,
-                    subidx,
-                    pmap(new_path),
-                    pmap(new_loop_sizes),
-                    pmap(new_jnames),
-                    new_ipath,
-                    pmap(new_temporary_jnames),
-                    new_temp_path,
-                    subtaxis,
-                )
-
-            else:
-                # used to be _assignment_insn
-                pass
+    # if isinstance(icpt, Slice):
+    #     # the stop is either provided by the index, already registered, or, lastly, the axis size
+    #     if icpt.stop:
+    #         stop = icpt.stop
+    #     elif icpt.from_axis in new_loop_sizes:
+    #         # TODO always pop
+    #         stop = new_loop_sizes.pop(icpt.from_axis)
+    #     else:
+    #         # TODO is this still required?
+    #         axis = find_axis(assignment.array.axes, new_path, icpt.to_axis)
+    #         cpt_index = axis.component_index(icpt.to_cpt)
+    #         stop = axis.components[cpt_index].count
+    #     # TODO add a remainder?
+    #     extent = (stop - icpt.start) // icpt.step
 
 
 def _assignment_array_insn(assignment, path, jnames, ctx):
@@ -856,20 +781,14 @@ def _(index: CalledMap, axis, loop_indices, ctx):
     path_per_leaf = {}
 
     if from_axes:
-        leaves = from_axes.leaves
+        leaf_keys = [(a.id, c.label) for a, c in from_axes.leaves]
         axes = from_axes
     else:
         # scalar index, from_axes is None
-        leaves = [None]
+        leaf_keys = [None]
         axes = None
 
-    for from_leaf in leaves:
-        if from_leaf:
-            from_leaf_axis, from_leaf_cpt = from_leaf
-            from_leaf_key = from_leaf_axis.id, from_leaf_cpt.label
-        else:
-            from_leaf_key = None
-
+    for from_leaf_key in leaf_keys:
         from_path = from_path_per_leaf[from_leaf_key]
 
         components = []
@@ -881,6 +800,7 @@ def _(index: CalledMap, axis, loop_indices, ctx):
         # (map_func, arity, to_axis, to_cpt)
         bits = index.bits[from_path]
         for (
+            mycptlabel,
             map_func,
             arity,
             to_axis,
@@ -889,24 +809,23 @@ def _(index: CalledMap, axis, loop_indices, ctx):
             myinsns = []
 
             if isinstance(map_func, MultiArray):  # is this the right class?
-                # TODO I am not clear on the difference between the innermost axis of the map
-                # and the "to_axis", "to_cpt". They are definitely different things (and
-                # extra maps would map from these smaller axes).
-                inner_axis, inner_cpt = map_func.axes.leaf
-
-                cpt = AxisComponent(arity, label=inner_cpt.label)
+                cpt = AxisComponent(arity, label=mycptlabel)
                 components.append(cpt)
 
-                for myexpr in from_jname_expr_per_leaf[from_leaf_key].values():
-                    jname = ctx.unique_name("j")
-                    ctx.add_temporary(jname)
-                    jnames.append(jname)
-                    myinsns.append((pym.var(jname), myexpr))
+                # for myexpr in from_jname_expr_per_leaf[from_leaf_key].values():
+                #     jname = ctx.unique_name("j")
+                #     ctx.add_temporary(jname)
+                #     jnames.append(jname)
+                #     myinsns.append((pym.var(jname), myexpr))
+                jname = ctx.unique_name("j")
+                ctx.add_temporary(jname)
+                jnames.append(jname)
 
                 # ? = map[j0, j1]
                 # where j0 comes from the from_index and j1 is advertised as the shape
                 # of the resulting axis (jname_per_cpt)
                 # j0 is now fixed but j1 can still be changed
+                inner_axis, inner_cpt = map_func.axes.leaf
                 insns_, jname_expr = _scalar_assignment(
                     map_func,
                     from_path | pmap({inner_axis.label: inner_cpt.label}),
@@ -927,7 +846,7 @@ def _(index: CalledMap, axis, loop_indices, ctx):
                 raise NotImplementedError
 
         # this is bad, need to look at getting maps to register the right thing
-        axis = Axis(components, label=inner_axis.label)
+        axis = Axis(components, label=index.name)
         if axes:
             axes = axes.add_subaxis(axis, *from_leaf_key)
         else:
@@ -1043,7 +962,7 @@ def emit_assignment_insn(
 ):
     offset = ctx.unique_name("off")
     ctx.add_temporary(offset, IntType)
-    ctx.add_assignment(pym.var(offset), 0)
+    # ctx.add_assignment(pym.var(offset), 0)
 
     return (
         emit_layout_insns(
@@ -1070,7 +989,7 @@ def emit_layout_insns(
     # breakpoint()
     insns = []
 
-    expr = pym.var(offset_var)
+    expr = 0  # pym.var(offset_var)
     for layout_fn in axes.layouts[path]:
         # TODO singledispatch!
         if isinstance(layout_fn, TabulatedLayout):
@@ -1177,7 +1096,7 @@ def _scalar_assignment(
     offset = ctx.unique_name("off")
     ctx.add_temporary(offset, IntType)
     # I don't think that I have to zero it since it all gets added together
-    ctx.add_assignment(pym.var(offset), 0)
+    # ctx.add_assignment(pym.var(offset), 0)
 
     layout_insns = emit_layout_insns(
         array.axes,
@@ -1186,7 +1105,6 @@ def _scalar_assignment(
         ctx,
         path,
     )
-    breakpoint()
     rexpr = pym.subscript(pym.var(array.name), pym.var(offset))
     return layout_insns, rexpr
 

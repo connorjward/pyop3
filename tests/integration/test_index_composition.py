@@ -117,31 +117,33 @@ def test_map_composition(debug_kernel):
     iterset = AxisTree(Axis([(2, "cpt0")], "ax0"))
     axes = AxisTree(Axis([(10, "cpt0")]))
 
-    mapaxes0 = iterset.add_node(
-        Axis([AxisComponent(arity0, "map0cpt0")], "map0ax0"), *iterset.leaf
-    )
+    mapaxes0 = iterset.add_node(Axis(arity0), *iterset.leaf)
     mapdata0 = np.asarray(flatten([[2, 4, 0], [6, 7, 1]]), dtype=int)
     maparray0 = MultiArray(mapaxes0, name="map0", data=mapdata0)
     map0 = Map(
         {
             pmap({iterset.root.label: "cpt0"}): [
-                (maparray0, arity0, axes.root.label, "cpt0"),
+                ("a", maparray0, arity0, axes.root.label, "cpt0"),
             ],
-        }
+        },
+        "map0",
     )
 
+    # I cant use the axis labels here to determine the temporary labels because multimaps
+    # could have multiple things for this. Similarly we cant use the component labels in case
+    # there are duplicates
+
     # this map targets the entries in mapdata0 so it can only contain 0s, 1s and 2s
-    mapaxes1 = iterset.add_node(
-        Axis([AxisComponent(arity1, "map1cpt0")], "map1ax0"), *iterset.leaf
-    )
+    mapaxes1 = iterset.add_node(Axis(arity1), *iterset.leaf)
     mapdata1 = np.asarray(flatten([[0, 2], [2, 1]]), dtype=int)
     maparray1 = MultiArray(mapaxes1, name="map1", data=mapdata1)
     map1 = Map(
         {
             pmap({iterset.root.label: "cpt0"}): [
-                (maparray1, arity1, mapaxes0.leaf[0].label, mapaxes0.leaf[1].label),
+                ("b", maparray1, arity1, "map0", "a"),
             ],
-        }
+        },
+        "map1",
     )
 
     dat0 = MultiArray(axes, name="dat0", data=np.arange(axes.size, dtype=ScalarType))
