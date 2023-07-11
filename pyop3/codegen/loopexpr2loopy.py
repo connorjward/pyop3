@@ -502,11 +502,11 @@ def build_assignment(
             axes.root,
             [indices],
             jnames_per_axcpt,
-            (),
             insns_per_leaf,
             array_expr_per_leaf,
             (),
             pmap(),
+            (),
         )
 
     # lastly generate loops for the tree structure at the end, also generate
@@ -527,12 +527,15 @@ def _parse_assignment_rec(
     axis: Axis,
     indices: tuple,
     jnames_per_axcpt: pmap,
-    insns_per_leaf,
     prior_insns_per_leaf: pmap,
     prior_array_expr_per_leaf: pmap,
     path: tuple,
     jnames: pmap,
+    extra_insns: tuple,
 ):
+    # maybe turn the whole thing into an index tree first?
+    # I think it makes more sense for the tree to only contain target things. Maps
+    # should be expanded into trees each time we encounter one.
     index, *subindices = indices
 
     axcpts = []
@@ -553,7 +556,7 @@ def _parse_assignment_rec(
 
     new_axes = iaxes
 
-    upwards_insns_per_leaf = {}
+    insns_per_leaf = {}
     array_expr_per_leaf = {}
 
     for ileaf in iaxes.leaves:
@@ -566,11 +569,12 @@ def _parse_assignment_rec(
 
         new_jnames_per_axcpt = jnames_per_axcpt_per_leaf[ileaf[0].id, ileaf[1].label]
 
-        new_insns_per_leaf = insns_per_leaf
+        new_extra_insns = extra_insns
 
         leaf_index = index_per_leaf[ileaf[0].id, ileaf[1].label]
 
         # select the right axis component as we go down
+        # not sure about this bit, does the ordering matter?
         axcpt = axis.components[axis.component_index(leaf_index.to_cpt)]
 
         # Every index produces a jname instruction and (unless 1-sized)
@@ -581,10 +585,11 @@ def _parse_assignment_rec(
             raise NotImplementedError
             # jname_insn =
         else:
+            # maybe I should traverse the tree to generate these instructions?
             assert isinstance(leaf_index, TabulatedMap)
             existing_jname = jnames_per_axcpt[axis.id, axcpt.label]
 
-            new_insns_per_leaf += _scalar_assignment(
+            new_extra_insns += _scalar_assignment(
                 leaf_index.data, existing_jname, index_path, index_jnames, ctx
             )
 
@@ -604,21 +609,21 @@ def _parse_assignment_rec(
                 subaxis,
                 subindices,
                 jnames_per_axcpt,
-                insns_per_leaf,
                 prior_insns_per_leaf,
                 prior_array_expr_per_leaf,
                 new_path,
                 new_jnames,
+                new_extra_insns,
             )
             new_axes = new_axes.add_subtree(subaxes, *ileaf)
             new_jnames_per_axcpt += subjnames
-            upwards_insns_per_leaf |= subinsns_per_leaf
+            insns_per_leaf |= subinsns_per_leaf
             array_expr_per_leaf |= prior_array_expr_per_leaf
         else:
             assert not axes.child(axis, axcpt)
             # store new_insns_per_leaf
-            upwards_insns_per_leaf[ileaf[0].id, ileaf[1].label] = (
-                new_insns_per_leaf + prior_insns_per_leaf[axis.id, axcpt.label]
+            insns_per_leaf[ileaf[0].id, ileaf[1].label] = (
+                new_extra_insns + prior_insns_per_leaf[axis.id, axcpt.label]
             )
 
             # transfer per leaf things to the new tree (since the leaves change)
@@ -629,7 +634,7 @@ def _parse_assignment_rec(
     return (
         new_axes,
         pmap(new_jnames_per_axcpt),
-        pmap(upwards_insns_per_leaf),
+        pmap(insns_per_leaf),
         pmap(array_expr_per_leaf),
     )
 
