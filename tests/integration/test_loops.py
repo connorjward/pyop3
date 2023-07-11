@@ -63,6 +63,22 @@ def vector_inc_kernel():
 
 
 @pytest.fixture
+def vec6_inc_kernel():
+    code = lp.make_kernel(
+        "{ [i]: 0 <= i < 6 }",
+        "y[0] = y[0] + x[i]",
+        [
+            lp.GlobalArg("x", ScalarType, (6,), is_input=True, is_output=False),
+            lp.GlobalArg("y", ScalarType, (1,), is_input=True, is_output=True),
+        ],
+        target=LOOPY_TARGET,
+        name="vector_inc",
+        lang_version=(2018, 2),
+    )
+    return LoopyKernel(code, [READ, INC])
+
+
+@pytest.fixture
 def ragged_copy_kernel():
     code = lp.make_kernel(
         "{ [i]: 0 <= i < n }",
@@ -832,37 +848,43 @@ def test_inc_with_multiple_maps(vector_inc_kernel):
     assert np.allclose(dat1.data, np.sum(mapdata0, axis=1) + np.sum(mapdata1, axis=1))
 
 
-def test_inc_with_map_composition(vector_inc_kernel):
+def test_inc_with_map_composition(vec6_inc_kernel):
     m = 5
-    arity0, arity1 = 1, 3
-    mapdata0 = np.asarray([[2], [3], [1], [0], [0]], dtype=IntType)
+    arity0, arity1 = 2, 3
+    mapdata0 = np.asarray([[2, 1], [0, 3], [1, 4], [0, 0], [3, 2]], dtype=IntType)
     mapdata1 = np.asarray(
         [[0, 4, 1], [2, 1, 3], [4, 2, 4], [0, 1, 2], [4, 2, 3]], dtype=IntType
     )
 
-    axes = AxisTree(Axis(m, "ax0"))
+    axes = AxisTree(Axis([AxisComponent(m, "cpt0")], "ax0"))
     dat0 = MultiArray(axes, name="dat0", data=np.arange(m, dtype=ScalarType))
-    dat1 = MultiArray(axes, name="dat1", data=np.zeros(m, dtype=ScalarType))
+    dat1 = MultiArray(axes, name="dat1", dtype=dat0.dtype)
 
     maxes0 = axes.add_subaxis(Axis(arity0), axes.root)
     maxes1 = axes.add_subaxis(Axis(arity1), axes.root)
 
-    map0 = MultiArray(maxes0, name="map0", data=mapdata0.flatten())
-    map1 = MultiArray(maxes1, name="map1", data=mapdata1.flatten())
+    maparray0 = MultiArray(maxes0, name="map0", data=mapdata0.flatten())
+    maparray1 = MultiArray(maxes1, name="map1", data=mapdata1.flatten())
 
-    p = IndexTree(Index(Range("ax0", m)))
-
-    q = p.copy()
-    q = q.put_node(
-        Index(TabulatedMap([("ax0", 0)], [("ax0", 0)], arity=arity0, data=map0[q])),
-        q.leaf,
+    # TODO Decide on the interface for "multi-maps"
+    map0 = TabulatedMap(
+        from_axis="ax0",
+        from_cpt="cpt0",
+        to_axis="ax0",
+        to_cpt="cpt0",
+        arity=arity0,
+        data=maparray0,
     )
-    q = q.put_node(
-        Index(TabulatedMap([("ax0", 0)], [("ax0", 0)], arity=arity1, data=map1[q])),
-        q.leaf,
+    map1 = TabulatedMap(
+        from_axis="ax0",
+        from_cpt="cpt0",
+        to_axis="ax0",
+        to_cpt="cpt0",
+        arity=arity1,
+        data=maparray1,
     )
 
-    do_loop(p, vector_inc_kernel(dat0[q], dat1[p]))
+    do_loop(p := axes.index(), vec6_inc_kernel(dat0[map1(map0(p))], dat1[p]))
 
     expected = np.sum(np.sum(np.arange(m)[mapdata1], axis=1)[mapdata0], axis=1)
     assert np.allclose(dat1.data, expected)

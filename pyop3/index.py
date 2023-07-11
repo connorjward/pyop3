@@ -79,12 +79,17 @@ class LoopIndex:
         self.iterset = iterset
 
 
-class Map(IndexComponent):
-    fields = IndexComponent.fields | {"arity"}
+# class Map(IndexComponent):
+class Map(pytools.ImmutableRecord):  # FIXME
+    # FIXME, naturally this is a placeholder
+    fields = {"bits"}
 
-    def __init__(self, from_axis, from_cpt, to_axis, to_cpt, arity, **kwargs) -> None:
-        super().__init__(from_axis, from_cpt, to_axis, to_cpt, **kwargs)
-        self.arity = arity
+    def __init__(self, bits, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.bits = bits
+
+    def __call__(self, index):
+        return CalledMap(self, index)
 
 
 class Slice(IndexComponent):
@@ -157,18 +162,10 @@ class TabulatedMap(Map):
         to_cpt,
         arity,
         data,
-        *,
-        from_index=None,
         **kwargs,
     ) -> None:
         super().__init__(from_axis, from_cpt, to_axis, to_cpt, arity, **kwargs)
         self.data = data
-
-        # FIXME, called map is a different type to a non-called one
-        self.from_index = from_index
-
-    def __call__(self, index):
-        return self.copy(from_index=index)
 
 
 class IdentityMap(Map):
@@ -179,6 +176,18 @@ class IdentityMap(Map):
     # def label(self):
     #     assert len(self.to_labels) == 1
     #     return self.to_labels[0]
+
+
+# this is an index
+class CalledMap:
+    def __init__(self, map, from_index):
+        self.map = map
+        self.from_index = from_index
+
+    # ick
+    @property
+    def bits(self):
+        return self.map.bits
 
 
 class AffineMap(Map):

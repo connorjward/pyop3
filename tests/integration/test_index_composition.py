@@ -1,15 +1,18 @@
 import loopy as lp
 import numpy as np
 import pytest
+from pyrsistent import pmap
 
 from pyop3 import (
     READ,
     WRITE,
     Axis,
+    AxisComponent,
     AxisTree,
     Index,
     IndexTree,
     LoopyKernel,
+    Map,
     MultiArray,
     ScalarType,
     Slice,
@@ -109,32 +112,36 @@ def test_2d_slice_composition(copy_kernel):
 
 # def test_map_composition(copy_kernel):
 def test_map_composition(debug_kernel):
-    iterset = AxisTree(Axis([(2, "cpt0")]))
+    arity0, arity1 = 3, 2
+
+    iterset = AxisTree(Axis([(2, "cpt0")], "ax0"))
     axes = AxisTree(Axis([(10, "cpt0")]))
 
-    mapaxes0 = iterset.add_node(Axis(3), *iterset.leaf)
+    mapaxes0 = iterset.add_node(
+        Axis([AxisComponent(arity0, "map0cpt0")], "map0ax0"), *iterset.leaf
+    )
     mapdata0 = np.asarray(flatten([[2, 4, 0], [6, 7, 1]]), dtype=int)
     maparray0 = MultiArray(mapaxes0, name="map0", data=mapdata0)
-    map0 = TabulatedMap(
-        from_axis=iterset.root.label,
-        from_cpt="cpt0",
-        to_axis=axes.root.label,
-        to_cpt="cpt0",
-        arity=3,  # this attr can be inferred
-        data=maparray0,
+    map0 = Map(
+        {
+            pmap({iterset.root.label: "cpt0"}): [
+                (maparray0, arity0, axes.root.label, "cpt0"),
+            ],
+        }
     )
 
     # this map targets the entries in mapdata0 so it can only contain 0s, 1s and 2s
-    mapaxes1 = iterset.add_node(Axis(2), *iterset.leaf)
+    mapaxes1 = iterset.add_node(
+        Axis([AxisComponent(arity1, "map1cpt0")], "map1ax0"), *iterset.leaf
+    )
     mapdata1 = np.asarray(flatten([[0, 2], [2, 1]]), dtype=int)
     maparray1 = MultiArray(mapaxes1, name="map1", data=mapdata1)
-    map1 = TabulatedMap(
-        from_axis=iterset.root.label,
-        from_cpt="cpt0",
-        to_axis=mapaxes0.leaf[0].label,
-        to_cpt=mapaxes0.leaf[1].label,
-        arity=2,  # this attr can be inferred
-        data=maparray1,
+    map1 = Map(
+        {
+            pmap({iterset.root.label: "cpt0"}): [
+                (maparray1, arity1, mapaxes0.leaf[0].label, mapaxes0.leaf[1].label),
+            ],
+        }
     )
 
     dat0 = MultiArray(axes, name="dat0", data=np.arange(axes.size, dtype=ScalarType))
