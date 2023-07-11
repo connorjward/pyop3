@@ -129,10 +129,6 @@ def test_map_composition(debug_kernel):
         "map0",
     )
 
-    # I cant use the axis labels here to determine the temporary labels because multimaps
-    # could have multiple things for this. Similarly we cant use the component labels in case
-    # there are duplicates
-
     # this map targets the entries in mapdata0 so it can only contain 0s, 1s and 2s
     mapaxes1 = iterset.add_node(Axis(arity1), *iterset.leaf)
     mapdata1 = np.asarray(flatten([[0, 2], [2, 1]]), dtype=int)

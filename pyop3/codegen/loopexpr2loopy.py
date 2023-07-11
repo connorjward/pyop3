@@ -245,7 +245,7 @@ def _parse_loop(
 
     # do a BIG hack for now, just for one test
     iname = ctx.unique_name("i0")
-    ctx.add_domain(iname, 2)
+    ctx.add_domain(iname, 5)
 
     # this is awful
     loop_indices = {loop.index: (pmap({"ax0": "cpt0"}), pmap({"ax0": iname}))}
@@ -375,7 +375,10 @@ def _(call: FunctionCall, loop_indices, ctx: LoopyCodegenContext) -> None:
         # !!!!!!!!!!!!!!!!!!!!
         # FIXME hack for testing
         # axes = temporary_axes(arg.axes, indices, loop_indices)
-        axes = AxisTree(Axis([AxisComponent(2, "b")], "map1"))
+        axes = AxisTree(
+            Axis([AxisComponent(2, "a")], "map0", id="root"),
+            {"root": [Axis([AxisComponent(3, "a")], "map1")]},
+        )
         temporary = MultiArray(
             axes,
             name=ctx.unique_name("t"),
@@ -775,7 +778,7 @@ def _(index: CalledMap, axis, loop_indices, ctx):
         from_path_per_leaf,
     ) = _expand_index(index.from_index, axis, loop_indices, ctx)
 
-    jnames_per_cpt = from_jnames_per_cpt
+    jnames_per_cpt = dict(from_jnames_per_cpt)
     insns_per_leaf = {}
     jname_expr_per_leaf = {}
     path_per_leaf = {}
@@ -790,6 +793,7 @@ def _(index: CalledMap, axis, loop_indices, ctx):
 
     for from_leaf_key in leaf_keys:
         from_path = from_path_per_leaf[from_leaf_key]
+        myexprs = from_jname_expr_per_leaf[from_leaf_key]
 
         components = []
         jnames = []
@@ -808,15 +812,21 @@ def _(index: CalledMap, axis, loop_indices, ctx):
         ) in bits:  # each one of these is a new "leaf"
             myinsns = []
 
+            # materialise the jname_expr. When we are indexing arrays this jname
+            # is provided externally, but not for index composition
+            myjnames = {}
+            for myaxislabel in from_path:
+                myjname = ctx.unique_name("j")
+                ctx.add_temporary(myjname)
+                myexpr = myexprs[myaxislabel]
+                myinsns.append((pym.var(myjname), myexpr))
+                myjnames[myaxislabel] = myjname
+            myjnames = pmap(myjnames)
+
             if isinstance(map_func, MultiArray):  # is this the right class?
                 cpt = AxisComponent(arity, label=mycptlabel)
                 components.append(cpt)
 
-                # for myexpr in from_jname_expr_per_leaf[from_leaf_key].values():
-                #     jname = ctx.unique_name("j")
-                #     ctx.add_temporary(jname)
-                #     jnames.append(jname)
-                #     myinsns.append((pym.var(jname), myexpr))
                 jname = ctx.unique_name("j")
                 ctx.add_temporary(jname)
                 jnames.append(jname)
@@ -829,21 +839,16 @@ def _(index: CalledMap, axis, loop_indices, ctx):
                 insns_, jname_expr = _scalar_assignment(
                     map_func,
                     from_path | pmap({inner_axis.label: inner_cpt.label}),
-                    from_jname_expr_per_leaf[from_leaf_key]
-                    | pmap(
-                        {
-                            inner_axis.label: jname,
-                        }
-                    ),
+                    myjnames | {inner_axis.label: jname},
                     ctx,
                 )
                 myinsns.extend(insns_)
 
-                insns.append(myinsns)
-                jname_exprs.append({to_axis: jname_expr})
-
             else:
                 raise NotImplementedError
+
+            insns.append(myinsns)
+            jname_exprs.append({to_axis: jname_expr})
 
         # this is bad, need to look at getting maps to register the right thing
         axis = Axis(components, label=index.name)

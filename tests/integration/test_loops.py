@@ -4,12 +4,21 @@ import loopy as lp
 import numpy as np
 import pymbolic as pym
 import pytest
+from pyrsistent import pmap
 
 from pyop3.axis import Axis, AxisComponent, AxisTree
 from pyop3.codegen import LOOPY_LANG_VERSION, LOOPY_TARGET
 from pyop3.distarray import MultiArray
 from pyop3.dtypes import IntType, ScalarType
-from pyop3.index import AffineMap, IdentityMap, Index, IndexTree, Slice, TabulatedMap
+from pyop3.index import (
+    AffineMap,
+    IdentityMap,
+    Index,
+    IndexTree,
+    Map,
+    Slice,
+    TabulatedMap,
+)
 from pyop3.loopexpr import INC, READ, WRITE, LoopyKernel, do_loop, loop
 from pyop3.utils import flatten
 
@@ -62,20 +71,21 @@ def vector_inc_kernel():
     return LoopyKernel(code, [READ, INC])
 
 
+# debug
 @pytest.fixture
 def vec6_inc_kernel():
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 6 }",
-        "y[0] = y[0] + x[i]",
+        "",
         [
             lp.GlobalArg("x", ScalarType, (6,), is_input=True, is_output=False),
-            lp.GlobalArg("y", ScalarType, (1,), is_input=True, is_output=True),
+            # lp.GlobalArg("y", ScalarType, (1,), is_input=True, is_output=True),
         ],
         target=LOOPY_TARGET,
         name="vector_inc",
         lang_version=(2018, 2),
     )
-    return LoopyKernel(code, [READ, INC])
+    return LoopyKernel(code, [READ])
 
 
 @pytest.fixture
@@ -866,25 +876,25 @@ def test_inc_with_map_composition(vec6_inc_kernel):
     maparray0 = MultiArray(maxes0, name="map0", data=mapdata0.flatten())
     maparray1 = MultiArray(maxes1, name="map1", data=mapdata1.flatten())
 
-    # TODO Decide on the interface for "multi-maps"
-    map0 = TabulatedMap(
-        from_axis="ax0",
-        from_cpt="cpt0",
-        to_axis="ax0",
-        to_cpt="cpt0",
-        arity=arity0,
-        data=maparray0,
+    map0 = Map(
+        {
+            pmap({"ax0": "cpt0"}): [
+                ("a", maparray0, arity0, "ax0", "cpt0"),
+            ],
+        },
+        "map0",
     )
-    map1 = TabulatedMap(
-        from_axis="ax0",
-        from_cpt="cpt0",
-        to_axis="ax0",
-        to_cpt="cpt0",
-        arity=arity1,
-        data=maparray1,
+    map1 = Map(
+        {
+            pmap({"ax0": "cpt0"}): [
+                ("a", maparray1, arity1, "ax0", "cpt0"),
+            ],
+        },
+        "map1",
     )
 
-    do_loop(p := axes.index(), vec6_inc_kernel(dat0[map1(map0(p))], dat1[p]))
+    # do_loop(p := axes.index(), vec6_inc_kernel(dat0[map1(map0(p))], dat1[p]))
+    do_loop(p := axes.index(), vec6_inc_kernel(dat0[map1(map0(p))]))
 
     expected = np.sum(np.sum(np.arange(m)[mapdata1], axis=1)[mapdata0], axis=1)
     assert np.allclose(dat1.data, expected)
