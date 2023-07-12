@@ -1344,3 +1344,37 @@ def _parse_assignment_final_rec(
                 for insn in temp_insns:
                     ctx.add_assignment(*insn)
                 _shared_assignment_insn(assignment, array_expr, temp_expr, ctx)
+
+
+def visit_indices(indices, pre, post_term, post_nonterm, *args, **kwargs):
+    return _visit_indices_rec(indices, pre, post_nonterm, post_term)
+
+
+# TODO This traversal is not quite right. I am often iterating over indexed things
+# that look like axes. At least I think so. Do I get arbitrary temp shapes with my
+# algorithm or not?
+# If so then I am not using subaxes here, I am traversing the index tree.
+"""
+I just have ambiguity in the trees if one axis comes before another in a multi-part thing
+and I want to index them in reverse. I think I can safely assume that the labels require
+consistency even if they have different IDs.
+
+Therefore things should work? Yes. I claim this to be the case.
+"""
+
+
+def _visit_indices_rec(indices, pre, post_nonterm, post_term, *args):
+    index, *subindices = indices
+
+    # loop over the leaves of the expanded index
+    retvals = []
+    for x in leaves:
+        args, kwargs = pre(*args, **kwargs)
+
+        if subindices:
+            retval = _visit_indices_rec(subindices, *args, **kwargs)
+            retval = post_nonterm(retval)
+        else:
+            retval = post_term(*args, **kwargs)
+        retvals.append(retval)
+    return last_func(retvals)
