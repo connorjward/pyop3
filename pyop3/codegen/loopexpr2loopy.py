@@ -617,13 +617,10 @@ def _parse_assignment_rec(
 
         # loop over these? Will I hit duplicates? no I wont since ipath is the *new*
         # set of axes that get touched by the index
-        mypath = path
         for myaxislabel, mycpt in ipath.items():
-            axis = prior_axes._node_from_path(mypath)
-            existing_jname = prior_jnames_per_axcpt[axis.id, mycpt]
+            existing_jname = prior_jnames_per_axcpt[myaxislabel, mycpt]
             myexpr = ijname_expr[myaxislabel]
             new_extra_insns.append((pym.var(existing_jname), myexpr))
-            mypath |= {myaxislabel: mycpt}
 
         # I think that indices also need to form a tree, how could I otherwise
         # index a mixed real space thing?
@@ -687,15 +684,11 @@ def _parse_assignment_rec(
     #     extent = (stop - icpt.start) // icpt.step
 
 
-def _parse_assignment_rec_pre_callback(
-    leaf, index_data, *, path, extra_insns, **kwargs
+def _parse_assignment_pre_callback(
+    leaf, index_data, *, prev_axes, prev_jnames, axis_path, insns, **kwargs
 ):
     # unpack leaf
-    iaxes_path, iaxes_jnames, iaxes_insns = leaf
-
-    iinsns = iinsns_per_leaf[ileaf_key]
-    ijname_expr = ijname_expr_per_leaf[ileaf_key]
-    ipath = ipath_per_leaf[ileaf_key]
+    iaxes_axis_path, iaxes_jname_exprs, iaxes_insns = leaf
 
     # I believe that this is always the case. Each index in the tree will
     # always target one axis in the input axes. Things like map composition
@@ -703,23 +696,18 @@ def _parse_assignment_rec_pre_callback(
     # of map1 is, map0 is just the input).
     # Even if we have complicated maps they do not matter here as they are
     # complicated for the input to the map, not the target.
-    new_path = path | ipath
-    new_extra_insns = list(extra_insns) + list(iinsns)
+    new_axis_path = axis_path | iaxes_axis_path
+    new_insns = list(insns) + list(iaxes_insns)
 
-    # loop over these? Will I hit duplicates? no I wont since ipath is the *new*
-    # set of axes that get touched by the index
-    mypath = path
-    for myaxislabel, mycpt in ipath.items():
-        axis = prior_axes._node_from_path(mypath)
-        existing_jname = prior_jnames_per_axcpt[axis.id, mycpt]
-        myexpr = ijname_expr[myaxislabel]
-        new_extra_insns.append((pym.var(existing_jname), myexpr))
-        mypath |= {myaxislabel: mycpt}
+    for axis, cpt in iaxes_axis_path.items():
+        prev_jname = prev_jnames[axis, cpt]
+        jname_expr = iaxes_jname_exprs[axis]
+        new_insns.append((pym.var(prev_jname), jname_expr))
 
     return {
-        "new_path": new_path,
+        "axis_path": new_axis_path,
         "new_jnames": new_jnames,
-        "extra_insns": new_extra_insns,
+        "insns": new_insns,
     }
 
 
@@ -808,9 +796,10 @@ def _(index: LoopIndex, axis, loop_indices, ctx):
     """
     path, jname_exprs = loop_indices[index]
     insns = ()
-    # return None, {}, {None: ()}, {None: jname_exprs}, {None: path}
+    return None, {}, {None: ()}, {None: jname_exprs}, {None: path}
     # TODO namedtuple anyone?
-    return [(path, jname_exprs, insns)], {}
+    # TODO generic algorithm
+    # return [(path, jname_exprs, insns)], {}
 
 
 @_expand_index.register
@@ -912,7 +901,7 @@ def _(index: CalledMap, axis, loop_indices, ctx):
         for i, cpt in enumerate(components):
             # hmm...
             leaf_key = (axis.id, cpt.label)
-            jnames_per_cpt[leaf_key] = jnames[i]
+            jnames_per_cpt[axis.label, cpt.label] = jnames[i]
             insns_per_leaf[leaf_key] = from_insns_per_leaf[from_leaf_key] + tuple(
                 insns[i]
             )
@@ -921,22 +910,23 @@ def _(index: CalledMap, axis, loop_indices, ctx):
             )
             path_per_leaf[leaf_key] = pmap({to_axis: to_cpt})
 
-    # return (
-    #     axes,
-    #     pmap(jnames_per_cpt),
-    #     pmap(insns_per_leaf),
-    #     pmap(jname_expr_per_leaf),
-    #     pmap(path_per_leaf),
-    # )
-    leaves = [
-        (path, jname_exprs, insns)
-        for (path, jname_exprs, insns) in checked_zip(
-            path_per_leaf.values(),
-            jname_expr_per_leaf.values(),
-            insns_per_leaf.values(),
-        )
-    ]
-    return leaves, {"axes": axes, "jnames": jnames_per_cpt}
+    return (
+        axes,
+        pmap(jnames_per_cpt),
+        pmap(insns_per_leaf),
+        pmap(jname_expr_per_leaf),
+        pmap(path_per_leaf),
+    )
+    # TODO below is an attempt at making the algorithm generic with callbacks
+    # leaves = [
+    #     (path, jname_exprs, insns)
+    #     for (path, jname_exprs, insns) in checked_zip(
+    #         path_per_leaf.values(),
+    #         jname_expr_per_leaf.values(),
+    #         insns_per_leaf.values(),
+    #     )
+    # ]
+    # return leaves, {"axes": axes, "jnames": jnames_per_cpt}
 
 
 # loop indices and jnames are very similar...
@@ -1304,7 +1294,8 @@ def _prepare_assignment_rec(
         jname = ctx.unique_name("j")
         ctx.add_temporary(jname)
         new_jnames = jnames | {axis.label: jname}
-        jnames_per_axcpt[axis.id, axcpt.label] = jname
+        # FIXME should only add once per axis label, component label combination
+        jnames_per_axcpt[axis.label, axcpt.label] = jname
         new_path = path | {axis.label: axcpt.label}
 
         if subaxis := axes.child(axis, axcpt):
@@ -1363,7 +1354,7 @@ def _parse_assignment_final_rec(
         iname = ctx.unique_name("i")
         ctx.add_domain(iname, size)
 
-        current_jname = jnames_per_axcpt[axis.id, axcpt.label]
+        current_jname = jnames_per_axcpt[axis.label, axcpt.label]
         new_jnames = jnames | {axis.label: current_jname}
         new_path = path | {axis.label: axcpt.label}
 
@@ -1435,43 +1426,7 @@ def _visit_indices_rec(
     # mdat is from a (vector-valued x scalar-valued) space to fail since the
     # second index (2) is only valid for one branch but not the other.
     index, *subindices = indices
-
-    # loop over the leaves of the expanded index
-
-    # TODO clean up this bit \/ \/
-    axis = prior_axes._node_from_path(path)
-
-    # FIXME NEXT: Need to characterise the returned thing from this! leaves? leafdata?
-    # axes? Key is to have an iterable of things plus shared data
-    # Should I always return axes? Things per leaf are dicts with the same key...
-    # Could be zipped lists? Iterable of leaf objects?
-
-    # loop over the leaves of the axis, jname combo from the maps?
-    # indices are therefore a list of things that can turn into trees
-    # This function turns an index into an axis tree that is added to the new shape.
-    (
-        iaxes,
-        ijnames_per_cpt,
-        iinsns_per_leaf,
-        ijname_expr_per_leaf,  # actually multiple of these, one per bit of the path
-        ipath_per_leaf,
-    ) = _expand_index(index, axis, loop_indices, ctx)
-
     leaves, index_data = expand_index_callback(index, **kwargs)
-
-    insns_per_leaf = {}
-    array_expr_per_leaf = {}
-    jnames_per_cpt = ijnames_per_cpt
-
-    if iaxes:
-        # maybe this should actually be turned into the key that I want
-        leaves = iaxes.leaves
-        leaves = [(a.id, c.label) for a, c in leaves]
-        new_axes = iaxes
-    else:
-        leaves = [None]
-        new_axes = None
-    # \cleanup ^^^^^
 
     retvals = []
     for leaf in leaves:
