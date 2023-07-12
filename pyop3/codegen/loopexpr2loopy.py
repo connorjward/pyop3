@@ -687,6 +687,42 @@ def _parse_assignment_rec(
     #     extent = (stop - icpt.start) // icpt.step
 
 
+def _parse_assignment_rec_pre_callback(
+    leaf, index_data, *, path, extra_insns, **kwargs
+):
+    # unpack leaf
+    iaxes_path, iaxes_jnames, iaxes_insns = leaf
+
+    iinsns = iinsns_per_leaf[ileaf_key]
+    ijname_expr = ijname_expr_per_leaf[ileaf_key]
+    ipath = ipath_per_leaf[ileaf_key]
+
+    # I believe that this is always the case. Each index in the tree will
+    # always target one axis in the input axes. Things like map composition
+    # do not matter here (ie map1(map0(p)) means that we care what the output
+    # of map1 is, map0 is just the input).
+    # Even if we have complicated maps they do not matter here as they are
+    # complicated for the input to the map, not the target.
+    new_path = path | ipath
+    new_extra_insns = list(extra_insns) + list(iinsns)
+
+    # loop over these? Will I hit duplicates? no I wont since ipath is the *new*
+    # set of axes that get touched by the index
+    mypath = path
+    for myaxislabel, mycpt in ipath.items():
+        axis = prior_axes._node_from_path(mypath)
+        existing_jname = prior_jnames_per_axcpt[axis.id, mycpt]
+        myexpr = ijname_expr[myaxislabel]
+        new_extra_insns.append((pym.var(existing_jname), myexpr))
+        mypath |= {myaxislabel: mycpt}
+
+    return {
+        "new_path": new_path,
+        "new_jnames": new_jnames,
+        "extra_insns": new_extra_insns,
+    }
+
+
 def _assignment_array_insn(assignment, path, jnames, ctx):
     """
 
@@ -771,7 +807,10 @@ def _(index: LoopIndex, axis, loop_indices, ctx):
     _expand_index either returns a tree and leaf data or it returns None and a single set of leaf data
     """
     path, jname_exprs = loop_indices[index]
-    return None, {}, {None: ()}, {None: jname_exprs}, {None: path}
+    insns = ()
+    # return None, {}, {None: ()}, {None: jname_exprs}, {None: path}
+    # TODO namedtuple anyone?
+    return [(path, jname_exprs, insns)], {}
 
 
 @_expand_index.register
@@ -882,13 +921,22 @@ def _(index: CalledMap, axis, loop_indices, ctx):
             )
             path_per_leaf[leaf_key] = pmap({to_axis: to_cpt})
 
-    return (
-        axes,
-        pmap(jnames_per_cpt),
-        pmap(insns_per_leaf),
-        pmap(jname_expr_per_leaf),
-        pmap(path_per_leaf),
-    )
+    # return (
+    #     axes,
+    #     pmap(jnames_per_cpt),
+    #     pmap(insns_per_leaf),
+    #     pmap(jname_expr_per_leaf),
+    #     pmap(path_per_leaf),
+    # )
+    leaves = [
+        (path, jname_exprs, insns)
+        for (path, jname_exprs, insns) in checked_zip(
+            path_per_leaf.values(),
+            jname_expr_per_leaf.values(),
+            insns_per_leaf.values(),
+        )
+    ]
+    return leaves, {"axes": axes, "jnames": jnames_per_cpt}
 
 
 # loop indices and jnames are very similar...
@@ -1346,35 +1394,93 @@ def _parse_assignment_final_rec(
                 _shared_assignment_insn(assignment, array_expr, temp_expr, ctx)
 
 
-def visit_indices(indices, pre, post_term, post_nonterm, *args, **kwargs):
-    return _visit_indices_rec(indices, pre, post_nonterm, post_term)
+def _noop(**kwargs):
+    return kwargs
 
 
-# TODO This traversal is not quite right. I am often iterating over indexed things
-# that look like axes. At least I think so. Do I get arbitrary temp shapes with my
-# algorithm or not?
-# If so then I am not using subaxes here, I am traversing the index tree.
-"""
-I just have ambiguity in the trees if one axis comes before another in a multi-part thing
-and I want to index them in reverse. I think I can safely assume that the labels require
-consistency even if they have different IDs.
-
-Therefore things should work? Yes. I claim this to be the case.
-"""
+def _none(**kwargs):
+    pass
 
 
-def _visit_indices_rec(indices, pre, post_nonterm, post_term, *args):
+def visit_indices(
+    indices,
+    pre_callback=_noop,
+    post_callback_nonterminal=_noop,
+    post_callback_terminal=_none,
+    final_callback=_none,
+    **kwargs,
+):
+    # Technically this inner function isn't required but I think it will be
+    # once indices become trees.
+    return _visit_indices_rec(
+        indices,
+        pre_callback,
+        post_callback_nonterminal,
+        post_callback_terminal,
+        final_callback,
+        **kwargs,
+    )
+
+
+def _visit_indices_rec(
+    indices,
+    pre_callback,
+    post_callback_nonterminal,
+    post_callback_terminal,
+    final_callback,
+    **kwargs,
+):
+    # FIXME This should really be a tree (important for things like mixed inc.
+    # real space). We should expect something like mdat[closure(p), 2] where
+    # mdat is from a (vector-valued x scalar-valued) space to fail since the
+    # second index (2) is only valid for one branch but not the other.
     index, *subindices = indices
 
     # loop over the leaves of the expanded index
+
+    # TODO clean up this bit \/ \/
+    axis = prior_axes._node_from_path(path)
+
+    # FIXME NEXT: Need to characterise the returned thing from this! leaves? leafdata?
+    # axes? Key is to have an iterable of things plus shared data
+    # Should I always return axes? Things per leaf are dicts with the same key...
+    # Could be zipped lists? Iterable of leaf objects?
+
+    # loop over the leaves of the axis, jname combo from the maps?
+    # indices are therefore a list of things that can turn into trees
+    # This function turns an index into an axis tree that is added to the new shape.
+    (
+        iaxes,
+        ijnames_per_cpt,
+        iinsns_per_leaf,
+        ijname_expr_per_leaf,  # actually multiple of these, one per bit of the path
+        ipath_per_leaf,
+    ) = _expand_index(index, axis, loop_indices, ctx)
+
+    leaves, index_data = expand_index_callback(index, **kwargs)
+
+    insns_per_leaf = {}
+    array_expr_per_leaf = {}
+    jnames_per_cpt = ijnames_per_cpt
+
+    if iaxes:
+        # maybe this should actually be turned into the key that I want
+        leaves = iaxes.leaves
+        leaves = [(a.id, c.label) for a, c in leaves]
+        new_axes = iaxes
+    else:
+        leaves = [None]
+        new_axes = None
+    # \cleanup ^^^^^
+
     retvals = []
-    for x in leaves:
-        args, kwargs = pre(*args, **kwargs)
+    for leaf in leaves:
+        kwargs_ = pre_callback(leaf, index_data, **kwargs)
 
         if subindices:
-            retval = _visit_indices_rec(subindices, *args, **kwargs)
-            retval = post_nonterm(retval)
+            retval = _visit_indices_rec(subindices, **kwargs_)
+            retval = post_callback_nonterminal(retval)
         else:
-            retval = post_term(*args, **kwargs)
+            retval = post_callback_terminal(**kwargs_)
         retvals.append(retval)
-    return last_func(retvals)
+    return final_callback(retvals)
