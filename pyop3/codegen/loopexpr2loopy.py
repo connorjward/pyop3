@@ -575,36 +575,27 @@ def _parse_assignment_rec(
     # loop over the leaves of the axis, jname combo from the maps?
     # indices are therefore a list of things that can turn into trees
     # This function turns an index into an axis tree that is added to the new shape.
-    (
-        iaxes,
-        ijnames_per_cpt,
-        iinsns_per_leaf,
-        ijname_expr_per_leaf,  # actually multiple of these, one per bit of the path
-        ipath_per_leaf,
-    ) = _expand_index(index, axis, loop_indices, ctx)
+    # (
+    #     iaxes,
+    #     ijnames_per_cpt,
+    #     iinsns_per_leaf,
+    #     ijname_expr_per_leaf,  # actually multiple of these, one per bit of the path
+    #     ipath_per_leaf,
+    # ) = _expand_index(index, axis, loop_indices, ctx)
+    leaves, index_data = _expand_index(index, axis, loop_indices, ctx)
+    iaxes = index_data.get("axes")
+    ijnames_per_cpt = index_data.get("jnames")
 
     insns_per_leaf = {}
     array_expr_per_leaf = {}
     jnames_per_cpt = ijnames_per_cpt
 
-    if iaxes:
-        # maybe this should actually be turned into the key that I want
-        leaves = iaxes.leaves
-        new_axes = iaxes
-    else:
-        leaves = [None]
-        new_axes = None
-
     for ileaf in leaves:
-        if ileaf:
-            iaxis, icpt = ileaf
-            ileaf_key = (iaxis.id, icpt.label)
-        else:
-            ileaf_key = None
+        leaf_key, leaf_path, leaf_jname_exprs, leaf_insns = ileaf
 
-        iinsns = iinsns_per_leaf[ileaf_key]
-        ijname_expr = ijname_expr_per_leaf[ileaf_key]
-        ipath = ipath_per_leaf[ileaf_key]
+        iinsns = leaf_insns
+        ijname_expr = leaf_jname_exprs
+        ipath = leaf_path
 
         # I believe that this is always the case. Each index in the tree will
         # always target one axis in the input axes. Things like map composition
@@ -650,15 +641,15 @@ def _parse_assignment_rec(
         else:
             # prepend new_insns_per_leaf
             # awful hack, will only work if indices are depth 1 (as mycpt is output from earlier loop)
-            insns_per_leaf[ileaf_key] = (
+            insns_per_leaf[leaf_key] = (
                 tuple(new_extra_insns) + prior_insns_per_leaf[axis.id, mycpt]
             )
 
             # transfer per leaf things to the new tree (since the leaves change)
-            array_expr_per_leaf[ileaf_key] = prior_array_expr_per_leaf[axis.id, mycpt]
+            array_expr_per_leaf[leaf_key] = prior_array_expr_per_leaf[axis.id, mycpt]
 
     return (
-        new_axes,
+        iaxes,
         pmap(jnames_per_cpt),
         pmap(insns_per_leaf),
         pmap(array_expr_per_leaf),
@@ -796,38 +787,26 @@ def _(index: LoopIndex, axis, loop_indices, ctx):
     """
     path, jname_exprs = loop_indices[index]
     insns = ()
-    return None, {}, {None: ()}, {None: jname_exprs}, {None: path}
+    # return None, {}, {None: ()}, {None: jname_exprs}, {None: path}
     # TODO namedtuple anyone?
     # TODO generic algorithm
-    # return [(path, jname_exprs, insns)], {}
+    return [(None, path, jname_exprs, insns)], {}
 
 
 @_expand_index.register
 def _(index: CalledMap, axis, loop_indices, ctx):
-    (
-        from_axes,
-        from_jnames_per_cpt,
-        from_insns_per_leaf,
-        from_jname_expr_per_leaf,
-        from_path_per_leaf,
-    ) = _expand_index(index.from_index, axis, loop_indices, ctx)
+    leaves, index_data = _expand_index(index.from_index, axis, loop_indices, ctx)
+    from_axes = index_data.get("axes")
+    from_jnames = index_data.get("jnames", {})
 
-    jnames_per_cpt = dict(from_jnames_per_cpt)
-    insns_per_leaf = {}
-    jname_expr_per_leaf = {}
-    path_per_leaf = {}
+    jnames_per_cpt = dict(from_jnames)
+    leaf_keys = []
+    insns_per_leaf = []
+    jname_expr_per_leaf = []
+    path_per_leaf = []
 
-    if from_axes:
-        leaf_keys = [(a.id, c.label) for a, c in from_axes.leaves]
-        axes = from_axes
-    else:
-        # scalar index, from_axes is None
-        leaf_keys = [None]
-        axes = None
-
-    for from_leaf_key in leaf_keys:
-        from_path = from_path_per_leaf[from_leaf_key]
-        myexprs = from_jname_expr_per_leaf[from_leaf_key]
+    for leaf in leaves:
+        from_leaf_key, from_path, from_jname_exprs, from_insns = leaf
 
         components = []
         jnames = []
@@ -859,7 +838,7 @@ def _(index: CalledMap, axis, loop_indices, ctx):
             for myaxislabel in from_path:
                 myjname = ctx.unique_name("j")
                 ctx.add_temporary(myjname)
-                myexpr = myexprs[myaxislabel]
+                myexpr = from_jname_exprs[myaxislabel]
                 myinsns.append((pym.var(myjname), myexpr))
                 myjnames[myaxislabel] = myjname
             myjnames = pmap(myjnames)
@@ -893,40 +872,37 @@ def _(index: CalledMap, axis, loop_indices, ctx):
             jname_exprs.append({to_axis: jname_expr})
 
         axis = Axis(components, label=index.name)
-        if axes:
-            axes = axes.add_subaxis(axis, *from_leaf_key)
+        if from_axes:
+            axes = from_axes.add_subaxis(axis, *from_leaf_key)
         else:
             axes = AxisTree(axis)
 
         for i, cpt in enumerate(components):
-            # hmm...
-            leaf_key = (axis.id, cpt.label)
+            # this makes sense I think since we are only adding one axis
             jnames_per_cpt[axis.label, cpt.label] = jnames[i]
-            insns_per_leaf[leaf_key] = from_insns_per_leaf[from_leaf_key] + tuple(
-                insns[i]
-            )
-            jname_expr_per_leaf[leaf_key] = (
-                from_jname_expr_per_leaf[from_leaf_key] | jname_exprs[i]
-            )
-            path_per_leaf[leaf_key] = pmap({to_axis: to_cpt})
+            leaf_keys.append((axis.id, cpt.label))
+            insns_per_leaf.append(from_insns + tuple(insns[i]))
+            jname_expr_per_leaf.append(from_jname_exprs | jname_exprs[i])
+            path_per_leaf.append(pmap({to_axis: to_cpt}))
 
-    return (
-        axes,
-        pmap(jnames_per_cpt),
-        pmap(insns_per_leaf),
-        pmap(jname_expr_per_leaf),
-        pmap(path_per_leaf),
-    )
+    # return (
+    #     axes,
+    #     pmap(jnames_per_cpt),
+    #     pmap(insns_per_leaf),
+    #     pmap(jname_expr_per_leaf),
+    #     pmap(path_per_leaf),
+    # )
     # TODO below is an attempt at making the algorithm generic with callbacks
-    # leaves = [
-    #     (path, jname_exprs, insns)
-    #     for (path, jname_exprs, insns) in checked_zip(
-    #         path_per_leaf.values(),
-    #         jname_expr_per_leaf.values(),
-    #         insns_per_leaf.values(),
-    #     )
-    # ]
-    # return leaves, {"axes": axes, "jnames": jnames_per_cpt}
+    leaves = [
+        (leaf_key, path, jname_exprs, insns)
+        for (leaf_key, path, jname_exprs, insns) in checked_zip(
+            leaf_keys,
+            path_per_leaf,
+            jname_expr_per_leaf,
+            insns_per_leaf,
+        )
+    ]
+    return leaves, {"axes": axes, "jnames": jnames_per_cpt}
 
 
 # loop indices and jnames are very similar...
