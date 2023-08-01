@@ -63,6 +63,72 @@ LOOPY_TARGET = lp.CWithGNULibcTarget()
 LOOPY_LANG_VERSION = (2018, 2)
 
 
+def _noop(**kwargs):
+    return kwargs
+
+
+def _none(**kwargs):
+    pass
+
+
+def visit_indices(
+    indices,
+    pre_ctx,
+    *,
+    index_callback=_none,  # FIXME bad default, will break
+    pre_callback=_noop,
+    post_callback_nonterminal=_noop,
+    post_callback_terminal=_none,
+    final_callback=_none,
+    **kwargs,
+):
+    # Technically this inner function isn't required but I think it will be
+    # once indices become trees.
+    return _visit_indices_rec(
+        indices,
+        pre_ctx,
+        index_callback=index_callback,
+        pre_callback=pre_callback,
+        post_callback_nonterminal=post_callback_nonterminal,
+        post_callback_terminal=post_callback_terminal,
+        final_callback=final_callback,
+        **kwargs,
+    )
+
+
+def _visit_indices_rec(
+    indices,
+    preorder_ctx,
+    *,
+    index_callback,
+    pre_callback,
+    post_callback_nonterminal,
+    post_callback_terminal,
+    final_callback,
+    **kwargs,
+):
+    # FIXME This should really be a tree (important for things like mixed inc.
+    # real space). We should expect something like mdat[closure(p), 2] where
+    # mdat is from a (vector-valued x scalar-valued) space to fail since the
+    # second index (2) is only valid for one branch but not the other.
+    index, *subindices = indices
+    leaves, index_data = index_callback(index, **kwargs)
+
+    leafdata = {}
+    for leafkey, leaf in leaves.items():
+        preorder_ctx_ = pre_callback(leaf, preorder_ctx, **kwargs)
+
+        if subindices:
+            retval = _visit_indices_rec(subindices, preorder_ctx_, **kwargs)
+            leafdata[leafkey] = post_callback_nonterminal(
+                retval, leaf, preorder_ctx_, **kwargs
+            )
+        else:
+            leafdata[leafkey] = post_callback_terminal(leaf, preorder_ctx_, **kwargs)
+
+    return final_callback(index_data, leafdata)
+
+
 class CodegenContext(abc.ABC):
     pass
 
@@ -240,111 +306,94 @@ def _parse_loop(
     jnames,
     ipath,
 ):
-    # I want to do a traversal like I do for assignment. Then I can loop over indexed
-    # things. Firstly collect jnames and instructions then traverse...
+    """This is for something like map(p).index() or map0(map1(p)).index().
 
-    # do a BIG hack for now, just for one test
-    iname = ctx.unique_name("i0")
-    ctx.add_domain(iname, 5)
+    We 'expand' the provided index into something with shape and then
+    traverse the leaves.
+    """
+    """It should be possible to loop over things such as axes[::2][1:].index().
 
-    # this is awful
-    loop_indices = {loop.index: (pmap({"ax0": "cpt0"}), pmap({"ax0": iname}))}
+    For such a case we need to traverse the indexed axes in turn until we end up
+    with a final set of axes that give the shape of the iteration. As above we then
+    need to traverse the leaves in turn.
+    """
+    leaves, index_data = _expand_index(
+        loop.index.iterset, loop_indices=loop_indices, codegen_ctx=ctx
+    )
 
-    with ctx.within_inames({iname}):
-        for stmt in loop.statements:
-            _compile(stmt, loop_indices, ctx)
-    return
+    axes = index_data["axes"]
+    jnames_per_axcpt = index_data["jnames"]
 
-    ### old code
+    insns_per_leaf = {k: v[2] for k, v in leaves.items()}
 
-    for axcpt in axis.components:
-        assert isinstance(icpt, (LoopIndex, Map)), "slices not allowed for loops"
+    _finalize_parse_loop(
+        loop, axes, jnames_per_axcpt, insns_per_leaf, ctx, loop_indices
+    )
 
-        # TODO I hate that these are mutable
-        new_loop_indices = loop_indices
 
-        # is this needed?
-        new_path = path
-        if isinstance(icpt, LoopIndex):
-            new_path |= {icpt.to_axis: icpt.to_cpt}
-        else:
-            assert isinstance(icpt, Map)
-            del new_path[icpt.from_axis]
-            new_path |= {icpt.to_axis: icpt.to_cpt}
+def _finalize_parse_loop(
+    loop, axes, jnames_per_axcpt, insns_per_leaf, codegen_ctx, loop_indices
+):
+    _finalize_parse_loop_rec(
+        loop,
+        axes,
+        jnames_per_axcpt,
+        insns_per_leaf,
+        codegen_ctx,
+        loop_indices,
+        current_axis=axes.root,
+        current_path=pmap(),
+        current_jnames=pmap(),
+    )
 
-        new_loop_sizes = dict(loop_sizes)
-        new_jnames = dict(jnames)
-        new_ipath = ipath + ((index, icpt),)
 
-        # don't overwrite loop sizes, the only valid occasion where we can
-        # target an existing domain is if the input and output axes of a
-        # map match
-        # if icpt.to_axis in loop_sizes and icpt.from_axis != icpt.to_axis:
-        #     raise ValueError
+# this is similar to what we do for assignments but we do something different at the bottom
+def _finalize_parse_loop_rec(
+    loop,
+    axes,
+    jnames_per_axcpt,
+    insns_per_leaf,
+    codegen_ctx,
+    loop_indices,
+    *,
+    current_axis,
+    current_path,
+    current_jnames,
+):
+    for axcpt in current_axis.components:
+        size = register_extent(axcpt.count, current_path, current_jnames, codegen_ctx)
+        iname = codegen_ctx.unique_name("i")
+        codegen_ctx.add_domain(iname, size)
 
-        new_inames = set()
-        if icpt in loop_indices:
-            assert icpt.to_axis not in new_jnames
-            new_loop_sizes[icpt.to_axis] = 1
-            new_jnames[icpt.to_axis] = loop_indices[icpt]
+        new_path = current_path | {current_axis.label: axcpt.label}
+        current_jname = jnames_per_axcpt[current_axis.id, axcpt.label]
+        new_jnames = current_jnames | {current_axis.label: current_jname}
 
-        else:
-            # need to emit a loop
-            if isinstance(icpt, LoopIndex):
-                size = icpt.cpt.count
-            else:
-                assert isinstance(icpt, Map)
-                size = icpt.arity
+        with codegen_ctx.within_inames({iname}):
+            codegen_ctx.add_assignment(pym.var(current_jname), pym.var(iname))
 
-            sizename = register_extent(
-                size,
-                new_path,
-                new_jnames,
-                ctx,
-            )
-            new_iname = ctx.unique_name("i")
-            new_inames.add(new_iname)
-            ctx.add_domain(new_iname, sizename)
-
-            # do I even need this?
-            new_loop_sizes[icpt.to_axis] = (
-                pym.var(sizename) if isinstance(sizename, str) else sizename
-            )
-
-        with ctx.within_inames(new_inames):
-            # maps transform jnames
-            if isinstance(icpt, Map):
-                jname = new_iname  # ???
-                new_jname = myinnerfunc(
-                    jname,
-                    index,
-                    icpt,
-                    new_jnames,
-                    loop_indices,
-                    ctx,
-                )
-                new_jnames[icpt.to_axis] = new_jname
-                new_loop_indices |= {icpt: new_jname}
-            else:
-                assert isinstance(icpt, LoopIndex)
-                new_jnames[icpt.to_axis] = new_iname
-                new_loop_indices |= {icpt: new_iname}
-
-            if subaxis := axes.child(axis, axcpt):
-                _parse_loop(
+            if subaxis := axes.child(current_axis, axcpt):
+                _finalize_parse_loop_rec(
                     loop,
-                    new_loop_indices,
-                    ctx,
-                    subidx,
-                    new_path,
-                    pmap(new_loop_sizes),
-                    pmap(new_jnames),
-                    new_ipath,
+                    axes,
+                    jnames_per_axcpt,
+                    insns_per_leaf,
+                    codegen_ctx,
+                    current_axis=subaxis,
+                    current_path=new_path,
+                    current_jnames=new_jnames,
                 )
-
             else:
+                for insn in insns_per_leaf[current_axis.id, axcpt.label]:
+                    codegen_ctx.add_assignment(*insn)
+
                 for stmt in loop.statements:
-                    _compile(stmt, new_loop_indices, ctx)
+                    # I think that this is probably wrong. I want jname exprs here
+                    _compile(
+                        stmt,
+                        loop_indices | {loop.index: (new_path, new_jnames)},
+                        codegen_ctx,
+                    )
 
 
 @_compile.register
@@ -471,10 +520,11 @@ def _(call: FunctionCall, loop_indices, ctx: LoopyCodegenContext) -> None:
 
 
 # FIXME this is practically identical to what we do in build_loop
+# parse_assignment?
 def build_assignment(
     assignment,
     loop_indices,
-    ctx,
+    cgen_ctx,
 ):
     # each application of an index tree takes an input axis tree and the
     # jnames that apply to each axis component and then filters/transforms the
@@ -483,8 +533,8 @@ def build_assignment(
     # actual loops.
     # The first step is therefore to generate these initial jnames, and the last
     # is to emit the loops for the final tree.
-    jnames_per_cpt, insns_per_leaf, array_expr_per_leaf = _prepare_assignment(
-        assignment, ctx
+    jnames_per_cpt, array_expr_per_leaf, insns_per_leaf = _prepare_assignment(
+        assignment, cgen_ctx
     )
 
     """
@@ -510,37 +560,20 @@ def build_assignment(
     # one index instruction (jname) per index component
     axes = assignment.array.axes
     for indices in assignment.array.indicess:
-        # (
-        #     axes,
-        #     jnames_per_cpt,
-        #     insns_per_leaf,
-        #     array_expr_per_leaf,
-        # ) = _parse_assignment_rec(
-        #     assignment,
-        #     loop_indices,
-        #     ctx,
-        #     axes,
-        #     indices,
-        #     jnames_per_cpt,
-        #     insns_per_leaf,
-        #     array_expr_per_leaf,
-        #     pmap(),
-        #     pmap(),
-        #     (),
-        # )
         (
             axes,
             jnames_per_cpt,
-            insns_per_leaf,
             array_expr_per_leaf,
+            insns_per_leaf,
         ) = _parse_assignment(
-            loop_indices,
-            ctx,
             indices,
+            ParseAssignmentPreorderContext(),
+            cgen_ctx=cgen_ctx,
+            loop_indices=loop_indices,
             prev_axes=axes,
-            prev_jnames=jnames_per_cpt,
-            prev_insns_per_leaf=insns_per_leaf,
+            prev_jnames_per_cpt=jnames_per_cpt,
             prev_array_expr_per_leaf=array_expr_per_leaf,
+            prev_insns_per_leaf=insns_per_leaf,
         )
 
     # lastly generate loops for the tree structure at the end, also generate
@@ -548,207 +581,97 @@ def build_assignment(
     # This will traverse the final axis tree, collecting jnames. At the bottom the
     # leaf insns will be emitted and the temp_expr will be assigned to the array one.
     _parse_assignment_final(
-        assignment, axes, jnames_per_cpt, insns_per_leaf, array_expr_per_leaf, ctx
+        assignment, axes, jnames_per_cpt, array_expr_per_leaf, insns_per_leaf, cgen_ctx
     )
 
 
-def _parse_assignment(
-    loop_indices,
-    ctx,
-    indices,
-    *,
-    prev_axes,
-    prev_jnames,
-    prev_insns_per_leaf,
-    prev_array_expr_per_leaf,
-):
-    return visit_indices(
-        indices,
-        index_callback=_expand_index,
-        pre_callback=_parse_assignment_pre_callback,
-        post_callback_nonterminal=_parse_assignment_post_callback_nonterminal,
-        post_callback_terminal=_parse_assignment_post_callback_terminal,
-        final_callback=_parse_assignment_final_callback,
-        #
-        loop_indices=loop_indices,
-        ctx=ctx,
-        prev_axes=prev_axes,
-        prev_jnames=prev_jnames,
-        prev_insns_per_leaf=prev_insns_per_leaf,
-        prev_array_expr_per_leaf=prev_array_expr_per_leaf,
-        axis_path=pmap(),
-        extra_insns=(),
+def _prepare_assignment(assignment, ctx: LoopyCodegenContext) -> tuple[pmap, pmap]:
+    return _prepare_assignment_rec(
+        assignment,
+        assignment.array.axes,
+        assignment.array.axes.root,
+        pmap(),
+        pmap(),
+        ctx,
     )
 
 
-# bad name now
-def _parse_assignment_rec(
+def _prepare_assignment_rec(
     assignment,
-    loop_indices,
-    ctx,
-    prior_axes: AxisTree,
-    indices: tuple,
-    prior_jnames_per_axcpt: pmap,
-    prior_insns_per_leaf: pmap,
-    prior_array_expr_per_leaf: pmap,
-    path: pmap,  # path through prior axes
+    axes: AxisTree,
+    axis: Axis,
+    path: pmap,
     jnames: pmap,
-    extra_insns: tuple,
-):
-    """Multi-component index trees are bad because we could then combine a map
-    with a slice side-by-side and this doesn't make any sense. What would the new set
-    of axes look like? Maps themselves yield
-    multiple axis components. We could similarly have a "multi-slice" that could do the
-    same? I don't like that very much.
-    For now just permit single slices. Since full slices are the default we shouldn't (?)
-    lose shape.
-
-    Note: since indices can only act on the current axis of the array the the number of
-    options available to slices is very limited. I can slice some or all of the available
-    axes! So a slice can be a single entity. Avoid multi-component.
-
-    Slices are basically maps from the current axis, so index.from_axis is undefined and
-    we can't do the sort of recursion we can with maps.
-    """
-    # indices are some sort of conditional tree, only work for specific axis labels
-    index, *subindices = indices
-
-    axis = prior_axes._node_from_path(path)
-
-    # loop over the leaves of the axis, jname combo from the maps?
-    # indices are therefore a list of things that can turn into trees
-    # This function turns an index into an axis tree that is added to the new shape.
-    # (
-    #     iaxes,
-    #     ijnames_per_cpt,
-    #     iinsns_per_leaf,
-    #     ijname_expr_per_leaf,  # actually multiple of these, one per bit of the path
-    #     ipath_per_leaf,
-    # ) = _expand_index(index, axis, loop_indices, ctx)
-    leaves, index_data = _expand_index(index, axis, loop_indices, ctx)
-    iaxes = index_data.get("axes")
-    ijnames_per_cpt = index_data.get("jnames")
-
+    ctx: LoopyCodegenContext,
+) -> tuple[pmap, pmap]:
+    jnames_per_axcpt = {}
     insns_per_leaf = {}
     array_expr_per_leaf = {}
-    jnames_per_cpt = ijnames_per_cpt
+    for axcpt in axis.components:
+        jname = ctx.unique_name("j")
+        ctx.add_temporary(jname)
+        new_jnames = jnames | {axis.label: jname}
+        # FIXME should only add once per axis label, component label combination
+        jnames_per_axcpt[axis.label, axcpt.label] = jname
+        new_path = path | {axis.label: axcpt.label}
 
-    for ileaf in leaves:
-        ### pre_callback (done)
-        leaf_key, leaf_path, leaf_jname_exprs, leaf_insns = ileaf
-
-        iinsns = leaf_insns
-        ijname_expr = leaf_jname_exprs
-        ipath = leaf_path
-
-        # I believe that this is always the case. Each index in the tree will
-        # always target one axis in the input axes. Things like map composition
-        # do not matter here (ie map1(map0(p)) means that we care what the output
-        # of map1 is, map0 is just the input).
-        # Even if we have complicated maps they do not matter here as they are
-        # complicated for the input to the map, not the target.
-        new_path = path | ipath
-        new_extra_insns = list(extra_insns) + list(iinsns)
-
-        # loop over these? Will I hit duplicates? no I wont since ipath is the *new*
-        # set of axes that get touched by the index
-        for myaxislabel, mycpt in ipath.items():
-            existing_jname = prior_jnames_per_axcpt[myaxislabel, mycpt]
-            myexpr = ijname_expr[myaxislabel]
-            new_extra_insns.append((pym.var(existing_jname), myexpr))
-
-        ### above is done in pre_callback
-
-        # I think that indices also need to form a tree, how could I otherwise
-        # index a mixed real space thing?
-        if subindices:
+        if subaxis := axes.child(axis, axcpt):
             (
-                subaxes,
                 subjnames_per_axcpt,
                 subinsns_per_leaf,
                 subarray_expr_per_leaf,
-            ) = _parse_assignment_rec(
-                assignment,
-                loop_indices,
-                ctx,
-                axes,
-                subindices,
-                prior_jnames_per_axcpt,
-                prior_insns_per_leaf,
-                prior_array_expr_per_leaf,
-                new_path,
-                new_jnames,
-                new_extra_insns,
-            )
-
-            # post_callback_nonterminal
-            new_axes = new_axes.add_subtree(subaxes, *ileaf)
+            ) = _parse_assignment_rec(axes, subaxis, new_path, new_jnames, ctx)
             jnames_per_axcpt |= subjnames_per_axcpt
             insns_per_leaf |= subinsns_per_leaf
-            array_expr_per_leaf |= prior_array_expr_per_leaf
+            array_expr_per_leaf |= subarray_expr_per_leaf
         else:
-            # post_callback_terminal
-            # prepend new_insns_per_leaf
-            # awful hack, will only work if indices are depth 1 (as mycpt is output from earlier loop)
-            insns_per_leaf[leaf_key] = (
-                tuple(new_extra_insns) + prior_insns_per_leaf[axis.id, mycpt]
+            insns, array_expr = _assignment_array_insn(
+                assignment, new_path, new_jnames, ctx
             )
+            insns_per_leaf[axis.id, axcpt.label] = insns
+            array_expr_per_leaf[axis.id, axcpt.label] = array_expr
 
-            # transfer per leaf things to the new tree (since the leaves change)
-            array_expr_per_leaf[leaf_key] = prior_array_expr_per_leaf[axis.id, mycpt]
+    return pmap(jnames_per_axcpt), pmap(array_expr_per_leaf), pmap(insns_per_leaf)
 
-    return (
-        iaxes,
-        pmap(jnames_per_cpt),
-        pmap(insns_per_leaf),
-        pmap(array_expr_per_leaf),
-    )
 
-    ###
+@dataclasses.dataclass(frozen=True)
+class ParseAssignmentPreorderContext:
+    path: pmap = pmap()
+    insns: tuple = ()
 
-    assert False, "old impl"
 
-    # if isinstance(icpt, Slice):
-    #     # the stop is either provided by the index, already registered, or, lastly, the axis size
-    #     if icpt.stop:
-    #         stop = icpt.stop
-    #     elif icpt.from_axis in new_loop_sizes:
-    #         # TODO always pop
-    #         stop = new_loop_sizes.pop(icpt.from_axis)
-    #     else:
-    #         # TODO is this still required?
-    #         axis = find_axis(assignment.array.axes, new_path, icpt.to_axis)
-    #         cpt_index = axis.component_index(icpt.to_cpt)
-    #         stop = axis.components[cpt_index].count
-    #     # TODO add a remainder?
-    #     extent = (stop - icpt.start) // icpt.step
+"""Multi-component index trees are bad because we could then combine a map
+with a slice side-by-side and this doesn't make any sense. What would the new set
+of axes look like? Maps themselves yield
+multiple axis components. We could similarly have a "multi-slice" that could do the
+same? I don't like that very much.
+For now just permit single slices. Since full slices are the default we shouldn't (?)
+lose shape.
+
+Note: since indices can only act on the current axis of the array the the number of
+options available to slices is very limited. I can slice some or all of the available
+axes! So a slice can be a single entity. Avoid multi-component.
+
+Slices are basically maps from the current axis, so index.from_axis is undefined and
+we can't do the sort of recursion we can with maps.
+"""
 
 
 def _parse_assignment_pre_callback(
-    leaf, index_data, *, prev_jnames, axis_path, extra_insns, **kwargs
+    leaf, preorder_ctx, *, prev_jnames_per_cpt, **kwargs
 ):
     # unpack leaf
-    leaf_key, iaxes_axis_path, iaxes_jname_exprs, iaxes_insns = leaf
+    iaxes_axis_path, iaxes_jname_exprs, iaxes_insns = leaf
 
-    # I believe that this is always the case. Each index in the tree will
-    # always target one axis in the input axes. Things like map composition
-    # do not matter here (ie map1(map0(p)) means that we care what the output
-    # of map1 is, map0 is just the input).
-    # Even if we have complicated maps they do not matter here as they are
-    # complicated for the input to the map, not the target.
-    new_axis_path = axis_path | iaxes_axis_path
-    new_insns = list(extra_insns) + list(iaxes_insns)
+    new_axis_path = preorder_ctx.path | iaxes_axis_path
+    new_insns = preorder_ctx.insns + iaxes_insns
 
     for axis, cpt in iaxes_axis_path.items():
-        prev_jname = prev_jnames[axis, cpt]
+        prev_jname = prev_jnames_per_cpt[axis, cpt]
         jname_expr = iaxes_jname_exprs[axis]
-        new_insns.append((pym.var(prev_jname), jname_expr))
+        new_insns += ((pym.var(prev_jname), jname_expr),)
 
-    return {
-        "axis_path": new_axis_path,
-        "jnames": index_data["jnames"],
-        "extra_insns": new_insns,
-    } | kwargs
+    return ParseAssignmentPreorderContext(new_axis_path, new_insns)
 
 
 def _parse_assignment_post_callback_nonterminal(
@@ -767,42 +690,318 @@ def _parse_assignment_post_callback_nonterminal(
 
 
 def _parse_assignment_post_callback_terminal(
+    leaf,
+    preorder_ctx,
     *,
     prev_axes,
-    prev_insns_per_leaf,
     prev_array_expr_per_leaf,
-    axis_path,
-    extra_insns,
+    prev_insns_per_leaf,
     **kwargs,
 ):
-    prev_leaf, prev_leaf_cpt = prev_axes._node_from_path(axis_path)
+    prev_leaf_axis, prev_leaf_cpt = prev_axes._node_from_path(preorder_ctx.path)
+    prev_leaf_key = (prev_leaf_axis.id, prev_leaf_cpt.label)
 
-    insns_per_leaf = (
-        tuple(extra_insns) + prev_insns_per_leaf[prev_leaf.id, prev_leaf_cpt.label]
-    )
-    array_expr_per_leaf = prev_array_expr_per_leaf[prev_leaf.id, prev_leaf_cpt.label]
-
-    return insns_per_leaf, array_expr_per_leaf
+    array_expr_per_leaf = prev_array_expr_per_leaf[prev_leaf_key]
+    insns_per_leaf = preorder_ctx.insns + prev_insns_per_leaf[prev_leaf_key]
+    return array_expr_per_leaf, insns_per_leaf
 
 
 def _parse_assignment_final_callback(
     index_data,
     leafdata,
 ):
-    insns_per_leaf = {}
-    array_expr_per_leaf = {}
-    for leaf_key, (insns, array_expr) in leafdata.items():
-        insns_per_leaf[leaf_key] = insns
-        array_expr_per_leaf[leaf_key] = array_expr
-    insns_per_leaf = pmap(insns_per_leaf)
-    array_expr_per_leaf = pmap(array_expr_per_leaf)
-
+    array_expr_per_leaf = pmap({k: v[0] for k, v in leafdata.items()})
+    insns_per_leaf = pmap({k: v[1] for k, v in leafdata.items()})
     return (
         index_data["axes"],
         index_data["jnames"],
-        insns_per_leaf,
         array_expr_per_leaf,
+        insns_per_leaf,
     )
+
+
+def _parse_assignment_final(
+    assignment,
+    axes,
+    jnames_per_axcpt,
+    array_expr_per_leaf,
+    insns_per_leaf,
+    ctx: LoopyCodegenContext,
+):
+    _parse_assignment_final_rec(
+        assignment,
+        axes,
+        axes.root,
+        jnames_per_axcpt,
+        array_expr_per_leaf,
+        insns_per_leaf,
+        pmap(),
+        pmap(),
+        ctx,
+    )
+
+
+def _parse_assignment_final_rec(
+    assignment,
+    axes,
+    axis,
+    jnames_per_axcpt,
+    array_expr_per_leaf,
+    insns_per_leaf,
+    path: pmap,
+    jnames: pmap,
+    ctx,
+):
+    for axcpt in axis.components:
+        size = register_extent(axcpt.count, path, jnames, ctx)
+        iname = ctx.unique_name("i")
+        ctx.add_domain(iname, size)
+
+        current_jname = jnames_per_axcpt[axis.label, axcpt.label]
+        new_jnames = jnames | {axis.label: current_jname}
+        new_path = path | {axis.label: axcpt.label}
+
+        with ctx.within_inames({iname}):
+            ctx.add_assignment(pym.var(current_jname), pym.var(iname))
+
+            if subaxis := axes.child(axis, axcpt):
+                _parse_assignment_final_rec(
+                    assignment,
+                    axes,
+                    subaxis,
+                    jnames_per_axcpt,
+                    array_expr_per_leaf,
+                    insns_per_leaf,
+                    new_path,
+                    new_jnames,
+                    ctx,
+                )
+            else:
+                for insn in insns_per_leaf[axis.id, axcpt.label]:
+                    ctx.add_assignment(*insn)
+                array_expr = array_expr_per_leaf[axis.id, axcpt.label]
+                temp_insns, temp_expr = _assignment_temp_insn(
+                    assignment, new_path, new_jnames, ctx
+                )
+                for insn in temp_insns:
+                    ctx.add_assignment(*insn)
+                _shared_assignment_insn(assignment, array_expr, temp_expr, ctx)
+
+
+@functools.singledispatch
+def _expand_index(index, *, loop_indices, cgen_ctx, **kwargs):
+    """
+    Return an axis tree and jnames corresponding to unfolding the index.
+
+    Note that the # of jnames and path length is often longer than the size
+    of the resultant axes. This is because loop indices add jnames but no shape.
+    """
+    raise TypeError
+
+
+@_expand_index.register
+def _(index: LoopIndex, *, loop_indices, cgen_ctx, **kwargs):
+    # what do here?
+    # I don't have leaves since those are handled outside
+    """
+    _expand_index either returns a tree and leaf data or it returns None and a single set of leaf data
+    """
+    path, jname_exprs = loop_indices[index]
+    insns = ()
+    # return None, {}, {None: ()}, {None: jname_exprs}, {None: path}
+    # TODO namedtuple anyone?
+    # TODO generic algorithm
+    return {None: (path, jname_exprs, insns)}, {}
+
+
+@_expand_index.register
+def _(index: CalledMap, *, loop_indices, cgen_ctx, **kwargs):
+    # old alias
+    ctx = cgen_ctx
+
+    leaves, index_data = _expand_index(
+        index.from_index, loop_indices=loop_indices, cgen_ctx=ctx, **kwargs
+    )
+    from_axes = index_data.get("axes")
+    from_jnames = index_data.get("jnames", {})
+
+    jnames_per_cpt = dict(from_jnames)
+    leaf_keys = []
+    insns_per_leaf = []
+    jname_expr_per_leaf = []
+    path_per_leaf = []
+
+    for from_leaf_key, leaf in leaves.items():
+        from_path, from_jname_exprs, from_insns = leaf
+
+        components = []
+        jnames = []
+        insns = []
+        jname_exprs = []
+
+        # this is a mapping from (from_axis, from_cpt) to an iterable of
+        # (map_func, arity, to_axis, to_cpt)
+        bits = index.bits[from_path]
+        for (
+            mycptlabel,
+            map_func,
+            arity,
+            to_axis,
+            to_cpt,
+        ) in bits:  # each one of these is a new "leaf"
+            myinsns = []
+
+            # materialise the jname_expr. When we are indexing arrays this jname
+            # is provided externally, but not for index composition
+            # could I do this earlier to mirror what I do elsewhere?
+            # what jnames are required to index this axis?
+            # extra loop indices? generated first?
+            # need to convert index into jnames and path - materialise?
+
+            # map composition does sort of rely on emitting the prior loops. Only the final
+            # loop can be sliced? Not really, the whole resulting tree can be...
+            myjnames = {}
+            for myaxislabel in from_path:
+                myjname = ctx.unique_name("j")
+                ctx.add_temporary(myjname)
+                myexpr = from_jname_exprs[myaxislabel]
+                myinsns.append((pym.var(myjname), myexpr))
+                myjnames[myaxislabel] = myjname
+            myjnames = pmap(myjnames)
+
+            if isinstance(map_func, MultiArray):  # is this the right class?
+                cpt = AxisComponent(arity, label=mycptlabel)
+                components.append(cpt)
+
+                jname = ctx.unique_name("j")
+                ctx.add_temporary(jname)
+                jnames.append(jname)
+
+                # ? = map[j0, j1]
+                # where j0 comes from the from_index and j1 is advertised as the shape
+                # of the resulting axis (jname_per_cpt)
+                # j0 is now fixed but j1 can still be changed
+                inner_axis, inner_cpt = map_func.axes.leaf
+                insns_, jname_expr = _scalar_assignment(
+                    map_func,
+                    from_path | pmap({inner_axis.label: inner_cpt.label}),
+                    myjnames | {inner_axis.label: jname},
+                    ctx,
+                )
+                myinsns.extend(insns_)
+
+            else:
+                raise NotImplementedError
+
+            insns.append(myinsns)
+            jname_exprs.append({to_axis: jname_expr})
+
+        axis = Axis(components, label=index.name)
+        if from_axes:
+            axes = from_axes.add_subaxis(axis, *from_leaf_key)
+        else:
+            axes = AxisTree(axis)
+
+        for i, cpt in enumerate(components):
+            # this makes sense I think since we are only adding one axis
+            jnames_per_cpt[axis.label, cpt.label] = jnames[i]
+            leaf_keys.append((axis.id, cpt.label))
+            insns_per_leaf.append(from_insns + tuple(insns[i]))
+            jname_expr_per_leaf.append(from_jname_exprs | jname_exprs[i])
+            path_per_leaf.append(pmap({to_axis: to_cpt}))
+
+    leaves = {
+        leaf_key: (path, jname_exprs, insns)
+        for (leaf_key, path, jname_exprs, insns) in checked_zip(
+            leaf_keys,
+            path_per_leaf,
+            jname_expr_per_leaf,
+            insns_per_leaf,
+        )
+    }
+    return leaves, {"axes": axes, "jnames": jnames_per_cpt}
+
+
+@_expand_index.register
+def _(axes: AxisTree, *, loop_indices, codegen_ctx, **kwargs):
+    leaves, jnames_per_axcpt = _parse_index_axis_tree_rec(
+        axes,
+        codegen_ctx,
+        current_axis=axes.root,
+        current_path=pmap(),
+        current_target_jnames=pmap(),
+    )
+
+    # don't need to construct any axes here since they already exist
+    index_data = {"axes": axes, "jnames": jnames_per_axcpt}
+    return leaves, index_data
+
+
+def _parse_index_axis_tree_rec(
+    axes: AxisTree, codegen_ctx, *, current_axis, current_path, current_target_jnames
+):
+    leaves = {}
+    jnames_per_cpt = {}
+    for axcpt in current_axis.components:
+        # for axis trees the src and target jnames are the same
+        jname = codegen_ctx.unique_name("j")
+        codegen_ctx.add_temporary(jname)
+        jnames_per_cpt[current_axis.id, axcpt.label] = jname
+        new_target_jnames = current_target_jnames | {current_axis.label: jname}
+
+        new_path = current_path | {current_axis.label: axcpt.label}
+        new_insns = ()  # don't generate instructions for axis trees
+
+        if subaxis := axes.child(current_axis, axcpt):
+            subleaves, subsrc_jnames = _parse_index_axis_tree_rec(
+                axes,
+                codegen_ctx,
+                current_axis=subaxis,
+                current_path=new_path,
+                current_target_jnames=new_target_jnames,
+            )
+            leaves |= subleaves
+            jnames_per_cpt |= subsrc_jnames
+        else:
+            leaves[current_axis.id, axcpt.label] = (
+                new_path,
+                new_target_jnames,
+                new_insns,
+            )
+
+    return pmap(leaves), pmap(jnames_per_cpt)
+
+
+# TODO
+# @_expand_index.register
+# def _(slice: Sliced, *, loop_indices, codegen_ctx, **kwargs):
+#     ...
+#     leaves = {leaf_key: (path, jname_exprs, insns)
+#         for (leaf_key, path, jname_exprs, insns) in checked_zip(
+#             leaf_keys,
+#             path_per_leaf,
+#             jname_expr_per_leaf,
+#             insns_per_leaf,
+#         )
+#     }
+#     return leaves, {"axes": axes, "jnames": jnames_per_cpt}
+
+
+"""This function effectively traverses an index tree and returns a new set of axes
+plus things like src and target jnames as well as extra instructions.
+
+This is generic across assignments and loops.
+
+I want to generalise this to work for anything that can be used as an index.
+"""
+_parse_assignment = functools.partial(
+    visit_indices,
+    index_callback=_expand_index,
+    pre_callback=_parse_assignment_pre_callback,
+    post_callback_nonterminal=_parse_assignment_post_callback_nonterminal,
+    post_callback_terminal=_parse_assignment_post_callback_terminal,
+    final_callback=_parse_assignment_final_callback,
+)
 
 
 def _assignment_array_insn(assignment, path, jnames, ctx):
@@ -868,146 +1067,6 @@ def _shared_assignment_insn(assignment, array_expr, temp_expr, ctx):
         raise NotImplementedError
 
     ctx.add_assignment(lexpr, rexpr)
-
-
-@functools.singledispatch
-def _expand_index(index, *, loop_indices, ctx, **kwargs):
-    """
-    Return an axis tree and jnames corresponding to unfolding the index.
-
-    Note that the # of jnames and path length is often longer than the size
-    of the resultant axes. This is because loop indices add jnames but no shape.
-    """
-    raise TypeError
-
-
-@_expand_index.register
-def _(index: LoopIndex, *, loop_indices, ctx, **kwargs):
-    # what do here?
-    # I don't have leaves since those are handled outside
-    """
-    _expand_index either returns a tree and leaf data or it returns None and a single set of leaf data
-    """
-    path, jname_exprs = loop_indices[index]
-    insns = ()
-    # return None, {}, {None: ()}, {None: jname_exprs}, {None: path}
-    # TODO namedtuple anyone?
-    # TODO generic algorithm
-    return [(None, path, jname_exprs, insns)], {}
-
-
-@_expand_index.register
-def _(index: CalledMap, *, loop_indices, ctx, **kwargs):
-    leaves, index_data = _expand_index(
-        index.from_index, loop_indices=loop_indices, ctx=ctx, **kwargs
-    )
-    from_axes = index_data.get("axes")
-    from_jnames = index_data.get("jnames", {})
-
-    jnames_per_cpt = dict(from_jnames)
-    leaf_keys = []
-    insns_per_leaf = []
-    jname_expr_per_leaf = []
-    path_per_leaf = []
-
-    for leaf in leaves:
-        from_leaf_key, from_path, from_jname_exprs, from_insns = leaf
-
-        components = []
-        jnames = []
-        insns = []
-        jname_exprs = []
-
-        # this is a mapping from (from_axis, from_cpt) to an iterable of
-        # (map_func, arity, to_axis, to_cpt)
-        bits = index.bits[from_path]
-        for (
-            mycptlabel,
-            map_func,
-            arity,
-            to_axis,
-            to_cpt,
-        ) in bits:  # each one of these is a new "leaf"
-            myinsns = []
-
-            # materialise the jname_expr. When we are indexing arrays this jname
-            # is provided externally, but not for index composition
-            # could I do this earlier to mirror what I do elsewhere?
-            # what jnames are required to index this axis?
-            # extra loop indices? generated first?
-            # need to convert index into jnames and path - materialise?
-
-            # map composition does sort of rely on emitting the prior loops. Only the final
-            # loop can be sliced? Not really, the whole resulting tree can be...
-            myjnames = {}
-            for myaxislabel in from_path:
-                myjname = ctx.unique_name("j")
-                ctx.add_temporary(myjname)
-                myexpr = from_jname_exprs[myaxislabel]
-                myinsns.append((pym.var(myjname), myexpr))
-                myjnames[myaxislabel] = myjname
-            myjnames = pmap(myjnames)
-
-            if isinstance(map_func, MultiArray):  # is this the right class?
-                cpt = AxisComponent(arity, label=mycptlabel)
-                components.append(cpt)
-
-                jname = ctx.unique_name("j")
-                ctx.add_temporary(jname)
-                jnames.append(jname)
-
-                # ? = map[j0, j1]
-                # where j0 comes from the from_index and j1 is advertised as the shape
-                # of the resulting axis (jname_per_cpt)
-                # j0 is now fixed but j1 can still be changed
-                # no. j0 can *still be modified*
-                inner_axis, inner_cpt = map_func.axes.leaf
-                insns_, jname_expr = _scalar_assignment(
-                    map_func,
-                    from_path | pmap({inner_axis.label: inner_cpt.label}),
-                    myjnames | {inner_axis.label: jname},
-                    ctx,
-                )
-                myinsns.extend(insns_)
-
-            else:
-                raise NotImplementedError
-
-            insns.append(myinsns)
-            jname_exprs.append({to_axis: jname_expr})
-
-        axis = Axis(components, label=index.name)
-        if from_axes:
-            axes = from_axes.add_subaxis(axis, *from_leaf_key)
-        else:
-            axes = AxisTree(axis)
-
-        for i, cpt in enumerate(components):
-            # this makes sense I think since we are only adding one axis
-            jnames_per_cpt[axis.label, cpt.label] = jnames[i]
-            leaf_keys.append((axis.id, cpt.label))
-            insns_per_leaf.append(from_insns + tuple(insns[i]))
-            jname_expr_per_leaf.append(from_jname_exprs | jname_exprs[i])
-            path_per_leaf.append(pmap({to_axis: to_cpt}))
-
-    # return (
-    #     axes,
-    #     pmap(jnames_per_cpt),
-    #     pmap(insns_per_leaf),
-    #     pmap(jname_expr_per_leaf),
-    #     pmap(path_per_leaf),
-    # )
-    # TODO below is an attempt at making the algorithm generic with callbacks
-    leaves = [
-        (leaf_key, path, jname_exprs, insns)
-        for (leaf_key, path, jname_exprs, insns) in checked_zip(
-            leaf_keys,
-            path_per_leaf,
-            jname_expr_per_leaf,
-            insns_per_leaf,
-        )
-    ]
-    return leaves, {"axes": axes, "jnames": jnames_per_cpt}
 
 
 # loop indices and jnames are very similar...
@@ -1347,184 +1406,3 @@ def _temporary_axes_rec(
         root.id: [subtree.root] for subtree in subtrees
     } | merge_dicts([subtree.parent_to_children for subtree in subtrees])
     return AxisTree(root, parent_to_children)
-
-
-def _prepare_assignment(assignment, ctx: LoopyCodegenContext) -> tuple[pmap, pmap]:
-    return _prepare_assignment_rec(
-        assignment,
-        assignment.array.axes,
-        assignment.array.axes.root,
-        pmap(),
-        pmap(),
-        ctx,
-    )
-
-
-def _prepare_assignment_rec(
-    assignment,
-    axes: AxisTree,
-    axis: Axis,
-    path: pmap,
-    jnames: pmap,
-    ctx: LoopyCodegenContext,
-) -> tuple[pmap, pmap]:
-    jnames_per_axcpt = {}
-    insns_per_leaf = {}
-    array_expr_per_leaf = {}
-    for axcpt in axis.components:
-        jname = ctx.unique_name("j")
-        ctx.add_temporary(jname)
-        new_jnames = jnames | {axis.label: jname}
-        # FIXME should only add once per axis label, component label combination
-        jnames_per_axcpt[axis.label, axcpt.label] = jname
-        new_path = path | {axis.label: axcpt.label}
-
-        if subaxis := axes.child(axis, axcpt):
-            (
-                subjnames_per_axcpt,
-                subinsns_per_leaf,
-                subarray_expr_per_leaf,
-            ) = _parse_assignment_rec(axes, subaxis, new_path, new_jnames, ctx)
-            jnames_per_axcpt |= subjnames_per_axcpt
-            insns_per_leaf |= subinsns_per_leaf
-            array_expr_per_leaf |= subarray_expr_per_leaf
-        else:
-            insns, array_expr = _assignment_array_insn(
-                assignment, new_path, new_jnames, ctx
-            )
-            insns_per_leaf[axis.id, axcpt.label] = insns
-            array_expr_per_leaf[axis.id, axcpt.label] = array_expr
-
-    return pmap(jnames_per_axcpt), pmap(insns_per_leaf), pmap(array_expr_per_leaf)
-
-
-def _parse_assignment_final(
-    assignment,
-    axes,
-    jnames_per_axcpt,
-    insns_per_leaf,
-    array_expr_per_leaf,
-    ctx: LoopyCodegenContext,
-):
-    _parse_assignment_final_rec(
-        assignment,
-        axes,
-        axes.root,
-        jnames_per_axcpt,
-        insns_per_leaf,
-        array_expr_per_leaf,
-        pmap(),
-        pmap(),
-        ctx,
-    )
-
-
-def _parse_assignment_final_rec(
-    assignment,
-    axes,
-    axis,
-    jnames_per_axcpt,
-    insns_per_leaf,
-    array_expr_per_leaf,
-    path: pmap,
-    jnames: pmap,
-    ctx,
-):
-    for axcpt in axis.components:
-        size = register_extent(axcpt.count, path, jnames, ctx)
-        iname = ctx.unique_name("i")
-        ctx.add_domain(iname, size)
-
-        current_jname = jnames_per_axcpt[axis.label, axcpt.label]
-        new_jnames = jnames | {axis.label: current_jname}
-        new_path = path | {axis.label: axcpt.label}
-
-        with ctx.within_inames({iname}):
-            ctx.add_assignment(pym.var(current_jname), pym.var(iname))
-
-            if subaxis := axes.child(axis, axcpt):
-                _parse_assignment_final_rec(
-                    assignment,
-                    axes,
-                    subaxis,
-                    jnames_per_axcpt,
-                    insns_per_leaf,
-                    array_expr_per_leaf,
-                    new_path,
-                    new_jnames,
-                    ctx,
-                )
-            else:
-                for insn in insns_per_leaf[axis.id, axcpt.label]:
-                    ctx.add_assignment(*insn)
-                array_expr = array_expr_per_leaf[axis.id, axcpt.label]
-                temp_insns, temp_expr = _assignment_temp_insn(
-                    assignment, new_path, new_jnames, ctx
-                )
-                for insn in temp_insns:
-                    ctx.add_assignment(*insn)
-                _shared_assignment_insn(assignment, array_expr, temp_expr, ctx)
-
-
-def _noop(**kwargs):
-    return kwargs
-
-
-def _none(**kwargs):
-    pass
-
-
-def visit_indices(
-    indices,
-    *,
-    index_callback=_none,  # FIXME bad default, will break
-    pre_callback=_noop,
-    post_callback_nonterminal=_noop,
-    post_callback_terminal=_none,
-    final_callback=_none,
-    **kwargs,
-):
-    # Technically this inner function isn't required but I think it will be
-    # once indices become trees.
-    return _visit_indices_rec(
-        indices,
-        index_callback,
-        pre_callback,
-        post_callback_nonterminal,
-        post_callback_terminal,
-        final_callback,
-        **kwargs,
-    )
-
-
-def _visit_indices_rec(
-    indices,
-    index_callback,
-    pre_callback,
-    post_callback_nonterminal,
-    post_callback_terminal,
-    final_callback,
-    **kwargs,
-):
-    # FIXME This should really be a tree (important for things like mixed inc.
-    # real space). We should expect something like mdat[closure(p), 2] where
-    # mdat is from a (vector-valued x scalar-valued) space to fail since the
-    # second index (2) is only valid for one branch but not the other.
-    index, *subindices = indices
-    leaves, index_data = index_callback(index, **kwargs)
-
-    retvals = {}
-    for leaf in leaves:
-        leaf_key = leaf[0]
-
-        kwargs_ = pre_callback(leaf, index_data, **kwargs)
-
-        if subindices:
-            retval = _visit_indices_rec(subindices, **kwargs_)
-            retval = post_callback_nonterminal(retval, **kwargs_)
-        else:
-            retval = post_callback_terminal(**kwargs_)
-        retvals[leaf_key] = retval
-    retvals = pmap(retvals)
-
-    return final_callback(index_data, retvals)
