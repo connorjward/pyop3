@@ -63,11 +63,11 @@ LOOPY_TARGET = lp.CWithGNULibcTarget()
 LOOPY_LANG_VERSION = (2018, 2)
 
 
-def _noop(**kwargs):
-    return kwargs
+def _noop(leaf, preorder_ctx, **kwargs):
+    return preorder_ctx
 
 
-def _none(**kwargs):
+def _none(*args, **kwargs):
     pass
 
 
@@ -421,19 +421,12 @@ def _(call: FunctionCall, loop_indices, ctx: LoopyCodegenContext) -> None:
                 "Need to handle indices to create temp shape differently"
             )
 
-        # !!!!!!!!!!!!!!!!!!!!
-        # FIXME hack for testing
-        # axes = temporary_axes(arg.axes, indices, loop_indices)
-        axes = AxisTree(
-            Axis([AxisComponent(2, "a")], "map0", id="root"),
-            {"root": [Axis([AxisComponent(3, "a")], "map1")]},
-        )
+        axes = _indexed_axes(arg.axes, arg.indicess, loop_indices)
         temporary = MultiArray(
             axes,
             name=ctx.unique_name("t"),
             dtype=arg.dtype,
         )
-        # indexed_temp = temporary[...]
         indexed_temp = temporary
 
         if loopy_arg.shape is None:
@@ -596,6 +589,7 @@ def _prepare_assignment(assignment, ctx: LoopyCodegenContext) -> tuple[pmap, pma
     )
 
 
+# FIXME this is very very similar to _expand_index for an axis tree, just different leaf data
 def _prepare_assignment_rec(
     assignment,
     axes: AxisTree,
@@ -728,17 +722,28 @@ def _parse_assignment_final(
     insns_per_leaf,
     ctx: LoopyCodegenContext,
 ):
-    _parse_assignment_final_rec(
-        assignment,
-        axes,
-        axes.root,
-        jnames_per_axcpt,
-        array_expr_per_leaf,
-        insns_per_leaf,
-        pmap(),
-        pmap(),
-        ctx,
-    )
+    # catch empty axes here
+    if not axes.root:
+        for insn in insns_per_leaf[None]:
+            ctx.add_assignment(*insn)
+        array_expr = array_expr_per_leaf[None]
+        temp_insns, temp_expr = _assignment_temp_insn(assignment, pmap(), pmap(), ctx)
+        for insn in temp_insns:
+            ctx.add_assignment(*insn)
+        _shared_assignment_insn(assignment, array_expr, temp_expr, ctx)
+
+    else:
+        _parse_assignment_final_rec(
+            assignment,
+            axes,
+            axes.root,
+            jnames_per_axcpt,
+            array_expr_per_leaf,
+            insns_per_leaf,
+            pmap(),
+            pmap(),
+            ctx,
+        )
 
 
 def _parse_assignment_final_rec(
@@ -811,7 +816,7 @@ def _(index: LoopIndex, *, loop_indices, cgen_ctx, **kwargs):
     # return None, {}, {None: ()}, {None: jname_exprs}, {None: path}
     # TODO namedtuple anyone?
     # TODO generic algorithm
-    return {None: (path, jname_exprs, insns)}, {}
+    return {None: (path, jname_exprs, insns)}, {"axes": AxisTree(), "jnames": pmap()}
 
 
 @_expand_index.register
@@ -897,7 +902,7 @@ def _(index: CalledMap, *, loop_indices, cgen_ctx, **kwargs):
             jname_exprs.append({to_axis: jname_expr})
 
         axis = Axis(components, label=index.name)
-        if from_axes:
+        if from_leaf_key:
             axes = from_axes.add_subaxis(axis, *from_leaf_key)
         else:
             axes = AxisTree(axis)
@@ -1323,86 +1328,119 @@ def find_axis(axes, path, target, current_axis=None):
         return find_axis(axes, path, target, subaxis)
 
 
-def temporary_axes(axes, indices, loop_indices):
-    # TODO think about "prior_indicess" (affects sizes but not ordering)
-    return _temporary_axes_rec(
-        axes, indices, loop_indices, indices.root, pmap(), PrettyTuple(), pmap()
-    )
+@functools.singledispatch
+def collect_shape_index_callback(index, *args, **kwargs):
+    raise TypeError(f"No handler provided for {type(index)}")
 
 
-def _temporary_axes_rec(
-    axes,
-    indices,
-    loop_indices,
-    index,
-    axis_path,
-    index_path,
-    sizes,
-):
-    component_sizes = []
-    subtrees = []
-    for icpt in index.components:
-        new_axis_path = axis_path
-        new_index_path = index_path | (index, icpt)
-        new_sizes = sizes
+@collect_shape_index_callback.register
+def _(loop_index: LoopIndex, *, loop_indices, **kwargs):
+    path = loop_indices[loop_index][0]
+    return {None: (path,)}, {"axes": None}
 
-        if icpt in loop_indices:
-            assert icpt.to_axis not in new_sizes
-            component_sizes.append(1)
-            new_sizes |= {icpt.to_axis: 1}
 
-            # but what about loop(map[p][:2], ...)???
-            assert not isinstance(icpt, Slice)
+# TODO this could be done with callbacks so we share code with when
+# we also want to emit instructions
+@collect_shape_index_callback.register
+def _(called_map: CalledMap, **kwargs):
+    leaves, index_data = collect_shape_index_callback(called_map.from_index, **kwargs)
+    from_axes = index_data["axes"]
 
-            if isinstance(icpt, Map):
-                ...
-            new_axis_path |= {icpt.to_axis: icpt.to_cpt}
-        else:
-            if isinstance(icpt, ScalarIndex):
-                raise NotImplementedError("TODO")
-            elif isinstance(icpt, Slice):
-                if icpt.stop:
-                    stop = icpt.stop
-                else:
-                    # TODO is this still required?
-                    axis = find_axis(axes, axis_path, icpt.to_axis)
-                    cpt_index = axis.component_index(icpt.to_cpt)
-                    stop = axis.components[cpt_index].count
+    leaf_keys = []
+    path_per_leaf = []
+    for from_leaf_key, leaf in leaves.items():
+        components = []
+        (from_path,) = leaf
 
-                # TODO add a remainder?
-                size = (stop - icpt.start) // icpt.step
-                component_sizes.append(size)
-
-                new_axis_path |= {icpt.to_axis: icpt.to_cpt}
+        # this is a mapping from (from_axis, from_cpt) to an iterable of
+        # (map_func, arity, to_axis, to_cpt)
+        bits = called_map.bits[from_path]
+        for (
+            mycptlabel,
+            map_func,
+            arity,
+            to_axis,
+            to_cpt,
+        ) in bits:  # each one of these is a new "leaf"
+            if isinstance(map_func, MultiArray):  # is this the right class?
+                cpt = AxisComponent(arity, label=mycptlabel)
+                components.append(cpt)
 
             else:
-                assert isinstance(icpt, Map)
-                axis = find_axis(axes, axis_path, icpt.from_axis)
-                cpt_index = axis.component_index(icpt.from_cpt)
-                size = axis.components[cpt_index].count
-                component_sizes.append(size)
+                raise NotImplementedError
 
-                new_axis_path = new_axis_path.discard(icpt.from_axis)
-                new_axis_path |= {icpt.to_axis: icpt.to_cpt}
-
-        if subidx := indices.child(index, icpt):
-            subtree = _temporary_axes_rec(
-                axes,
-                indices,
-                loop_indices,
-                subidx,
-                pmap(new_axis_path),
-                new_index_path,
-                new_sizes,
-            )
-            subtrees.append(subtree)
+        axis = Axis(components, label=called_map.name)
+        if from_axes:
+            axes = from_axes.add_subaxis(axis, *from_leaf_key)
         else:
-            subtree = AxisTree()
-            subtrees.append(subtree)
+            axes = AxisTree(axis)
 
-    # convert the subtrees to a full one
-    root = Axis(component_sizes)
-    parent_to_children = {
-        root.id: [subtree.root] for subtree in subtrees
-    } | merge_dicts([subtree.parent_to_children for subtree in subtrees])
-    return AxisTree(root, parent_to_children)
+        for i, cpt in enumerate(components):
+            leaf_keys.append((axis.id, cpt.label))
+            path_per_leaf.append(pmap({to_axis: to_cpt}))
+
+    leaves = {
+        leaf_key: (path,)
+        for (leaf_key, path) in checked_zip(
+            leaf_keys,
+            path_per_leaf,
+        )
+    }
+    return leaves, {"axes": axes}
+
+
+# @collect_shape_index_callback.register
+# def _(axes: AxisTree, ???):
+#     ...
+
+
+def collect_shape_pre_callback(leaf, preorder_ctx, **kwargs):
+    return None
+
+
+def collect_shape_post_callback_terminal(*args, **kwargs):
+    return None
+
+
+def collect_shape_post_callback_nonterminal(*args, **kwargs):
+    raise NotImplementedError("TODO")
+
+
+def collect_shape_final_callback(index_data, leafdata):
+    return index_data["axes"]
+
+
+def _indexed_axes(axes, indicess, loop_indices):
+    """Construct an axis tree corresponding to indexed shape.
+
+    Parameters
+    ----------
+    indicess
+        Iterable of index trees corresponding to something like ``dat[x][y]``.
+
+
+    Notes
+    -----
+    This function is very similar to other traversals of indexed things. The
+    core difference here is that we only care about the shape of the final
+    axis tree. No instructions need be emitted.
+
+    """
+
+    # I don't know if I really need this loop if I implement Sliced correctly.
+    for indices in indicess:
+        axes = visit_indices(
+            indices,
+            None,
+            index_callback=collect_shape_index_callback,
+            pre_callback=collect_shape_pre_callback,
+            post_callback_terminal=collect_shape_post_callback_terminal,
+            post_callback_nonterminal=collect_shape_post_callback_nonterminal,
+            final_callback=collect_shape_final_callback,
+            loop_indices=loop_indices,
+        )
+
+    if axes is not None:
+        return axes
+    else:
+        return AxisTree()

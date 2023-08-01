@@ -76,16 +76,16 @@ def vector_inc_kernel():
 def vec6_inc_kernel():
     code = lp.make_kernel(
         "{ [i]: 0 <= i < 6 }",
-        "",
+        "y[0] = y[0] + x[i]",
         [
             lp.GlobalArg("x", ScalarType, (6,), is_input=True, is_output=False),
-            # lp.GlobalArg("y", ScalarType, (1,), is_input=True, is_output=True),
+            lp.GlobalArg("y", ScalarType, (1,), is_input=True, is_output=True),
         ],
         target=LOOPY_TARGET,
         name="vector_inc",
         lang_version=(2018, 2),
     )
-    return LoopyKernel(code, [READ])
+    return LoopyKernel(code, [READ, INC])
 
 
 @pytest.fixture
@@ -893,8 +893,7 @@ def test_inc_with_map_composition(vec6_inc_kernel):
         "map1",
     )
 
-    # do_loop(p := axes.index(), vec6_inc_kernel(dat0[map1(map0(p))], dat1[p]))
-    do_loop(p := axes.index(), vec6_inc_kernel(dat0[map1(map0(p))]))
+    do_loop(p := axes.index(), vec6_inc_kernel(dat0[map1(map0(p))], dat1[p]))
 
     expected = np.sum(np.sum(np.arange(m)[mapdata1], axis=1)[mapdata0], axis=1)
     assert np.allclose(dat1.data, expected)

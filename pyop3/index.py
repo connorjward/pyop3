@@ -78,6 +78,10 @@ class LoopIndex:
     def __init__(self, iterset):
         self.iterset = iterset
 
+    @functools.cached_property
+    def datamap(self):
+        return self.iterset.datamap
+
 
 # class Map(IndexComponent):
 class Map(pytools.ImmutableRecord):  # FIXME
@@ -91,6 +95,11 @@ class Map(pytools.ImmutableRecord):  # FIXME
 
     def __call__(self, index):
         return CalledMap(self, index)
+
+    @functools.cached_property
+    def datamap(self):
+        # this ain't pleasant
+        return merge_dicts([b[1].datamap for bit in self.bits.values() for b in bit])
 
 
 class Slice(IndexComponent):
@@ -184,6 +193,10 @@ class CalledMap:
     def __init__(self, map, from_index):
         self.map = map
         self.from_index = from_index
+
+    @functools.cached_property
+    def datamap(self):
+        return self.map.datamap | self.from_index.datamap
 
     # ick
     @property

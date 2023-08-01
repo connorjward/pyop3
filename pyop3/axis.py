@@ -550,6 +550,11 @@ class AxisTree(LabelledTree):
         # TODO: put somewhere better
         # self._check_labels()
 
+        # catch empyt axis tree
+        if self.root is None:
+            self._layouts = pmap({pmap(): ()})
+            return self
+
         layouts, _, _ = _compute_layouts(self, self.root)
         layoutsnew = _collect_at_leaves(self, layouts)
         # self.apply_layouts(layouts)
@@ -1290,6 +1295,8 @@ def axis_tree_size(axes: AxisTree) -> int:
     example, an array with shape ``(10, 3)`` will have a size of 30.
 
     """
+    if not axes.root:
+        return 1
     return _axis_size(axes, axes.root, pmap(), pmap())
 
 

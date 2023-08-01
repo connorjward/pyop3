@@ -24,6 +24,7 @@ from pyop3.utils import (
     PrettyTuple,
     as_tuple,
     just_one,
+    merge_dicts,
     single_valued,
     strict_int,
     strictly_all,
@@ -141,11 +142,17 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
 
     @functools.cached_property
     def datamap(self) -> dict[str:DistributedArray]:
-        return {self.name: self} | self.axes.datamap
+        # FIXME when we use proper index trees
+        # return {self.name: self} | self.axes.datamap | merge_dicts([idxs.datamap for idxs in self.indicess])
+        return (
+            {self.name: self}
+            | self.axes.datamap
+            | merge_dicts([idx.datamap for idxs in self.indicess for idx in idxs])
+        )
 
     @property
     def alloc_size(self):
-        return self.axes.alloc_size() if self.axes else 1
+        return self.axes.alloc_size() if self.axes.root else 1
 
     # ???
     # @property
