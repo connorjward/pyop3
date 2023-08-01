@@ -424,12 +424,20 @@ class LabelledTree(pytools.ImmutableRecord):
         if not path:
             return self.root
 
-        path_ = path.copy()
+        path_ = dict(path)
         node = self.root
         while path_:
-            component_index = path_.pop(node.label)
-            node = self.parent_to_children[node.id][component_index]
-        return node
+            cpt_label = path_.pop(node.label)
+            cpt_index = node.component_index(cpt_label)
+            new_node = self.parent_to_children[node.id][cpt_index]
+
+            # if we are a leaf then return the final bit
+            if new_node is None:
+                assert not path_
+                return node, node.components[cpt_index]
+            else:
+                node = new_node
+        assert False, "should not hit"
 
     # def find_node(
     #     self, loc: Mapping[Hashable, int] | tuple[Node | Hashable, int] | None = None

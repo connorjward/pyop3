@@ -166,7 +166,7 @@ def test_scalar_copy(scalar_copy_kernel):
     )
 
     # do_loop(p := axis.index, scalar_copy_kernel(dat0[p], dat1[p]))
-    l = loop(p := axis.index, scalar_copy_kernel(dat0[p], dat1[p]))
+    l = loop(p := axis.index(), scalar_copy_kernel(dat0[p], dat1[p]))
     from pyop3.codegen.loopexpr2loopy import compile
 
     compile(l)

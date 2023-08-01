@@ -43,10 +43,10 @@ def copy_kernel():
 @pytest.fixture
 def debug_kernel():
     lpy_kernel = lp.make_kernel(
-        "{ [i]: 0 <= i < 2 }",
+        "{ [i]: 0 <= i < 6 }",
         "",
         [
-            lp.GlobalArg("x", ScalarType, (2,), is_input=True, is_output=False),
+            lp.GlobalArg("x", ScalarType, (6,), is_input=True, is_output=False),
         ],
         name="debug",
         target=LOOPY_TARGET,
@@ -120,6 +120,8 @@ def test_map_composition(debug_kernel):
     mapaxes0 = iterset.add_node(Axis(arity0), *iterset.leaf)
     mapdata0 = np.asarray(flatten([[2, 4, 0], [6, 7, 1]]), dtype=int)
     maparray0 = MultiArray(mapaxes0, name="map0", data=mapdata0)
+    # map from iterset to the target axes, the formed temporary uses the map
+    # as the axis label
     map0 = Map(
         {
             pmap({iterset.root.label: "cpt0"}): [
@@ -133,6 +135,8 @@ def test_map_composition(debug_kernel):
     mapaxes1 = iterset.add_node(Axis(arity1), *iterset.leaf)
     mapdata1 = np.asarray(flatten([[0, 2], [2, 1]]), dtype=int)
     maparray1 = MultiArray(mapaxes1, name="map1", data=mapdata1)
+    # map from iterset to the target axes of the prior formed temporary, the
+    # formed temporary uses the map as the axis label
     map1 = Map(
         {
             pmap({iterset.root.label: "cpt0"}): [

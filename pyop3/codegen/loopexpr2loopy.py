@@ -510,23 +510,37 @@ def build_assignment(
     # one index instruction (jname) per index component
     axes = assignment.array.axes
     for indices in assignment.array.indicess:
+        # (
+        #     axes,
+        #     jnames_per_cpt,
+        #     insns_per_leaf,
+        #     array_expr_per_leaf,
+        # ) = _parse_assignment_rec(
+        #     assignment,
+        #     loop_indices,
+        #     ctx,
+        #     axes,
+        #     indices,
+        #     jnames_per_cpt,
+        #     insns_per_leaf,
+        #     array_expr_per_leaf,
+        #     pmap(),
+        #     pmap(),
+        #     (),
+        # )
         (
             axes,
             jnames_per_cpt,
             insns_per_leaf,
             array_expr_per_leaf,
-        ) = _parse_assignment_rec(
-            assignment,
+        ) = _parse_assignment(
             loop_indices,
             ctx,
-            axes,
             indices,
-            jnames_per_cpt,
-            insns_per_leaf,
-            array_expr_per_leaf,
-            pmap(),
-            pmap(),
-            (),
+            prev_axes=axes,
+            prev_jnames=jnames_per_cpt,
+            prev_insns_per_leaf=insns_per_leaf,
+            prev_array_expr_per_leaf=array_expr_per_leaf,
         )
 
     # lastly generate loops for the tree structure at the end, also generate
@@ -535,6 +549,35 @@ def build_assignment(
     # leaf insns will be emitted and the temp_expr will be assigned to the array one.
     _parse_assignment_final(
         assignment, axes, jnames_per_cpt, insns_per_leaf, array_expr_per_leaf, ctx
+    )
+
+
+def _parse_assignment(
+    loop_indices,
+    ctx,
+    indices,
+    *,
+    prev_axes,
+    prev_jnames,
+    prev_insns_per_leaf,
+    prev_array_expr_per_leaf,
+):
+    return visit_indices(
+        indices,
+        index_callback=_expand_index,
+        pre_callback=_parse_assignment_pre_callback,
+        post_callback_nonterminal=_parse_assignment_post_callback_nonterminal,
+        post_callback_terminal=_parse_assignment_post_callback_terminal,
+        final_callback=_parse_assignment_final_callback,
+        #
+        loop_indices=loop_indices,
+        ctx=ctx,
+        prev_axes=prev_axes,
+        prev_jnames=prev_jnames,
+        prev_insns_per_leaf=prev_insns_per_leaf,
+        prev_array_expr_per_leaf=prev_array_expr_per_leaf,
+        axis_path=pmap(),
+        extra_insns=(),
     )
 
 
@@ -591,6 +634,7 @@ def _parse_assignment_rec(
     jnames_per_cpt = ijnames_per_cpt
 
     for ileaf in leaves:
+        ### pre_callback (done)
         leaf_key, leaf_path, leaf_jname_exprs, leaf_insns = ileaf
 
         iinsns = leaf_insns
@@ -613,6 +657,8 @@ def _parse_assignment_rec(
             myexpr = ijname_expr[myaxislabel]
             new_extra_insns.append((pym.var(existing_jname), myexpr))
 
+        ### above is done in pre_callback
+
         # I think that indices also need to form a tree, how could I otherwise
         # index a mixed real space thing?
         if subindices:
@@ -634,11 +680,14 @@ def _parse_assignment_rec(
                 new_jnames,
                 new_extra_insns,
             )
+
+            # post_callback_nonterminal
             new_axes = new_axes.add_subtree(subaxes, *ileaf)
             jnames_per_axcpt |= subjnames_per_axcpt
             insns_per_leaf |= subinsns_per_leaf
             array_expr_per_leaf |= prior_array_expr_per_leaf
         else:
+            # post_callback_terminal
             # prepend new_insns_per_leaf
             # awful hack, will only work if indices are depth 1 (as mycpt is output from earlier loop)
             insns_per_leaf[leaf_key] = (
@@ -676,10 +725,10 @@ def _parse_assignment_rec(
 
 
 def _parse_assignment_pre_callback(
-    leaf, index_data, *, prev_axes, prev_jnames, axis_path, insns, **kwargs
+    leaf, index_data, *, prev_jnames, axis_path, extra_insns, **kwargs
 ):
     # unpack leaf
-    iaxes_axis_path, iaxes_jname_exprs, iaxes_insns = leaf
+    leaf_key, iaxes_axis_path, iaxes_jname_exprs, iaxes_insns = leaf
 
     # I believe that this is always the case. Each index in the tree will
     # always target one axis in the input axes. Things like map composition
@@ -688,7 +737,7 @@ def _parse_assignment_pre_callback(
     # Even if we have complicated maps they do not matter here as they are
     # complicated for the input to the map, not the target.
     new_axis_path = axis_path | iaxes_axis_path
-    new_insns = list(insns) + list(iaxes_insns)
+    new_insns = list(extra_insns) + list(iaxes_insns)
 
     for axis, cpt in iaxes_axis_path.items():
         prev_jname = prev_jnames[axis, cpt]
@@ -697,9 +746,63 @@ def _parse_assignment_pre_callback(
 
     return {
         "axis_path": new_axis_path,
-        "new_jnames": new_jnames,
-        "insns": new_insns,
-    }
+        "jnames": index_data["jnames"],
+        "extra_insns": new_insns,
+    } | kwargs
+
+
+def _parse_assignment_post_callback_nonterminal(
+    # retval, *, ???, **kwargs
+):
+    # FIXME I don't actually have any of these yet
+    raise NotImplementedError("TODO")
+    iaxes, jnames, insns_per_leaf, array_expr_per_leaf = retval
+
+    leaf_key, leaf_path, leaf_jname_exprs, leaf_insns = ileaf
+
+    new_axes = new_axes.add_subtree(subaxes, *leaf_key)
+    jnames_per_axcpt |= subjnames_per_axcpt
+    insns_per_leaf |= subinsns_per_leaf
+    array_expr_per_leaf |= prior_array_expr_per_leaf
+
+
+def _parse_assignment_post_callback_terminal(
+    *,
+    prev_axes,
+    prev_insns_per_leaf,
+    prev_array_expr_per_leaf,
+    axis_path,
+    extra_insns,
+    **kwargs,
+):
+    prev_leaf, prev_leaf_cpt = prev_axes._node_from_path(axis_path)
+
+    insns_per_leaf = (
+        tuple(extra_insns) + prev_insns_per_leaf[prev_leaf.id, prev_leaf_cpt.label]
+    )
+    array_expr_per_leaf = prev_array_expr_per_leaf[prev_leaf.id, prev_leaf_cpt.label]
+
+    return insns_per_leaf, array_expr_per_leaf
+
+
+def _parse_assignment_final_callback(
+    index_data,
+    leafdata,
+):
+    insns_per_leaf = {}
+    array_expr_per_leaf = {}
+    for leaf_key, (insns, array_expr) in leafdata.items():
+        insns_per_leaf[leaf_key] = insns
+        array_expr_per_leaf[leaf_key] = array_expr
+    insns_per_leaf = pmap(insns_per_leaf)
+    array_expr_per_leaf = pmap(array_expr_per_leaf)
+
+    return (
+        index_data["axes"],
+        index_data["jnames"],
+        insns_per_leaf,
+        array_expr_per_leaf,
+    )
 
 
 def _assignment_array_insn(assignment, path, jnames, ctx):
@@ -768,7 +871,7 @@ def _shared_assignment_insn(assignment, array_expr, temp_expr, ctx):
 
 
 @functools.singledispatch
-def _expand_index(index, axis, loop_indices, ctx):
+def _expand_index(index, *, loop_indices, ctx, **kwargs):
     """
     Return an axis tree and jnames corresponding to unfolding the index.
 
@@ -779,7 +882,7 @@ def _expand_index(index, axis, loop_indices, ctx):
 
 
 @_expand_index.register
-def _(index: LoopIndex, axis, loop_indices, ctx):
+def _(index: LoopIndex, *, loop_indices, ctx, **kwargs):
     # what do here?
     # I don't have leaves since those are handled outside
     """
@@ -794,8 +897,10 @@ def _(index: LoopIndex, axis, loop_indices, ctx):
 
 
 @_expand_index.register
-def _(index: CalledMap, axis, loop_indices, ctx):
-    leaves, index_data = _expand_index(index.from_index, axis, loop_indices, ctx)
+def _(index: CalledMap, *, loop_indices, ctx, **kwargs):
+    leaves, index_data = _expand_index(
+        index.from_index, loop_indices=loop_indices, ctx=ctx, **kwargs
+    )
     from_axes = index_data.get("axes")
     from_jnames = index_data.get("jnames", {})
 
@@ -1371,6 +1476,8 @@ def _none(**kwargs):
 
 def visit_indices(
     indices,
+    *,
+    index_callback=_none,  # FIXME bad default, will break
     pre_callback=_noop,
     post_callback_nonterminal=_noop,
     post_callback_terminal=_none,
@@ -1381,6 +1488,7 @@ def visit_indices(
     # once indices become trees.
     return _visit_indices_rec(
         indices,
+        index_callback,
         pre_callback,
         post_callback_nonterminal,
         post_callback_terminal,
@@ -1391,6 +1499,7 @@ def visit_indices(
 
 def _visit_indices_rec(
     indices,
+    index_callback,
     pre_callback,
     post_callback_nonterminal,
     post_callback_terminal,
@@ -1402,16 +1511,20 @@ def _visit_indices_rec(
     # mdat is from a (vector-valued x scalar-valued) space to fail since the
     # second index (2) is only valid for one branch but not the other.
     index, *subindices = indices
-    leaves, index_data = expand_index_callback(index, **kwargs)
+    leaves, index_data = index_callback(index, **kwargs)
 
-    retvals = []
+    retvals = {}
     for leaf in leaves:
+        leaf_key = leaf[0]
+
         kwargs_ = pre_callback(leaf, index_data, **kwargs)
 
         if subindices:
             retval = _visit_indices_rec(subindices, **kwargs_)
-            retval = post_callback_nonterminal(retval)
+            retval = post_callback_nonterminal(retval, **kwargs_)
         else:
             retval = post_callback_terminal(**kwargs_)
-        retvals.append(retval)
-    return final_callback(retvals)
+        retvals[leaf_key] = retval
+    retvals = pmap(retvals)
+
+    return final_callback(index_data, retvals)
