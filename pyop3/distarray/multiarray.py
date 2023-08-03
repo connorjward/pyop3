@@ -19,7 +19,7 @@ from pyop3 import utils
 from pyop3.axis import Axis, AxisComponent, AxisTree, as_axis_tree, get_bottom_part
 from pyop3.distarray.base import DistributedArray
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
-from pyop3.index import IndexTree, TabulatedMap, as_index_tree
+from pyop3.index import Indexed, IndexTree, TabulatedMap, as_index_tree
 from pyop3.utils import (
     PrettyTuple,
     as_tuple,
@@ -307,13 +307,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
 
     # maybe I could check types here and use instead of get_value?
     def __getitem__(self, indices: IndexTree | Index | IndexComponent):
-        # self.indicess should be a tuple of tuples, this just turns dat[p] into dat[(p,)]
-        indices = as_tuple(indices)
-        if indices is Ellipsis:
-            raise NotImplementedError("do nothing here")
-            indices = ()
-
-        return self.copy(indicess=self.indicess + (indices,))
+        return Indexed(self, indices)
 
     def select_axes(self, indices):
         selected = []

@@ -110,8 +110,7 @@ def test_2d_slice_composition(copy_kernel):
     assert np.allclose(dat1.data, dat0.data.reshape((m0, m1))[::2, 1:][2:4, 1])
 
 
-# def test_map_composition(copy_kernel):
-def test_map_composition(debug_kernel):
+def test_map_composition(copy_kernel):
     arity0, arity1 = 3, 2
 
     iterset = AxisTree(Axis([(2, "cpt0")], "ax0"))
@@ -120,8 +119,6 @@ def test_map_composition(debug_kernel):
     mapaxes0 = iterset.add_node(Axis(arity0), *iterset.leaf)
     mapdata0 = np.asarray(flatten([[2, 4, 0], [6, 7, 1]]), dtype=int)
     maparray0 = MultiArray(mapaxes0, name="map0", data=mapdata0)
-    # map from iterset to the target axes, the formed temporary uses the map
-    # as the axis label
     map0 = Map(
         {
             pmap({iterset.root.label: "cpt0"}): [
@@ -135,8 +132,6 @@ def test_map_composition(debug_kernel):
     mapaxes1 = iterset.add_node(Axis(arity1), *iterset.leaf)
     mapdata1 = np.asarray(flatten([[0, 2], [2, 1]]), dtype=int)
     maparray1 = MultiArray(mapaxes1, name="map1", data=mapdata1)
-    # map from iterset to the target axes of the prior formed temporary, the
-    # formed temporary uses the map as the axis label
     map1 = Map(
         {
             pmap({iterset.root.label: "cpt0"}): [
@@ -147,10 +142,9 @@ def test_map_composition(debug_kernel):
     )
 
     dat0 = MultiArray(axes, name="dat0", data=np.arange(axes.size, dtype=ScalarType))
-    dat1 = MultiArray(Axis(2), name="dat1", dtype=dat0.dtype)
+    dat1 = MultiArray(Axis(arity1), name="dat1", dtype=dat0.dtype)
 
-    # do_loop(p := iterset.index(), copy_kernel(dat0[map0(p)][map1(p)], dat1[...]))
-    do_loop(p := iterset.index(), debug_kernel(dat0[map0(p)][map1(p)]))
+    do_loop(p := iterset.index(), copy_kernel(dat0[map0(p)][map1(p)], dat1[...]))
 
     assert False, "TODO"
 

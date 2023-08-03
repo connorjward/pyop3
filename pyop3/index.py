@@ -9,16 +9,10 @@ import pytools
 
 from pyop3.axis import Axis, AxisComponent
 from pyop3.tree import LabelledNode, LabelledTree, NodeComponent, postvisit
-from pyop3.utils import as_tuple, merge_dicts
+from pyop3.utils import as_tuple, just_one, merge_dicts
 
 
 class IndexTree(LabelledTree):
-    fields = LabelledTree.fields | {"axes"}
-
-    def __init__(self, *args, axes=None, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.axes = axes
-
     @functools.cached_property
     def datamap(self) -> dict[str:DistributedArray]:
         return postvisit(self, _collect_datamap, itree=self)
@@ -27,44 +21,53 @@ class IndexTree(LabelledTree):
 IndexLabel = collections.namedtuple("IndexLabel", ["axis", "component"])
 
 
-# This class is pretty irrelevant...
-class Index(LabelledNode):
-    fields = LabelledNode.fields - {"degree"} | {"components"}
+class Indexed:
+    """Container representing an object that has been indexed.
 
-    def __init__(self, components: Sequence[IndexComponent] | IndexComponent, **kwargs):
-        components = as_tuple(components)
+    For example ``dat[index]`` would produce ``Indexed(dat, index)``.
 
-        super().__init__(degree=len(components), **kwargs)
-        self.components = components
+    """
 
-    def __str__(self) -> str:
-        return f"{type(self).__name__}('{self.label}', [{', '.join(map(str, self.components))}])"
+    def __init__(self, obj, itree):
+        self.obj = obj
+        self.itree = itree
 
-    def index(self, x: Index) -> int:
-        assert False, "bad API"
-        return self.components.index(x)
+    @functools.cached_property
+    def datamap(self):
+        return self.obj.datamap | self.itree.datamap
 
-    # old alias
     @property
-    def indices(self):
-        return self.components
+    def name(self):
+        return self.obj.name
+
+    @property
+    def dtype(self):
+        return self.obj.dtype
 
 
-class IndexComponent(NodeComponent, abc.ABC):
-    fields = NodeComponent.fields | {"from_axis", "from_cpt", "to_axis", "to_cpt"}
+class Index(LabelledNode):
+    pass
 
-    # FIXME I think that these are the wrong attributes
-    def __init__(self, from_axis, from_cpt, to_axis, to_cpt, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self.from_axis = from_axis
-        self.from_cpt = from_cpt
-        self.to_axis = to_axis
-        self.to_cpt = to_cpt
+
+# class IndexComponent(NodeComponent, abc.ABC):
+#     fields = NodeComponent.fields | {"from_axis", "from_cpt", "to_axis", "to_cpt"}
+#
+#     # FIXME I think that these are the wrong attributes
+#     def __init__(self, from_axis, from_cpt, to_axis, to_cpt, **kwargs) -> None:
+#         super().__init__(**kwargs)
+#         self.from_axis = from_axis
+#         self.from_cpt = from_cpt
+#         self.to_axis = to_axis
+#         self.to_cpt = to_cpt
 
 
 # TODO
-# class LoopIndex(pytools.ImmutableRecord):
-class LoopIndex:
+# should come from Index
+# class LoopIndex(Index):
+from pyop3.tree import Node
+
+
+class LoopIndex(Node):
     """Object representing a set of indices of a loop nest.
 
     FIXME More detail needed.
@@ -73,23 +76,34 @@ class LoopIndex:
 
     # TODO this needs an ID attribute so we can differentiate p := mesh.cells.index()
     # with q := mesh.cells.index() for example.
-    # fields = {"iterset"}
+    # fields = Index.fields | {"iterset"}
 
-    def __init__(self, iterset):
+    def __init__(self, iterset, **kwargs):
+        super().__init__(degree=1, **kwargs)
         self.iterset = iterset
+        # FIXME
+        # self.id = id(self)
+        # self.degree = 1
 
     @functools.cached_property
     def datamap(self):
         return self.iterset.datamap
 
 
-# class Map(IndexComponent):
-class Map(pytools.ImmutableRecord):  # FIXME
+class Map(pytools.ImmutableRecord):
     # FIXME, naturally this is a placeholder
     fields = {"bits", "name"}
 
     def __init__(self, bits, name, **kwargs) -> None:
+        try:
+            key = just_one(bits.keys())
+        except ValueError:
+            raise AssertionError("Maps now only map from a single set of axes")
+
+        degree = len(bits[key])
+
         super().__init__(**kwargs)
+        self.degree = degree
         self.bits = bits
         self.name = name
 
@@ -98,51 +112,53 @@ class Map(pytools.ImmutableRecord):  # FIXME
 
     @functools.cached_property
     def datamap(self):
-        # this ain't pleasant
-        return merge_dicts([b[1].datamap for bit in self.bits.values() for b in bit])
+        try:
+            key = just_one(self.bits.keys())
+        except ValueError:
+            raise AssertionError("Maps now only map from a single set of axes")
+        return merge_dicts([bit[1].datamap for bit in self.bits[key]])
 
 
-class Slice(IndexComponent):
+class Slice(Index):
     """
 
     A slice can be thought of as a map from a smaller space to the target space.
 
+    Like maps it can also target multiple outputs. This is useful for multi-component
+    axes.
+
     """
 
-    fields = IndexComponent.fields | {"start", "stop", "step"}
+    fields = Index.fields | {"values"}
 
-    def __init__(self, *args, axis=None, cpt=None, **kwargs):
+    def __init__(self, values, axis=None, cpt=None, **kwargs):
         # cyclic import
         from pyop3.axis import Axis, AxisComponent
 
-        nargs = len(args)
-        if nargs == 0:
-            start, stop, step = 0, None, 1
-        elif nargs == 1:
-            start, stop, step = 0, args[0], 1
-        elif nargs == 2:
-            start, stop, step = args[0], args[1], 1
-        elif nargs == 3:
-            start, stop, step = args[0], args[1], args[2]
-        else:
-            raise ValueError("Too many arguments")
-
+        # nargs = len(args)
+        # if nargs == 0:
+        #     start, stop, step = 0, None, 1
+        # elif nargs == 1:
+        #     start, stop, step = 0, args[0], 1
+        # elif nargs == 2:
+        #     start, stop, step = args[0], args[1], 1
+        # elif nargs == 3:
+        #     start, stop, step = args[0], args[1], args[2]
+        # else:
+        #     raise ValueError("Too many arguments")
         # the smaller space mapped from by the slice is "anonymous" so use
         # something unique here
         # FIXME this breaks copy
-        from_axis = Axis._unique_label()
-        from_cpt = AxisComponent._label_generator()
+        # from_axis = Axis._unique_label()
+        # from_cpt = AxisComponent._label_generator()
+        # super().__init__(from_axis, from_cpt, axis, cpt, **kwargs)
+        super().__init__(degree=len(values))
+        self.values = values
 
-        super().__init__(from_axis, from_cpt, axis, cpt, **kwargs)
-        self.start = start
-        self.stop = stop
-        self.step = step
-
-    # def __repr__(self) -> str:
-    #     return f"{type(self)}({self.start}, {self.stop}, {self.step}, axis={self.to_axis}, to_cpt={self.to_cpt})"
-
-    # def __str__(self) -> str:
-    # return f"{type(self)}({self.start}, {self.stop}, {self.step}, from_axis={self.from_axis}, from_cpt={self.from_cpt}, to_axis={self.to_axis}, to_cpt={self.to_cpt})"
+    @property
+    def datamap(self):
+        # return pmap()
+        return {}
 
 
 class ScalarIndex(Slice):
@@ -188,9 +204,9 @@ class IdentityMap(Map):
     #     return self.to_labels[0]
 
 
-# this is an index
-class CalledMap:
+class CalledMap(Index):
     def __init__(self, map, from_index):
+        super().__init__(degree=map.degree)
         self.map = map
         self.from_index = from_index
 
@@ -243,8 +259,4 @@ def _(arg: Index) -> IndexTree:
 
 
 def _collect_datamap(index, *subdatamaps, itree):
-    datamap = {}
-    for cidx, component in enumerate(index.components):
-        if isinstance(component, TabulatedMap):
-            datamap |= component.data.datamap
-    return datamap | merge_dicts(subdatamaps)
+    return index.datamap | merge_dicts(subdatamaps)

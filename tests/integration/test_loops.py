@@ -71,7 +71,6 @@ def vector_inc_kernel():
     return LoopyKernel(code, [READ, INC])
 
 
-# debug
 @pytest.fixture
 def vec6_inc_kernel():
     code = lp.make_kernel(
@@ -80,6 +79,22 @@ def vec6_inc_kernel():
         [
             lp.GlobalArg("x", ScalarType, (6,), is_input=True, is_output=False),
             lp.GlobalArg("y", ScalarType, (1,), is_input=True, is_output=True),
+        ],
+        target=LOOPY_TARGET,
+        name="vector_inc",
+        lang_version=(2018, 2),
+    )
+    return LoopyKernel(code, [READ, INC])
+
+
+@pytest.fixture
+def vec12_inc_kernel():
+    code = lp.make_kernel(
+        ["{ [i]: 0 <= i < 6 }", "{ [j]: 0 <= j < 2 }"],
+        "y[j] = y[j] + x[i, j]",
+        [
+            lp.GlobalArg("x", ScalarType, (6, 2), is_input=True, is_output=False),
+            lp.GlobalArg("y", ScalarType, (2,), is_input=True, is_output=True),
         ],
         target=LOOPY_TARGET,
         name="vector_inc",
@@ -897,6 +912,58 @@ def test_inc_with_map_composition(vec6_inc_kernel):
 
     expected = np.sum(np.sum(np.arange(m)[mapdata1], axis=1)[mapdata0], axis=1)
     assert np.allclose(dat1.data, expected)
+
+
+def test_vector_inc_with_map_composition(vec12_inc_kernel):
+    m, n = 5, 2
+    arity0, arity1 = 2, 3
+    mapdata0 = np.asarray([[2, 1], [0, 3], [1, 4], [0, 0], [3, 2]], dtype=IntType)
+    mapdata1 = np.asarray(
+        [[0, 4, 1], [2, 1, 3], [4, 2, 4], [0, 1, 2], [4, 2, 3]], dtype=IntType
+    )
+
+    axes = AxisTree(Axis([AxisComponent(m, "cpt0")], "ax0"))
+
+    daxes = axes.add_subaxis(Axis([AxisComponent(n, "cpt0")], "ax1"), axes.root)
+    dat0 = MultiArray(daxes, name="dat0", data=np.arange(daxes.size, dtype=ScalarType))
+    dat1 = MultiArray(daxes, name="dat1", dtype=dat0.dtype)
+
+    maxes0 = axes.add_subaxis(Axis(arity0), axes.root)
+    maxes1 = axes.add_subaxis(Axis(arity1), axes.root)
+
+    maparray0 = MultiArray(maxes0, name="map0", data=mapdata0.flatten())
+    maparray1 = MultiArray(maxes1, name="map1", data=mapdata1.flatten())
+
+    map0 = Map(
+        {
+            pmap({"ax0": "cpt0"}): [
+                ("a", maparray0, arity0, "ax0", "cpt0"),
+            ],
+        },
+        "map0",
+    )
+    map1 = Map(
+        {
+            pmap({"ax0": "cpt0"}): [
+                ("a", maparray1, arity1, "ax0", "cpt0"),
+            ],
+        },
+        "map1",
+    )
+
+    p = axes.index()
+    iroot = map1(map0(p))
+    itree = IndexTree(iroot, {iroot.id: Slice([("ax1", "cpt0", 0, None, 1)])})
+
+    itree1 = IndexTree(p, {p.id: Slice([("ax1", "cpt0", 0, None, 1)])})
+
+    do_loop(p, vec12_inc_kernel(dat0[itree], dat1[itree1]))
+
+    expected = np.sum(
+        np.sum(np.arange(m * n).reshape((m, n))[mapdata1, :], axis=1)[mapdata0, :],
+        axis=1,
+    )
+    assert np.allclose(dat1.data.reshape((m, n)), expected)
 
 
 def test_inc_with_variable_arity_map(ragged_inc_kernel):

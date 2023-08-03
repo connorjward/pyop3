@@ -14,7 +14,7 @@ import numpy as np
 import pytools
 
 from pyop3.distarray import DistributedArray, MultiArray
-from pyop3.index import as_index_tree
+from pyop3.index import Indexed, as_index_tree
 from pyop3.utils import as_tuple, checked_zip, merge_dicts
 
 
@@ -212,7 +212,9 @@ class Terminal(LoopExpr):
 class FunctionCall(Terminal):
     def __init__(self, function, arguments):
         self.function = function
-        self.arguments = tuple(arg if arg.index else arg[...] for arg in arguments)
+        self.arguments = tuple(
+            arg if isinstance(arg, Indexed) else arg[...] for arg in arguments
+        )
 
     @functools.cached_property
     def datamap(self) -> dict[str, DistributedArray]:

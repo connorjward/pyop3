@@ -345,6 +345,22 @@ class LabelledTree(pytools.ImmutableRecord):
     #         if self.parent_to_children[node.id][cidx] is None
     #     )
 
+    def find_component(self, node_label, cpt_label):
+        """Return the first component in the tree matching the given labels.
+
+        Notes
+        -----
+        This will return the first component matching the labels. Multiple may exist
+        but we assume that they are identical.
+
+        """
+        for node in self.nodes:
+            if node.label == node_label:
+                for cpt in node.components:
+                    if cpt.label == cpt_label:
+                        return cpt
+        raise ValueError("Matching component not found")
+
     @property
     def leaf(self) -> Node:
         return just_one(self.leaves)
@@ -437,7 +453,7 @@ class LabelledTree(pytools.ImmutableRecord):
                 return node, node.components[cpt_index]
             else:
                 node = new_node
-        assert False, "should not hit"
+        return node, node.components[cpt_index]
 
     # def find_node(
     #     self, loc: Mapping[Hashable, int] | tuple[Node | Hashable, int] | None = None
