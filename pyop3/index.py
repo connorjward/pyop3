@@ -155,7 +155,7 @@ class Slice(Index):
         # from_axis = Axis._unique_label()
         # from_cpt = AxisComponent._label_generator()
         # super().__init__(from_axis, from_cpt, axis, cpt, **kwargs)
-        super().__init__(degree=len(values))
+        super().__init__(degree=len(values), **kwargs)
         self.values = values
 
     @property
