@@ -4,6 +4,7 @@ import pytest
 from pyrsistent import pmap
 
 from pyop3 import (
+    INC,
     READ,
     WRITE,
     Axis,
@@ -38,6 +39,22 @@ def copy_kernel():
         lang_version=LOOPY_LANG_VERSION,
     )
     return LoopyKernel(lpy_kernel, [READ, WRITE])
+
+
+@pytest.fixture
+def vec2_inc_kernel():
+    lpy_kernel = lp.make_kernel(
+        "{ [i]: 0 <= i < 2 }",
+        "y[i] = y[i] + x[i]",
+        [
+            lp.GlobalArg("x", ScalarType, (2,), is_input=True, is_output=False),
+            lp.GlobalArg("y", ScalarType, (2,), is_input=True, is_output=True),
+        ],
+        name="vec2_inc",
+        target=LOOPY_TARGET,
+        lang_version=LOOPY_LANG_VERSION,
+    )
+    return LoopyKernel(lpy_kernel, [READ, INC])
 
 
 @pytest.fixture
@@ -109,19 +126,21 @@ def test_2d_slice_composition(copy_kernel):
     assert np.allclose(dat1.data, dat0.data.reshape((m0, m1))[::2, 1:][2:4, 1])
 
 
-def test_map_composition(copy_kernel):
+def test_map_composition(vec2_inc_kernel):
     arity0, arity1 = 3, 2
 
     iterset = AxisTree(Axis([(2, "cpt0")], "ax0"))
-    axes = AxisTree(Axis([(10, "cpt0")]))
+
+    daxes0 = AxisTree(Axis([(10, "cpt0")]))
+    daxes1 = AxisTree(Axis([AxisComponent(arity1, "cpt0")], "ax0"))
 
     mapaxes0 = iterset.add_node(Axis(arity0), *iterset.leaf)
-    mapdata0 = np.asarray(flatten([[2, 4, 0], [6, 7, 1]]), dtype=int)
-    maparray0 = MultiArray(mapaxes0, name="map0", data=mapdata0)
+    mapdata0 = np.asarray([[2, 4, 0], [6, 7, 1]], dtype=int)
+    maparray0 = MultiArray(mapaxes0, name="map0", data=flatten(mapdata0))
     map0 = Map(
         {
             pmap({iterset.root.label: "cpt0"}): [
-                ("a", maparray0, arity0, axes.root.label, "cpt0"),
+                ("a", maparray0, arity0, daxes0.root.label, "cpt0"),
             ],
         },
         "map0",
@@ -129,8 +148,8 @@ def test_map_composition(copy_kernel):
 
     # this map targets the entries in mapdata0 so it can only contain 0s, 1s and 2s
     mapaxes1 = iterset.add_node(Axis(arity1), *iterset.leaf)
-    mapdata1 = np.asarray(flatten([[0, 2], [2, 1]]), dtype=int)
-    maparray1 = MultiArray(mapaxes1, name="map1", data=mapdata1)
+    mapdata1 = np.asarray([[0, 2], [2, 1]], dtype=int)
+    maparray1 = MultiArray(mapaxes1, name="map1", data=mapdata1.flatten())
     map1 = Map(
         {
             pmap({iterset.root.label: "cpt0"}): [
@@ -140,12 +159,22 @@ def test_map_composition(copy_kernel):
         "map1",
     )
 
-    dat0 = MultiArray(axes, name="dat0", data=np.arange(axes.size, dtype=ScalarType))
-    dat1 = MultiArray(Axis(arity1), name="dat1", dtype=dat0.dtype)
+    dat0 = MultiArray(
+        daxes0, name="dat0", data=np.arange(daxes0.size, dtype=ScalarType)
+    )
+    dat1 = MultiArray(daxes1, name="dat1", dtype=dat0.dtype)
 
-    do_loop(p := iterset.index(), copy_kernel(dat0[map0(p)][map1(p)], dat1[...]))
+    p = iterset.index()
+    itree0 = IndexTree(map0(p))
+    itree1 = IndexTree(map1(p))
+    itree2 = IndexTree(Slice([("ax0", "cpt0", 0, None, 1)]))
 
-    assert False, "TODO"
+    do_loop(p, vec2_inc_kernel(dat0[itree0][itree1], dat1[itree2]))
+
+    expected = np.zeros_like(dat1.data)
+    for i in range(2):
+        expected += dat0.data[mapdata0[i]][mapdata1[i]]
+    assert np.allclose(dat1.data, expected)
 
 
 def test_multi_map_composition():
