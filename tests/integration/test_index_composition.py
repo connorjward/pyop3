@@ -56,24 +56,21 @@ def debug_kernel():
 
 
 def test_1d_slice_composition(copy_kernel):
+    # equivalent to dat1[...] = dat0[::2][1:3] (== [2, 4])
     m, n = 10, 2
     dat0 = MultiArray(
         AxisTree(Axis([(m, "cpt0")], "ax0")),
         name="dat0",
         data=np.arange(m, dtype=ScalarType),
     )
-    dat1 = MultiArray(Axis([(n, "cpt0")], "ax0"), name="dat1", dtype=ScalarType)
+    dat1 = MultiArray(Axis([(n, "cpt0")], "ax0"), name="dat1", dtype=dat0.dtype)
 
-    # equivalent to dat1[...] = dat0[::2][1:3] (== [2, 4])
-    do_loop(
-        Axis(1).index,  # for _ in range(1)
-        copy_kernel(
-            dat0[Index(Slice(None, None, 2, axis="ax0", cpt="cpt0"))][
-                Index(Slice(1, 3, axis="ax0", cpt="cpt0"))
-            ],
-            dat1[Index(Slice(axis="ax0", cpt="cpt0"))],
-        ),
-    )
+    p = Axis(1).index()
+    itree0 = IndexTree(Slice([("ax0", "cpt0", 0, None, 2)]))
+    itree1 = IndexTree(Slice([("ax0", "cpt0", 1, 3, 1)]))
+    itree2 = IndexTree(Slice([("ax0", "cpt0", 0, None, 1)]))
+
+    do_loop(p, copy_kernel(dat0[itree0][itree1], dat1[itree2]))
 
     assert np.allclose(dat1.data, dat0.data[::2][1:3])
 

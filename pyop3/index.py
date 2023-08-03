@@ -32,6 +32,9 @@ class Indexed:
         self.obj = obj
         self.itree = itree
 
+    def __getitem__(self, indices):
+        return Indexed(self, indices)
+
     @functools.cached_property
     def datamap(self):
         return self.obj.datamap | self.itree.datamap
