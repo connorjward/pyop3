@@ -432,11 +432,123 @@ def test_map_composition(vec2_inc_kernel):
     assert np.allclose(dat1.data, expected)
 
 
-def test_multi_map_composition():
-    raise NotImplementedError
-    mmap0 = MultiMap(maps0)
-    mmap1 = MultiMap(maps1)
-    do_loop(p := Axis(2).index(), copy_kernel(dat0[mmap0(p)][mmap1(p)], dat1[...]))
+def test_recursive_multi_component_maps():
+    dat_sizes = 5, 6
+    arity0_0, arity0_1, arity1 = 3, 2, 1
+
+    dat0_axes = AxisTree(
+        Axis(
+            [
+                AxisComponent(dat_sizes[0], "dat0_ax0_cpt0"),
+                AxisComponent(dat_sizes[1], "dat0_ax0_cpt1"),
+            ],
+            "dat0_ax0",
+        )
+    )
+    dat1_axes = AxisTree(
+        Axis([AxisComponent(dat_sizes[0], "dat0_ax0_cpt0")], "dat0_ax0")
+    )
+
+    # maps from ax0_cpt0 so the array has size (dat_sizes[0], arity0_0)
+    map_axes0_0 = AxisTree(
+        Axis([AxisComponent(dat_sizes[0], "dat0_ax0_cpt0")], "dat0_ax0", id="root"),
+        {"root": Axis(arity0_0)},
+    )
+    # maps to ax0_cpt0 so the maximum possible index is dat_sizes[0] - 1
+    map_data0_0 = np.asarray(
+        [[2, 4, 0], [2, 3, 1], [0, 2, 3], [1, 3, 4], [3, 1, 0]], dtype=IntType
+    )
+    assert np.prod(map_data0_0.shape) == map_axes0_0.size
+    map_array0_0 = MultiArray(map_axes0_0, name="map0_0", data=map_data0_0.flatten())
+
+    # maps from ax0_cpt0 so the array has size (dat_sizes[0], arity0_1)
+    map_axes0_1 = AxisTree(
+        Axis([AxisComponent(dat_sizes[0], "dat0_ax0_cpt0")], "dat0_ax0", id="root"),
+        {"root": Axis(arity0_1)},
+    )
+    # maps to ax0_cpt1 so the maximum possible index is dat_sizes[1] - 1
+    map_data0_1 = np.asarray([[4, 5], [2, 1], [0, 3], [5, 0], [3, 2]], dtype=IntType)
+    assert np.prod(map_data0_1.shape) == map_axes0_1.size
+    map_array0_1 = MultiArray(map_axes0_1, name="map0_1", data=map_data0_1.flatten())
+
+    # maps from ax0_cpt1 so the array has size (dat_sizes[1], arity1)
+    map_axes1 = AxisTree(
+        Axis([AxisComponent(dat_sizes[1], "dat0_ax0_cpt1")], "dat0_ax0", id="root"),
+        {"root": Axis(arity1)},
+    )
+    # maps to ax0_cpt1 so the maximum possible index is dat_sizes[1] - 1
+    map_data1 = np.asarray([[4], [5], [2], [3], [0], [1]], dtype=IntType)
+    assert np.prod(map_data1.shape) == map_axes1.size
+    map_array1 = MultiArray(map_axes1, name="map1", data=map_data1.flatten())
+
+    # map from cpt0 -> {cpt0, cpt1} and from cpt1 -> {cpt1}
+    map0 = Map(
+        {
+            pmap({"dat0_ax0": "dat0_ax0_cpt0"}): [
+                ("a", map_array0_0, arity0_0, "dat0_ax0", "dat0_ax0_cpt0"),
+                ("b", map_array0_1, arity0_1, "dat0_ax0", "dat0_ax0_cpt1"),
+            ],
+            pmap({"dat0_ax0": "dat0_ax0_cpt1"}): [
+                ("a", map_array1, arity1, "dat0_ax0", "dat0_ax0_cpt1"),
+            ],
+        },
+        "map0",
+    )
+
+    # FIXME duplicate map0 just to give it a different name (passed to temporary)
+    map1 = Map(
+        {
+            pmap({"dat0_ax0": "dat0_ax0_cpt0"}): [
+                ("a", map_array0_0, arity0_0, "dat0_ax0", "dat0_ax0_cpt0"),
+                ("b", map_array0_1, arity0_1, "dat0_ax0", "dat0_ax0_cpt1"),
+            ],
+            pmap({"dat0_ax0": "dat0_ax0_cpt1"}): [
+                ("a", map_array1, arity1, "dat0_ax0", "dat0_ax0_cpt1"),
+            ],
+        },
+        "map1",
+    )
+
+    dat0 = MultiArray(
+        dat0_axes, name="dat0", data=np.arange(dat0_axes.size, dtype=ScalarType)
+    )
+    dat1 = MultiArray(dat1_axes, name="dat1", dtype=dat0.dtype)
+
+    p = dat1_axes.index()
+    itree0 = IndexTree(map1(map0(p)))
+    itree1 = IndexTree(p)
+
+    # create the local kernel
+    # the temporary from the maps will look like:
+    #    cpt0 -> {cpt0 -> {cpt0, cpt1}, cpt1 -> {cpt1}}
+    # =           (3  *    (3   + 2)) +  (2 *     1)   ==   17
+    lpy_kernel = lp.make_kernel(
+        "{ [i]: 0 <= i < 17 }",
+        "y[0] = y[0] + x[i]",
+        [
+            lp.GlobalArg("x", ScalarType, (17,), is_input=True, is_output=False),
+            lp.GlobalArg("y", ScalarType, (1,), is_input=False, is_output=True),
+        ],
+        name="sum_kernel",
+        target=LOOPY_TARGET,
+        lang_version=LOOPY_LANG_VERSION,
+    )
+    sum_kernel = LoopyKernel(lpy_kernel, [READ, WRITE])
+
+    do_loop(p, sum_kernel(dat0[itree0], dat1[itree1]))
+
+    expected = np.zeros_like(dat1.data)
+    for i in range(dat_sizes[0]):
+        # cpt0, cpt0 (9 entries)
+        packed00 = dat0.data[:5][map_data0_0[map_data0_0[i]]]
+        # cpt0, cpt1 (6 entries)
+        packed01 = dat0.data[5:][map_data0_1[map_data0_0[i]]]
+        # cpt1, cpt1 (2 entries)
+        packed11 = dat0.data[5:][map_data1[map_data0_1[i]]]
+
+        # in the local kernel we sum all the entries together
+        expected[i] = np.sum(packed00) + np.sum(packed01) + np.sum(packed11)
+    assert np.allclose(dat1.data, expected)
 
 
 def test_sum_with_consecutive_maps():
@@ -518,4 +630,4 @@ def test_sum_with_consecutive_maps():
 
 
 if __name__ == "__main__":
-    test_sum_with_consecutive_maps()
+    test_recursive_multi_component_maps()

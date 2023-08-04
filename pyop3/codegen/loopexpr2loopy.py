@@ -816,7 +816,7 @@ def _parse_assignment_final_rec(
         iname = ctx.unique_name("i")
         ctx.add_domain(iname, size)
 
-        current_jname = jnames_per_axcpt[axis.label, axcpt.label]
+        current_jname = jnames_per_axcpt[axis.id, axcpt.label]
         new_jnames = jnames | {axis.label: current_jname}
         new_path = path | {axis.label: axcpt.label}
 
@@ -881,7 +881,7 @@ def _(index: CalledMap, *, loop_indices, cgen_ctx, **kwargs):
     leaves, index_data = _expand_index(
         index.from_index, loop_indices=loop_indices, cgen_ctx=ctx, **kwargs
     )
-    from_axes = index_data.get("axes")
+    axes = index_data.get("axes")
     from_jnames = index_data.get("jnames", {})
 
     jnames_per_cpt = dict(from_jnames)
@@ -947,20 +947,19 @@ def _(index: CalledMap, *, loop_indices, cgen_ctx, **kwargs):
 
             insns.append(myinsns)
             jname_exprs.append({to_axis: jname_expr})
+            path_per_leaf.append(pmap({to_axis: to_cpt}))
 
         axis = Axis(components, label=index.name)
         if from_leaf_key:
-            axes = from_axes.add_subaxis(axis, *from_leaf_key)
+            axes = axes.add_subaxis(axis, *from_leaf_key)
         else:
             axes = AxisTree(axis)
 
         for i, cpt in enumerate(components):
-            # this makes sense I think since we are only adding one axis
-            jnames_per_cpt[axis.label, cpt.label] = jnames[i]
+            jnames_per_cpt[axis.id, cpt.label] = jnames[i]
             leaf_keys.append((axis.id, cpt.label))
             insns_per_leaf.append(from_insns + tuple(insns[i]))
             jname_expr_per_leaf.append(from_jname_exprs | jname_exprs[i])
-            path_per_leaf.append(pmap({to_axis: to_cpt}))
 
     leaves = {
         leaf_key: (path, jname_exprs, insns)
@@ -1448,7 +1447,7 @@ def _(loop_index: LoopIndex, *, loop_indices, **kwargs):
 @collect_shape_index_callback.register
 def _(called_map: CalledMap, **kwargs):
     leaves, index_data = collect_shape_index_callback(called_map.from_index, **kwargs)
-    from_axes = index_data["axes"]
+    axes = index_data["axes"]
 
     leaf_keys = []
     path_per_leaf = []
@@ -1472,16 +1471,16 @@ def _(called_map: CalledMap, **kwargs):
 
             else:
                 raise NotImplementedError
+            path_per_leaf.append(pmap({to_axis: to_cpt}))
 
         axis = Axis(components, label=called_map.name)
-        if from_axes.root:
-            axes = from_axes.add_subaxis(axis, *from_leaf_key)
+        if axes.root:
+            axes = axes.add_subaxis(axis, *from_leaf_key)
         else:
             axes = AxisTree(axis)
 
         for i, cpt in enumerate(components):
             leaf_keys.append((axis.id, cpt.label))
-            path_per_leaf.append(pmap({to_axis: to_cpt}))
 
     leaves = {
         leaf_key: (path,)

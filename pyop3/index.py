@@ -6,6 +6,7 @@ import functools
 from typing import Any, Hashable, Sequence
 
 import pytools
+from pyrsistent import pmap
 
 from pyop3.axis import Axis, AxisComponent
 from pyop3.tree import LabelledNode, LabelledTree, NodeComponent, postvisit
@@ -75,6 +76,14 @@ class LoopIndex(Node):
 
     FIXME More detail needed.
 
+    Notes
+    -----
+    For the moment we assume that `LoopIndex` objects cannot be
+    multi-component. This would need to produce a different set of loops
+    for each component. One application of this would be to be able to iterate
+    over all points of a mesh together (since cells, edges etc are different
+    components).
+
     """
 
     # TODO this needs an ID attribute so we can differentiate p := mesh.cells.index()
@@ -98,15 +107,7 @@ class Map(pytools.ImmutableRecord):
     fields = {"bits", "name"}
 
     def __init__(self, bits, name, **kwargs) -> None:
-        try:
-            key = just_one(bits.keys())
-        except ValueError:
-            raise AssertionError("Maps now only map from a single set of axes")
-
-        degree = len(bits[key])
-
         super().__init__(**kwargs)
-        self.degree = degree
         self.bits = bits
         self.name = name
 
@@ -115,11 +116,11 @@ class Map(pytools.ImmutableRecord):
 
     @functools.cached_property
     def datamap(self):
-        try:
-            key = just_one(self.bits.keys())
-        except ValueError:
-            raise AssertionError("Maps now only map from a single set of axes")
-        return merge_dicts([bit[1].datamap for bit in self.bits[key]])
+        data = {}
+        for bit in self.bits.values():
+            for stuff in bit:
+                data |= stuff[1].datamap
+        return data
 
 
 class Slice(Index):
@@ -209,9 +210,51 @@ class IdentityMap(Map):
 
 class CalledMap(Index):
     def __init__(self, map, from_index):
-        super().__init__(degree=map.degree)
+        # The degree of the called map depends on the index it acts on. If
+        # the map maps from a -> {a, b, c} *and* b -> {b, c} then the degree
+        # is 3 or 2 depending on from_index. If from_index is also a CalledMap
+        # with multiple output components then the degree will need to be
+        # determined by summing from the leaves of this prior map.
+        # Note that 'degree' is equivalent to stating the number of leaves of
+        # the resulting axes.
+        if isinstance(from_index, LoopIndex):
+            # For now maps will only work with loop indices with depth 1. Being
+            # able to work with deeper loop indices is required for things like
+            # ephemeral meshes to work (since mesh.cells would have base and
+            # column axes).
+            if from_index.iterset.depth > 1:
+                raise NotImplementedError(
+                    "Mapping from loop indices with depth greater than 1 is not "
+                    "yet supported"
+                )
+            iterset_axis = from_index.iterset.root
+            axis_label = iterset_axis.label
+            # just_one used since from_index can (currently) only have a
+            # single component
+            cpt_label = just_one(iterset_axis.components).label
+
+            leaves = []
+            for leaf in map.bits[pmap({axis_label: cpt_label})]:
+                to_axis_label = leaf[3]
+                to_cpt_label = leaf[4]
+                path = pmap({to_axis_label: to_cpt_label})
+                leaves.append(path)
+        else:
+            assert isinstance(from_index, CalledMap)
+            leaves = []
+            for from_leaf in from_index.leaves:
+                for leaf in map.bits[from_leaf]:
+                    to_axis_label = leaf[3]
+                    to_cpt_label = leaf[4]
+                    path = pmap({to_axis_label: to_cpt_label})
+                    leaves.append(path)
+
+        super().__init__(degree=len(leaves))
         self.map = map
         self.from_index = from_index
+
+        # useful for computing degree of maps that call this one
+        self.leaves = leaves
 
     @functools.cached_property
     def datamap(self):
