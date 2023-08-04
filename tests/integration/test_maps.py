@@ -12,6 +12,7 @@ from pyop3 import (
     AxisTree,
     Index,
     IndexTree,
+    IntType,
     LoopyKernel,
     Map,
     MultiArray,
@@ -436,3 +437,85 @@ def test_multi_map_composition():
     mmap0 = MultiMap(maps0)
     mmap1 = MultiMap(maps1)
     do_loop(p := Axis(2).index(), copy_kernel(dat0[mmap0(p)][mmap1(p)], dat1[...]))
+
+
+def test_sum_with_consecutive_maps():
+    iterset_size = 5
+    dat_sizes = 10, 4
+    arity0 = 3
+    arity1 = 2
+
+    iterset = AxisTree(Axis([AxisComponent(iterset_size, "iter_ax0_cpt0")], "iter_ax0"))
+    dat_axes0 = AxisTree(
+        Axis([AxisComponent(dat_sizes[0], "dat0_ax0_cpt0")], "dat0_ax0", id="root"),
+        {"root": Axis([AxisComponent(dat_sizes[1], "dat0_ax1_cpt0")], "dat0_ax1")},
+    )
+
+    dat0 = MultiArray(
+        dat_axes0, name="dat0", data=np.arange(dat_axes0.size, dtype=ScalarType)
+    )
+    dat1 = MultiArray(iterset, name="dat1", dtype=dat0.dtype)
+
+    # map0 maps from the iterset to dat0_ax0
+    map_axes0 = iterset.add_node(Axis(arity0), *iterset.leaf)
+    map_data0 = np.asarray(
+        [[2, 9, 0], [6, 7, 1], [5, 3, 8], [9, 3, 2], [2, 4, 6]], dtype=IntType
+    )
+    map_array0 = MultiArray(map_axes0, name="map0", data=map_data0.flatten())
+    map0 = Map(
+        {
+            pmap({"iter_ax0": "iter_ax0_cpt0"}): [
+                ("a", map_array0, arity0, "dat0_ax0", "dat0_ax0_cpt0"),
+            ],
+        },
+        "map0",
+    )
+
+    # map0 maps from the iterset to dat0_ax1
+    map_axes1 = iterset.add_node(Axis(arity1), *iterset.leaf)
+    map_data1 = np.asarray([[0, 2], [2, 1], [3, 1], [0, 0], [1, 2]], dtype=IntType)
+    map_array1 = MultiArray(map_axes1, name="map1", data=map_data1.flatten())
+    map1 = Map(
+        {
+            pmap({"iter_ax0": "iter_ax0_cpt0"}): [
+                ("b", map_array1, arity1, "dat0_ax1", "dat0_ax1_cpt0"),
+            ],
+        },
+        "map1",
+    )
+
+    # create the local kernel
+    lpy_kernel = lp.make_kernel(
+        f"{{ [i]: 0 <= i < {arity0*arity1} }}",
+        "y[0] = y[0] + x[i]",
+        [
+            lp.GlobalArg(
+                "x", ScalarType, (arity0 * arity1,), is_input=True, is_output=False
+            ),
+            lp.GlobalArg("y", ScalarType, (1,), is_input=False, is_output=True),
+        ],
+        name="sum",
+        target=LOOPY_TARGET,
+        lang_version=LOOPY_LANG_VERSION,
+    )
+    sum_kernel = LoopyKernel(lpy_kernel, [READ, WRITE])
+
+    # prepare the index trees
+    # TODO this is a clumsy way of writing dat0[map0(p), map1(p)]
+    p = iterset.index()
+    iroot = map0(p)
+    itree0 = IndexTree(iroot, {iroot.id: map1(p)})
+    itree1 = IndexTree(p)
+
+    do_loop(p, sum_kernel(dat0[itree0], dat1[itree1]))
+
+    expected = np.zeros_like(dat1.data)
+    for i in range(iterset.size):
+        expected[i] = np.sum(
+            dat0.data.reshape(dat_sizes)[map_data0[i]][:, map_data1[i]]
+        )
+    assert np.allclose(dat1.data, expected)
+
+
+if __name__ == "__main__":
+    test_sum_with_consecutive_maps()
