@@ -3,7 +3,7 @@ from __future__ import annotations
 import abc
 import collections
 import functools
-from typing import Any, Hashable, Sequence
+from typing import Any, Collection, Hashable, Sequence
 
 import pytools
 from pyrsistent import pmap
@@ -267,7 +267,10 @@ class CalledMap(Index):
 
 @functools.singledispatch
 def as_index_tree(arg: Any) -> IndexTree:
-    raise TypeError(f"Handler is not registered for {type(arg)}")
+    if isinstance(arg, Collection):
+        return _index_tree_from_collection(arg)
+    else:
+        raise TypeError(f"Handler is not registered for {type(arg)}")
 
 
 @as_index_tree.register
@@ -282,3 +285,19 @@ def _(arg: Index) -> IndexTree:
 
 def _collect_datamap(index, *subdatamaps, itree):
     return index.datamap | merge_dicts(subdatamaps)
+
+
+def _index_tree_from_collection(indices: Collection[Index]):
+    """Return an index tree formed by concatenating successive indices.
+
+    If any of the indices yield multiple components then subsequent indices
+    will be attached to all components.
+
+    """
+    index, *subindices = indices
+    tree = IndexTree(index)
+    if subindices:
+        subtree = _index_tree_from_collection(subindices)
+        for cpt_label in index.component_labels:
+            tree = tree.add_subtree(subtree, index, cpt_label)
+    return tree

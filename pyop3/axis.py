@@ -669,6 +669,16 @@ class AxisTree(LabelledTree):
                         return cpt
         raise ValueError("Matching component not found")
 
+    def add_node(
+        self,
+        axis,
+        parent,
+        parent_component,
+        **kwargs,
+    ):
+        parent_cpt_label = _as_axis_component_label(parent_component)
+        return super().add_node(axis, parent, parent_cpt_label, **kwargs)
+
     @property
     def leaf(self):
         leaf_axis, leaf_cpt_label = super().leaf

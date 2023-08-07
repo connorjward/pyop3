@@ -272,8 +272,7 @@ class LabelledTree(pytools.ImmutableRecord):
             return subtree
         else:
             parent = self._as_node(parent)
-            cpt_label = component
-            cpt_index = [c.label for c in parent.components].index(cpt_label)
+            cpt_index = parent.component_labels.index(component)
             new_parent_to_children = {
                 p: list(ch) for p, ch in self.parent_to_children.items()
             }

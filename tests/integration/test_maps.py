@@ -503,8 +503,13 @@ def test_recursive_multi_component_maps():
 
     # create the local kernel
     # the temporary from the maps will look like:
-    #    cpt0 -> {cpt0 -> {cpt0, cpt1}, cpt1 -> {cpt1}}
-    # =           (3  *    (3   + 2)) +  (2 *     1)   ==   17
+    # Axis([{count=3}, {count=2}], label=map0)
+    # ├──➤ Axis([{count=3}, {count=2}], label=map1)
+    # │    ├──➤ None
+    # │    └──➤ None
+    # └──➤ Axis([{count=1}], label=map1)
+    #      └──➤ None
+    # which has 17 entries
     lpy_kernel = lp.make_kernel(
         "{ [i]: 0 <= i < 17 }",
         "y[0] = y[0] + x[i]",
@@ -560,20 +565,20 @@ def test_sum_with_consecutive_maps():
     map0 = Map(
         {
             pmap({"iter_ax0": "iter_ax0_cpt0"}): [
-                ("a", map_array0, arity0, "dat0_ax0", "dat0_ax0_cpt0"),
+                TabulatedMapComponent("dat0_ax0", "dat0_ax0_cpt0", map_array0),
             ],
         },
         "map0",
     )
 
-    # map0 maps from the iterset to dat0_ax1
+    # map1 maps from the iterset to dat0_ax1
     map_axes1 = iterset.add_node(Axis(arity1), *iterset.leaf)
     map_data1 = np.asarray([[0, 2], [2, 1], [3, 1], [0, 0], [1, 2]], dtype=IntType)
     map_array1 = MultiArray(map_axes1, name="map1", data=map_data1.flatten())
     map1 = Map(
         {
             pmap({"iter_ax0": "iter_ax0_cpt0"}): [
-                ("b", map_array1, arity1, "dat0_ax1", "dat0_ax1_cpt0"),
+                TabulatedMapComponent("dat0_ax1", "dat0_ax1_cpt0", map_array1),
             ],
         },
         "map1",
@@ -595,14 +600,7 @@ def test_sum_with_consecutive_maps():
     )
     sum_kernel = LoopyKernel(lpy_kernel, [READ, WRITE])
 
-    # prepare the index trees
-    # TODO this is a clumsy way of writing dat0[map0(p), map1(p)]
-    p = iterset.index()
-    iroot = map0(p)
-    itree0 = IndexTree(iroot, {iroot.id: map1(p)})
-    itree1 = IndexTree(p)
-
-    do_loop(p, sum_kernel(dat0[itree0], dat1[itree1]))
+    do_loop(p := iterset.index(), sum_kernel(dat0[map0(p), map1(p)], dat1[p]))
 
     expected = np.zeros_like(dat1.data)
     for i in range(iterset.size):
@@ -610,7 +608,3 @@ def test_sum_with_consecutive_maps():
             dat0.data.reshape(dat_sizes)[map_data0[i]][:, map_data1[i]]
         )
     assert np.allclose(dat1.data, expected)
-
-
-if __name__ == "__main__":
-    test_recursive_multi_component_maps()
