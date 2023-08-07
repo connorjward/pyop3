@@ -9,7 +9,7 @@ import pytools
 from pyrsistent import pmap
 
 from pyop3.axis import Axis, AxisComponent
-from pyop3.tree import LabelledNode, LabelledTree, NodeComponent, postvisit
+from pyop3.tree import LabelledNode, LabelledTree, postvisit
 from pyop3.utils import as_tuple, just_one, merge_dicts
 
 
@@ -22,6 +22,7 @@ class IndexTree(LabelledTree):
 IndexLabel = collections.namedtuple("IndexLabel", ["axis", "component"])
 
 
+# is IndexedArray a better name? Probably
 class Indexed:
     """Container representing an object that has been indexed.
 
@@ -53,25 +54,7 @@ class Index(LabelledNode):
     pass
 
 
-# class IndexComponent(NodeComponent, abc.ABC):
-#     fields = NodeComponent.fields | {"from_axis", "from_cpt", "to_axis", "to_cpt"}
-#
-#     # FIXME I think that these are the wrong attributes
-#     def __init__(self, from_axis, from_cpt, to_axis, to_cpt, **kwargs) -> None:
-#         super().__init__(**kwargs)
-#         self.from_axis = from_axis
-#         self.from_cpt = from_cpt
-#         self.to_axis = to_axis
-#         self.to_cpt = to_cpt
-
-
-# TODO
-# should come from Index
-# class LoopIndex(Index):
-from pyop3.tree import Node
-
-
-class LoopIndex(Node):
+class LoopIndex(Index):
     """Object representing a set of indices of a loop nest.
 
     FIXME More detail needed.
@@ -86,16 +69,15 @@ class LoopIndex(Node):
 
     """
 
-    # TODO this needs an ID attribute so we can differentiate p := mesh.cells.index()
-    # with q := mesh.cells.index() for example.
-    # fields = Index.fields | {"iterset"}
-
     def __init__(self, iterset, **kwargs):
-        super().__init__(degree=1, **kwargs)
+        cpt_labels = [cpt.label for ax, cpt in iterset.leaves]
+        if len(cpt_labels) > 1:
+            raise NotImplementedError(
+                "Multi-component loop indices are not currently supported"
+            )
+
+        super().__init__(cpt_labels, **kwargs)
         self.iterset = iterset
-        # FIXME
-        # self.id = id(self)
-        # self.degree = 1
 
     @functools.cached_property
     def datamap(self):
@@ -242,19 +224,16 @@ class CalledMap(Index):
         else:
             assert isinstance(from_index, CalledMap)
             leaves = []
-            for from_leaf in from_index.leaves:
+            for from_leaf in from_index.component_labels:
                 for leaf in map.bits[from_leaf]:
                     to_axis_label = leaf[3]
                     to_cpt_label = leaf[4]
                     path = pmap({to_axis_label: to_cpt_label})
                     leaves.append(path)
 
-        super().__init__(degree=len(leaves))
+        super().__init__(leaves)
         self.map = map
         self.from_index = from_index
-
-        # useful for computing degree of maps that call this one
-        self.leaves = leaves
 
     @functools.cached_property
     def datamap(self):
@@ -291,7 +270,7 @@ class AffineMap(Map):
 
 @functools.singledispatch
 def as_index_tree(arg: Any) -> IndexTree:
-    raise TypeError
+    raise TypeError(f"Handler is not registered for {type(arg)}")
 
 
 @as_index_tree.register

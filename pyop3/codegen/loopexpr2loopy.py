@@ -50,7 +50,6 @@ from pyop3.loopexpr import (
 )
 from pyop3.utils import (
     PrettyTuple,
-    StrictlyUniqueSet,
     checked_zip,
     just_one,
     merge_dicts,

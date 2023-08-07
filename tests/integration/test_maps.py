@@ -494,29 +494,12 @@ def test_recursive_multi_component_maps():
         },
         "map0",
     )
-
-    # FIXME duplicate map0 just to give it a different name (passed to temporary)
-    map1 = Map(
-        {
-            pmap({"dat0_ax0": "dat0_ax0_cpt0"}): [
-                ("a", map_array0_0, arity0_0, "dat0_ax0", "dat0_ax0_cpt0"),
-                ("b", map_array0_1, arity0_1, "dat0_ax0", "dat0_ax0_cpt1"),
-            ],
-            pmap({"dat0_ax0": "dat0_ax0_cpt1"}): [
-                ("a", map_array1, arity1, "dat0_ax0", "dat0_ax0_cpt1"),
-            ],
-        },
-        "map1",
-    )
+    map1 = map0.copy(name="map1")
 
     dat0 = MultiArray(
         dat0_axes, name="dat0", data=np.arange(dat0_axes.size, dtype=ScalarType)
     )
     dat1 = MultiArray(dat1_axes, name="dat1", dtype=dat0.dtype)
-
-    p = dat1_axes.index()
-    itree0 = IndexTree(map1(map0(p)))
-    itree1 = IndexTree(p)
 
     # create the local kernel
     # the temporary from the maps will look like:
@@ -535,7 +518,7 @@ def test_recursive_multi_component_maps():
     )
     sum_kernel = LoopyKernel(lpy_kernel, [READ, WRITE])
 
-    do_loop(p, sum_kernel(dat0[itree0], dat1[itree1]))
+    do_loop(p := dat1_axes.index(), sum_kernel(dat0[map1(map0(p))], dat1[p]))
 
     expected = np.zeros_like(dat1.data)
     for i in range(dat_sizes[0]):

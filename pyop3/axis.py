@@ -26,15 +26,17 @@ from pyop3.dtypes import IntType, PointerType, get_mpi_dtype
 
 # from pyop3.index import Index, IndexTree, Map, Slice, TabulatedMap
 from pyop3.tree import (
+    ComponentLabel,
     LabelledNode,
     LabelledTree,
-    Node,
-    NodeComponent,
+    NodeId,
     postvisit,
     previsit,
 )
 from pyop3.utils import (
+    LabelledImmutableRecord,
     PrettyTuple,
+    UniquelyIdentifiedImmutableRecord,
     as_tuple,
     checked_zip,
     flatten,
@@ -381,25 +383,203 @@ def _collect_datamap(axis, *subdatamaps, axes):
     return datamap | merge_dicts(subdatamaps)
 
 
-class AxisTree(LabelledTree):
-    fields = LabelledTree.fields | {"within_axes"}
+class AxisComponent(LabelledImmutableRecord):
+    """
+    Parameters
+    ----------
+    indexed : bool
+        Is this axis indexed (as part of a temporary) - used to generate the right layouts
 
+    indices
+        If the thing is sparse then we need to specify the indices of the sparsity here.
+        This is like CSR. This is normally a nested/ragged thing.
+
+        E.g. a diagonal matrix would be 3 x [1, 1, 1] with indices being [0, 1, 2]. The
+        CSR row pointers are [0, 1, 2] (we already calculate this), but when we look up
+        the values we use [0, 1, 2] instead of [0, 0, 0]. A binary search of all the
+        indices is required to find the right offset.
+
+        Note that this is an entirely separate concept to the numbering. Imagine a
+        sparse matrix where the row and column axes are renumbered. The indices are
+        still sorted. The indices gives us a mapping from "dense" indices to "sparse"
+        ones. This is normally inverted (via binary search) to get the "dense" index
+        from the "sparse" one. The numbering then concerns the lookup from dense
+        indices to an offset. This means, for example, that the numbering of a sparse
+        thing is dense and contains the numbers [0, ..., ndense).
+
+    """
+
+    fields = {
+        "count",
+        "overlap",
+        "indexed",
+        "indices",
+        "lgmap",
+    } | LabelledImmutableRecord.fields
+
+    def __init__(
+        self,
+        count,
+        label: Hashable | None = None,
+        *,
+        indices=None,
+        overlap=None,
+        indexed=False,
+        lgmap=None,
+        **kwargs,
+    ):
+        super().__init__(label=label, **kwargs)
+        self.count = count
+        self.indices = indices
+        self.overlap = overlap
+        self.indexed = indexed
+        self.lgmap = lgmap
+        """
+        this property is required because we can hit situations like the following:
+
+            sizes = 3 -> [2, 1, 2] -> [[2, 1], [1], [3, 2]]
+
+        this yields a layout that looks like
+
+            [[0, 2], [3], [4, 7]]
+
+        however, if we have a temporary where we only want the inner two dimensions
+        then we need a layout that looks like the following:
+
+            [[0, 2], [0], [0, 3]]
+
+        This effectively means that we need to zero the offset as we traverse the
+        tree to produce the layout. This is why we need this ``indexed`` flag.
+        """
+
+    def __str__(self) -> str:
+        return f"{{count={self.count}}}"
+
+    @property
+    def is_distributed(self):
+        return self.overlap is not None
+
+    @property
+    def has_integer_count(self):
+        return isinstance(self.count, numbers.Integral)
+
+    @property
+    def is_ragged(self):
+        from pyop3.distarray import MultiArray
+
+        return isinstance(self.count, MultiArray)
+
+    # deprecated alias, permutation is a better name as it is easier to reason
+    # about sending points vs where they map to.
+    @property
+    def numbering(self):
+        return self.permutation
+
+    # TODO this is just a traversal - clean up
+    def alloc_size(self, axtree, axis):
+        from pyop3.distarray import MultiArray
+
+        if axis.indexed:
+            npoints = 1
+        elif isinstance(self.count, MultiArray):
+            npoints = self.count.max_value
+        else:
+            assert isinstance(self.count, numbers.Integral)
+            npoints = self.count
+
+        assert npoints is not None
+
+        if subaxis := axtree.child(axis, self):
+            return npoints * axtree.alloc_size(subaxis)
+        else:
+            return npoints
+
+    @property
+    def has_partitioned_halo(self):
+        if self.overlap is None:
+            return True
+
+        remaining = itertools.dropwhile(lambda o: is_owned_by_process(o), self.overlap)
+        return all(isinstance(o, Halo) for o in remaining)
+
+    @property
+    def num_owned(self) -> int:
+        from pyop3.distarray import MultiArray
+
+        """Return the number of owned points."""
+        if isinstance(self.count, MultiArray):
+            # TODO: Might we ever want this to work?
+            raise RuntimeError("nowned is only valid for non-ragged axes")
+
+        if self.overlap is None:
+            return self.count
+        else:
+            return sum(1 for o in self.overlap if is_owned_by_process(o))
+
+    @property
+    def nowned(self):
+        # alias, what is the best name?
+        return self.num_owned
+
+
+class Axis(LabelledNode):
+    fields = LabelledNode.fields - {"component_labels"} | {"components", "permutation"}
+
+    def __init__(
+        self,
+        components: Sequence[AxisComponent] | AxisComponent | int,
+        label: Hashable | None = None,
+        *,
+        permutation: Sequence[int] | None = None,
+        **kwargs,
+    ):
+        components = tuple(_as_axis_component(cpt) for cpt in as_tuple(components))
+
+        if permutation is not None and not all(
+            isinstance(cpt.count, numbers.Integral) for cpt in components
+        ):
+            raise NotImplementedError(
+                "Axis permutations are only supported for axes with fixed component sizes"
+            )
+        # TODO could also check sizes here
+
+        super().__init__([c.label for c in components], label=label, **kwargs)
+        self.components = components
+
+        # FIXME: permutation should be something hashable but not quite like this...
+        self.permutation = tuple(permutation) if permutation is not None else None
+
+        # dead code, remove
+        self.indexed = False
+
+    def __str__(self) -> str:
+        return f"{self.__class__.__name__}([{', '.join(str(cpt) for cpt in self.components)}], label={self.label})"
+
+    @property
+    def count(self):
+        """Return the total number of entries in the axis across all axis parts.
+        Will fail if axis parts do not have integer counts.
+        """
+        if not all(cpt.has_integer_count for cpt in self.components):
+            raise RuntimeError("non-int counts present, cannot sum")
+        return sum(cpt.find_integer_count() for cpt in self.components)
+
+    def index(self):
+        return as_axis_tree(self).index()
+
+
+class AxisTree(LabelledTree):
     def __init__(
         self,
         root: MultiAxis | None = None,
         parent_to_children: dict | None = None,
         *,
-        within_axes=None,
         sf=None,
         shared_sf=None,
         comm=None,
     ):
         super().__init__(root, parent_to_children)
 
-        # this is a map from axis labels to their extents. This is useful for
-        # things like temporaries where the axis tree does not itself fully characterise
-        # the shapes of things
-        self.within_axes = within_axes or {}
         self.sf = sf
         self.shared_sf = shared_sf
         self.comm = comm  # FIXME DTRT with internal comms
@@ -473,59 +653,27 @@ class AxisTree(LabelledTree):
     # old alias
     get_offset = offset
 
-    # def mul(self, other, sparsity=None):
-    #     """Compute the outer product with another :class:`MultiAxis`.
-    #
-    #     Parameters
-    #     ----------
-    #     other : :class:`MultiAxis`
-    #         The other :class:`MultiAxis` used to compute the product.
-    #     sparsity : ???
-    #         The sparsity of the resulting product (produced by combining maps). If
-    #         ``None`` then the resulting axis will be dense.
-    #     """
-    #     # NOTE: As discussed in the message below, composing star forests is really hard.
-    #     # In particular it is difficult to prescibe the ownership of the points that are
-    #     # owned in one axis and halo in the other. This effectively corresponds to making
-    #     # the off-diagonal portions of the matrices stored on a process either share the
-    #     # row or the column.
-    #     # Simply making a policy decision here (of distributed along rows) is not enough
-    #     # because for the Real space we need to distribute the dense column between
-    #     # processes (so distributed along rows), but the dense row also needs to be
-    #     # distributed (so distribute along the columns).
-    #     # Once this works we can start implementing our own matrices in pyop3 which
-    #     # would be good for things like PCPATCH. We could also play around with COO and
-    #     # CSC layouts by swapping the axes around.
-    #     raise NotImplementedError(
-    #         "Computing the outer product of multi-axes is difficult in parallel "
-    #         "since we need to compose star forests and decide upon the ownership of the "
-    #         "off-diagonal components."
-    #     )
-    #
-    # def find_part_from_indices(self, indices):
-    #     """Traverse axis to find things
-    #
-    #     indices is a list of integers"""
-    #     index, *rest = indices
-    #
-    #     if not rest:
-    #         return self.parts[index]
-    #     else:
-    #         return self.parts[index].subaxis.find_part_from_indices(rest)
-    #
-    # # TODO I think I would prefer to subclass tuple here s.t. indexing with
-    # # None works iff len(self.parts) == 1
-    # def get_part(self, npart):
-    #     if npart is None:
-    #         if len(self.parts) != 1:
-    #             raise RuntimeError
-    #         return self.parts[0]
-    #     else:
-    #         return self.parts[npart]
-    #
-    # @property
-    # def nparts(self):
-    #     return len(self.parts)
+    def find_component(self, node_label, cpt_label):
+        """Return the first component in the tree matching the given labels.
+
+        Notes
+        -----
+        This will return the first component matching the labels. Multiple may exist
+        but we assume that they are identical.
+
+        """
+        for node in self.nodes:
+            if node.label == node_label:
+                for cpt in node.components:
+                    if cpt.label == cpt_label:
+                        return cpt
+        raise ValueError("Matching component not found")
+
+    def child(
+        self, parent: Axis, component: AxisComponent | ComponentLabel
+    ) -> Axis | None:
+        cpt_label = _as_axis_component_label(component)
+        return super().child(parent, cpt_label)
 
     @functools.cached_property
     def size(self):
@@ -626,51 +774,6 @@ class AxisTree(LabelledTree):
         return self.put_node(subaxis, *loc)
 
 
-class Axis(LabelledNode):
-    fields = LabelledNode.fields - {"degree"} | {"components", "permutation", "indexed"}
-
-    def __init__(
-        self,
-        components: Sequence[AxisComponent] | AxisComponent | int,
-        label: Hashable | None = None,
-        *,
-        permutation: Sequence[int] | None = None,
-        indexed: bool = False,
-        **kwargs,
-    ):
-        components = tuple(_as_axis_component(cpt) for cpt in as_tuple(components))
-
-        if permutation is not None and not all(
-            isinstance(cpt.count, numbers.Integral) for cpt in components
-        ):
-            raise NotImplementedError(
-                "Axis permutations are only supported for axes with fixed component sizes"
-            )
-        # TODO could also check sizes here
-
-        super().__init__(label, degree=len(components), **kwargs)
-        self.components = components
-
-        # FIXME: permutation should be something hashable but not quite like this...
-        self.permutation = tuple(permutation) if permutation is not None else None
-        self.indexed = indexed
-
-    def __str__(self) -> str:
-        return f"{self.__class__.__name__}([{', '.join(str(cpt) for cpt in self.components)}], label={self.label})"
-
-    def index(self):
-        return as_axis_tree(self).index()
-
-    @property
-    def count(self):
-        """Return the total number of entries in the axis across all axis parts.
-        Will fail if axis parts do not have integer counts.
-        """
-        if not all(cpt.has_integer_count for cpt in self.components):
-            raise RuntimeError("non-int counts present, cannot sum")
-        return sum(cpt.find_integer_count() for cpt in self.components)
-
-
 def get_slice_bounds(array, indices):
     raise NotImplementedError("used for sparse things I believe")
     from pyop3.distarray import MultiArray
@@ -727,145 +830,6 @@ def has_constant_step(axes: AxisTree, axis, cpt, depth=0):
         )
     else:
         return True
-
-
-class AxisComponent(NodeComponent):
-    """
-    Parameters
-    ----------
-    indexed : bool
-        Is this axis indexed (as part of a temporary) - used to generate the right layouts
-
-    indices
-        If the thing is sparse then we need to specify the indices of the sparsity here.
-        This is like CSR. This is normally a nested/ragged thing.
-
-        E.g. a diagonal matrix would be 3 x [1, 1, 1] with indices being [0, 1, 2]. The
-        CSR row pointers are [0, 1, 2] (we already calculate this), but when we look up
-        the values we use [0, 1, 2] instead of [0, 0, 0]. A binary search of all the
-        indices is required to find the right offset.
-
-        Note that this is an entirely separate concept to the numbering. Imagine a
-        sparse matrix where the row and column axes are renumbered. The indices are
-        still sorted. The indices gives us a mapping from "dense" indices to "sparse"
-        ones. This is normally inverted (via binary search) to get the "dense" index
-        from the "sparse" one. The numbering then concerns the lookup from dense
-        indices to an offset. This means, for example, that the numbering of a sparse
-        thing is dense and contains the numbers [0, ..., ndense).
-
-    """
-
-    fields = NodeComponent.fields | {
-        "count",
-        "overlap",
-        "indexed",
-        "indices",
-        "lgmap",
-    }
-
-    def __init__(
-        self,
-        count,
-        label: Hashable | None = None,
-        *,
-        indices=None,
-        overlap=None,
-        indexed=False,
-        lgmap=None,
-        **kwargs,
-    ):
-        super().__init__(label, **kwargs)
-        self.count = count
-        self.indices = indices
-        self.overlap = overlap
-        self.indexed = indexed
-        self.lgmap = lgmap
-        """
-        this property is required because we can hit situations like the following:
-
-            sizes = 3 -> [2, 1, 2] -> [[2, 1], [1], [3, 2]]
-
-        this yields a layout that looks like
-
-            [[0, 2], [3], [4, 7]]
-
-        however, if we have a temporary where we only want the inner two dimensions
-        then we need a layout that looks like the following:
-
-            [[0, 2], [0], [0, 3]]
-
-        This effectively means that we need to zero the offset as we traverse the
-        tree to produce the layout. This is why we need this ``indexed`` flag.
-        """
-
-    def __str__(self) -> str:
-        return f"{{count={self.count}}}"
-
-    @property
-    def is_distributed(self):
-        return self.overlap is not None
-
-    @property
-    def has_integer_count(self):
-        return isinstance(self.count, numbers.Integral)
-
-    @property
-    def is_ragged(self):
-        from pyop3.distarray import MultiArray
-
-        return isinstance(self.count, MultiArray)
-
-    # deprecated alias, permutation is a better name as it is easier to reason
-    # about sending points vs where they map to.
-    @property
-    def numbering(self):
-        return self.permutation
-
-    # TODO this is just a traversal - clean up
-    def alloc_size(self, axtree, axis):
-        from pyop3.distarray import MultiArray
-
-        if axis.indexed:
-            npoints = 1
-        elif isinstance(self.count, MultiArray):
-            npoints = self.count.max_value
-        else:
-            assert isinstance(self.count, numbers.Integral)
-            npoints = self.count
-
-        assert npoints is not None
-
-        if subaxis := axtree.child(axis, self):
-            return npoints * axtree.alloc_size(subaxis)
-        else:
-            return npoints
-
-    @property
-    def has_partitioned_halo(self):
-        if self.overlap is None:
-            return True
-
-        remaining = itertools.dropwhile(lambda o: is_owned_by_process(o), self.overlap)
-        return all(isinstance(o, Halo) for o in remaining)
-
-    @property
-    def num_owned(self) -> int:
-        from pyop3.distarray import MultiArray
-
-        """Return the number of owned points."""
-        if isinstance(self.count, MultiArray):
-            # TODO: Might we ever want this to work?
-            raise RuntimeError("nowned is only valid for non-ragged axes")
-
-        if self.overlap is None:
-            return self.count
-        else:
-            return sum(1 for o in self.overlap if is_owned_by_process(o))
-
-    @property
-    def nowned(self):
-        # alias, what is the best name?
-        return self.num_owned
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1007,10 +971,23 @@ def _(arg: tuple) -> AxisComponent:
     return AxisComponent(*arg)
 
 
+@functools.singledispatch
+def _as_axis_component_label(arg: Any) -> ComponentLabel:
+    if isinstance(arg, ComponentLabel):
+        return arg
+    else:
+        raise TypeError(f"No handler registered for {type(arg).__name__}")
+
+
+@_as_axis_component_label.register
+def _(component: AxisComponent):
+    return component.label
+
+
 # use this to build a tree of sizes that we use to construct
 # the right count arrays
-class CustomNode(Node):
-    fields = Node.fields - {"degree"} | {"counts"}
+class CustomNode(LabelledNode):
+    fields = LabelledNode.fields - {"component_labels"} | {"counts"}
 
     def __init__(self, counts, **kwargs):
         super().__init__(len(counts), **kwargs)
@@ -1368,7 +1345,7 @@ def _path_and_indices_from_index_tuple(
         else:
             cpt_label, index = index
 
-        cpt_index = axis.component_index(cpt_label)
+        cpt_index = axis.component_labels.index(cpt_label)
 
         if index < 0:
             # In theory we could still get this to work...

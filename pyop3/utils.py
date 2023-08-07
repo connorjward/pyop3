@@ -2,29 +2,49 @@ import collections
 import functools
 import itertools
 import operator
-from typing import Any, Collection
+from typing import Any, Collection, Hashable
 
 import pytools
 
 
-class DuplicateInsertionException(Exception):
-    pass
+class UniqueNameGenerator(pytools.UniqueNameGenerator):
+    """Class for generating unique names."""
+
+    def __call__(self, prefix: str) -> str:
+        # To skip using prefix as a unique name we declare it as already used
+        self.add_name(prefix, conflicting_ok=True)
+        return super().__call__(prefix)
 
 
-class StrictlyUniqueSet(set):
-    def add(self, element):
-        if element in self:
-            raise DuplicateInsertionException(
-                f"{element} is already present in the set"
-            )
-        super().add(element)
+_unique_name_generator = UniqueNameGenerator()
+"""Generator for creating globally unique names."""
 
-    def update(self, other):
-        if any(el in self for el in other):
-            raise DuplicateInsertionException(
-                "Attempting to add set entries that already exist"
-            )
-        super().update(other)
+
+def unique_name(prefix: str) -> str:
+    return _unique_name_generator(prefix)
+
+
+# type aliases
+Id = Hashable
+Label = Hashable
+
+
+class UniquelyIdentifiedImmutableRecord(pytools.ImmutableRecord):
+    fields = {"id"}
+
+    def __init__(self, id: Id | None = None):
+        super().__init__()
+        self.id = id if id is not None else unique_name(f"_{type(self).__name__}_id")
+
+
+class LabelledImmutableRecord(UniquelyIdentifiedImmutableRecord):
+    fields = {"label"} | UniquelyIdentifiedImmutableRecord.fields
+
+    def __init__(self, label: Label | None = None, **kwargs):
+        super().__init__(**kwargs)
+        self.label = (
+            label if label is not None else unique_name(f"_{type(self).__name__}_label")
+        )
 
 
 def as_tuple(item):

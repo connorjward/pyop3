@@ -9,6 +9,10 @@ import pyrsistent
 import pytools
 
 from pyop3.utils import (
+    Id,
+    Label,
+    LabelledImmutableRecord,
+    UniquelyIdentifiedImmutableRecord,
     apply_at,
     as_tuple,
     checked_zip,
@@ -21,64 +25,30 @@ from pyop3.utils import (
     unique,
 )
 
-# can I declare this as more obviously a type?
-Id = Hashable
-Label = Hashable
-
 
 class NodeNotFoundException(Exception):
     pass
 
 
-# TODO merge with LabelledNode
-class Node(pytools.ImmutableRecord):
-    fields = {"degree", "id"}
-
-    _id_generator = pytools.UniqueNameGenerator()
-
-    def __init__(self, degree: int, id: Id | None = None):
-        self.degree = degree
-        self.id = id or self._id_generator()
-
-    def component_index(self, component: NodeComponent | Label):
-        cpt_label = _as_component_label(component)
-        return [c.label for c in self.components].index(cpt_label)
-
-    # TODO this is a common pattern, could be a separate function taking type, suffix and the generator
-    def _unique_id(self):
-        prefix = f"_{type(self).__name__}_id"
-        # prevent prefix from being a valid name
-        self._id_generator.add_name(prefix, conflicting_ok=True)
-        return self._id_generator(prefix)
+# type aliases
+NodeId = Id
+ComponentLabel = Label
 
 
-class NodeComponent(pytools.ImmutableRecord):
-    fields = {"label", "id"}
+class LabelledNode(LabelledImmutableRecord):
+    fields = {"component_labels"} | LabelledImmutableRecord.fields
 
-    _lazy_label_generator = None
-    _lazy_id_generator = None
+    def __init__(self, component_labels, **kwargs):
+        LabelledImmutableRecord.__init__(self, **kwargs)
+        self.component_labels = as_tuple(component_labels)
 
-    def __init__(self, label: Label | None = None, id: Id | None = None):
-        self.label = label if label is not None else self._label_generator()
-        self.id = id if id is not None else self._id_generator()
-
-    @classmethod
     @property
-    def _label_generator(cls):
-        if not cls._lazy_label_generator:
-            cls._lazy_label_generator = pytools.UniqueNameGenerator(
-                forced_prefix=f"_{cls.__name__}_label"
-            )
-        return cls._lazy_label_generator
+    def degree(self) -> int:
+        return len(self.component_labels)
 
-    @classmethod
-    @property
-    def _id_generator(cls):
-        if not cls._lazy_id_generator:
-            cls._lazy_id_generator = pytools.UniqueNameGenerator(
-                forced_prefix=f"_{cls.__name__}_id"
-            )
-        return cls._lazy_id_generator
+
+# old alias
+Node = LabelledNode
 
 
 class LabelledTree(pytools.ImmutableRecord):
@@ -141,7 +111,7 @@ class LabelledTree(pytools.ImmutableRecord):
         self,
         node: Node,
         parent: Node | Id | None = None,
-        parent_component: NodeComponent | Label | None = None,
+        parent_component: Label | None = None,
         uniquify: bool = False,
     ) -> None:
         if parent is None:
@@ -161,9 +131,9 @@ class LabelledTree(pytools.ImmutableRecord):
                         "Must specify a component for parents with multiple components"
                     )
             else:
-                parent_cpt_label = _as_component_label(parent_component)
+                parent_cpt_label = parent_component
 
-            cpt_index = parent.component_index(parent_cpt_label)
+            cpt_index = parent.component_labels.index(parent_cpt_label)
 
             if self.parent_to_children[parent.id][cpt_index] is not None:
                 raise ValueError("Node already exists at this location")
@@ -196,7 +166,7 @@ class LabelledTree(pytools.ImmutableRecord):
             new_root = new
         else:
             parent_node, parent_cpt = self.parent(old)
-            parent_cpt_index = parent_node.component_index(parent_cpt)
+            parent_cpt_index = parent_node.component_labels.index(parent_cpt)
             new_parent_to_children[parent_node.id][parent_cpt_index] = new
 
         return self.copy(root=new_root, parent_to_children=new_parent_to_children)
@@ -204,21 +174,12 @@ class LabelledTree(pytools.ImmutableRecord):
     # old alias
     with_node = replace_node
 
-    def child(self, parent, cpt) -> Node:
+    def child(
+        self, parent: LabelledNode | NodeId, component_label: ComponentLabel
+    ) -> LabelledNode:
         parent = self._as_node(parent)
-        cpt_label = _as_component_label(cpt)
-        cpt_index = [c.label for c in parent.components].index(cpt_label)
+        cpt_index = parent.component_labels.index(component_label)
         return self.parent_to_children[parent.id][cpt_index]
-
-    # def as_node
-    # """Return the node from the tree matching the provided ``id``.
-    #
-    # Raises an exception if ``id`` is not found in the tree.
-    # """
-    #     try:
-    #         return just_one(node for node in self.nodes if node.id == node_id)
-    #     except:
-    #         raise NodeNotFoundException(f"{node_id} is not present in the tree")
 
     @functools.cached_property
     def node_ids(self) -> frozenset[Id]:
@@ -245,18 +206,6 @@ class LabelledTree(pytools.ImmutableRecord):
             node
             for node in filter(None, flatten(list(self.parent_to_children.values())))
         }
-
-    # def _as_existing_node(self, node: Node | str) -> Node:
-    #     node = node if isinstance(node, Node) else self.find_node(node)
-    #     if node.id not in self.node_ids:
-    #         raise NodeNotFoundException(f"{node.id} is not present in the tree")
-    #     return node
-    #
-    # def _as_existing_node_id(self, node: Node | Id) -> Id:
-    #     node_id = node.id if isinstance(node, Node) else node
-    #     if node_id not in self.node_ids:
-    #         raise NodeNotFoundException(f"{node_id} is not present in the tree")
-    #     return node_id
 
     def parent(self, node: Node | Id) -> tuple[Node, NodeComponent] | None:
         node = self._as_node(node)
@@ -323,7 +272,7 @@ class LabelledTree(pytools.ImmutableRecord):
             return subtree
         else:
             parent = self._as_node(parent)
-            cpt_label = _as_component_label(component)
+            cpt_label = component
             cpt_index = [c.label for c in parent.components].index(cpt_label)
             new_parent_to_children = {
                 p: list(ch) for p, ch in self.parent_to_children.items()
@@ -335,31 +284,6 @@ class LabelledTree(pytools.ImmutableRecord):
     # alias, better?
     def _to_node_id(self, arg):
         return self._as_node_id(arg)
-
-    # @property
-    # def leaves(self) -> tuple[Node]:
-    #     return tuple(
-    #         (node, cidx)
-    #         for node in self.nodes
-    #         for cidx in range(node.degree)
-    #         if self.parent_to_children[node.id][cidx] is None
-    #     )
-
-    def find_component(self, node_label, cpt_label):
-        """Return the first component in the tree matching the given labels.
-
-        Notes
-        -----
-        This will return the first component matching the labels. Multiple may exist
-        but we assume that they are identical.
-
-        """
-        for node in self.nodes:
-            if node.label == node_label:
-                for cpt in node.components:
-                    if cpt.label == cpt_label:
-                        return cpt
-        raise ValueError("Matching component not found")
 
     @property
     def leaf(self) -> Node:
@@ -397,7 +321,7 @@ class LabelledTree(pytools.ImmutableRecord):
             node_id = f"{orig_node_id}{sep}{counter}"
         return node_id
 
-    def _as_node(self, node: Node | Id) -> Node:
+    def _as_node(self, node: LabelledNode | Id) -> Node:
         return node if isinstance(node, Node) else self.id_to_node[node]
 
     def _as_node_id(self, node: Node | Id) -> Id:
@@ -435,76 +359,6 @@ class LabelledTree(pytools.ImmutableRecord):
         return self.replace_node(
             node, node.with_modified_component(component, **kwargs)
         )
-
-    def _node_from_path(self, path: Mapping[Node | Hashable, int]) -> Node:
-        if not path:
-            return self.root
-
-        path_ = dict(path)
-        node = self.root
-        while path_:
-            cpt_label = path_.pop(node.label)
-            cpt_index = node.component_index(cpt_label)
-            new_node = self.parent_to_children[node.id][cpt_index]
-
-            # if we are a leaf then return the final bit
-            if new_node is None:
-                assert not path_
-                return node, node.components[cpt_index]
-            else:
-                node = new_node
-        return node, node.components[cpt_index]
-
-    # def find_node(
-    #     self, loc: Mapping[Hashable, int] | tuple[Node | Hashable, int] | None = None
-    # ) -> LabelledNode:
-    #     if isinstance(loc, Mapping):
-    #         return self._node_from_path(loc)
-    #     else:
-    #         return super().find_node(loc)
-
-    # def children(self, node: LabelledNode | Hashable | NodePath) -> tuple[Node]:
-    #     if isinstance(node, Mapping):
-    #         child = self.from_path(node)
-    #         return (child,) if child else ()
-    #     else:
-    #         return super().children(node)
-
-    # def add_subtree(
-    #     self,
-    #     subtree: "Tree",
-    #     parent: NodePath = None,
-    #     uniquify: bool = False,
-    # ) -> None:
-    #     """
-    #     Parameters
-    #     ----------
-    #     etc
-    #         ...
-    #     uniquify
-    #         If ``False``, duplicate ``ids`` between the tree and subtree
-    #         will raise an exception. If ``True``, the ``ids`` will be changed
-    #         to avoid the clash.
-    #     """
-    #     if parent:
-    #         myparent, parentlabel = self._node_from_path(parent)
-    #         self._check_exists(myparent)
-    #         myouterpath = self._node_to_path[myparent.id] or {}
-    #         myouterpath |= {myparent.label: parentlabel}
-    #     else:
-    #         myouterpath = {}
-    #
-    #     def add_subtree_node(node, parent_id):
-    #         if parent_id == myparent.id:
-    #             path = myouterpath
-    #         else:
-    #             path = myouterpath | subtree._node_to_path[parent_id]
-    #         if uniquify:
-    #             node = node.copy(id=self._first_unique_id(node))
-    #         self.add_node(node, path)
-    #         return node.id
-    #
-    #     previsit(subtree, add_subtree_node, None, myparent.id)
 
     def pop_subtree(self, subroot: Node | str) -> "Tree":
         subroot = self._as_node(subroot)
@@ -614,47 +468,24 @@ class LabelledTree(pytools.ImmutableRecord):
     def path(self, node, component_index):
         return self._paths[node, component_index]
 
+    def _node_from_path(self, path: Mapping[Node | Hashable, int]) -> Node:
+        if not path:
+            return self.root
 
-# FIXME Components should live here I think
-class LabelledNode(Node):
-    fields = Node.fields | {"label"}
+        path_ = dict(path)
+        node = self.root
+        while path_:
+            cpt_label = path_.pop(node.label)
+            cpt_index = node.component_labels.index(cpt_label)
+            new_node = self.parent_to_children[node.id][cpt_index]
 
-    _label_generator = pytools.UniqueNameGenerator()
-
-    def __init__(self, label: Hashable | None = None, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self.label = label or self._unique_label()
-
-    def with_modified_component(
-        self, component: NodeComponent | Label | None = None, **kwargs
-    ):
-        if component is None:
-            if self.degree == 1:
-                component = self.components[0]
+            # if we are a leaf then return the final bit
+            if new_node is None:
+                assert not path_
+                return node, node.components[cpt_index]
             else:
-                raise ValueError(
-                    "Must specify a component index for multi-component nodes"
-                )
-
-        if not isinstance(component, NodeComponent):
-            raise NotImplementedError
-        # component = self._as_node_component(component)
-
-        new_components = tuple(
-            map_when(
-                lambda c: c.copy(**kwargs),
-                lambda c: c == component,
-                self.components,
-            )
-        )
-        return self.copy(components=new_components)
-
-    @classmethod
-    def _unique_label(cls):
-        prefix = f"_{cls.__name__}_label"
-        # prevent prefix from being a valid name
-        cls._label_generator.add_name(prefix, conflicting_ok=True)
-        return cls._label_generator(prefix)
+                node = new_node
+        return node, node.components[cpt_index]
 
 
 NodePath = dict[Hashable, Hashable]
@@ -716,18 +547,3 @@ def postvisit(tree, fn, current_node: Node | None = None, **kwargs) -> Any:
         ),
         **kwargs,
     )
-
-
-@functools.singledispatch
-def _as_component_label(arg: Any):
-    raise TypeError
-
-
-@_as_component_label.register
-def _(arg: NodeComponent):
-    return arg.label
-
-
-@_as_component_label.register
-def _(arg: Label):
-    return arg
