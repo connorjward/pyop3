@@ -286,15 +286,6 @@ class LabelledTree(pytools.ImmutableRecord):
         return self._as_node_id(arg)
 
     @property
-    def leaf(self) -> Node:
-        return just_one(self.leaves)
-
-    def is_leaf(self, node: Node | str) -> bool:
-        node = self._as_node(node)
-        self._check_exists(node)
-        return all(child is None for child in self.parent_to_children[node.id])
-
-    @property
     def is_empty(self) -> bool:
         return not self.root
 
@@ -450,16 +441,25 @@ class LabelledTree(pytools.ImmutableRecord):
         return pyrsistent.freeze(paths_)
 
     @functools.cached_property
-    def leaves(self) -> tuple[tuple[Node, NodeComponent]]:
+    def leaves(self) -> tuple[tuple[Node, ComponentLabel]]:
         """Return the leaves of the tree."""
+        leaves_ = []
 
         def leaves_fn(node, cpt, prev):
             if not self.child(node, cpt):
                 leaves_.append((node, cpt))
 
-        leaves_ = []
         previsit(self, leaves_fn)
         return tuple(leaves_)
+
+    @property
+    def leaf(self) -> Node:
+        return just_one(self.leaves)
+
+    def is_leaf(self, node: Node | str) -> bool:
+        node = self._as_node(node)
+        self._check_exists(node)
+        return all(child is None for child in self.parent_to_children[node.id])
 
     def ancestors(self, node, component_index):
         """Return the ancestors of a ``(node_id, component_label)`` 2-tuple."""
@@ -516,9 +516,9 @@ def previsit(
         raise RuntimeError("Cannot traverse an empty tree")
 
     current_node = current_node or tree.root
-    for cpt in current_node.components:
-        next = fn(current_node, cpt, prev)
-        if subnode := tree.child(current_node, cpt):
+    for cpt_label in current_node.component_labels:
+        next = fn(current_node, cpt_label, prev)
+        if subnode := tree.child(current_node, cpt_label):
             previsit(tree, fn, subnode, next)
 
 

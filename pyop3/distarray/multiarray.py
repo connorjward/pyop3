@@ -19,7 +19,7 @@ from pyop3 import utils
 from pyop3.axis import Axis, AxisComponent, AxisTree, as_axis_tree, get_bottom_part
 from pyop3.distarray.base import DistributedArray
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
-from pyop3.index import Indexed, IndexTree, TabulatedMap, as_index_tree
+from pyop3.index import Indexed, IndexTree, as_index_tree
 from pyop3.utils import (
     PrettyTuple,
     as_tuple,

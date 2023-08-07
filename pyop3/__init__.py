@@ -10,7 +10,13 @@ del pytools
 from pyop3.axis import Axis, AxisComponent, AxisTree  # noqa: F401
 from pyop3.distarray import MultiArray  # noqa: F401
 from pyop3.dtypes import IntType, ScalarType  # noqa: F401
-from pyop3.index import Index, IndexTree, Map, Slice, TabulatedMap  # noqa: F401
+from pyop3.index import (  # noqa: F401
+    Index,
+    IndexTree,
+    Map,
+    Slice,
+    TabulatedMapComponent,
+)
 from pyop3.loopexpr import (  # noqa: F401
     INC,
     MAX_RW,

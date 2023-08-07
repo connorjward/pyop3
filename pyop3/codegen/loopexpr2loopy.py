@@ -24,16 +24,15 @@ from pyop3.axis import AffineLayout, Axis, AxisComponent, AxisTree, TabulatedLay
 from pyop3.distarray import IndexedMultiArray, MultiArray
 from pyop3.dtypes import IntType
 from pyop3.index import (
-    AffineMap,
+    AffineMapComponent,
     CalledMap,
-    IdentityMap,
     Index,
     Indexed,
     IndexTree,
     LoopIndex,
     Map,
     Slice,
-    TabulatedMap,
+    TabulatedMapComponent,
 )
 from pyop3.log import logger
 from pyop3.loopexpr import (
@@ -897,16 +896,8 @@ def _(index: CalledMap, *, loop_indices, cgen_ctx, **kwargs):
         insns = []
         jname_exprs = []
 
-        # this is a mapping from (from_axis, from_cpt) to an iterable of
-        # (map_func, arity, to_axis, to_cpt)
         bits = index.bits[from_path]
-        for (
-            mycptlabel,
-            map_func,
-            arity,
-            to_axis,
-            to_cpt,
-        ) in bits:  # each one of these is a new "leaf"
+        for map_cpt in bits:  # each one of these is a new "leaf"
             myinsns = []
 
             # map composition does sort of rely on emitting the prior loops. Only the final
@@ -920,8 +911,8 @@ def _(index: CalledMap, *, loop_indices, cgen_ctx, **kwargs):
                 myjnames[myaxislabel] = myjname
             myjnames = pmap(myjnames)
 
-            if isinstance(map_func, MultiArray):  # is this the right class?
-                cpt = AxisComponent(arity, label=mycptlabel)
+            if isinstance(map_cpt, TabulatedMapComponent):
+                cpt = AxisComponent(map_cpt.arity, label=map_cpt.label)
                 components.append(cpt)
 
                 jname = ctx.unique_name("j")
@@ -932,9 +923,9 @@ def _(index: CalledMap, *, loop_indices, cgen_ctx, **kwargs):
                 # where j0 comes from the from_index and j1 is advertised as the shape
                 # of the resulting axis (jname_per_cpt)
                 # j0 is now fixed but j1 can still be changed
-                inner_axis, inner_cpt = map_func.axes.leaf
+                inner_axis, inner_cpt = map_cpt.array.axes.leaf
                 insns_, jname_expr = _scalar_assignment(
-                    map_func,
+                    map_cpt.array,
                     from_path | pmap({inner_axis.label: inner_cpt.label}),
                     myjnames | {inner_axis.label: jname},
                     ctx,
@@ -945,8 +936,8 @@ def _(index: CalledMap, *, loop_indices, cgen_ctx, **kwargs):
                 raise NotImplementedError
 
             insns.append(myinsns)
-            jname_exprs.append({to_axis: jname_expr})
-            path_per_leaf.append(pmap({to_axis: to_cpt}))
+            jname_exprs.append({map_cpt.target_axis: jname_expr})
+            path_per_leaf.append(pmap({map_cpt.target_axis: map_cpt.target_component}))
 
         axis = Axis(components, label=index.name)
         if from_leaf_key:
@@ -1454,23 +1445,13 @@ def _(called_map: CalledMap, **kwargs):
         components = []
         (from_path,) = leaf
 
-        # this is a mapping from (from_axis, from_cpt) to an iterable of
-        # (map_func, arity, to_axis, to_cpt)
         bits = called_map.bits[from_path]
-        for (
-            mycptlabel,
-            map_func,
-            arity,
-            to_axis,
-            to_cpt,
-        ) in bits:  # each one of these is a new "leaf"
-            if isinstance(map_func, MultiArray):  # is this the right class?
-                cpt = AxisComponent(arity, label=mycptlabel)
-                components.append(cpt)
-
-            else:
-                raise NotImplementedError
-            path_per_leaf.append(pmap({to_axis: to_cpt}))
+        for map_component in bits:  # each one of these is a new "leaf"
+            cpt = AxisComponent(map_component.arity, label=map_component.label)
+            components.append(cpt)
+            path_per_leaf.append(
+                pmap({map_component.target_axis: map_component.target_component})
+            )
 
         axis = Axis(components, label=called_map.name)
         if axes.root:

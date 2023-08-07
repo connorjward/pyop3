@@ -18,7 +18,7 @@ from pyop3 import (
     MultiArray,
     ScalarType,
     Slice,
-    TabulatedMap,
+    TabulatedMapComponent,
     do_loop,
     loop,
 )
@@ -485,11 +485,11 @@ def test_recursive_multi_component_maps():
     map0 = Map(
         {
             pmap({"dat0_ax0": "dat0_ax0_cpt0"}): [
-                ("a", map_array0_0, arity0_0, "dat0_ax0", "dat0_ax0_cpt0"),
-                ("b", map_array0_1, arity0_1, "dat0_ax0", "dat0_ax0_cpt1"),
+                TabulatedMapComponent("dat0_ax0", "dat0_ax0_cpt0", map_array0_0),
+                TabulatedMapComponent("dat0_ax0", "dat0_ax0_cpt1", map_array0_1),
             ],
             pmap({"dat0_ax0": "dat0_ax0_cpt1"}): [
-                ("a", map_array1, arity1, "dat0_ax0", "dat0_ax0_cpt1"),
+                TabulatedMapComponent("dat0_ax0", "dat0_ax0_cpt1", map_array1),
             ],
         },
         "map0",

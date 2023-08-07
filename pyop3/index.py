@@ -10,7 +10,7 @@ from pyrsistent import pmap
 
 from pyop3.axis import Axis, AxisComponent
 from pyop3.tree import LabelledNode, LabelledTree, postvisit
-from pyop3.utils import as_tuple, just_one, merge_dicts
+from pyop3.utils import LabelledImmutableRecord, as_tuple, just_one, merge_dicts
 
 
 class IndexTree(LabelledTree):
@@ -50,6 +50,57 @@ class Indexed:
         return self.obj.dtype
 
 
+class MapComponent(LabelledImmutableRecord):
+    fields = {
+        "target_axis",
+        "target_component",
+        "arity",
+    } | LabelledImmutableRecord.fields
+
+    def __init__(self, target_axis, target_component, arity, **kwargs):
+        super().__init__(**kwargs)
+        self.target_axis = target_axis
+        self.target_component = target_component
+        self.arity = arity
+
+
+class TabulatedMapComponent(MapComponent):
+    fields = MapComponent.fields - {"arity"} | {"array"}
+
+    def __init__(self, target_axis, target_component, array, **kwargs):
+        arity = array.axes.leaf_component.count
+        super().__init__(target_axis, target_component, arity, **kwargs)
+        self.array = array
+
+    # old alias
+    @property
+    def data(self):
+        return self.array
+
+    @functools.cached_property
+    def datamap(self):
+        return self.array.datamap
+
+
+class AffineMapComponent(MapComponent):
+    fields = MapComponent.fields | {"expr"}
+
+    def __init__(self, from_labels, to_labels, arity, expr, **kwargs):
+        """
+        Parameters
+        ----------
+        expr:
+            A 2-tuple of pymbolic variables and an expression. We need to split them
+            like this because we need to know the order in which the variables
+            correspond to the axis parts.
+        """
+        if len(expr[0]) != len(from_labels) + 1:
+            raise ValueError("Wrong number of variables in expression")
+
+        self.expr = expr
+        super().__init__(from_labels, to_labels, arity, **kwargs)
+
+
 class Index(LabelledNode):
     pass
 
@@ -70,7 +121,7 @@ class LoopIndex(Index):
     """
 
     def __init__(self, iterset, **kwargs):
-        cpt_labels = [cpt.label for ax, cpt in iterset.leaves]
+        cpt_labels = [cpt_label for ax, cpt_label in iterset.leaves]
         if len(cpt_labels) > 1:
             raise NotImplementedError(
                 "Multi-component loop indices are not currently supported"
@@ -85,6 +136,14 @@ class LoopIndex(Index):
 
 
 class Map(pytools.ImmutableRecord):
+    """
+
+    Notes
+    -----
+    This class *cannot* be used as an index. Instead, one must use a
+    `CalledMap` which can be formed from a `Map` using call syntax.
+    """
+
     # FIXME, naturally this is a placeholder
     fields = {"bits", "name"}
 
@@ -100,8 +159,8 @@ class Map(pytools.ImmutableRecord):
     def datamap(self):
         data = {}
         for bit in self.bits.values():
-            for stuff in bit:
-                data |= stuff[1].datamap
+            for map_cpt in bit:
+                data |= map_cpt.datamap
         return data
 
 
@@ -147,49 +206,6 @@ class Slice(Index):
         return {}
 
 
-class ScalarIndex(Slice):
-    """Index component representing a single scalar value.
-
-    This class is distinct from a `LoopIndex` because no loop needs to be emitted.
-    We also distinguish between it and a `Slice` (even though they are really the
-    same thing) because indexing with a scalar removes the axis from the resulting
-    indexed array.
-
-    """
-
-    def __init__(self, value):
-        # a scalar index is equivalent to a slice starting at value
-        # and stopping at value+1.
-        super().__init__(value, value + 1)
-
-
-class TabulatedMap(Map):
-    fields = Map.fields | {"data"}
-
-    def __init__(
-        self,
-        from_axis,
-        from_cpt,
-        to_axis,
-        to_cpt,
-        arity,
-        data,
-        **kwargs,
-    ) -> None:
-        super().__init__(from_axis, from_cpt, to_axis, to_cpt, arity, **kwargs)
-        self.data = data
-
-
-class IdentityMap(Map):
-    pass
-
-    # TODO is this strictly needed?
-    # @property
-    # def label(self):
-    #     assert len(self.to_labels) == 1
-    #     return self.to_labels[0]
-
-
 class CalledMap(Index):
     def __init__(self, map, from_index):
         # The degree of the called map depends on the index it acts on. If
@@ -217,8 +233,8 @@ class CalledMap(Index):
 
             leaves = []
             for leaf in map.bits[pmap({axis_label: cpt_label})]:
-                to_axis_label = leaf[3]
-                to_cpt_label = leaf[4]
+                to_axis_label = leaf.target_axis
+                to_cpt_label = leaf.target_component
                 path = pmap({to_axis_label: to_cpt_label})
                 leaves.append(path)
         else:
@@ -226,8 +242,8 @@ class CalledMap(Index):
             leaves = []
             for from_leaf in from_index.component_labels:
                 for leaf in map.bits[from_leaf]:
-                    to_axis_label = leaf[3]
-                    to_cpt_label = leaf[4]
+                    to_axis_label = leaf.target_axis
+                    to_cpt_label = leaf.target_component
                     path = pmap({to_axis_label: to_cpt_label})
                     leaves.append(path)
 
@@ -247,25 +263,6 @@ class CalledMap(Index):
     @property
     def name(self):
         return self.map.name
-
-
-class AffineMap(Map):
-    fields = Map.fields | {"expr"}
-
-    def __init__(self, from_labels, to_labels, arity, expr, **kwargs):
-        """
-        Parameters
-        ----------
-        expr:
-            A 2-tuple of pymbolic variables and an expression. We need to split them
-            like this because we need to know the order in which the variables
-            correspond to the axis parts.
-        """
-        if len(expr[0]) != len(from_labels) + 1:
-            raise ValueError("Wrong number of variables in expression")
-
-        self.expr = expr
-        super().__init__(from_labels, to_labels, arity, **kwargs)
 
 
 @functools.singledispatch
