@@ -353,7 +353,7 @@ def _finalize_parse_loop(
         codegen_ctx,
         loop_indices,
         current_axis=axes.root,
-        current_path=pmap(),
+        current_path=(),
         current_jnames=pmap(),
     )
 
@@ -376,7 +376,7 @@ def _finalize_parse_loop_rec(
         iname = codegen_ctx.unique_name("i")
         codegen_ctx.add_domain(iname, size)
 
-        new_path = current_path | {current_axis.label: axcpt.label}
+        new_path = current_path + ((current_axis.label, axcpt.label),)
         current_jname = jnames_per_axcpt[current_axis.id, axcpt.label]
         new_jnames = current_jnames | {current_axis.label: current_jname}
 
@@ -670,15 +670,15 @@ def _parse_assignment_pre_callback(
     # unpack leaf
     iaxes_axis_path, iaxes_jname_exprs, iaxes_insns = leaf
 
-    # iaxes_axis_path is the path targeted by the handled index
-    # for maps this means the target axis.
-    new_axis_path = preorder_ctx.path | iaxes_axis_path
     new_insns = preorder_ctx.insns + iaxes_insns
 
-    if len(iaxes_axis_path) > 1:
-        raise NotImplementedError("Can only target single axes for now")
-
-    for axis, cpt in iaxes_axis_path.items():  # should only be 1 item for now
+    # iaxes_axis_path is the path targeted by the handled index
+    # for maps this means the target axis.
+    # for loop indices this can have multiple entries. We assume them ordered here
+    # and successively add them to new_axis_path
+    new_axis_path = preorder_ctx.path
+    for axis, cpt in iaxes_axis_path:
+        new_axis_path |= {axis: cpt}
         prev_axis, prev_cpt = prev_axes._node_from_path(new_axis_path)
         prev_jname = prev_jnames_per_cpt[prev_axis.id, prev_cpt.label]
         jname_expr = iaxes_jname_exprs[axis]
@@ -913,7 +913,7 @@ def _(index: CalledMap, *, loop_indices, cgen_ctx, **kwargs):
 
             insns.append(myinsns)
             jname_exprs.append({map_cpt.target_axis: jname_expr})
-            path_per_leaf.append(pmap({map_cpt.target_axis: map_cpt.target_component}))
+            path_per_leaf.append(((map_cpt.target_axis, map_cpt.target_component),))
 
         axis = Axis(components, label=index.name)
         if from_leaf_key:
@@ -983,7 +983,7 @@ def _(slice_: Slice, *, cgen_ctx, prev_axes, **kwargs):
         jnames_per_cpt[axis.id, cpt.label] = jnames[i]
         leaf_keys.append((axis.id, cpt.label))
         jname_expr_per_leaf.append(jname_exprs[i])
-        path_per_leaf.append(pmap({slice_.axis: subslice.component}))
+        path_per_leaf.append(((slice_.axis, subslice.component),))
 
     leaves = {
         leaf_key: (path, jname_exprs, ())
@@ -1126,88 +1126,6 @@ def _shared_assignment_insn(assignment, array_expr, temp_expr, ctx):
         raise NotImplementedError
 
     ctx.add_assignment(lexpr, rexpr)
-
-
-# loop indices and jnames are very similar...
-def myinnerfunc(iname, multi_index, index, jnames, loop_indices, ctx):
-    if index in loop_indices:
-        return loop_indices[index]
-    elif isinstance(index, Slice):
-        jname = ctx.unique_name("j")
-        ctx.add_temporary(jname, IntType)
-        ctx.add_assignment(pym.var(jname), pym.var(iname) * index.step + index.start)
-        return jname
-
-    elif isinstance(index, IdentityMap):
-        index_insns = []
-        new_labels = existing_labels
-        new_jnames = existing_jnames
-        jnames = ()
-        new_within = {}
-
-    elif isinstance(index, AffineMap):
-        raise NotImplementedError
-        jname = self._namer.next("j")
-        self._temp_kernel_data.append(
-            lp.TemporaryVariable(jname, shape=(), dtype=np.uintp)
-        )
-
-        subst_rules = {
-            var: pym.var(j)
-            for var, j in checked_zip(
-                index.expr[0][:-1],
-                existing_jnames[-len(index.from_labels) :],
-            )
-        }
-        subst_rules |= {index.expr[0][-1]: pym.var(iname)}
-
-        expr = pym.substitute(index.expr[1], subst_rules)
-
-        index_insn = lp.Assignment(
-            pym.var(jname),
-            expr,
-            id=self._namer.next("myid"),
-            within_inames=within_inames | {iname},
-            within_inames_is_final=True,
-            depends_on=depends_on,
-        )
-        index_insns = [index_insn]
-
-        temp_labels = list(existing_labels)
-        temp_jnames = list(existing_jnames)
-        assert len(index.from_labels) == 1
-        assert len(index.to_labels) == 1
-        for label in index.from_labels:
-            assert temp_labels.pop() == label
-            temp_jnames.pop()
-
-        (to_label,) = index.to_labels
-        new_labels = PrettyTuple(temp_labels) | to_label
-        new_jnames = PrettyTuple(temp_jnames) | jname
-        jnames = (jname,)
-        new_within = {multi_index.label: ((to_label,), (jname,))}
-
-    elif isinstance(index, TabulatedMap):
-        jname = ctx.unique_name("j")
-        ctx.add_temporary(jname, IntType)
-
-        varname = register_scalar_assignment(
-            index.data,
-            jnames | {index.from_tuple: iname},
-            ctx,
-        )
-        ctx.add_assignment(pym.var(jname), pym.var(varname))
-        return jname
-    else:
-        raise AssertionError
-
-    assert index_insns is not None
-    assert new_labels is not None
-    assert new_jnames is not None
-    assert jnames is not None
-    assert new_within is not None
-    self.instructions.extend(index_insns)
-    return new_labels, new_jnames, new_within, new_deps
 
 
 def emit_assignment_insn(
