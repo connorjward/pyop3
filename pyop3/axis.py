@@ -1016,7 +1016,7 @@ class CustomNode(LabelledNode):
     fields = LabelledNode.fields - {"component_labels"} | {"counts"}
 
     def __init__(self, counts, **kwargs):
-        super().__init__(len(counts), **kwargs)
+        super().__init__(counts, **kwargs)
         self.counts = tuple(counts)
 
 
@@ -1127,6 +1127,7 @@ def _compute_layouts(
             ctree = LabelledTree(croot, cparent_to_children)
 
             fulltree = _create_count_array_tree(ctree)
+            # breakpoint()
 
             # now populate fulltree
             offset = IntRef(0)

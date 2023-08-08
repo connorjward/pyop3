@@ -185,7 +185,7 @@ class LabelledTree(pytools.ImmutableRecord):
             new_root = new
         else:
             parent_node, parent_cpt = self.parent(old)
-            parent_cpt_index = parent_node.component_labels.index(parent_cpt)
+            parent_cpt_index = parent_node.component_labels.index(parent_cpt.label)
             new_parent_to_children[parent_node.id][parent_cpt_index] = new
 
         return self.copy(root=new_root, parent_to_children=new_parent_to_children)

@@ -10,15 +10,6 @@ from pyop3.axis import Axis, AxisComponent, AxisTree
 from pyop3.codegen import LOOPY_LANG_VERSION, LOOPY_TARGET
 from pyop3.distarray import MultiArray
 from pyop3.dtypes import IntType, ScalarType
-from pyop3.index import (
-    AffineMap,
-    IdentityMap,
-    Index,
-    IndexTree,
-    Map,
-    Slice,
-    TabulatedMap,
-)
 from pyop3.loopexpr import INC, READ, WRITE, LoopyKernel, do_loop, loop
 from pyop3.utils import flatten
 
@@ -55,70 +46,6 @@ def vector_copy_kernel():
     return LoopyKernel(code, [READ, WRITE])
 
 
-@pytest.fixture
-def vec2_copy_kernel():
-    lpy_kernel = lp.make_kernel(
-        "{ [i]: 0 <= i < 2 }",
-        "y[i] = x[i]",
-        [
-            lp.GlobalArg("x", ScalarType, (2,), is_input=True, is_output=False),
-            lp.GlobalArg("y", ScalarType, (2,), is_input=False, is_output=True),
-        ],
-        name="copy",
-        target=LOOPY_TARGET,
-        lang_version=LOOPY_LANG_VERSION,
-    )
-    return LoopyKernel(lpy_kernel, [READ, WRITE])
-
-
-@pytest.fixture
-def vector_inc_kernel():
-    code = lp.make_kernel(
-        "{ [i]: 0 <= i < 3 }",
-        "y[0] = y[0] + x[i]",
-        [
-            lp.GlobalArg("x", ScalarType, (3,), is_input=True, is_output=False),
-            lp.GlobalArg("y", ScalarType, (1,), is_input=True, is_output=True),
-        ],
-        target=LOOPY_TARGET,
-        name="vector_inc",
-        lang_version=(2018, 2),
-    )
-    return LoopyKernel(code, [READ, INC])
-
-
-@pytest.fixture
-def vec6_inc_kernel():
-    code = lp.make_kernel(
-        "{ [i]: 0 <= i < 6 }",
-        "y[0] = y[0] + x[i]",
-        [
-            lp.GlobalArg("x", ScalarType, (6,), is_input=True, is_output=False),
-            lp.GlobalArg("y", ScalarType, (1,), is_input=True, is_output=True),
-        ],
-        target=LOOPY_TARGET,
-        name="vector_inc",
-        lang_version=(2018, 2),
-    )
-    return LoopyKernel(code, [READ, INC])
-
-
-@pytest.fixture
-def vec12_inc_kernel():
-    code = lp.make_kernel(
-        ["{ [i]: 0 <= i < 6 }", "{ [j]: 0 <= j < 2 }"],
-        "y[j] = y[j] + x[i, j]",
-        [
-            lp.GlobalArg("x", ScalarType, (6, 2), is_input=True, is_output=False),
-            lp.GlobalArg("y", ScalarType, (2,), is_input=True, is_output=True),
-        ],
-        target=LOOPY_TARGET,
-        name="vector_inc",
-        lang_version=(2018, 2),
-    )
-    return LoopyKernel(code, [READ, INC])
-
-
 def test_vector_copy_with_permuted_axis(vector_copy_kernel):
     m, n = 6, 3
     perm = np.asarray([3, 2, 0, 5, 4, 1], dtype=IntType)
@@ -131,14 +58,7 @@ def test_vector_copy_with_permuted_axis(vector_copy_kernel):
     dat0 = MultiArray(axes, name="dat0", data=np.arange(m * n, dtype=ScalarType))
     dat1 = MultiArray(paxes, name="dat1", dtype=ScalarType)
 
-    # do_loop(p := axes.root.index, vector_copy_kernel(dat0[p], dat1[p]))
-
-    l = loop(p := axes.root.index, vector_copy_kernel(dat0[p], dat1[p]))
-    from pyop3.codegen.loopexpr2loopy import compile
-
-    compile(l)
-    l()
-
+    do_loop(p := axes.root.index(), vector_copy_kernel(dat0[p, :], dat1[p, :]))
     assert np.allclose(dat1.data.reshape((m, n))[perm].flatten(), dat0.data)
 
 
@@ -164,7 +84,7 @@ def test_vector_copy_with_two_permuted_axes(vector_copy_kernel):
     dat1 = MultiArray(paxes, name="dat1", dtype=ScalarType)
 
     iterset = AxisTree(axis0, {axis0.id: axis1})
-    do_loop(p := iterset.index, vector_copy_kernel(dat0[p], dat1[p]))
+    do_loop(p := iterset.index(), vector_copy_kernel(dat0[p, :], dat1[p, :]))
 
     assert np.allclose(
         dat1.data.reshape((a, b, c))[perm0][:, perm1].flatten(), dat0.data
@@ -186,7 +106,7 @@ def test_vector_copy_with_permuted_inner_axis(vector_copy_kernel):
     dat1 = MultiArray(paxes, name="dat1", dtype=ScalarType)
 
     iterset = AxisTree(root, {root.id: inner_axis})
-    do_loop(p := iterset.index, vector_copy_kernel(dat0[p], dat1[p]))
+    do_loop(p := iterset.index(), vector_copy_kernel(dat0[p, :], dat1[p, :]))
 
     assert np.allclose(dat1.data.reshape((a, b, c))[:, perm].flatten(), dat0.data)
 
@@ -205,7 +125,7 @@ def test_vector_copy_with_permuted_multi_component_axes(vector_copy_kernel):
     dat1 = MultiArray(paxes, name="dat1", dtype=ScalarType)
 
     iterset = AxisTree(Axis([root.components[1]], root.label))
-    do_loop(p := iterset.index, vector_copy_kernel(dat0[p], dat1[p]))
+    do_loop(p := iterset.index(), vector_copy_kernel(dat0[p, :], dat1[p, :]))
 
     assert np.allclose(dat1.data[fullperm][: m * a], 0)
     assert np.allclose(dat1.data[fullperm][m * a :], dat0.data[m * a :])
@@ -220,6 +140,6 @@ def test_scalar_copy_with_permuted_inner_axis(scalar_copy_kernel):
     dat0 = MultiArray(axes, name="dat0", data=np.arange(npoints, dtype=ScalarType))
     dat1 = MultiArray(axes, name="dat1", data=np.zeros(npoints, dtype=ScalarType))
 
-    do_loop(p := axes.index, scalar_copy_kernel(dat0[p], dat1[p]))
+    do_loop(p := axes.index(), scalar_copy_kernel(dat0[p], dat1[p]))
 
     assert np.allclose(dat0.data, dat1.data)

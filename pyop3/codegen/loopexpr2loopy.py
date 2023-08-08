@@ -264,6 +264,17 @@ def compile(expr: LoopExpr, name="mykernel"):
     ctx = LoopyCodegenContext()
     _compile(expr, pmap(), ctx)
 
+    # add a no-op instruction touching all of the kernel arguments so they are
+    # not silently dropped
+    noop = lp.CInstruction(
+        (),
+        "",
+        read_variables=frozenset({a.name for a in ctx.arguments}),
+        within_inames=frozenset(),
+        within_inames_is_final=True,
+    )
+    ctx._insns.append(noop)
+
     translation_unit = lp.make_kernel(
         ctx.domains,
         ctx.instructions,
@@ -1182,14 +1193,14 @@ def emit_layout_insns(
             trimmed_jnames = pmap(trimmed_jnames)
 
             varname = ctx.unique_name("p")
-            insns += register_scalar_assignment(
+            new_insns, varname = _scalar_assignment(
                 layout_fn.data,
-                varname,
                 trimmed_path,
                 trimmed_jnames,
                 ctx,
             )
-            expr += pym.var(varname)
+            insns += new_insns
+            expr += varname
         elif isinstance(layout_fn, AffineLayout):
             start = layout_fn.start
             step = layout_fn.step
