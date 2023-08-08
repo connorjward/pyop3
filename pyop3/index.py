@@ -277,7 +277,7 @@ class CalledMap(Index):
 
     @property
     def target_paths(self):
-        return self.leaves
+        return self.component_labels
 
     @functools.cached_property
     def datamap(self):

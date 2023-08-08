@@ -872,14 +872,14 @@ def _(index: CalledMap, *, loop_indices, cgen_ctx, **kwargs):
         insns = []
         jname_exprs = []
 
-        bits = index.bits[from_path]
+        bits = index.bits[pmap(from_path)]
         for map_cpt in bits:  # each one of these is a new "leaf"
             myinsns = []
 
             # map composition does sort of rely on emitting the prior loops. Only the final
             # loop can be sliced? Not really, the whole resulting tree can be...
             myjnames = {}
-            for myaxislabel in from_path:
+            for myaxislabel, _ in from_path:
                 myjname = ctx.unique_name("j")
                 ctx.add_temporary(myjname)
                 myexpr = from_jname_exprs[myaxislabel]
@@ -902,7 +902,7 @@ def _(index: CalledMap, *, loop_indices, cgen_ctx, **kwargs):
                 inner_axis, inner_cpt = map_cpt.array.axes.leaf
                 insns_, jname_expr = _scalar_assignment(
                     map_cpt.array,
-                    from_path | pmap({inner_axis.label: inner_cpt.label}),
+                    pmap(from_path) | pmap({inner_axis.label: inner_cpt.label}),
                     myjnames | {inner_axis.label: jname},
                     ctx,
                 )
@@ -1324,7 +1324,7 @@ def _(called_map: CalledMap, **kwargs):
         components = []
         (from_path,) = leaf
 
-        bits = called_map.bits[from_path]
+        bits = called_map.bits[pmap(from_path)]
         for map_component in bits:  # each one of these is a new "leaf"
             cpt = AxisComponent(map_component.arity, label=map_component.label)
             components.append(cpt)
