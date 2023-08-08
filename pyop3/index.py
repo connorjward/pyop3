@@ -8,9 +8,15 @@ from typing import Any, Collection, Hashable, Sequence
 import pytools
 from pyrsistent import pmap
 
-from pyop3.axis import Axis, AxisComponent
+from pyop3.axis import Axis, AxisComponent, AxisTree
 from pyop3.tree import LabelledNode, LabelledTree, postvisit
-from pyop3.utils import LabelledImmutableRecord, as_tuple, just_one, merge_dicts
+from pyop3.utils import (
+    LabelledImmutableRecord,
+    as_tuple,
+    checked_zip,
+    just_one,
+    merge_dicts,
+)
 
 
 class IndexTree(LabelledTree):
@@ -35,7 +41,15 @@ class Indexed:
         self.itree = itree
 
     def __getitem__(self, indices):
-        indices = as_index_tree(indices)
+        from pyop3.distarray import MultiArray
+
+        if not isinstance(self.obj, MultiArray) and not isinstance(
+            indices, (IndexTree, Index)
+        ):
+            raise NotImplementedError(
+                "Need to compute the temporary/intermediate axes for this to be allowed"
+            )
+        indices = as_index_tree(indices, "not currently an axis tree")
         return Indexed(self, indices)
 
     @functools.cached_property
@@ -261,28 +275,38 @@ class CalledMap(Index):
 
 
 @functools.singledispatch
-def as_index_tree(arg: Any) -> IndexTree:
+def as_index_tree(arg: Any, axes: AxisTree) -> IndexTree:
     if isinstance(arg, Collection):
-        return _index_tree_from_collection(arg)
+        return _index_tree_from_collection(arg, axes)
+    elif arg is Ellipsis:
+        return _index_tree_from_ellipsis(axes)
     else:
         raise TypeError(f"Handler is not registered for {type(arg)}")
 
 
 @as_index_tree.register
-def _(arg: IndexTree) -> IndexTree:
+def _(arg: IndexTree, axes: AxisTree) -> IndexTree:
     return arg
 
 
 @as_index_tree.register
-def _(arg: Index) -> IndexTree:
+def _(arg: Index, axes: AxisTree) -> IndexTree:
     return IndexTree(arg)
+
+
+@as_index_tree.register
+def _(slice_: slice, axes: AxisTree) -> IndexTree:
+    return _index_tree_from_slices([slice_], axes)
 
 
 def _collect_datamap(index, *subdatamaps, itree):
     return index.datamap | merge_dicts(subdatamaps)
 
 
-def _index_tree_from_collection(indices: Collection[Index]):
+# TODO Handle axes so we can include slices in the list
+# There are some rules about how we do this. Indices do not strictly need to
+# follow the same ordering as the axes themselves.
+def _index_tree_from_collection(indices: Collection[Index], axes: AxisTree):
     """Return an index tree formed by concatenating successive indices.
 
     If any of the indices yield multiple components then subsequent indices
@@ -295,4 +319,63 @@ def _index_tree_from_collection(indices: Collection[Index]):
         subtree = _index_tree_from_collection(subindices)
         for cpt_label in index.component_labels:
             tree = tree.add_subtree(subtree, index, cpt_label)
+    return tree
+
+
+def _index_tree_from_slices(
+    slices: Collection[slice], axes: AxisTree, current_axis: Axis | None = None
+):
+    current_axis = current_axis or axes.root
+    slice_, *subslices = slices
+
+    if some_but_not_all(
+        axes.child(current_axis, cpt) is None for cpt in current_axis.component_labels
+    ):
+        raise ValueError(
+            "Slice shorthand cannot be used for data layouts with variable depth, "
+            "construct and explicit IndexTree instead"
+        )
+
+    slice_cpts = []
+    for cpt in current_axis.components:
+        slice_cpts.append(
+            SliceComponent(cpt.label, slice_.start, slice_.stop, slice_.step)
+        )
+
+    index = Slice(current_axis.label, slice_cpts)
+    tree = IndexTree(index)
+    for cpt_label in index.component_labels:
+        subaxis = axes.child(current_axis, cpt_label)
+        if subslices:
+            if not subaxis:
+                raise ValueError("Too many slices provided")
+            subtree = _index_tree_from_slices(subslices, axes, subaxis)
+            tree = tree.add_subtree(subtree, index, cpt_label)
+        else:
+            if subaxis:
+                raise ValueError("Too few slices provided")
+    return tree
+
+
+def _index_tree_from_ellipsis(
+    axes: AxisTree, current_axis: Axis | None = None
+) -> IndexTree:
+    current_axis = current_axis or axes.root
+
+    subslices = []
+    subtrees = []
+    for cpt in current_axis.components:
+        subslices.append(SliceComponent(cpt.label))
+
+        subaxis = axes.child(current_axis, cpt)
+        if subaxis:
+            subtrees.append(_index_tree_from_ellipsis(axes, subaxis))
+        else:
+            subtrees.append(None)
+
+    slice_ = Slice(current_axis.label, subslices)
+    tree = IndexTree(slice_)
+    for subslice, subtree in checked_zip(subslices, subtrees):
+        if subtree is not None:
+            tree = tree.add_subtree(subtree, slice_, subslice.component)
     return tree

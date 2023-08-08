@@ -307,7 +307,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
 
     # maybe I could check types here and use instead of get_value?
     def __getitem__(self, indices: IndexTree | Index):
-        indices = as_index_tree(indices)
+        indices = as_index_tree(indices, self.axes)
         return Indexed(self, indices)
 
     def select_axes(self, indices):

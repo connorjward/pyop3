@@ -420,9 +420,7 @@ def test_map_composition(vec2_inc_kernel):
     )
     dat1 = MultiArray(daxes1, name="dat1", dtype=dat0.dtype)
 
-    itree2 = IndexTree(Slice("ax0", [SliceComponent("cpt0")]))
-
-    do_loop(p := iterset.index(), vec2_inc_kernel(dat0[map0(p)][map1(p)], dat1[itree2]))
+    do_loop(p := iterset.index(), vec2_inc_kernel(dat0[map0(p)][map1(p)], dat1[...]))
 
     expected = np.zeros_like(dat1.data)
     for i in range(iterset.size):
