@@ -634,7 +634,7 @@ def _prepare_assignment_rec(
         ctx.add_temporary(jname)
         new_jnames = jnames | {axis.label: jname}
         # FIXME should only add once per axis label, component label combination
-        jnames_per_axcpt[axis.label, axcpt.label] = jname
+        jnames_per_axcpt[axis.id, axcpt.label] = jname
         new_path = path | {axis.label: axcpt.label}
 
         if subaxis := axes.child(axis, axcpt):
@@ -664,34 +664,20 @@ class ParseAssignmentPreorderContext:
     insns: tuple = ()
 
 
-"""Multi-component index trees are bad because we could then combine a map
-with a slice side-by-side and this doesn't make any sense. What would the new set
-of axes look like? Maps themselves yield
-multiple axis components. We could similarly have a "multi-slice" that could do the
-same? I don't like that very much.
-For now just permit single slices. Since full slices are the default we shouldn't (?)
-lose shape.
-
-Note: since indices can only act on the current axis of the array the the number of
-options available to slices is very limited. I can slice some or all of the available
-axes! So a slice can be a single entity. Avoid multi-component.
-
-Slices are basically maps from the current axis, so index.from_axis is undefined and
-we can't do the sort of recursion we can with maps.
-"""
-
-
 def _parse_assignment_pre_callback(
-    leaf, preorder_ctx, *, prev_jnames_per_cpt, **kwargs
+    leaf, preorder_ctx, *, prev_axes, prev_jnames_per_cpt, **kwargs
 ):
     # unpack leaf
     iaxes_axis_path, iaxes_jname_exprs, iaxes_insns = leaf
 
+    # iaxes_axis_path is the path targeted by the handled index
+    # for maps this means the target axis.
     new_axis_path = preorder_ctx.path | iaxes_axis_path
     new_insns = preorder_ctx.insns + iaxes_insns
 
     for axis, cpt in iaxes_axis_path.items():
-        prev_jname = prev_jnames_per_cpt[axis, cpt]
+        prev_axis, prev_cpt = prev_axes._node_from_path(new_axis_path)
+        prev_jname = prev_jnames_per_cpt[prev_axis.id, prev_cpt.label]
         jname_expr = iaxes_jname_exprs[axis]
         new_insns += ((pym.var(prev_jname), jname_expr),)
 
@@ -706,14 +692,6 @@ def _parse_assignment_post_callback_nonterminal(
 ):
     # this is all just "leaf data"
     return retval
-    iaxes, jnames, insns_per_leaf, array_expr_per_leaf = retval
-
-    leaf_key, leaf_path, leaf_jname_exprs, leaf_insns = ileaf
-
-    new_axes = new_axes.add_subtree(subaxes, *leaf_key)
-    jnames_per_axcpt |= subjnames_per_axcpt
-    insns_per_leaf |= subinsns_per_leaf
-    array_expr_per_leaf |= prior_array_expr_per_leaf
 
 
 def _parse_assignment_post_callback_terminal(
@@ -982,32 +960,32 @@ def _(slice_: Slice, *, cgen_ctx, prev_axes, **kwargs):
     jname_exprs = []
 
     # each one of these is a new "leaf"
-    for axis_label, cpt_label, start, stop, step in slice_.values:
-        prev_cpt = prev_axes.find_component(axis_label, cpt_label)
+    for subslice in slice_.slices:
+        prev_cpt = prev_axes.find_component(slice_.axis, subslice.component)
         # FIXME should be ceiling
-        if stop is None:
+        if subslice.stop is None:
             stop = prev_cpt.count
-        size = (stop - start) // step
+        else:
+            stop = subslice.stop
+        size = (stop - subslice.start) // subslice.step
         cpt = AxisComponent(size, label=prev_cpt.label)
         components.append(cpt)
 
         jname = ctx.unique_name("j")
         ctx.add_temporary(jname)
         jnames.append(jname)
-        jname_expr = pym.var(jname) * step + start
+        jname_expr = pym.var(jname) * subslice.step + subslice.start
 
-        jname_exprs.append({axis_label: jname_expr})
+        jname_exprs.append({slice_.axis: jname_expr})
 
-    axis = Axis(components, label=axis_label)
+    axis = Axis(components, label=slice_.axis)
     axes = AxisTree(axis)
 
-    for i, cpt in enumerate(components):
-        # this makes sense I think since we are only adding one axis
-        jnames_per_cpt[axis.label, cpt.label] = jnames[i]
+    for i, (cpt, subslice) in enumerate(checked_zip(components, slice_.slices)):
+        jnames_per_cpt[axis.id, cpt.label] = jnames[i]
         leaf_keys.append((axis.id, cpt.label))
         jname_expr_per_leaf.append(jname_exprs[i])
-        # FIXME I think the component label needs to be in this loop
-        path_per_leaf.append(pmap({axis_label: cpt_label}))
+        path_per_leaf.append(pmap({slice_.axis: subslice.component}))
 
     leaves = {
         leaf_key: (path, jname_exprs, ())
@@ -1068,21 +1046,6 @@ def _parse_index_axis_tree_rec(
             )
 
     return pmap(leaves), pmap(jnames_per_cpt)
-
-
-# TODO
-# @_expand_index.register
-# def _(slice: Sliced, *, loop_indices, codegen_ctx, **kwargs):
-#     ...
-#     leaves = {leaf_key: (path, jname_exprs, insns)
-#         for (leaf_key, path, jname_exprs, insns) in checked_zip(
-#             leaf_keys,
-#             path_per_leaf,
-#             jname_expr_per_leaf,
-#             insns_per_leaf,
-#         )
-#     }
-#     return leaves, {"axes": axes, "jnames": jnames_per_cpt}
 
 
 """This function effectively traverses an index tree and returns a new set of axes
@@ -1476,16 +1439,18 @@ def _(called_map: CalledMap, **kwargs):
 def _(slice_: Slice, *, prev_axes, **kwargs):
     components = []
     # I think that axis_label should probably be the same for all bits of the slice
-    for axis_label, cpt_label, start, stop, step in slice_.values:
-        prev_cpt = prev_axes.find_component(axis_label, cpt_label)
+    for subslice in slice_.slices:
+        prev_cpt = prev_axes.find_component(slice_.axis, subslice.component)
         # FIXME should be ceiling
-        if stop is None:
+        if subslice.stop is None:
             stop = prev_cpt.count
-        size = (stop - start) // step
+        else:
+            stop = subslice.stop
+        size = (stop - subslice.start) // subslice.step
         cpt = AxisComponent(size, label=prev_cpt.label)
         components.append(cpt)
 
-    axes = AxisTree(Axis(components, label=axis_label))
+    axes = AxisTree(Axis(components, label=slice_.axis))
     leaves = {}
     for cpt in axes.root.components:
         path = pmap({axes.root.label: cpt.label})

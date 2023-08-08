@@ -35,6 +35,7 @@ class Indexed:
         self.itree = itree
 
     def __getitem__(self, indices):
+        indices = as_index_tree(indices)
         return Indexed(self, indices)
 
     @functools.cached_property
@@ -48,6 +49,17 @@ class Indexed:
     @property
     def dtype(self):
         return self.obj.dtype
+
+
+class SliceComponent(pytools.ImmutableRecord):
+    fields = {"component", "start", "stop", "step"}
+
+    def __init__(self, component, start=0, stop=None, step=1):
+        super().__init__()
+        self.component = component
+        self.start = start
+        self.stop = stop
+        self.step = step
 
 
 class MapComponent(LabelledImmutableRecord):
@@ -101,6 +113,35 @@ class AffineMapComponent(MapComponent):
         super().__init__(from_labels, to_labels, arity, **kwargs)
 
 
+class Map(pytools.ImmutableRecord):
+    """
+
+    Notes
+    -----
+    This class *cannot* be used as an index. Instead, one must use a
+    `CalledMap` which can be formed from a `Map` using call syntax.
+    """
+
+    # FIXME, naturally this is a placeholder
+    fields = {"bits", "name"}
+
+    def __init__(self, bits, name, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.bits = bits
+        self.name = name
+
+    def __call__(self, index):
+        return CalledMap(self, index)
+
+    @functools.cached_property
+    def datamap(self):
+        data = {}
+        for bit in self.bits.values():
+            for map_cpt in bit:
+                data |= map_cpt.datamap
+        return data
+
+
 class Index(LabelledNode):
     pass
 
@@ -135,35 +176,6 @@ class LoopIndex(Index):
         return self.iterset.datamap
 
 
-class Map(pytools.ImmutableRecord):
-    """
-
-    Notes
-    -----
-    This class *cannot* be used as an index. Instead, one must use a
-    `CalledMap` which can be formed from a `Map` using call syntax.
-    """
-
-    # FIXME, naturally this is a placeholder
-    fields = {"bits", "name"}
-
-    def __init__(self, bits, name, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self.bits = bits
-        self.name = name
-
-    def __call__(self, index):
-        return CalledMap(self, index)
-
-    @functools.cached_property
-    def datamap(self):
-        data = {}
-        for bit in self.bits.values():
-            for map_cpt in bit:
-                data |= map_cpt.datamap
-        return data
-
-
 class Slice(Index):
     """
 
@@ -174,31 +186,14 @@ class Slice(Index):
 
     """
 
-    fields = Index.fields | {"values"}
+    fields = {"axis", "slices"} | Index.fields
 
-    def __init__(self, values, axis=None, cpt=None, **kwargs):
-        # cyclic import
-        from pyop3.axis import Axis, AxisComponent
-
-        # nargs = len(args)
-        # if nargs == 0:
-        #     start, stop, step = 0, None, 1
-        # elif nargs == 1:
-        #     start, stop, step = 0, args[0], 1
-        # elif nargs == 2:
-        #     start, stop, step = args[0], args[1], 1
-        # elif nargs == 3:
-        #     start, stop, step = args[0], args[1], args[2]
-        # else:
-        #     raise ValueError("Too many arguments")
-        # the smaller space mapped from by the slice is "anonymous" so use
-        # something unique here
-        # FIXME this breaks copy
-        # from_axis = Axis._unique_label()
-        # from_cpt = AxisComponent._label_generator()
-        # super().__init__(from_axis, from_cpt, axis, cpt, **kwargs)
-        super().__init__(degree=len(values), **kwargs)
-        self.values = values
+    def __init__(self, axis, slices: Collection[SliceComponent], **kwargs):
+        slices = as_tuple(slices)
+        cpt_labels = [s.component for s in slices]
+        super().__init__(cpt_labels, **kwargs)
+        self.axis = axis
+        self.slices = slices
 
     @property
     def datamap(self):

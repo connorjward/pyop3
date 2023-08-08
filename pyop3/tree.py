@@ -103,9 +103,27 @@ class LabelledTree(pytools.ImmutableRecord):
     def __contains__(self, node: Node | str) -> bool:
         return self._as_node(node) in self.nodes
 
+    @property
+    def is_empty(self) -> bool:
+        return not self.root
+
+    @property
+    def depth(self) -> int:
+        if self.is_empty:
+            return 0
+        count = lambda _, *o: max(o or [0]) + 1
+        return postvisit(self, count)
+
     def children(self, node: Node | str) -> tuple[Node]:
         node_id = self._as_node_id(node)
         return self.parent_to_children[node_id]
+
+    def child(
+        self, parent: LabelledNode | NodeId, component_label: ComponentLabel
+    ) -> LabelledNode:
+        parent = self._as_node(parent)
+        cpt_index = parent.component_labels.index(component_label)
+        return self.parent_to_children[parent.id][cpt_index]
 
     def add_node(
         self,
@@ -173,13 +191,6 @@ class LabelledTree(pytools.ImmutableRecord):
 
     # old alias
     with_node = replace_node
-
-    def child(
-        self, parent: LabelledNode | NodeId, component_label: ComponentLabel
-    ) -> LabelledNode:
-        parent = self._as_node(parent)
-        cpt_index = parent.component_labels.index(component_label)
-        return self.parent_to_children[parent.id][cpt_index]
 
     @functools.cached_property
     def node_ids(self) -> frozenset[Id]:
@@ -283,17 +294,6 @@ class LabelledTree(pytools.ImmutableRecord):
     # alias, better?
     def _to_node_id(self, arg):
         return self._as_node_id(arg)
-
-    @property
-    def is_empty(self) -> bool:
-        return not self.root
-
-    @property
-    def depth(self) -> int:
-        if self.is_empty:
-            return 0
-        count = lambda _, *o: max(o or [0]) + 1
-        return postvisit(self, count)
 
     def _check_exists(self, node: Node | str) -> None:
         if (node_id := self._as_node(node).id) not in self.node_ids:
@@ -464,8 +464,8 @@ class LabelledTree(pytools.ImmutableRecord):
         """Return the ancestors of a ``(node_id, component_label)`` 2-tuple."""
         return self.path(node, component_index)[:-1]
 
-    def path(self, node, component_index):
-        return self._paths[node, component_index]
+    def path(self, node, component_label):
+        return self._paths[node, component_label]
 
     def _node_from_path(self, path: Mapping[Node | Hashable, int]) -> Node:
         if not path:
