@@ -393,6 +393,7 @@ def _finalize_parse_loop_rec(
                     current_axis=subaxis,
                     current_path=new_path,
                     current_jnames=new_jnames,
+                    loop_indices=loop_indices,
                 )
             else:
                 for insn in insns_per_leaf[current_axis.id, axcpt.label]:
@@ -617,7 +618,6 @@ def _prepare_assignment(assignment, ctx: LoopyCodegenContext) -> tuple[pmap, pma
     )
 
 
-# FIXME this is very very similar to _expand_index for an axis tree, just different leaf data
 def _prepare_assignment_rec(
     assignment,
     axes: AxisTree,
@@ -675,7 +675,10 @@ def _parse_assignment_pre_callback(
     new_axis_path = preorder_ctx.path | iaxes_axis_path
     new_insns = preorder_ctx.insns + iaxes_insns
 
-    for axis, cpt in iaxes_axis_path.items():
+    if len(iaxes_axis_path) > 1:
+        raise NotImplementedError("Can only target single axes for now")
+
+    for axis, cpt in iaxes_axis_path.items():  # should only be 1 item for now
         prev_axis, prev_cpt = prev_axes._node_from_path(new_axis_path)
         prev_jname = prev_jnames_per_cpt[prev_axis.id, prev_cpt.label]
         jname_expr = iaxes_jname_exprs[axis]
@@ -836,11 +839,6 @@ def _expand_index(index, *, loop_indices, cgen_ctx, **kwargs):
 
 @_expand_index.register
 def _(index: LoopIndex, *, loop_indices, cgen_ctx, **kwargs):
-    # what do here?
-    # I don't have leaves since those are handled outside
-    """
-    _expand_index either returns a tree and leaf data or it returns None and a single set of leaf data
-    """
     path, jname_exprs = loop_indices[index]
     insns = ()
     # return None, {}, {None: ()}, {None: jname_exprs}, {None: path}

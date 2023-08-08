@@ -7,6 +7,7 @@ from typing import Any, Mapping
 
 import pyrsistent
 import pytools
+from pyrsistent import pmap
 
 from pyop3.utils import (
     Id,
@@ -429,15 +430,31 @@ class LabelledTree(pytools.ImmutableRecord):
 
     @functools.cached_property
     def _paths(self):
-        def paths_fn(node, component_index, prev):
-            prev = prev or []
-            new_path = prev + [(node, component_index)]
-            paths_[node, component_index] = new_path
+        def paths_fn(node, component_label, current_path):
+            if current_path is None:
+                current_path = pmap()
+            new_path = current_path | {node.label: component_label}
+            paths_[node.id, component_label] = new_path
             return new_path
 
         paths_ = {}
         previsit(self, paths_fn)
-        return pyrsistent.freeze(paths_)
+        return pmap(paths_)
+
+    # TODO interface choice about whether we want whole nodes, ids or labels in paths
+    # maybe need to distinguish between paths, ancestors and label-only?
+    @functools.cached_property
+    def _paths_with_nodes(self):
+        def paths_fn(node, component_label, current_path):
+            if current_path is None:
+                current_path = pmap()
+            new_path = current_path | {node: component_label}
+            paths_[node.id, component_label] = new_path
+            return new_path
+
+        paths_ = {}
+        previsit(self, paths_fn)
+        return pmap(paths_)
 
     @functools.cached_property
     def leaves(self) -> tuple[tuple[Node, ComponentLabel]]:
@@ -465,7 +482,12 @@ class LabelledTree(pytools.ImmutableRecord):
         return self.path(node, component_index)[:-1]
 
     def path(self, node, component_label):
-        return self._paths[node, component_label]
+        node_id = self._as_node_id(node)
+        return self._paths[node_id, component_label]
+
+    def path_with_nodes(self, node, component_label):
+        node_id = self._as_node_id(node)
+        return self._paths_with_nodes[node_id, component_label]
 
     def _node_from_path(self, path: Mapping[Node | Hashable, int]) -> Node:
         if not path:
@@ -473,18 +495,17 @@ class LabelledTree(pytools.ImmutableRecord):
 
         path_ = dict(path)
         node = self.root
-        while path_:
+        while True:
             cpt_label = path_.pop(node.label)
             cpt_index = node.component_labels.index(cpt_label)
             new_node = self.parent_to_children[node.id][cpt_index]
 
             # if we are a leaf then return the final bit
-            if new_node is None:
-                assert not path_
-                return node, node.components[cpt_index]
-            else:
+            if path_:
                 node = new_node
-        return node, node.components[cpt_index]
+            else:
+                return node, node.components[cpt_index]
+        assert False, "shouldn't get this far"
 
 
 NodePath = dict[Hashable, Hashable]

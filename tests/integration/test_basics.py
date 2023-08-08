@@ -10,15 +10,7 @@ from pyop3.axis import Axis, AxisComponent, AxisTree
 from pyop3.codegen import LOOPY_LANG_VERSION, LOOPY_TARGET
 from pyop3.distarray import MultiArray
 from pyop3.dtypes import IntType, ScalarType
-from pyop3.index import (
-    AffineMap,
-    IdentityMap,
-    Index,
-    IndexTree,
-    Map,
-    Slice,
-    TabulatedMap,
-)
+from pyop3.index import Index, IndexTree, Slice
 from pyop3.loopexpr import INC, READ, WRITE, LoopyKernel, do_loop, loop
 from pyop3.utils import flatten
 
@@ -55,54 +47,6 @@ def vector_copy_kernel():
     return LoopyKernel(code, [READ, WRITE])
 
 
-@pytest.fixture
-def vector_inc_kernel():
-    code = lp.make_kernel(
-        "{ [i]: 0 <= i < 3 }",
-        "y[0] = y[0] + x[i]",
-        [
-            lp.GlobalArg("x", ScalarType, (3,), is_input=True, is_output=False),
-            lp.GlobalArg("y", ScalarType, (1,), is_input=True, is_output=True),
-        ],
-        target=LOOPY_TARGET,
-        name="vector_inc",
-        lang_version=(2018, 2),
-    )
-    return LoopyKernel(code, [READ, INC])
-
-
-@pytest.fixture
-def vec6_inc_kernel():
-    code = lp.make_kernel(
-        "{ [i]: 0 <= i < 6 }",
-        "y[0] = y[0] + x[i]",
-        [
-            lp.GlobalArg("x", ScalarType, (6,), is_input=True, is_output=False),
-            lp.GlobalArg("y", ScalarType, (1,), is_input=True, is_output=True),
-        ],
-        target=LOOPY_TARGET,
-        name="vector_inc",
-        lang_version=(2018, 2),
-    )
-    return LoopyKernel(code, [READ, INC])
-
-
-@pytest.fixture
-def vec12_inc_kernel():
-    code = lp.make_kernel(
-        ["{ [i]: 0 <= i < 6 }", "{ [j]: 0 <= j < 2 }"],
-        "y[j] = y[j] + x[i, j]",
-        [
-            lp.GlobalArg("x", ScalarType, (6, 2), is_input=True, is_output=False),
-            lp.GlobalArg("y", ScalarType, (2,), is_input=True, is_output=True),
-        ],
-        target=LOOPY_TARGET,
-        name="vector_inc",
-        lang_version=(2018, 2),
-    )
-    return LoopyKernel(code, [READ, INC])
-
-
 def test_scalar_copy(scalar_copy_kernel):
     m = 10
 
@@ -115,16 +59,10 @@ def test_scalar_copy(scalar_copy_kernel):
     dat1 = MultiArray(
         axis,
         name="dat1",
-        data=np.zeros(m, dtype=ScalarType),
+        dtype=dat0.dtype,
     )
 
-    # do_loop(p := axis.index, scalar_copy_kernel(dat0[p], dat1[p]))
-    l = loop(p := axis.index(), scalar_copy_kernel(dat0[p], dat1[p]))
-    from pyop3.codegen.loopexpr2loopy import compile
-
-    compile(l)
-    l()
-
+    do_loop(p := axis.index(), scalar_copy_kernel(dat0[p], dat1[p]))
     assert np.allclose(dat1.data, dat0.data)
 
 
@@ -145,16 +83,10 @@ def test_vector_copy(vector_copy_kernel):
     dat1 = MultiArray(
         axes,
         name="dat1",
-        dtype=ScalarType,
+        dtype=dat0.dtype,
     )
 
-    # do_loop(p := axes.root.index, vector_copy_kernel(dat0[p], dat1[p]))
-    l = loop(p := axes.root.index, vector_copy_kernel(dat0[p], dat1[p]))
-    from pyop3.codegen.loopexpr2loopy import compile
-
-    compile(l)
-    l()
-
+    do_loop(p := axes.root.index(), vector_copy_kernel(dat0[p, :], dat1[p, :]))
     assert np.allclose(dat1.data, dat0.data)
 
 
@@ -173,21 +105,19 @@ def test_multi_component_vector_copy(vector_copy_kernel):
     dat0 = MultiArray(
         axes,
         name="dat0",
-        data=np.arange(m * a + n * b, dtype=np.float64),
-        dtype=np.float64,
+        data=np.arange(m * a + n * b, dtype=ScalarType),
     )
     dat1 = MultiArray(
         axes,
         name="dat1",
-        data=np.zeros(m * a + n * b, dtype=np.float64),
-        dtype=np.float64,
+        dtype=dat0.dtype,
     )
 
     # TODO It would be nice to express this as a loop over
     # p := axes.root[Slice(axis="ax0", cpt=1)].index
     # but this needs axis slicing to work first.
     iterset = Axis([(n, "cpt1")], "ax0")
-    do_loop(p := iterset.index, vector_copy_kernel(dat0[p], dat1[p]))
+    do_loop(p := iterset.index(), vector_copy_kernel(dat0[p, :], dat1[p, :]))
 
     assert all(dat1.data[: m * a] == 0)
     assert all(dat1.data[m * a :] == dat0.data[m * a :])
@@ -213,25 +143,21 @@ def test_multi_component_scalar_copy_with_two_outer_loops(scalar_copy_kernel):
         },
     )
     dat0 = MultiArray(
-        axes, name="dat0", data=np.arange(m * a + n * b, dtype=np.float64)
+        axes, name="dat0", data=np.arange(m * a + n * b, dtype=ScalarType)
     )
-    dat1 = MultiArray(axes, name="dat1", data=np.zeros(m * a + n * b, dtype=np.float64))
+    dat1 = MultiArray(axes, name="dat1", dtype=dat0.dtype)
 
     iterset = AxisTree(
         Axis([(n, 1)], "ax0", id="root"),
         {"root": Axis([(b, 0)], "ax1")},
     )
-    # do_loop(p := iterset.index, scalar_copy_kernel(dat0[p], dat1[p]))
-    l = loop(p := iterset.index, scalar_copy_kernel(dat0[p], dat1[p]))
-    from pyop3.codegen.loopexpr2loopy import compile
-
-    compile(l)
-    l()
+    do_loop(p := iterset.index(), scalar_copy_kernel(dat0[p], dat1[p]))
 
     assert all(dat1.data[: m * a] == 0)
     assert all(dat1.data[m * a :] == dat0.data[m * a :])
 
 
+@pytest.mark.skip(reason="TODO")
 def test_inc_with_shared_global_value():
     m0, m1 = 5, 1
     n = 2

@@ -49,6 +49,7 @@ class Indexed:
             raise NotImplementedError(
                 "Need to compute the temporary/intermediate axes for this to be allowed"
             )
+
         indices = as_index_tree(indices, "not currently an axis tree")
         return Indexed(self, indices)
 
@@ -157,7 +158,10 @@ class Map(pytools.ImmutableRecord):
 
 
 class Index(LabelledNode):
-    pass
+    @property
+    @abc.abstractmethod
+    def target_paths(self):
+        pass
 
 
 class LoopIndex(Index):
@@ -185,6 +189,13 @@ class LoopIndex(Index):
         super().__init__(cpt_labels, **kwargs)
         self.iterset = iterset
 
+    @property
+    def target_paths(self) -> tuple[pmap]:
+        return tuple(
+            self.iterset.path(leaf_axis, leaf_cpt_label)
+            for leaf_axis, leaf_cpt_label in self.iterset.leaves
+        )
+
     @functools.cached_property
     def datamap(self):
         return self.iterset.datamap
@@ -208,6 +219,10 @@ class Slice(Index):
         super().__init__(cpt_labels, **kwargs)
         self.axis = axis
         self.slices = slices
+
+    @property
+    def target_paths(self):
+        return tuple(pmap({self.axis: subslice.component}) for subslice in self.slices)
 
     @property
     def datamap(self):
@@ -260,6 +275,10 @@ class CalledMap(Index):
         self.map = map
         self.from_index = from_index
 
+    @property
+    def target_paths(self):
+        return self.leaves
+
     @functools.cached_property
     def datamap(self):
         return self.map.datamap | self.from_index.datamap
@@ -296,7 +315,7 @@ def _(arg: Index, axes: AxisTree) -> IndexTree:
 
 @as_index_tree.register
 def _(slice_: slice, axes: AxisTree) -> IndexTree:
-    return _index_tree_from_slices([slice_], axes)
+    return _index_tree_from_collection([slice_], axes)
 
 
 def _collect_datamap(index, *subdatamaps, itree):
@@ -306,7 +325,9 @@ def _collect_datamap(index, *subdatamaps, itree):
 # TODO Handle axes so we can include slices in the list
 # There are some rules about how we do this. Indices do not strictly need to
 # follow the same ordering as the axes themselves.
-def _index_tree_from_collection(indices: Collection[Index], axes: AxisTree):
+def _index_tree_from_collection(
+    indices: Collection[Index], axes: AxisTree, path=pmap()
+):
     """Return an index tree formed by concatenating successive indices.
 
     If any of the indices yield multiple components then subsequent indices
@@ -314,17 +335,46 @@ def _index_tree_from_collection(indices: Collection[Index], axes: AxisTree):
 
     """
     index, *subindices = indices
+
+    if isinstance(index, slice):
+        # We can use a slice provided that the previous indices provide a complete path.
+        # Consider an axis tree ax0 -> ax1 -> ax2. We can safely use a slice if the
+        # previous indices indexed {}, {ax0} or {ax0, ax1} since the axis acted upon by
+        # the slice is unambiguous. This is not the case if we have only indexed {ax1},
+        # {ax2}, {ax1, ax2} or {ax0, ax2}. The following line should raise an error if
+        # any of the latter cases are encountered.
+        parent_axis, parent_cpt = axes._node_from_path(path)
+        current_axis = axes.child(parent_axis, parent_cpt)
+
+        start = index.start if index.start is not None else 0
+        stop = index.stop
+        step = index.step if index.step is not None else 1
+
+        # Slices target all components of the current axis.
+        slice_cpts = []
+        for cpt in current_axis.components:
+            subslice = SliceComponent(cpt.label, start, stop, step)
+            slice_cpts.append(subslice)
+        index = Slice(current_axis.label, slice_cpts)
+    else:
+        assert isinstance(index, Index)
+
     tree = IndexTree(index)
     if subindices:
-        subtree = _index_tree_from_collection(subindices)
-        for cpt_label in index.component_labels:
-            tree = tree.add_subtree(subtree, index, cpt_label)
+        # for maps these are identical but that is not so for slices
+        for component, target_path in checked_zip(
+            index.component_labels, index.target_paths
+        ):
+            subtree = _index_tree_from_collection(subindices, axes, path | target_path)
+            tree = tree.add_subtree(subtree, index, component)
     return tree
 
 
+# dead code, useful error checking should be transferred
 def _index_tree_from_slices(
     slices: Collection[slice], axes: AxisTree, current_axis: Axis | None = None
 ):
+    assert False, "dead code"
     current_axis = current_axis or axes.root
     slice_, *subslices = slices
 
@@ -379,3 +429,27 @@ def _index_tree_from_ellipsis(
         if subtree is not None:
             tree = tree.add_subtree(subtree, slice_, subslice.component)
     return tree
+
+
+def is_fully_indexed(axes: AxisTree, indices: IndexTree) -> bool:
+    """Check that the provided indices are compatible with the axis tree."""
+    # To check for correctness we ensure that all of the paths through the
+    # index tree generate valid paths through the axis tree.
+    for leaf_index, component_label in indices.leaves:
+        # this maps indices to the specific component being accessed
+        # use this to find the right target_path
+        index_path = indices.path_with_nodes(leaf_index, component_label)
+
+        full_target_path = {}
+        for index, cpt_label in index_path.items():
+            # select the target_path corresponding to this component label
+            cidx = index.component_labels.index(cpt_label)
+            full_target_path |= index.target_paths[cidx]
+
+        # the axis addressed by the full path should be a leaf, else we are
+        # not fully indexing the array
+        final_axis, final_cpt = axes._node_from_path(full_target_path)
+        if axes.child(final_axis, final_cpt) is not None:
+            return False
+
+    return True
