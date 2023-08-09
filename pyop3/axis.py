@@ -689,6 +689,14 @@ class AxisTree(LabelledTree):
     # alias
     add_subaxis = add_node
 
+    def path(self, axis: Axis, component: AxisComponent):
+        cpt_label = _as_axis_component_label(component)
+        return super().path(axis, cpt_label)
+
+    def path_with_nodes(self, axis: Axis, component: AxisComponent):
+        cpt_label = _as_axis_component_label(component)
+        return super().path_with_nodes(axis, cpt_label)
+
     @property
     def leaf(self):
         leaf_axis, leaf_cpt_label = super().leaf

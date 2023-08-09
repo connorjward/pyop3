@@ -491,7 +491,7 @@ class LabelledTree(pytools.ImmutableRecord):
 
     def _node_from_path(self, path: Mapping[Node | Hashable, int]) -> Node:
         if not path:
-            return self.root
+            return None
 
         path_ = dict(path)
         node = self.root

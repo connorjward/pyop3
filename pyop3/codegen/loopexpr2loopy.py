@@ -673,6 +673,7 @@ def _prepare_assignment_rec(
 class ParseAssignmentPreorderContext:
     path: pmap = pmap()
     insns: tuple = ()
+    jname_exprs: pmap = pmap()
 
 
 def _parse_assignment_pre_callback(
@@ -681,21 +682,45 @@ def _parse_assignment_pre_callback(
     # unpack leaf
     iaxes_axis_path, iaxes_jname_exprs, iaxes_insns = leaf
 
+    # FIXME iaxes_axis_path should really be unordered
+    new_axis_path = preorder_ctx.path | dict(iaxes_axis_path)
     new_insns = preorder_ctx.insns + iaxes_insns
+    new_jname_exprs = preorder_ctx.jname_exprs | iaxes_jname_exprs
 
     # iaxes_axis_path is the path targeted by the handled index
     # for maps this means the target axis.
     # for loop indices this can have multiple entries. We assume them ordered here
     # and successively add them to new_axis_path
-    new_axis_path = preorder_ctx.path
-    for axis, cpt in iaxes_axis_path:
-        new_axis_path |= {axis: cpt}
-        prev_axis, prev_cpt = prev_axes._node_from_path(new_axis_path)
-        prev_jname = prev_jnames_per_cpt[prev_axis.id, prev_cpt.label]
-        jname_expr = iaxes_jname_exprs[axis]
-        new_insns += ((pym.var(prev_jname), jname_expr),)
 
-    return ParseAssignmentPreorderContext(new_axis_path, new_insns)
+    """
+    I sort of want to connect the previous jnames to the new exprs. But these may not
+    be ordered.
+    Let's try looking at the ancestors of the new path.
+
+    I need to do this at the bottom of the tree. Indices do not have the full picture
+    at this point.
+
+    Don't pass instructions down. Instead?
+    """
+
+    # if preorder_ctx.path:
+    #     start_leaf_axis = prev_axes._node_from_path(preorder_ctx.path)
+    #     start_path = prev_axes.path_with_nodes(*start_leaf_axis)
+    # else:
+    #     start_path = set()
+    #
+    #
+    # end_leaf_axis = prev_axes._node_from_path(new_axis_path)
+    # end_path = prev_axes.path_with_nodes(*end_leaf_axis)
+    #
+    # new_axes = {k: v for k, v in end_path.items() if k not in start_path}
+    #
+    # for prev_axis, prev_cpt_label in new_axes.items():
+    #     prev_jname = prev_jnames_per_cpt[prev_axis.id, prev_cpt_label]
+    #     jname_expr = iaxes_jname_exprs[prev_axis.label]  # not sure about this
+    #     new_insns += ((pym.var(prev_jname), jname_expr),)
+
+    return ParseAssignmentPreorderContext(new_axis_path, new_insns, new_jname_exprs)
 
 
 def _parse_assignment_post_callback_nonterminal(
@@ -716,13 +741,27 @@ def _parse_assignment_post_callback_terminal(
     prev_axes,
     prev_array_expr_per_leaf,
     prev_insns_per_leaf,
+    prev_jnames_per_cpt,
     **kwargs,
 ):
+    new_insns = preorder_ctx.insns
+
+    if preorder_ctx.path:
+        leaf_axis, leaf_cpt = prev_axes._node_from_path(preorder_ctx.path)
+        axis_path = prev_axes.path_with_nodes(leaf_axis, leaf_cpt)
+    else:
+        axis_path = {}
+
+    for prev_axis, prev_cpt_label in axis_path.items():
+        prev_jname = prev_jnames_per_cpt[prev_axis.id, prev_cpt_label]
+        jname_expr = preorder_ctx.jname_exprs[prev_axis.label]
+        new_insns += ((pym.var(prev_jname), jname_expr),)
+
     prev_leaf_axis, prev_leaf_cpt = prev_axes._node_from_path(preorder_ctx.path)
     prev_leaf_key = (prev_leaf_axis.id, prev_leaf_cpt.label)
 
     array_expr_per_leaf = {leafkey: prev_array_expr_per_leaf[prev_leaf_key]}
-    insns_per_leaf = {leafkey: preorder_ctx.insns + prev_insns_per_leaf[prev_leaf_key]}
+    insns_per_leaf = {leafkey: new_insns + prev_insns_per_leaf[prev_leaf_key]}
     return None, pmap(), array_expr_per_leaf, insns_per_leaf
 
 
