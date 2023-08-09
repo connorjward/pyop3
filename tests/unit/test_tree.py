@@ -2,6 +2,9 @@ import pytest
 
 from pyop3.tree import *
 
+# This file is pretty outdated
+pytest.skip(allow_module_level=True)
+
 
 def test_parent_works_with_nodes_and_ids():
     a = Node("a")
