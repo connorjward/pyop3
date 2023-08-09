@@ -123,6 +123,19 @@ def test_multi_component_vector_copy(vector_copy_kernel):
     assert all(dat1.data[m * a :] == dat0.data[m * a :])
 
 
+def test_copy_multi_component_temporary(vector_copy_kernel):
+    m = 4
+    n0, n1 = 2, 1
+    npoints = m * n0 + m * n1
+
+    axes = AxisTree(Axis(m, "ax0", id="root"), {"root": Axis([n0, n1], "ax1")})
+    dat0 = MultiArray(axes, name="dat0", data=np.arange(npoints, dtype=ScalarType))
+    dat1 = MultiArray(axes, name="dat1", dtype=dat0.dtype)
+
+    do_loop(p := axes.root.index(), vector_copy_kernel(dat0[p, :], dat1[p, :]))
+    assert np.allclose(dat1.data, dat0.data)
+
+
 def test_multi_component_scalar_copy_with_two_outer_loops(scalar_copy_kernel):
     m, n, a, b = 8, 6, 2, 3
 

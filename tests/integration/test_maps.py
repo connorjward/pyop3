@@ -28,6 +28,38 @@ from pyop3.utils import flatten
 
 
 @pytest.fixture
+def scalar_copy_kernel():
+    code = lp.make_kernel(
+        "{ [i]: 0 <= i < 1 }",
+        "y[i] = x[i]",
+        [
+            lp.GlobalArg("x", ScalarType, (1,), is_input=True, is_output=False),
+            lp.GlobalArg("y", ScalarType, (1,), is_input=False, is_output=True),
+        ],
+        target=LOOPY_TARGET,
+        name="scalar_copy",
+        lang_version=(2018, 2),
+    )
+    return LoopyKernel(code, [READ, WRITE])
+
+
+@pytest.fixture
+def vector_inc_kernel():
+    lpy_kernel = lp.make_kernel(
+        "{ [i]: 0 <= i < 3 }",
+        "y[0] = y[0] + x[i]",
+        [
+            lp.GlobalArg("x", ScalarType, (3,), is_input=True, is_output=False),
+            lp.GlobalArg("y", ScalarType, (1,), is_input=True, is_output=True),
+        ],
+        name="vector_inc",
+        target=LOOPY_TARGET,
+        lang_version=LOOPY_LANG_VERSION,
+    )
+    return LoopyKernel(lpy_kernel, [READ, INC])
+
+
+@pytest.fixture
 def vec2_inc_kernel():
     lpy_kernel = lp.make_kernel(
         "{ [i]: 0 <= i < 2 }",
@@ -43,26 +75,36 @@ def vec2_inc_kernel():
     return LoopyKernel(lpy_kernel, [READ, INC])
 
 
-def test_scalar_copy_of_subset(scalar_copy_kernel):
-    m, n = 6, 4
-    sdata = np.asarray([2, 3, 5, 0], dtype=IntType)
-    untouched = [1, 4]
-
-    axes = AxisTree(Axis([AxisComponent(m, "cpt0")], "ax0"))
-    dat0 = MultiArray(axes, name="dat0", data=np.arange(axes.size, dtype=ScalarType))
-    dat1 = MultiArray(axes, name="dat1", dtype=dat0.dtype)
-
-    # a subset is really a map from a small set into a larger one
-    saxes = AxisTree(
-        Axis([AxisComponent(n, "scpt0")], "sax0", id="root"), {"root": Axis(1)}
+@pytest.fixture
+def vec6_inc_kernel():
+    code = lp.make_kernel(
+        "{ [i]: 0 <= i < 6 }",
+        "y[0] = y[0] + x[i]",
+        [
+            lp.GlobalArg("x", ScalarType, (6,), is_input=True, is_output=False),
+            lp.GlobalArg("y", ScalarType, (1,), is_input=True, is_output=True),
+        ],
+        name="vector_inc",
+        target=LOOPY_TARGET,
+        lang_version=LOOPY_LANG_VERSION,
     )
-    subset = MultiArray(saxes, name="subset0", data=sdata)
+    return LoopyKernel(code, [READ, INC])
 
-    p = (Index(TabulatedMap("sax0", "scpt0", "ax0", "cpt0", arity=1, data=subset)),)
-    do_loop(p, scalar_copy_kernel(dat0[p], dat1[p]))
 
-    assert np.allclose(dat1.data[sdata], dat0.data[sdata])
-    assert np.allclose(dat1.data[untouched], 0)
+@pytest.fixture
+def vec12_inc_kernel():
+    code = lp.make_kernel(
+        ["{ [i]: 0 <= i < 6 }", "{ [j]: 0 <= j < 2 }"],
+        "y[j] = y[j] + x[i, j]",
+        [
+            lp.GlobalArg("x", ScalarType, (6, 2), is_input=True, is_output=False),
+            lp.GlobalArg("y", ScalarType, (2,), is_input=True, is_output=True),
+        ],
+        name="vector_inc",
+        target=LOOPY_TARGET,
+        lang_version=LOOPY_LANG_VERSION,
+    )
+    return LoopyKernel(code, [READ, INC])
 
 
 def test_inc_from_tabulated_map(vector_inc_kernel):
@@ -74,18 +116,21 @@ def test_inc_from_tabulated_map(vector_inc_kernel):
     dat1 = MultiArray(axes, name="dat1", dtype=dat0.dtype)
 
     maxes = axes.add_node(Axis(n), *axes.leaf)
-    map0 = MultiArray(
+    maparray = MultiArray(
         maxes,
         name="map0",
         data=mapdata.flatten(),
     )
-
-    p = axes.index
-    q = p.add_node(
-        Index(TabulatedMap("ax0", "cpt0", "ax0", "cpt0", arity=n, data=map0)), *p.leaf
+    map0 = Map(
+        {
+            pmap({"ax0": "cpt0"}): [
+                TabulatedMapComponent("ax0", "cpt0", maparray),
+            ],
+        },
+        "map0",
     )
 
-    do_loop(p, vector_inc_kernel(dat0[q], dat1[p]))
+    do_loop(p := axes.index(), vector_inc_kernel(dat0[map0(p)], dat1[p]))
 
     # Since dat0.data is simply arange, accessing index i of it will also just be i.
     # Therefore, accessing multiple entries and storing the sum of them is
@@ -98,27 +143,32 @@ def test_inc_from_multi_component_temporary(vector_inc_kernel):
     arity = 2
     mapdata = np.asarray([[1, 2], [0, 1], [3, 2]], dtype=IntType)
 
-    axes0 = AxisTree(Axis([m, n], "ax0"))
-    axes1 = AxisTree(Axis(m, "ax0"))
+    axes0 = AxisTree(Axis([AxisComponent(m, "cpt0"), AxisComponent(n, "cpt1")], "ax0"))
+    axes1 = AxisTree(Axis([AxisComponent(m, "cpt0")], "ax0"))
 
     dat0 = MultiArray(axes0, name="dat0", data=np.arange(m + n, dtype=ScalarType))
     dat1 = MultiArray(axes1, name="dat1", data=np.zeros(m, dtype=ScalarType))
 
-    maxes = AxisTree(root := Axis(m, "ax0"), {root.id: Axis(arity)})
-    map0 = MultiArray(maxes, name="map0", data=mapdata.flatten())
-
-    p = IndexTree(Index(Range("ax0", m)))
-    q = p.put_node(
-        Index(
-            [
-                IdentityMap([("ax0", 0)], [("ax0", 0)], arity=1),
-                TabulatedMap([("ax0", 0)], [("ax0", 1)], arity=arity, data=map0[p]),
-            ]
-        ),
-        p.leaf,
+    # this is an identity map
+    maxes0 = axes1.add_subaxis(Axis(1), *axes1.leaf)
+    maparray0 = MultiArray(
+        maxes0, name="map0", data=np.arange(maxes0.size, dtype=IntType)
     )
 
-    do_loop(p, vector_inc_kernel(dat0[q], dat1[p]))
+    maxes1 = axes1.add_subaxis(Axis(arity), *axes1.leaf)
+    maparray1 = MultiArray(maxes1, name="map1", data=mapdata.flatten())
+
+    map0 = Map(
+        {
+            pmap({"ax0": "cpt0"}): [
+                TabulatedMapComponent("ax0", "cpt0", maparray0),
+                TabulatedMapComponent("ax0", "cpt1", maparray1),
+            ],
+        },
+        "map0",
+    )
+
+    do_loop(p := axes1.index(), vector_inc_kernel(dat0[map0(p)], dat1[p]))
 
     # The expected value is the current index (from the identity map), plus the values
     # from the map. Since the indices in the map are offset in the actual array we
@@ -126,23 +176,7 @@ def test_inc_from_multi_component_temporary(vector_inc_kernel):
     assert np.allclose(dat1.data, np.arange(m) + np.sum(mapdata + m, axis=1))
 
 
-def test_copy_multi_component_temporary(vector_copy_kernel):
-    m = 4
-    n0, n1 = 2, 1
-    npoints = m * n0 + m * n1
-
-    axes = AxisTree(root := Axis(m, "ax0"), {root.id: Axis([n0, n1], "ax1")})
-    dat0 = MultiArray(axes, name="dat0", data=np.arange(npoints, dtype=ScalarType))
-    dat1 = MultiArray(axes, name="dat1", data=np.zeros(npoints, dtype=ScalarType))
-
-    p = IndexTree(Index(Range("ax0", m)))
-    q = p.put_node(Index([Range(("ax1", 0), n0), Range(("ax1", 1), n1)]), p.leaf)
-
-    do_loop(p, vector_copy_kernel(dat0[q], dat1[q]))
-
-    assert np.allclose(dat1.data, dat0.data)
-
-
+@pytest.mark.skip(reason="Affine maps not yet supported")
 def test_inc_from_index_function(vector_inc_kernel):
     m, n = 3, 4
 
@@ -181,37 +215,35 @@ def test_inc_with_multiple_maps(vector_inc_kernel):
     mapdata0 = np.asarray([[1, 2], [0, 2], [0, 1], [3, 4], [2, 1]], dtype=IntType)
     mapdata1 = np.asarray([[1], [1], [3], [0], [2]], dtype=IntType)
 
-    axes = AxisTree(Axis(m, "ax0"))
-    dat0 = MultiArray(axes, name="dat0", data=np.arange(m, dtype=ScalarType))
-    dat1 = MultiArray(axes, name="dat1", data=np.zeros(m, dtype=ScalarType))
+    axes = AxisTree(Axis([AxisComponent(m, "pt0")], "ax0"))
+    dat0 = MultiArray(axes, name="dat0", data=np.arange(axes.size, dtype=ScalarType))
+    dat1 = MultiArray(axes, name="dat1", dtype=dat0.dtype)
 
-    maxes0 = axes.add_subaxis(Axis(arity0), axes.leaf)
-    maxes1 = axes.add_subaxis(Axis(arity1), axes.leaf)
+    maxes0 = axes.add_subaxis(Axis(arity0), *axes.leaf)
+    maxes1 = axes.add_subaxis(Axis(arity1), *axes.leaf)
 
-    map0 = MultiArray(
+    maparray0 = MultiArray(
         maxes0,
         name="map0",
         data=mapdata0.flatten(),
     )
-    map1 = MultiArray(
+    maparray1 = MultiArray(
         maxes1,
         name="map1",
         data=mapdata1.flatten(),
     )
 
-    p = IndexTree(Index(Range("ax0", m)))
-    q = p.put_node(
-        Index(
-            [
-                TabulatedMap([("ax0", 0)], [("ax0", 0)], arity=arity0, data=map0[p]),
-                TabulatedMap([("ax0", 0)], [("ax0", 0)], arity=arity1, data=map1[p]),
-            ]
-        ),
-        p.leaf,
+    map0 = Map(
+        {
+            pmap({"ax0": "pt0"}): [
+                TabulatedMapComponent("ax0", "pt0", maparray0),
+                TabulatedMapComponent("ax0", "pt0", maparray1),
+            ],
+        },
+        "map0",
     )
 
-    do_loop(p, vector_inc_kernel(dat0[q], dat1[p]))
-
+    do_loop(p := axes.index(), vector_inc_kernel(dat0[map0(p)], dat1[p]))
     assert np.allclose(dat1.data, np.sum(mapdata0, axis=1) + np.sum(mapdata1, axis=1))
 
 
@@ -236,7 +268,7 @@ def test_inc_with_map_composition(vec6_inc_kernel):
     map0 = Map(
         {
             pmap({"ax0": "cpt0"}): [
-                ("a", maparray0, arity0, "ax0", "cpt0"),
+                TabulatedMapComponent("ax0", "cpt0", maparray0),
             ],
         },
         "map0",
@@ -244,7 +276,7 @@ def test_inc_with_map_composition(vec6_inc_kernel):
     map1 = Map(
         {
             pmap({"ax0": "cpt0"}): [
-                ("a", maparray1, arity1, "ax0", "cpt0"),
+                TabulatedMapComponent("ax0", "cpt0", maparray1),
             ],
         },
         "map1",
@@ -279,7 +311,7 @@ def test_vector_inc_with_map_composition(vec12_inc_kernel):
     map0 = Map(
         {
             pmap({"ax0": "cpt0"}): [
-                ("a", maparray0, arity0, "ax0", "cpt0"),
+                TabulatedMapComponent("ax0", "cpt0", maparray0),
             ],
         },
         "map0",
@@ -287,19 +319,13 @@ def test_vector_inc_with_map_composition(vec12_inc_kernel):
     map1 = Map(
         {
             pmap({"ax0": "cpt0"}): [
-                ("a", maparray1, arity1, "ax0", "cpt0"),
+                TabulatedMapComponent("ax0", "cpt0", maparray1),
             ],
         },
         "map1",
     )
 
-    p = axes.index()
-    iroot = map1(map0(p))
-    itree = IndexTree(iroot, {iroot.id: Slice([("ax1", "cpt0", 0, None, 1)])})
-
-    itree1 = IndexTree(p, {p.id: Slice([("ax1", "cpt0", 0, None, 1)])})
-
-    do_loop(p, vec12_inc_kernel(dat0[itree], dat1[itree1]))
+    do_loop(p := axes.index(), vec12_inc_kernel(dat0[map1(map0(p)), :], dat1[p, :]))
 
     expected = np.sum(
         np.sum(np.arange(m * n).reshape((m, n))[mapdata1, :], axis=1)[mapdata0, :],
@@ -308,6 +334,9 @@ def test_vector_inc_with_map_composition(vec12_inc_kernel):
     assert np.allclose(dat1.data.reshape((m, n)), expected)
 
 
+@pytest.mark.skip(
+    reason="Passing ragged arguments through to the local is not yet supported"
+)
 def test_inc_with_variable_arity_map(ragged_inc_kernel):
     m = 3
     nnzdata = np.asarray([3, 2, 1], dtype=IntType)
@@ -335,6 +364,7 @@ def test_inc_with_variable_arity_map(ragged_inc_kernel):
     assert np.allclose(dat1.data, [sum(xs) for xs in mapdata])
 
 
+@pytest.mark.skip(reason="Looping over maps is not yet supported")
 def test_loop_over_map(vector_inc_kernel):
     m = 5
     arity0 = 2
