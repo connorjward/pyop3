@@ -10,15 +10,7 @@ from pyop3.axis import Axis, AxisComponent, AxisTree
 from pyop3.codegen import LOOPY_LANG_VERSION, LOOPY_TARGET
 from pyop3.distarray import MultiArray
 from pyop3.dtypes import IntType, ScalarType
-from pyop3.index import (
-    AffineMap,
-    IdentityMap,
-    Index,
-    IndexTree,
-    Map,
-    Slice,
-    TabulatedMap,
-)
+from pyop3.index import IndexTree, Slice, SliceComponent
 from pyop3.loopexpr import INC, READ, WRITE, LoopyKernel, do_loop, loop
 from pyop3.utils import flatten
 
@@ -49,13 +41,12 @@ def test_1d_slice_composition(vec2_copy_kernel):
     )
     dat1 = MultiArray(Axis([(n, "cpt0")], "ax0"), name="dat1", dtype=dat0.dtype)
 
-    p = Axis(1).index()
-    itree0 = IndexTree(Slice([("ax0", "cpt0", 0, None, 2)]))
-    itree1 = IndexTree(Slice([("ax0", "cpt0", 1, 3, 1)]))
-    itree2 = IndexTree(Slice([("ax0", "cpt0", 0, None, 1)]))
+    # this is needed because we currently do not compute the axis tree for the
+    # intermediate indexed object, so it cannot be indexed with shorthand
+    itree = IndexTree(Slice("ax0", [SliceComponent("cpt0", 1, 3)]))
 
-    do_loop(p, vec2_copy_kernel(dat0[itree0][itree1], dat1[itree2]))
-
+    # do_loop(Axis(1).index(), vec2_copy_kernel(dat0[::2][1:3], dat1[...]))
+    do_loop(Axis(1).index(), vec2_copy_kernel(dat0[::2][itree], dat1[...]))
     assert np.allclose(dat1.data, dat0.data[::2][1:3])
 
 
@@ -71,22 +62,17 @@ def test_2d_slice_composition(vec2_copy_kernel):
     dat0 = MultiArray(axes0, name="dat0", data=np.arange(axes0.size, dtype=ScalarType))
     dat1 = MultiArray(axes1, name="dat1", dtype=dat0.dtype)
 
-    p = Axis(1).index()
-    itree0 = IndexTree(
-        Slice([("ax0", "cpt0", 0, None, 2)], id="slice0"),
-        {"slice0": Slice([("ax1", "cpt0", 1, None, 1)])},
+    itree = IndexTree(
+        Slice("ax0", [SliceComponent("cpt0", 2, 4)], id="slice1"),
+        {"slice1": Slice("ax1", [SliceComponent("cpt0", 1, 2)])},
     )
-    itree1 = IndexTree(
-        Slice([("ax0", "cpt0", 2, 4, 1)], id="slice1"),
-        {"slice1": Slice([("ax1", "cpt0", 1, 2, 1)])},
-    )
-    itree2 = IndexTree(Slice([("ax0", "cpt0", 0, None, 1)]))
 
     do_loop(
-        p,
+        Axis(1).index(),
         vec2_copy_kernel(
-            dat0[itree0][itree1],
-            dat1[itree2],
+            # dat0[::2, 1:][2:4, 1],
+            dat0[::2, 1:][itree],
+            dat1[...],
         ),
     )
 

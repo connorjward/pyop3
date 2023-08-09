@@ -343,8 +343,11 @@ def _index_tree_from_collection(
         # the slice is unambiguous. This is not the case if we have only indexed {ax1},
         # {ax2}, {ax1, ax2} or {ax0, ax2}. The following line should raise an error if
         # any of the latter cases are encountered.
-        parent_axis, parent_cpt = axes._node_from_path(path)
-        current_axis = axes.child(parent_axis, parent_cpt)
+        if not path:
+            current_axis = axes.root
+        else:
+            parent_axis, parent_cpt = axes._node_from_path(path)
+            current_axis = axes.child(parent_axis, parent_cpt)
 
         start = index.start if index.start is not None else 0
         stop = index.stop
