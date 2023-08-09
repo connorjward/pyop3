@@ -673,11 +673,21 @@ class AxisTree(LabelledTree):
         self,
         axis,
         parent,
-        parent_component,
+        parent_component=None,
         **kwargs,
     ):
-        parent_cpt_label = _as_axis_component_label(parent_component)
+        parent = self._as_node(parent)
+        if parent_component is None:
+            if len(parent.components) == 1:
+                parent_cpt_label = parent.components[0].label
+            else:
+                raise ValueError("Must specify parent component")
+        else:
+            parent_cpt_label = _as_axis_component_label(parent_component)
         return super().add_node(axis, parent, parent_cpt_label, **kwargs)
+
+    # alias
+    add_subaxis = add_node
 
     @property
     def leaf(self):
@@ -797,7 +807,7 @@ class AxisTree(LabelledTree):
         import warnings
 
         warnings.warn("deprecated")
-        return self.put_node(subaxis, *loc)
+        return self.add_node(subaxis, *loc)
 
 
 def get_slice_bounds(array, indices):

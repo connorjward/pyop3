@@ -10,15 +10,6 @@ from pyop3.axis import Axis, AxisComponent, AxisTree
 from pyop3.codegen import LOOPY_LANG_VERSION, LOOPY_TARGET
 from pyop3.distarray import MultiArray
 from pyop3.dtypes import IntType, ScalarType
-from pyop3.index import (
-    AffineMap,
-    IdentityMap,
-    Index,
-    IndexTree,
-    Map,
-    Slice,
-    TabulatedMap,
-)
 from pyop3.loopexpr import INC, READ, WRITE, LoopyKernel, do_loop, loop
 from pyop3.utils import flatten
 
@@ -39,86 +30,6 @@ def scalar_copy_kernel():
     return LoopyKernel(code, [READ, WRITE])
 
 
-@pytest.fixture
-def vector_copy_kernel():
-    code = lp.make_kernel(
-        "{ [i]: 0 <= i < 3 }",
-        "y[i] = x[i]",
-        [
-            lp.GlobalArg("x", ScalarType, (3,), is_input=True, is_output=False),
-            lp.GlobalArg("y", ScalarType, (3,), is_input=False, is_output=True),
-        ],
-        target=LOOPY_TARGET,
-        name="vector_copy",
-        lang_version=(2018, 2),
-    )
-    return LoopyKernel(code, [READ, WRITE])
-
-
-@pytest.fixture
-def vec2_copy_kernel():
-    lpy_kernel = lp.make_kernel(
-        "{ [i]: 0 <= i < 2 }",
-        "y[i] = x[i]",
-        [
-            lp.GlobalArg("x", ScalarType, (2,), is_input=True, is_output=False),
-            lp.GlobalArg("y", ScalarType, (2,), is_input=False, is_output=True),
-        ],
-        name="copy",
-        target=LOOPY_TARGET,
-        lang_version=LOOPY_LANG_VERSION,
-    )
-    return LoopyKernel(lpy_kernel, [READ, WRITE])
-
-
-@pytest.fixture
-def vector_inc_kernel():
-    code = lp.make_kernel(
-        "{ [i]: 0 <= i < 3 }",
-        "y[0] = y[0] + x[i]",
-        [
-            lp.GlobalArg("x", ScalarType, (3,), is_input=True, is_output=False),
-            lp.GlobalArg("y", ScalarType, (1,), is_input=True, is_output=True),
-        ],
-        target=LOOPY_TARGET,
-        name="vector_inc",
-        lang_version=(2018, 2),
-    )
-    return LoopyKernel(code, [READ, INC])
-
-
-@pytest.fixture
-def vec6_inc_kernel():
-    code = lp.make_kernel(
-        "{ [i]: 0 <= i < 6 }",
-        "y[0] = y[0] + x[i]",
-        [
-            lp.GlobalArg("x", ScalarType, (6,), is_input=True, is_output=False),
-            lp.GlobalArg("y", ScalarType, (1,), is_input=True, is_output=True),
-        ],
-        target=LOOPY_TARGET,
-        name="vector_inc",
-        lang_version=(2018, 2),
-    )
-    return LoopyKernel(code, [READ, INC])
-
-
-@pytest.fixture
-def vec12_inc_kernel():
-    code = lp.make_kernel(
-        ["{ [i]: 0 <= i < 6 }", "{ [j]: 0 <= j < 2 }"],
-        "y[j] = y[j] + x[i, j]",
-        [
-            lp.GlobalArg("x", ScalarType, (6, 2), is_input=True, is_output=False),
-            lp.GlobalArg("y", ScalarType, (2,), is_input=True, is_output=True),
-        ],
-        target=LOOPY_TARGET,
-        name="vector_inc",
-        lang_version=(2018, 2),
-    )
-    return LoopyKernel(code, [READ, INC])
-
-
 def test_scalar_copy_with_ragged_axis(scalar_copy_kernel):
     m = 5
     nnzdata = np.array([3, 2, 1, 3, 2], dtype=IntType)
@@ -130,14 +41,7 @@ def test_scalar_copy_with_ragged_axis(scalar_copy_kernel):
     dat0 = MultiArray(axes, name="dat0", data=np.arange(axes.size, dtype=ScalarType))
     dat1 = MultiArray(axes, name="dat1", dtype=ScalarType)
 
-    # do_loop(p := axes.index, scalar_copy_kernel(dat0[p], dat1[p]))
-
-    l = loop(p := axes.index, scalar_copy_kernel(dat0[p], dat1[p]))
-    from pyop3.codegen.loopexpr2loopy import compile
-
-    compile(l)
-    l()
-
+    do_loop(p := axes.index(), scalar_copy_kernel(dat0[p], dat1[p]))
     assert np.allclose(dat1.data, dat0.data)
 
 
@@ -158,16 +62,10 @@ def test_scalar_copy_with_two_ragged_axes(scalar_copy_kernel):
     nnz1 = MultiArray(nnzaxes1, name="nnz1", data=nnzdata1, max_value=5)
 
     axes = nnzaxes1.add_subaxis(Axis(nnz1, "ax2"), *nnzaxes1.leaf)
-
-    # from pyop3.axis import axis_tree_size
-    # axis_tree_size(axes)
-    axes.set_up()
-
     dat0 = MultiArray(axes, name="dat0", data=np.arange(axes.size, dtype=ScalarType))
     dat1 = MultiArray(axes, name="dat1", dtype=dat0.dtype)
 
-    do_loop(p := axes.index, scalar_copy_kernel(dat0[p], dat1[p]))
-
+    do_loop(p := axes.index(), scalar_copy_kernel(dat0[p], dat1[p]))
     assert np.allclose(dat1.data, dat0.data)
 
 
@@ -190,8 +88,7 @@ def test_scalar_copy_two_ragged_loops_with_fixed_loop_between(scalar_copy_kernel
     dat0 = MultiArray(axes, name="dat0", data=np.arange(axes.size, dtype=ScalarType))
     dat1 = MultiArray(axes, name="dat1", dtype=dat0.dtype)
 
-    do_loop(p := axes.index, scalar_copy_kernel(dat0[p], dat1[p]))
-
+    do_loop(p := axes.index(), scalar_copy_kernel(dat0[p], dat1[p]))
     assert np.allclose(dat1.data, dat0.data)
 
 
@@ -211,8 +108,7 @@ def test_scalar_copy_ragged_axis_inside_two_fixed_axes(scalar_copy_kernel):
     dat0 = MultiArray(axes, name="dat0", data=np.arange(axes.size, dtype=ScalarType))
     dat1 = MultiArray(axes, name="dat1", dtype=dat0.dtype)
 
-    do_loop(p := axes.index, scalar_copy_kernel(dat0[p], dat1[p]))
-
+    do_loop(p := axes.index(), scalar_copy_kernel(dat0[p], dat1[p]))
     assert np.allclose(dat1.data, dat0.data)
 
 
@@ -328,9 +224,6 @@ def test_scalar_copy_of_ragged_component_in_multi_component_axis(scalar_copy_ker
         max_value=max(nnzdata),
     )
 
-    # debug
-    nnzaxes.set_up()
-
     axes = AxisTree(
         Axis(
             [
@@ -346,14 +239,11 @@ def test_scalar_copy_of_ragged_component_in_multi_component_axis(scalar_copy_ker
         },
     )
 
-    # debug
-    axes.set_up()
-
     dat0 = MultiArray(axes, name="dat0", data=np.arange(axes.size, dtype=ScalarType))
     dat1 = MultiArray(axes, name="dat1", dtype=ScalarType)
 
     iterset = nnzaxes.add_node(Axis([(nnz, "cpt0")], "ax1"), *nnzaxes.leaf)
-    do_loop(p := iterset.index, scalar_copy_kernel(dat0[p], dat1[p]))
+    do_loop(p := iterset.index(), scalar_copy_kernel(dat0[p], dat1[p]))
 
     off = np.cumsum([m0 * n0, sum(nnzdata), m2 * n1])
     assert np.allclose(dat1.data[: off[0]], 0)
@@ -384,8 +274,7 @@ def test_scalar_copy_of_permuted_axis_with_ragged_inner_axis(scalar_copy_kernel)
     dat0 = MultiArray(axes, name="dat0", data=np.arange(axes.size, dtype=ScalarType))
     dat1 = MultiArray(paxes, name="dat1", dtype=dat0.dtype)
 
-    do_loop(p := axes.index, scalar_copy_kernel(dat0[p], dat1[p]))
-
+    do_loop(p := axes.index(), scalar_copy_kernel(dat0[p], dat1[p]))
     assert np.allclose(dat1.data[fullperm], dat0.data)
 
 
@@ -415,6 +304,5 @@ def test_scalar_copy_of_permuted_then_ragged_then_permuted_axes(scalar_copy_kern
     dat0 = MultiArray(axes, name="dat0", data=np.arange(npoints, dtype=ScalarType))
     dat1 = MultiArray(paxes, name="dat1", data=np.zeros(npoints, dtype=ScalarType))
 
-    do_loop(p := axes.index, scalar_copy_kernel(dat0[p], dat1[p]))
-
+    do_loop(p := axes.index(), scalar_copy_kernel(dat0[p], dat1[p]))
     assert np.allclose(dat1.data[fullperm], dat0.data)

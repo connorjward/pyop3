@@ -1219,8 +1219,7 @@ def register_extent(extent, path, jnames, ctx):
 
     # actually a pymbolic expression
 
-    # TODO
-    # * Traverse the pymbolic expression and generate a replace map for the multi-arrays
+    path = dict(path)
 
     replace_map = {}
     for array in collect_arrays(extent):
@@ -1237,7 +1236,9 @@ def register_extent(extent, path, jnames, ctx):
         trimmed_path = pmap(trimmed_path)
         trimmed_jnames = pmap(trimmed_jnames)
 
-        varname = register_scalar_assignment(array, trimmed_path, trimmed_jnames, ctx)
+        insns, varname = _scalar_assignment(array, trimmed_path, trimmed_jnames, ctx)
+        for lhs, rhs in insns:
+            ctx.add_assignment(lhs, rhs)
         replace_map[array.name] = varname
 
     varname = ctx.unique_name("p")
