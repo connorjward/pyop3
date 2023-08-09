@@ -6,19 +6,11 @@ import pymbolic as pym
 import pytest
 from pyrsistent import pmap
 
+from pyop3 import IndexTree, Slice, SliceComponent
 from pyop3.axis import Axis, AxisComponent, AxisTree
 from pyop3.codegen import LOOPY_LANG_VERSION, LOOPY_TARGET
 from pyop3.distarray import MultiArray
 from pyop3.dtypes import IntType, ScalarType
-from pyop3.index import (
-    AffineMap,
-    IdentityMap,
-    Index,
-    IndexTree,
-    Map,
-    Slice,
-    TabulatedMap,
-)
 from pyop3.loopexpr import INC, READ, WRITE, LoopyKernel, do_loop, loop
 from pyop3.utils import flatten
 
@@ -27,7 +19,7 @@ def test_different_axis_orderings_do_not_change_packing_order():
     m0, m1, m2 = 5, 2, 2
     npoints = m0 * m1 * m2
 
-    code = lp.make_kernel(
+    lpy_kernel = lp.make_kernel(
         [f"{{ [i]: 0 <= i < {m1} }}", f"{{ [j]: 0 <= j < {m2} }}"],
         "y[i, j] = x[i, j]",
         [
@@ -38,7 +30,7 @@ def test_different_axis_orderings_do_not_change_packing_order():
         name="copy",
         lang_version=(2018, 2),
     )
-    copy_kernel = LoopyKernel(code, [READ, WRITE])
+    copy_kernel = LoopyKernel(lpy_kernel, [READ, WRITE])
 
     axis0 = Axis(m0, "ax0")
     axis1 = Axis(m1, "ax1")
@@ -58,11 +50,10 @@ def test_different_axis_orderings_do_not_change_packing_order():
     dat0_1 = MultiArray(axes1, name="dat0_1", data=data1.flatten())
     dat1 = MultiArray(axes0, name="dat1", data=np.zeros(npoints, dtype=ScalarType))
 
-    p = IndexTree(Index(Range("ax0", m0)))
-
-    q = p.copy()
-    q = q.put_node(Index(Range("ax1", m1)), q.leaf)
-    q = q.put_node(Index(Range("ax2", m2)), q.leaf)
+    p = axis0.index()
+    q = IndexTree(p)
+    q = q.put_node(Slice("ax1", [SliceComponent(axis1.component_labels[0])]), *q.leaf)
+    q = q.put_node(Slice("ax2", [SliceComponent(axis2.component_labels[0])]), *q.leaf)
 
     do_loop(p, copy_kernel(dat0_0[q], dat1[q]))
     assert np.allclose(dat1.data, dat0_0.data)
