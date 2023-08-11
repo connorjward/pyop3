@@ -29,6 +29,7 @@ from pyop3.index import (
     Index,
     Indexed,
     IndexTree,
+    LocalLoopIndex,
     LoopIndex,
     Map,
     Slice,
@@ -81,8 +82,6 @@ def visit_indices(
     final_callback=_none,
     **kwargs,
 ):
-    # Technically this inner function isn't required but I think it will be
-    # once indices become trees.
     return _visit_indices_rec(
         indices,
         pre_ctx,
@@ -589,13 +588,20 @@ def build_assignment(
         array = array.obj
 
     for indices in itrees:
+        # get the right index tree given the loop context
+        loop_context = {}
+        for loop_index, (path, _) in loop_indices.items():
+            loop_context[loop_index] = pmap(path)
+        loop_context = pmap(loop_context)
+        index_tree = indices[loop_context]
+
         (
             axes,
             jnames_per_cpt,
             array_expr_per_leaf,
             insns_per_leaf,
         ) = _parse_assignment(
-            indices,
+            index_tree,
             ParseAssignmentPreorderContext(),
             cgen_ctx=cgen_ctx,
             loop_indices=loop_indices,
@@ -884,16 +890,14 @@ def _expand_index(index, *, loop_indices, cgen_ctx, **kwargs):
     Note that the # of jnames and path length is often longer than the size
     of the resultant axes. This is because loop indices add jnames but no shape.
     """
-    raise TypeError
+    raise TypeError(f"No handler provided for {type(index).__name__}")
 
 
 @_expand_index.register
 def _(index: LoopIndex, *, loop_indices, cgen_ctx, **kwargs):
     path, jname_exprs = loop_indices[index]
     insns = ()
-    # return None, {}, {None: ()}, {None: jname_exprs}, {None: path}
     # TODO namedtuple anyone?
-    # TODO generic algorithm
     return {None: (path, jname_exprs, insns)}, {"axes": AxisTree(), "jnames": pmap()}
 
 
@@ -1362,6 +1366,13 @@ def _(loop_index: LoopIndex, *, loop_indices, **kwargs):
     return {None: (path,)}, {"axes": AxisTree()}
 
 
+@collect_shape_index_callback.register
+def _(local_index: LocalLoopIndex, *, loop_indices, **kwargs):
+    return collect_shape_index_callback(
+        local_index.loop_index, loop_indices=loop_indices, **kwargs
+    )
+
+
 # TODO this could be done with callbacks so we share code with when
 # we also want to emit instructions
 @collect_shape_index_callback.register
@@ -1479,13 +1490,20 @@ def _indexed_axes(indexed, loop_indices):
 
     # handle 'indexed of indexed' things
     if isinstance(indexed.obj, Indexed):
-        axes = _indexed_axes(indexed.obj, loop_indices)
+        orig_axes = _indexed_axes(indexed.obj, loop_indices)
     else:
         assert isinstance(indexed.obj, MultiArray)
-        axes = indexed.obj.axes
+        orig_axes = indexed.obj.axes
+
+    # get the right index tree given the loop context
+    loop_context = {}
+    for loop_index, (path, _) in loop_indices.items():
+        loop_context[loop_index] = pmap(path)
+    loop_context = pmap(loop_context)
+    index_tree = indexed.indices[loop_context]
 
     axes = visit_indices(
-        indexed.itree,
+        index_tree,
         None,
         index_callback=collect_shape_index_callback,
         pre_callback=collect_shape_pre_callback,
@@ -1493,7 +1511,7 @@ def _indexed_axes(indexed, loop_indices):
         post_callback_nonterminal=collect_shape_post_callback_nonterminal,
         final_callback=collect_shape_final_callback,
         loop_indices=loop_indices,
-        prev_axes=axes,
+        prev_axes=orig_axes,
     )
 
     if axes is not None:

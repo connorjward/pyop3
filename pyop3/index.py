@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import abc
 import collections
+import dataclasses
 import functools
 from typing import Any, Collection, Hashable, Sequence
 
@@ -14,6 +15,7 @@ from pyop3.utils import (
     LabelledImmutableRecord,
     as_tuple,
     checked_zip,
+    is_single_valued,
     just_one,
     merge_dicts,
 )
@@ -23,6 +25,31 @@ class IndexTree(LabelledTree):
     @functools.cached_property
     def datamap(self) -> dict[str:DistributedArray]:
         return postvisit(self, _collect_datamap, itree=self)
+
+
+class IndexTreeBag:
+    def __init__(self, index_trees: pmap[pmap[LoopIndex, pmap[str, str]], IndexTree]):
+        # this is terribly unclear
+        if not is_single_valued([set(key.keys()) for key in index_trees.keys()]):
+            raise ValueError("Loop contexts must contain the same loop indices")
+        self.index_trees = index_trees
+
+    def __getitem__(self, loop_context):
+        key = {}
+        for loop_index, path in loop_context.items():
+            if loop_index in self.loop_indices:
+                key |= {loop_index: path}
+        key = pmap(key)
+        return self.index_trees[key]
+
+    @functools.cached_property
+    def loop_indices(self) -> frozenset[LoopIndex]:
+        for loop_context in self.index_trees.keys():
+            return frozenset(loop_context.keys())
+
+    @functools.cached_property
+    def datamap(self):
+        return merge_dicts([itree.datamap for itree in self.index_trees.values()])
 
 
 IndexLabel = collections.namedtuple("IndexLabel", ["axis", "component"])
@@ -36,9 +63,23 @@ class Indexed:
 
     """
 
-    def __init__(self, obj, itree):
+    def __init__(self, obj, indices):
+        # Since loop indices can target different axes we need to have multiple index
+        # trees. These are stored in a pmap mapping {loop_index: axis_path, ...} to
+        # index tree. The idea is that each tree can be handled cleanly with explicitly
+        # known axes. During code generation we can select the right tree.
+        # Some thought is required about how we want to parse index trees/lists of indices
+        # into these separable trees.
+        if not isinstance(indices, IndexTreeBag):
+            raise NotImplementedError("Some clever parsing is required here")
+
         self.obj = obj
-        self.itree = itree
+        self.indices = indices
+
+    # old alias, not right now we have a pmap of index trees rather than just a single one
+    @property
+    def itree(self):
+        return self.indices
 
     def __getitem__(self, indices):
         from pyop3.distarray import MultiArray
@@ -66,15 +107,30 @@ class Indexed:
         return self.obj.dtype
 
 
-class SliceComponent(pytools.ImmutableRecord):
-    fields = {"component", "start", "stop", "step"}
+class SliceComponent(pytools.ImmutableRecord, abc.ABC):
+    fields = {"component"}
 
-    def __init__(self, component, start=0, stop=None, step=1):
+    def __init__(self, component):
         super().__init__()
         self.component = component
+
+
+class AffineSliceComponent(SliceComponent):
+    fields = SliceComponent.fields | {"start", "stop", "step"}
+
+    def __init__(self, component, start=0, stop=None, step=1):
+        super().__init__(component)
         self.start = start
         self.stop = stop
         self.step = step
+
+
+class Subset(SliceComponent):
+    fields = SliceComponent.fields | {"array"}
+
+    def __init__(self, component, array: MultiArray):
+        super().__init__(component)
+        self.array = array
 
 
 class MapComponent(LabelledImmutableRecord):
@@ -157,6 +213,15 @@ class Map(pytools.ImmutableRecord):
         return data
 
 
+# ImmutableRecord?
+class CalledMap:
+    # This function cannot be part of an index tree because it has no specialised
+    # to a particular loop index path.
+    def __init__(self, map, from_index):
+        self.map = map
+        self.from_index = from_index
+
+
 class Index(LabelledNode):
     @property
     @abc.abstractmethod
@@ -201,6 +266,22 @@ class LoopIndex(Index):
         return self.iterset.datamap
 
 
+class LocalLoopIndex(Index):
+    """Class representing a 'local' index."""
+
+    def __init__(self, loop_index: LoopIndex, **kwargs):
+        super().__init__(loop_index.component_labels, **kwargs)
+        self.loop_index = loop_index
+
+    @property
+    def target_paths(self):
+        return self.loop_index.target_paths
+
+    @property
+    def datamap(self):
+        return self.loop_index.datamap
+
+
 class Slice(Index):
     """
 
@@ -230,8 +311,8 @@ class Slice(Index):
         return {}
 
 
-class CalledMap(Index):
-    def __init__(self, map, from_index):
+class UnrolledCalledMap(Index):
+    def __init__(self, map, from_index, loop_context):
         # The degree of the called map depends on the index it acts on. If
         # the map maps from a -> {a, b, c} *and* b -> {b, c} then the degree
         # is 3 or 2 depending on from_index. If from_index is also a CalledMap
@@ -251,6 +332,9 @@ class CalledMap(Index):
                 )
             iterset_axis = from_index.iterset.root
             axis_label = iterset_axis.label
+            raise NotImplementedError(
+                "here need to use the loop context to get the right bit"
+            )
             # just_one used since from_index can (currently) only have a
             # single component
             cpt_label = just_one(iterset_axis.components).label
@@ -293,9 +377,20 @@ class CalledMap(Index):
         return self.map.name
 
 
+class EnumeratedLoopIndex:
+    def __init__(self, iterset: AxisTree):
+        self.index = LoopIndex(iterset)
+        self.count = LocalLoopIndex(self.index)
+
+
 @functools.singledispatch
 def as_index_tree(arg: Any, axes: AxisTree) -> IndexTree:
-    if isinstance(arg, Collection):
+    # cyclic import
+    from pyop3.distarray import MultiArray
+
+    if isinstance(arg, MultiArray):
+        return _index_tree_from_collection([arg], axes)
+    elif isinstance(arg, Collection):
         return _index_tree_from_collection(arg, axes)
     elif arg is Ellipsis:
         return _index_tree_from_ellipsis(axes)
@@ -334,9 +429,12 @@ def _index_tree_from_collection(
     will be attached to all components.
 
     """
+    # cyclic import
+    from pyop3.distarray import MultiArray
+
     index, *subindices = indices
 
-    if isinstance(index, slice):
+    if not isinstance(index, Index):
         # We can use a slice provided that the previous indices provide a complete path.
         # Consider an axis tree ax0 -> ax1 -> ax2. We can safely use a slice if the
         # previous indices indexed {}, {ax0} or {ax0, ax1} since the axis acted upon by
@@ -349,18 +447,25 @@ def _index_tree_from_collection(
             parent_axis, parent_cpt = axes._node_from_path(path)
             current_axis = axes.child(parent_axis, parent_cpt)
 
-        start = index.start if index.start is not None else 0
-        stop = index.stop
-        step = index.step if index.step is not None else 1
+        if isinstance(index, slice):
+            start = index.start if index.start is not None else 0
+            stop = index.stop
+            step = index.step if index.step is not None else 1
 
-        # Slices target all components of the current axis.
-        slice_cpts = []
-        for cpt in current_axis.components:
-            subslice = SliceComponent(cpt.label, start, stop, step)
-            slice_cpts.append(subslice)
+            # Slices target all components of the current axis.
+            slice_cpts = []
+            for cpt in current_axis.components:
+                subslice = AffineSliceComponent(cpt.label, start, stop, step)
+                slice_cpts.append(subslice)
+        elif isinstance(index, MultiArray):
+            slice_cpts = []
+            for cpt in current_axis.components:
+                subslice = Subset(cpt.label, index)
+                slice_cpts.append(subslice)
+        else:
+            raise TypeError
+
         index = Slice(current_axis.label, slice_cpts)
-    else:
-        assert isinstance(index, Index)
 
     tree = IndexTree(index)
     if subindices:
@@ -370,43 +475,6 @@ def _index_tree_from_collection(
         ):
             subtree = _index_tree_from_collection(subindices, axes, path | target_path)
             tree = tree.add_subtree(subtree, index, component)
-    return tree
-
-
-# dead code, useful error checking should be transferred
-def _index_tree_from_slices(
-    slices: Collection[slice], axes: AxisTree, current_axis: Axis | None = None
-):
-    assert False, "dead code"
-    current_axis = current_axis or axes.root
-    slice_, *subslices = slices
-
-    if some_but_not_all(
-        axes.child(current_axis, cpt) is None for cpt in current_axis.component_labels
-    ):
-        raise ValueError(
-            "Slice shorthand cannot be used for data layouts with variable depth, "
-            "construct and explicit IndexTree instead"
-        )
-
-    slice_cpts = []
-    for cpt in current_axis.components:
-        slice_cpts.append(
-            SliceComponent(cpt.label, slice_.start, slice_.stop, slice_.step)
-        )
-
-    index = Slice(current_axis.label, slice_cpts)
-    tree = IndexTree(index)
-    for cpt_label in index.component_labels:
-        subaxis = axes.child(current_axis, cpt_label)
-        if subslices:
-            if not subaxis:
-                raise ValueError("Too many slices provided")
-            subtree = _index_tree_from_slices(subslices, axes, subaxis)
-            tree = tree.add_subtree(subtree, index, cpt_label)
-        else:
-            if subaxis:
-                raise ValueError("Too few slices provided")
     return tree
 
 
@@ -456,3 +524,13 @@ def is_fully_indexed(axes: AxisTree, indices: IndexTree) -> bool:
             return False
 
     return True
+
+
+# it is probably a better pattern to give axis trees a "parent" option
+class IndexedAxisTree:
+    def __init__(self, axes: AxisTree, indices: IndexTree):
+        self.axes = axes
+        self.indices = as_index_tree(indices, axes)
+
+    def index(self):
+        return LoopIndex(self)

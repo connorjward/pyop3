@@ -28,22 +28,6 @@ from pyop3.utils import flatten
 
 
 @pytest.fixture
-def scalar_copy_kernel():
-    code = lp.make_kernel(
-        "{ [i]: 0 <= i < 1 }",
-        "y[i] = x[i]",
-        [
-            lp.GlobalArg("x", ScalarType, (1,), is_input=True, is_output=False),
-            lp.GlobalArg("y", ScalarType, (1,), is_input=False, is_output=True),
-        ],
-        target=LOOPY_TARGET,
-        name="scalar_copy",
-        lang_version=(2018, 2),
-    )
-    return LoopyKernel(code, [READ, WRITE])
-
-
-@pytest.fixture
 def vector_inc_kernel():
     lpy_kernel = lp.make_kernel(
         "{ [i]: 0 <= i < 3 }",

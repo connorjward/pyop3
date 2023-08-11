@@ -586,11 +586,22 @@ class AxisTree(LabelledTree):
 
         self._layouts = {}
 
+    def __getitem__(self, indices):
+        from pyop3.index import IndexedAxisTree
+
+        return IndexedAxisTree(self, indices)
+
     def index(self):
         # cyclic import
         from pyop3.index import LoopIndex
 
         return LoopIndex(self)
+
+    def enumerate(self):
+        # cyclic import
+        from pyop3.index import EnumeratedLoopIndex
+
+        return EnumeratedLoopIndex(self)
 
     @functools.cached_property
     def datamap(self) -> dict[str:DistributedArray]:

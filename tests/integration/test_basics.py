@@ -10,7 +10,9 @@ from pyop3.axis import Axis, AxisComponent, AxisTree
 from pyop3.codegen import LOOPY_LANG_VERSION, LOOPY_TARGET
 from pyop3.distarray import MultiArray
 from pyop3.dtypes import IntType, ScalarType
-from pyop3.index import Index, IndexTree, Slice
+
+# ultimately shouldn't be needed here
+from pyop3.index import Index, IndexTree, IndexTreeBag, Slice
 from pyop3.loopexpr import INC, READ, WRITE, LoopyKernel, do_loop, loop
 from pyop3.utils import flatten
 
@@ -50,7 +52,7 @@ def vector_copy_kernel():
 def test_scalar_copy(scalar_copy_kernel):
     m = 10
 
-    axis = Axis(m)
+    axis = Axis([AxisComponent(m, "pt0")], "ax0")
     dat0 = MultiArray(
         axis,
         name="dat0",
@@ -62,7 +64,12 @@ def test_scalar_copy(scalar_copy_kernel):
         dtype=dat0.dtype,
     )
 
-    do_loop(p := axis.index(), scalar_copy_kernel(dat0[p], dat1[p]))
+    # for now, need to clean up API
+    p = axis.index()
+    itree_bag = IndexTreeBag(pmap({pmap({p: pmap({"ax0": "pt0"})}): IndexTree(p)}))
+
+    # do_loop(p := axis.index(), scalar_copy_kernel(dat0[p], dat1[p]))
+    do_loop(p, scalar_copy_kernel(dat0[itree_bag], dat1[itree_bag]))
     assert np.allclose(dat1.data, dat0.data)
 
 

@@ -27,20 +27,26 @@ from pyop3.codegen import LOOPY_LANG_VERSION, LOOPY_TARGET
 from pyop3.utils import flatten
 
 
-@pytest.fixture
-def scalar_copy_kernel():
-    code = lp.make_kernel(
-        "{ [i]: 0 <= i < 1 }",
-        "y[i] = x[i]",
-        [
-            lp.GlobalArg("x", ScalarType, (1,), is_input=True, is_output=False),
-            lp.GlobalArg("y", ScalarType, (1,), is_input=False, is_output=True),
-        ],
-        target=LOOPY_TARGET,
-        name="scalar_copy",
-        lang_version=(2018, 2),
-    )
-    return LoopyKernel(code, [READ, WRITE])
+# these could be separate tests
+def test_loop_over_slices(scalar_copy_kernel):
+    npoints = 10
+    axes = AxisTree(Axis(npoints))
+    dat0 = MultiArray(axes, name="dat0", data=np.arange(npoints, dtype=ScalarType))
+    dat1 = MultiArray(axes, name="dat1", dtype=dat0.dtype)
+
+    do_loop(p := axes[1:].index(), scalar_copy_kernel(dat0[p], dat1[p]))
+    assert np.allclose(dat1.data[:2], 0)
+    assert np.allclose(dat1.data[2:], dat0.data[2:])
+
+    dat1.data[...] = 0
+    do_loop(p := axes[:6].index(), scalar_copy_kernel(dat0[p], dat1[p]))
+    assert np.allclose(dat1.data[:6], dat0.data[:6])
+    assert np.allclose(dat1.data[6:], 0)
+
+    dat1.data[...] = 0
+    do_loop(p := axes[::2].index(), scalar_copy_kernel(dat0[p], dat1[p]))
+    assert np.allclose(dat1.data[::2], dat0.data[::2])
+    assert np.allclose(dat1.data[1::2], 0)
 
 
 def test_scalar_copy_of_subset(scalar_copy_kernel):
@@ -56,19 +62,9 @@ def test_scalar_copy_of_subset(scalar_copy_kernel):
     saxes = AxisTree(
         Axis([AxisComponent(n, "scpt0")], "sax0", id="root"), {"root": Axis(1)}
     )
-    subset_array = MultiArray(saxes, name="subset0", data=sdata)
-    subset = Map(
-        {
-            pmap({"sax0": "scpt0"}): [
-                TabulatedMapComponent("ax0", "cpt0", subset_array),
-            ],
-        },
-        "subset",
-    )
+    subset = MultiArray(saxes, name="subset0", data=sdata)
 
-    do_loop(
-        p := saxes.root.index(), scalar_copy_kernel(dat0[subset(p)], dat1[subset(p)])
-    )
+    do_loop(p := axes[subset].index(), scalar_copy_kernel(dat0[p], dat1[p]))
 
     assert np.allclose(dat1.data[sdata], dat0.data[sdata])
     assert np.allclose(dat1.data[untouched], 0)
