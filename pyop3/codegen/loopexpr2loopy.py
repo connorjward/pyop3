@@ -28,12 +28,15 @@ from pyop3.index import (
     CalledMap,
     Index,
     Indexed,
+    IndexedAxisTree,
     IndexTree,
     LocalLoopIndex,
     LoopIndex,
     Map,
     Slice,
     TabulatedMapComponent,
+    UnrolledCalledMap,
+    UnrolledLoopIndex,
 )
 from pyop3.log import logger
 from pyop3.loopexpr import (
@@ -299,18 +302,10 @@ def _(
     loop_indices,
     ctx: LoopyCodegenContext,
 ) -> None:
-    if not isinstance(loop.index.iterset, AxisTree):
-        raise NotImplementedError("Could use _expand index to get the right thing?")
     _parse_loop(
         loop,
         loop_indices,
         ctx,
-        loop.index.iterset,
-        loop.index.iterset.root,
-        pmap(),
-        pmap(),
-        pmap(),
-        (),
     )
 
 
@@ -319,13 +314,7 @@ def _(
 def _parse_loop(
     loop: Loop,
     loop_indices,
-    ctx: LoopyCodegenContext,
-    axes,
-    axis,
-    path,
-    loop_sizes,
-    jnames,
-    ipath,
+    codegen_ctx: LoopyCodegenContext,
 ):
     """This is for something like map(p).index() or map0(map1(p)).index().
 
@@ -338,27 +327,110 @@ def _parse_loop(
     with a final set of axes that give the shape of the iteration. As above we then
     need to traverse the leaves in turn.
     """
-    leaves, index_data = _expand_index(
-        loop.index.iterset, loop_indices=loop_indices, codegen_ctx=ctx
+    """
+    11/08
+
+    It is not sufficient to just use _expand_index here. We could have a whole index
+    tree here. We need to use visit_indices instead.
+
+    14/08
+
+    Ah but we always have a loop index here, which is itself part of an index tree.
+    We need to use the iterset here instead of the index. The iterset must be either
+    an index tree, axis tree or indexed axis tree.
+    """
+    iterset = loop.index.iterset
+    if isinstance(iterset, AxisTree):
+        # e.g. axes.index()
+        axes = iterset
+        itrees = []
+    elif isinstance(iterset, IndexedAxisTree):
+        # e.g. axes[::2].index()
+        # very much like what we do for assignment
+
+        # unroll the index trees and axes
+        axes = iterset
+        itrees = []
+        while isinstance(axes, IndexedAxisTree):
+            itrees.insert(0, axes.indices)
+            axes = axes.axes
+    elif isinstance(iterset, IndexTree):
+        raise NotImplementedError("Building the initial axes requires some thought")
+        # something like map(p).index()
+        axes = None
+        itrees = [iterset]
+    else:
+        raise TypeError
+
+    # initialise some bits
+    myleaves, jnames_per_cpt = _parse_index_axis_tree_rec(
+        axes,
+        codegen_ctx,
+        current_axis=axes.root,
+        current_path=pmap(),
+        current_target_jnames=pmap(),
     )
 
-    axes = index_data["axes"]
-    jnames_per_axcpt = index_data["jnames"]
+    insns_per_leaf = {}
+    array_expr_per_leaf = {}
+    for leaf_key, leafdata in myleaves.items():
+        insns_per_leaf[leaf_key] = ()
+        array_expr_per_leaf[leaf_key] = leafdata[1]
 
-    insns_per_leaf = {k: v[2] for k, v in leaves.items()}
+    for indices in itrees:
+        # get the right index tree given the loop context
+        loop_context = {}
+        for loop_index, (path, _) in loop_indices.items():
+            loop_context[loop_index] = pmap(path)
+        loop_context = pmap(loop_context)
+        index_tree = indices[loop_context]
+
+        # this is exactly the same as what we do for assignment (hence the currently bad name)
+        # the only difference between these is that at the end we do something different
+        # for loops
+        (
+            axes,
+            jnames_per_cpt,
+            array_expr_per_leaf,
+            insns_per_leaf,
+        ) = _parse_assignment(
+            index_tree,
+            ParseAssignmentPreorderContext(),
+            codegen_ctx=codegen_ctx,
+            loop_indices=loop_indices,
+            prev_axes=axes,
+            prev_jnames_per_cpt=jnames_per_cpt,
+            prev_array_expr_per_leaf=array_expr_per_leaf,
+            prev_insns_per_leaf=insns_per_leaf,
+        )
+
+    ###
 
     _finalize_parse_loop(
-        loop, axes, jnames_per_axcpt, insns_per_leaf, ctx, loop_indices
+        loop,
+        axes,
+        jnames_per_cpt,
+        array_expr_per_leaf,
+        insns_per_leaf,
+        codegen_ctx,
+        loop_indices,
     )
 
 
 def _finalize_parse_loop(
-    loop, axes, jnames_per_axcpt, insns_per_leaf, codegen_ctx, loop_indices
+    loop,
+    axes,
+    jnames_per_axcpt,
+    array_expr_per_leaf,
+    insns_per_leaf,
+    codegen_ctx,
+    loop_indices,
 ):
     _finalize_parse_loop_rec(
         loop,
         axes,
         jnames_per_axcpt,
+        array_expr_per_leaf,
         insns_per_leaf,
         codegen_ctx,
         loop_indices,
@@ -373,6 +445,7 @@ def _finalize_parse_loop_rec(
     loop,
     axes,
     jnames_per_axcpt,
+    array_expr_per_leaf,
     insns_per_leaf,
     codegen_ctx,
     loop_indices,
@@ -388,6 +461,8 @@ def _finalize_parse_loop_rec(
 
         new_path = current_path + ((current_axis.label, axcpt.label),)
         current_jname = jnames_per_axcpt[current_axis.id, axcpt.label]
+
+        # not sure that this needs tracking
         new_jnames = current_jnames | {current_axis.label: current_jname}
 
         with codegen_ctx.within_inames({iname}):
@@ -410,10 +485,15 @@ def _finalize_parse_loop_rec(
                     codegen_ctx.add_assignment(*insn)
 
                 for stmt in loop.statements:
-                    # I think that this is probably wrong. I want jname exprs here
                     _compile(
                         stmt,
-                        loop_indices | {loop.index: (new_path, new_jnames)},
+                        loop_indices
+                        | {
+                            loop.index: (
+                                new_path,
+                                array_expr_per_leaf[current_axis.id, axcpt.label],
+                            )
+                        },
                         codegen_ctx,
                     )
 
@@ -539,7 +619,7 @@ def _(call: FunctionCall, loop_indices, ctx: LoopyCodegenContext) -> None:
 def build_assignment(
     assignment,
     loop_indices,
-    cgen_ctx,
+    codegen_ctx,
 ):
     # each application of an index tree takes an input axis tree and the
     # jnames that apply to each axis component and then filters/transforms the
@@ -549,7 +629,7 @@ def build_assignment(
     # The first step is therefore to generate these initial jnames, and the last
     # is to emit the loops for the final tree.
     jnames_per_cpt, array_expr_per_leaf, insns_per_leaf = _prepare_assignment(
-        assignment, cgen_ctx
+        assignment, codegen_ctx
     )
 
     """
@@ -603,7 +683,7 @@ def build_assignment(
         ) = _parse_assignment(
             index_tree,
             ParseAssignmentPreorderContext(),
-            cgen_ctx=cgen_ctx,
+            codegen_ctx=codegen_ctx,
             loop_indices=loop_indices,
             prev_axes=axes,
             prev_jnames_per_cpt=jnames_per_cpt,
@@ -616,7 +696,12 @@ def build_assignment(
     # This will traverse the final axis tree, collecting jnames. At the bottom the
     # leaf insns will be emitted and the temp_expr will be assigned to the array one.
     _parse_assignment_final(
-        assignment, axes, jnames_per_cpt, array_expr_per_leaf, insns_per_leaf, cgen_ctx
+        assignment,
+        axes,
+        jnames_per_cpt,
+        array_expr_per_leaf,
+        insns_per_leaf,
+        codegen_ctx,
     )
 
 
@@ -635,6 +720,8 @@ def _prepare_assignment(assignment, ctx: LoopyCodegenContext) -> tuple[pmap, pma
     )
 
 
+# I think that this is pretty much exactly the same as what _expand_index does for
+# an axis tree
 def _prepare_assignment_rec(
     assignment,
     axes: AxisTree,
@@ -883,7 +970,7 @@ def _parse_assignment_final_rec(
 
 
 @functools.singledispatch
-def _expand_index(index, *, loop_indices, cgen_ctx, **kwargs):
+def _expand_index(index, *, loop_indices, codegen_ctx, **kwargs):
     """
     Return an axis tree and jnames corresponding to unfolding the index.
 
@@ -894,20 +981,20 @@ def _expand_index(index, *, loop_indices, cgen_ctx, **kwargs):
 
 
 @_expand_index.register
-def _(index: LoopIndex, *, loop_indices, cgen_ctx, **kwargs):
-    path, jname_exprs = loop_indices[index]
+def _(index: UnrolledLoopIndex, *, loop_indices, codegen_ctx, **kwargs):
+    path, jname_exprs = loop_indices[index.loop_index]
     insns = ()
     # TODO namedtuple anyone?
     return {None: (path, jname_exprs, insns)}, {"axes": AxisTree(), "jnames": pmap()}
 
 
 @_expand_index.register
-def _(index: CalledMap, *, loop_indices, cgen_ctx, **kwargs):
+def _(index: UnrolledCalledMap, *, loop_indices, codegen_ctx, **kwargs):
     # old alias
-    ctx = cgen_ctx
+    ctx = codegen_ctx
 
     leaves, index_data = _expand_index(
-        index.from_index, loop_indices=loop_indices, cgen_ctx=ctx, **kwargs
+        index.from_index, loop_indices=loop_indices, codegen_ctx=ctx, **kwargs
     )
     axes = index_data.get("axes")
     from_jnames = index_data.get("jnames", {})
@@ -994,9 +1081,9 @@ def _(index: CalledMap, *, loop_indices, cgen_ctx, **kwargs):
 
 
 @_expand_index.register
-def _(slice_: Slice, *, cgen_ctx, prev_axes, **kwargs):
+def _(slice_: Slice, *, codegen_ctx, prev_axes, **kwargs):
     # alias, fix
-    ctx = cgen_ctx
+    ctx = codegen_ctx
 
     jnames_per_cpt = {}
     leaf_keys = []
@@ -1361,8 +1448,8 @@ def collect_shape_index_callback(index, *args, **kwargs):
 
 
 @collect_shape_index_callback.register
-def _(loop_index: LoopIndex, *, loop_indices, **kwargs):
-    path = loop_indices[loop_index][0]
+def _(loop_index: UnrolledLoopIndex, *, loop_indices, **kwargs):
+    path = loop_indices[loop_index.loop_index][0]
     return {None: (path,)}, {"axes": AxisTree()}
 
 
@@ -1376,7 +1463,7 @@ def _(local_index: LocalLoopIndex, *, loop_indices, **kwargs):
 # TODO this could be done with callbacks so we share code with when
 # we also want to emit instructions
 @collect_shape_index_callback.register
-def _(called_map: CalledMap, **kwargs):
+def _(called_map: UnrolledCalledMap, **kwargs):
     leaves, index_data = collect_shape_index_callback(called_map.from_index, **kwargs)
     axes = index_data["axes"]
 

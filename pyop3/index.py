@@ -222,6 +222,11 @@ class CalledMap:
         self.from_index = from_index
 
 
+class LoopIndex:
+    def __init__(self, iterset):
+        self.iterset = iterset
+
+
 class Index(LabelledNode):
     @property
     @abc.abstractmethod
@@ -229,7 +234,7 @@ class Index(LabelledNode):
         pass
 
 
-class LoopIndex(Index):
+class UnrolledLoopIndex(Index):
     """Object representing a set of indices of a loop nest.
 
     FIXME More detail needed.
@@ -244,15 +249,12 @@ class LoopIndex(Index):
 
     """
 
-    def __init__(self, iterset, **kwargs):
-        cpt_labels = [cpt_label for ax, cpt_label in iterset.leaves]
-        if len(cpt_labels) > 1:
-            raise NotImplementedError(
-                "Multi-component loop indices are not currently supported"
-            )
+    def __init__(self, loop_index: LoopIndex, path, **kwargs):
+        # cpt_labels = [cpt_label for ax, cpt_label in iterset.leaves]
 
-        super().__init__(cpt_labels, **kwargs)
-        self.iterset = iterset
+        super().__init__(["not a useful label"], **kwargs)
+        self.loop_index = loop_index
+        self.path = path
 
     @property
     def target_paths(self) -> tuple[pmap]:
@@ -263,7 +265,7 @@ class LoopIndex(Index):
 
     @functools.cached_property
     def datamap(self):
-        return self.iterset.datamap
+        return self.loop_index.iterset.datamap
 
 
 class LocalLoopIndex(Index):
@@ -529,8 +531,15 @@ def is_fully_indexed(axes: AxisTree, indices: IndexTree) -> bool:
 # it is probably a better pattern to give axis trees a "parent" option
 class IndexedAxisTree:
     def __init__(self, axes: AxisTree, indices: IndexTree):
+        if not isinstance(indices, IndexTreeBag):
+            raise NotImplementedError("TODO")
         self.axes = axes
-        self.indices = as_index_tree(indices, axes)
+        # self.indices = as_index_tree(indices, axes)
+        self.indices = indices
 
     def index(self):
         return LoopIndex(self)
+
+    @functools.cached_property
+    def datamap(self):
+        return self.axes.datamap | self.indices.datamap

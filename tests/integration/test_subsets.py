@@ -24,19 +24,36 @@ from pyop3 import (
     loop,
 )
 from pyop3.codegen import LOOPY_LANG_VERSION, LOOPY_TARGET
+from pyop3.index import AffineSliceComponent, IndexTreeBag, UnrolledLoopIndex
 from pyop3.utils import flatten
 
 
 # these could be separate tests
 def test_loop_over_slices(scalar_copy_kernel):
     npoints = 10
-    axes = AxisTree(Axis(npoints))
+    # axes = AxisTree(Axis(npoints))
+    axes = AxisTree(Axis([AxisComponent(npoints, "pt0")], "ax0"))
     dat0 = MultiArray(axes, name="dat0", data=np.arange(npoints, dtype=ScalarType))
     dat1 = MultiArray(axes, name="dat1", dtype=dat0.dtype)
 
-    do_loop(p := axes[1:].index(), scalar_copy_kernel(dat0[p], dat1[p]))
+    # cleanup
+    itreebag0 = IndexTreeBag(
+        pmap({pmap(): IndexTree(Slice("ax0", [AffineSliceComponent("pt0", start=2)]))})
+    )
+    p = axes[itreebag0].index()
+    unrolled_p = UnrolledLoopIndex(p, pmap({"ax0": "pt0"}))
+    itree_bag = IndexTreeBag(
+        pmap({pmap({p: pmap({"ax0": "pt0"})}): IndexTree(unrolled_p)})
+    )
+
+    # do_loop(p := axes[2:].index(), scalar_copy_kernel(dat0[p], dat1[p]))
+    # do_loop(p, scalar_copy_kernel(dat0[itree_bag], dat1[itree_bag]))
+    l = loop(p, scalar_copy_kernel(dat0[itree_bag], dat1[itree_bag]))
+    l()
     assert np.allclose(dat1.data[:2], 0)
     assert np.allclose(dat1.data[2:], dat0.data[2:])
+
+    assert False, "fixme below"
 
     dat1.data[...] = 0
     do_loop(p := axes[:6].index(), scalar_copy_kernel(dat0[p], dat1[p]))
