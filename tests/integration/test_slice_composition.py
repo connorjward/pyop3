@@ -57,16 +57,10 @@ def test_2d_slice_composition(vec2_copy_kernel):
     dat0 = MultiArray(axes0, name="dat0", data=np.arange(axes0.size, dtype=ScalarType))
     dat1 = MultiArray(axes1, name="dat1", dtype=dat0.dtype)
 
-    itree = IndexTree(
-        Slice("ax0", [AffineSliceComponent("cpt0", 2, 4)], id="slice1"),
-        {"slice1": Slice("ax1", [AffineSliceComponent("cpt0", 1, 2)])},
-    )
-
     do_loop(
         Axis(1).index(),
         vec2_copy_kernel(
-            # dat0[::2, 1:][2:4, 1],
-            dat0[::2, 1:][itree],
+            dat0[::2, 1:][2:4, 1],
             dat1[...],
         ),
     )

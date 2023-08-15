@@ -4,6 +4,7 @@ import abc
 import collections
 import dataclasses
 import functools
+import numbers
 from typing import Any, Collection, Hashable, Mapping, Sequence
 
 import pytools
@@ -566,6 +567,12 @@ def _split_index_tree_from_iterable(
             ]
         elif isinstance(index, MultiArray):
             slice_cpts = [Subset(cpt.label, index) for cpt in current_axis.components]
+        elif isinstance(index, numbers.Integral):
+            # an integer is just a one-sized slice (assumed over all components)
+            slice_cpts = [
+                AffineSliceComponent(cpt.label, index, index + 1)
+                for cpt in current_axis.components
+            ]
         else:
             raise TypeError
         index = Slice(current_axis.label, slice_cpts)
