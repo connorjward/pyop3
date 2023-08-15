@@ -22,8 +22,8 @@ from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
 from pyop3.index import (
     Indexed,
     IndexTree,
-    IndexTreeBag,
-    as_index_tree,
+    SplitIndexTree,
+    as_split_index_tree,
     is_fully_indexed,
 )
 from pyop3.utils import (
@@ -313,9 +313,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
 
     # maybe I could check types here and use instead of get_value?
     def __getitem__(self, indices: IndexTree | Index):
-        # indices = as_index_tree(indices, self.axes)
-        if not isinstance(indices, IndexTreeBag):
-            raise NotImplementedError("TODO nice parsing")
+        indices = as_split_index_tree(indices, axes=self.axes)
 
         # TODO recover this
         # if not is_fully_indexed(self.axes, indices):

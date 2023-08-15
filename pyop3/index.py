@@ -27,7 +27,27 @@ class IndexTree(LabelledTree):
         return postvisit(self, _collect_datamap, itree=self)
 
 
-class IndexTreeBag:
+class SplitIndexTree:
+    """Container of `IndexTree`s distinguished by outer loop information.
+
+    This class is required because multi-component outer loops can lead to
+    ambiguity in the shape of the resulting `IndexTree`. Consider the loop:
+
+    .. code:: python
+
+        loop(p := mesh.points, kernel(dat0[closure(p)]))
+
+    In this case, assuming ``mesh`` to be at least 1-dimensional, ``p`` will
+    loop over multiple components (cells, edges, vertices, etc) and each
+    component will have a differently sized temporary. This is because
+    vertices map to themselves whereas, for example, edges map to themselves
+    *and* the incident vertices.
+
+    A `SplitIndexTree` is therefore useful as it allows the description of
+    an `IndexTree` *per possible configuration of relevant loop indices*.
+
+    """
+
     def __init__(self, index_trees: pmap[pmap[LoopIndex, pmap[str, str]], IndexTree]):
         # this is terribly unclear
         if not is_single_valued([set(key.keys()) for key in index_trees.keys()]):
@@ -64,17 +84,8 @@ class Indexed:
     """
 
     def __init__(self, obj, indices):
-        # Since loop indices can target different axes we need to have multiple index
-        # trees. These are stored in a pmap mapping {loop_index: axis_path, ...} to
-        # index tree. The idea is that each tree can be handled cleanly with explicitly
-        # known axes. During code generation we can select the right tree.
-        # Some thought is required about how we want to parse index trees/lists of indices
-        # into these separable trees.
-        if not isinstance(indices, IndexTreeBag):
-            raise NotImplementedError("Some clever parsing is required here")
-
         self.obj = obj
-        self.indices = indices
+        self.indices = as_split_index_tree(indices)
 
     # old alias, not right now we have a pmap of index trees rather than just a single one
     @property
@@ -118,11 +129,12 @@ class SliceComponent(pytools.ImmutableRecord, abc.ABC):
 class AffineSliceComponent(SliceComponent):
     fields = SliceComponent.fields | {"start", "stop", "step"}
 
-    def __init__(self, component, start=0, stop=None, step=1):
+    def __init__(self, component, start=None, stop=None, step=None):
         super().__init__(component)
-        self.start = start
+        # use None for the default args here since that agrees with Python slices
+        self.start = start if start is not None else 0
         self.stop = stop
-        self.step = step
+        self.step = step if step is not None else 1
 
 
 class Subset(SliceComponent):
@@ -234,7 +246,7 @@ class Index(LabelledNode):
         pass
 
 
-class UnrolledLoopIndex(Index):
+class SplitLoopIndex(Index):
     """Object representing a set of indices of a loop nest.
 
     FIXME More detail needed.
@@ -254,14 +266,18 @@ class UnrolledLoopIndex(Index):
 
         super().__init__(["not a useful label"], **kwargs)
         self.loop_index = loop_index
+
+        # TODO I don't think that I need to store this attribute as we can always
+        # find it another way.
         self.path = path
 
     @property
     def target_paths(self) -> tuple[pmap]:
-        return tuple(
-            self.iterset.path(leaf_axis, leaf_cpt_label)
-            for leaf_axis, leaf_cpt_label in self.iterset.leaves
-        )
+        return (self.path,)
+        # return tuple(
+        #     self.iterset.path(leaf_axis, leaf_cpt_label)
+        #     for leaf_axis, leaf_cpt_label in self.iterset.leaves
+        # )
 
     @functools.cached_property
     def datamap(self):
@@ -313,7 +329,7 @@ class Slice(Index):
         return {}
 
 
-class UnrolledCalledMap(Index):
+class SplitCalledMap(Index):
     def __init__(self, map, from_index, loop_context):
         # The degree of the called map depends on the index it acts on. If
         # the map maps from a -> {a, b, c} *and* b -> {b, c} then the degree
@@ -385,6 +401,76 @@ class EnumeratedLoopIndex:
         self.count = LocalLoopIndex(self.index)
 
 
+# it is probably a better pattern to give axis trees a "parent" option
+class IndexedAxisTree:
+    def __init__(self, axes: AxisTree, indices: IndexTree):
+        self.axes = axes
+        self.indices = as_split_index_tree(indices, axes=axes)
+
+    @property
+    def target_paths(self):
+        # should move somewhere else
+        from pyop3.codegen.loopexpr2loopy import collect_target_paths
+
+        # TODO I don't think I need to pass loop_indices here (pmap() here)
+        _, paths = collect_target_paths(self, pmap())
+        return tuple(paths.values())
+
+    def index(self):
+        return LoopIndex(self)
+
+    @functools.cached_property
+    def datamap(self):
+        return self.axes.datamap | self.indices.datamap
+
+
+@functools.singledispatch
+def as_split_index_tree(arg: Any, **kwargs) -> SplitIndexTree:
+    # cyclic import
+    from pyop3.distarray import MultiArray
+
+    if isinstance(arg, MultiArray):
+        return _split_index_tree_from_iterable([arg], **kwargs)
+    elif isinstance(arg, collections.abc.Iterable):
+        return _split_index_tree_from_iterable(arg, **kwargs)
+    elif arg is Ellipsis:
+        return _split_index_tree_from_ellipsis(**kwargs)
+    else:
+        raise TypeError(f"No handler registered for {type(arg).__name__}")
+
+
+@as_split_index_tree.register
+def _(split_index_tree: SplitIndexTree, **kwargs) -> SplitIndexTree:
+    return split_index_tree
+
+
+@as_split_index_tree.register
+def _(index_tree: IndexTree, **kwargs) -> SplitIndexTree:
+    for index in index_tree.nodes:
+        if isinstance(index, SplitLoopIndex) and len(index.loop_index.leaves) > 1:
+            raise ValueError(
+                "Cannot convert an IndexTree to a SplitIndexTree if it contains a multi-component loop index"
+            )
+    return SplitIndexTree({pmap(): index_tree})
+
+
+@as_split_index_tree.register
+def _(loop_index: LoopIndex, **kwargs) -> SplitIndexTree:
+    index_trees = {}
+    # this API could be better
+    for leaf_axis, leaf_cpt_label in loop_index.iterset.leaves:
+        path = loop_index.iterset.path(leaf_axis, leaf_cpt_label)
+        index_trees[pmap({loop_index: path})] = IndexTree(
+            SplitLoopIndex(loop_index, path)
+        )
+    return SplitIndexTree(index_trees)
+
+
+@as_split_index_tree.register
+def _(slice_: Slice, **kwargs) -> SplitIndexTree:
+    return as_split_index_tree(IndexTree(slice_), **kwargs)
+
+
 @functools.singledispatch
 def as_index_tree(arg: Any, axes: AxisTree) -> IndexTree:
     # cyclic import
@@ -419,12 +505,12 @@ def _collect_datamap(index, *subdatamaps, itree):
     return index.datamap | merge_dicts(subdatamaps)
 
 
-# TODO Handle axes so we can include slices in the list
-# There are some rules about how we do this. Indices do not strictly need to
-# follow the same ordering as the axes themselves.
-def _index_tree_from_collection(
-    indices: Collection[Index], axes: AxisTree, path=pmap()
-):
+def _split_index_tree_from_iterable(
+    indices: Iterable[Any],
+    axes: AxisTree,
+    path=pmap(),
+    loop_context=pmap(),
+) -> SplitIndexTree:
     """Return an index tree formed by concatenating successive indices.
 
     If any of the indices yield multiple components then subsequent indices
@@ -435,6 +521,21 @@ def _index_tree_from_collection(
     from pyop3.distarray import MultiArray
 
     index, *subindices = indices
+
+    if isinstance(index, LoopIndex):
+        if index in loop_context:
+            raise NotImplementedError("Pretty easy, should reuse existing path")
+
+        # again, bad API
+        subtrees = {}
+        for loop_path in index.iterset.target_paths:
+            new_indices = [SplitLoopIndex(index, loop_path)] + subindices
+            new_loop_context = loop_context | {index: loop_path}
+            subtree = _split_index_tree_from_iterable(
+                new_indices, axes, path, new_loop_context
+            )
+            subtrees |= subtree.index_trees
+        return SplitIndexTree(subtrees)
 
     if not isinstance(index, Index):
         # We can use a slice provided that the previous indices provide a complete path.
@@ -450,37 +551,43 @@ def _index_tree_from_collection(
             current_axis = axes.child(parent_axis, parent_cpt)
 
         if isinstance(index, slice):
-            start = index.start if index.start is not None else 0
-            stop = index.stop
-            step = index.step if index.step is not None else 1
-
             # Slices target all components of the current axis.
-            slice_cpts = []
-            for cpt in current_axis.components:
-                subslice = AffineSliceComponent(cpt.label, start, stop, step)
-                slice_cpts.append(subslice)
+            slice_cpts = [
+                AffineSliceComponent(cpt.label, index.start, index.stop, index.step)
+                for cpt in current_axis.components
+            ]
         elif isinstance(index, MultiArray):
-            slice_cpts = []
-            for cpt in current_axis.components:
-                subslice = Subset(cpt.label, index)
-                slice_cpts.append(subslice)
+            slice_cpts = [Subset(cpt.label, index) for cpt in current_axis.components]
         else:
             raise TypeError
-
         index = Slice(current_axis.label, slice_cpts)
+    else:
+        pass
 
-    tree = IndexTree(index)
     if subindices:
+        index_trees = {}
         # for maps these are identical but that is not so for slices
         for component, target_path in checked_zip(
             index.component_labels, index.target_paths
         ):
-            subtree = _index_tree_from_collection(subindices, axes, path | target_path)
-            tree = tree.add_subtree(subtree, index, component)
-    return tree
+            split_subtree = _split_index_tree_from_iterable(
+                subindices, axes, path | target_path
+            )
+            for loopctx, subtree in split_subtree.index_trees.items():
+                if loopctx not in index_trees:
+                    index_trees[loopctx] = IndexTree(index).add_subtree(
+                        subtree, index, component
+                    )
+                else:
+                    index_trees[loopctx] = index_trees[loopctx].add_subtree(
+                        subtree, index, component
+                    )
+    else:
+        index_trees = {loop_context: IndexTree(index)}
+    return SplitIndexTree(index_trees)
 
 
-def _index_tree_from_ellipsis(
+def _split_index_tree_from_ellipsis(
     axes: AxisTree, current_axis: Axis | None = None
 ) -> IndexTree:
     current_axis = current_axis or axes.root
@@ -526,20 +633,3 @@ def is_fully_indexed(axes: AxisTree, indices: IndexTree) -> bool:
             return False
 
     return True
-
-
-# it is probably a better pattern to give axis trees a "parent" option
-class IndexedAxisTree:
-    def __init__(self, axes: AxisTree, indices: IndexTree):
-        if not isinstance(indices, IndexTreeBag):
-            raise NotImplementedError("TODO")
-        self.axes = axes
-        # self.indices = as_index_tree(indices, axes)
-        self.indices = indices
-
-    def index(self):
-        return LoopIndex(self)
-
-    @functools.cached_property
-    def datamap(self):
-        return self.axes.datamap | self.indices.datamap

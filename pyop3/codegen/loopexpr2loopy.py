@@ -34,9 +34,9 @@ from pyop3.index import (
     LoopIndex,
     Map,
     Slice,
+    SplitCalledMap,
+    SplitLoopIndex,
     TabulatedMapComponent,
-    UnrolledCalledMap,
-    UnrolledLoopIndex,
 )
 from pyop3.log import logger
 from pyop3.loopexpr import (
@@ -461,8 +461,6 @@ def _finalize_parse_loop_rec(
 
         new_path = current_path + ((current_axis.label, axcpt.label),)
         current_jname = jnames_per_axcpt[current_axis.id, axcpt.label]
-
-        # not sure that this needs tracking
         new_jnames = current_jnames | {current_axis.label: current_jname}
 
         with codegen_ctx.within_inames({iname}):
@@ -473,6 +471,7 @@ def _finalize_parse_loop_rec(
                     loop,
                     axes,
                     jnames_per_axcpt,
+                    array_expr_per_leaf,
                     insns_per_leaf,
                     codegen_ctx,
                     current_axis=subaxis,
@@ -981,7 +980,7 @@ def _expand_index(index, *, loop_indices, codegen_ctx, **kwargs):
 
 
 @_expand_index.register
-def _(index: UnrolledLoopIndex, *, loop_indices, codegen_ctx, **kwargs):
+def _(index: SplitLoopIndex, *, loop_indices, codegen_ctx, **kwargs):
     path, jname_exprs = loop_indices[index.loop_index]
     insns = ()
     # TODO namedtuple anyone?
@@ -989,7 +988,7 @@ def _(index: UnrolledLoopIndex, *, loop_indices, codegen_ctx, **kwargs):
 
 
 @_expand_index.register
-def _(index: UnrolledCalledMap, *, loop_indices, codegen_ctx, **kwargs):
+def _(index: SplitCalledMap, *, loop_indices, codegen_ctx, **kwargs):
     # old alias
     ctx = codegen_ctx
 
@@ -1448,7 +1447,7 @@ def collect_shape_index_callback(index, *args, **kwargs):
 
 
 @collect_shape_index_callback.register
-def _(loop_index: UnrolledLoopIndex, *, loop_indices, **kwargs):
+def _(loop_index: SplitLoopIndex, *, loop_indices, **kwargs):
     path = loop_indices[loop_index.loop_index][0]
     return {None: (path,)}, {"axes": AxisTree()}
 
@@ -1463,7 +1462,7 @@ def _(local_index: LocalLoopIndex, *, loop_indices, **kwargs):
 # TODO this could be done with callbacks so we share code with when
 # we also want to emit instructions
 @collect_shape_index_callback.register
-def _(called_map: UnrolledCalledMap, **kwargs):
+def _(called_map: SplitCalledMap, **kwargs):
     leaves, index_data = collect_shape_index_callback(called_map.from_index, **kwargs)
     axes = index_data["axes"]
 
@@ -1522,11 +1521,6 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
         leaves[axes.root.id, cpt.label] = (path,)
 
     return leaves, {"axes": axes}
-
-
-# @collect_shape_index_callback.register
-# def _(axes: AxisTree, ???):
-#     ...
 
 
 def collect_shape_pre_callback(leaf, preorder_ctx, **kwargs):
@@ -1605,3 +1599,72 @@ def _indexed_axes(indexed, loop_indices):
         return axes
     else:
         return AxisTree()
+
+
+def collect_target_paths_pre_callback(leaf, preorder_ctx, **kwargs):
+    return preorder_ctx
+
+
+def _collect_target_paths_post_callback_terminal(
+    leafkey,
+    leaf,
+    preorder_ctx,
+    **kwargs,
+):
+    (target_path_for_this_leaf,) = leaf
+    return None, target_path_for_this_leaf
+
+
+def collect_target_paths_final_callback(index_data, leafdata):
+    axes = index_data["axes"]
+    target_paths_per_leaf = {}
+    for k, (subax, target_path) in leafdata.items():
+        if subax is not None:
+            if axes.root:
+                axes = axes.add_subtree(subax, *k)
+            else:
+                axes = subax
+        target_paths_per_leaf[k] = target_path
+
+    return axes, target_paths_per_leaf
+
+
+def collect_target_paths(indexed, loop_indices):
+    # handle 'indexed of indexed' things
+    if isinstance(indexed, Indexed):
+        if isinstance(indexed.obj, Indexed):
+            orig_axes, _ = collect_target_paths(indexed.obj, loop_indices)
+        else:
+            assert isinstance(indexed.obj, MultiArray)
+            orig_axes = indexed.obj.axes
+    else:
+        assert isinstance(indexed, IndexedAxisTree)
+        if isinstance(indexed.axes, IndexedAxisTree):
+            orig_axes, _ = collect_target_paths(indexed.axes, loop_indices)
+        else:
+            assert isinstance(indexed.axes, AxisTree)
+            orig_axes = indexed.axes
+
+    # get the right index tree given the loop context
+    loop_context = {}
+    for loop_index, (path, _) in loop_indices.items():
+        loop_context[loop_index] = pmap(path)
+    loop_context = pmap(loop_context)
+    index_tree = indexed.indices[loop_context]
+
+    axes, target_paths = visit_indices(
+        index_tree,
+        None,
+        index_callback=collect_shape_index_callback,
+        pre_callback=collect_target_paths_pre_callback,
+        post_callback_terminal=_collect_target_paths_post_callback_terminal,
+        post_callback_nonterminal=collect_shape_post_callback_nonterminal,
+        final_callback=collect_target_paths_final_callback,
+        loop_indices=loop_indices,
+        prev_axes=orig_axes,
+    )
+
+    if axes is not None:
+        return axes, target_paths
+    else:
+        return AxisTree(), target_paths

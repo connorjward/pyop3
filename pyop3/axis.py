@@ -552,6 +552,9 @@ class Axis(LabelledNode):
         # dead code, remove
         self.indexed = False
 
+    def __getitem__(self, indices):
+        return as_axis_tree(self)[indices]
+
     def __str__(self) -> str:
         return f"{self.__class__.__name__}([{', '.join(str(cpt) for cpt in self.components)}], label={self.label})"
 
@@ -612,12 +615,8 @@ class AxisTree(LabelledTree):
         return dmap
 
     @property
-    def part(self):
-        try:
-            (pt,) = self.parts
-            return pt
-        except ValueError:
-            raise RuntimeError
+    def target_paths(self):
+        return tuple(self.path(ax, cpt) for ax, cpt in self.leaves)
 
     @functools.cached_property
     def layouts(self):

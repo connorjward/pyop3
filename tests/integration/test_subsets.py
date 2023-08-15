@@ -24,7 +24,7 @@ from pyop3 import (
     loop,
 )
 from pyop3.codegen import LOOPY_LANG_VERSION, LOOPY_TARGET
-from pyop3.index import AffineSliceComponent, IndexTreeBag, UnrolledLoopIndex
+from pyop3.index import AffineSliceComponent, SplitIndexTree, SplitLoopIndex
 from pyop3.utils import flatten
 
 
@@ -37,12 +37,12 @@ def test_loop_over_slices(scalar_copy_kernel):
     dat1 = MultiArray(axes, name="dat1", dtype=dat0.dtype)
 
     # cleanup
-    itreebag0 = IndexTreeBag(
+    itreebag0 = SplitIndexTree(
         pmap({pmap(): IndexTree(Slice("ax0", [AffineSliceComponent("pt0", start=2)]))})
     )
     p = axes[itreebag0].index()
-    unrolled_p = UnrolledLoopIndex(p, pmap({"ax0": "pt0"}))
-    itree_bag = IndexTreeBag(
+    unrolled_p = SplitLoopIndex(p, pmap({"ax0": "pt0"}))
+    itree_bag = SplitIndexTree(
         pmap({pmap({p: pmap({"ax0": "pt0"})}): IndexTree(unrolled_p)})
     )
 
