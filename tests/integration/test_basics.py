@@ -10,7 +10,9 @@ from pyop3.axis import Axis, AxisComponent, AxisTree
 from pyop3.codegen import LOOPY_LANG_VERSION, LOOPY_TARGET
 from pyop3.distarray import MultiArray
 from pyop3.dtypes import IntType, ScalarType
-from pyop3.index import Index, IndexTree, Slice
+
+# ultimately shouldn't be needed here
+from pyop3.index import AffineSliceComponent, Index, IndexTree, Slice, SplitIndexTree
 from pyop3.loopexpr import INC, READ, WRITE, LoopyKernel, do_loop, loop
 from pyop3.utils import flatten
 
@@ -50,7 +52,7 @@ def vector_copy_kernel():
 def test_scalar_copy(scalar_copy_kernel):
     m = 10
 
-    axis = Axis(m)
+    axis = Axis([AxisComponent(m, "pt0")], "ax0")
     dat0 = MultiArray(
         axis,
         name="dat0",
@@ -94,9 +96,9 @@ def test_multi_component_vector_copy(vector_copy_kernel):
     m, n, a, b = 4, 6, 2, 3
 
     axes = AxisTree(
-        root := Axis([(m, "cpt0"), (n, "cpt1")], "ax0"),
+        Axis([AxisComponent(m, "pt0"), AxisComponent(n, "pt1")], "ax0", id="root"),
         {
-            root.id: [
+            "root": [
                 Axis(a),
                 Axis(b),
             ]
@@ -113,11 +115,10 @@ def test_multi_component_vector_copy(vector_copy_kernel):
         dtype=dat0.dtype,
     )
 
-    # TODO It would be nice to express this as a loop over
-    # p := axes.root[Slice(axis="ax0", cpt=1)].index
-    # but this needs axis slicing to work first.
-    iterset = Axis([(n, "cpt1")], "ax0")
-    do_loop(p := iterset.index(), vector_copy_kernel(dat0[p, :], dat1[p, :]))
+    do_loop(
+        p := axes.root[Slice("ax0", [AffineSliceComponent("pt1")])].index(),
+        vector_copy_kernel(dat0[p, :], dat1[p, :]),
+    )
 
     assert all(dat1.data[: m * a] == 0)
     assert all(dat1.data[m * a :] == dat0.data[m * a :])

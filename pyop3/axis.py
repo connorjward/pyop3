@@ -552,8 +552,19 @@ class Axis(LabelledNode):
         # dead code, remove
         self.indexed = False
 
+    def __getitem__(self, indices):
+        return as_axis_tree(self)[indices]
+
     def __str__(self) -> str:
         return f"{self.__class__.__name__}([{', '.join(str(cpt) for cpt in self.components)}], label={self.label})"
+
+    @property
+    def target_paths(self):
+        return tuple(pmap({self.label: cpt.label}) for cpt in self.components)
+
+    @property
+    def size(self):
+        return as_axis_tree(self).size
 
     @property
     def count(self):
@@ -586,11 +597,22 @@ class AxisTree(LabelledTree):
 
         self._layouts = {}
 
+    def __getitem__(self, indices):
+        from pyop3.index import IndexedAxisTree
+
+        return IndexedAxisTree(self, indices)
+
     def index(self):
         # cyclic import
         from pyop3.index import LoopIndex
 
         return LoopIndex(self)
+
+    def enumerate(self):
+        # cyclic import
+        from pyop3.index import EnumeratedLoopIndex
+
+        return EnumeratedLoopIndex(self)
 
     @functools.cached_property
     def datamap(self) -> dict[str:DistributedArray]:
@@ -601,12 +623,8 @@ class AxisTree(LabelledTree):
         return dmap
 
     @property
-    def part(self):
-        try:
-            (pt,) = self.parts
-            return pt
-        except ValueError:
-            raise RuntimeError
+    def target_paths(self):
+        return tuple(self.path(ax, cpt) for ax, cpt in self.leaves)
 
     @functools.cached_property
     def layouts(self):
