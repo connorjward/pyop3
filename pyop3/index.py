@@ -87,11 +87,31 @@ class Indexed:
     def __init__(self, obj, indices):
         from pyop3.codegen.loopexpr2loopy import _indexed_axes
 
-        self.obj = obj
-        self.indices = as_split_index_tree(indices, axes=self.obj.axes)
+        # The following tricksy bit of code builds a pretend AxisTree for the
+        # indexed object. It is complicated because the resultant AxisTree will
+        # have a different shape depending on the loop context (which is why we have
+        # SplitIndexTrees). We therefore store axes here split by loop context.
+        # I think the best solution is probably to not eagerly evaluate things. But
+        # we have to be careful because we need the axes in order for subsequent
+        # indexing with nice shorthand (e.g. axes[::2][1:]) to make sense. Perhaps
+        # we should parse these things at a later point?
+        split_indices = {}
+        split_axes = {}
+        for loop_ctx, axes in obj.split_axes.items():
+            indices = as_split_index_tree(indices, axes=axes, loop_context=loop_ctx)
+            split_indices |= indices.index_trees
+            for loop_ctx_, itree in indices.index_trees.items():
+                # nasty hack because _indexed_axes currently expects a 2-tuple per loop index
+                my_loop_context = {
+                    idx: (path, "not used") for idx, path in loop_ctx.items()
+                } | {idx: (path, "not used") for idx, path in loop_ctx_.items()}
+                split_axes[loop_ctx | loop_ctx_] = _indexed_axes(
+                    (axes, indices), my_loop_context
+                )
 
-        # for now
-        self.axes = _indexed_axes(self, pmap())
+        self.obj = obj
+        self.split_axes = pmap(split_axes)
+        self.indices = SplitIndexTree(split_indices)
 
     # old alias, not right now we have a pmap of index trees rather than just a single one
     @property
@@ -99,7 +119,6 @@ class Indexed:
         return self.indices
 
     def __getitem__(self, indices):
-        indices = as_split_index_tree(indices, axes=self.axes)
         return Indexed(self, indices)
 
     @functools.cached_property
@@ -586,7 +605,7 @@ def _split_index_tree_from_iterable(
             index.component_labels, index.target_paths
         ):
             split_subtree = _split_index_tree_from_iterable(
-                subindices, axes, path | target_path
+                subindices, axes, path | target_path, loop_context
             )
             for loopctx, subtree in split_subtree.index_trees.items():
                 if loopctx not in index_trees:
@@ -603,7 +622,9 @@ def _split_index_tree_from_iterable(
 
 
 def _split_index_tree_from_ellipsis(
-    axes: AxisTree, current_axis: Axis | None = None
+    axes: AxisTree,
+    current_axis: Axis | None = None,
+    loop_context=pmap(),
 ) -> IndexTree:
     current_axis = current_axis or axes.root
 
@@ -614,7 +635,7 @@ def _split_index_tree_from_ellipsis(
 
         subaxis = axes.child(current_axis, cpt)
         if subaxis:
-            subtrees.append(_index_tree_from_ellipsis(axes, subaxis))
+            subtrees.append(_index_tree_from_ellipsis(axes, subaxis, loop_context))
         else:
             subtrees.append(None)
 
@@ -623,7 +644,7 @@ def _split_index_tree_from_ellipsis(
     for subslice, subtree in checked_zip(subslices, subtrees):
         if subtree is not None:
             tree = tree.add_subtree(subtree, slice_, subslice.component)
-    return tree
+    return SplitIndexTree({pmap(): tree})
 
 
 def is_fully_indexed(axes: AxisTree, indices: IndexTree) -> bool:
