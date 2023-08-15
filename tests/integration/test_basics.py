@@ -115,11 +115,6 @@ def test_multi_component_vector_copy(vector_copy_kernel):
         dtype=dat0.dtype,
     )
 
-    # TODO It would be nice to express this as a loop over
-    # p := axes.root[Slice(axis="ax0", cpt=1)].index
-    # but this needs axis slicing to work first.
-    # iterset = Axis([(n, "cpt1")], "ax0")
-    # do_loop(p := iterset.index(), vector_copy_kernel(dat0[p, :], dat1[p, :]))
     do_loop(
         p := axes.root[Slice("ax0", [AffineSliceComponent("pt1")])].index(),
         vector_copy_kernel(dat0[p, :], dat1[p, :]),
