@@ -84,8 +84,13 @@ class Indexed:
     """
 
     def __init__(self, obj, indices):
+        from pyop3.codegen.loopexpr2loopy import _indexed_axes
+
         self.obj = obj
-        self.indices = as_split_index_tree(indices)
+        self.indices = as_split_index_tree(indices, axes=self.obj.axes)
+
+        # for now
+        self.axes = _indexed_axes(self, pmap())
 
     # old alias, not right now we have a pmap of index trees rather than just a single one
     @property
@@ -93,16 +98,7 @@ class Indexed:
         return self.indices
 
     def __getitem__(self, indices):
-        from pyop3.distarray import MultiArray
-
-        if not isinstance(self.obj, MultiArray) and not isinstance(
-            indices, (IndexTree, Index)
-        ):
-            raise NotImplementedError(
-                "Need to compute the temporary/intermediate axes for this to be allowed"
-            )
-
-        indices = as_split_index_tree(indices)
+        indices = as_split_index_tree(indices, axes=self.axes)
         return Indexed(self, indices)
 
     @functools.cached_property

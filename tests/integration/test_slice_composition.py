@@ -41,12 +41,7 @@ def test_1d_slice_composition(vec2_copy_kernel):
     )
     dat1 = MultiArray(Axis([(n, "cpt0")], "ax0"), name="dat1", dtype=dat0.dtype)
 
-    # this is needed because we currently do not compute the axis tree for the
-    # intermediate indexed object, so it cannot be indexed with shorthand
-    itree = IndexTree(Slice("ax0", [AffineSliceComponent("cpt0", 1, 3)]))
-
-    # do_loop(Axis(1).index(), vec2_copy_kernel(dat0[::2][1:3], dat1[...]))
-    do_loop(Axis(1).index(), vec2_copy_kernel(dat0[::2][itree], dat1[...]))
+    do_loop(Axis(1).index(), vec2_copy_kernel(dat0[::2][1:3], dat1[...]))
     assert np.allclose(dat1.data, dat0.data[::2][1:3])
 
 
