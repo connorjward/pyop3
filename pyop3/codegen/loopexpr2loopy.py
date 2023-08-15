@@ -1595,19 +1595,24 @@ def _indexed_axes(indexed, loop_indices):
 
     """
 
-    # handle 'indexed of indexed' things
-    if isinstance(indexed.obj, Indexed):
-        orig_axes = _indexed_axes(indexed.obj, loop_indices)
-    else:
-        assert isinstance(indexed.obj, MultiArray)
-        orig_axes = indexed.obj.axes
-
     # get the right index tree given the loop context
     loop_context = {}
     for loop_index, (path, _) in loop_indices.items():
         loop_context[loop_index] = pmap(path)
     loop_context = pmap(loop_context)
-    index_tree = indexed.indices[loop_context]
+
+    # nasty hack, pass a tuple of axis tree and index tree sometimes
+    if isinstance(indexed, tuple):
+        orig_axes, split_index_tree = indexed
+        index_tree = split_index_tree[loop_context]
+    else:
+        # handle 'indexed of indexed' things
+        if isinstance(indexed.obj, Indexed):
+            orig_axes = _indexed_axes(indexed.obj, loop_indices)
+        else:
+            assert isinstance(indexed.obj, MultiArray)
+            orig_axes = indexed.obj.axes
+        index_tree = indexed.indices[loop_context]
 
     axes = visit_indices(
         index_tree,

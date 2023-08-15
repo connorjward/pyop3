@@ -14,6 +14,7 @@ import pymbolic as pym
 import pytools
 from mpi4py import MPI
 from petsc4py import PETSc
+from pyrsistent import pmap
 
 from pyop3 import utils
 from pyop3.axis import Axis, AxisComponent, AxisTree, as_axis_tree, get_bottom_part
@@ -124,6 +125,12 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
         self._halo_valid = True
 
         self._sync_thread = None
+
+    # don't like this, instead use something singledispatch in the right place
+    # split_axes is only used for a very specific use case
+    @property
+    def split_axes(self):
+        return pmap({pmap(): self.axes})
 
     @property
     def data(self):
@@ -313,12 +320,6 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
 
     # maybe I could check types here and use instead of get_value?
     def __getitem__(self, indices: IndexTree | Index):
-        indices = as_split_index_tree(indices, axes=self.axes)
-
-        # TODO recover this
-        # if not is_fully_indexed(self.axes, indices):
-        #     raise ValueError("Provided indices are insufficient to address the array")
-
         return Indexed(self, indices)
 
     def select_axes(self, indices):

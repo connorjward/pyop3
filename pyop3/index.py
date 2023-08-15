@@ -4,6 +4,7 @@ import abc
 import collections
 import dataclasses
 import functools
+import numbers
 from typing import Any, Collection, Hashable, Mapping, Sequence
 
 import pytools
@@ -84,8 +85,28 @@ class Indexed:
     """
 
     def __init__(self, obj, indices):
+        from pyop3.codegen.loopexpr2loopy import _indexed_axes
+
+        # The following tricksy bit of code builds a pretend AxisTree for the
+        # indexed object. It is complicated because the resultant AxisTree will
+        # have a different shape depending on the loop context (which is why we have
+        # SplitIndexTrees). We therefore store axes here split by loop context.
+        split_indices = {}
+        split_axes = {}
+        for loop_ctx, axes in obj.split_axes.items():
+            indices = as_split_index_tree(indices, axes=axes, loop_context=loop_ctx)
+            split_indices |= indices.index_trees
+            for loop_ctx_, itree in indices.index_trees.items():
+                # nasty hack because _indexed_axes currently expects a 2-tuple per loop index
+                assert set(loop_ctx.keys()) <= set(loop_ctx_.keys())
+                my_loop_context = {
+                    idx: (path, "not used") for idx, path in loop_ctx_.items()
+                }
+                split_axes[loop_ctx_] = _indexed_axes((axes, indices), my_loop_context)
+
         self.obj = obj
-        self.indices = as_split_index_tree(indices)
+        self.split_axes = pmap(split_axes)
+        self.indices = SplitIndexTree(split_indices)
 
     # old alias, not right now we have a pmap of index trees rather than just a single one
     @property
@@ -93,16 +114,6 @@ class Indexed:
         return self.indices
 
     def __getitem__(self, indices):
-        from pyop3.distarray import MultiArray
-
-        if not isinstance(self.obj, MultiArray) and not isinstance(
-            indices, (IndexTree, Index)
-        ):
-            raise NotImplementedError(
-                "Need to compute the temporary/intermediate axes for this to be allowed"
-            )
-
-        indices = as_split_index_tree(indices)
         return Indexed(self, indices)
 
     @functools.cached_property
@@ -570,6 +581,12 @@ def _split_index_tree_from_iterable(
             ]
         elif isinstance(index, MultiArray):
             slice_cpts = [Subset(cpt.label, index) for cpt in current_axis.components]
+        elif isinstance(index, numbers.Integral):
+            # an integer is just a one-sized slice (assumed over all components)
+            slice_cpts = [
+                AffineSliceComponent(cpt.label, index, index + 1)
+                for cpt in current_axis.components
+            ]
         else:
             raise TypeError
         index = Slice(current_axis.label, slice_cpts)
@@ -583,7 +600,7 @@ def _split_index_tree_from_iterable(
             index.component_labels, index.target_paths
         ):
             split_subtree = _split_index_tree_from_iterable(
-                subindices, axes, path | target_path
+                subindices, axes, path | target_path, loop_context
             )
             for loopctx, subtree in split_subtree.index_trees.items():
                 if loopctx not in index_trees:
@@ -600,7 +617,9 @@ def _split_index_tree_from_iterable(
 
 
 def _split_index_tree_from_ellipsis(
-    axes: AxisTree, current_axis: Axis | None = None
+    axes: AxisTree,
+    current_axis: Axis | None = None,
+    loop_context=pmap(),
 ) -> IndexTree:
     current_axis = current_axis or axes.root
 
@@ -611,7 +630,7 @@ def _split_index_tree_from_ellipsis(
 
         subaxis = axes.child(current_axis, cpt)
         if subaxis:
-            subtrees.append(_index_tree_from_ellipsis(axes, subaxis))
+            subtrees.append(_index_tree_from_ellipsis(axes, subaxis, loop_context))
         else:
             subtrees.append(None)
 
@@ -620,7 +639,7 @@ def _split_index_tree_from_ellipsis(
     for subslice, subtree in checked_zip(subslices, subtrees):
         if subtree is not None:
             tree = tree.add_subtree(subtree, slice_, subslice.component)
-    return tree
+    return SplitIndexTree({pmap(): tree})
 
 
 def is_fully_indexed(axes: AxisTree, indices: IndexTree) -> bool:
