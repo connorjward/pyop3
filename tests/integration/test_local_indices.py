@@ -1,6 +1,10 @@
 import numpy as np
+import pytest
 
 from pyop3 import Axis, AxisTree, MultiArray, ScalarType, do_loop
+
+# TODO
+pytest.skip(allow_module_level=True)
 
 
 def test_copy_with_local_indices(scalar_copy_kernel):

@@ -1472,7 +1472,8 @@ def _(called_map: SplitCalledMap, **kwargs):
         components = []
         (from_path,) = leaf
 
-        bits = called_map.bits[pmap(from_path)]
+        # clean this up, we know some of this at an earlier point (loop context)
+        bits = called_map.map.map.bits[pmap(from_path)]
         for map_component in bits:  # each one of these is a new "leaf"
             cpt = AxisComponent(map_component.arity, label=map_component.label)
             components.append(cpt)

@@ -559,6 +559,10 @@ class Axis(LabelledNode):
         return f"{self.__class__.__name__}([{', '.join(str(cpt) for cpt in self.components)}], label={self.label})"
 
     @property
+    def target_paths(self):
+        return tuple(pmap({self.label: cpt.label}) for cpt in self.components)
+
+    @property
     def count(self):
         """Return the total number of entries in the axis across all axis parts.
         Will fail if axis parts do not have integer counts.

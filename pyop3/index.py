@@ -4,7 +4,7 @@ import abc
 import collections
 import dataclasses
 import functools
-from typing import Any, Collection, Hashable, Sequence
+from typing import Any, Collection, Hashable, Mapping, Sequence
 
 import pytools
 from pyrsistent import pmap
@@ -102,7 +102,7 @@ class Indexed:
                 "Need to compute the temporary/intermediate axes for this to be allowed"
             )
 
-        indices = as_index_tree(indices, "not currently an axis tree")
+        indices = as_split_index_tree(indices)
         return Indexed(self, indices)
 
     @functools.cached_property
@@ -238,6 +238,10 @@ class LoopIndex:
     def __init__(self, iterset):
         self.iterset = iterset
 
+    @property
+    def target_paths(self):
+        return self.iterset.target_paths
+
 
 class Index(LabelledNode):
     @property
@@ -338,42 +342,26 @@ class SplitCalledMap(Index):
         # determined by summing from the leaves of this prior map.
         # Note that 'degree' is equivalent to stating the number of leaves of
         # the resulting axes.
-        if isinstance(from_index, LoopIndex):
+        if isinstance(from_index, SplitLoopIndex):
             # For now maps will only work with loop indices with depth 1. Being
             # able to work with deeper loop indices is required for things like
             # ephemeral meshes to work (since mesh.cells would have base and
-            # column axes).
-            if from_index.iterset.depth > 1:
+            # column axes (for extruded)).
+            if any(len(path) > 1 for path in from_index.target_paths):
                 raise NotImplementedError(
                     "Mapping from loop indices with depth greater than 1 is not "
                     "yet supported"
                 )
-            iterset_axis = from_index.iterset.root
-            axis_label = iterset_axis.label
-            raise NotImplementedError(
-                "here need to use the loop context to get the right bit"
-            )
-            # just_one used since from_index can (currently) only have a
-            # single component
-            cpt_label = just_one(iterset_axis.components).label
 
-            leaves = []
-            for leaf in map.bits[pmap({axis_label: cpt_label})]:
+        target_paths = []
+        for from_target_path in from_index.target_paths:
+            for leaf in map.map.bits[from_target_path]:
                 to_axis_label = leaf.target_axis
                 to_cpt_label = leaf.target_component
-                path = pmap({to_axis_label: to_cpt_label})
-                leaves.append(path)
-        else:
-            assert isinstance(from_index, CalledMap)
-            leaves = []
-            for from_leaf in from_index.component_labels:
-                for leaf in map.bits[from_leaf]:
-                    to_axis_label = leaf.target_axis
-                    to_cpt_label = leaf.target_component
-                    path = pmap({to_axis_label: to_cpt_label})
-                    leaves.append(path)
+                target_path = pmap({to_axis_label: to_cpt_label})
+                target_paths.append(target_path)
 
-        super().__init__(leaves)
+        super().__init__(target_paths)
         self.map = map
         self.from_index = from_index
 
@@ -383,16 +371,16 @@ class SplitCalledMap(Index):
 
     @functools.cached_property
     def datamap(self):
-        return self.map.datamap | self.from_index.datamap
+        return self.map.map.datamap | self.from_index.datamap
 
     # ick
     @property
     def bits(self):
-        return self.map.bits
+        return self.map.map.bits
 
     @property
     def name(self):
-        return self.map.name
+        return self.map.map.name
 
 
 class EnumeratedLoopIndex:
@@ -447,22 +435,23 @@ def _(split_index_tree: SplitIndexTree, **kwargs) -> SplitIndexTree:
 @as_split_index_tree.register
 def _(index_tree: IndexTree, **kwargs) -> SplitIndexTree:
     for index in index_tree.nodes:
-        if isinstance(index, SplitLoopIndex) and len(index.loop_index.leaves) > 1:
+        if (
+            isinstance(index, SplitLoopIndex)
+            and len(index.loop_index.iterset.target_paths) > 1
+        ):
             raise ValueError(
                 "Cannot convert an IndexTree to a SplitIndexTree if it contains a multi-component loop index"
             )
     return SplitIndexTree({pmap(): index_tree})
 
 
+# same as CalledMap
 @as_split_index_tree.register
 def _(loop_index: LoopIndex, **kwargs) -> SplitIndexTree:
-    index_trees = {}
-    # this API could be better
-    for leaf_axis, leaf_cpt_label in loop_index.iterset.leaves:
-        path = loop_index.iterset.path(leaf_axis, leaf_cpt_label)
-        index_trees[pmap({loop_index: path})] = IndexTree(
-            SplitLoopIndex(loop_index, path)
-        )
+    index_trees = {
+        loop_ctx: IndexTree(split_loop_index)
+        for loop_ctx, split_loop_index in _split_index(loop_index).items()
+    }
     return SplitIndexTree(index_trees)
 
 
@@ -471,38 +460,42 @@ def _(slice_: Slice, **kwargs) -> SplitIndexTree:
     return as_split_index_tree(IndexTree(slice_), **kwargs)
 
 
+@as_split_index_tree.register
+def _(slice_: slice, **kwargs) -> SplitIndexTree:
+    return _split_index_tree_from_iterable([slice_], **kwargs)
+
+
+@as_split_index_tree.register
+def _(called_map: CalledMap, **kwargs) -> SplitIndexTree:
+    index_trees = {
+        loop_ctx: IndexTree(split_map)
+        for loop_ctx, split_map in _split_index(called_map).items()
+    }
+    return SplitIndexTree(index_trees)
+
+
 @functools.singledispatch
-def as_index_tree(arg: Any, axes: AxisTree) -> IndexTree:
-    # cyclic import
-    from pyop3.distarray import MultiArray
-
-    if isinstance(arg, MultiArray):
-        return _index_tree_from_collection([arg], axes)
-    elif isinstance(arg, Collection):
-        return _index_tree_from_collection(arg, axes)
-    elif arg is Ellipsis:
-        return _index_tree_from_ellipsis(axes)
-    else:
-        raise TypeError(f"Handler is not registered for {type(arg)}")
+def _split_index(arg: Any, **kwargs) -> Mapping[Mapping[LoopIndex, Mapping], Index]:
+    raise TypeError
 
 
-@as_index_tree.register
-def _(arg: IndexTree, axes: AxisTree) -> IndexTree:
-    return arg
+@_split_index.register
+def _(loop_index: LoopIndex) -> Mapping[Mapping[LoopIndex, Mapping], SplitLoopIndex]:
+    split_indices = {}
+    for target_path in loop_index.target_paths:
+        split_indices[pmap({loop_index: target_path})] = SplitLoopIndex(
+            loop_index, target_path
+        )
+    return pmap(split_indices)
 
 
-@as_index_tree.register
-def _(arg: Index, axes: AxisTree) -> IndexTree:
-    return IndexTree(arg)
-
-
-@as_index_tree.register
-def _(slice_: slice, axes: AxisTree) -> IndexTree:
-    return _index_tree_from_collection([slice_], axes)
-
-
-def _collect_datamap(index, *subdatamaps, itree):
-    return index.datamap | merge_dicts(subdatamaps)
+@_split_index.register
+def _(called_map: CalledMap) -> Mapping[Mapping[LoopIndex, Mapping], SplitCalledMap]:
+    split_maps = {}
+    split_from_indices = _split_index(called_map.from_index)
+    for loop_context, from_index in split_from_indices.items():
+        split_maps[loop_context] = SplitCalledMap(called_map, from_index, loop_context)
+    return pmap(split_maps)
 
 
 def _split_index_tree_from_iterable(
@@ -528,9 +521,21 @@ def _split_index_tree_from_iterable(
 
         # again, bad API
         subtrees = {}
-        for loop_path in index.iterset.target_paths:
+        for loop_path in index.target_paths:
             new_indices = [SplitLoopIndex(index, loop_path)] + subindices
             new_loop_context = loop_context | {index: loop_path}
+            subtree = _split_index_tree_from_iterable(
+                new_indices, axes, path, new_loop_context
+            )
+            subtrees |= subtree.index_trees
+        return SplitIndexTree(subtrees)
+
+    if isinstance(index, CalledMap):
+        # again again, bad API
+        subtrees = {}
+        for loop_path, from_index in _split_index(index.from_index).items():
+            new_indices = [SplitCalledMap(index, from_index, loop_path)] + subindices
+            new_loop_context = loop_context | loop_path
             subtree = _split_index_tree_from_iterable(
                 new_indices, axes, path, new_loop_context
             )
@@ -595,7 +600,7 @@ def _split_index_tree_from_ellipsis(
     subslices = []
     subtrees = []
     for cpt in current_axis.components:
-        subslices.append(SliceComponent(cpt.label))
+        subslices.append(AffineSliceComponent(cpt.label))
 
         subaxis = axes.child(current_axis, cpt)
         if subaxis:
@@ -633,3 +638,7 @@ def is_fully_indexed(axes: AxisTree, indices: IndexTree) -> bool:
             return False
 
     return True
+
+
+def _collect_datamap(index, *subdatamaps, itree):
+    return index.datamap | merge_dicts(subdatamaps)
