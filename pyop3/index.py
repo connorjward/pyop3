@@ -136,6 +136,10 @@ class AffineSliceComponent(SliceComponent):
         self.stop = stop
         self.step = step if step is not None else 1
 
+    @property
+    def datamap(self):
+        return {}
+
 
 class Subset(SliceComponent):
     fields = SliceComponent.fields | {"array"}
@@ -143,6 +147,10 @@ class Subset(SliceComponent):
     def __init__(self, component, array: MultiArray):
         super().__init__(component)
         self.array = array
+
+    @property
+    def datamap(self):
+        return self.array.datamap
 
 
 class MapComponent(LabelledImmutableRecord):
@@ -329,8 +337,7 @@ class Slice(Index):
 
     @property
     def datamap(self):
-        # return pmap()
-        return {}
+        return merge_dicts([s.datamap for s in self.slices])
 
 
 class SplitCalledMap(Index):

@@ -563,6 +563,10 @@ class Axis(LabelledNode):
         return tuple(pmap({self.label: cpt.label}) for cpt in self.components)
 
     @property
+    def size(self):
+        return as_axis_tree(self).size
+
+    @property
     def count(self):
         """Return the total number of entries in the axis across all axis parts.
         Will fail if axis parts do not have integer counts.

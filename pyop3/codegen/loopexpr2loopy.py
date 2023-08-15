@@ -25,6 +25,7 @@ from pyop3.distarray import IndexedMultiArray, MultiArray
 from pyop3.dtypes import IntType
 from pyop3.index import (
     AffineMapComponent,
+    AffineSliceComponent,
     CalledMap,
     Index,
     Indexed,
@@ -36,6 +37,7 @@ from pyop3.index import (
     Slice,
     SplitCalledMap,
     SplitLoopIndex,
+    Subset,
     TabulatedMapComponent,
 )
 from pyop3.log import logger
@@ -1090,9 +1092,6 @@ def _(slice_: Slice, *, codegen_ctx, prev_axes, **kwargs):
     jname_expr_per_leaf = []
     path_per_leaf = []
 
-    # for from_leaf_key, leaf in leaves.items():
-    #     from_path, from_jname_exprs, from_insns = leaf
-
     components = []
     jnames = []
     jname_exprs = []
@@ -1100,19 +1099,40 @@ def _(slice_: Slice, *, codegen_ctx, prev_axes, **kwargs):
     # each one of these is a new "leaf"
     for subslice in slice_.slices:
         prev_cpt = prev_axes.find_component(slice_.axis, subslice.component)
-        # FIXME should be ceiling
-        if subslice.stop is None:
-            stop = prev_cpt.count
+        if isinstance(subslice, AffineSliceComponent):
+            # FIXME should be ceiling
+            if subslice.stop is None:
+                stop = prev_cpt.count
+            else:
+                stop = subslice.stop
+            size = (stop - subslice.start) // subslice.step
         else:
-            stop = subslice.stop
-        size = (stop - subslice.start) // subslice.step
+            assert isinstance(subslice, Subset)
+            size = subslice.array.axes.size
         cpt = AxisComponent(size, label=prev_cpt.label)
         components.append(cpt)
 
         jname = ctx.unique_name("j")
         ctx.add_temporary(jname)
         jnames.append(jname)
-        jname_expr = pym.var(jname) * subslice.step + subslice.start
+
+        if isinstance(subslice, AffineSliceComponent):
+            jname_expr = pym.var(jname) * subslice.step + subslice.start
+            insns_per_leaf.append([])
+        else:
+            assert isinstance(subslice, Subset)
+            # subsets must be 1D, single component arrays
+            subset = subslice.array
+            assert subset.axes.depth == 1
+            subset_axis = subset.axes.root
+            subset_component = just_one(subset_axis.components)
+            insns_, jname_expr = _scalar_assignment(
+                subset,
+                pmap({subset_axis.label: subset_component.label}),
+                pmap({subset_axis.label: jname}),
+                codegen_ctx,
+            )
+            insns_per_leaf.append(insns_)
 
         jname_exprs.append({slice_.axis: jname_expr})
 
@@ -1126,11 +1146,12 @@ def _(slice_: Slice, *, codegen_ctx, prev_axes, **kwargs):
         path_per_leaf.append(((slice_.axis, subslice.component),))
 
     leaves = {
-        leaf_key: (path, jname_exprs, ())
-        for (leaf_key, path, jname_exprs) in checked_zip(
+        leaf_key: (path, jname_exprs, insns)
+        for (leaf_key, path, jname_exprs, insns) in checked_zip(
             leaf_keys,
             path_per_leaf,
             jname_expr_per_leaf,
+            insns_per_leaf,
         )
     }
     return leaves, {"axes": axes, "jnames": jnames_per_cpt}
@@ -1506,12 +1527,16 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
     # I think that axis_label should probably be the same for all bits of the slice
     for subslice in slice_.slices:
         prev_cpt = prev_axes.find_component(slice_.axis, subslice.component)
-        # FIXME should be ceiling
-        if subslice.stop is None:
-            stop = prev_cpt.count
+        if isinstance(subslice, AffineSliceComponent):
+            # FIXME should be ceiling
+            if subslice.stop is None:
+                stop = prev_cpt.count
+            else:
+                stop = subslice.stop
+            size = (stop - subslice.start) // subslice.step
         else:
-            stop = subslice.stop
-        size = (stop - subslice.start) // subslice.step
+            assert isinstance(subslice, Subset)
+            size = subslice.array.axes.size
         cpt = AxisComponent(size, label=prev_cpt.label)
         components.append(cpt)
 
