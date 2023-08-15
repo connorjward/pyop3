@@ -91,10 +91,6 @@ class Indexed:
         # indexed object. It is complicated because the resultant AxisTree will
         # have a different shape depending on the loop context (which is why we have
         # SplitIndexTrees). We therefore store axes here split by loop context.
-        # I think the best solution is probably to not eagerly evaluate things. But
-        # we have to be careful because we need the axes in order for subsequent
-        # indexing with nice shorthand (e.g. axes[::2][1:]) to make sense. Perhaps
-        # we should parse these things at a later point?
         split_indices = {}
         split_axes = {}
         for loop_ctx, axes in obj.split_axes.items():
@@ -102,12 +98,11 @@ class Indexed:
             split_indices |= indices.index_trees
             for loop_ctx_, itree in indices.index_trees.items():
                 # nasty hack because _indexed_axes currently expects a 2-tuple per loop index
+                assert set(loop_ctx.keys()) <= set(loop_ctx_.keys())
                 my_loop_context = {
-                    idx: (path, "not used") for idx, path in loop_ctx.items()
-                } | {idx: (path, "not used") for idx, path in loop_ctx_.items()}
-                split_axes[loop_ctx | loop_ctx_] = _indexed_axes(
-                    (axes, indices), my_loop_context
-                )
+                    idx: (path, "not used") for idx, path in loop_ctx_.items()
+                }
+                split_axes[loop_ctx_] = _indexed_axes((axes, indices), my_loop_context)
 
         self.obj = obj
         self.split_axes = pmap(split_axes)

@@ -126,6 +126,8 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
 
         self._sync_thread = None
 
+    # don't like this, instead use something singledispatch in the right place
+    # split_axes is only used for a very specific use case
     @property
     def split_axes(self):
         return pmap({pmap(): self.axes})
