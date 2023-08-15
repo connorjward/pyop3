@@ -28,42 +28,23 @@ from pyop3.index import AffineSliceComponent, SplitIndexTree, SplitLoopIndex
 from pyop3.utils import flatten
 
 
-# these could be separate tests
-def test_loop_over_slices(scalar_copy_kernel):
+@pytest.mark.parametrize(
+    "touched,untouched",
+    [
+        (slice(2, None), slice(2)),
+        (slice(6), slice(6, None)),
+        (slice(None, None, 2), slice(1, None, 2)),
+    ],
+)
+def test_loop_over_slices(scalar_copy_kernel, touched, untouched):
     npoints = 10
-    # axes = AxisTree(Axis(npoints))
-    axes = AxisTree(Axis([AxisComponent(npoints, "pt0")], "ax0"))
+    axes = AxisTree(Axis(npoints))
     dat0 = MultiArray(axes, name="dat0", data=np.arange(npoints, dtype=ScalarType))
     dat1 = MultiArray(axes, name="dat1", dtype=dat0.dtype)
 
-    # cleanup
-    itreebag0 = SplitIndexTree(
-        pmap({pmap(): IndexTree(Slice("ax0", [AffineSliceComponent("pt0", start=2)]))})
-    )
-    p = axes[itreebag0].index()
-    unrolled_p = SplitLoopIndex(p, pmap({"ax0": "pt0"}))
-    itree_bag = SplitIndexTree(
-        pmap({pmap({p: pmap({"ax0": "pt0"})}): IndexTree(unrolled_p)})
-    )
-
-    # do_loop(p := axes[2:].index(), scalar_copy_kernel(dat0[p], dat1[p]))
-    # do_loop(p, scalar_copy_kernel(dat0[itree_bag], dat1[itree_bag]))
-    l = loop(p, scalar_copy_kernel(dat0[itree_bag], dat1[itree_bag]))
-    l()
-    assert np.allclose(dat1.data[:2], 0)
-    assert np.allclose(dat1.data[2:], dat0.data[2:])
-
-    assert False, "fixme below"
-
-    dat1.data[...] = 0
-    do_loop(p := axes[:6].index(), scalar_copy_kernel(dat0[p], dat1[p]))
-    assert np.allclose(dat1.data[:6], dat0.data[:6])
-    assert np.allclose(dat1.data[6:], 0)
-
-    dat1.data[...] = 0
-    do_loop(p := axes[::2].index(), scalar_copy_kernel(dat0[p], dat1[p]))
-    assert np.allclose(dat1.data[::2], dat0.data[::2])
-    assert np.allclose(dat1.data[1::2], 0)
+    do_loop(p := axes[touched].index(), scalar_copy_kernel(dat0[p], dat1[p]))
+    assert np.allclose(dat1.data[untouched], 0)
+    assert np.allclose(dat1.data[touched], dat0.data[touched])
 
 
 def test_scalar_copy_of_subset(scalar_copy_kernel):
