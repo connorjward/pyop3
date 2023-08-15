@@ -1118,7 +1118,7 @@ def _(slice_: Slice, *, codegen_ctx, prev_axes, **kwargs):
 
         if isinstance(subslice, AffineSliceComponent):
             jname_expr = pym.var(jname) * subslice.step + subslice.start
-            insns_per_leaf.append([])
+            insns_per_leaf.append(())
         else:
             assert isinstance(subslice, Subset)
             # subsets must be 1D, single component arrays
