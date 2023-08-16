@@ -20,7 +20,14 @@ import pytools
 from pyrsistent import pmap
 
 from pyop3 import tlang, utils
-from pyop3.axis import AffineLayout, Axis, AxisComponent, AxisTree, TabulatedLayout
+from pyop3.axis import (
+    AffineLayout,
+    Axis,
+    AxisComponent,
+    AxisTree,
+    CalledAxisTree,
+    TabulatedLayout,
+)
 from pyop3.distarray import IndexedMultiArray, MultiArray
 from pyop3.dtypes import IntType
 from pyop3.index import (
@@ -544,7 +551,9 @@ def _(call: FunctionCall, loop_indices, ctx: LoopyCodegenContext) -> None:
         temporaries.append((arg, indexed_temp, spec.access, shape))
 
         # Register data
-        ctx.add_argument(arg.name, arg.dtype)
+        if not isinstance(arg, CalledAxisTree):
+            ctx.add_argument(arg.name, arg.dtype)
+
         ctx.add_temporary(temporary.name, temporary.dtype, shape)
 
         # subarrayref nonsense/magic
@@ -665,10 +674,13 @@ def build_assignment(
 
     # unroll the index trees, this should be tidied up
     array = assignment.array
-    itrees = []
-    while isinstance(array, Indexed):
-        itrees.insert(0, array.itree)
-        array = array.obj
+    if isinstance(array, CalledAxisTree):
+        itrees = [array.indices]
+    else:
+        itrees = []
+        while isinstance(array, Indexed):
+            itrees.insert(0, array.itree)
+            array = array.obj
 
     for indices in itrees:
         # get the right index tree given the loop context
@@ -733,6 +745,10 @@ def _prepare_assignment_rec(
     jnames: pmap,
     ctx: LoopyCodegenContext,
 ) -> tuple[pmap, pmap]:
+    # catch empty axis trees
+    # if axes.is_empty:
+    #     return pmap(), pmap({None: 0}), pmap({None: ()})
+
     jnames_per_axcpt = {}
     insns_per_leaf = {}
     array_expr_per_leaf = {}
@@ -756,9 +772,15 @@ def _prepare_assignment_rec(
             insns_per_leaf |= subinsns_per_leaf
             array_expr_per_leaf |= subarray_expr_per_leaf
         else:
-            insns, array_expr = _assignment_array_insn(
-                assignment, axes, new_path, new_jnames, ctx
-            )
+            if isinstance(assignment.array, CalledAxisTree):
+                # just the offset instructions here, no subscript
+                insns, array_expr = emit_assignment_insn(
+                    axes, new_path, new_jnames, ctx
+                )
+            else:
+                insns, array_expr = _assignment_array_insn(
+                    assignment, axes, new_path, new_jnames, ctx
+                )
             insns_per_leaf[axis.id, axcpt.label] = insns
             array_expr_per_leaf[axis.id, axcpt.label] = array_expr
 
@@ -901,8 +923,7 @@ def _parse_assignment_final(
     insns_per_leaf,
     ctx: LoopyCodegenContext,
 ):
-    # catch empty axes here
-    if not axes.root:
+    if not axes.root:  # catch empty axes here
         for insn in insns_per_leaf[None]:
             ctx.add_assignment(*insn)
         array_expr = array_expr_per_leaf[None]
@@ -964,11 +985,18 @@ def _parse_assignment_final_rec(
                 for insn in insns_per_leaf[axis.id, axcpt.label]:
                     ctx.add_assignment(*insn)
                 array_expr = array_expr_per_leaf[axis.id, axcpt.label]
-                temp_insns, temp_expr = _assignment_temp_insn(
-                    assignment, new_path, new_jnames, ctx
-                )
-                for insn in temp_insns:
-                    ctx.add_assignment(*insn)
+                if isinstance(assignment.array, CalledAxisTree):
+                    temp_insns, temp_expr = _assignment_temp_insn(
+                        assignment, pmap(), pmap(), ctx
+                    )
+                    for insn in temp_insns:
+                        ctx.add_assignment(*insn)
+                else:
+                    temp_insns, temp_expr = _assignment_temp_insn(
+                        assignment, new_path, new_jnames, ctx
+                    )
+                    for insn in temp_insns:
+                        ctx.add_assignment(*insn)
                 _shared_assignment_insn(assignment, array_expr, temp_expr, ctx)
 
 
@@ -1240,7 +1268,6 @@ def _assignment_array_insn(assignment, axes, path, jnames, ctx):
 
     """
     offset_insns, array_offset = emit_assignment_insn(
-        assignment.array.name,
         axes,
         path,
         jnames,
@@ -1260,7 +1287,6 @@ def _assignment_temp_insn(assignment, path, jnames, ctx):
 
     """
     offset_insns, temp_offset = emit_assignment_insn(
-        assignment.temporary.name,
         assignment.temporary.axes,
         path,
         jnames,
@@ -1298,7 +1324,6 @@ def _shared_assignment_insn(assignment, array_expr, temp_expr, ctx):
 
 
 def emit_assignment_insn(
-    array_name,
     axes,
     path,
     labels_to_jnames,
@@ -1605,6 +1630,9 @@ def _indexed_axes(indexed, loop_indices):
     axis tree. No instructions need be emitted.
 
     """
+    # offsets are always scalar
+    if isinstance(indexed, CalledAxisTree):
+        return AxisTree()
 
     # get the right index tree given the loop context
     loop_context = {}

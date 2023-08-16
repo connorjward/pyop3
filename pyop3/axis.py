@@ -555,6 +555,9 @@ class Axis(LabelledNode):
     def __getitem__(self, indices):
         return as_axis_tree(self)[indices]
 
+    def __call__(self, *args):
+        return as_axis_tree(self)(*args)
+
     def __str__(self) -> str:
         return f"{self.__class__.__name__}([{', '.join(str(cpt) for cpt in self.components)}], label={self.label})"
 
@@ -577,6 +580,30 @@ class Axis(LabelledNode):
 
     def index(self):
         return as_axis_tree(self).index()
+
+    def enumerate(self):
+        return as_axis_tree(self).enumerate()
+
+
+# this is supposed to be used in place of an array to represent the offset
+# of an axis at a given index
+class CalledAxisTree:
+    def __init__(self, axes, indices):
+        self.axes = axes
+        self.indices = indices
+
+    # FIXME
+    @property
+    def name(self):
+        return "my_called_axis"
+
+    @property
+    def dtype(self):
+        return IntType
+
+    @functools.cached_property
+    def datamap(self):
+        return self.axes.datamap | self.indices.datamap
 
 
 class AxisTree(LabelledTree):
@@ -601,6 +628,9 @@ class AxisTree(LabelledTree):
         from pyop3.index import IndexedAxisTree
 
         return IndexedAxisTree(self, indices)
+
+    def __call__(self, *args):
+        return CalledAxisTree(self, *args)
 
     def index(self):
         # cyclic import
