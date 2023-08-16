@@ -604,9 +604,9 @@ class AxisTree(LabelledTree):
 
     def index(self):
         # cyclic import
-        from pyop3.index import LoopIndex
+        from pyop3.index import GlobalLoopIndex
 
-        return LoopIndex(self)
+        return GlobalLoopIndex(self)
 
     def enumerate(self):
         # cyclic import

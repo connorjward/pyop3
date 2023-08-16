@@ -81,7 +81,7 @@ class Loop(LoopExpr):
         super().__init__()
 
         if isinstance(index, EnumeratedLoopIndex):
-            index = index.index
+            index = index.global_index
 
         self.index = index
         self.statements = as_tuple(statements)

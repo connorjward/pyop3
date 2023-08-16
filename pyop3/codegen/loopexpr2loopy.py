@@ -27,6 +27,7 @@ from pyop3.index import (
     AffineMapComponent,
     AffineSliceComponent,
     CalledMap,
+    GlobalLoopIndex,
     Index,
     Indexed,
     IndexedAxisTree,
@@ -493,6 +494,7 @@ def _finalize_parse_loop_rec(
                             loop.index: (
                                 new_path,
                                 array_expr_per_leaf[current_axis.id, axcpt.label],
+                                new_jnames,  # "local index"
                             )
                         },
                         codegen_ctx,
@@ -671,7 +673,7 @@ def build_assignment(
     for indices in itrees:
         # get the right index tree given the loop context
         loop_context = {}
-        for loop_index, (path, _) in loop_indices.items():
+        for loop_index, (path, _, _) in loop_indices.items():
             loop_context[loop_index] = pmap(path)
         loop_context = pmap(loop_context)
         index_tree = indices[loop_context]
@@ -983,7 +985,13 @@ def _expand_index(index, *, loop_indices, codegen_ctx, **kwargs):
 
 @_expand_index.register
 def _(index: SplitLoopIndex, *, loop_indices, codegen_ctx, **kwargs):
-    path, jname_exprs = loop_indices[index.loop_index]
+    global_index = index.loop_index
+    if isinstance(global_index, GlobalLoopIndex):
+        path, jname_exprs, _ = loop_indices[global_index]
+    else:
+        assert isinstance(global_index, LocalLoopIndex)
+        global_index = global_index.global_index
+        path, _, jname_exprs = loop_indices[global_index]
     insns = ()
     # TODO namedtuple anyone?
     return {None: (path, jname_exprs, insns)}, {"axes": AxisTree(), "jnames": pmap()}
@@ -1469,7 +1477,10 @@ def collect_shape_index_callback(index, *args, **kwargs):
 
 @collect_shape_index_callback.register
 def _(loop_index: SplitLoopIndex, *, loop_indices, **kwargs):
-    path = loop_indices[loop_index.loop_index][0]
+    global_index = loop_index.loop_index
+    if isinstance(global_index, LocalLoopIndex):
+        global_index = global_index.global_index
+    path = loop_indices[global_index][0]
     return {None: (path,)}, {"axes": AxisTree()}
 
 
@@ -1597,7 +1608,7 @@ def _indexed_axes(indexed, loop_indices):
 
     # get the right index tree given the loop context
     loop_context = {}
-    for loop_index, (path, _) in loop_indices.items():
+    for loop_index, (path, _, _) in loop_indices.items():
         loop_context[loop_index] = pmap(path)
     loop_context = pmap(loop_context)
 
