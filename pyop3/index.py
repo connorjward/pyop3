@@ -53,11 +53,22 @@ class SplitIndexTree:
         # this is terribly unclear
         if not is_single_valued([set(key.keys()) for key in index_trees.keys()]):
             raise ValueError("Loop contexts must contain the same loop indices")
-        self.index_trees = index_trees
+
+        new_index_trees = {}
+        for key, itree in index_trees.items():
+            new_key = {}
+            for loop_index, path in key.items():
+                if isinstance(loop_index, LocalLoopIndex):
+                    loop_index = loop_index.global_index
+                new_key[loop_index] = path
+            new_index_trees[pmap(new_key)] = itree
+        self.index_trees = pmap(new_index_trees)
 
     def __getitem__(self, loop_context):
         key = {}
         for loop_index, path in loop_context.items():
+            if isinstance(loop_index, LocalLoopIndex):
+                loop_index = loop_index.global_index
             if loop_index in self.loop_indices:
                 key |= {loop_index: path}
         key = pmap(key)
@@ -65,8 +76,14 @@ class SplitIndexTree:
 
     @functools.cached_property
     def loop_indices(self) -> frozenset[LoopIndex]:
+        # loop is used just for unpacking
         for loop_context in self.index_trees.keys():
-            return frozenset(loop_context.keys())
+            indices = set()
+            for loop_index in loop_context.keys():
+                if isinstance(loop_index, LocalLoopIndex):
+                    loop_index = loop_index.global_index
+                indices.add(loop_index)
+            return frozenset(indices)
 
     @functools.cached_property
     def datamap(self):
@@ -97,10 +114,11 @@ class Indexed:
             indices = as_split_index_tree(indices, axes=axes, loop_context=loop_ctx)
             split_indices |= indices.index_trees
             for loop_ctx_, itree in indices.index_trees.items():
-                # nasty hack because _indexed_axes currently expects a 2-tuple per loop index
+                # nasty hack because _indexed_axes currently expects a 3-tuple per loop index
                 assert set(loop_ctx.keys()) <= set(loop_ctx_.keys())
                 my_loop_context = {
-                    idx: (path, "not used") for idx, path in loop_ctx_.items()
+                    idx: (path, "not used", "not used")
+                    for idx, path in loop_ctx_.items()
                 }
                 split_axes[loop_ctx_] = _indexed_axes((axes, indices), my_loop_context)
 
@@ -253,13 +271,36 @@ class CalledMap:
         self.from_index = from_index
 
 
-class LoopIndex:
+class LoopIndex(abc.ABC):
+    pass
+
+
+class GlobalLoopIndex(LoopIndex):
     def __init__(self, iterset):
         self.iterset = iterset
 
     @property
     def target_paths(self):
         return self.iterset.target_paths
+
+    @property
+    def datamap(self):
+        return self.iterset.datamap
+
+
+class LocalLoopIndex(LoopIndex):
+    """Class representing a 'local' index."""
+
+    def __init__(self, loop_index: LoopIndex):
+        self.global_index = loop_index
+
+    @property
+    def target_paths(self):
+        return self.global_index.target_paths
+
+    @property
+    def datamap(self):
+        return self.global_index.datamap
 
 
 class Index(LabelledNode):
@@ -303,22 +344,6 @@ class SplitLoopIndex(Index):
         # )
 
     @functools.cached_property
-    def datamap(self):
-        return self.loop_index.iterset.datamap
-
-
-class LocalLoopIndex(Index):
-    """Class representing a 'local' index."""
-
-    def __init__(self, loop_index: LoopIndex, **kwargs):
-        super().__init__(loop_index.component_labels, **kwargs)
-        self.loop_index = loop_index
-
-    @property
-    def target_paths(self):
-        return self.loop_index.target_paths
-
-    @property
     def datamap(self):
         return self.loop_index.datamap
 
@@ -403,8 +428,11 @@ class SplitCalledMap(Index):
 
 class EnumeratedLoopIndex:
     def __init__(self, iterset: AxisTree):
-        self.index = LoopIndex(iterset)
-        self.count = LocalLoopIndex(self.index)
+        global_index = GlobalLoopIndex(iterset)
+        local_index = LocalLoopIndex(global_index)
+
+        self.global_index = global_index
+        self.local_index = local_index
 
 
 # it is probably a better pattern to give axis trees a "parent" option
@@ -423,7 +451,10 @@ class IndexedAxisTree:
         return tuple(paths.values())
 
     def index(self):
-        return LoopIndex(self)
+        return GlobalLoopIndex(self)
+
+    def enumerate(self):
+        return EnumeratedLoopIndex(self)
 
     @functools.cached_property
     def datamap(self):
