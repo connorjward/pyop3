@@ -180,8 +180,66 @@ class IndexedArray:
         self.layout_exprs = layout_exprs
 
     def __getitem__(self, indices):
-        raise NotImplementedError
-        return Indexed(self, indices)
+        # pretty much copied from multiarray, cleanup
+        # FIXME
+        from pyop3.codegen.loopexpr2loopy import index_axes
+        from pyop3.distarray.multiarray import IndexExpressionReplacer
+
+        axis_trees = {}
+        layout_expr_per_axis_tree_per_leaf = {}
+        for old_loop_context, axes in self.axis_trees.items():
+            layouts = self.layout_exprs[old_loop_context]
+            # should probably include old_loop_context in this
+            index_forest = as_index_forest(indices, axes=axes)
+
+            for loop_context, index_tree in index_forest.items():
+                indexed_axes, index_exprs_per_leaf, target_path_per_leaf = index_axes(
+                    axes, index_tree, loop_context
+                )
+
+                layout_expr_per_leaf = {}
+                if indexed_axes.is_empty:
+                    leaf_key = None
+
+                    # this is a map from axis label to new expression
+                    index_exprs = index_exprs_per_leaf[leaf_key]
+                    target_path = target_path_per_leaf[leaf_key]
+
+                    # this hackery is required because sometimes layouts use leaf IDs
+                    # and sometimes we use paths
+                    myaxis, mycpt = axes._node_from_path(target_path)
+                    target_leaf_id = myaxis.id, mycpt.label
+                    orig_layout_expr = layouts[target_leaf_id]
+                    new_layout_expr = IndexExpressionReplacer(index_exprs)(
+                        orig_layout_expr
+                    )
+
+                    layout_expr_per_leaf[leaf_key] = new_layout_expr
+                else:
+                    for (
+                        indexed_leaf_axis,
+                        indexed_leaf_cpt_label,
+                    ) in indexed_axes.leaves:
+                        leaf_key = indexed_leaf_axis.id, indexed_leaf_cpt_label
+                        # this is a map from axis label to new expression
+                        index_exprs = index_exprs_per_leaf[leaf_key]
+                        target_path = target_path_per_leaf[leaf_key]
+
+                        # this hackery is required because sometimes layouts use leaf IDs
+                        # and sometimes we use paths
+                        myaxis, mycpt = axes._node_from_path(target_path)
+                        target_leaf_id = myaxis.id, mycpt.label
+                        orig_layout_expr = layouts[target_leaf_id]
+                        new_layout_expr = IndexExpressionReplacer(index_exprs)(
+                            orig_layout_expr
+                        )
+
+                        layout_expr_per_leaf[leaf_key] = new_layout_expr
+
+                axis_trees[loop_context] = indexed_axes
+                layout_expr_per_axis_tree_per_leaf[loop_context] = layout_expr_per_leaf
+
+        return IndexedArray(self, axis_trees, layout_expr_per_axis_tree_per_leaf)
 
     @functools.cached_property
     def datamap(self):
@@ -666,7 +724,7 @@ def _split_index_tree_from_iterable(
                     )
     else:
         index_trees = {loop_context: IndexTree(index)}
-    return SplitIndexTree(index_trees)
+    return index_trees
 
 
 def _split_index_tree_from_ellipsis(
@@ -692,7 +750,7 @@ def _split_index_tree_from_ellipsis(
     for subslice, subtree in checked_zip(subslices, subtrees):
         if subtree is not None:
             tree = tree.add_subtree(subtree, slice_, subslice.component)
-    return SplitIndexTree({pmap(): tree})
+    return pmap({pmap(): tree})
 
 
 def is_fully_indexed(axes: AxisTree, indices: IndexTree) -> bool:
@@ -734,7 +792,10 @@ Since we always have the context anyway this doesn't matter for us.
 
 @functools.singledispatch
 def as_index_forest(arg: Any, **kwargs):
-    raise TypeError
+    if arg is Ellipsis:
+        return _split_index_tree_from_ellipsis(**kwargs)
+    else:
+        raise TypeError
 
 
 @as_index_forest.register
@@ -749,3 +810,8 @@ def _(loop_index: LoopIndex, **kwargs):
     for path in loop_index.target_paths:
         forest[pmap({loop_index: path})] = IndexTree(loop_index)
     return pmap(forest)
+
+
+@as_index_forest.register
+def _(slice_: slice, **kwargs):
+    return _split_index_tree_from_iterable([slice_], **kwargs)

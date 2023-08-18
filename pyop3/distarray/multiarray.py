@@ -332,7 +332,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
         # FIXME
         from pyop3.codegen.loopexpr2loopy import index_axes
 
-        index_forest = as_index_forest(indices)
+        index_forest = as_index_forest(indices, axes=self.axes)
 
         axis_trees = {}
         layout_expr_per_axis_tree_per_leaf = {}
@@ -355,14 +355,14 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
 
                 layout_expr_per_leaf[leaf_key] = new_layout_expr
             else:
-                for indexed_leaf_axis, indexed_leaf_cpt in indexed_axes.leaves:
-                    leaf_key = indexed_leaf_axis.id, indexed_leaf_cpt.label
+                for indexed_leaf_axis, indexed_leaf_cpt_label in indexed_axes.leaves:
+                    leaf_key = indexed_leaf_axis.id, indexed_leaf_cpt_label
                     # this is a map from axis label to new expression
                     index_exprs = index_exprs_per_leaf[leaf_key]
                     target_path = target_path_per_leaf[leaf_key]
 
-                    breakpoint()
-                    # orig_layout_expr = ???
+                    # sum here because we have a tuple of things at present, should fix
+                    orig_layout_expr = sum(self.axes.layouts[target_path])
                     new_layout_expr = IndexExpressionReplacer(index_exprs)(
                         orig_layout_expr
                     )

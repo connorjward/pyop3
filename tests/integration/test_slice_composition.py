@@ -32,7 +32,6 @@ def vec2_copy_kernel():
 
 
 def test_1d_slice_composition(vec2_copy_kernel):
-    # equivalent to dat1[...] = dat0[::2][1:3] (== [2, 4])
     m, n = 10, 2
     dat0 = MultiArray(
         AxisTree(Axis([(m, "cpt0")], "ax0")),

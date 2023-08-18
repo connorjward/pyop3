@@ -25,6 +25,7 @@ from pyop3.axis import (
     Axis,
     AxisComponent,
     AxisTree,
+    AxisVariable,
     CalledAxisTree,
     TabulatedLayout,
 )
@@ -531,11 +532,14 @@ def _(call: FunctionCall, loop_indices, ctx: LoopyCodegenContext) -> None:
         #         "Need to handle indices to create temp shape differently"
         #     )
 
-        # axes = _indexed_axes(arg, loop_indices)
+        loop_index_keys = frozenset(
+            loop_index for key in arg.axis_trees.keys() for loop_index in key.keys()
+        )
         loop_context = pmap(
             {
                 loop_index: pmap(path)
                 for loop_index, (path, _, _) in loop_indices.items()
+                if loop_index in loop_index_keys
             }
         )
         axes = arg.axis_trees[loop_context]
@@ -715,9 +719,15 @@ def build_assignment(
     # the intermediate index instructions
     # This will traverse the final axis tree, collecting jnames. At the bottom the
     # leaf insns will be emitted and the temp_expr will be assigned to the array one.
+    loop_index_keys = frozenset(
+        loop_index
+        for key in assignment.array.axis_trees.keys()
+        for loop_index in key.keys()
+    )
     loop_context = {}
     for loop_index, (path, _, _) in loop_indices.items():
-        loop_context[loop_index] = pmap(path)
+        if loop_index in loop_index_keys:
+            loop_context[loop_index] = pmap(path)
     loop_context = pmap(loop_context)
 
     _parse_assignment_final(
@@ -957,9 +967,6 @@ def _parse_assignment_final(
             {ax: cpt for path in loop_context.values() for ax, cpt in path.items()}
         )
 
-        # for insn in insns_per_leaf[None]:
-        #     ctx.add_assignment(*insn)
-        # array_expr = array_expr_per_leaf[None]
         array_insns, array_expr = _assignment_array_insn(
             assignment, layout_expr[None], path, axis_labels_to_jnames, ctx
         )
@@ -974,67 +981,79 @@ def _parse_assignment_final(
         _parse_assignment_final_rec(
             assignment,
             axes,
-            axes.root,
+            layout_expr,
             # jnames_per_axcpt,
             # array_expr_per_leaf,
             # insns_per_leaf,
+            loop_context,
+            loop_indices,
             pmap(),
             pmap(),
             ctx,
+            current_axis=axes.root,
         )
 
 
 def _parse_assignment_final_rec(
     assignment,
     axes,
-    axis,
-    jnames_per_axcpt,
-    array_expr_per_leaf,
-    insns_per_leaf,
+    layout_expr,
+    loop_context,
+    loop_indices,
     path: pmap,
     jnames: pmap,
     ctx,
+    *,
+    current_axis,
 ):
-    for axcpt in axis.components:
+    for axcpt in current_axis.components:
         size = register_extent(axcpt.count, path, jnames, ctx)
         iname = ctx.unique_name("i")
         ctx.add_domain(iname, size)
 
-        current_jname = jnames_per_axcpt[axis.id, axcpt.label]
-        new_jnames = jnames | {axis.label: current_jname}
-        new_path = path | {axis.label: axcpt.label}
+        # current_jname = jnames_per_axcpt[axis.id, axcpt.label]
+        current_jname = iname
+        new_jnames = jnames | {current_axis.label: current_jname}
+        new_path = path | {current_axis.label: axcpt.label}
 
         with ctx.within_inames({iname}):
-            ctx.add_assignment(pym.var(current_jname), pym.var(iname))
+            # ctx.add_assignment(pym.var(current_jname), pym.var(iname))
 
-            if subaxis := axes.child(axis, axcpt):
+            if subaxis := axes.child(current_axis, axcpt):
                 _parse_assignment_final_rec(
                     assignment,
                     axes,
-                    subaxis,
-                    jnames_per_axcpt,
-                    array_expr_per_leaf,
-                    insns_per_leaf,
+                    layout_expr,
+                    loop_context,
+                    loop_indices,
+                    new_path,
+                    new_jnames,
+                    ctx,
+                    current_axis=subaxis,
+                )
+            else:
+                # if isinstance(assignment.array, CalledAxisTree):
+                #     temp_insns, temp_expr = _assignment_temp_insn(
+                #         assignment, pmap(), pmap(), ctx
+                #     )
+                #     for insn in temp_insns:
+                #         ctx.add_assignment(*insn)
+
+                leafaxis, leafcpt = axes._node_from_path(new_path)
+                array_insns, array_expr = _assignment_array_insn(
+                    assignment,
+                    layout_expr[leafaxis.id, leafcpt.label],
                     new_path,
                     new_jnames,
                     ctx,
                 )
-            else:
-                for insn in insns_per_leaf[axis.id, axcpt.label]:
+                temp_insns, temp_expr = _assignment_temp_insn(
+                    assignment, new_path, new_jnames, ctx
+                )
+                for insn in array_insns:
                     ctx.add_assignment(*insn)
-                array_expr = array_expr_per_leaf[axis.id, axcpt.label]
-                if isinstance(assignment.array, CalledAxisTree):
-                    temp_insns, temp_expr = _assignment_temp_insn(
-                        assignment, pmap(), pmap(), ctx
-                    )
-                    for insn in temp_insns:
-                        ctx.add_assignment(*insn)
-                else:
-                    temp_insns, temp_expr = _assignment_temp_insn(
-                        assignment, new_path, new_jnames, ctx
-                    )
-                    for insn in temp_insns:
-                        ctx.add_assignment(*insn)
+                for insn in temp_insns:
+                    ctx.add_assignment(*insn)
                 _shared_assignment_insn(assignment, array_expr, temp_expr, ctx)
 
 
@@ -1325,7 +1344,7 @@ def _assignment_temp_insn(assignment, path, jnames, ctx):
 
     """
     offset_insns, temp_offset = emit_assignment_insn(
-        assignment.temporary.axes.layouts[path],
+        sum(assignment.temporary.axes.layouts[path]),
         path,
         jnames,
         ctx,
@@ -1401,7 +1420,6 @@ def emit_layout_insns(
     """
     TODO
     """
-    # breakpoint()
     insns = []
 
     expr = JnameSubstitutor(labels_to_jnames)(layouts)
@@ -1569,6 +1587,7 @@ def _(loop_index: LoopIndex, *, loop_indices, **kwargs):
 
 @collect_shape_index_callback.register
 def _(local_index: LocalLoopIndex, *, loop_indices, **kwargs):
+    raise NotImplementedError
     return collect_shape_index_callback(
         local_index.loop_index, loop_indices=loop_indices, **kwargs
     )
@@ -1618,6 +1637,7 @@ def _(called_map: CalledMap, **kwargs):
 @collect_shape_index_callback.register
 def _(slice_: Slice, *, prev_axes, **kwargs):
     components = []
+    index_expr_per_leaf = []
     # I think that axis_label should probably be the same for all bits of the slice
     for subslice in slice_.slices:
         prev_cpt = prev_axes.find_component(slice_.axis, subslice.component)
@@ -1634,11 +1654,16 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
         cpt = AxisComponent(size, label=prev_cpt.label)
         components.append(cpt)
 
+        newvar = AxisVariable(slice_.axis)
+        index_expr_per_leaf.append(
+            pmap({slice_.axis: newvar * subslice.step + subslice.start})
+        )
+
     axes = AxisTree(Axis(components, label=slice_.axis))
     leaves = {}
-    for cpt in axes.root.components:
+    for cpt, index_expr in checked_zip(axes.root.components, index_expr_per_leaf):
         path = pmap({axes.root.label: cpt.label})
-        leaves[axes.root.id, cpt.label] = (path,)
+        leaves[axes.root.id, cpt.label] = (path, index_expr)
 
     return leaves, {"axes": axes}
 
