@@ -65,6 +65,15 @@ from pyop3.utils import (
 #     return False
 
 
+class ExpressionEvaluator(pym.mapper.evaluator.EvaluationMapper):
+    def map_axis_variable(self, expr):
+        return self.context[expr.axis_label]
+
+    def map_multi_array(self, array):
+        breakpoint()
+        pass
+
+
 class IntRef:
     """Pass-by-reference integer."""
 
@@ -597,6 +606,11 @@ class Axis(LabelledNode, LoopIterable):
         return as_axis_tree(self).index_exprs
 
 
+class MultiArrayCollector(pym.mapper.Collector):
+    def map_multi_array(self, expr):
+        return {expr}
+
+
 # this is supposed to be used in place of an array to represent the offset
 # of an axis at a given index
 class CalledAxisTree:
@@ -688,9 +702,9 @@ class AxisTree(LabelledTree, LoopIterable):
         if self.is_empty:
             return {}
         dmap = postvisit(self, _collect_datamap, axes=self)
-        for layout in flatten(list(self.layouts.values())):
-            if isinstance(layout, TabulatedLayout):
-                dmap |= layout.data.datamap
+        for layout in self.layouts.values():
+            for array in MultiArrayCollector()(layout):
+                dmap |= array.datamap
         return dmap
 
     @property
@@ -717,7 +731,11 @@ class AxisTree(LabelledTree, LoopIterable):
         if allow_unused:
             path = _trim_path(self, path)
 
+        offset = pym.evaluate(sum(self.layouts[path]), indices, ExpressionEvaluator)
+        return strict_int(offset)
+
         offset_ = 0
+
         for layout in self.layouts[path]:
             if isinstance(layout, TabulatedLayout):
                 offset_ += layout.data.get_value(path, indices, allow_unused=True)
@@ -997,26 +1015,26 @@ class LayoutFunction(IndexFunction, abc.ABC):
     pass
 
 
-class AffineLayout(LayoutFunction):
-    fields = {"axis", "cpt", "step", "start"}
-
-    def __init__(self, axis, cpt, step, start=0):
-        assert False, "old code"
-        super().__init__()
-        self.axis = axis
-        self.cpt = cpt
-        self.step = step
-        self.start = start
+# class AffineLayout(LayoutFunction):
+#     fields = {"axis", "cpt", "step", "start"}
+#
+#     def __init__(self, axis, cpt, step, start=0):
+#         assert False, "old code"
+#         super().__init__()
+#         self.axis = axis
+#         self.cpt = cpt
+#         self.step = step
+#         self.start = start
 
 
 # FIXME I don't think that layout functions generically need to record which axes
 # they work over (we do for affine) since the map already knows.
-class TabulatedLayout(LayoutFunction):
-    fields = {"data"}
-
-    def __init__(self, data):
-        super().__init__()
-        self.data = data
+# class TabulatedLayout(LayoutFunction):
+#     fields = {"data"}
+#
+#     def __init__(self, data):
+#         super().__init__()
+#         self.data = data
 
 
 @dataclasses.dataclass
@@ -1243,7 +1261,7 @@ def _compute_layouts(
             _tabulate_count_array_tree(axes, axis, fulltree, offset)
 
             for subpath, offset_data in fulltree.items():
-                layouts[path | subpath] = TabulatedLayout(offset_data)
+                layouts[path | subpath] = offset_data
             ctree = None
             steps = {path: _axis_size(axes, axis)}
 

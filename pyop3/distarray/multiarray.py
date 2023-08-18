@@ -29,6 +29,7 @@ from pyop3.index import (  # index_axes,
 )
 from pyop3.utils import (
     PrettyTuple,
+    UniqueNameGenerator,
     as_tuple,
     just_one,
     merge_dicts,
@@ -70,8 +71,8 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
 
     mapper_method = sys.intern("map_multi_array")
 
-    prefix = "ten"
-    name_generator = pytools.UniqueNameGenerator()
+    prefix = "array"
+    name_generator = UniqueNameGenerator()
 
     def __init__(
         self,
@@ -115,8 +116,6 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
         name = name or self.name_generator(prefix or self.prefix)
 
         DistributedArray.__init__(self, name)
-
-        # make a property instead? bit ugly like this
         pym.primitives.Variable.__init__(self, name)
 
         self._data = data

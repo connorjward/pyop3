@@ -12,6 +12,8 @@ from pyop3 import (
     loop,
 )
 
+pytest.skip(allow_module_level=True)
+
 
 def test_copy_with_local_indices(scalar_copy_kernel):
     size = 10

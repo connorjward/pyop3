@@ -20,15 +20,7 @@ import pytools
 from pyrsistent import pmap
 
 from pyop3 import tlang, utils
-from pyop3.axis import (
-    AffineLayout,
-    Axis,
-    AxisComponent,
-    AxisTree,
-    AxisVariable,
-    CalledAxisTree,
-    TabulatedLayout,
-)
+from pyop3.axis import Axis, AxisComponent, AxisTree, AxisVariable, CalledAxisTree
 from pyop3.distarray import IndexedMultiArray, MultiArray
 from pyop3.dtypes import IntType
 from pyop3.index import (
@@ -1398,11 +1390,39 @@ def emit_assignment_insn(
 
 
 class JnameSubstitutor(pym.mapper.IdentityMapper):
-    def __init__(self, replace_map):
-        self._replace_map = replace_map
+    def __init__(self, path, jnames, codegen_context):
+        self._path = path
+        self._labels_to_jnames = jnames
+        self._codegen_context = codegen_context
 
     def map_axis_variable(self, expr):
-        return pym.var(self._replace_map[expr.axis_label])
+        return pym.var(self._labels_to_jnames[expr.axis_label])
+
+    def map_multi_array(self, array):
+        # must be single-component here
+        # leaf_axis, leaf_cpt = array.leaf
+
+        trimmed_path = {}
+        trimmed_jnames = {}
+        axes = array.axes
+        axis = axes.root
+        while axis:
+            trimmed_path[axis.label] = self._path[axis.label]
+            trimmed_jnames[axis.label] = self._labels_to_jnames[axis.label]
+            cpt = just_one(axis.components)
+            axis = axes.child(axis, cpt)
+        trimmed_path = pmap(trimmed_path)
+        trimmed_jnames = pmap(trimmed_jnames)
+
+        insns, varname = _scalar_assignment(
+            array,
+            trimmed_path,
+            trimmed_jnames,
+            self._codegen_context,
+        )
+        for insn in insns:
+            self._codegen_context.add_assignment(*insn)
+        return varname
 
 
 def emit_layout_insns(
@@ -1417,50 +1437,12 @@ def emit_layout_insns(
     """
     insns = []
 
-    expr = JnameSubstitutor(labels_to_jnames)(layouts)
+    expr = JnameSubstitutor(path, labels_to_jnames, ctx)(layouts)
 
     if expr == ():
         expr = 0
 
     return ((pym.var(offset_var), expr),)
-
-    # old code
-    # expr = 0  # pym.var(offset_var)
-    # for layout_fn in layouts:
-    #     # TODO singledispatch!
-    #     if isinstance(layout_fn, TabulatedLayout):
-    #         # trim path and labels so only existing axes are used
-    #         trimmed_path = {}
-    #         trimmed_jnames = {}
-    #         laxes = layout_fn.data.axes
-    #         laxis = laxes.root
-    #         while laxis:
-    #             trimmed_path[laxis.label] = path[laxis.label]
-    #             trimmed_jnames[laxis.label] = labels_to_jnames[laxis.label]
-    #             lcpt = just_one(laxis.components)
-    #             laxis = laxes.child(laxis, lcpt)
-    #         trimmed_path = pmap(trimmed_path)
-    #         trimmed_jnames = pmap(trimmed_jnames)
-    #
-    #         varname = ctx.unique_name("p")
-    #         new_insns, varname = _scalar_assignment(
-    #             layout_fn.data,
-    #             trimmed_path,
-    #             trimmed_jnames,
-    #             ctx,
-    #         )
-    #         insns += new_insns
-    #         expr += varname
-    #     elif isinstance(layout_fn, AffineLayout):
-    #         start = layout_fn.start
-    #         step = layout_fn.step
-    #         jname = pym.var(labels_to_jnames[layout_fn.axis])
-    #         expr += jname * step + start
-    #     else:
-    #         raise NotImplementedError
-    #
-    # ret = tuple(insns) + ((pym.var(offset_var), expr),)
-    # return ret
 
 
 def register_extent(extent, path, jnames, ctx):
@@ -1532,11 +1514,9 @@ def _scalar_assignment(
 
     offset = ctx.unique_name("off")
     ctx.add_temporary(offset, IntType)
-    # I don't think that I have to zero it since it all gets added together
-    # ctx.add_assignment(pym.var(offset), 0)
 
     layout_insns = emit_layout_insns(
-        array.axes,
+        sum(array.axes.layouts[path]),
         offset,
         array_labels_to_jnames,
         ctx,
