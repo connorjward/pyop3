@@ -193,7 +193,7 @@ class IndexedArray:
             index_forest = as_index_forest(indices, axes=axes)
 
             for loop_context, index_tree in index_forest.items():
-                indexed_axes, index_exprs_per_leaf, target_path_per_leaf = index_axes(
+                indexed_axes, target_path_per_leaf, index_exprs_per_leaf = index_axes(
                     axes, index_tree, loop_context
                 )
 
@@ -713,7 +713,7 @@ def _split_index_tree_from_iterable(
             split_subtree = _split_index_tree_from_iterable(
                 subindices, axes, path | target_path, loop_context
             )
-            for loopctx, subtree in split_subtree.index_trees.items():
+            for loopctx, subtree in split_subtree.items():
                 if loopctx not in index_trees:
                     index_trees[loopctx] = IndexTree(index).add_subtree(
                         subtree, index, component
@@ -792,7 +792,9 @@ Since we always have the context anyway this doesn't matter for us.
 
 @functools.singledispatch
 def as_index_forest(arg: Any, **kwargs):
-    if arg is Ellipsis:
+    if isinstance(arg, collections.abc.Iterable):
+        return _split_index_tree_from_iterable(arg, **kwargs)
+    elif arg is Ellipsis:
         return _split_index_tree_from_ellipsis(**kwargs)
     else:
         raise TypeError

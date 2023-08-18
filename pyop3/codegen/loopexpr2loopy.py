@@ -408,9 +408,6 @@ def _parse_loop(
             codegen_ctx=codegen_ctx,
             loop_indices=loop_indices,
             prev_axes=axes,
-            prev_jnames_per_cpt=jnames_per_cpt,
-            prev_array_expr_per_leaf=array_expr_per_leaf,
-            prev_insns_per_leaf=insns_per_leaf,
         )
 
     ###
@@ -1669,16 +1666,32 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
 
 
 def collect_shape_pre_callback(leaf, preorder_ctx, **kwargs):
-    return preorder_ctx
+    iaxes_axis_path, iaxes_jname_exprs = leaf
+
+    new_axis_path = preorder_ctx.path | iaxes_axis_path
+
+    return ParseAssignmentPreorderContext(
+        new_axis_path, (), preorder_ctx.jname_exprs | iaxes_jname_exprs
+    )
 
 
-def collect_shape_post_callback_terminal(leafkey, leaf, preorder_ctx, **kwargs):
+def collect_shape_post_callback_terminal(
+    leafkey, leaf, preorder_ctx, *, prev_axes, **kwargs
+):
     # leaf is a 2-tuple of path and index_exprs. We don't need the path any more
     # return axis and index exprs
-    return None, *leaf
+    # if preorder_ctx.path:
+    #     leaf_axis, leaf_cpt = prev_axes._node_from_path(preorder_ctx.path)
+    #     axis_path = prev_axes.path_with_nodes(leaf_axis, leaf_cpt)
+    # else:
+    #     axis_path = pmap()
+
+    path_per_leaf = {leafkey: preorder_ctx.path}
+    expr_per_leaf = {leafkey: preorder_ctx.jname_exprs}
+    return None, path_per_leaf, expr_per_leaf
 
 
-def collect_shape_post_callback_nonterminal(retval, **kwargs):
+def collect_shape_post_callback_nonterminal(retval, *args, **kwargs):
     """Accumulate results
 
     We just return an axis tree from below. No special treatment is needed here.
@@ -1698,9 +1711,10 @@ def collect_shape_final_callback(index_data, leafdata):
                 axes = axes.add_subtree(subax, *k)
             else:
                 axes = subax
-        expr_per_leaf[k] = expr
-        target_path_per_leaf[k] = path
-    return axes, pmap(expr_per_leaf), pmap(target_path_per_leaf)
+
+        expr_per_leaf |= expr
+        target_path_per_leaf |= path
+    return axes, pmap(target_path_per_leaf), pmap(expr_per_leaf)
 
 
 def _indexed_axes(indexed, loop_indices):
@@ -1838,7 +1852,7 @@ def index_axes(axes: AxisTree, indices: IndexTree, loop_context):
 
     indexed_axes, expr_per_leaf, target_path_per_leaf = visit_indices(
         indices,
-        None,
+        ParseAssignmentPreorderContext(),
         index_callback=collect_shape_index_callback,
         pre_callback=collect_shape_pre_callback,
         post_callback_terminal=collect_shape_post_callback_terminal,

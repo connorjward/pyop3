@@ -337,7 +337,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
         axis_trees = {}
         layout_expr_per_axis_tree_per_leaf = {}
         for loop_context, index_tree in index_forest.items():
-            indexed_axes, index_exprs_per_leaf, target_path_per_leaf = index_axes(
+            indexed_axes, target_path_per_leaf, index_exprs_per_leaf = index_axes(
                 self.axes, index_tree, loop_context
             )
 
