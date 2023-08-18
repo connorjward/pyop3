@@ -10,6 +10,7 @@ import functools
 import itertools
 import numbers
 import operator
+import sys
 import threading
 from typing import Any, FrozenSet, Hashable, Mapping, Optional, Sequence, Tuple, Union
 
@@ -23,6 +24,7 @@ from pyrsistent import pmap
 
 from pyop3 import utils
 from pyop3.dtypes import IntType, PointerType, get_mpi_dtype
+from pyop3.index import LoopIterable
 
 # from pyop3.index import Index, IndexTree, Map, Slice, TabulatedMap
 from pyop3.tree import (
@@ -522,7 +524,7 @@ class AxisComponent(LabelledImmutableRecord):
         return self.num_owned
 
 
-class Axis(LabelledNode):
+class Axis(LabelledNode, LoopIterable):
     fields = LabelledNode.fields - {"component_labels"} | {"components", "permutation"}
 
     def __init__(
@@ -584,6 +586,16 @@ class Axis(LabelledNode):
     def enumerate(self):
         return as_axis_tree(self).enumerate()
 
+    # cached?
+    @property
+    def axes(self):
+        return as_axis_tree(self)
+
+    # cached?
+    @property
+    def index_exprs(self):
+        return as_axis_tree(self).index_exprs
+
 
 # this is supposed to be used in place of an array to represent the offset
 # of an axis at a given index
@@ -606,7 +618,19 @@ class CalledAxisTree:
         return self.axes.datamap | self.indices.datamap
 
 
-class AxisTree(LabelledTree):
+# hacky class for index_exprs to work, needs cleaning up
+class AxisVariable(pym.primitives.Variable):
+    mapper_method = sys.intern("map_axis_variable")
+
+    mycounter = 0
+
+    def __init__(self, axis_label):
+        super().__init__(f"var{self.mycounter}")
+        self.__class__.mycounter += 1  # ugly
+        self.axis_label = axis_label
+
+
+class AxisTree(LabelledTree, LoopIterable):
     def __init__(
         self,
         root: MultiAxis | None = None,
@@ -644,8 +668,25 @@ class AxisTree(LabelledTree):
 
         return EnumeratedLoopIndex(self)
 
+    @property
+    def axes(self):
+        return self
+
+    @functools.cached_property
+    def index_exprs(self):
+        exprs_per_leaf = {}
+        for leaf_axis, leaf_cpt_label in self.leaves:
+            exprs = {}
+            for axis_label, cpt_label in self.path(leaf_axis, leaf_cpt_label).items():
+                # for simple axis trees we don't do anything fancy with the indices
+                exprs[axis_label] = AxisVariable(axis_label)
+            exprs_per_leaf[leaf_axis.id, leaf_cpt_label] = pmap(exprs)
+        return pmap(exprs_per_leaf)
+
     @functools.cached_property
     def datamap(self) -> dict[str:DistributedArray]:
+        if self.is_empty:
+            return {}
         dmap = postvisit(self, _collect_datamap, axes=self)
         for layout in flatten(list(self.layouts.values())):
             if isinstance(layout, TabulatedLayout):
@@ -960,6 +1001,7 @@ class AffineLayout(LayoutFunction):
     fields = {"axis", "cpt", "step", "start"}
 
     def __init__(self, axis, cpt, step, start=0):
+        assert False, "old code"
         super().__init__()
         self.axis = axis
         self.cpt = cpt
@@ -1152,7 +1194,8 @@ def _compute_layouts(
                 step = step_size(axes, axis, c)
                 layouts |= {
                     path
-                    | {axis.label: c.label}: AffineLayout(axis.label, c.label, step)
+                    # | {axis.label: c.label}: AffineLayout(axis.label, c.label, step)
+                    | {axis.label: c.label}: AxisVariable(axis.label) * step
                 }
 
         else:
@@ -1219,7 +1262,8 @@ def _compute_layouts(
                 mycomponent = axis.components[cidx]
                 sublayouts = sublayoutss[cidx].copy()
 
-                new_layout = AffineLayout(axis.label, mycomponent.label, step, start)
+                # new_layout = AffineLayout(axis.label, mycomponent.label, step, start)
+                new_layout = AxisVariable(axis.label) * step + start
                 sublayouts[path | {axis.label: mycomponent.label}] = new_layout
                 start += _axis_component_size(axes, axis, mycomponent)
 

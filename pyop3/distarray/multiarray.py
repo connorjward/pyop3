@@ -20,10 +20,10 @@ from pyop3 import utils
 from pyop3.axis import Axis, AxisComponent, AxisTree, as_axis_tree, get_bottom_part
 from pyop3.distarray.base import DistributedArray
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
-from pyop3.index import (
-    Indexed,
+from pyop3.index import (  # index_axes,
+    IndexedArray,
     IndexTree,
-    SplitIndexTree,
+    as_index_forest,
     as_split_index_tree,
     is_fully_indexed,
 )
@@ -36,6 +36,15 @@ from pyop3.utils import (
     strict_int,
     strictly_all,
 )
+
+
+# should be elsewhere, this is copied from loopexpr2loopy VariableReplacer
+class IndexExpressionReplacer(pym.mapper.IdentityMapper):
+    def __init__(self, replace_map):
+        self._replace_map = replace_map
+
+    def map_axis_variable(self, expr):
+        return self._replace_map[expr.axis_label]
 
 
 class MultiArray(DistributedArray, pym.primitives.Variable):
@@ -319,8 +328,51 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
         return self.dim
 
     # maybe I could check types here and use instead of get_value?
-    def __getitem__(self, indices: IndexTree | Index):
-        return Indexed(self, indices)
+    def __getitem__(self, indices):
+        # FIXME
+        from pyop3.codegen.loopexpr2loopy import index_axes
+
+        index_forest = as_index_forest(indices)
+
+        axis_trees = {}
+        layout_expr_per_axis_tree_per_leaf = {}
+        for loop_context, index_tree in index_forest.items():
+            indexed_axes, index_exprs_per_leaf, target_path_per_leaf = index_axes(
+                self.axes, index_tree, loop_context
+            )
+
+            layout_expr_per_leaf = {}
+            if indexed_axes.is_empty:
+                leaf_key = None
+
+                # this is a map from axis label to new expression
+                index_exprs = index_exprs_per_leaf[leaf_key]
+                target_path = target_path_per_leaf[leaf_key]
+
+                # sum here because we have a tuple of things at present, should fix
+                orig_layout_expr = sum(self.axes.layouts[target_path])
+                new_layout_expr = IndexExpressionReplacer(index_exprs)(orig_layout_expr)
+
+                layout_expr_per_leaf[leaf_key] = new_layout_expr
+            else:
+                for indexed_leaf_axis, indexed_leaf_cpt in indexed_axes.leaves:
+                    leaf_key = indexed_leaf_axis.id, indexed_leaf_cpt.label
+                    # this is a map from axis label to new expression
+                    index_exprs = index_exprs_per_leaf[leaf_key]
+                    target_path = target_path_per_leaf[leaf_key]
+
+                    breakpoint()
+                    # orig_layout_expr = ???
+                    new_layout_expr = IndexExpressionReplacer(index_exprs)(
+                        orig_layout_expr
+                    )
+
+                    layout_expr_per_leaf[leaf_key] = new_layout_expr
+
+            axis_trees[loop_context] = indexed_axes
+            layout_expr_per_axis_tree_per_leaf[loop_context] = layout_expr_per_leaf
+
+        return IndexedArray(self, axis_trees, layout_expr_per_axis_tree_per_leaf)
 
     def select_axes(self, indices):
         selected = []

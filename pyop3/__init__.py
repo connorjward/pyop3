@@ -17,7 +17,6 @@ from pyop3.index import (  # noqa: F401
     Map,
     Slice,
     SliceComponent,
-    SplitLoopIndex,
     TabulatedMapComponent,
 )
 from pyop3.loopexpr import (  # noqa: F401

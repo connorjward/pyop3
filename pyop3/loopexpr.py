@@ -14,7 +14,7 @@ import numpy as np
 import pytools
 
 from pyop3.distarray import DistributedArray, MultiArray
-from pyop3.index import EnumeratedLoopIndex, Indexed
+from pyop3.index import EnumeratedLoopIndex, IndexedArray
 from pyop3.utils import as_tuple, checked_zip, merge_dicts
 
 

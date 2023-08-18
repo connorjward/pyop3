@@ -10,7 +10,8 @@ from typing import Any, Collection, Hashable, Mapping, Sequence
 import pytools
 from pyrsistent import pmap
 
-from pyop3.axis import Axis, AxisComponent, AxisTree
+# cyclic import, avoid
+# from pyop3.axis import Axis, AxisComponent, AxisTree
 from pyop3.tree import LabelledNode, LabelledTree, postvisit
 from pyop3.utils import (
     LabelledImmutableRecord,
@@ -22,129 +23,179 @@ from pyop3.utils import (
 )
 
 
+class LoopIterable(abc.ABC):
+    """Abstract class representing something that can be looped over.
+
+    In order for an object to be loop-able over it needs to have shape
+    (``axes``) and an index expression per leaf of the shape. The simplest
+    case is `AxisTree` since the index expression is just identity. This
+    contrasts with something like an `IndexedLoopIterable` or `CalledMap`.
+    For the former the index expression for ``axes[::2]`` would be ``2*i``
+    and for the latter ``map(p)`` would be something like ``map[i, j]``.
+
+    """
+
+    @abc.abstractmethod
+    def index(self) -> LoopIndex:
+        pass
+
+    @abc.abstractmethod
+    def enumerate(self) -> EnumeratedLoopIndex:
+        pass
+
+    @property
+    @abc.abstractmethod
+    def axes(self):
+        pass
+
+    # this is a map from axes leaves to both target_paths and associated index expressions.
+    @property
+    @abc.abstractmethod
+    def index_exprs(self):
+        pass
+
+
+class IndexedLoopIterable(LoopIterable):
+    """Class representing an indexed object that can be looped over.
+
+    Examples include ``axes[map(p)]`` or ``map(p)[::2]``.
+
+    """
+
+
+# just use a pmap for this
+# class IndexForest:
+#     def __init__(self, trees: Mapping[Mapping, IndexTree]):
+#         # per loop context
+#         self.trees = trees
+
+
 class IndexTree(LabelledTree):
     @functools.cached_property
     def datamap(self) -> dict[str:DistributedArray]:
         return postvisit(self, _collect_datamap, itree=self)
 
 
-class SplitIndexTree:
-    """Container of `IndexTree`s distinguished by outer loop information.
-
-    This class is required because multi-component outer loops can lead to
-    ambiguity in the shape of the resulting `IndexTree`. Consider the loop:
-
-    .. code:: python
-
-        loop(p := mesh.points, kernel(dat0[closure(p)]))
-
-    In this case, assuming ``mesh`` to be at least 1-dimensional, ``p`` will
-    loop over multiple components (cells, edges, vertices, etc) and each
-    component will have a differently sized temporary. This is because
-    vertices map to themselves whereas, for example, edges map to themselves
-    *and* the incident vertices.
-
-    A `SplitIndexTree` is therefore useful as it allows the description of
-    an `IndexTree` *per possible configuration of relevant loop indices*.
-
-    """
-
-    def __init__(self, index_trees: pmap[pmap[LoopIndex, pmap[str, str]], IndexTree]):
-        # this is terribly unclear
-        if not is_single_valued([set(key.keys()) for key in index_trees.keys()]):
-            raise ValueError("Loop contexts must contain the same loop indices")
-
-        new_index_trees = {}
-        for key, itree in index_trees.items():
-            new_key = {}
-            for loop_index, path in key.items():
-                if isinstance(loop_index, LocalLoopIndex):
-                    loop_index = loop_index.global_index
-                new_key[loop_index] = path
-            new_index_trees[pmap(new_key)] = itree
-        self.index_trees = pmap(new_index_trees)
-
-    def __getitem__(self, loop_context):
-        key = {}
-        for loop_index, path in loop_context.items():
-            if isinstance(loop_index, LocalLoopIndex):
-                loop_index = loop_index.global_index
-            if loop_index in self.loop_indices:
-                key |= {loop_index: path}
-        key = pmap(key)
-        return self.index_trees[key]
-
-    @functools.cached_property
-    def loop_indices(self) -> frozenset[LoopIndex]:
-        # loop is used just for unpacking
-        for loop_context in self.index_trees.keys():
-            indices = set()
-            for loop_index in loop_context.keys():
-                if isinstance(loop_index, LocalLoopIndex):
-                    loop_index = loop_index.global_index
-                indices.add(loop_index)
-            return frozenset(indices)
-
-    @functools.cached_property
-    def datamap(self):
-        return merge_dicts([itree.datamap for itree in self.index_trees.values()])
+# We don't use this any more because index trees are eagerly consumed
+# class SplitIndexTree:
+#     """Container of `IndexTree`s distinguished by outer loop information.
+#
+#     This class is required because multi-component outer loops can lead to
+#     ambiguity in the shape of the resulting `IndexTree`. Consider the loop:
+#
+#     .. code:: python
+#
+#         loop(p := mesh.points, kernel(dat0[closure(p)]))
+#
+#     In this case, assuming ``mesh`` to be at least 1-dimensional, ``p`` will
+#     loop over multiple components (cells, edges, vertices, etc) and each
+#     component will have a differently sized temporary. This is because
+#     vertices map to themselves whereas, for example, edges map to themselves
+#     *and* the incident vertices.
+#
+#     A `SplitIndexTree` is therefore useful as it allows the description of
+#     an `IndexTree` *per possible configuration of relevant loop indices*.
+#
+#     """
+#
+#     def __init__(self, index_trees: pmap[pmap[LoopIndex, pmap[str, str]], IndexTree]):
+#         # this is terribly unclear
+#         if not is_single_valued([set(key.keys()) for key in index_trees.keys()]):
+#             raise ValueError("Loop contexts must contain the same loop indices")
+#
+#         new_index_trees = {}
+#         for key, itree in index_trees.items():
+#             new_key = {}
+#             for loop_index, path in key.items():
+#                 if isinstance(loop_index, LocalLoopIndex):
+#                     loop_index = loop_index.global_index
+#                 new_key[loop_index] = path
+#             new_index_trees[pmap(new_key)] = itree
+#         self.index_trees = pmap(new_index_trees)
+#
+#     def __getitem__(self, loop_context):
+#         key = {}
+#         for loop_index, path in loop_context.items():
+#             if isinstance(loop_index, LocalLoopIndex):
+#                 loop_index = loop_index.global_index
+#             if loop_index in self.loop_indices:
+#                 key |= {loop_index: path}
+#         key = pmap(key)
+#         return self.index_trees[key]
+#
+#     @functools.cached_property
+#     def loop_indices(self) -> frozenset[LoopIndex]:
+#         # loop is used just for unpacking
+#         for loop_context in self.index_trees.keys():
+#             indices = set()
+#             for loop_index in loop_context.keys():
+#                 if isinstance(loop_index, LocalLoopIndex):
+#                     loop_index = loop_index.global_index
+#                 indices.add(loop_index)
+#             return frozenset(indices)
+#
+#     @functools.cached_property
+#     def datamap(self):
+#         return merge_dicts([itree.datamap for itree in self.index_trees.values()])
 
 
 IndexLabel = collections.namedtuple("IndexLabel", ["axis", "component"])
 
 
-# is IndexedArray a better name? Probably
-class Indexed:
+class IndexedArray:
     """Container representing an object that has been indexed.
 
     For example ``dat[index]`` would produce ``Indexed(dat, index)``.
 
     """
 
-    def __init__(self, obj, indices):
-        from pyop3.codegen.loopexpr2loopy import _indexed_axes
-
-        # The following tricksy bit of code builds a pretend AxisTree for the
-        # indexed object. It is complicated because the resultant AxisTree will
-        # have a different shape depending on the loop context (which is why we have
-        # SplitIndexTrees). We therefore store axes here split by loop context.
-        split_indices = {}
-        split_axes = {}
-        for loop_ctx, axes in obj.split_axes.items():
-            indices = as_split_index_tree(indices, axes=axes, loop_context=loop_ctx)
-            split_indices |= indices.index_trees
-            for loop_ctx_, itree in indices.index_trees.items():
-                # nasty hack because _indexed_axes currently expects a 3-tuple per loop index
-                assert set(loop_ctx.keys()) <= set(loop_ctx_.keys())
-                my_loop_context = {
-                    idx: (path, "not used", "not used")
-                    for idx, path in loop_ctx_.items()
-                }
-                split_axes[loop_ctx_] = _indexed_axes((axes, indices), my_loop_context)
-
-        self.obj = obj
-        self.split_axes = pmap(split_axes)
-        self.indices = SplitIndexTree(split_indices)
-
-    # old alias, not right now we have a pmap of index trees rather than just a single one
-    @property
-    def itree(self):
-        return self.indices
+    # note that axes here are specially modified to have the right layout functions
+    # this needs to be done inside __getitem__
+    def __init__(self, array: MultiArray, axis_trees, layout_exprs):
+        # from pyop3.codegen.loopexpr2loopy import _indexed_axes
+        #
+        # # The following tricksy bit of code builds a pretend AxisTree for the
+        # # indexed object. It is complicated because the resultant AxisTree will
+        # # have a different shape depending on the loop context (which is why we have
+        # # SplitIndexTrees). We therefore store axes here split by loop context.
+        # split_indices = {}
+        # split_axes = {}
+        # for loop_ctx, axes in obj.split_axes.items():
+        #     indices = as_split_index_tree(indices, axes=axes, loop_context=loop_ctx)
+        #     split_indices |= indices.index_trees
+        #     for loop_ctx_, itree in indices.index_trees.items():
+        #         # nasty hack because _indexed_axes currently expects a 3-tuple per loop index
+        #         assert set(loop_ctx.keys()) <= set(loop_ctx_.keys())
+        #         my_loop_context = {
+        #             idx: (path, "not used", "not used")
+        #             for idx, path in loop_ctx_.items()
+        #         }
+        #         split_axes[loop_ctx_] = _indexed_axes((axes, indices), my_loop_context)
+        #
+        # self.obj = obj
+        # self.split_axes = pmap(split_axes)
+        # self.indices = SplitIndexTree(split_indices)
+        self.array = array
+        self.axis_trees = axis_trees
+        self.layout_exprs = layout_exprs
 
     def __getitem__(self, indices):
+        raise NotImplementedError
         return Indexed(self, indices)
 
     @functools.cached_property
     def datamap(self):
-        return self.obj.datamap | self.itree.datamap
+        return self.array.datamap | merge_dicts(
+            [axes.datamap for axes in self.axis_trees.values()]
+        )
 
     @property
     def name(self):
-        return self.obj.name
+        return self.array.name
 
     @property
     def dtype(self):
-        return self.obj.dtype
+        return self.array.dtype
 
 
 class SliceComponent(pytools.ImmutableRecord, abc.ABC):
@@ -263,7 +314,7 @@ class Map(pytools.ImmutableRecord):
 
 
 # ImmutableRecord?
-class CalledMap:
+class CalledMap(LoopIterable):
     # This function cannot be part of an index tree because it has no specialised
     # to a particular loop index path.
     def __init__(self, map, from_index):
@@ -271,12 +322,27 @@ class CalledMap:
         self.from_index = from_index
 
 
-class LoopIndex(abc.ABC):
+class Index(LabelledNode):
+    @property
+    @abc.abstractmethod
+    def target_paths(self):
+        pass
+
+
+class LoopIndex(Index, abc.ABC):
     pass
 
 
+# TODO just call this LoopIndex (inherit from AbstractLoopIndex)
 class GlobalLoopIndex(LoopIndex):
-    def __init__(self, iterset):
+    fields = LoopIndex.fields | {"iterset"}
+
+    def __init__(self, iterset, **kwargs):
+        # FIXME I think that an IndexTree should not know its component labels
+        # we can do that in the dict. This is because it is context dependent.
+        # for now just use one label (assume single component)
+        cpt_labels = ["dont use"]
+        super().__init__(cpt_labels, **kwargs)
         self.iterset = iterset
 
     @property
@@ -303,51 +369,7 @@ class LocalLoopIndex(LoopIndex):
         return self.global_index.datamap
 
 
-class Index(LabelledNode):
-    @property
-    @abc.abstractmethod
-    def target_paths(self):
-        pass
-
-
-class SplitLoopIndex(Index):
-    """Object representing a set of indices of a loop nest.
-
-    FIXME More detail needed.
-
-    Notes
-    -----
-    For the moment we assume that `LoopIndex` objects cannot be
-    multi-component. This would need to produce a different set of loops
-    for each component. One application of this would be to be able to iterate
-    over all points of a mesh together (since cells, edges etc are different
-    components).
-
-    """
-
-    def __init__(self, loop_index: LoopIndex, path, **kwargs):
-        # cpt_labels = [cpt_label for ax, cpt_label in iterset.leaves]
-
-        super().__init__(["not a useful label"], **kwargs)
-        self.loop_index = loop_index
-
-        # TODO I don't think that I need to store this attribute as we can always
-        # find it another way.
-        self.path = path
-
-    @property
-    def target_paths(self) -> tuple[pmap]:
-        return (self.path,)
-        # return tuple(
-        #     self.iterset.path(leaf_axis, leaf_cpt_label)
-        #     for leaf_axis, leaf_cpt_label in self.iterset.leaves
-        # )
-
-    @functools.cached_property
-    def datamap(self):
-        return self.loop_index.datamap
-
-
+# TODO I want a Slice to have "bits" like a Map/CalledMap does
 class Slice(Index):
     """
 
@@ -376,54 +398,54 @@ class Slice(Index):
         return merge_dicts([s.datamap for s in self.slices])
 
 
-class SplitCalledMap(Index):
-    def __init__(self, map, from_index, loop_context):
-        # The degree of the called map depends on the index it acts on. If
-        # the map maps from a -> {a, b, c} *and* b -> {b, c} then the degree
-        # is 3 or 2 depending on from_index. If from_index is also a CalledMap
-        # with multiple output components then the degree will need to be
-        # determined by summing from the leaves of this prior map.
-        # Note that 'degree' is equivalent to stating the number of leaves of
-        # the resulting axes.
-        if isinstance(from_index, SplitLoopIndex):
-            # For now maps will only work with loop indices with depth 1. Being
-            # able to work with deeper loop indices is required for things like
-            # ephemeral meshes to work (since mesh.cells would have base and
-            # column axes (for extruded)).
-            if any(len(path) > 1 for path in from_index.target_paths):
-                raise NotImplementedError(
-                    "Mapping from loop indices with depth greater than 1 is not "
-                    "yet supported"
-                )
-
-        target_paths = []
-        for from_target_path in from_index.target_paths:
-            for leaf in map.map.bits[from_target_path]:
-                to_axis_label = leaf.target_axis
-                to_cpt_label = leaf.target_component
-                target_path = pmap({to_axis_label: to_cpt_label})
-                target_paths.append(target_path)
-
-        super().__init__(target_paths)
-        self.map = map
-        self.from_index = from_index
-
-    @property
-    def target_paths(self):
-        return self.component_labels
-
-    @functools.cached_property
-    def datamap(self):
-        return self.map.map.datamap | self.from_index.datamap
-
-    # ick
-    @property
-    def bits(self):
-        return self.map.map.bits
-
-    @property
-    def name(self):
-        return self.map.map.name
+# class SplitCalledMap(Index):
+#     def __init__(self, map, from_index, loop_context):
+#         # The degree of the called map depends on the index it acts on. If
+#         # the map maps from a -> {a, b, c} *and* b -> {b, c} then the degree
+#         # is 3 or 2 depending on from_index. If from_index is also a CalledMap
+#         # with multiple output components then the degree will need to be
+#         # determined by summing from the leaves of this prior map.
+#         # Note that 'degree' is equivalent to stating the number of leaves of
+#         # the resulting axes.
+#         if isinstance(from_index, SplitLoopIndex):
+#             # For now maps will only work with loop indices with depth 1. Being
+#             # able to work with deeper loop indices is required for things like
+#             # ephemeral meshes to work (since mesh.cells would have base and
+#             # column axes (for extruded)).
+#             if any(len(path) > 1 for path in from_index.target_paths):
+#                 raise NotImplementedError(
+#                     "Mapping from loop indices with depth greater than 1 is not "
+#                     "yet supported"
+#                 )
+#
+#         target_paths = []
+#         for from_target_path in from_index.target_paths:
+#             for leaf in map.map.bits[from_target_path]:
+#                 to_axis_label = leaf.target_axis
+#                 to_cpt_label = leaf.target_component
+#                 target_path = pmap({to_axis_label: to_cpt_label})
+#                 target_paths.append(target_path)
+#
+#         super().__init__(target_paths)
+#         self.map = map
+#         self.from_index = from_index
+#
+#     @property
+#     def target_paths(self):
+#         return self.component_labels
+#
+#     @functools.cached_property
+#     def datamap(self):
+#         return self.map.map.datamap | self.from_index.datamap
+#
+#     # ick
+#     @property
+#     def bits(self):
+#         return self.map.map.bits
+#
+#     @property
+#     def name(self):
+#         return self.map.map.name
 
 
 class EnumeratedLoopIndex:
@@ -476,75 +498,75 @@ def as_split_index_tree(arg: Any, **kwargs) -> SplitIndexTree:
         raise TypeError(f"No handler registered for {type(arg).__name__}")
 
 
-@as_split_index_tree.register
-def _(split_index_tree: SplitIndexTree, **kwargs) -> SplitIndexTree:
-    return split_index_tree
+# @as_split_index_tree.register
+# def _(split_index_tree: SplitIndexTree, **kwargs) -> SplitIndexTree:
+#     return split_index_tree
 
 
-@as_split_index_tree.register
-def _(index_tree: IndexTree, **kwargs) -> SplitIndexTree:
-    for index in index_tree.nodes:
-        if (
-            isinstance(index, SplitLoopIndex)
-            and len(index.loop_index.iterset.target_paths) > 1
-        ):
-            raise ValueError(
-                "Cannot convert an IndexTree to a SplitIndexTree if it contains a multi-component loop index"
-            )
-    return SplitIndexTree({pmap(): index_tree})
+# @as_split_index_tree.register
+# def _(index_tree: IndexTree, **kwargs) -> SplitIndexTree:
+#     for index in index_tree.nodes:
+#         if (
+#             isinstance(index, SplitLoopIndex)
+#             and len(index.loop_index.iterset.target_paths) > 1
+#         ):
+#             raise ValueError(
+#                 "Cannot convert an IndexTree to a SplitIndexTree if it contains a multi-component loop index"
+#             )
+#     return SplitIndexTree({pmap(): index_tree})
 
 
 # same as CalledMap
-@as_split_index_tree.register
-def _(loop_index: LoopIndex, **kwargs) -> SplitIndexTree:
-    index_trees = {
-        loop_ctx: IndexTree(split_loop_index)
-        for loop_ctx, split_loop_index in _split_index(loop_index).items()
-    }
-    return SplitIndexTree(index_trees)
+# @as_split_index_tree.register
+# def _(loop_index: LoopIndex, **kwargs) -> SplitIndexTree:
+#     index_trees = {
+#         loop_ctx: IndexTree(split_loop_index)
+#         for loop_ctx, split_loop_index in _split_index(loop_index).items()
+#     }
+#     return SplitIndexTree(index_trees)
+#
+#
+# @as_split_index_tree.register
+# def _(slice_: Slice, **kwargs) -> SplitIndexTree:
+#     return as_split_index_tree(IndexTree(slice_), **kwargs)
+#
+#
+# @as_split_index_tree.register
+# def _(slice_: slice, **kwargs) -> SplitIndexTree:
+#     return _split_index_tree_from_iterable([slice_], **kwargs)
+#
+#
+# @as_split_index_tree.register
+# def _(called_map: CalledMap, **kwargs) -> SplitIndexTree:
+#     index_trees = {
+#         loop_ctx: IndexTree(split_map)
+#         for loop_ctx, split_map in _split_index(called_map).items()
+#     }
+#     return SplitIndexTree(index_trees)
+#
 
-
-@as_split_index_tree.register
-def _(slice_: Slice, **kwargs) -> SplitIndexTree:
-    return as_split_index_tree(IndexTree(slice_), **kwargs)
-
-
-@as_split_index_tree.register
-def _(slice_: slice, **kwargs) -> SplitIndexTree:
-    return _split_index_tree_from_iterable([slice_], **kwargs)
-
-
-@as_split_index_tree.register
-def _(called_map: CalledMap, **kwargs) -> SplitIndexTree:
-    index_trees = {
-        loop_ctx: IndexTree(split_map)
-        for loop_ctx, split_map in _split_index(called_map).items()
-    }
-    return SplitIndexTree(index_trees)
-
-
-@functools.singledispatch
-def _split_index(arg: Any, **kwargs) -> Mapping[Mapping[LoopIndex, Mapping], Index]:
-    raise TypeError
-
-
-@_split_index.register
-def _(loop_index: LoopIndex) -> Mapping[Mapping[LoopIndex, Mapping], SplitLoopIndex]:
-    split_indices = {}
-    for target_path in loop_index.target_paths:
-        split_indices[pmap({loop_index: target_path})] = SplitLoopIndex(
-            loop_index, target_path
-        )
-    return pmap(split_indices)
-
-
-@_split_index.register
-def _(called_map: CalledMap) -> Mapping[Mapping[LoopIndex, Mapping], SplitCalledMap]:
-    split_maps = {}
-    split_from_indices = _split_index(called_map.from_index)
-    for loop_context, from_index in split_from_indices.items():
-        split_maps[loop_context] = SplitCalledMap(called_map, from_index, loop_context)
-    return pmap(split_maps)
+# @functools.singledispatch
+# def _split_index(arg: Any, **kwargs) -> Mapping[Mapping[LoopIndex, Mapping], Index]:
+#     raise TypeError
+#
+#
+# @_split_index.register
+# def _(loop_index: LoopIndex) -> Mapping[Mapping[LoopIndex, Mapping], SplitLoopIndex]:
+#     split_indices = {}
+#     for target_path in loop_index.target_paths:
+#         split_indices[pmap({loop_index: target_path})] = SplitLoopIndex(
+#             loop_index, target_path
+#         )
+#     return pmap(split_indices)
+#
+#
+# @_split_index.register
+# def _(called_map: CalledMap) -> Mapping[Mapping[LoopIndex, Mapping], SplitCalledMap]:
+#     split_maps = {}
+#     split_from_indices = _split_index(called_map.from_index)
+#     for loop_context, from_index in split_from_indices.items():
+#         split_maps[loop_context] = SplitCalledMap(called_map, from_index, loop_context)
+#     return pmap(split_maps)
 
 
 def _split_index_tree_from_iterable(
@@ -699,3 +721,31 @@ def is_fully_indexed(axes: AxisTree, indices: IndexTree) -> bool:
 
 def _collect_datamap(index, *subdatamaps, itree):
     return index.datamap | merge_dicts(subdatamaps)
+
+
+""" 17/08
+
+It is important that index trees contain the original LoopIndex and CalledMap
+objects. Else it gets very onerous for the user to construct the right forests.
+
+Since we always have the context anyway this doesn't matter for us.
+"""
+
+
+@functools.singledispatch
+def as_index_forest(arg: Any, **kwargs):
+    raise TypeError
+
+
+@as_index_forest.register
+def _(index_tree: IndexTree, **kwargs):
+    # should probably search for context inside it?
+    return pmap({pmap(): index_tree})
+
+
+@as_index_forest.register
+def _(loop_index: LoopIndex, **kwargs):
+    forest = {}
+    for path in loop_index.target_paths:
+        forest[pmap({loop_index: path})] = IndexTree(loop_index)
+    return pmap(forest)

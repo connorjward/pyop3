@@ -36,15 +36,13 @@ from pyop3.index import (
     CalledMap,
     GlobalLoopIndex,
     Index,
-    Indexed,
+    IndexedArray,
     IndexedAxisTree,
     IndexTree,
     LocalLoopIndex,
     LoopIndex,
     Map,
     Slice,
-    SplitCalledMap,
-    SplitLoopIndex,
     Subset,
     TabulatedMapComponent,
 )
@@ -533,7 +531,14 @@ def _(call: FunctionCall, loop_indices, ctx: LoopyCodegenContext) -> None:
         #         "Need to handle indices to create temp shape differently"
         #     )
 
-        axes = _indexed_axes(arg, loop_indices)
+        # axes = _indexed_axes(arg, loop_indices)
+        loop_context = pmap(
+            {
+                loop_index: pmap(path)
+                for loop_index, (path, _, _) in loop_indices.items()
+            }
+        )
+        axes = arg.axis_trees[loop_context]
         temporary = MultiArray(
             axes,
             name=ctx.unique_name("t"),
@@ -640,9 +645,9 @@ def build_assignment(
     # actual loops.
     # The first step is therefore to generate these initial jnames, and the last
     # is to emit the loops for the final tree.
-    jnames_per_cpt, array_expr_per_leaf, insns_per_leaf = _prepare_assignment(
-        assignment, codegen_ctx
-    )
+    # jnames_per_cpt, array_expr_per_leaf, insns_per_leaf = _prepare_assignment(
+    #     assignment, codegen_ctx
+    # )
 
     """
     The difference between iterating over map0(map1(p)).index() and axes.index()
@@ -667,55 +672,64 @@ def build_assignment(
     # one index instruction (jname) per index component
 
     # retrieve the original axes
-    array = assignment.array
-    while isinstance(array, Indexed):
-        array = array.obj
-    axes = array.axes
-
-    # unroll the index trees, this should be tidied up
-    array = assignment.array
-    if isinstance(array, CalledAxisTree):
-        itrees = [array.indices]
-    else:
-        itrees = []
-        while isinstance(array, Indexed):
-            itrees.insert(0, array.itree)
-            array = array.obj
-
-    for indices in itrees:
-        # get the right index tree given the loop context
-        loop_context = {}
-        for loop_index, (path, _, _) in loop_indices.items():
-            loop_context[loop_index] = pmap(path)
-        loop_context = pmap(loop_context)
-        index_tree = indices[loop_context]
-
-        (
-            axes,
-            jnames_per_cpt,
-            array_expr_per_leaf,
-            insns_per_leaf,
-        ) = _parse_assignment(
-            index_tree,
-            ParseAssignmentPreorderContext(),
-            codegen_ctx=codegen_ctx,
-            loop_indices=loop_indices,
-            prev_axes=axes,
-            prev_jnames_per_cpt=jnames_per_cpt,
-            prev_array_expr_per_leaf=array_expr_per_leaf,
-            prev_insns_per_leaf=insns_per_leaf,
-        )
+    # array = assignment.array
+    # while isinstance(array, Indexed):
+    #     array = array.obj
+    # axes = array.axes
+    #
+    # # unroll the index trees, this should be tidied up
+    # array = assignment.array
+    # if isinstance(array, CalledAxisTree):
+    #     itrees = [array.indices]
+    # else:
+    #     itrees = []
+    #     while isinstance(array, Indexed):
+    #         itrees.insert(0, array.itree)
+    #         array = array.obj
+    #
+    # for indices in itrees:
+    #     # get the right index tree given the loop context
+    #     loop_context = {}
+    #     for loop_index, (path, _, _) in loop_indices.items():
+    #         loop_context[loop_index] = pmap(path)
+    #     loop_context = pmap(loop_context)
+    #     index_tree = indices[loop_context]
+    #
+    #     (
+    #         axes,
+    #         jnames_per_cpt,
+    #         array_expr_per_leaf,
+    #         insns_per_leaf,
+    #     ) = _parse_assignment(
+    #         index_tree,
+    #         ParseAssignmentPreorderContext(),
+    #         codegen_ctx=codegen_ctx,
+    #         loop_indices=loop_indices,
+    #         prev_axes=axes,
+    #         prev_jnames_per_cpt=jnames_per_cpt,
+    #         prev_array_expr_per_leaf=array_expr_per_leaf,
+    #         prev_insns_per_leaf=insns_per_leaf,
+    #     )
 
     # lastly generate loops for the tree structure at the end, also generate
     # the intermediate index instructions
     # This will traverse the final axis tree, collecting jnames. At the bottom the
     # leaf insns will be emitted and the temp_expr will be assigned to the array one.
+    loop_context = {}
+    for loop_index, (path, _, _) in loop_indices.items():
+        loop_context[loop_index] = pmap(path)
+    loop_context = pmap(loop_context)
+
     _parse_assignment_final(
         assignment,
-        axes,
-        jnames_per_cpt,
-        array_expr_per_leaf,
-        insns_per_leaf,
+        assignment.array.axis_trees[loop_context],
+        assignment.array.layout_exprs[loop_context],
+        loop_context,
+        loop_indices,
+        # I think that these can be skipped and just traverse the final expression thing...
+        # jnames_per_cpt,
+        # array_expr_per_leaf,
+        # insns_per_leaf,
         codegen_ctx,
     )
 
@@ -918,16 +932,40 @@ def _parse_assignment_final_callback(
 def _parse_assignment_final(
     assignment,
     axes,
-    jnames_per_axcpt,
-    array_expr_per_leaf,
-    insns_per_leaf,
+    layout_expr,
+    loop_context,
+    loop_indices,
+    # jnames_per_axcpt,
+    # array_expr_per_leaf,
+    # insns_per_leaf,
     ctx: LoopyCodegenContext,
 ):
     if not axes.root:  # catch empty axes here
-        for insn in insns_per_leaf[None]:
-            ctx.add_assignment(*insn)
-        array_expr = array_expr_per_leaf[None]
+        # produce the map of axis labels to jnames
+
+        # for the case where shape comes from the temporary do the same thing
+        axis_labels_to_jnames = {}
+        # FIXME i don't think this is used for loop indices unless we have local indices
+        src_axis_labels_to_jnames = {}
+        for loop_index, (_, target_jnames, src_jnames) in loop_indices.items():
+            for axis_label, jname in target_jnames.items():
+                axis_labels_to_jnames[axis_label] = jname
+            for axis_label, jname in src_jnames.items():
+                src_axis_labels_to_jnames[axis_label] = jname
+
+        path = pmap(
+            {ax: cpt for path in loop_context.values() for ax, cpt in path.items()}
+        )
+
+        # for insn in insns_per_leaf[None]:
+        #     ctx.add_assignment(*insn)
+        # array_expr = array_expr_per_leaf[None]
+        array_insns, array_expr = _assignment_array_insn(
+            assignment, layout_expr[None], path, axis_labels_to_jnames, ctx
+        )
         temp_insns, temp_expr = _assignment_temp_insn(assignment, pmap(), pmap(), ctx)
+        for insn in array_insns:
+            ctx.add_assignment(*insn)
         for insn in temp_insns:
             ctx.add_assignment(*insn)
         _shared_assignment_insn(assignment, array_expr, temp_expr, ctx)
@@ -937,9 +975,9 @@ def _parse_assignment_final(
             assignment,
             axes,
             axes.root,
-            jnames_per_axcpt,
-            array_expr_per_leaf,
-            insns_per_leaf,
+            # jnames_per_axcpt,
+            # array_expr_per_leaf,
+            # insns_per_leaf,
             pmap(),
             pmap(),
             ctx,
@@ -1012,7 +1050,7 @@ def _expand_index(index, *, loop_indices, codegen_ctx, **kwargs):
 
 
 @_expand_index.register
-def _(index: SplitLoopIndex, *, loop_indices, codegen_ctx, **kwargs):
+def _(index: LoopIndex, *, loop_indices, codegen_ctx, **kwargs):
     global_index = index.loop_index
     if isinstance(global_index, GlobalLoopIndex):
         path, jname_exprs, _ = loop_indices[global_index]
@@ -1026,7 +1064,7 @@ def _(index: SplitLoopIndex, *, loop_indices, codegen_ctx, **kwargs):
 
 
 @_expand_index.register
-def _(index: SplitCalledMap, *, loop_indices, codegen_ctx, **kwargs):
+def _(index: CalledMap, *, loop_indices, codegen_ctx, **kwargs):
     # old alias
     ctx = codegen_ctx
 
@@ -1260,7 +1298,7 @@ _parse_assignment = functools.partial(
 )
 
 
-def _assignment_array_insn(assignment, axes, path, jnames, ctx):
+def _assignment_array_insn(assignment, layouts, path, jnames, ctx):
     """
 
     Return a list of (assignee, expression) tuples and the array expr used
@@ -1268,7 +1306,7 @@ def _assignment_array_insn(assignment, axes, path, jnames, ctx):
 
     """
     offset_insns, array_offset = emit_assignment_insn(
-        axes,
+        layouts,
         path,
         jnames,
         ctx,
@@ -1287,7 +1325,7 @@ def _assignment_temp_insn(assignment, path, jnames, ctx):
 
     """
     offset_insns, temp_offset = emit_assignment_insn(
-        assignment.temporary.axes,
+        assignment.temporary.axes.layouts[path],
         path,
         jnames,
         ctx,
@@ -1324,7 +1362,7 @@ def _shared_assignment_insn(assignment, array_expr, temp_expr, ctx):
 
 
 def emit_assignment_insn(
-    axes,
+    layouts,
     path,
     labels_to_jnames,
     ctx,
@@ -1335,7 +1373,7 @@ def emit_assignment_insn(
 
     return (
         emit_layout_insns(
-            axes,
+            layouts,
             offset,
             labels_to_jnames,
             ctx,
@@ -1345,8 +1383,16 @@ def emit_assignment_insn(
     )
 
 
+class JnameSubstitutor(pym.mapper.IdentityMapper):
+    def __init__(self, replace_map):
+        self._replace_map = replace_map
+
+    def map_axis_variable(self, expr):
+        return pym.var(self._replace_map[expr.axis_label])
+
+
 def emit_layout_insns(
-    axes,
+    layouts,
     offset_var,
     labels_to_jnames,
     ctx,
@@ -1358,42 +1404,50 @@ def emit_layout_insns(
     # breakpoint()
     insns = []
 
-    expr = 0  # pym.var(offset_var)
-    for layout_fn in axes.layouts[path]:
-        # TODO singledispatch!
-        if isinstance(layout_fn, TabulatedLayout):
-            # trim path and labels so only existing axes are used
-            trimmed_path = {}
-            trimmed_jnames = {}
-            laxes = layout_fn.data.axes
-            laxis = laxes.root
-            while laxis:
-                trimmed_path[laxis.label] = path[laxis.label]
-                trimmed_jnames[laxis.label] = labels_to_jnames[laxis.label]
-                lcpt = just_one(laxis.components)
-                laxis = laxes.child(laxis, lcpt)
-            trimmed_path = pmap(trimmed_path)
-            trimmed_jnames = pmap(trimmed_jnames)
+    expr = JnameSubstitutor(labels_to_jnames)(layouts)
 
-            varname = ctx.unique_name("p")
-            new_insns, varname = _scalar_assignment(
-                layout_fn.data,
-                trimmed_path,
-                trimmed_jnames,
-                ctx,
-            )
-            insns += new_insns
-            expr += varname
-        elif isinstance(layout_fn, AffineLayout):
-            start = layout_fn.start
-            step = layout_fn.step
-            jname = pym.var(labels_to_jnames[layout_fn.axis])
-            expr += jname * step + start
-        else:
-            raise NotImplementedError
+    if expr == ():
+        expr = 0
 
-    ret = tuple(insns) + ((pym.var(offset_var), expr),)
-    return ret
+    return ((pym.var(offset_var), expr),)
+
+    # old code
+    # expr = 0  # pym.var(offset_var)
+    # for layout_fn in layouts:
+    #     # TODO singledispatch!
+    #     if isinstance(layout_fn, TabulatedLayout):
+    #         # trim path and labels so only existing axes are used
+    #         trimmed_path = {}
+    #         trimmed_jnames = {}
+    #         laxes = layout_fn.data.axes
+    #         laxis = laxes.root
+    #         while laxis:
+    #             trimmed_path[laxis.label] = path[laxis.label]
+    #             trimmed_jnames[laxis.label] = labels_to_jnames[laxis.label]
+    #             lcpt = just_one(laxis.components)
+    #             laxis = laxes.child(laxis, lcpt)
+    #         trimmed_path = pmap(trimmed_path)
+    #         trimmed_jnames = pmap(trimmed_jnames)
+    #
+    #         varname = ctx.unique_name("p")
+    #         new_insns, varname = _scalar_assignment(
+    #             layout_fn.data,
+    #             trimmed_path,
+    #             trimmed_jnames,
+    #             ctx,
+    #         )
+    #         insns += new_insns
+    #         expr += varname
+    #     elif isinstance(layout_fn, AffineLayout):
+    #         start = layout_fn.start
+    #         step = layout_fn.step
+    #         jname = pym.var(labels_to_jnames[layout_fn.axis])
+    #         expr += jname * step + start
+    #     else:
+    #         raise NotImplementedError
+    #
+    # ret = tuple(insns) + ((pym.var(offset_var), expr),)
+    # return ret
 
 
 def register_extent(extent, path, jnames, ctx):
@@ -1501,12 +1555,16 @@ def collect_shape_index_callback(index, *args, **kwargs):
 
 
 @collect_shape_index_callback.register
-def _(loop_index: SplitLoopIndex, *, loop_indices, **kwargs):
-    global_index = loop_index.loop_index
-    if isinstance(global_index, LocalLoopIndex):
-        global_index = global_index.global_index
-    path = loop_indices[global_index][0]
-    return {None: (path,)}, {"axes": AxisTree()}
+def _(loop_index: LoopIndex, *, loop_indices, **kwargs):
+    # global_index = loop_index.loop_index
+    # if isinstance(global_index, LocalLoopIndex):
+    #     global_index = global_index.global_index
+    path = loop_indices[loop_index]
+
+    # hacky, path or leaf ID?
+    leaf_axis, leaf_cpt = loop_index.iterset._node_from_path(path)
+    index_exprs = loop_index.iterset.index_exprs[leaf_axis.id, leaf_cpt.label]
+    return {None: (path, index_exprs)}, {"axes": AxisTree()}
 
 
 @collect_shape_index_callback.register
@@ -1519,7 +1577,7 @@ def _(local_index: LocalLoopIndex, *, loop_indices, **kwargs):
 # TODO this could be done with callbacks so we share code with when
 # we also want to emit instructions
 @collect_shape_index_callback.register
-def _(called_map: SplitCalledMap, **kwargs):
+def _(called_map: CalledMap, **kwargs):
     leaves, index_data = collect_shape_index_callback(called_map.from_index, **kwargs)
     axes = index_data["axes"]
 
@@ -1586,32 +1644,38 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
 
 
 def collect_shape_pre_callback(leaf, preorder_ctx, **kwargs):
-    return None
+    return preorder_ctx
 
 
-def collect_shape_post_callback_terminal(*args, **kwargs):
-    return None
+def collect_shape_post_callback_terminal(leafkey, leaf, preorder_ctx, **kwargs):
+    # leaf is a 2-tuple of path and index_exprs. We don't need the path any more
+    # return axis and index exprs
+    return None, *leaf
 
 
-def collect_shape_post_callback_nonterminal(*args, **kwargs):
+def collect_shape_post_callback_nonterminal(retval, **kwargs):
     """Accumulate results
 
     We just return an axis tree from below. No special treatment is needed here.
 
     """
-    axes = args[0]
-    return axes
+    return retval
 
 
+# leafdata is return values here
 def collect_shape_final_callback(index_data, leafdata):
     axes = index_data["axes"]
-    for k, subax in leafdata.items():
+    expr_per_leaf = {}
+    target_path_per_leaf = {}
+    for k, (subax, path, expr) in leafdata.items():
         if subax is not None:
             if axes.root:
                 axes = axes.add_subtree(subax, *k)
             else:
                 axes = subax
-    return axes
+        expr_per_leaf[k] = expr
+        target_path_per_leaf[k] = path
+    return axes, pmap(expr_per_leaf), pmap(target_path_per_leaf)
 
 
 def _indexed_axes(indexed, loop_indices):
@@ -1738,3 +1802,34 @@ def collect_target_paths(indexed, loop_indices):
         return axes, target_paths
     else:
         return AxisTree(), target_paths
+
+
+# FIXME doesn't belong here
+def index_axes(axes: AxisTree, indices: IndexTree, loop_context):
+    # offsets are always scalar
+    # if isinstance(indexed, CalledAxisTree):
+    #     raise NotImplementedError
+    # return AxisTree()
+
+    indexed_axes, expr_per_leaf, target_path_per_leaf = visit_indices(
+        indices,
+        None,
+        index_callback=collect_shape_index_callback,
+        pre_callback=collect_shape_pre_callback,
+        post_callback_terminal=collect_shape_post_callback_terminal,
+        post_callback_nonterminal=collect_shape_post_callback_nonterminal,
+        final_callback=collect_shape_final_callback,
+        loop_indices=loop_context,
+        prev_axes=axes,
+    )
+
+    if indexed_axes is None:
+        indexed_axes = AxisTree()
+
+    # if axes is not None:
+    #     return axes
+    # else:
+    #     return AxisTree()
+
+    # return the new axes plus the new index expressions per leaf
+    return indexed_axes, expr_per_leaf, target_path_per_leaf
