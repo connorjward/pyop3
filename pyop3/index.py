@@ -644,20 +644,16 @@ def _split_index_tree_from_iterable(
 
     index, *subindices = indices
 
-    if isinstance(index, LoopIndex):
-        if index in loop_context:
-            raise NotImplementedError("Pretty easy, should reuse existing path")
-
+    if isinstance(index, LoopIndex) and index not in loop_context:
         # again, bad API
         subtrees = {}
         for loop_path in index.target_paths:
-            new_indices = [SplitLoopIndex(index, loop_path)] + subindices
             new_loop_context = loop_context | {index: loop_path}
             subtree = _split_index_tree_from_iterable(
-                new_indices, axes, path, new_loop_context
+                indices, axes, path, new_loop_context
             )
-            subtrees |= subtree.index_trees
-        return SplitIndexTree(subtrees)
+            subtrees |= subtree
+        return subtrees
 
     if isinstance(index, CalledMap):
         # again again, bad API

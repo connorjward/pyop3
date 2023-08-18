@@ -942,32 +942,31 @@ def _parse_assignment_final(
     layout_expr,
     loop_context,
     loop_indices,
-    # jnames_per_axcpt,
-    # array_expr_per_leaf,
-    # insns_per_leaf,
     ctx: LoopyCodegenContext,
 ):
+    array_axis_labels_to_jnames = {}
+    for loop_index in loop_context.keys():
+        # we don't do anything with src_jnames currently. I should probably just register
+        # it as a separate loop index
+        _, target_jnames, src_jnames = loop_indices[loop_index]
+        for axis_label, jname in target_jnames.items():
+            array_axis_labels_to_jnames[axis_label] = jname
+
+    # loop indices aren't included in the temporary
+    temp_axis_labels_to_jnames = {}
+
+    array_path = pmap(
+        {ax: cpt for path in loop_context.values() for ax, cpt in path.items()}
+    )
+    temp_path = pmap()
+
     if not axes.root:  # catch empty axes here
-        # produce the map of axis labels to jnames
-
-        # for the case where shape comes from the temporary do the same thing
-        axis_labels_to_jnames = {}
-        # FIXME i don't think this is used for loop indices unless we have local indices
-        src_axis_labels_to_jnames = {}
-        for loop_index, (_, target_jnames, src_jnames) in loop_indices.items():
-            for axis_label, jname in target_jnames.items():
-                axis_labels_to_jnames[axis_label] = jname
-            for axis_label, jname in src_jnames.items():
-                src_axis_labels_to_jnames[axis_label] = jname
-
-        path = pmap(
-            {ax: cpt for path in loop_context.values() for ax, cpt in path.items()}
-        )
-
         array_insns, array_expr = _assignment_array_insn(
-            assignment, layout_expr[None], path, axis_labels_to_jnames, ctx
+            assignment, layout_expr[None], array_path, array_axis_labels_to_jnames, ctx
         )
-        temp_insns, temp_expr = _assignment_temp_insn(assignment, pmap(), pmap(), ctx)
+        temp_insns, temp_expr = _assignment_temp_insn(
+            assignment, temp_path, temp_axis_labels_to_jnames, ctx
+        )
         for insn in array_insns:
             ctx.add_assignment(*insn)
         for insn in temp_insns:
@@ -979,13 +978,10 @@ def _parse_assignment_final(
             assignment,
             axes,
             layout_expr,
-            # jnames_per_axcpt,
-            # array_expr_per_leaf,
-            # insns_per_leaf,
-            loop_context,
-            loop_indices,
-            pmap(),
-            pmap(),
+            array_axis_labels_to_jnames,
+            array_path,
+            temp_axis_labels_to_jnames,
+            temp_path,
             ctx,
             current_axis=axes.root,
         )
@@ -995,23 +991,25 @@ def _parse_assignment_final_rec(
     assignment,
     axes,
     layout_expr,
-    loop_context,
-    loop_indices,
-    path: pmap,
-    jnames: pmap,
+    array_jnames,
+    array_path,
+    temp_jnames,
+    temp_path,
     ctx,
     *,
     current_axis,
 ):
     for axcpt in current_axis.components:
-        size = register_extent(axcpt.count, path, jnames, ctx)
+        size = register_extent(axcpt.count, array_path, array_jnames, ctx)
         iname = ctx.unique_name("i")
         ctx.add_domain(iname, size)
 
         # current_jname = jnames_per_axcpt[axis.id, axcpt.label]
         current_jname = iname
-        new_jnames = jnames | {current_axis.label: current_jname}
-        new_path = path | {current_axis.label: axcpt.label}
+        new_array_jnames = array_jnames | {current_axis.label: current_jname}
+        new_temp_jnames = temp_jnames | {current_axis.label: current_jname}
+        new_array_path = array_path | {current_axis.label: axcpt.label}
+        new_temp_path = temp_path | {current_axis.label: axcpt.label}
 
         with ctx.within_inames({iname}):
             # ctx.add_assignment(pym.var(current_jname), pym.var(iname))
@@ -1021,10 +1019,10 @@ def _parse_assignment_final_rec(
                     assignment,
                     axes,
                     layout_expr,
-                    loop_context,
-                    loop_indices,
-                    new_path,
-                    new_jnames,
+                    new_array_jnames,
+                    new_array_path,
+                    new_temp_jnames,
+                    new_temp_path,
                     ctx,
                     current_axis=subaxis,
                 )
@@ -1036,16 +1034,16 @@ def _parse_assignment_final_rec(
                 #     for insn in temp_insns:
                 #         ctx.add_assignment(*insn)
 
-                leafaxis, leafcpt = axes._node_from_path(new_path)
+                leafaxis, leafcpt = axes._node_from_path(new_temp_path)
                 array_insns, array_expr = _assignment_array_insn(
                     assignment,
                     layout_expr[leafaxis.id, leafcpt.label],
-                    new_path,
-                    new_jnames,
+                    new_array_path,
+                    new_array_jnames,
                     ctx,
                 )
                 temp_insns, temp_expr = _assignment_temp_insn(
-                    assignment, new_path, new_jnames, ctx
+                    assignment, new_temp_path, new_temp_jnames, ctx
                 )
                 for insn in array_insns:
                     ctx.add_assignment(*insn)
