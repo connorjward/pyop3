@@ -35,6 +35,7 @@ from pyop3.index import (
     LocalLoopIndex,
     LoopIndex,
     Map,
+    MapVariable,
     Slice,
     Subset,
     TabulatedMapComponent,
@@ -118,8 +119,9 @@ def _visit_indices_rec(
     for i, (leafkey, leaf) in enumerate(leaves.items()):
         preorder_ctx_ = pre_callback(leaf, preorder_ctx, **kwargs)
 
-        subindex = indices.parent_to_children[current_index.id][i]
-        if subindex is not None:
+        subindices = indices.parent_to_children.get(current_index.id)
+        if subindices is not None:
+            subindex = subindices[i]
             retval = _visit_indices_rec(
                 indices,
                 preorder_ctx_,
@@ -768,7 +770,7 @@ def _prepare_assignment_rec(
     for axcpt in axis.components:
         jname = ctx.unique_name("j")
         ctx.add_temporary(jname)
-        new_jnames = jnames | {axis.label: jname}
+        new_jnames = jnames | {axis.label: pym.var(jname)}
         # FIXME should only add once per axis label, component label combination
         jnames_per_axcpt[axis.id, axcpt.label] = jname
         new_path = path | {axis.label: axcpt.label}
@@ -942,7 +944,7 @@ def _parse_assignment_final(
         # it as a separate loop index
         _, target_jnames, src_jnames = loop_indices[loop_index]
         for axis_label, jname in target_jnames.items():
-            array_axis_labels_to_jnames[axis_label] = jname
+            array_axis_labels_to_jnames[axis_label] = pym.var(jname)
 
     # loop indices aren't included in the temporary
     temp_axis_labels_to_jnames = {}
@@ -998,8 +1000,8 @@ def _parse_assignment_final_rec(
 
         # current_jname = jnames_per_axcpt[axis.id, axcpt.label]
         current_jname = iname
-        new_array_jnames = array_jnames | {current_axis.label: current_jname}
-        new_temp_jnames = temp_jnames | {current_axis.label: current_jname}
+        new_array_jnames = array_jnames | {current_axis.label: pym.var(current_jname)}
+        new_temp_jnames = temp_jnames | {current_axis.label: pym.var(current_jname)}
         new_array_path = array_path | {current_axis.label: axcpt.label}
         new_temp_path = temp_path | {current_axis.label: axcpt.label}
 
@@ -1125,7 +1127,7 @@ def _(index: CalledMap, *, loop_indices, codegen_ctx, **kwargs):
                 insns_, jname_expr = _scalar_assignment(
                     map_cpt.array,
                     pmap(from_path) | pmap({inner_axis.label: inner_cpt.label}),
-                    myjnames | {inner_axis.label: jname},
+                    myjnames | {inner_axis.label: pym.var(jname)},
                     ctx,
                 )
                 myinsns.extend(insns_)
@@ -1396,8 +1398,10 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         self._codegen_context = codegen_context
 
     def map_axis_variable(self, expr):
-        return pym.var(self._labels_to_jnames[expr.axis_label])
+        return self._labels_to_jnames[expr.axis_label]
 
+    # this is cleaner if I do it as a single line expression
+    # rather than register assignments for things.
     def map_multi_array(self, array):
         # must be single-component here
         # leaf_axis, leaf_cpt = array.leaf
@@ -1423,6 +1427,37 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         for insn in insns:
             self._codegen_context.add_assignment(*insn)
         return varname
+
+    def map_called_map(self, expr):
+        if not isinstance(expr.function.map_component.array, MultiArray):
+            raise NotImplementedError("Affine map stuff not supported yet")
+
+        inner_expr = self.rec(expr.parameters)
+        map_array = expr.function.map_component.array
+
+        jname = self._labels_to_jnames[expr.function.full_map.name]
+        # jname = self._codegen_context.unique_name("j")
+        # self._codegen_context.add_temporary(jname)
+
+        # ? = map[j0, j1]
+        # where j0 comes from the from_index and j1 is advertised as the shape
+        # of the resulting axis (jname_per_cpt)
+        # j0 is now fixed but j1 can still be changed
+        rootaxis = map_array.axes.root
+        inner_axis, inner_cpt = map_array.axes.leaf
+        insns, jname_expr = _scalar_assignment(
+            map_array,
+            pmap({rootaxis.label: just_one(rootaxis.components).label})
+            | pmap({inner_axis.label: inner_cpt.label}),
+            {rootaxis.label: inner_expr} | {inner_axis.label: jname},
+            self._codegen_context,
+        )
+        for insn in insns:
+            self._codegen_context.add_assignment(*insn)
+        return jname_expr
+
+    def map_map_variable(self, map_variable):
+        assert False, "dont touch, handle at called_map level"
 
 
 def emit_layout_insns(
@@ -1577,17 +1612,26 @@ def _(called_map: CalledMap, **kwargs):
 
     leaf_keys = []
     path_per_leaf = []
+    index_expr_per_leaf = []
     for from_leaf_key, leaf in leaves.items():
         components = []
-        (from_path,) = leaf
+        (from_path, from_index_expr) = leaf
 
         # clean this up, we know some of this at an earlier point (loop context)
-        bits = called_map.map.map.bits[pmap(from_path)]
+        bits = called_map.map.bits[pmap(from_path)]
         for map_component in bits:  # each one of these is a new "leaf"
             cpt = AxisComponent(map_component.arity, label=map_component.label)
             components.append(cpt)
             path_per_leaf.append(
                 pmap({map_component.target_axis: map_component.target_component})
+            )
+
+            map_var = MapVariable(called_map, map_component)
+
+            index_expr_per_leaf.append(
+                # not super happy about this use of values. The called variable doesn't now
+                # necessarily know the right axis labels
+                pmap({map_component.target_axis: map_var(*from_index_expr.values())})
             )
 
         axis = Axis(components, label=called_map.name)
@@ -1600,10 +1644,11 @@ def _(called_map: CalledMap, **kwargs):
             leaf_keys.append((axis.id, cpt.label))
 
     leaves = {
-        leaf_key: (path,)
-        for (leaf_key, path) in checked_zip(
+        leaf_key: (path, index_exprs)
+        for (leaf_key, path, index_exprs) in checked_zip(
             leaf_keys,
             path_per_leaf,
+            index_expr_per_leaf,
         )
     }
     return leaves, {"axes": axes}

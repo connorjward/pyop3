@@ -5,8 +5,10 @@ import collections
 import dataclasses
 import functools
 import numbers
+import sys
 from typing import Any, Collection, Hashable, Mapping, Sequence
 
+import pymbolic as pym
 import pytools
 from pyrsistent import pmap
 
@@ -15,6 +17,7 @@ from pyrsistent import pmap
 from pyop3.tree import LabelledNode, LabelledTree, postvisit
 from pyop3.utils import (
     LabelledImmutableRecord,
+    UniquelyIdentifiedImmutableRecord,
     as_tuple,
     checked_zip,
     is_single_valued,
@@ -70,10 +73,27 @@ class IndexedLoopIterable(LoopIterable):
 #         self.trees = trees
 
 
-class IndexTree(LabelledTree):
+# class IndexTree(LabelledTree):
+# index trees are different to axis trees because we know less about
+# the possible attaching components. In particular a CalledMap can
+# have different "attaching components"/output components depending on
+# the loop context. This is awful for a user to have to build since we
+# need something like a SplitCalledMap. Instead we will just admit any
+# parent_to_children map and do error checking when we convert it to shape.
+class IndexTree:
+    def __init__(self, root, parent_to_children=pmap()):
+        self.root = root
+        self.parent_to_children = parent_to_children
+
     @functools.cached_property
     def datamap(self) -> dict[str:DistributedArray]:
-        return postvisit(self, _collect_datamap, itree=self)
+        return self.root.datamap | merge_dicts(
+            [
+                child.datamap
+                for children in parent_to_children.values()
+                for child in children
+            ]
+        )
 
 
 # We don't use this any more because index trees are eagerly consumed
@@ -140,6 +160,27 @@ class IndexTree(LabelledTree):
 
 
 IndexLabel = collections.namedtuple("IndexLabel", ["axis", "component"])
+
+
+class DatamapCollector(pym.mapper.CombineMapper):
+    def combine(self, values):
+        return merge_dicts(values)
+
+    def map_constant(self, expr):
+        return {}
+
+    map_variable = map_constant
+
+    def map_called_map(self, called_map):
+        dmap = self.rec(called_map.parameters)
+        return dmap | called_map.function.map_component.datamap
+
+
+_datamap_collector = DatamapCollector()
+
+
+def collect_datamap_from_expression(expr: pym.primitives.Expr) -> dict:
+    return _datamap_collector(expr)
 
 
 class IndexedArray:
@@ -243,8 +284,15 @@ class IndexedArray:
 
     @functools.cached_property
     def datamap(self):
-        return self.array.datamap | merge_dicts(
-            [axes.datamap for axes in self.axis_trees.values()]
+        dmap = {}
+        for expr_per_leaf in self.layout_exprs.values():
+            for expr in expr_per_leaf.values():
+                dmap |= collect_datamap_from_expression(expr)
+
+        return (
+            dmap
+            | self.array.datamap
+            | merge_dicts([axes.datamap for axes in self.axis_trees.values()])
         )
 
     @property
@@ -305,6 +353,24 @@ class MapComponent(LabelledImmutableRecord):
         self.arity = arity
 
 
+class MapVariable(pym.primitives.Variable):
+    """Pymbolic variable representing the action of a map."""
+
+    mapper_method = sys.intern("map_map_variable")
+
+    def __init__(self, full_map, map_component):
+        super().__init__(map_component.array.name)
+        self.full_map = full_map
+        self.map_component = map_component
+
+    def __call__(self, *args):
+        return CalledMapVariable(self, *args)
+
+
+class CalledMapVariable(pym.primitives.Call):
+    mapper_method = sys.intern("map_called_map")
+
+
 class TabulatedMapComponent(MapComponent):
     fields = MapComponent.fields - {"arity"} | {"array"}
 
@@ -312,6 +378,8 @@ class TabulatedMapComponent(MapComponent):
         arity = array.axes.leaf_component.count
         super().__init__(target_axis, target_component, arity, **kwargs)
         self.array = array
+
+        # self.index_expr = MapVariable(self)
 
     # old alias
     @property
@@ -372,12 +440,33 @@ class Map(pytools.ImmutableRecord):
 
 
 # ImmutableRecord?
-class CalledMap(LoopIterable):
-    # This function cannot be part of an index tree because it has no specialised
+class CalledMap(LoopIterable, UniquelyIdentifiedImmutableRecord):
+    # This function cannot be part of an index tree because it has not specialised
     # to a particular loop index path.
     def __init__(self, map, from_index):
         self.map = map
         self.from_index = from_index
+        UniquelyIdentifiedImmutableRecord.__init__(self)
+
+    @property
+    def name(self):
+        return self.map.name
+
+    @property
+    def axes(self):
+        raise NotImplementedError
+
+    @property
+    def index(self):
+        raise NotImplementedError
+
+    @property
+    def enumerate(self):
+        raise NotImplementedError
+
+    @property
+    def index_exprs(self):
+        raise NotImplementedError
 
 
 class Index(LabelledNode):
@@ -664,8 +753,8 @@ def _split_index_tree_from_iterable(
             subtree = _split_index_tree_from_iterable(
                 new_indices, axes, path, new_loop_context
             )
-            subtrees |= subtree.index_trees
-        return SplitIndexTree(subtrees)
+            subtrees |= subtree
+        return subtrees
 
     if not isinstance(index, Index):
         # We can use a slice provided that the previous indices provide a complete path.
@@ -807,6 +896,20 @@ def _(loop_index: LoopIndex, **kwargs):
     forest = {}
     for path in loop_index.target_paths:
         forest[pmap({loop_index: path})] = IndexTree(loop_index)
+    return pmap(forest)
+
+
+@as_index_forest.register
+def _(called_map: CalledMap, **kwargs):
+    loop_index = called_map.from_index
+    while isinstance(loop_index, CalledMap):
+        loop_index = loop_index.from_index
+    # We assume that a map will always either call another map or a loop index
+    assert isinstance(loop_index, LoopIndex)
+
+    forest = {}
+    for path in loop_index.target_paths:
+        forest[pmap({loop_index: path})] = IndexTree(called_map)
     return pmap(forest)
 
 
