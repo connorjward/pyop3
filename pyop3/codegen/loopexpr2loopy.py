@@ -353,12 +353,11 @@ def _parse_loop(
         # e.g. axes[::2].index()
         # very much like what we do for assignment
 
-        # unroll the index trees and axes
-        axes = iterset
+        if len(iterset.axis_trees) > 1:
+            raise NotImplementedError("TODO")
+
+        axes = just_one(iterset.axis_trees.values())
         itrees = []
-        while isinstance(axes, IndexedAxisTree):
-            itrees.insert(0, axes.indices)
-            axes = axes.axes
     elif isinstance(iterset, IndexTree):
         raise NotImplementedError("Building the initial axes requires some thought")
         # something like map(p).index()
@@ -1036,10 +1035,9 @@ def _parse_assignment_final_rec(
                 #     for insn in temp_insns:
                 #         ctx.add_assignment(*insn)
 
-                leafaxis, leafcpt = axes._node_from_path(new_temp_path)
                 array_insns, array_expr = _assignment_array_insn(
                     assignment,
-                    layout_expr[leafaxis.id, leafcpt.label],
+                    layout_expr[new_temp_path],
                     new_array_path,
                     new_array_jnames,
                     ctx,
@@ -1601,9 +1599,19 @@ def _(loop_index: ContextFreeLoopIndex, *, loop_indices, **kwargs):
     #     global_index = global_index.global_index
     path = loop_indices[loop_index.index]
 
+    # select the right axis tree given some context. This should be done at a different point
+    # probably when we construct the context free loop index
+
+    possible_itersets = loop_index.index.iterset.axis_trees.values()
+
+    # cheat for now
+    if len(possible_itersets) > 1:
+        raise NotImplementedError("do this properly")
+
+    iterset = just_one(possible_itersets)
     # hacky, path or leaf ID?
-    leaf_axis, leaf_cpt = loop_index.index.iterset._node_from_path(path)
-    index_exprs = loop_index.index.iterset.index_exprs[leaf_axis.id, leaf_cpt.label]
+    leaf_axis, leaf_cpt = iterset._node_from_path(path)
+    index_exprs = iterset.index_exprs[leaf_axis.id, leaf_cpt.label]
     # index_exprs = 0 doesnt work
     return {None: (path, index_exprs)}, {"axes": AxisTree()}
 

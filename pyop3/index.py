@@ -764,7 +764,17 @@ def _(arg: ContextFreeLoopIndex, *args, **kwargs):
 
 @collect_loop_context.register
 def _(arg: LoopIndex):
-    return [pmap({arg: arg.iterset.path(*leaf)}) for leaf in arg.iterset.leaves]
+    from pyop3.axis import AxisTree
+
+    if isinstance(arg.iterset, IndexedAxisTree):
+        loop_contexts = []
+        for loop_context, axis_tree in arg.iterset.axis_trees.items():
+            for leaf in axis_tree.leaves:
+                loop_contexts.append(loop_context | pmap({arg: axis_tree.path(*leaf)}))
+        return loop_contexts
+    else:
+        assert isinstance(arg.iterset, AxisTree)
+        return [pmap({arg: arg.iterset.path(*leaf)}) for leaf in arg.iterset.leaves]
 
 
 @collect_loop_context.register
@@ -774,6 +784,11 @@ def _(called_map: CalledMap):
 
 @collect_loop_context.register
 def _(slice_: slice):
+    return ()
+
+
+@collect_loop_context.register
+def _(slice_: Slice):
     return ()
 
 
@@ -925,7 +940,7 @@ def _(index_tree: IndexTree, **kwargs):
 
 @as_index_forest.register
 def _(index: ContextSensitiveIndex, **kwargs):
-    loop_contexts = collect_loop_context(index)
+    loop_contexts = collect_loop_context(index) or [pmap()]
     return tuple(as_index_tree(index, ctx) for ctx in loop_contexts)
 
 

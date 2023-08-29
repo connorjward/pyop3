@@ -670,7 +670,10 @@ class AxisTree(LabelledTree, LoopIterable):
         from pyop3.index import IndexedAxisTree, as_index_forest, collect_loop_context
 
         axis_trees = {}
-        for loop_context in collect_loop_context(indices):
+        loop_contexts = collect_loop_context(indices)
+        if not loop_contexts:
+            loop_contexts = [pmap()]
+        for loop_context in loop_contexts:
             layouts = self.layouts
             # should probably include old_loop_context in this
             index_forest = as_index_forest(indices, axes=self)
