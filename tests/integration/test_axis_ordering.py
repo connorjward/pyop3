@@ -51,15 +51,25 @@ def test_different_axis_orderings_do_not_change_packing_order():
     dat1 = MultiArray(axes0, name="dat1", data=np.zeros(npoints, dtype=ScalarType))
 
     p = axis0.index()
-    path = just_one(axis0.target_paths)
-    q = IndexTree(p)
-    q = q.put_node(
-        Slice("ax1", [AffineSliceComponent(axis1.component_labels[0])]), *q.leaf
+    path = just_one(p.target_paths)
+
+    loop_context = pmap({p: path})
+    q = IndexTree(
+        p,
+        {
+            p.id: [
+                Slice(
+                    "ax1",
+                    [AffineSliceComponent(just_one(axis1.component_labels))],
+                    id="slice0",
+                )
+            ],
+            "slice0": [
+                Slice("ax2", [AffineSliceComponent(just_one(axis2.component_labels))])
+            ],
+        },
+        loop_context=loop_context,
     )
-    q = q.put_node(
-        Slice("ax2", [AffineSliceComponent(axis2.component_labels[0])]), *q.leaf
-    )
-    q = {pmap({p: path}): q}
 
     do_loop(p, copy_kernel(dat0_0[q], dat1[q]))
     assert np.allclose(dat1.data, dat0_0.data)

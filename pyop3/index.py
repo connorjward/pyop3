@@ -247,66 +247,6 @@ class IndexedArray:
         self.layout_exprs = layout_exprs
 
     def __getitem__(self, indices):
-        # pretty much copied from multiarray, cleanup
-        # FIXME
-        from pyop3.codegen.loopexpr2loopy import index_axes
-        from pyop3.distarray.multiarray import IndexExpressionReplacer
-
-        axis_trees = {}
-        layout_expr_per_axis_tree_per_leaf = {}
-        for old_loop_context, axes in self.axis_trees.items():
-            layouts = self.layout_exprs[old_loop_context]
-            # should probably include old_loop_context in this
-            index_forest = as_index_forest(indices, axes=axes)
-
-            for index_tree in index_forest:
-                loop_context = index_tree.loop_context
-                indexed_axes, target_path_per_leaf, index_exprs_per_leaf = index_axes(
-                    axes, index_tree, loop_context
-                )
-
-                layout_expr_per_leaf = {}
-                if indexed_axes.is_empty:
-                    leaf_key = None
-
-                    # this is a map from axis label to new expression
-                    index_exprs = index_exprs_per_leaf[leaf_key]
-                    target_path = target_path_per_leaf[leaf_key]
-
-                    # this hackery is required because sometimes layouts use leaf IDs
-                    # and sometimes we use paths
-                    myaxis, mycpt = axes._node_from_path(target_path)
-                    target_leaf_id = myaxis.id, mycpt.label
-                    orig_layout_expr = layouts[target_leaf_id]
-                    new_layout_expr = IndexExpressionReplacer(index_exprs)(
-                        orig_layout_expr
-                    )
-
-                    layout_expr_per_leaf[leaf_key] = new_layout_expr
-                else:
-                    for (
-                        indexed_leaf_axis,
-                        indexed_leaf_cpt_label,
-                    ) in indexed_axes.leaves:
-                        leaf_key = indexed_leaf_axis.id, indexed_leaf_cpt_label
-                        # this is a map from axis label to new expression
-                        index_exprs = index_exprs_per_leaf[leaf_key]
-                        target_path = target_path_per_leaf[leaf_key]
-
-                        # this hackery is required because sometimes layouts use leaf IDs
-                        # and sometimes we use paths
-                        myaxis, mycpt = axes._node_from_path(target_path)
-                        target_leaf_id = myaxis.id, mycpt.label
-                        orig_layout_expr = layouts[target_leaf_id]
-                        new_layout_expr = IndexExpressionReplacer(index_exprs)(
-                            orig_layout_expr
-                        )
-
-                        layout_expr_per_leaf[leaf_key] = new_layout_expr
-
-                axis_trees[loop_context] = indexed_axes
-                layout_expr_per_axis_tree_per_leaf[loop_context] = layout_expr_per_leaf
-
         return IndexedArray(self, axis_trees, layout_expr_per_axis_tree_per_leaf)
 
     @functools.cached_property
@@ -665,9 +605,14 @@ class EnumeratedLoopIndex:
 
 # it is probably a better pattern to give axis trees a "parent" option
 class IndexedAxisTree:
-    def __init__(self, axes: AxisTree, indices: IndexTree):
-        self.axes = axes
-        self.indices = as_split_index_tree(indices, axes=axes)
+    def __init__(self, axis_trees):
+        self.axis_trees = pmap(axis_trees)
+
+    def __getitem__(self, indices):
+        new_axis_trees = {}
+        for loop_context, axis_tree in self.axis_trees.items():
+            new_axis_trees[loop_context] = axis_tree[indices]
+        return IndexedAxisTree(new_axis_trees)
 
     @property
     def target_paths(self):
@@ -686,7 +631,7 @@ class IndexedAxisTree:
 
     @functools.cached_property
     def datamap(self):
-        return self.axes.datamap | self.indices.datamap
+        return merge_dicts(axis_tree.datamap for axis_tree in self.axis_trees.values())
 
 
 """
@@ -754,6 +699,11 @@ def _(loop_index: LoopIndex, loop_context, **kwargs):
     # use the path as the component label
     component_label = loop_context[loop_index]
     return ContextFreeLoopIndex(loop_index, [component_label])
+
+
+@apply_loop_context.register
+def _(slice_: Slice, loop_context, **kwargs):
+    return ContextFreeSlice(slice_, [cpt.label for cpt in slice_.slices])
 
 
 @apply_loop_context.register

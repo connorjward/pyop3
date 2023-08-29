@@ -526,7 +526,9 @@ def _(call: FunctionCall, loop_indices, ctx: LoopyCodegenContext) -> None:
         #     )
 
         loop_index_keys = frozenset(
-            loop_index for key in arg.axis_trees.keys() for loop_index in key.keys()
+            loop_index
+            for key in arg.axes.axis_trees.keys()
+            for loop_index in key.keys()
         )
         loop_context = pmap(
             {
@@ -535,7 +537,7 @@ def _(call: FunctionCall, loop_indices, ctx: LoopyCodegenContext) -> None:
                 if loop_index in loop_index_keys
             }
         )
-        axes = arg.axis_trees[loop_context]
+        axes = arg.axes.axis_trees[loop_context].copy(layout_exprs=None)
         temporary = MultiArray(
             axes,
             name=ctx.unique_name("t"),
@@ -714,7 +716,7 @@ def build_assignment(
     # leaf insns will be emitted and the temp_expr will be assigned to the array one.
     loop_index_keys = frozenset(
         loop_index
-        for key in assignment.array.axis_trees.keys()
+        for key in assignment.array.axes.axis_trees.keys()
         for loop_index in key.keys()
     )
     loop_context = {}
@@ -725,8 +727,8 @@ def build_assignment(
 
     _parse_assignment_final(
         assignment,
-        assignment.array.axis_trees[loop_context],
-        assignment.array.layout_exprs[loop_context],
+        assignment.array.axes.axis_trees[loop_context],
+        assignment.array.axes.axis_trees[loop_context].layouts,
         loop_context,
         loop_indices,
         # I think that these can be skipped and just traverse the final expression thing...
@@ -958,7 +960,11 @@ def _parse_assignment_final(
 
     if not axes.root:  # catch empty axes here
         array_insns, array_expr = _assignment_array_insn(
-            assignment, layout_expr[None], array_path, array_axis_labels_to_jnames, ctx
+            assignment,
+            layout_expr[pmap()],
+            array_path,
+            array_axis_labels_to_jnames,
+            ctx,
         )
         temp_insns, temp_expr = _assignment_temp_insn(
             assignment, temp_path, temp_axis_labels_to_jnames, ctx
@@ -1335,7 +1341,7 @@ def _assignment_temp_insn(assignment, path, jnames, ctx):
 
     """
     offset_insns, temp_offset = emit_assignment_insn(
-        sum(assignment.temporary.axes.layouts[path]),
+        assignment.temporary.axes.layouts[path],
         path,
         jnames,
         ctx,
@@ -1598,6 +1604,7 @@ def _(loop_index: ContextFreeLoopIndex, *, loop_indices, **kwargs):
     # hacky, path or leaf ID?
     leaf_axis, leaf_cpt = loop_index.index.iterset._node_from_path(path)
     index_exprs = loop_index.index.iterset.index_exprs[leaf_axis.id, leaf_cpt.label]
+    # index_exprs = 0 doesnt work
     return {None: (path, index_exprs)}, {"axes": AxisTree()}
 
 

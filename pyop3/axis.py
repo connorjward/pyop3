@@ -70,8 +70,7 @@ class ExpressionEvaluator(pym.mapper.evaluator.EvaluationMapper):
         return self.context[expr.axis_label]
 
     def map_multi_array(self, array):
-        breakpoint()
-        pass
+        raise NotImplementedError
 
 
 class IntRef:
@@ -650,6 +649,7 @@ class AxisTree(LabelledTree, LoopIterable):
         root: MultiAxis | None = None,
         parent_to_children: dict | None = None,
         *,
+        layout_exprs=None,
         sf=None,
         shared_sf=None,
         comm=None,
@@ -660,16 +660,72 @@ class AxisTree(LabelledTree, LoopIterable):
         self.shared_sf = shared_sf
         self.comm = comm  # FIXME DTRT with internal comms
 
-        self._layouts = {}
+        self.layout_exprs = layout_exprs
+        self._layouts = None
 
     def __getitem__(self, indices):
-        raise NotImplementedError("TODO")
-        from pyop3.index import IndexedAxisTree
+        # FIXME
+        from pyop3.codegen.loopexpr2loopy import index_axes
+        from pyop3.distarray.multiarray import IndexExpressionReplacer
+        from pyop3.index import IndexedAxisTree, as_index_forest, collect_loop_context
 
-        return IndexedAxisTree(self, indices)
+        axis_trees = {}
+        for loop_context in collect_loop_context(indices):
+            layouts = self.layouts
+            # should probably include old_loop_context in this
+            index_forest = as_index_forest(indices, axes=self)
+
+            for index_tree in index_forest:
+                loop_context = index_tree.loop_context
+                indexed_axes, target_path_per_leaf, index_exprs_per_leaf = index_axes(
+                    self, index_tree, loop_context
+                )
+
+                layout_expr_per_leaf = {}
+                if indexed_axes.is_empty:
+                    leaf_key = None
+
+                    # this is a map from axis label to new expression
+                    index_exprs = index_exprs_per_leaf[leaf_key]
+                    target_path = target_path_per_leaf[leaf_key]
+
+                    orig_layout_expr = layouts[target_path]
+                    new_layout_expr = IndexExpressionReplacer(index_exprs)(
+                        orig_layout_expr
+                    )
+
+                    layout_expr_per_leaf[pmap()] = new_layout_expr
+                else:
+                    for (
+                        indexed_leaf_axis,
+                        indexed_leaf_cpt_label,
+                    ) in indexed_axes.leaves:
+                        leaf_key = indexed_leaf_axis.id, indexed_leaf_cpt_label
+                        # this is a map from axis label to new expression
+                        index_exprs = index_exprs_per_leaf[leaf_key]
+                        target_path = target_path_per_leaf[leaf_key]
+
+                        orig_layout_expr = layouts[target_path]
+                        new_layout_expr = IndexExpressionReplacer(index_exprs)(
+                            orig_layout_expr
+                        )
+
+                        newkey = indexed_axes.path(
+                            indexed_leaf_axis, indexed_leaf_cpt_label
+                        )
+                        layout_expr_per_leaf[newkey] = new_layout_expr
+
+            axis_trees[loop_context] = indexed_axes.copy(
+                layout_exprs=layout_expr_per_leaf
+            )
+        return IndexedAxisTree(axis_trees)
 
     def __call__(self, *args):
         return CalledAxisTree(self, *args)
+
+    @property
+    def axis_trees(self):
+        return pmap({pmap(): self})
 
     def index(self):
         # cyclic import
@@ -712,8 +768,10 @@ class AxisTree(LabelledTree, LoopIterable):
     def target_paths(self):
         return tuple(self.path(ax, cpt) for ax, cpt in self.leaves)
 
-    @functools.cached_property
+    @property
     def layouts(self):
+        if self.layout_exprs:
+            return self.layout_exprs
         if not self._layouts:
             self.set_up()
         return self._layouts
@@ -852,7 +910,7 @@ class AxisTree(LabelledTree, LoopIterable):
 
         # catch empyt axis tree
         if self.root is None:
-            self._layouts = pmap({pmap(): ()})
+            self._layouts = pmap({pmap(): 0})
             return self
 
         layouts, _, _ = _compute_layouts(self, self.root)
@@ -1080,6 +1138,10 @@ def create_lgmap(axes):
 
 @functools.singledispatch
 def as_axis_tree(arg: Any):
+    from pyop3.index import IndexedAxisTree
+
+    if isinstance(arg, IndexedAxisTree):
+        return arg
     raise TypeError
 
 
@@ -1402,7 +1464,7 @@ def _collect_at_leaves(
     values,
     axis: Axis | None = None,
     path=pmap(),
-    prior=PrettyTuple(),
+    prior=0,
 ):
     axis = axis or axes.root
     acc = {}
@@ -1410,7 +1472,7 @@ def _collect_at_leaves(
     for cpt in axis.components:
         new_path = path | {axis.label: cpt.label}
         if new_path in values:
-            prior_ = prior | values[new_path]
+            prior_ = prior + values[new_path]
         else:
             prior_ = prior
         if subaxis := axes.child(axis, cpt):

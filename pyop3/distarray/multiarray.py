@@ -59,7 +59,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
     """
 
     fields = DistributedArray.fields | {
-        "dim",
+        "axes",
         "dtype",
         "name",
         "data",
@@ -75,7 +75,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
 
     def __init__(
         self,
-        dim,
+        axes,
         dtype=None,
         *,
         name: str = None,
@@ -87,7 +87,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
     ):
         if name and prefix:
             raise ValueError("Can only specify one of name and prefix")
-        dim = as_axis_tree(dim)
+        axes = as_axis_tree(axes)
 
         if isinstance(data, np.ndarray):
             if dtype:
@@ -102,10 +102,10 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
                 raise ValueError("Must either specify a dtype or provide an array")
             dtype = np.dtype(dtype)
             # debug
-            # data = np.zeros(dim.size, dtype=dtype)
+            # data = np.zeros(axes.size, dtype=dtype)
             from pyop3.axis import axis_tree_size
 
-            data = np.zeros(axis_tree_size(dim), dtype=dtype)
+            data = np.zeros(axis_tree_size(axes), dtype=dtype)
         else:
             raise TypeError("data argument not recognised")
 
@@ -122,7 +122,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
 
         self.indicess = indicess
 
-        self.dim = dim
+        self.axes = axes
 
         self.max_value = max_value
         self.sf = sf
@@ -265,7 +265,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
 
         Notes
         -----
-        This is a blocking operation. For the non-blocking alternative use
+        This is a blocking operation. F.labelor the non-blocking alternative use
         :meth:`sync_begin` and :meth:`sync_end` (FIXME)
 
         Note that this method should only be called when one needs to read from
@@ -316,17 +316,9 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
     def set_value(self, path, indices, value):
         self.data[self.root.get_offset(path, indices)] = value
 
-    # aliases, this is preferred to dim
-    @property
-    def axes(self):
-        return self.dim
-
-    @property
-    def root(self):
-        return self.dim
-
     # maybe I could check types here and use instead of get_value?
     def __getitem__(self, indices):
+        return self.copy(axes=self.axes[indices])
         if indices is Ellipsis:
             axis_trees = pmap({pmap(): self.axes})
             layout_expr_per_leaf = {}
@@ -392,67 +384,6 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
 
     def __str__(self):
         return self.name
-
-    @property
-    def is_indexed(self):
-        assert False, "not touched"
-        return all(self._check_indexed(self.dim, idxs) for idxs in self.indicess)
-
-    def _check_indexed(self, dim, indices):
-        assert False, "not touched"
-        for label, size in zip(dim.labels, dim.sizes):
-            try:
-                ((index, subindices),) = [
-                    (idx, subidxs) for idx, subidxs in indices if idx.label == label
-                ]
-
-                npart = dim.labels.index(index.label)
-
-                if subdims := self.dim.get_children(dim):
-                    subdim = subdims[npart]
-                    return self._check_indexed(subdim, subindices)
-                else:
-                    return index.size != size
-            except:
-                return True
-
-    @property
-    def indexed_shape(self):
-        assert False, "not touched"
-        try:
-            (sh,) = self.indexed_shapes
-            return sh
-        except ValueError:
-            raise RuntimeError
-
-    @property
-    def indexed_shapes(self):
-        assert False, "not touched"
-        return indexed_shapes(self)
-
-    @property
-    def indexed_size(self):
-        assert False, "not touched"
-        return functools.reduce(operator.mul, self.indexed_shape, 1)
-
-    @property
-    def shape(self):
-        assert False, "not touched"
-        try:
-            (sh,) = self.shapes
-            return sh
-        except ValueError:
-            raise RuntimeError
-
-    @property
-    def shapes(self):
-        assert False, "not touched"
-        return self._compute_shapes(self.dim)
-
-    @property
-    def size(self):
-        assert False, "not touched"
-        return functools.reduce(operator.mul, self.shape, 1)
 
 
 def make_sparsity(
