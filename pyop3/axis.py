@@ -663,6 +663,7 @@ class AxisTree(LabelledTree, LoopIterable):
         self._layouts = {}
 
     def __getitem__(self, indices):
+        raise NotImplementedError("TODO")
         from pyop3.index import IndexedAxisTree
 
         return IndexedAxisTree(self, indices)

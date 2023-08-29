@@ -24,7 +24,6 @@ from pyop3.index import (  # index_axes,
     IndexedArray,
     IndexTree,
     as_index_forest,
-    as_split_index_tree,
     is_fully_indexed,
 )
 from pyop3.utils import (
@@ -335,7 +334,8 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
 
         axis_trees = {}
         layout_expr_per_axis_tree_per_leaf = {}
-        for loop_context, index_tree in index_forest.items():
+        for index_tree in index_forest:
+            loop_context = index_tree.loop_context
             indexed_axes, target_path_per_leaf, index_exprs_per_leaf = index_axes(
                 self.axes, index_tree, loop_context
             )

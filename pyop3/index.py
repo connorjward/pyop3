@@ -73,27 +73,19 @@ class IndexedLoopIterable(LoopIterable):
 #         self.trees = trees
 
 
-# class IndexTree(LabelledTree):
 # index trees are different to axis trees because we know less about
 # the possible attaching components. In particular a CalledMap can
 # have different "attaching components"/output components depending on
 # the loop context. This is awful for a user to have to build since we
 # need something like a SplitCalledMap. Instead we will just admit any
 # parent_to_children map and do error checking when we convert it to shape.
-class IndexTree:
-    def __init__(self, root, parent_to_children=pmap()):
-        self.root = root
-        self.parent_to_children = parent_to_children
-
-    @functools.cached_property
-    def datamap(self) -> dict[str:DistributedArray]:
-        return self.root.datamap | merge_dicts(
-            [
-                child.datamap
-                for children in parent_to_children.values()
-                for child in children
-            ]
+class IndexTree(LabelledTree):
+    def __init__(self, root, parent_to_children=pmap(), *, loop_context=pmap()):
+        root, parent_to_children, loop_context = parse_index_tree(
+            root, parent_to_children, loop_context
         )
+        super().__init__(root, parent_to_children)
+        self.loop_context = loop_context
 
 
 # We don't use this any more because index trees are eagerly consumed
@@ -159,6 +151,34 @@ class IndexTree:
 #         return merge_dicts([itree.datamap for itree in self.index_trees.values()])
 
 
+def parse_index_tree(root, parent_to_children, loop_context):
+    root = apply_loop_context(root, loop_context)
+    new_parent_to_children = parse_parent_to_children(
+        parent_to_children, root, loop_context
+    )
+
+    return root, pmap(new_parent_to_children), loop_context
+
+
+def parse_parent_to_children(parent_to_children, parent, loop_context):
+    assert isinstance(parent, ContextFreeIndex)
+    new_children = []
+    subparents_to_children = []
+
+    if parent.id in parent_to_children:
+        for child in parent_to_children[parent.id]:
+            child = apply_loop_context(child, loop_context)
+            new_children.append(child)
+            subparents_to_children.append(
+                parse_parent_to_children(parent_to_children, child, loop_context)
+            )
+    else:
+        for _ in parent.component_labels:
+            new_children.append(None)
+
+    return pmap({parent.id: new_children} | merge_dicts(subparents_to_children))
+
+
 IndexLabel = collections.namedtuple("IndexLabel", ["axis", "component"])
 
 
@@ -181,6 +201,10 @@ _datamap_collector = DatamapCollector()
 
 def collect_datamap_from_expression(expr: pym.primitives.Expr) -> dict:
     return _datamap_collector(expr)
+
+
+class ContextSensitiveIndex(abc.ABC):
+    pass
 
 
 class IndexedArray:
@@ -304,11 +328,11 @@ class IndexedArray:
         return self.array.dtype
 
 
-class SliceComponent(pytools.ImmutableRecord, abc.ABC):
-    fields = {"component"}
+class SliceComponent(LabelledImmutableRecord, abc.ABC):
+    fields = LabelledImmutableRecord.fields | {"component"}
 
-    def __init__(self, component):
-        super().__init__()
+    def __init__(self, component, **kwargs):
+        super().__init__(**kwargs)
         self.component = component
 
 
@@ -440,7 +464,7 @@ class Map(pytools.ImmutableRecord):
 
 
 # ImmutableRecord?
-class CalledMap(LoopIterable, UniquelyIdentifiedImmutableRecord):
+class CalledMap(LoopIterable, UniquelyIdentifiedImmutableRecord, ContextSensitiveIndex):
     # This function cannot be part of an index tree because it has not specialised
     # to a particular loop index path.
     def __init__(self, map, from_index):
@@ -476,8 +500,24 @@ class Index(LabelledNode):
         pass
 
 
-class LoopIndex(Index, abc.ABC):
+class LoopIndex(Index, ContextSensitiveIndex, abc.ABC):
     pass
+
+
+# inherit from Index?
+class ContextFreeIndex(abc.ABC):
+    # make abstract etc
+    # @property
+    # def id(self):
+    #     raise NotImplementedError
+    pass
+
+
+class ContextFreeLoopIndex(Index, ContextFreeIndex):
+    def __init__(self, orig_index, labels, **kwargs):
+        assert len(labels) == 1
+        super().__init__(labels, id=orig_index.id, **kwargs)
+        self.index = orig_index
 
 
 # TODO just call this LoopIndex (inherit from AbstractLoopIndex)
@@ -517,7 +557,7 @@ class LocalLoopIndex(LoopIndex):
 
 
 # TODO I want a Slice to have "bits" like a Map/CalledMap does
-class Slice(Index):
+class Slice(Index, ContextSensitiveIndex):
     """
 
     A slice can be thought of as a map from a smaller space to the target space.
@@ -545,45 +585,36 @@ class Slice(Index):
         return merge_dicts([s.datamap for s in self.slices])
 
 
-# class SplitCalledMap(Index):
-#     def __init__(self, map, from_index, loop_context):
-#         # The degree of the called map depends on the index it acts on. If
-#         # the map maps from a -> {a, b, c} *and* b -> {b, c} then the degree
-#         # is 3 or 2 depending on from_index. If from_index is also a CalledMap
-#         # with multiple output components then the degree will need to be
-#         # determined by summing from the leaves of this prior map.
-#         # Note that 'degree' is equivalent to stating the number of leaves of
-#         # the resulting axes.
-#         if isinstance(from_index, SplitLoopIndex):
-#             # For now maps will only work with loop indices with depth 1. Being
-#             # able to work with deeper loop indices is required for things like
-#             # ephemeral meshes to work (since mesh.cells would have base and
-#             # column axes (for extruded)).
-#             if any(len(path) > 1 for path in from_index.target_paths):
-#                 raise NotImplementedError(
-#                     "Mapping from loop indices with depth greater than 1 is not "
-#                     "yet supported"
-#                 )
-#
-#         target_paths = []
-#         for from_target_path in from_index.target_paths:
-#             for leaf in map.map.bits[from_target_path]:
-#                 to_axis_label = leaf.target_axis
-#                 to_cpt_label = leaf.target_component
-#                 target_path = pmap({to_axis_label: to_cpt_label})
-#                 target_paths.append(target_path)
-#
-#         super().__init__(target_paths)
-#         self.map = map
-#         self.from_index = from_index
-#
-#     @property
-#     def target_paths(self):
-#         return self.component_labels
-#
-#     @functools.cached_property
-#     def datamap(self):
-#         return self.map.map.datamap | self.from_index.datamap
+# TODO
+class ContextFreeSlice(ContextFreeIndex):
+    def __init__(self, orig_slice, labels):
+        self.orig_slice = orig_slice
+        self.component_labels = labels
+        self.id = self.orig_slice.id
+
+    @property
+    def degree(self):
+        return len(self.component_labels)
+
+
+class ContextFreeCalledMap(Index, ContextFreeIndex):
+    def __init__(self, component_labels, map: CalledMap):
+        super().__init__(component_labels)
+        self.map = map
+
+    # @property
+    # def target_paths(self):
+    #     return self.component_labels
+
+    # @property
+    # def id(self):
+    #     return self.map.id
+
+    @functools.cached_property
+    def datamap(self):
+        return self.map.map.datamap | self.from_index.datamap
+
+
 #
 #     # ick
 #     @property
@@ -630,186 +661,120 @@ class IndexedAxisTree:
         return self.axes.datamap | self.indices.datamap
 
 
-@functools.singledispatch
-def as_split_index_tree(arg: Any, **kwargs) -> SplitIndexTree:
-    # cyclic import
-    from pyop3.distarray import MultiArray
+"""
+25/08
 
-    if isinstance(arg, MultiArray):
-        return _split_index_tree_from_iterable([arg], **kwargs)
-    elif isinstance(arg, collections.abc.Iterable):
-        return _split_index_tree_from_iterable(arg, **kwargs)
-    elif arg is Ellipsis:
-        return _split_index_tree_from_ellipsis(**kwargs)
-    else:
-        raise TypeError(f"No handler registered for {type(arg).__name__}")
+* I want this function to return a nested dictionary of the form:
 
+    {
+        loop_context0: {
+            {
+                "root": CalledMap,
+            }
+        },
+        loop_context1: {
+            {
+                "root": CalledMap,
+            }
+        },
+    }
 
-# @as_split_index_tree.register
-# def _(split_index_tree: SplitIndexTree, **kwargs) -> SplitIndexTree:
-#     return split_index_tree
+  Then things (e.g. slices) will attach below this:
 
+    {
+        loop_context0: {
+            {
+                "root": CalledMap,
+                X: Slice,
+                Y: Slice,
+            }
+        },
+        loop_context1: {
+            {
+                "root": CalledMap,
+                A: Slice,
+                B: Slice,
+                C: Slice,
+            }
+        },
+    }
 
-# @as_split_index_tree.register
-# def _(index_tree: IndexTree, **kwargs) -> SplitIndexTree:
-#     for index in index_tree.nodes:
-#         if (
-#             isinstance(index, SplitLoopIndex)
-#             and len(index.loop_index.iterset.target_paths) > 1
-#         ):
-#             raise ValueError(
-#                 "Cannot convert an IndexTree to a SplitIndexTree if it contains a multi-component loop index"
-#             )
-#     return SplitIndexTree({pmap(): index_tree})
-
-
-# same as CalledMap
-# @as_split_index_tree.register
-# def _(loop_index: LoopIndex, **kwargs) -> SplitIndexTree:
-#     index_trees = {
-#         loop_ctx: IndexTree(split_loop_index)
-#         for loop_ctx, split_loop_index in _split_index(loop_index).items()
-#     }
-#     return SplitIndexTree(index_trees)
-#
-#
-# @as_split_index_tree.register
-# def _(slice_: Slice, **kwargs) -> SplitIndexTree:
-#     return as_split_index_tree(IndexTree(slice_), **kwargs)
-#
-#
-# @as_split_index_tree.register
-# def _(slice_: slice, **kwargs) -> SplitIndexTree:
-#     return _split_index_tree_from_iterable([slice_], **kwargs)
-#
-#
-# @as_split_index_tree.register
-# def _(called_map: CalledMap, **kwargs) -> SplitIndexTree:
-#     index_trees = {
-#         loop_ctx: IndexTree(split_map)
-#         for loop_ctx, split_map in _split_index(called_map).items()
-#     }
-#     return SplitIndexTree(index_trees)
-#
-
-# @functools.singledispatch
-# def _split_index(arg: Any, **kwargs) -> Mapping[Mapping[LoopIndex, Mapping], Index]:
-#     raise TypeError
-#
-#
-# @_split_index.register
-# def _(loop_index: LoopIndex) -> Mapping[Mapping[LoopIndex, Mapping], SplitLoopIndex]:
-#     split_indices = {}
-#     for target_path in loop_index.target_paths:
-#         split_indices[pmap({loop_index: target_path})] = SplitLoopIndex(
-#             loop_index, target_path
-#         )
-#     return pmap(split_indices)
-#
-#
+  where X, Y, A, B and C are some sort of path describing how they attach to the map.
+  This will depend on the loop context and the advertised outputs of the map.
+    
+"""
 # @_split_index.register
 # def _(called_map: CalledMap) -> Mapping[Mapping[LoopIndex, Mapping], SplitCalledMap]:
-#     split_maps = {}
-#     split_from_indices = _split_index(called_map.from_index)
-#     for loop_context, from_index in split_from_indices.items():
-#         split_maps[loop_context] = SplitCalledMap(called_map, from_index, loop_context)
-#     return pmap(split_maps)
+#     index_forest = collections.defaultdict(dict)
+#     for loop_context, inner_index_tree in _split_index(called_map.from_index).items():
+#         index_forest[loop_context] = IndexTree(called_map)
+#     return pmap(index_forest)
 
 
-def _split_index_tree_from_iterable(
-    indices: Iterable[Any],
-    axes: AxisTree,
-    path=pmap(),
-    loop_context=pmap(),
-) -> SplitIndexTree:
-    """Return an index tree formed by concatenating successive indices.
+@functools.singledispatch
+def apply_loop_context(arg, *args, **kwargs):
+    raise TypeError
 
-    If any of the indices yield multiple components then subsequent indices
-    will be attached to all components.
 
-    """
-    # cyclic import
-    from pyop3.distarray import MultiArray
+@apply_loop_context.register
+def _(index: ContextFreeIndex, loop_context, **kwargs):
+    return index
 
-    index, *subindices = indices
 
-    if isinstance(index, LoopIndex) and index not in loop_context:
-        # again, bad API
-        subtrees = {}
-        for loop_path in index.target_paths:
-            new_loop_context = loop_context | {index: loop_path}
-            subtree = _split_index_tree_from_iterable(
-                indices, axes, path, new_loop_context
-            )
-            subtrees |= subtree
-        return subtrees
+@apply_loop_context.register
+def _(loop_index: LoopIndex, loop_context, **kwargs):
+    # use the path as the component label
+    component_label = loop_context[loop_index]
+    return ContextFreeLoopIndex(loop_index, [component_label])
 
-    if isinstance(index, CalledMap):
-        # again again, bad API
-        subtrees = {}
-        for loop_path, from_index in _split_index(index.from_index).items():
-            new_indices = [SplitCalledMap(index, from_index, loop_path)] + subindices
-            new_loop_context = loop_context | loop_path
-            subtree = _split_index_tree_from_iterable(
-                new_indices, axes, path, new_loop_context
-            )
-            subtrees |= subtree
-        return subtrees
 
-    if not isinstance(index, Index):
-        # We can use a slice provided that the previous indices provide a complete path.
-        # Consider an axis tree ax0 -> ax1 -> ax2. We can safely use a slice if the
-        # previous indices indexed {}, {ax0} or {ax0, ax1} since the axis acted upon by
-        # the slice is unambiguous. This is not the case if we have only indexed {ax1},
-        # {ax2}, {ax1, ax2} or {ax0, ax2}. The following line should raise an error if
-        # any of the latter cases are encountered.
-        if not path:
-            current_axis = axes.root
-        else:
-            parent_axis, parent_cpt = axes._node_from_path(path)
-            current_axis = axes.child(parent_axis, parent_cpt)
+@apply_loop_context.register
+def _(slice_: slice, loop_context, axes, path):
+    parent_axis, parent_cpt = axes._node_from_path(path)
+    target_axis = axes.child(parent_axis, parent_cpt)
+    slice_cpts = []
+    for cpt in target_axis.components:
+        slice_cpt = AffineSliceComponent(
+            cpt.label, slice_.start, slice_.stop, slice_.step
+        )
+        slice_cpts.append(slice_cpt)
+    fullslice = Slice(target_axis.label, slice_cpts)
+    return ContextFreeSlice(fullslice, [scpt.label for scpt in slice_cpts])
 
-        if isinstance(index, slice):
-            # Slices target all components of the current axis.
-            slice_cpts = [
-                AffineSliceComponent(cpt.label, index.start, index.stop, index.step)
-                for cpt in current_axis.components
-            ]
-        elif isinstance(index, MultiArray):
-            slice_cpts = [Subset(cpt.label, index) for cpt in current_axis.components]
-        elif isinstance(index, numbers.Integral):
-            # an integer is just a one-sized slice (assumed over all components)
-            slice_cpts = [
-                AffineSliceComponent(cpt.label, index, index + 1)
-                for cpt in current_axis.components
-            ]
-        else:
-            raise TypeError
-        index = Slice(current_axis.label, slice_cpts)
+
+def loop_contexts_from_iterable(indices):
+    # this is a bit tricky/unpleasant to write
+    # FIXME this is currently very naive/limited, need to check for conflicts etc
+    loop_contexts = []
+    for index in indices:
+        ctx = collect_loop_context(index)
+        if len(ctx) > 1:
+            raise NotImplementedError("TODO")
+        loop_contexts.extend(ctx)
+    return tuple(loop_contexts)
+
+
+@functools.singledispatch
+def collect_loop_context(arg, *args, **kwargs):
+    if isinstance(arg, collections.abc.Iterable):
+        return loop_contexts_from_iterable(arg)
     else:
-        pass
+        raise TypeError
 
-    if subindices:
-        index_trees = {}
-        # for maps these are identical but that is not so for slices
-        for component, target_path in checked_zip(
-            index.component_labels, index.target_paths
-        ):
-            split_subtree = _split_index_tree_from_iterable(
-                subindices, axes, path | target_path, loop_context
-            )
-            for loopctx, subtree in split_subtree.items():
-                if loopctx not in index_trees:
-                    index_trees[loopctx] = IndexTree(index).add_subtree(
-                        subtree, index, component
-                    )
-                else:
-                    index_trees[loopctx] = index_trees[loopctx].add_subtree(
-                        subtree, index, component
-                    )
-    else:
-        index_trees = {loop_context: IndexTree(index)}
-    return index_trees
+
+@collect_loop_context.register
+def _(arg: ContextFreeLoopIndex, *args, **kwargs):
+    return [pmap({arg.index: just_one(arg.component_labels)})]
+
+
+@collect_loop_context.register
+def _(arg: LoopIndex):
+    return [pmap({arg: arg.iterset.path(*leaf)}) for leaf in arg.iterset.leaves]
+
+
+@collect_loop_context.register
+def _(slice_: slice):
+    return ()
 
 
 def _split_index_tree_from_ellipsis(
@@ -866,53 +831,77 @@ def _collect_datamap(index, *subdatamaps, itree):
     return index.datamap | merge_dicts(subdatamaps)
 
 
-""" 17/08
+def index_tree_from_iterable(
+    indices, loop_context, axes=None, path=pmap(), first_call=False
+):
+    index, *subindices = indices
 
-It is important that index trees contain the original LoopIndex and CalledMap
-objects. Else it gets very onerous for the user to construct the right forests.
+    index = apply_loop_context(index, loop_context, axes=axes, path=path)
 
-Since we always have the context anyway this doesn't matter for us.
-"""
+    if subindices:
+        children = []
+        subtrees = []
+        for target_path in index.index.target_paths:
+            new_path = path | target_path
+            child, subtree = index_tree_from_iterable(
+                subindices, loop_context, axes, new_path
+            )
+            children.append(child)
+            subtrees.append(subtree)
+
+        root = index
+        parent_to_children = pmap({index.id: children} | merge_dicts(subtrees))
+    else:
+        root = index
+        parent_to_children = pmap()
+
+    if first_call:
+        return IndexTree(root, parent_to_children, loop_context=loop_context)
+    else:
+        return root, parent_to_children
+
+
+@functools.singledispatch
+def as_index_tree(arg, loop_context, **kwargs):
+    if isinstance(arg, collections.abc.Iterable):
+        return index_tree_from_iterable(arg, loop_context, first_call=True, **kwargs)
+    else:
+        raise TypeError
+
+
+# @as_index_tree.register
+# def _(index_tree:IndexTree, loop_context):
+#     assert index_tree.loop_context == loop_context
+#     return index_tree
+
+
+@as_index_tree.register
+def _(index: ContextSensitiveIndex, ctx):
+    return IndexTree(index, loop_context=ctx)
 
 
 @functools.singledispatch
 def as_index_forest(arg: Any, **kwargs):
     if isinstance(arg, collections.abc.Iterable):
-        return _split_index_tree_from_iterable(arg, **kwargs)
+        loop_contexts = collect_loop_context(arg)
+        return tuple(as_index_tree(arg, ctx, **kwargs) for ctx in loop_contexts)
     elif arg is Ellipsis:
-        return _split_index_tree_from_ellipsis(**kwargs)
+        raise NotImplementedError
     else:
         raise TypeError
 
 
 @as_index_forest.register
 def _(index_tree: IndexTree, **kwargs):
-    # should probably search for context inside it?
-    return pmap({pmap(): index_tree})
+    return (index_tree,)
 
 
 @as_index_forest.register
-def _(loop_index: LoopIndex, **kwargs):
-    forest = {}
-    for path in loop_index.target_paths:
-        forest[pmap({loop_index: path})] = IndexTree(loop_index)
-    return pmap(forest)
-
-
-@as_index_forest.register
-def _(called_map: CalledMap, **kwargs):
-    loop_index = called_map.from_index
-    while isinstance(loop_index, CalledMap):
-        loop_index = loop_index.from_index
-    # We assume that a map will always either call another map or a loop index
-    assert isinstance(loop_index, LoopIndex)
-
-    forest = {}
-    for path in loop_index.target_paths:
-        forest[pmap({loop_index: path})] = IndexTree(called_map)
-    return pmap(forest)
+def _(index: ContextSensitiveIndex, **kwargs):
+    loop_contexts = collect_loop_context(index)
+    return tuple(as_index_tree(index, ctx) for ctx in loop_contexts)
 
 
 @as_index_forest.register
 def _(slice_: slice, **kwargs):
-    return _split_index_tree_from_iterable([slice_], **kwargs)
+    raise NotImplementedError
