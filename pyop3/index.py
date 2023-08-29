@@ -167,6 +167,8 @@ def parse_parent_to_children(parent_to_children, parent, loop_context):
 
     if parent.id in parent_to_children:
         for child in parent_to_children[parent.id]:
+            if child is None:
+                continue
             child = apply_loop_context(child, loop_context)
             new_children.append(child)
             subparents_to_children.append(
@@ -257,7 +259,8 @@ class IndexedArray:
             # should probably include old_loop_context in this
             index_forest = as_index_forest(indices, axes=axes)
 
-            for loop_context, index_tree in index_forest.items():
+            for index_tree in index_forest:
+                loop_context = index_tree.loop_context
                 indexed_axes, target_path_per_leaf, index_exprs_per_leaf = index_axes(
                     axes, index_tree, loop_context
                 )
@@ -388,7 +391,7 @@ class MapVariable(pym.primitives.Variable):
         self.map_component = map_component
 
     def __call__(self, *args):
-        return CalledMapVariable(self, *args)
+        return CalledMapVariable(self, args)
 
 
 class CalledMapVariable(pym.primitives.Call):
@@ -492,12 +495,16 @@ class CalledMap(LoopIterable, UniquelyIdentifiedImmutableRecord, ContextSensitiv
     def index_exprs(self):
         raise NotImplementedError
 
+    @property
+    def bits(self):
+        return self.map.bits
+
 
 class Index(LabelledNode):
     @property
     @abc.abstractmethod
     def target_paths(self):
-        pass
+        raise NotImplementedError
 
 
 class LoopIndex(Index, ContextSensitiveIndex, abc.ABC):
@@ -518,6 +525,11 @@ class ContextFreeLoopIndex(Index, ContextFreeIndex):
         assert len(labels) == 1
         super().__init__(labels, id=orig_index.id, **kwargs)
         self.index = orig_index
+
+    # TODO clean this up.
+    @property
+    def target_paths(self):
+        return self.component_labels
 
 
 # TODO just call this LoopIndex (inherit from AbstractLoopIndex)
@@ -598,17 +610,33 @@ class ContextFreeSlice(ContextFreeIndex):
 
 
 class ContextFreeCalledMap(Index, ContextFreeIndex):
-    def __init__(self, component_labels, map: CalledMap):
+    def __init__(self, component_labels, map: CalledMap, from_index: ContextFreeIndex):
         super().__init__(component_labels)
         self.map = map
+        self.from_index = from_index
 
-    # @property
-    # def target_paths(self):
-    #     return self.component_labels
+    @property
+    def target_paths(self):
+        # hopefully I shouldn't have to do this introspection here, make a class attribute
+        all_map_components = {}
+        for map_components in self.map.bits.values():
+            for map_component in map_components:
+                all_map_components[map_component.label] = map_component
+
+        targets = []
+        for component_label in self.component_labels:
+            map_component_label = component_label[-1]
+            selected_cpt = all_map_components[map_component_label]
+            target = pmap({selected_cpt.target_axis: selected_cpt.target_component})
+            targets.append(target)
+        return targets
 
     # @property
     # def id(self):
     #     return self.map.id
+    @property
+    def name(self):
+        return self.map.name
 
     @functools.cached_property
     def datamap(self):
@@ -729,6 +757,23 @@ def _(loop_index: LoopIndex, loop_context, **kwargs):
 
 
 @apply_loop_context.register
+def _(called_map: CalledMap, loop_context, **kwargs):
+    from_index = apply_loop_context(called_map.from_index, loop_context, **kwargs)
+
+    new_labels = []
+    for from_label, from_path in checked_zip(
+        from_index.component_labels, from_index.target_paths
+    ):
+        map_components = called_map.bits[from_path]
+        for map_component in map_components:
+            # the new label should be the concatenation of previous ones
+            new_label = as_tuple(from_label) + (map_component.label,)
+            new_labels.append(new_label)
+
+    return ContextFreeCalledMap(new_labels, called_map, from_index)
+
+
+@apply_loop_context.register
 def _(slice_: slice, loop_context, axes, path):
     parent_axis, parent_cpt = axes._node_from_path(path)
     target_axis = axes.child(parent_axis, parent_cpt)
@@ -770,6 +815,11 @@ def _(arg: ContextFreeLoopIndex, *args, **kwargs):
 @collect_loop_context.register
 def _(arg: LoopIndex):
     return [pmap({arg: arg.iterset.path(*leaf)}) for leaf in arg.iterset.leaves]
+
+
+@collect_loop_context.register
+def _(called_map: CalledMap):
+    return collect_loop_context(called_map.from_index)
 
 
 @collect_loop_context.register
@@ -831,6 +881,30 @@ def _collect_datamap(index, *subdatamaps, itree):
     return index.datamap | merge_dicts(subdatamaps)
 
 
+def index_tree_from_ellipsis(axes, current_axis, first_call=True):
+    slice_components = []
+    subroots = []
+    subtrees = []
+    for component in current_axis.components:
+        slice_components.append(AffineSliceComponent(component.label))
+
+        if subaxis := axes.child(current_axis, component):
+            subroot, subtree = index_tree_from_ellipsis(axes, subaxis, first_call=False)
+            subroots.append(subroot)
+            subtrees.append(subtree)
+        else:
+            subroots.append(None)
+            subtrees.append({})
+
+    fullslice = Slice(current_axis.label, slice_components)
+    myslice = ContextFreeSlice(fullslice, [c.label for c in slice_components])
+
+    if first_call:
+        return IndexTree(myslice, {myslice.id: subroots} | merge_dicts(subtrees))
+    else:
+        return myslice, {myslice.id: subroots} | merge_dicts(subtrees)
+
+
 def index_tree_from_iterable(
     indices, loop_context, axes=None, path=pmap(), first_call=False
 ):
@@ -841,7 +915,7 @@ def index_tree_from_iterable(
     if subindices:
         children = []
         subtrees = []
-        for target_path in index.index.target_paths:
+        for target_path in index.target_paths:
             new_path = path | target_path
             child, subtree = index_tree_from_iterable(
                 subindices, loop_context, axes, new_path
@@ -881,12 +955,15 @@ def _(index: ContextSensitiveIndex, ctx):
 
 
 @functools.singledispatch
-def as_index_forest(arg: Any, **kwargs):
+def as_index_forest(arg: Any, *, axes, **kwargs):
     if isinstance(arg, collections.abc.Iterable):
         loop_contexts = collect_loop_context(arg)
-        return tuple(as_index_tree(arg, ctx, **kwargs) for ctx in loop_contexts)
+        return tuple(
+            as_index_tree(arg, ctx, axes=axes, **kwargs) for ctx in loop_contexts
+        )
     elif arg is Ellipsis:
-        raise NotImplementedError
+        assert False, "dont go this way"
+        return (index_tree_from_ellipsis(axes, axes.root),)
     else:
         raise TypeError
 

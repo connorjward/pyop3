@@ -1434,12 +1434,16 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         if not isinstance(expr.function.map_component.array, MultiArray):
             raise NotImplementedError("Affine map stuff not supported yet")
 
-        inner_expr = self.rec(expr.parameters)
+        inner_expr = [self.rec(param) for param in expr.parameters]
         map_array = expr.function.map_component.array
 
-        jname = self._labels_to_jnames[expr.function.full_map.name]
-        # jname = self._codegen_context.unique_name("j")
-        # self._codegen_context.add_temporary(jname)
+        # handle [map0(p)][map1(p)] where map0 does not have an associated loop
+        try:
+            jname = self._labels_to_jnames[expr.function.full_map.name]
+        except KeyError:
+            jname = self._codegen_context.unique_name("j")
+            self._codegen_context.add_temporary(jname)
+            jname = pym.var(jname)
 
         # ? = map[j0, j1]
         # where j0 comes from the from_index and j1 is advertised as the shape
@@ -1451,7 +1455,7 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
             map_array,
             pmap({rootaxis.label: just_one(rootaxis.components).label})
             | pmap({inner_axis.label: inner_cpt.label}),
-            {rootaxis.label: inner_expr} | {inner_axis.label: jname},
+            {rootaxis.label: inner_expr[0]} | {inner_axis.label: inner_expr[1]},
             self._codegen_context,
         )
         for insn in insns:
@@ -1629,11 +1633,18 @@ def _(called_map: ContextFreeCalledMap, **kwargs):
             )
 
             map_var = MapVariable(called_map, map_component)
+            axisvar = AxisVariable(called_map.name)
 
             index_expr_per_leaf.append(
                 # not super happy about this use of values. The called variable doesn't now
                 # necessarily know the right axis labels
-                pmap({map_component.target_axis: map_var(*from_index_expr.values())})
+                pmap(
+                    {
+                        map_component.target_axis: map_var(
+                            *from_index_expr.values(), axisvar
+                        )
+                    }
+                )
             )
 
         axis = Axis(components, label=called_map.name)
@@ -1875,7 +1886,7 @@ def index_axes(axes: AxisTree, indices: IndexTree, loop_context):
     #     raise NotImplementedError
     # return AxisTree()
 
-    indexed_axes, expr_per_leaf, target_path_per_leaf = visit_indices(
+    indexed_axes, target_path_per_leaf, expr_per_leaf = visit_indices(
         indices,
         ParseAssignmentPreorderContext(),
         index_callback=collect_shape_index_callback,
@@ -1896,4 +1907,4 @@ def index_axes(axes: AxisTree, indices: IndexTree, loop_context):
     #     return AxisTree()
 
     # return the new axes plus the new index expressions per leaf
-    return indexed_axes, expr_per_leaf, target_path_per_leaf
+    return indexed_axes, target_path_per_leaf, expr_per_leaf

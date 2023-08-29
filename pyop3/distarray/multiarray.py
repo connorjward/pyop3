@@ -44,7 +44,7 @@ class IndexExpressionReplacer(pym.mapper.IdentityMapper):
         self._replace_map = replace_map
 
     def map_axis_variable(self, expr):
-        return self._replace_map[expr.axis_label]
+        return self._replace_map.get(expr.axis_label, expr)
 
 
 class MultiArray(DistributedArray, pym.primitives.Variable):
@@ -327,7 +327,16 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
 
     # maybe I could check types here and use instead of get_value?
     def __getitem__(self, indices):
-        # FIXME
+        if indices is Ellipsis:
+            axis_trees = pmap({pmap(): self.axes})
+            layout_expr_per_leaf = {}
+            for leaf_axis, leaf_cpt in self.axes.leaves:
+                target_path = self.axes.path(leaf_axis, leaf_cpt)
+                layout_expr = sum(self.axes.layouts[target_path])
+                layout_expr_per_leaf[leaf_axis.id, leaf_cpt] = layout_expr
+            return IndexedArray(self, axis_trees, {pmap(): layout_expr_per_leaf})
+
+        # FIXME, move code
         from pyop3.codegen.loopexpr2loopy import index_axes
 
         index_forest = as_index_forest(indices, axes=self.axes)
