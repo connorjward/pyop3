@@ -1561,7 +1561,7 @@ def _scalar_assignment(
     ctx.add_temporary(offset, IntType)
 
     layout_insns = emit_layout_insns(
-        sum(array.axes.layouts[path]),
+        array.axes.layouts[path],
         offset,
         array_labels_to_jnames,
         ctx,

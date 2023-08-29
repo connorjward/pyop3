@@ -753,6 +753,8 @@ def loop_contexts_from_iterable(indices):
 def collect_loop_context(arg, *args, **kwargs):
     if isinstance(arg, collections.abc.Iterable):
         return loop_contexts_from_iterable(arg)
+    if arg is Ellipsis:
+        return ()
     else:
         raise TypeError
 

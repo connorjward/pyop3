@@ -314,7 +314,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
         return self.data[self.axes.get_offset(*args, **kwargs)]
 
     def set_value(self, path, indices, value):
-        self.data[self.root.get_offset(path, indices)] = value
+        self.data[self.axes.get_offset(path, indices)] = value
 
     # maybe I could check types here and use instead of get_value?
     def __getitem__(self, indices):

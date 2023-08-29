@@ -606,6 +606,9 @@ class Axis(LabelledNode, LoopIterable):
 
 
 class MultiArrayCollector(pym.mapper.Collector):
+    def map_map_variable(self, expr):
+        return {expr.map_component.array}
+
     def map_multi_array(self, expr):
         return {expr}
 
@@ -760,8 +763,9 @@ class AxisTree(LabelledTree, LoopIterable):
     @functools.cached_property
     def datamap(self) -> dict[str:DistributedArray]:
         if self.is_empty:
-            return {}
-        dmap = postvisit(self, _collect_datamap, axes=self)
+            dmap = {}
+        else:
+            dmap = postvisit(self, _collect_datamap, axes=self)
         for layout in self.layouts.values():
             for array in MultiArrayCollector()(layout):
                 dmap |= array.datamap
@@ -793,7 +797,7 @@ class AxisTree(LabelledTree, LoopIterable):
         if allow_unused:
             path = _trim_path(self, path)
 
-        offset = pym.evaluate(sum(self.layouts[path]), indices, ExpressionEvaluator)
+        offset = pym.evaluate(self.layouts[path], indices, ExpressionEvaluator)
         return strict_int(offset)
 
         offset_ = 0
