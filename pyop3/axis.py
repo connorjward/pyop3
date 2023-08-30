@@ -1210,7 +1210,7 @@ def _(component: AxisComponent):
 
 # use this to build a tree of sizes that we use to construct
 # the right count arrays
-class CustomNode(LabelledNode):
+class CustomNode(StrictLabelledNode):
     fields = LabelledNode.fields - {"component_labels"} | {"counts"}
 
     def __init__(self, counts, **kwargs):
@@ -1298,7 +1298,7 @@ def _compute_layouts(
                 } | merge_dicts(sub.parent_to_children for sub in csubtrees)
             else:
                 cparent_to_children = {}
-            ctree = LabelledTree(croot, cparent_to_children)
+            ctree = StrictLabelledTree(croot, cparent_to_children)
 
         # layouts and steps are just propagated from below
         return layouts | merge_dicts(sublayoutss), ctree, steps
@@ -1323,7 +1323,7 @@ def _compute_layouts(
                 } | merge_dicts(sub.parent_to_children for sub in csubtrees)
             else:
                 cparent_to_children = {}
-            ctree = LabelledTree(croot, cparent_to_children)
+            ctree = StrictLabelledTree(croot, cparent_to_children)
 
             fulltree = _create_count_array_tree(ctree)
             # breakpoint()
