@@ -100,7 +100,9 @@ class Loop(LoopExpr):
 
     @functools.cached_property
     def datamap(self):
-        return merge_dicts(stmt.datamap for stmt in self.statements)
+        return self.index.datamap | merge_dicts(
+            stmt.datamap for stmt in self.statements
+        )
 
     def __str__(self):
         return f"for {self.index} ∊ {self.index.point_set}"

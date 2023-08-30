@@ -69,10 +69,14 @@ from pyop3.utils import (
 
 class ExpressionEvaluator(pym.mapper.evaluator.EvaluationMapper):
     def map_axis_variable(self, expr):
-        return self.context[expr.axis_label]
+        return self.context[1][expr.axis_label]
 
     def map_multi_array(self, array):
-        raise NotImplementedError
+        path = _trim_path(array.axes, self.context[0])
+        # context = []
+        # for keyval in self.context.items():
+        #     context.append(keyval)
+        return array.get_value(path, self.context[1])
 
 
 class IntRef:
@@ -799,7 +803,7 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         if allow_unused:
             path = _trim_path(self, path)
 
-        offset = pym.evaluate(self.layouts[path], indices, ExpressionEvaluator)
+        offset = pym.evaluate(self.layouts[path], (path, indices), ExpressionEvaluator)
         return strict_int(offset)
 
         offset_ = 0

@@ -232,7 +232,11 @@ class LoopyCodegenContext(CodegenContext):
         # add prefix to the generator so names are generated starting with
         # "prefix_0" instead of "prefix"
         self._name_generator.add_name(prefix, conflicting_ok=True)
-        return self._name_generator(prefix)
+        # return self._name_generator(prefix)
+        retval = self._name_generator(prefix)
+        if retval == "j_1":
+            breakpoint()
+        return retval
 
     # def add_iname(self, iname: str) -> None:
     #     self._within_inames |= {iname}
@@ -362,54 +366,16 @@ def _parse_loop(
     else:
         raise TypeError
 
-    # initialise some bits
-    myleaves, jnames_per_cpt = _parse_index_axis_tree_rec(
-        axes,
-        codegen_ctx,
-        current_axis=axes.root,
-        current_path=pmap(),
-        current_target_jnames=pmap(),
-    )
-
-    insns_per_leaf = {}
-    array_expr_per_leaf = {}
-    for leaf_key, leafdata in myleaves.items():
-        insns_per_leaf[leaf_key] = ()
-        array_expr_per_leaf[leaf_key] = leafdata[1]
-
-    for indices in itrees:
-        # get the right index tree given the loop context
-        loop_context = {}
-        for loop_index, (path, _) in loop_indices.items():
-            loop_context[loop_index] = pmap(path)
-        loop_context = pmap(loop_context)
-        index_tree = indices[loop_context]
-
-        # this is exactly the same as what we do for assignment (hence the currently bad name)
-        # the only difference between these is that at the end we do something different
-        # for loops
-        (
-            axes,
-            jnames_per_cpt,
-            array_expr_per_leaf,
-            insns_per_leaf,
-        ) = _parse_assignment(
-            index_tree,
-            ParseAssignmentPreorderContext(),
-            codegen_ctx=codegen_ctx,
-            loop_indices=loop_indices,
-            prev_axes=axes,
-        )
-
-    ###
+    loop_context = {}
+    for loop_index, (path, _) in loop_indices.items():
+        loop_context[loop_index] = pmap(path)
+    loop_context = pmap(loop_context)
 
     _finalize_parse_loop(
         loop,
         axes,
-        jnames_per_cpt,
-        array_expr_per_leaf,
-        insns_per_leaf,
         codegen_ctx,
+        loop_context,
         loop_indices,
     )
 
@@ -417,19 +383,15 @@ def _parse_loop(
 def _finalize_parse_loop(
     loop,
     axes,
-    jnames_per_axcpt,
-    array_expr_per_leaf,
-    insns_per_leaf,
     codegen_ctx,
+    loop_context,
     loop_indices,
 ):
     _finalize_parse_loop_rec(
         loop,
         axes,
-        jnames_per_axcpt,
-        array_expr_per_leaf,
-        insns_per_leaf,
         codegen_ctx,
+        loop_context,
         loop_indices,
         current_axis=axes.root,
         current_path=(),
@@ -441,45 +403,70 @@ def _finalize_parse_loop(
 def _finalize_parse_loop_rec(
     loop,
     axes,
-    jnames_per_axcpt,
-    array_expr_per_leaf,
-    insns_per_leaf,
     codegen_ctx,
+    loop_context,
     loop_indices,
     *,
     current_axis,
     current_path,
     current_jnames,
 ):
+    # very very similar to _parse_assignment_final
+    axis_labels_to_jnames = {}
+    for loop_index in loop_context.keys():
+        # we don't do anything with src_jnames currently. I should probably just register
+        # it as a separate loop index
+        _, target_jnames, src_jnames = loop_indices[loop_index]
+        for axis_label, jname in target_jnames.items():
+            axis_labels_to_jnames[axis_label] = pym.var(jname)
+
+    array_path = pmap(
+        {ax: cpt for path in loop_context.values() for ax, cpt in path.items()}
+    )
+
+    parse_loop_final_rec(
+        loop,
+        axes,
+        axis_labels_to_jnames,
+        array_path,
+        codegen_ctx,
+        loop_indices,
+        current_axis=current_axis,
+    )
+
+
+def parse_loop_final_rec(
+    loop,
+    axes,
+    current_jnames,
+    current_path,
+    codegen_ctx,
+    loop_indices,
+    *,
+    current_axis,
+):
     for axcpt in current_axis.components:
         size = register_extent(axcpt.count, current_path, current_jnames, codegen_ctx)
         iname = codegen_ctx.unique_name("i")
         codegen_ctx.add_domain(iname, size)
 
-        new_path = current_path + ((current_axis.label, axcpt.label),)
-        current_jname = jnames_per_axcpt[current_axis.id, axcpt.label]
-        new_jnames = current_jnames | {current_axis.label: current_jname}
+        new_path = current_path | {current_axis.label: axcpt.label}
+        current_jname = iname
+        new_jnames = current_jnames | {current_axis.label: pym.var(current_jname)}
 
         with codegen_ctx.within_inames({iname}):
-            codegen_ctx.add_assignment(pym.var(current_jname), pym.var(iname))
-
             if subaxis := axes.child(current_axis, axcpt):
-                _finalize_parse_loop_rec(
+                parse_loop_final_rec(
                     loop,
                     axes,
-                    jnames_per_axcpt,
-                    array_expr_per_leaf,
-                    insns_per_leaf,
+                    new_jnames,
+                    new_path,
                     codegen_ctx,
+                    loop_indices,
                     current_axis=subaxis,
-                    current_path=new_path,
-                    current_jnames=new_jnames,
-                    loop_indices=loop_indices,
                 )
             else:
-                for insn in insns_per_leaf[current_axis.id, axcpt.label]:
-                    codegen_ctx.add_assignment(*insn)
-
+                # FIXME I may or may not need layout_expr here
                 for stmt in loop.statements:
                     _compile(
                         stmt,
@@ -487,8 +474,10 @@ def _finalize_parse_loop_rec(
                         | {
                             loop.index: (
                                 new_path,
-                                array_expr_per_leaf[current_axis.id, axcpt.label],
-                                new_jnames,  # "local index"
+                                # FIXME I will need to change this if we are looping over
+                                # some sort of index
+                                pmap(new_jnames),
+                                pmap(new_jnames),  # "local index"
                             )
                         },
                         codegen_ctx,
@@ -520,19 +509,12 @@ def _(call: FunctionCall, loop_indices, ctx: LoopyCodegenContext) -> None:
         #         "Need to handle indices to create temp shape differently"
         #     )
 
-        loop_index_keys = frozenset(
-            loop_index
-            for key in arg.axes.axis_trees.keys()
-            for loop_index in key.keys()
-        )
-        loop_context = pmap(
-            {
-                loop_index: pmap(path)
-                for loop_index, (path, _, _) in loop_indices.items()
-                if loop_index in loop_index_keys
-            }
-        )
-        axes = arg.axes.axis_trees[loop_context].copy(layout_exprs=None)
+        loop_context = {}
+        for loop_index, (path, _, _) in loop_indices.items():
+            loop_context[loop_index] = pmap(path)
+        loop_context = pmap(loop_context)
+
+        axes = arg.axes.with_context(loop_context).copy(layout_exprs=None)
         temporary = MultiArray(
             axes,
             name=ctx.unique_name("t"),
@@ -662,68 +644,16 @@ def build_assignment(
     is equivalent to a single step of this mapping. Sort of.
     """
 
-    # each index tree transforms an axis tree into another and produces
-    # one index instruction (jname) per index component
-
-    # retrieve the original axes
-    # array = assignment.array
-    # while isinstance(array, Indexed):
-    #     array = array.obj
-    # axes = array.axes
-    #
-    # # unroll the index trees, this should be tidied up
-    # array = assignment.array
-    # if isinstance(array, CalledAxisTree):
-    #     itrees = [array.indices]
-    # else:
-    #     itrees = []
-    #     while isinstance(array, Indexed):
-    #         itrees.insert(0, array.itree)
-    #         array = array.obj
-    #
-    # for indices in itrees:
-    #     # get the right index tree given the loop context
-    #     loop_context = {}
-    #     for loop_index, (path, _, _) in loop_indices.items():
-    #         loop_context[loop_index] = pmap(path)
-    #     loop_context = pmap(loop_context)
-    #     index_tree = indices[loop_context]
-    #
-    #     (
-    #         axes,
-    #         jnames_per_cpt,
-    #         array_expr_per_leaf,
-    #         insns_per_leaf,
-    #     ) = _parse_assignment(
-    #         index_tree,
-    #         ParseAssignmentPreorderContext(),
-    #         codegen_ctx=codegen_ctx,
-    #         loop_indices=loop_indices,
-    #         prev_axes=axes,
-    #         prev_jnames_per_cpt=jnames_per_cpt,
-    #         prev_array_expr_per_leaf=array_expr_per_leaf,
-    #         prev_insns_per_leaf=insns_per_leaf,
-    #     )
-
-    # lastly generate loops for the tree structure at the end, also generate
-    # the intermediate index instructions
-    # This will traverse the final axis tree, collecting jnames. At the bottom the
-    # leaf insns will be emitted and the temp_expr will be assigned to the array one.
-    loop_index_keys = frozenset(
-        loop_index
-        for key in assignment.array.axes.axis_trees.keys()
-        for loop_index in key.keys()
-    )
+    # get the right index tree given the loop context
     loop_context = {}
     for loop_index, (path, _, _) in loop_indices.items():
-        if loop_index in loop_index_keys:
-            loop_context[loop_index] = pmap(path)
+        loop_context[loop_index] = pmap(path)
     loop_context = pmap(loop_context)
 
     _parse_assignment_final(
         assignment,
-        assignment.array.axes.axis_trees[loop_context],
-        assignment.array.axes.axis_trees[loop_context].layouts,
+        assignment.array.axes.with_context(loop_context),
+        assignment.array.axes.with_context(loop_context).layouts,
         loop_context,
         loop_indices,
         # I think that these can be skipped and just traverse the final expression thing...
@@ -732,73 +662,6 @@ def build_assignment(
         # insns_per_leaf,
         codegen_ctx,
     )
-
-
-def _prepare_assignment(assignment, ctx: LoopyCodegenContext) -> tuple[pmap, pmap]:
-    array = assignment.array
-    while isinstance(array, Indexed):
-        array = array.obj
-
-    return _prepare_assignment_rec(
-        assignment,
-        array.axes,
-        array.axes.root,
-        pmap(),
-        pmap(),
-        ctx,
-    )
-
-
-# I think that this is pretty much exactly the same as what _expand_index does for
-# an axis tree
-def _prepare_assignment_rec(
-    assignment,
-    axes: AxisTree,
-    axis: Axis,
-    path: pmap,
-    jnames: pmap,
-    ctx: LoopyCodegenContext,
-) -> tuple[pmap, pmap]:
-    # catch empty axis trees
-    # if axes.is_empty:
-    #     return pmap(), pmap({None: 0}), pmap({None: ()})
-
-    jnames_per_axcpt = {}
-    insns_per_leaf = {}
-    array_expr_per_leaf = {}
-    for axcpt in axis.components:
-        jname = ctx.unique_name("j")
-        ctx.add_temporary(jname)
-        new_jnames = jnames | {axis.label: pym.var(jname)}
-        # FIXME should only add once per axis label, component label combination
-        jnames_per_axcpt[axis.id, axcpt.label] = jname
-        new_path = path | {axis.label: axcpt.label}
-
-        if subaxis := axes.child(axis, axcpt):
-            (
-                subjnames_per_axcpt,
-                subarray_expr_per_leaf,
-                subinsns_per_leaf,
-            ) = _prepare_assignment_rec(
-                assignment, axes, subaxis, new_path, new_jnames, ctx
-            )
-            jnames_per_axcpt |= subjnames_per_axcpt
-            insns_per_leaf |= subinsns_per_leaf
-            array_expr_per_leaf |= subarray_expr_per_leaf
-        else:
-            if isinstance(assignment.array, CalledAxisTree):
-                # just the offset instructions here, no subscript
-                insns, array_expr = emit_assignment_insn(
-                    axes, new_path, new_jnames, ctx
-                )
-            else:
-                insns, array_expr = _assignment_array_insn(
-                    assignment, axes, new_path, new_jnames, ctx
-                )
-            insns_per_leaf[axis.id, axcpt.label] = insns
-            array_expr_per_leaf[axis.id, axcpt.label] = array_expr
-
-    return pmap(jnames_per_axcpt), pmap(array_expr_per_leaf), pmap(insns_per_leaf)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -943,7 +806,7 @@ def _parse_assignment_final(
         # it as a separate loop index
         _, target_jnames, src_jnames = loop_indices[loop_index]
         for axis_label, jname in target_jnames.items():
-            array_axis_labels_to_jnames[axis_label] = pym.var(jname)
+            array_axis_labels_to_jnames[axis_label] = jname
 
     # loop indices aren't included in the temporary
     temp_axis_labels_to_jnames = {}
@@ -1009,8 +872,6 @@ def _parse_assignment_final_rec(
         new_temp_path = temp_path | {current_axis.label: axcpt.label}
 
         with ctx.within_inames({iname}):
-            # ctx.add_assignment(pym.var(current_jname), pym.var(iname))
-
             if subaxis := axes.child(current_axis, axcpt):
                 _parse_assignment_final_rec(
                     assignment,
@@ -1256,6 +1117,7 @@ def _(axes: AxisTree, *, loop_indices, codegen_ctx, **kwargs):
     return leaves, index_data
 
 
+# FIXME I don't think I use current_target_jnames at all
 def _parse_index_axis_tree_rec(
     axes: AxisTree, codegen_ctx, *, current_axis, current_path, current_target_jnames
 ):
