@@ -673,6 +673,8 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         self._layouts = None
 
     def __getitem__(self, indices):
+        if indices is Ellipsis:
+            return self
         # FIXME
         from pyop3.codegen.loopexpr2loopy import index_axes
         from pyop3.distarray.multiarray import IndexExpressionReplacer

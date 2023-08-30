@@ -339,8 +339,14 @@ class Map(pytools.ImmutableRecord):
         return data
 
 
+class Index(LabelledNode):
+    @abc.abstractmethod
+    def target_paths(self, context):
+        pass
+
+
 # ImmutableRecord?
-class CalledMap(LoopIterable, UniquelyIdentifiedImmutableRecord):
+class CalledMap(Index, LoopIterable, UniquelyIdentifiedImmutableRecord):
     # This function cannot be part of an index tree because it has not specialised
     # to a particular loop index path.
     def __init__(self, map, from_index):
@@ -372,12 +378,12 @@ class CalledMap(LoopIterable, UniquelyIdentifiedImmutableRecord):
     def bits(self):
         return self.map.bits
 
-
-class Index(LabelledNode):
-    @property
-    @abc.abstractmethod
-    def target_paths(self):
-        raise NotImplementedError
+    def target_paths(self, context):
+        targets = {}
+        for src_path in self.from_index.target_paths(context):
+            for map_component in self.bits[src_path]:
+                targets[map_component.target_axis] = map_component.target_component
+        return (pmap(targets),)
 
 
 class LoopIndex(Index, abc.ABC):
@@ -396,12 +402,11 @@ class GlobalLoopIndex(LoopIndex):
         self.iterset = iterset
 
     @property
-    def target_paths(self):
-        return self.iterset.target_paths
-
-    @property
     def datamap(self):
         return self.iterset.datamap
+
+    def target_paths(self, context):
+        return self.iterset.with_context(context).target_paths
 
 
 class LocalLoopIndex(LoopIndex):
@@ -545,7 +550,7 @@ class IndexedAxisTree(ContextSensitive):
     def __getitem__(self, indices):
         new_axis_trees = {}
         for loop_context, axis_tree in self.axis_trees.items():
-            new_axis_trees[loop_context] = axis_tree[indices]
+            new_axis_trees[loop_context] = axis_tree[indices].with_context(loop_context)
         return IndexedAxisTree(new_axis_trees)
 
     def index(self):
@@ -722,7 +727,7 @@ def index_tree_from_iterable(
     if subindices:
         children = []
         subtrees = []
-        for target_path in index.iterset.with_context(loop_context).target_paths:
+        for target_path in index.target_paths(loop_context):
             new_path = path | target_path
             child, subtree = index_tree_from_iterable(
                 subindices, loop_context, axes, new_path

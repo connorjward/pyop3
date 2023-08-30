@@ -466,7 +466,6 @@ def parse_loop_final_rec(
                     current_axis=subaxis,
                 )
             else:
-                # FIXME I may or may not need layout_expr here
                 for stmt in loop.statements:
                     _compile(
                         stmt,
