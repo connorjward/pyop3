@@ -88,69 +88,6 @@ class IndexTree(LabelledTree):
         self.loop_context = loop_context
 
 
-# We don't use this any more because index trees are eagerly consumed
-# class SplitIndexTree:
-#     """Container of `IndexTree`s distinguished by outer loop information.
-#
-#     This class is required because multi-component outer loops can lead to
-#     ambiguity in the shape of the resulting `IndexTree`. Consider the loop:
-#
-#     .. code:: python
-#
-#         loop(p := mesh.points, kernel(dat0[closure(p)]))
-#
-#     In this case, assuming ``mesh`` to be at least 1-dimensional, ``p`` will
-#     loop over multiple components (cells, edges, vertices, etc) and each
-#     component will have a differently sized temporary. This is because
-#     vertices map to themselves whereas, for example, edges map to themselves
-#     *and* the incident vertices.
-#
-#     A `SplitIndexTree` is therefore useful as it allows the description of
-#     an `IndexTree` *per possible configuration of relevant loop indices*.
-#
-#     """
-#
-#     def __init__(self, index_trees: pmap[pmap[LoopIndex, pmap[str, str]], IndexTree]):
-#         # this is terribly unclear
-#         if not is_single_valued([set(key.keys()) for key in index_trees.keys()]):
-#             raise ValueError("Loop contexts must contain the same loop indices")
-#
-#         new_index_trees = {}
-#         for key, itree in index_trees.items():
-#             new_key = {}
-#             for loop_index, path in key.items():
-#                 if isinstance(loop_index, LocalLoopIndex):
-#                     loop_index = loop_index.global_index
-#                 new_key[loop_index] = path
-#             new_index_trees[pmap(new_key)] = itree
-#         self.index_trees = pmap(new_index_trees)
-#
-#     def __getitem__(self, loop_context):
-#         key = {}
-#         for loop_index, path in loop_context.items():
-#             if isinstance(loop_index, LocalLoopIndex):
-#                 loop_index = loop_index.global_index
-#             if loop_index in self.loop_indices:
-#                 key |= {loop_index: path}
-#         key = pmap(key)
-#         return self.index_trees[key]
-#
-#     @functools.cached_property
-#     def loop_indices(self) -> frozenset[LoopIndex]:
-#         # loop is used just for unpacking
-#         for loop_context in self.index_trees.keys():
-#             indices = set()
-#             for loop_index in loop_context.keys():
-#                 if isinstance(loop_index, LocalLoopIndex):
-#                     loop_index = loop_index.global_index
-#                 indices.add(loop_index)
-#             return frozenset(indices)
-#
-#     @functools.cached_property
-#     def datamap(self):
-#         return merge_dicts([itree.datamap for itree in self.index_trees.values()])
-
-
 def parse_index_tree(root, parent_to_children, loop_context):
     root = apply_loop_context(root, loop_context)
     new_parent_to_children = parse_parent_to_children(
@@ -161,11 +98,9 @@ def parse_index_tree(root, parent_to_children, loop_context):
 
 
 def parse_parent_to_children(parent_to_children, parent, loop_context):
-    assert isinstance(parent, ContextFreeIndex)
-    new_children = []
-    subparents_to_children = []
-
     if parent.id in parent_to_children:
+        new_children = []
+        subparents_to_children = []
         for child in parent_to_children[parent.id]:
             if child is None:
                 continue
@@ -174,11 +109,12 @@ def parse_parent_to_children(parent_to_children, parent, loop_context):
             subparents_to_children.append(
                 parse_parent_to_children(parent_to_children, child, loop_context)
             )
-    else:
-        for _ in parent.component_labels:
-            new_children.append(None)
 
-    return pmap({parent.id: new_children} | merge_dicts(subparents_to_children))
+        return pmap(
+            {parent.id: tuple(new_children)} | merge_dicts(subparents_to_children)
+        )
+    else:
+        return pmap()
 
 
 IndexLabel = collections.namedtuple("IndexLabel", ["axis", "component"])
@@ -205,10 +141,6 @@ def collect_datamap_from_expression(expr: pym.primitives.Expr) -> dict:
     return _datamap_collector(expr)
 
 
-class ContextSensitiveIndex(abc.ABC):
-    pass
-
-
 class IndexedArray:
     """Container representing an object that has been indexed.
 
@@ -219,6 +151,7 @@ class IndexedArray:
     # note that axes here are specially modified to have the right layout functions
     # this needs to be done inside __getitem__
     def __init__(self, array: MultiArray, axis_trees, layout_exprs):
+        assert False, "old code, used IndexedAxisTree instead"
         # from pyop3.codegen.loopexpr2loopy import _indexed_axes
         #
         # # The following tricksy bit of code builds a pretend AxisTree for the
@@ -407,7 +340,7 @@ class Map(pytools.ImmutableRecord):
 
 
 # ImmutableRecord?
-class CalledMap(LoopIterable, UniquelyIdentifiedImmutableRecord, ContextSensitiveIndex):
+class CalledMap(LoopIterable, UniquelyIdentifiedImmutableRecord):
     # This function cannot be part of an index tree because it has not specialised
     # to a particular loop index path.
     def __init__(self, map, from_index):
@@ -447,29 +380,8 @@ class Index(LabelledNode):
         raise NotImplementedError
 
 
-class LoopIndex(Index, ContextSensitiveIndex, abc.ABC):
+class LoopIndex(Index, abc.ABC):
     pass
-
-
-# inherit from Index?
-class ContextFreeIndex(abc.ABC):
-    # make abstract etc
-    # @property
-    # def id(self):
-    #     raise NotImplementedError
-    pass
-
-
-class ContextFreeLoopIndex(Index, ContextFreeIndex):
-    def __init__(self, orig_index, labels, **kwargs):
-        assert len(labels) == 1
-        super().__init__(labels, id=orig_index.id, **kwargs)
-        self.index = orig_index
-
-    # TODO clean this up.
-    @property
-    def target_paths(self):
-        return self.component_labels
 
 
 # TODO just call this LoopIndex (inherit from AbstractLoopIndex)
@@ -480,8 +392,7 @@ class GlobalLoopIndex(LoopIndex):
         # FIXME I think that an IndexTree should not know its component labels
         # we can do that in the dict. This is because it is context dependent.
         # for now just use one label (assume single component)
-        cpt_labels = ["dont use"]
-        super().__init__(cpt_labels, **kwargs)
+        super().__init__(**kwargs)
         self.iterset = iterset
 
     @property
@@ -509,7 +420,7 @@ class LocalLoopIndex(LoopIndex):
 
 
 # TODO I want a Slice to have "bits" like a Map/CalledMap does
-class Slice(Index, ContextSensitiveIndex):
+class Slice(Index):
     """
 
     A slice can be thought of as a map from a smaller space to the target space.
@@ -537,61 +448,82 @@ class Slice(Index, ContextSensitiveIndex):
         return merge_dicts([s.datamap for s in self.slices])
 
 
-# TODO
-class ContextFreeSlice(ContextFreeIndex):
-    def __init__(self, orig_slice, labels):
-        self.orig_slice = orig_slice
-        self.component_labels = labels
-        self.id = self.orig_slice.id
+# class ContextFreeCalledMap(Index, ContextFreeIndex):
+#     def __init__(self, component_labels, map: CalledMap, from_index: ContextFreeIndex):
+#         super().__init__(component_labels)
+#         self.map = map
+#         self.from_index = from_index
+#
+#     @property
+#     def target_paths(self):
+#         # hopefully I shouldn't have to do this introspection here, make a class attribute
+#         all_map_components = {}
+#         for map_components in self.map.bits.values():
+#             for map_component in map_components:
+#                 all_map_components[map_component.label] = map_component
+#
+#         targets = []
+#         for component_label in self.component_labels:
+#             map_component_label = component_label[-1]
+#             selected_cpt = all_map_components[map_component_label]
+#             target = pmap({selected_cpt.target_axis: selected_cpt.target_component})
+#             targets.append(target)
+#         return targets
 
-    @property
-    def degree(self):
-        return len(self.component_labels)
 
+class ContextSensitive(pytools.ImmutableRecord, abc.ABC):
+    #     """Container of `IndexTree`s distinguished by outer loop information.
+    #
+    #     This class is required because multi-component outer loops can lead to
+    #     ambiguity in the shape of the resulting `IndexTree`. Consider the loop:
+    #
+    #     .. code:: python
+    #
+    #         loop(p := mesh.points, kernel(dat0[closure(p)]))
+    #
+    #     In this case, assuming ``mesh`` to be at least 1-dimensional, ``p`` will
+    #     loop over multiple components (cells, edges, vertices, etc) and each
+    #     component will have a differently sized temporary. This is because
+    #     vertices map to themselves whereas, for example, edges map to themselves
+    #     *and* the incident vertices.
+    #
+    #     A `SplitIndexTree` is therefore useful as it allows the description of
+    #     an `IndexTree` *per possible configuration of relevant loop indices*.
+    #
+    #     """
+    #
+    #     def __init__(self, index_trees: pmap[pmap[LoopIndex, pmap[str, str]], IndexTree]):
+    fields = {"values"}  # bad name
 
-class ContextFreeCalledMap(Index, ContextFreeIndex):
-    def __init__(self, component_labels, map: CalledMap, from_index: ContextFreeIndex):
-        super().__init__(component_labels)
-        self.map = map
-        self.from_index = from_index
+    def __init__(self, values):
+        super().__init__()
+        # this is terribly unclear
+        if not is_single_valued([set(key.keys()) for key in values.keys()]):
+            raise ValueError("Loop contexts must contain the same loop indices")
 
-    @property
-    def target_paths(self):
-        # hopefully I shouldn't have to do this introspection here, make a class attribute
-        all_map_components = {}
-        for map_components in self.map.bits.values():
-            for map_component in map_components:
-                all_map_components[map_component.label] = map_component
-
-        targets = []
-        for component_label in self.component_labels:
-            map_component_label = component_label[-1]
-            selected_cpt = all_map_components[map_component_label]
-            target = pmap({selected_cpt.target_axis: selected_cpt.target_component})
-            targets.append(target)
-        return targets
-
-    # @property
-    # def id(self):
-    #     return self.map.id
-    @property
-    def name(self):
-        return self.map.name
+        self.values = pmap(values)
 
     @functools.cached_property
-    def datamap(self):
-        return self.map.map.datamap | self.from_index.datamap
+    def keys(self):
+        # loop is used just for unpacking
+        for context in self.values.keys():
+            indices = set()
+            for loop_index in context.keys():
+                indices.add(loop_index)
+            return frozenset(indices)
+
+    def with_context(self, context):
+        key = {}
+        for loop_index, path in context.items():
+            if loop_index in self.keys:
+                key |= {loop_index: path}
+        key = pmap(key)
+        return self.values[key]
 
 
-#
-#     # ick
-#     @property
-#     def bits(self):
-#         return self.map.map.bits
-#
-#     @property
-#     def name(self):
-#         return self.map.map.name
+class ContextFree(ContextSensitive, abc.ABC):
+    def with_context(self, context):
+        return self
 
 
 class EnumeratedLoopIndex:
@@ -603,9 +535,11 @@ class EnumeratedLoopIndex:
         self.local_index = local_index
 
 
+# move with other axis trees
 # it is probably a better pattern to give axis trees a "parent" option
-class IndexedAxisTree:
+class IndexedAxisTree(ContextSensitive):
     def __init__(self, axis_trees):
+        ContextSensitive.__init__(self, axis_trees)
         self.axis_trees = pmap(axis_trees)
 
     def __getitem__(self, indices):
@@ -613,15 +547,6 @@ class IndexedAxisTree:
         for loop_context, axis_tree in self.axis_trees.items():
             new_axis_trees[loop_context] = axis_tree[indices]
         return IndexedAxisTree(new_axis_trees)
-
-    @property
-    def target_paths(self):
-        # should move somewhere else
-        from pyop3.codegen.loopexpr2loopy import collect_target_paths
-
-        # TODO I don't think I need to pass loop_indices here (pmap() here)
-        _, paths = collect_target_paths(self, pmap())
-        return tuple(paths.values())
 
     def index(self):
         return GlobalLoopIndex(self)
@@ -634,93 +559,14 @@ class IndexedAxisTree:
         return merge_dicts(axis_tree.datamap for axis_tree in self.axis_trees.values())
 
 
-"""
-25/08
-
-* I want this function to return a nested dictionary of the form:
-
-    {
-        loop_context0: {
-            {
-                "root": CalledMap,
-            }
-        },
-        loop_context1: {
-            {
-                "root": CalledMap,
-            }
-        },
-    }
-
-  Then things (e.g. slices) will attach below this:
-
-    {
-        loop_context0: {
-            {
-                "root": CalledMap,
-                X: Slice,
-                Y: Slice,
-            }
-        },
-        loop_context1: {
-            {
-                "root": CalledMap,
-                A: Slice,
-                B: Slice,
-                C: Slice,
-            }
-        },
-    }
-
-  where X, Y, A, B and C are some sort of path describing how they attach to the map.
-  This will depend on the loop context and the advertised outputs of the map.
-    
-"""
-# @_split_index.register
-# def _(called_map: CalledMap) -> Mapping[Mapping[LoopIndex, Mapping], SplitCalledMap]:
-#     index_forest = collections.defaultdict(dict)
-#     for loop_context, inner_index_tree in _split_index(called_map.from_index).items():
-#         index_forest[loop_context] = IndexTree(called_map)
-#     return pmap(index_forest)
-
-
 @functools.singledispatch
 def apply_loop_context(arg, *args, **kwargs):
     raise TypeError
 
 
 @apply_loop_context.register
-def _(index: ContextFreeIndex, loop_context, **kwargs):
+def _(index: Index, loop_context, **kwargs):
     return index
-
-
-@apply_loop_context.register
-def _(loop_index: LoopIndex, loop_context, **kwargs):
-    # use the path as the component label
-    component_label = loop_context[loop_index]
-    return ContextFreeLoopIndex(loop_index, [component_label])
-
-
-@apply_loop_context.register
-def _(slice_: Slice, loop_context, **kwargs):
-    return ContextFreeSlice(slice_, [cpt.label for cpt in slice_.slices])
-
-
-@apply_loop_context.register
-def _(called_map: CalledMap, loop_context, **kwargs):
-    from_index = apply_loop_context(called_map.from_index, loop_context, **kwargs)
-
-    new_labels = []
-    for from_label, from_path in checked_zip(
-        from_index.component_labels, from_index.target_paths
-    ):
-        map_components = called_map.bits[from_path]
-        for map_component in map_components:
-            # the new label should be the concatenation of previous ones
-            new_label = as_tuple(from_label) + (map_component.label,)
-            new_labels.append(new_label)
-
-    return ContextFreeCalledMap(new_labels, called_map, from_index)
 
 
 @apply_loop_context.register
@@ -733,8 +579,7 @@ def _(slice_: slice, loop_context, axes, path):
             cpt.label, slice_.start, slice_.stop, slice_.step
         )
         slice_cpts.append(slice_cpt)
-    fullslice = Slice(target_axis.label, slice_cpts)
-    return ContextFreeSlice(fullslice, [scpt.label for scpt in slice_cpts])
+    return Slice(target_axis.label, slice_cpts)
 
 
 def loop_contexts_from_iterable(indices):
@@ -757,11 +602,6 @@ def collect_loop_context(arg, *args, **kwargs):
         return ()
     else:
         raise TypeError
-
-
-@collect_loop_context.register
-def _(arg: ContextFreeLoopIndex, *args, **kwargs):
-    return [pmap({arg.index: just_one(arg.component_labels)})]
 
 
 @collect_loop_context.register
@@ -864,7 +704,7 @@ def index_tree_from_ellipsis(axes, current_axis, first_call=True):
             subtrees.append({})
 
     fullslice = Slice(current_axis.label, slice_components)
-    myslice = ContextFreeSlice(fullslice, [c.label for c in slice_components])
+    myslice = fullslice
 
     if first_call:
         return IndexTree(myslice, {myslice.id: subroots} | merge_dicts(subtrees))
@@ -882,7 +722,7 @@ def index_tree_from_iterable(
     if subindices:
         children = []
         subtrees = []
-        for target_path in index.target_paths:
+        for target_path in index.iterset.with_context(loop_context).target_paths:
             new_path = path | target_path
             child, subtree = index_tree_from_iterable(
                 subindices, loop_context, axes, new_path
@@ -917,7 +757,7 @@ def as_index_tree(arg, loop_context, **kwargs):
 
 
 @as_index_tree.register
-def _(index: ContextSensitiveIndex, ctx):
+def _(index: Index, ctx):
     return IndexTree(index, loop_context=ctx)
 
 
@@ -941,7 +781,7 @@ def _(index_tree: IndexTree, **kwargs):
 
 
 @as_index_forest.register
-def _(index: ContextSensitiveIndex, **kwargs):
+def _(index: Index, **kwargs):
     loop_contexts = collect_loop_context(index) or [pmap()]
     return tuple(as_index_tree(index, ctx) for ctx in loop_contexts)
 

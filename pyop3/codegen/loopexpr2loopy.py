@@ -27,9 +27,6 @@ from pyop3.index import (
     AffineMapComponent,
     AffineSliceComponent,
     CalledMap,
-    ContextFreeCalledMap,
-    ContextFreeLoopIndex,
-    ContextFreeSlice,
     GlobalLoopIndex,
     Index,
     IndexedArray,
@@ -118,12 +115,11 @@ def _visit_indices_rec(
     leaves, index_data = index_callback(current_index, **kwargs)
 
     leafdata = {}
-    # loop has size matching the degree of the current_index
     for i, (leafkey, leaf) in enumerate(leaves.items()):
         preorder_ctx_ = pre_callback(leaf, preorder_ctx, **kwargs)
 
-        for subindex in indices.parent_to_children[current_index.id]:
-            if subindex is not None:
+        if current_index.id in indices.parent_to_children:
+            for subindex in indices.parent_to_children[current_index.id]:
                 retval = _visit_indices_rec(
                     indices,
                     preorder_ctx_,
@@ -139,10 +135,10 @@ def _visit_indices_rec(
                 leafdata[leafkey] = post_callback_nonterminal(
                     retval, leaf, preorder_ctx_, **kwargs
                 )
-            else:
-                leafdata[leafkey] = post_callback_terminal(
-                    leafkey, leaf, preorder_ctx_, **kwargs
-                )
+        else:
+            leafdata[leafkey] = post_callback_terminal(
+                leafkey, leaf, preorder_ctx_, **kwargs
+            )
 
     return final_callback(index_data, leafdata)
 
@@ -1593,22 +1589,13 @@ def collect_shape_index_callback(index, *args, **kwargs):
 
 
 @collect_shape_index_callback.register
-def _(loop_index: ContextFreeLoopIndex, *, loop_indices, **kwargs):
+def _(loop_index: LoopIndex, *, loop_indices, **kwargs):
     # global_index = loop_index.loop_index
     # if isinstance(global_index, LocalLoopIndex):
     #     global_index = global_index.global_index
-    path = loop_indices[loop_index.index]
+    path = loop_indices[loop_index]
+    iterset = loop_index.iterset.with_context(loop_indices)
 
-    # select the right axis tree given some context. This should be done at a different point
-    # probably when we construct the context free loop index
-
-    possible_itersets = loop_index.index.iterset.axis_trees.values()
-
-    # cheat for now
-    if len(possible_itersets) > 1:
-        raise NotImplementedError("do this properly")
-
-    iterset = just_one(possible_itersets)
     # hacky, path or leaf ID?
     leaf_axis, leaf_cpt = iterset._node_from_path(path)
     index_exprs = iterset.index_exprs[leaf_axis.id, leaf_cpt.label]
@@ -1627,7 +1614,7 @@ def _(local_index: LocalLoopIndex, *, loop_indices, **kwargs):
 # TODO this could be done with callbacks so we share code with when
 # we also want to emit instructions
 @collect_shape_index_callback.register
-def _(called_map: ContextFreeCalledMap, **kwargs):
+def _(called_map: CalledMap, **kwargs):
     leaves, index_data = collect_shape_index_callback(called_map.from_index, **kwargs)
     axes = index_data["axes"]
 
@@ -1683,12 +1670,12 @@ def _(called_map: ContextFreeCalledMap, **kwargs):
 
 
 @collect_shape_index_callback.register
-def _(slice_: ContextFreeSlice, *, prev_axes, **kwargs):
+def _(slice_: Slice, *, prev_axes, **kwargs):
     components = []
     index_expr_per_leaf = []
     # I think that axis_label should probably be the same for all bits of the slice
-    for subslice in slice_.orig_slice.slices:
-        prev_cpt = prev_axes.find_component(slice_.orig_slice.axis, subslice.component)
+    for subslice in slice_.slices:
+        prev_cpt = prev_axes.find_component(slice_.axis, subslice.component)
         if isinstance(subslice, AffineSliceComponent):
             # FIXME should be ceiling
             if subslice.stop is None:
@@ -1702,12 +1689,12 @@ def _(slice_: ContextFreeSlice, *, prev_axes, **kwargs):
         cpt = AxisComponent(size, label=prev_cpt.label)
         components.append(cpt)
 
-        newvar = AxisVariable(slice_.orig_slice.axis)
+        newvar = AxisVariable(slice_.axis)
         index_expr_per_leaf.append(
-            pmap({slice_.orig_slice.axis: newvar * subslice.step + subslice.start})
+            pmap({slice_.axis: newvar * subslice.step + subslice.start})
         )
 
-    axes = AxisTree(Axis(components, label=slice_.orig_slice.axis))
+    axes = AxisTree(Axis(components, label=slice_.axis))
     leaves = {}
     for cpt, index_expr in checked_zip(axes.root.components, index_expr_per_leaf):
         path = pmap({axes.root.label: cpt.label})

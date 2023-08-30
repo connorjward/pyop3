@@ -24,7 +24,7 @@ from pyrsistent import pmap
 
 from pyop3 import utils
 from pyop3.dtypes import IntType, PointerType, get_mpi_dtype
-from pyop3.index import LoopIterable
+from pyop3.index import ContextFree, ContextSensitive, LoopIterable
 
 # from pyop3.index import Index, IndexTree, Map, Slice, TabulatedMap
 from pyop3.tree import (
@@ -32,6 +32,8 @@ from pyop3.tree import (
     LabelledNode,
     LabelledTree,
     NodeId,
+    StrictLabelledNode,
+    StrictLabelledTree,
     postvisit,
     previsit,
 )
@@ -532,7 +534,7 @@ class AxisComponent(LabelledImmutableRecord):
         return self.num_owned
 
 
-class Axis(LabelledNode, LoopIterable):
+class Axis(StrictLabelledNode, LoopIterable):
     fields = LabelledNode.fields - {"component_labels"} | {"components", "permutation"}
 
     def __init__(
@@ -646,7 +648,7 @@ class AxisVariable(pym.primitives.Variable):
         self.axis_label = axis_label
 
 
-class AxisTree(LabelledTree, LoopIterable):
+class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
     def __init__(
         self,
         root: MultiAxis | None = None,

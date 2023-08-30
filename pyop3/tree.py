@@ -37,10 +37,14 @@ ComponentLabel = Label
 
 
 class LabelledNode(LabelledImmutableRecord):
-    fields = {"component_labels"} | LabelledImmutableRecord.fields
+    pass
+
+
+class StrictLabelledNode(LabelledNode):
+    fields = LabelledNode.fields | {"component_labels"}
 
     def __init__(self, component_labels, **kwargs):
-        LabelledImmutableRecord.__init__(self, **kwargs)
+        super().__init__(**kwargs)
         self.component_labels = as_tuple(component_labels)
 
     @property
@@ -55,6 +59,47 @@ Node = LabelledNode
 class LabelledTree(pytools.ImmutableRecord):
     fields = {"root", "parent_to_children"}
 
+    def __init__(self, root, parent_to_children):
+        self.root = root
+        self.parent_to_children = pmap(parent_to_children)
+
+    def __str__(self):
+        return self._stringify()
+
+    def __contains__(self, node: Node | str) -> bool:
+        return self._as_node(node) in self.nodes
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.root
+
+    def _stringify(
+        self,
+        node: Node | Hashable | None = None,
+        begin_prefix: str = "",
+        cont_prefix: str = "",
+    ) -> list[str] | str:
+        if self.is_empty:
+            return "empty"
+        node = self._as_node(node) if node else self.root
+
+        nodestr = [f"{begin_prefix}{node}"]
+        for i, child in enumerate(children := self.children(node)):
+            last_child = i == len(children) - 1
+            next_begin_prefix = f"{cont_prefix}{'└' if last_child else '├'}──➤ "
+            next_cont_prefix = f"{cont_prefix}{' ' if last_child else '│'}    "
+            if child is not None:
+                nodestr += self._stringify(child, next_begin_prefix, next_cont_prefix)
+            else:
+                nodestr += [f"{next_begin_prefix}None"]
+
+        if not strictly_all([begin_prefix, cont_prefix]):
+            return "\n".join(nodestr)
+        else:
+            return nodestr
+
+
+class StrictLabelledTree(LabelledTree):
     def __init__(
         self,
         root: Node | None = None,
@@ -94,19 +139,7 @@ class LabelledTree(pytools.ImmutableRecord):
             else:
                 parent_to_children = {}
 
-        super().__init__()
-        self.root = root
-        self.parent_to_children = pyrsistent.freeze(parent_to_children)
-
-    def __str__(self):
-        return self._stringify()
-
-    def __contains__(self, node: Node | str) -> bool:
-        return self._as_node(node) in self.nodes
-
-    @property
-    def is_empty(self) -> bool:
-        return not self.root
+        super().__init__(root, parent_to_children)
 
     @property
     def depth(self) -> int:
@@ -317,29 +350,6 @@ class LabelledTree(pytools.ImmutableRecord):
 
     def _as_node_id(self, node: Node | Id) -> Id:
         return node.id if isinstance(node, Node) else node
-
-    def _stringify(
-        self,
-        node: Node | Hashable | None = None,
-        begin_prefix: str = "",
-        cont_prefix: str = "",
-    ) -> list[str] | str:
-        node = self._as_node(node) if node else self.root
-
-        nodestr = [f"{begin_prefix}{node}"]
-        for i, child in enumerate(children := self.children(node)):
-            last_child = i == len(children) - 1
-            next_begin_prefix = f"{cont_prefix}{'└' if last_child else '├'}──➤ "
-            next_cont_prefix = f"{cont_prefix}{' ' if last_child else '│'}    "
-            if child is not None:
-                nodestr += self._stringify(child, next_begin_prefix, next_cont_prefix)
-            else:
-                nodestr += [f"{next_begin_prefix}None"]
-
-        if not strictly_all([begin_prefix, cont_prefix]):
-            return "\n".join(nodestr)
-        else:
-            return nodestr
 
     def with_modified_node(self, node: Node | Id, **kwargs):
         return self.replace_node(node, node.copy(**kwargs))
