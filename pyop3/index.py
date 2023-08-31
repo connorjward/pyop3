@@ -379,7 +379,6 @@ class CalledMap(Index, LoopIterable, UniquelyIdentifiedImmutableRecord):
         return self.map.bits
 
     def target_paths(self, context):
-        assert False, "dead code"
         targets = {}
         for src_path in self.from_index.target_paths(context):
             for map_component in self.bits[src_path]:
@@ -407,8 +406,7 @@ class GlobalLoopIndex(LoopIndex):
         return self.iterset.datamap
 
     def target_paths(self, context):
-        assert False, "dead code"
-        return self.iterset.with_context(context).target_paths
+        return tuple(self.iterset.with_context(context).target_path_per_leaf.values())
 
 
 class LocalLoopIndex(LoopIndex):
@@ -445,9 +443,7 @@ class Slice(Index):
         self.axis = axis
         self.slices = as_tuple(slices)
 
-    @property
-    def target_paths(self):
-        assert False, "dead code"
+    def target_paths(self, context):
         return tuple(pmap({self.axis: subslice.component}) for subslice in self.slices)
 
     @property
@@ -595,6 +591,10 @@ def apply_loop_context(arg, loop_context, *, axes, path):
             slice_cpt = Subset(cpt.label, arg, label=array_component_label)
             slice_cpts.append(slice_cpt)
         return Slice(target_axis.label, slice_cpts, label=array_axis_label)
+    elif isinstance(arg, numbers.Integral):
+        return apply_loop_context(
+            slice(arg, arg + 1), loop_context, axes=axes, path=path
+        )
     else:
         raise TypeError
 
@@ -638,7 +638,7 @@ def collect_loop_context(arg, *args, **kwargs):
     # cyclic import
     from pyop3.distarray import MultiArray
 
-    if isinstance(arg, MultiArray):
+    if isinstance(arg, (MultiArray, numbers.Integral)):
         return ()
     elif isinstance(arg, collections.abc.Iterable):
         return loop_contexts_from_iterable(arg)
@@ -768,9 +768,7 @@ def index_tree_from_iterable(
     if subindices:
         children = []
         subtrees = []
-        for target_path in index.iterset.with_context(
-            loop_context
-        ).target_path_per_leaf.values():
+        for target_path in index.target_paths(loop_context):
             new_path = path | target_path
             child, subtree = index_tree_from_iterable(
                 subindices, loop_context, axes, new_path
@@ -813,7 +811,7 @@ def as_index_forest(arg: Any, *, axes, **kwargs):
         )
         return (IndexTree(slice_),)
     elif isinstance(arg, collections.abc.Iterable):
-        loop_contexts = collect_loop_context(arg)
+        loop_contexts = collect_loop_context(arg) or [pmap()]
         return tuple(
             as_index_tree(arg, ctx, axes=axes, **kwargs) for ctx in loop_contexts
         )

@@ -696,6 +696,8 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
             # should probably include old_loop_context in this
             index_forest = as_index_forest(indices, axes=self)
 
+            assert len(index_forest) > 0
+
             for index_tree in index_forest:
                 loop_context = index_tree.loop_context
                 # should this return layout_expr_per_leaf too? it's the inverse of index_expr
