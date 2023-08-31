@@ -447,9 +447,11 @@ def parse_loop_final_rec(
                 # at the bottom, emit a statement corresponding to the loop index at hand
 
                 output_vars = {}
-                for target_axis, target_component in just_one(
-                    loop.index.target_paths(loop_indices)
-                ).items():
+                for target_axis, target_component in (
+                    loop.index.iterset.with_context(loop_indices)
+                    .target_path_per_leaf[new_path]
+                    .items()
+                ):
                     insns, loopvar = emit_assignment_insn(
                         axes.index_exprs[new_path][target_axis],
                         new_path,
@@ -814,8 +816,9 @@ def _parse_assignment_final(
     temp_path = pmap()
 
     if not axes.root:  # catch empty axes here
+        targetpath = axes.target_path_per_leaf[temp_path]
         layout_fn = IndexExpressionReplacer(axes.index_exprs[temp_path])(
-            axes.orig_layout_fn[array_path]
+            axes.orig_layout_fn[targetpath]
         )
         array_insns, array_expr = _assignment_array_insn(
             assignment,
@@ -914,6 +917,7 @@ def _parse_assignment_final_rec(
 
 @functools.singledispatch
 def _expand_index(index, *, loop_indices, codegen_ctx, **kwargs):
+    assert False, "dead code"
     """
     Return an axis tree and jnames corresponding to unfolding the index.
 
@@ -925,6 +929,7 @@ def _expand_index(index, *, loop_indices, codegen_ctx, **kwargs):
 
 @_expand_index.register
 def _(index: LoopIndex, *, loop_indices, codegen_ctx, **kwargs):
+    assert False, "dead code"
     global_index = index.loop_index
     if isinstance(global_index, GlobalLoopIndex):
         path, jname_exprs, _ = loop_indices[global_index]
@@ -939,6 +944,7 @@ def _(index: LoopIndex, *, loop_indices, codegen_ctx, **kwargs):
 
 @_expand_index.register
 def _(index: CalledMap, *, loop_indices, codegen_ctx, **kwargs):
+    assert False, "dead code"
     # old alias
     ctx = codegen_ctx
 
@@ -1031,6 +1037,7 @@ def _(index: CalledMap, *, loop_indices, codegen_ctx, **kwargs):
 
 @_expand_index.register
 def _(slice_: Slice, *, codegen_ctx, prev_axes, **kwargs):
+    assert False, "dead code"
     # alias, fix
     ctx = codegen_ctx
 
@@ -1107,6 +1114,7 @@ def _(slice_: Slice, *, codegen_ctx, prev_axes, **kwargs):
 
 @_expand_index.register
 def _(axes: AxisTree, *, loop_indices, codegen_ctx, **kwargs):
+    assert False, "dead code"
     leaves, jnames_per_axcpt = _parse_index_axis_tree_rec(
         axes,
         codegen_ctx,
@@ -1124,6 +1132,7 @@ def _(axes: AxisTree, *, loop_indices, codegen_ctx, **kwargs):
 def _parse_index_axis_tree_rec(
     axes: AxisTree, codegen_ctx, *, current_axis, current_path, current_target_jnames
 ):
+    assert False, "dead code"
     leaves = {}
     jnames_per_cpt = {}
     for axcpt in current_axis.components:
@@ -1454,11 +1463,18 @@ def _(loop_index: LoopIndex, *, loop_indices, **kwargs):
     # if isinstance(global_index, LocalLoopIndex):
     #     global_index = global_index.global_index
     path = loop_indices[loop_index]
-    iterset = loop_index.iterset.with_context(loop_indices)
+    target_path = loop_index.iterset.with_context(loop_indices).target_path_per_leaf[
+        path
+    ]
 
-    index_exprs = iterset.index_exprs[path]
-    layout_exprs = iterset.layout_exprs[path]
-    return {None: (path, index_exprs, layout_exprs)}, {"axes": AxisTree()}
+    # very similar to AxisTree._make_index_exprs
+    index_exprs = {}
+    for axis_label, cpt_label in target_path.items():
+        index_exprs[axis_label] = AxisVariable(axis_label)
+    index_exprs = pmap(index_exprs)
+
+    layout_exprs = pmap()  # not allowed I believe, or zero?
+    return {None: (target_path, index_exprs, layout_exprs)}, {"axes": AxisTree()}
 
 
 @collect_shape_index_callback.register
@@ -1540,6 +1556,9 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
 
     # I think that axis_label should probably be the same for all bits of the slice
     for subslice in slice_.slices:
+        if isinstance(subslice, Subset) and subslice.array.axes.depth > 1:
+            raise NotImplementedError("need to think about src axes etc")
+
         prev_cpt = prev_axes.find_component(slice_.axis, subslice.component)
         if isinstance(subslice, AffineSliceComponent):
             # FIXME should be ceiling
@@ -1551,24 +1570,30 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
         else:
             assert isinstance(subslice, Subset)
             size = subslice.array.axes.size
-        cpt = AxisComponent(size, label=prev_cpt.label)
+        cpt = AxisComponent(size, label=subslice.label)
         components.append(cpt)
 
-        newvar = AxisVariable(slice_.axis)
-        index_expr_per_leaf.append(
-            pmap({slice_.axis: newvar * subslice.step + subslice.start})
-        )
-        layout_expr_per_leaf.append(
-            pmap({slice_.axis: (newvar - subslice.start) // subslice.step})
-        )
+        if isinstance(subslice, AffineSliceComponent):
+            newvar = AxisVariable(slice_.label)
+            index_expr_per_leaf.append(
+                pmap({slice_.axis: newvar * subslice.step + subslice.start})
+            )
+            layout_expr_per_leaf.append(
+                pmap({slice_.axis: (newvar - subslice.start) // subslice.step})
+            )
+        else:
+            index_expr_per_leaf.append(pmap({slice_.axis: subslice.array}))
+            layout_expr_per_leaf.append(pmap({slice_.axis: "inverse search"}))
 
-    axes = AxisTree(Axis(components, label=slice_.axis))
+    # breakpoint()
+
+    axes = AxisTree(Axis(components, label=slice_.label))
     leaves = {}
-    for cpt, index_expr, layout_expr in checked_zip(
-        axes.root.components, index_expr_per_leaf, layout_expr_per_leaf
+    for cpt, subslice, index_expr, layout_expr in checked_zip(
+        components, slice_.slices, index_expr_per_leaf, layout_expr_per_leaf
     ):
-        path = pmap({axes.root.label: cpt.label})
-        leaves[axes.root.id, cpt.label] = (path, index_expr, layout_expr)
+        target_path = pmap({slice_.axis: subslice.component})
+        leaves[axes.root.id, cpt.label] = (target_path, index_expr, layout_expr)
 
     return leaves, {"axes": axes}
 

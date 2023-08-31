@@ -579,6 +579,7 @@ class Axis(StrictLabelledNode, LoopIterable):
 
     @property
     def target_paths(self):
+        assert False, "dead code"
         return tuple(pmap({self.label: cpt.label}) for cpt in self.components)
 
     @property
@@ -841,7 +842,9 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
     @property
     def target_path_per_leaf(self):
         if not self._target_path_per_leaf:
-            self._target_path_per_leaf = {path: path for path in self.target_paths}
+            self._target_path_per_leaf = {
+                path: path for path in self._make_target_paths()
+            }
         return self._target_path_per_leaf
 
     @functools.cached_property
@@ -851,9 +854,10 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         else:
             dmap = postvisit(self, _collect_datamap, axes=self)
 
-        for layout in self.layouts.values():
-            for array in MultiArrayCollector()(layout):
-                dmap |= array.datamap
+        for cleverdict in [self.layouts, self.orig_layout_fn]:
+            for layout in cleverdict.values():
+                for array in MultiArrayCollector()(layout):
+                    dmap |= array.datamap
 
         for cleverdict in [self.index_exprs, self.layout_exprs]:
             for layout in cleverdict.values():
@@ -862,8 +866,7 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
                         dmap |= array.datamap
         return dmap
 
-    @property
-    def target_paths(self):
+    def _make_target_paths(self):
         return tuple(self.path(ax, cpt) for ax, cpt in self.leaves)
 
     @property

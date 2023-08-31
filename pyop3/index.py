@@ -215,8 +215,8 @@ class SliceComponent(LabelledImmutableRecord, abc.ABC):
 class AffineSliceComponent(SliceComponent):
     fields = SliceComponent.fields | {"start", "stop", "step"}
 
-    def __init__(self, component, start=None, stop=None, step=None):
-        super().__init__(component)
+    def __init__(self, component, start=None, stop=None, step=None, **kwargs):
+        super().__init__(component, **kwargs)
         # use None for the default args here since that agrees with Python slices
         self.start = start if start is not None else 0
         self.stop = stop
@@ -230,8 +230,8 @@ class AffineSliceComponent(SliceComponent):
 class Subset(SliceComponent):
     fields = SliceComponent.fields | {"array"}
 
-    def __init__(self, component, array: MultiArray):
-        super().__init__(component)
+    def __init__(self, component, array: MultiArray, **kwargs):
+        super().__init__(component, **kwargs)
         self.array = array
 
     @property
@@ -379,6 +379,7 @@ class CalledMap(Index, LoopIterable, UniquelyIdentifiedImmutableRecord):
         return self.map.bits
 
     def target_paths(self, context):
+        assert False, "dead code"
         targets = {}
         for src_path in self.from_index.target_paths(context):
             for map_component in self.bits[src_path]:
@@ -406,6 +407,7 @@ class GlobalLoopIndex(LoopIndex):
         return self.iterset.datamap
 
     def target_paths(self, context):
+        assert False, "dead code"
         return self.iterset.with_context(context).target_paths
 
 
@@ -417,6 +419,7 @@ class LocalLoopIndex(LoopIndex):
 
     @property
     def target_paths(self):
+        assert False, "dead code"
         return self.global_index.target_paths
 
     @property
@@ -435,17 +438,16 @@ class Slice(Index):
 
     """
 
-    fields = {"axis", "slices"} | Index.fields
+    fields = Index.fields | {"axis", "slices"}
 
     def __init__(self, axis, slices: Collection[SliceComponent], **kwargs):
-        slices = as_tuple(slices)
-        cpt_labels = [s.component for s in slices]
-        super().__init__(cpt_labels, **kwargs)
+        super().__init__(**kwargs)
         self.axis = axis
-        self.slices = slices
+        self.slices = as_tuple(slices)
 
     @property
     def target_paths(self):
+        assert False, "dead code"
         return tuple(pmap({self.axis: subslice.component}) for subslice in self.slices)
 
     @property
@@ -572,8 +574,29 @@ class IndexedAxisTree(ContextSensitive):
 
 
 @functools.singledispatch
-def apply_loop_context(arg, *args, **kwargs):
-    raise TypeError
+def apply_loop_context(arg, loop_context, *, axes, path):
+    from pyop3.distarray import MultiArray
+
+    if isinstance(arg, MultiArray):
+        parent = axes._node_from_path(path)
+        if parent is not None:
+            parent_axis, parent_cpt = parent
+            target_axis = axes.child(parent_axis, parent_cpt)
+        else:
+            target_axis = axes.root
+        slice_cpts = []
+        # potentially a bad idea to apply the subset to all components. Might want to match
+        # labels. In fact I enforce that here and so multiple components would break things.
+        # Not sure what the right approach is. This is also potentially tricky for multi-level
+        # subsets
+        array_axis_label = arg.axes.root.label
+        array_component_label = just_one(arg.axes.root.components).label
+        for cpt in target_axis.components:
+            slice_cpt = Subset(cpt.label, arg, label=array_component_label)
+            slice_cpts.append(slice_cpt)
+        return Slice(target_axis.label, slice_cpts, label=array_axis_label)
+    else:
+        raise TypeError
 
 
 @apply_loop_context.register
@@ -612,7 +635,12 @@ def loop_contexts_from_iterable(indices):
 
 @functools.singledispatch
 def collect_loop_context(arg, *args, **kwargs):
-    if isinstance(arg, collections.abc.Iterable):
+    # cyclic import
+    from pyop3.distarray import MultiArray
+
+    if isinstance(arg, MultiArray):
+        return ()
+    elif isinstance(arg, collections.abc.Iterable):
         return loop_contexts_from_iterable(arg)
     if arg is Ellipsis:
         return ()
@@ -740,7 +768,9 @@ def index_tree_from_iterable(
     if subindices:
         children = []
         subtrees = []
-        for target_path in index.target_paths(loop_context):
+        for target_path in index.iterset.with_context(
+            loop_context
+        ).target_path_per_leaf.values():
             new_path = path | target_path
             child, subtree = index_tree_from_iterable(
                 subindices, loop_context, axes, new_path
@@ -775,7 +805,14 @@ def _(index: Index, ctx):
 
 @functools.singledispatch
 def as_index_forest(arg: Any, *, axes, **kwargs):
-    if isinstance(arg, collections.abc.Iterable):
+    from pyop3.distarray import MultiArray
+
+    if isinstance(arg, MultiArray):
+        slice_ = apply_loop_context(
+            arg, loop_context=pmap(), path=pmap(), axes=axes, **kwargs
+        )
+        return (IndexTree(slice_),)
+    elif isinstance(arg, collections.abc.Iterable):
         loop_contexts = collect_loop_context(arg)
         return tuple(
             as_index_tree(arg, ctx, axes=axes, **kwargs) for ctx in loop_contexts
