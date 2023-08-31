@@ -64,9 +64,6 @@ def test_scalar_copy(scalar_copy_kernel):
         dtype=dat0.dtype,
     )
 
-    # debug
-    axis.index_exprs
-
     do_loop(p := axis.index(), scalar_copy_kernel(dat0[p], dat1[p]))
     assert np.allclose(dat1.data, dat0.data)
 

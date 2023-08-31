@@ -658,7 +658,10 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         root: MultiAxis | None = None,
         parent_to_children: dict | None = None,
         *,
+        index_exprs=None,
         layout_exprs=None,
+        orig_layout_fn=None,
+        target_path_per_leaf=None,
         sf=None,
         shared_sf=None,
         comm=None,
@@ -669,8 +672,12 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         self.shared_sf = shared_sf
         self.comm = comm  # FIXME DTRT with internal comms
 
-        self.layout_exprs = layout_exprs
+        self._layout_exprs = layout_exprs
         self._layouts = None
+
+        self._index_exprs = index_exprs
+        self._orig_layout_fn = orig_layout_fn
+        self._target_path_per_leaf = target_path_per_leaf
 
     def __getitem__(self, indices):
         if indices is Ellipsis:
@@ -685,30 +692,46 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         if not loop_contexts:
             loop_contexts = [pmap()]
         for loop_context in loop_contexts:
-            layouts = self.layouts
             # should probably include old_loop_context in this
             index_forest = as_index_forest(indices, axes=self)
 
             for index_tree in index_forest:
                 loop_context = index_tree.loop_context
-                indexed_axes, target_path_per_leaf, index_exprs_per_leaf = index_axes(
-                    self, index_tree, loop_context
-                )
+                # should this return layout_expr_per_leaf too? it's the inverse of index_expr
+                (
+                    indexed_axes,
+                    target_path_per_leaf,
+                    index_exprs_per_leaf,
+                    layout_expr_per_leaf,
+                ) = index_axes(self, index_tree, loop_context)
 
-                layout_expr_per_leaf = {}
+                new_index_expr_per_axis_per_leaf = (
+                    {}
+                )  # very similar name to above, why?
+                newlayout_expr_per_leaf = {}
+                new_target_path_per_leaf = {}
                 if indexed_axes.is_empty:
                     leaf_key = None
 
                     # this is a map from axis label to new expression
                     index_exprs = index_exprs_per_leaf[leaf_key]
+
+                    # map from axis label to index expression but it is the "inverse"
+                    layout_expr = layout_expr_per_leaf[leaf_key]
                     target_path = target_path_per_leaf[leaf_key]
 
-                    orig_layout_expr = layouts[target_path]
-                    new_layout_expr = IndexExpressionReplacer(index_exprs)(
-                        orig_layout_expr
-                    )
+                    new_index_expr_per_axis = {}
+                    for axis_label, index_expr in self.index_exprs[target_path].items():
+                        new_index_expr = IndexExpressionReplacer(index_exprs)(
+                            index_expr
+                        )
+                        new_index_expr_per_axis[axis_label] = new_index_expr
+                    new_index_expr_per_axis_per_leaf[pmap()] = new_index_expr_per_axis
+                    #
+                    # newlayout_expr_per_leaf[pmap()] = new_layout_expr
+                    newlayout_expr_per_leaf[pmap()] = pmap({None: 0})
 
-                    layout_expr_per_leaf[pmap()] = new_layout_expr
+                    new_target_path_per_leaf[pmap()] = target_path_per_leaf[leaf_key]
                 else:
                     for (
                         indexed_leaf_axis,
@@ -719,18 +742,45 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
                         index_exprs = index_exprs_per_leaf[leaf_key]
                         target_path = target_path_per_leaf[leaf_key]
 
-                        orig_layout_expr = layouts[target_path]
-                        new_layout_expr = IndexExpressionReplacer(index_exprs)(
-                            orig_layout_expr
-                        )
+                        # FIXME do this later, only relevant with sparse axes
+                        # orig_layout_expr = self.layout_exprs[target_path]
+                        # new_layout_expr = IndexExpressionReplacer(layout_expr_per_leaf[leaf_key])(
+                        #     orig_layout_expr
+                        # )
 
                         newkey = indexed_axes.path(
                             indexed_leaf_axis, indexed_leaf_cpt_label
                         )
-                        layout_expr_per_leaf[newkey] = new_layout_expr
+                        new_index_expr_per_axis = {}
+                        for axis_label, index_expr in self.index_exprs[
+                            target_path
+                        ].items():
+                            new_index_expr = IndexExpressionReplacer(index_exprs)(
+                                index_expr
+                            )
+                            new_index_expr_per_axis[axis_label] = new_index_expr
+                        new_index_expr_per_axis_per_leaf[
+                            newkey
+                        ] = new_index_expr_per_axis
+
+                        # is this right? If layout_expr is not per axis then
+                        # substitution gets a bit tricky
+                        # but layout_expr can "consume" multiple axes for a single
+                        # value of the "target" axis/axes.
+                        # newlayout_expr_per_leaf[newkey] = new_layout_expr
+                        newlayout_expr_per_leaf[
+                            newkey
+                        ] = pmap()  # empty just to get things to pass
+
+                        new_target_path_per_leaf[newkey] = self.target_path_per_leaf[
+                            target_path
+                        ]
 
             axis_trees[loop_context] = indexed_axes.copy(
-                layout_exprs=layout_expr_per_leaf
+                index_exprs=new_index_expr_per_axis_per_leaf,
+                layout_exprs=newlayout_expr_per_leaf,  # not used currently
+                orig_layout_fn=self.orig_layout_fn,
+                target_path_per_leaf=new_target_path_per_leaf,
             )
         return IndexedAxisTree(axis_trees)
 
@@ -757,16 +807,42 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
     def axes(self):
         return self
 
-    @functools.cached_property
+    @property
     def index_exprs(self):
+        if not self._index_exprs:
+            self._index_exprs = self._make_index_exprs()
+        return self._index_exprs
+
+    @property
+    def layout_exprs(self):
+        if not self._layout_exprs:
+            self._layout_exprs = self._make_index_exprs()
+        return self._layout_exprs
+
+    def _make_index_exprs(self):
         exprs_per_leaf = {}
         for leaf_axis, leaf_cpt_label in self.leaves:
+            path = self.path(leaf_axis, leaf_cpt_label)
             exprs = {}
-            for axis_label, cpt_label in self.path(leaf_axis, leaf_cpt_label).items():
+            for axis_label, cpt_label in path.items():
                 # for simple axis trees we don't do anything fancy with the indices
                 exprs[axis_label] = AxisVariable(axis_label)
-            exprs_per_leaf[leaf_axis.id, leaf_cpt_label] = pmap(exprs)
+            exprs_per_leaf[path] = pmap(exprs)
+
+        # probably want path instead of leaf here
         return pmap(exprs_per_leaf)
+
+    @property
+    def orig_layout_fn(self):
+        if not self._orig_layout_fn:
+            self._orig_layout_fn = self.layouts
+        return self._orig_layout_fn
+
+    @property
+    def target_path_per_leaf(self):
+        if not self._target_path_per_leaf:
+            self._target_path_per_leaf = {path: path for path in self.target_paths}
+        return self._target_path_per_leaf
 
     @functools.cached_property
     def datamap(self) -> dict[str:DistributedArray]:
@@ -774,9 +850,16 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
             dmap = {}
         else:
             dmap = postvisit(self, _collect_datamap, axes=self)
+
         for layout in self.layouts.values():
             for array in MultiArrayCollector()(layout):
                 dmap |= array.datamap
+
+        for cleverdict in [self.index_exprs, self.layout_exprs]:
+            for layout in cleverdict.values():
+                for layout_ in layout.values():
+                    for array in MultiArrayCollector()(layout_):
+                        dmap |= array.datamap
         return dmap
 
     @property
@@ -785,8 +868,8 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
 
     @property
     def layouts(self):
-        if self.layout_exprs:
-            return self.layout_exprs
+        # if self.layout_exprs:
+        #     return self.layout_exprs
         if not self._layouts:
             self.set_up()
         return self._layouts
@@ -1332,7 +1415,6 @@ def _compute_layouts(
             ctree = StrictLabelledTree(croot, cparent_to_children)
 
             fulltree = _create_count_array_tree(ctree)
-            # breakpoint()
 
             # now populate fulltree
             offset = IntRef(0)

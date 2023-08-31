@@ -506,6 +506,8 @@ class ContextSensitive(pytools.ImmutableRecord, abc.ABC):
         if not is_single_valued([set(key.keys()) for key in values.keys()]):
             raise ValueError("Loop contexts must contain the same loop indices")
 
+        assert all(isinstance(v, ContextFree) for v in values.values())
+
         self.values = pmap(values)
 
     @functools.cached_property
@@ -541,7 +543,7 @@ class EnumeratedLoopIndex:
 
 
 # move with other axis trees
-# it is probably a better pattern to give axis trees a "parent" option
+# A better name for this is "ContextSensitiveAxisTree"
 class IndexedAxisTree(ContextSensitive):
     def __init__(self, axis_trees):
         ContextSensitive.__init__(self, axis_trees)
@@ -550,7 +552,12 @@ class IndexedAxisTree(ContextSensitive):
     def __getitem__(self, indices):
         new_axis_trees = {}
         for loop_context, axis_tree in self.axis_trees.items():
-            new_axis_trees[loop_context] = axis_tree[indices].with_context(loop_context)
+            context_sensitive_axes = axis_tree[indices]
+            for (
+                new_loop_context,
+                ctx_free_axes,
+            ) in context_sensitive_axes.values.items():
+                new_axis_trees[loop_context | new_loop_context] = ctx_free_axes
         return IndexedAxisTree(new_axis_trees)
 
     def index(self):
@@ -576,8 +583,12 @@ def _(index: Index, loop_context, **kwargs):
 
 @apply_loop_context.register
 def _(slice_: slice, loop_context, axes, path):
-    parent_axis, parent_cpt = axes._node_from_path(path)
-    target_axis = axes.child(parent_axis, parent_cpt)
+    parent = axes._node_from_path(path)
+    if parent is not None:
+        parent_axis, parent_cpt = parent
+        target_axis = axes.child(parent_axis, parent_cpt)
+    else:
+        target_axis = axes.root
     slice_cpts = []
     for cpt in target_axis.components:
         slice_cpt = AffineSliceComponent(
@@ -644,6 +655,7 @@ def _split_index_tree_from_ellipsis(
     current_axis: Axis | None = None,
     loop_context=pmap(),
 ) -> IndexTree:
+    assert False, "old code"
     current_axis = current_axis or axes.root
 
     subslices = []
@@ -694,6 +706,7 @@ def _collect_datamap(index, *subdatamaps, itree):
 
 
 def index_tree_from_ellipsis(axes, current_axis, first_call=True):
+    assert False, "not needed"
     slice_components = []
     subroots = []
     subtrees = []
@@ -755,12 +768,6 @@ def as_index_tree(arg, loop_context, **kwargs):
         raise TypeError
 
 
-# @as_index_tree.register
-# def _(index_tree:IndexTree, loop_context):
-#     assert index_tree.loop_context == loop_context
-#     return index_tree
-
-
 @as_index_tree.register
 def _(index: Index, ctx):
     return IndexTree(index, loop_context=ctx)
@@ -793,4 +800,5 @@ def _(index: Index, **kwargs):
 
 @as_index_forest.register
 def _(slice_: slice, **kwargs):
-    raise NotImplementedError
+    slice_ = apply_loop_context(slice_, loop_context=pmap(), path=pmap(), **kwargs)
+    return (IndexTree(slice_),)
