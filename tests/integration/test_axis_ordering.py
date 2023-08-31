@@ -51,7 +51,7 @@ def test_different_axis_orderings_do_not_change_packing_order():
     dat1 = MultiArray(axes0, name="dat1", data=np.zeros(npoints, dtype=ScalarType))
 
     p = axis0.index()
-    path = just_one(p.target_paths)
+    path = pmap({axis0.label: just_one(axis0.components).label})
 
     loop_context = pmap({p: path})
     q = IndexTree(

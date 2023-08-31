@@ -585,12 +585,11 @@ def apply_loop_context(arg, loop_context, *, axes, path):
         # labels. In fact I enforce that here and so multiple components would break things.
         # Not sure what the right approach is. This is also potentially tricky for multi-level
         # subsets
-        array_axis_label = arg.axes.root.label
-        array_component_label = just_one(arg.axes.root.components).label
+        array_axis, array_component = arg.axes.leaf
         for cpt in target_axis.components:
-            slice_cpt = Subset(cpt.label, arg, label=array_component_label)
+            slice_cpt = Subset(cpt.label, arg, label=array_component.label)
             slice_cpts.append(slice_cpt)
-        return Slice(target_axis.label, slice_cpts, label=array_axis_label)
+        return Slice(target_axis.label, slice_cpts, label=array_axis.label)
     elif isinstance(arg, numbers.Integral):
         return apply_loop_context(
             slice(arg, arg + 1), loop_context, axes=axes, path=path
@@ -621,11 +620,22 @@ def _(slice_: slice, loop_context, axes, path):
     return Slice(target_axis.label, slice_cpts)
 
 
+"""
+FIXME This function is currently not really fit for purpose. It cannot cope
+with multiple loop indices as they are not merged into the same context.
+
+If we pass index trees here then we could get incompatible loop contexts
+Probably should collect unrestricted loop indices as well as complete contexts?
+"""
+
+
 def loop_contexts_from_iterable(indices):
     # this is a bit tricky/unpleasant to write
     # FIXME this is currently very naive/limited, need to check for conflicts etc
     loop_contexts = []
     for index in indices:
+        # TODO Should check the type of index here as it is more restrictive than at a top
+        # level. One cannot have another iterable.
         ctx = collect_loop_context(index)
         if len(ctx) > 1:
             raise NotImplementedError("TODO")
@@ -646,6 +656,11 @@ def collect_loop_context(arg, *args, **kwargs):
         return ()
     else:
         raise TypeError
+
+
+@collect_loop_context.register
+def _(index_tree: IndexTree):
+    return index_tree.loop_context
 
 
 @collect_loop_context.register

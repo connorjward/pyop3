@@ -1035,97 +1035,98 @@ def _(index: CalledMap, *, loop_indices, codegen_ctx, **kwargs):
     return leaves, {"axes": axes, "jnames": jnames_per_cpt}
 
 
-@_expand_index.register
-def _(slice_: Slice, *, codegen_ctx, prev_axes, **kwargs):
-    assert False, "dead code"
-    # alias, fix
-    ctx = codegen_ctx
-
-    jnames_per_cpt = {}
-    leaf_keys = []
-    insns_per_leaf = []
-    jname_expr_per_leaf = []
-    path_per_leaf = []
-
-    components = []
-    jnames = []
-    jname_exprs = []
-
-    # each one of these is a new "leaf"
-    for subslice in slice_.slices:
-        prev_cpt = prev_axes.find_component(slice_.axis, subslice.component)
-        if isinstance(subslice, AffineSliceComponent):
-            # FIXME should be ceiling
-            if subslice.stop is None:
-                stop = prev_cpt.count
-            else:
-                stop = subslice.stop
-            size = (stop - subslice.start) // subslice.step
-        else:
-            assert isinstance(subslice, Subset)
-            size = subslice.array.axes.size
-        cpt = AxisComponent(size, label=prev_cpt.label)
-        components.append(cpt)
-
-        jname = ctx.unique_name("j")
-        ctx.add_temporary(jname)
-        jnames.append(jname)
-
-        if isinstance(subslice, AffineSliceComponent):
-            jname_expr = pym.var(jname) * subslice.step + subslice.start
-            insns_per_leaf.append(())
-        else:
-            assert isinstance(subslice, Subset)
-            # subsets must be 1D, single component arrays
-            subset = subslice.array
-            assert subset.axes.depth == 1
-            subset_axis = subset.axes.root
-            subset_component = just_one(subset_axis.components)
-            insns_, jname_expr = _scalar_assignment(
-                subset,
-                pmap({subset_axis.label: subset_component.label}),
-                pmap({subset_axis.label: jname}),
-                codegen_ctx,
-            )
-            insns_per_leaf.append(insns_)
-
-        jname_exprs.append({slice_.axis: jname_expr})
-
-    axis = Axis(components, label=slice_.axis)
-    axes = AxisTree(axis)
-
-    for i, (cpt, subslice) in enumerate(checked_zip(components, slice_.slices)):
-        jnames_per_cpt[axis.id, cpt.label] = jnames[i]
-        leaf_keys.append((axis.id, cpt.label))
-        jname_expr_per_leaf.append(jname_exprs[i])
-        path_per_leaf.append(((slice_.axis, subslice.component),))
-
-    leaves = {
-        leaf_key: (path, jname_exprs, insns)
-        for (leaf_key, path, jname_exprs, insns) in checked_zip(
-            leaf_keys,
-            path_per_leaf,
-            jname_expr_per_leaf,
-            insns_per_leaf,
-        )
-    }
-    return leaves, {"axes": axes, "jnames": jnames_per_cpt}
-
-
-@_expand_index.register
-def _(axes: AxisTree, *, loop_indices, codegen_ctx, **kwargs):
-    assert False, "dead code"
-    leaves, jnames_per_axcpt = _parse_index_axis_tree_rec(
-        axes,
-        codegen_ctx,
-        current_axis=axes.root,
-        current_path=pmap(),
-        current_target_jnames=pmap(),
-    )
-
-    # don't need to construct any axes here since they already exist
-    index_data = {"axes": axes, "jnames": jnames_per_axcpt}
-    return leaves, index_data
+# @_expand_index.register
+# def _(slice_: Slice, *, codegen_ctx, prev_axes, **kwargs):
+#     assert False, "dead code"
+#     # alias, fix
+#     ctx = codegen_ctx
+#
+#     jnames_per_cpt = {}
+#     leaf_keys = []
+#     insns_per_leaf = []
+#     jname_expr_per_leaf = []
+#     path_per_leaf = []
+#
+#     components = []
+#     jnames = []
+#     jname_exprs = []
+#
+#     # each one of these is a new "leaf"
+#     for subslice in slice_.slices:
+#         prev_cpt = prev_axes.find_component(slice_.axis, subslice.component)
+#         if isinstance(subslice, AffineSliceComponent):
+#             # FIXME should be ceiling
+#             if subslice.stop is None:
+#                 stop = prev_cpt.count
+#             else:
+#                 stop = subslice.stop
+#             size = (stop - subslice.start) // subslice.step
+#         else:
+#             assert isinstance(subslice, Subset)
+#             size = subslice.array.axes.size
+#         cpt = AxisComponent(size, label=prev_cpt.label)
+#         components.append(cpt)
+#
+#         jname = ctx.unique_name("j")
+#         ctx.add_temporary(jname)
+#         jnames.append(jname)
+#
+#         if isinstance(subslice, AffineSliceComponent):
+#             jname_expr = pym.var(jname) * subslice.step + subslice.start
+#             insns_per_leaf.append(())
+#         else:
+#             assert isinstance(subslice, Subset)
+#             breakpoint()
+#             # subsets must be 1D, single component arrays
+#             subset = subslice.array
+#             assert subset.axes.depth == 1
+#             subset_axis = subset.axes.root
+#             subset_component = just_one(subset_axis.components)
+#             insns_, jname_expr = _scalar_assignment(
+#                 subset,
+#                 pmap({subset_axis.label: subset_component.label}),
+#                 pmap({subset_axis.label: jname}),
+#                 codegen_ctx,
+#             )
+#             insns_per_leaf.append(insns_)
+#
+#         jname_exprs.append({slice_.axis: jname_expr})
+#
+#     axis = Axis(components, label=slice_.axis)
+#     axes = AxisTree(axis)
+#
+#     for i, (cpt, subslice) in enumerate(checked_zip(components, slice_.slices)):
+#         jnames_per_cpt[axis.id, cpt.label] = jnames[i]
+#         leaf_keys.append((axis.id, cpt.label))
+#         jname_expr_per_leaf.append(jname_exprs[i])
+#         path_per_leaf.append(((slice_.axis, subslice.component),))
+#
+#     leaves = {
+#         leaf_key: (path, jname_exprs, insns)
+#         for (leaf_key, path, jname_exprs, insns) in checked_zip(
+#             leaf_keys,
+#             path_per_leaf,
+#             jname_expr_per_leaf,
+#             insns_per_leaf,
+#         )
+#     }
+#     return leaves, {"axes": axes, "jnames": jnames_per_cpt}
+#
+#
+# @_expand_index.register
+# def _(axes: AxisTree, *, loop_indices, codegen_ctx, **kwargs):
+#     assert False, "dead code"
+#     leaves, jnames_per_axcpt = _parse_index_axis_tree_rec(
+#         axes,
+#         codegen_ctx,
+#         current_axis=axes.root,
+#         current_path=pmap(),
+#         current_target_jnames=pmap(),
+#     )
+#
+#     # don't need to construct any axes here since they already exist
+#     index_data = {"axes": axes, "jnames": jnames_per_axcpt}
+#     return leaves, index_data
 
 
 # FIXME I don't think I use current_target_jnames at all
@@ -1276,15 +1277,12 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
     def map_axis_variable(self, expr):
         return self._labels_to_jnames[expr.axis_label]
 
-    # this is cleaner if I do it as a single line expression
-    # rather than register assignments for things.
-    def map_multi_array(self, array):
-        # must be single-component here
-        # leaf_axis, leaf_cpt = array.leaf
+    def map_subscript(self, subscript):
+        index = self.rec(subscript.index)
 
         trimmed_path = {}
         trimmed_jnames = {}
-        axes = array.axes
+        axes = subscript.aggregate.axes
         axis = axes.root
         while axis:
             trimmed_path[axis.label] = self._path[axis.label]
@@ -1295,7 +1293,7 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         trimmed_jnames = pmap(trimmed_jnames)
 
         insns, varname = _scalar_assignment(
-            array,
+            subscript.aggregate,
             trimmed_path,
             trimmed_jnames,
             self._codegen_context,
@@ -1303,6 +1301,35 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         for insn in insns:
             self._codegen_context.add_assignment(*insn)
         return varname
+
+    # this is cleaner if I do it as a single line expression
+    # rather than register assignments for things.
+    def map_multi_array(self, array):
+        assert False, "dead code"
+        # must be single-component here
+        # leaf_axis, leaf_cpt = array.leaf
+
+        # trimmed_path = {}
+        # trimmed_jnames = {}
+        # axes = array.axes
+        # axis = axes.root
+        # while axis:
+        #     trimmed_path[axis.label] = self._path[axis.label]
+        #     trimmed_jnames[axis.label] = self._labels_to_jnames[axis.label]
+        #     cpt = just_one(axis.components)
+        #     axis = axes.child(axis, cpt)
+        # trimmed_path = pmap(trimmed_path)
+        # trimmed_jnames = pmap(trimmed_jnames)
+        #
+        # insns, varname = _scalar_assignment(
+        #     array,
+        #     trimmed_path,
+        #     trimmed_jnames,
+        #     self._codegen_context,
+        # )
+        # for insn in insns:
+        #     self._codegen_context.add_assignment(*insn)
+        # return varname
 
     def map_called_map(self, expr):
         if not isinstance(expr.function.map_component.array, MultiArray):
@@ -1556,9 +1583,6 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
 
     # I think that axis_label should probably be the same for all bits of the slice
     for subslice in slice_.slices:
-        if isinstance(subslice, Subset) and subslice.array.axes.depth > 1:
-            raise NotImplementedError("need to think about src axes etc")
-
         prev_cpt = prev_axes.find_component(slice_.axis, subslice.component)
         if isinstance(subslice, AffineSliceComponent):
             # FIXME should be ceiling
@@ -1573,8 +1597,8 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
         cpt = AxisComponent(size, label=subslice.label)
         components.append(cpt)
 
+        newvar = AxisVariable(slice_.label)
         if isinstance(subslice, AffineSliceComponent):
-            newvar = AxisVariable(slice_.label)
             index_expr_per_leaf.append(
                 pmap({slice_.axis: newvar * subslice.step + subslice.start})
             )
@@ -1582,7 +1606,12 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
                 pmap({slice_.axis: (newvar - subslice.start) // subslice.step})
             )
         else:
-            index_expr_per_leaf.append(pmap({slice_.axis: subslice.array}))
+            if subslice.array.axes.depth > 1:
+                raise NotImplementedError(
+                    "Need to look at preorder context or something"
+                )
+            index_expr = pym.subscript(subslice.array, (newvar,))
+            index_expr_per_leaf.append(pmap({slice_.axis: index_expr}))
             layout_expr_per_leaf.append(pmap({slice_.axis: "inverse search"}))
 
     # breakpoint()
