@@ -1198,11 +1198,11 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
             size = (stop - subslice.start) // subslice.step
         else:
             assert isinstance(subslice, Subset)
-            size = subslice.array.axes.size
-        cpt = AxisComponent(size, label=subslice.label)
+            size = subslice.array.axes.leaf_component.count
+        cpt = AxisComponent(size, label=subslice.component)
         components.append(cpt)
 
-        newvar = AxisVariable(slice_.label)
+        newvar = AxisVariable(slice_.axis)
         if isinstance(subslice, AffineSliceComponent):
             index_expr_per_leaf.append(
                 pmap({slice_.axis: newvar * subslice.step + subslice.start})
@@ -1218,7 +1218,7 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
 
     # breakpoint()
 
-    axes = AxisTree(Axis(components, label=slice_.label))
+    axes = AxisTree(Axis(components, label=slice_.axis))
     leaves = {}
     for cpt, subslice, index_expr, layout_expr in checked_zip(
         components, slice_.slices, index_expr_per_leaf, layout_expr_per_leaf
