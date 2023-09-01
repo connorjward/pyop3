@@ -112,7 +112,7 @@ def _visit_indices_rec(
     current_index,
     **kwargs,
 ):
-    leaves, index_data = index_callback(current_index, **kwargs)
+    leaves, index_data = index_callback(current_index, preorder_ctx, **kwargs)
 
     leafdata = {}
     for i, (leafkey, leaf) in enumerate(leaves.items()):
@@ -232,11 +232,7 @@ class LoopyCodegenContext(CodegenContext):
         # add prefix to the generator so names are generated starting with
         # "prefix_0" instead of "prefix"
         self._name_generator.add_name(prefix, conflicting_ok=True)
-        # return self._name_generator(prefix)
-        retval = self._name_generator(prefix)
-        if retval == "j_1":
-            breakpoint()
-        return retval
+        return self._name_generator(prefix)
 
     # def add_iname(self, iname: str) -> None:
     #     self._within_inames |= {iname}
@@ -407,6 +403,7 @@ def _finalize_parse_loop_rec(
         axes,
         axis_labels_to_jnames,
         array_path,
+        pmap(),  # definitely wrong
         codegen_ctx,
         loop_indices,
         current_axis=current_axis,
@@ -418,6 +415,7 @@ def parse_loop_final_rec(
     axes,
     current_jnames,
     current_path,
+    current_index_exprs,
     codegen_ctx,
     loop_indices,
     *,
@@ -433,33 +431,36 @@ def parse_loop_final_rec(
         new_jnames = current_jnames | {current_axis.label: pym.var(current_jname)}
 
         with codegen_ctx.within_inames({iname}):
+            # at the bottom, emit a statement corresponding to the loop index at hand
+
+            # not actually per leaf any more, and this is only a partial target path
+            targetpath = axes.target_path_per_leaf[new_path]
+            output_vars = {}
+            for target_axis, target_component in targetpath.items():
+                insns, loopvar = emit_assignment_insn(
+                    axes.index_exprs[new_path][target_axis],
+                    new_path,
+                    new_jnames,
+                    codegen_ctx,
+                )
+                for insn in insns:
+                    codegen_ctx.add_assignment(*insn)
+                output_vars[target_axis] = pym.var(loopvar)
+            output_vars = pmap(output_vars)
+            new_index_exprs = current_index_exprs | output_vars
+
             if subaxis := axes.child(current_axis, axcpt):
                 parse_loop_final_rec(
                     loop,
                     axes,
                     new_jnames,
                     new_path,
+                    new_index_exprs,
                     codegen_ctx,
                     loop_indices,
                     current_axis=subaxis,
                 )
             else:
-                # at the bottom, emit a statement corresponding to the loop index at hand
-
-                targetpath = axes.target_path_per_leaf[new_path]
-                output_vars = {}
-                for target_axis, target_component in targetpath.items():
-                    insns, loopvar = emit_assignment_insn(
-                        axes.index_exprs[new_path][target_axis],
-                        new_path,
-                        new_jnames,
-                        codegen_ctx,
-                    )
-                    for insn in insns:
-                        codegen_ctx.add_assignment(*insn)
-                    output_vars[target_axis] = pym.var(loopvar)
-                output_vars = pmap(output_vars)
-
                 for stmt in loop.statements:
                     _compile(
                         stmt,
@@ -467,7 +468,7 @@ def parse_loop_final_rec(
                         | {
                             loop.index: (
                                 new_path,
-                                output_vars,
+                                new_index_exprs,
                                 pmap(
                                     new_jnames
                                 ),  # "local index", should probably also be a variable
@@ -660,6 +661,7 @@ def build_assignment(
 
 @dataclasses.dataclass(frozen=True)
 class ParseAssignmentPreorderContext:
+    src_path: pmap = pmap()
     path: pmap = pmap()
     insns: tuple = ()
     jname_exprs: pmap = pmap()
@@ -720,6 +722,8 @@ def _parse_assignment_final(
             array_path,
             temp_axis_labels_to_jnames,
             temp_path,
+            axes.target_path_per_leaf[pmap()],
+            axes.index_exprs[pmap()],
             ctx,
             current_axis=axes.root,
         )
@@ -732,6 +736,8 @@ def _parse_assignment_final_rec(
     array_path,
     temp_jnames,
     temp_path,
+    current_target_path,
+    current_index_exprs,
     ctx,
     *,
     current_axis,
@@ -750,6 +756,10 @@ def _parse_assignment_final_rec(
         new_array_path = array_path | {current_axis.label: axcpt.label}
         new_temp_path = temp_path | {current_axis.label: axcpt.label}
 
+        # not per leaf!
+        newtargetpath = current_target_path | axes.target_path_per_leaf[new_temp_path]
+        new_index_exprs = current_index_exprs | axes.index_exprs[new_temp_path]
+
         with ctx.within_inames({iname}):
             if subaxis := axes.child(current_axis, axcpt):
                 _parse_assignment_final_rec(
@@ -759,20 +769,21 @@ def _parse_assignment_final_rec(
                     new_array_path,
                     new_temp_jnames,
                     new_temp_path,
+                    newtargetpath,
+                    new_index_exprs,
                     ctx,
                     current_axis=subaxis,
                 )
             else:
-                targetpath = axes.target_path_per_leaf[new_temp_path]
-                layout_fn = IndexExpressionReplacer(axes.index_exprs[new_temp_path])(
-                    axes.orig_layout_fn[targetpath]
-                )
                 # if isinstance(assignment.array, CalledAxisTree):
                 #     temp_insns, temp_expr = _assignment_temp_insn(
                 #         assignment, pmap(), pmap(), ctx
                 #     )
                 #     for insn in temp_insns:
                 #         ctx.add_assignment(*insn)
+                layout_fn = IndexExpressionReplacer(new_index_exprs)(
+                    axes.orig_layout_fn[newtargetpath]
+                )
 
                 array_insns, array_expr = _assignment_array_insn(
                     assignment,
@@ -1090,14 +1101,23 @@ def collect_shape_index_callback(index, *args, **kwargs):
 
 
 @collect_shape_index_callback.register
-def _(loop_index: LoopIndex, *, loop_indices, **kwargs):
+def _(loop_index: LoopIndex, preorder_ctx, *, loop_indices, **kwargs):
     # global_index = loop_index.loop_index
     # if isinstance(global_index, LocalLoopIndex):
     #     global_index = global_index.global_index
     path = loop_indices[loop_index]
-    target_path = loop_index.iterset.with_context(loop_indices).target_path_per_leaf[
-        path
-    ]
+
+    # this is very nasty, we need to look at path *in order* to collect all of the target paths
+    target_path = {}
+    leaf = loop_index.iterset.with_context(loop_indices)._node_from_path(path)
+    ordered_path = loop_index.iterset.with_context(loop_indices).path(
+        *leaf, ordered=True
+    )
+    for i in range(len(ordered_path)):
+        target_path |= loop_index.iterset.with_context(
+            loop_indices
+        ).target_path_per_leaf[pmap(ordered_path[: i + 1])]
+    target_path = pmap(target_path)
 
     # very similar to AxisTree._make_index_exprs
     index_exprs = {}
@@ -1106,7 +1126,9 @@ def _(loop_index: LoopIndex, *, loop_indices, **kwargs):
     index_exprs = pmap(index_exprs)
 
     layout_exprs = pmap()  # not allowed I believe, or zero?
-    return {None: (target_path, index_exprs, layout_exprs)}, {"axes": AxisTree()}
+    return {None: (pmap(), target_path, index_exprs, layout_exprs)}, {
+        "axes": AxisTree()
+    }
 
 
 @collect_shape_index_callback.register
@@ -1120,7 +1142,7 @@ def _(local_index: LocalLoopIndex, *, loop_indices, **kwargs):
 # TODO this could be done with callbacks so we share code with when
 # we also want to emit instructions
 @collect_shape_index_callback.register
-def _(called_map: CalledMap, **kwargs):
+def _(called_map: CalledMap, preorder_ctx, **kwargs):
     leaves, index_data = collect_shape_index_callback(called_map.from_index, **kwargs)
     axes = index_data["axes"]
 
@@ -1181,7 +1203,7 @@ def _(called_map: CalledMap, **kwargs):
 
 
 @collect_shape_index_callback.register
-def _(slice_: Slice, *, prev_axes, **kwargs):
+def _(slice_: Slice, preorder_ctx, *, prev_axes, **kwargs):
     components = []
     index_expr_per_leaf = []
     layout_expr_per_leaf = []
@@ -1199,10 +1221,10 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
         else:
             assert isinstance(subslice, Subset)
             size = subslice.array.axes.leaf_component.count
-        cpt = AxisComponent(size, label=subslice.component)
+        cpt = AxisComponent(size, label=subslice.label)
         components.append(cpt)
 
-        newvar = AxisVariable(slice_.axis)
+        newvar = AxisVariable(slice_.label)
         if isinstance(subslice, AffineSliceComponent):
             index_expr_per_leaf.append(
                 pmap({slice_.axis: newvar * subslice.step + subslice.start})
@@ -1211,34 +1233,54 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
                 pmap({slice_.axis: (newvar - subslice.start) // subslice.step})
             )
         else:
-            # index_expr = pym.subscript(subslice.array, (newvar,))
-            # index_expr_per_leaf.append(pmap({slice_.axis: index_expr}))
-            index_expr_per_leaf.append(pmap({slice_.axis: subslice.array}))
+            # ordering does not matter
+            indices = set()
+            leaf_axis, leaf_cpt = subslice.array.axes.leaf
+            for axis_label, cpt_label in subslice.array.axes.ancestors(
+                leaf_axis, leaf_cpt
+            ).items():
+                indices.add(preorder_ctx.jname_exprs[axis_label])
+
+            index_expr = pym.subscript(subslice.array, tuple(indices) + (newvar,))
+            index_expr_per_leaf.append(pmap({slice_.axis: index_expr}))
+            # index_expr_per_leaf.append(pmap({slice_.axis: subslice.array}))
             layout_expr_per_leaf.append(pmap({slice_.axis: "inverse search"}))
 
     # breakpoint()
 
-    axes = AxisTree(Axis(components, label=slice_.axis))
+    axes = AxisTree(Axis(components, label=slice_.label))
     leaves = {}
     for cpt, subslice, index_expr, layout_expr in checked_zip(
         components, slice_.slices, index_expr_per_leaf, layout_expr_per_leaf
     ):
+        new_path = pmap({slice_.label: subslice.label})
         target_path = pmap({slice_.axis: subslice.component})
-        leaves[axes.root.id, cpt.label] = (target_path, index_expr, layout_expr)
+        leaves[axes.root.id, cpt.label] = (
+            new_path,
+            target_path,
+            index_expr,
+            layout_expr,
+        )
 
     return leaves, {"axes": axes}
 
 
 def collect_shape_pre_callback(leaf, preorder_ctx, **kwargs):
-    iaxes_axis_path, iaxes_jname_exprs, ilayout_exprs = leaf
+    new_src_path, iaxes_axis_path, iaxes_jname_exprs, ilayout_exprs = leaf
 
-    new_axis_path = preorder_ctx.path | iaxes_axis_path
+    if preorder_ctx.path:
+        new_axis_path = preorder_ctx.path[preorder_ctx.src_path] | iaxes_axis_path
+    else:
+        new_axis_path = iaxes_axis_path
+
+    full_src_path = preorder_ctx.src_path | new_src_path
 
     return ParseAssignmentPreorderContext(
-        new_axis_path,
+        full_src_path,
+        preorder_ctx.path | pmap({full_src_path: new_axis_path}),
         (),
-        preorder_ctx.jname_exprs | iaxes_jname_exprs,
-        preorder_ctx.layout_exprs | ilayout_exprs,
+        preorder_ctx.jname_exprs | pmap({full_src_path: iaxes_jname_exprs}),
+        preorder_ctx.layout_exprs | pmap({full_src_path: ilayout_exprs}),
     )
 
 
@@ -1252,11 +1294,12 @@ def collect_shape_post_callback_terminal(
     #     axis_path = prev_axes.path_with_nodes(leaf_axis, leaf_cpt)
     # else:
     #     axis_path = pmap()
-
-    path_per_leaf = {leafkey: preorder_ctx.path}
-    expr_per_leaf = {leafkey: preorder_ctx.jname_exprs}
-    layoutexpr_per_leaf = {leafkey: preorder_ctx.layout_exprs}
-    return None, path_per_leaf, expr_per_leaf, layoutexpr_per_leaf
+    #
+    # target_path_per_leaf = {leafkey: preorder_ctx.path}
+    # expr_per_leaf = {leafkey: preorder_ctx.jname_exprs}
+    # layoutexpr_per_leaf = {leafkey: preorder_ctx.layout_exprs}
+    # return None, target_path_per_leaf, expr_per_leaf, layoutexpr_per_leaf
+    return None, preorder_ctx.path, preorder_ctx.jname_exprs, preorder_ctx.layout_exprs
 
 
 def collect_shape_post_callback_nonterminal(retval, *args, **kwargs):
@@ -1271,24 +1314,24 @@ def collect_shape_post_callback_nonterminal(retval, *args, **kwargs):
 # leafdata is return values here
 def collect_shape_final_callback(index_data, leafdata):
     axes = index_data["axes"]
-    expr_per_leaf = {}
-    layoutexprperleaf = {}
-    target_path_per_leaf = {}
-    for k, (subax, path, expr, layout_expr) in leafdata.items():
+    target_paths = {}
+    index_exprs = {}
+    layout_exprs = {}
+    for k, (subax, target_path, index_expr, layout_expr) in leafdata.items():
         if subax is not None:
             if axes.root:
                 axes = axes.add_subtree(subax, *k)
             else:
                 axes = subax
 
-        expr_per_leaf |= expr
-        layoutexprperleaf |= layout_expr
-        target_path_per_leaf |= path
+        index_exprs |= index_expr
+        layout_exprs |= layout_expr
+        target_paths |= target_path
     return (
         axes,
-        pmap(target_path_per_leaf),
-        pmap(expr_per_leaf),
-        pmap(layoutexprperleaf),
+        pmap(target_paths),
+        pmap(index_exprs),
+        pmap(layout_exprs),
     )
 
 

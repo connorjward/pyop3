@@ -25,7 +25,7 @@ def test_loop_over_ragged_subset(scalar_copy_kernel):
     # this is unpleasant
     # subset_axes = nnz_axes.add_subaxis(Axis([AxisComponent(nnz, "pt0")], "ax1"), *nnz_axes.leaf)
     subset_axes = nnz_axes.add_subaxis(
-        Axis([AxisComponent(nnz, "pt0")], "ax2"), *nnz_axes.leaf
+        Axis([AxisComponent(nnz, "pt0")], "not_ax2"), *nnz_axes.leaf
     )
     subset_data = np.asarray(flatten([[0, 1], [0, 1, 2], [1, 2]]), dtype=IntType)
     subset = MultiArray(

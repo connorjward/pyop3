@@ -442,8 +442,8 @@ class StrictLabelledTree(LabelledTree):
     def _paths(self):
         def paths_fn(node, component_label, current_path):
             if current_path is None:
-                current_path = pmap()
-            new_path = current_path | {node.label: component_label}
+                current_path = ()
+            new_path = current_path + ((node.label, component_label),)
             paths_[node.id, component_label] = new_path
             return new_path
 
@@ -487,13 +487,23 @@ class StrictLabelledTree(LabelledTree):
         self._check_exists(node)
         return all(child is None for child in self.parent_to_children[node.id])
 
-    def ancestors(self, node, component_index):
+    def ancestors(self, node, component_label):
         """Return the ancestors of a ``(node_id, component_label)`` 2-tuple."""
-        return self.path(node, component_index)[:-1]
+        return pmap(
+            {
+                nd: cpt
+                for nd, cpt in self.path(node, component_label).items()
+                if nd != node.label
+            }
+        )
 
-    def path(self, node, component_label):
+    def path(self, node, component_label, ordered=False):
         node_id = self._as_node_id(node)
-        return self._paths[node_id, component_label]
+        path_ = self._paths[node_id, component_label]
+        if ordered:
+            return path_
+        else:
+            return pmap(path_)
 
     def path_with_nodes(self, node, component_label):
         node_id = self._as_node_id(node)
