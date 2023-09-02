@@ -379,6 +379,7 @@ class CalledMap(Index, LoopIterable, UniquelyIdentifiedImmutableRecord):
         return self.map.bits
 
     def target_paths(self, context):
+        raise NotImplementedError("I think this will break")
         targets = {}
         for src_path in self.from_index.target_paths(context):
             for map_component in self.bits[src_path]:
@@ -406,7 +407,12 @@ class GlobalLoopIndex(LoopIndex):
         return self.iterset.datamap
 
     def target_paths(self, context):
-        return tuple(self.iterset.with_context(context).target_path_per_leaf.values())
+        iterset = self.iterset.with_context(context)
+        paths = []
+        for leaf in iterset.leaves:
+            path = iterset.path(*leaf)
+            paths.append(path)
+        return tuple(paths)
 
 
 class LocalLoopIndex(LoopIndex):
@@ -783,6 +789,7 @@ def index_tree_from_iterable(
     if subindices:
         children = []
         subtrees = []
+        # used to be leaves...
         for target_path in index.target_paths(loop_context):
             new_path = path | target_path
             child, subtree = index_tree_from_iterable(

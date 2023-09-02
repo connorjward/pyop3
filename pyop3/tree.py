@@ -457,8 +457,8 @@ class StrictLabelledTree(LabelledTree):
     def _paths_with_nodes(self):
         def paths_fn(node, component_label, current_path):
             if current_path is None:
-                current_path = pmap()
-            new_path = current_path | {node: component_label}
+                current_path = ()
+            new_path = current_path + ((node, component_label),)
             paths_[node.id, component_label] = new_path
             return new_path
 
@@ -505,9 +505,13 @@ class StrictLabelledTree(LabelledTree):
         else:
             return pmap(path_)
 
-    def path_with_nodes(self, node, component_label):
+    def path_with_nodes(self, node, component_label, ordered=False):
         node_id = self._as_node_id(node)
-        return self._paths_with_nodes[node_id, component_label]
+        path_ = self._paths_with_nodes[node_id, component_label]
+        if ordered:
+            return path_
+        else:
+            return pmap(path_)
 
     def _node_from_path(self, path: Mapping[Node | Hashable, int]) -> Node:
         if not path:
