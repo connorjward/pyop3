@@ -710,8 +710,11 @@ def _(arg: LoopIndex):
     if isinstance(arg.iterset, IndexedAxisTree):
         loop_contexts = []
         for loop_context, axis_tree in arg.iterset.axis_trees.items():
+            extracontext = {}
             for target_path in axis_tree.target_paths.values():
-                loop_contexts.append(loop_context | pmap({arg: target_path}))
+                extracontext |= target_path
+            loop_contexts.append(loop_context | {arg: pmap(extracontext)})
+        # breakpoint()
         return loop_contexts
     else:
         assert isinstance(arg.iterset, AxisTree)

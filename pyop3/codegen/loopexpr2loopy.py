@@ -425,7 +425,7 @@ def parse_loop_final_rec(
     if not jname_expr_per_axis_label:
         jname_expr_per_axis_label = {}
     for axcpt in current_axis.components:
-        size = register_extent(axcpt.count, current_path, current_jnames, codegen_ctx)
+        size = register_extent(axcpt.count, jname_expr_per_axis_label, codegen_ctx)
         iname = codegen_ctx.unique_name("i")
         codegen_ctx.add_domain(iname, size)
 
@@ -451,7 +451,11 @@ def parse_loop_final_rec(
                 if (myaxis.id, mycomponent.label) in axes.index_exprs:
                     assert not found
                     index_expr = axes.index_exprs[myaxis.id, mycomponent.label]
-                    jname_expr = JnameSubstitutor(new_jnames, codegen_ctx)(index_expr)
+                    # no confidence that this will work
+                    # jname_expr = JnameSubstitutor(new_jnames, codegen_ctx)(index_expr)
+                    jname_expr = JnameSubstitutor(
+                        new_jnames | new_jname_expr_per_target_axis_label, codegen_ctx
+                    )(index_expr)
                     new_jname_expr_per_target_axis_label[target_axis] = jname_expr
                     found = True
 
@@ -786,7 +790,7 @@ def _parse_assignment_final_rec(
         jname_expr_per_target_axis_label = {}
 
     for axcpt in current_axis.components:
-        size = register_extent(axcpt.count, array_path, array_jnames, ctx)
+        size = register_extent(axcpt.count, array_jnames, ctx)
         iname = ctx.unique_name("i")
         ctx.add_domain(iname, size)
 
@@ -1062,37 +1066,23 @@ def emit_layout_insns(
     return ((pym.var(offset_var), expr),)
 
 
-def register_extent(extent, path, jnames, ctx):
+def register_extent(extent, jnames, ctx):
     if isinstance(extent, numbers.Integral):
         return extent
 
     # actually a pymbolic expression
+    if not isinstance(extent, MultiArray):
+        raise NotImplementedError("need to tidy up assignment logic")
 
-    path = dict(path)
+    path = extent.axes.path(*extent.axes.leaf)
+    insns, expr = _scalar_assignment(extent, path, jnames, ctx)
 
-    replace_map = {}
-    for array in collect_arrays(extent):
-        # trim path and labels so only existing axes are used
-        trimmed_path = {}
-        trimmed_jnames = {}
-        laxes = array.axes
-        laxis = laxes.root
-        while laxis:
-            trimmed_path[laxis.label] = path[laxis.label]
-            trimmed_jnames[laxis.label] = jnames[laxis.label]
-            lcpt = just_one(laxis.components)
-            laxis = laxes.child(laxis, lcpt)
-        trimmed_path = pmap(trimmed_path)
-        trimmed_jnames = pmap(trimmed_jnames)
-
-        insns, varname = _scalar_assignment(array, trimmed_path, trimmed_jnames, ctx)
-        for lhs, rhs in insns:
-            ctx.add_assignment(lhs, rhs)
-        replace_map[array.name] = varname
+    for lhs, rhs in insns:
+        ctx.add_assignment(lhs, rhs)
 
     varname = ctx.unique_name("p")
     ctx.add_temporary(varname)
-    ctx.add_assignment(pym.var(varname), replace_variables(extent, replace_map))
+    ctx.add_assignment(pym.var(varname), expr)
     return varname
 
 

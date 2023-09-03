@@ -578,11 +578,6 @@ class Axis(StrictLabelledNode, LoopIterable):
         return f"{self.__class__.__name__}([{', '.join(str(cpt) for cpt in self.components)}], label={self.label})"
 
     @property
-    def target_paths(self):
-        assert False, "dead code"
-        return tuple(pmap({self.label: cpt.label}) for cpt in self.components)
-
-    @property
     def size(self):
         return as_axis_tree(self).size
 
@@ -890,20 +885,6 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
             else:
                 assert not new_minipath
                 pass
-                #
-                # leaf = self.orig_axes._node_from_path(new_target_path)
-                # target_path_with_axes = self.orig_axes.path_with_nodes(
-                #     *leaf, ordered=True
-                # )
-                # for target_axis, target_component in target_path_with_axes:
-                #     index_expr = self.index_exprs[target_axis.id, target_component]
-                #     breakpoint()
-                #     new_index_expr = IndexExpressionReplacer(index_expr_replace_map)(
-                #         index_expr
-                #     )
-                #     new_index_expr_per_target[
-                #         target_axis.id, target_component
-                #     ] = new_index_expr
         return pmap(new_index_expr_per_target)
 
     @property
@@ -970,19 +951,6 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         return self._orig_axes
 
     @property
-    def target_path_per_leaf(self):
-        assert False, "do not use, bad name"
-        # actually per component now
-        if not self._target_path_per_leaf:
-            self._target_path_per_leaf = {
-                pmap(p): ((p[-1][0], p[-1][1]),) for p in self._paths.values()
-            }
-            # self._target_path_per_leaf = {
-            #     path: path for path in self._make_target_paths()
-            # }
-        return self._target_path_per_leaf
-
-    @property
     def target_paths(self):
         # map from indexed axis IDs and component labels to {target_axis: target_component}
         # we always have the right IDs for the search but need the labels for the target
@@ -1024,9 +992,9 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
     def layouts(self):
         # if self.layout_exprs:
         #     return self.layout_exprs
-        if not self._layouts:
-            self.set_up()
-        return self._layouts
+        if not self.orig_axes._layouts:
+            self.orig_axes.set_up()
+        return self.orig_axes._layouts
 
     def find_part(self, label):
         return self._parts_by_label[label]
@@ -1560,9 +1528,11 @@ def _compute_layouts(
                 return layouts | merge_dicts(sublayoutss), None, steps
 
             # super ick
-            croot = CustomNode(
-                [(cpt.count, axis.label, cpt.label) for cpt in axis.components]
-            )
+            bits = []
+            for cpt in axis.components:
+                axlabel, clabel = just_one(axes.target_paths[((axis, cpt),)].items())
+                bits.append((cpt.count, axlabel, clabel))
+            croot = CustomNode(bits)
             if strictly_all(sub is not None for sub in csubtrees):
                 cparent_to_children = {
                     croot.id: [sub.root for sub in csubtrees]
@@ -1655,6 +1625,7 @@ def _tabulate_count_array_tree(
     count_arrays,
     offset,
     path=pmap(),
+    # other_path=pmap(),
     indices=pyrsistent.pmap(),
 ):
     npoints = sum(_as_int(c.count, path, indices) for c in axis.components)
@@ -1681,8 +1652,14 @@ def _tabulate_count_array_tree(
         selected_component_num = point_to_component_num[pt]
         selected_component = axis.components[selected_component_id]
 
-        new_path = path | {axis.label: selected_component.label}
-        new_indices = indices | {axis.label: selected_component_num}
+        new_path = path | axes.target_paths[((axis, selected_component),)]
+        # new_other_path = other_path | {axis.label: selected_component.label}
+        new_indices = indices | {
+            just_one(
+                axes.target_paths[((axis, selected_component),)].keys()
+            ): selected_component_num
+        }
+        # new_indices = indices | {axis.label: selected_component_num}
         if new_path in count_arrays:
             count_arrays[new_path].set_value(new_path, new_indices, offset.value)
             if not axis.indexed:
@@ -1691,6 +1668,7 @@ def _tabulate_count_array_tree(
                     axis,
                     selected_component,
                     new_path,
+                    # new_other_path,
                     new_indices,
                 )
         else:
@@ -1768,13 +1746,15 @@ def _axis_component_size(
     indices: Mapping = pyrsistent.pmap(),
 ):
     count = _as_int(component.count, path, indices)
+    target_path = axes.target_paths[((axis, component),)]
+    target_axis = just_one(target_path.keys())
     if subaxis := axes.child(axis, component):
         return sum(
             _axis_size(
                 axes,
                 subaxis,
-                path | {axis.label: component.label},
-                indices | {axis.label: i},
+                path | target_path,
+                indices | {target_axis: i},
             )
             for i in range(count)
         )
