@@ -785,21 +785,6 @@ def _parse_assignment_final_rec(
     if not jname_expr_per_target_axis_label:
         jname_expr_per_target_axis_label = {}
 
-    ###
-
-    if () in axes.target_paths:
-        mytargetpath = axes.target_paths[()]
-        target_path = target_path | mytargetpath
-
-        # for now, can in theory target multiple target axes
-        target_axis = just_one(mytargetpath.keys())
-
-        index_expr = axes.index_exprs[()]
-        jname_expr = JnameSubstitutor(array_jnames, ctx)(index_expr)
-        jname_expr_per_target_axis_label[target_axis] = jname_expr
-
-    ###
-
     for axcpt in current_axis.components:
         size = register_extent(axcpt.count, array_path, array_jnames, ctx)
         iname = ctx.unique_name("i")
@@ -862,26 +847,6 @@ def _parse_assignment_final_rec(
                 #     )
                 #     for insn in temp_insns:
                 #         ctx.add_assignment(*insn)
-
-                # create a map from target axis labels to index_expression
-                # we currently have indexed axis labels to jnames and, from the axes,
-                # a map of target axis label to indexed expression
-                # jname_expr_per_target_axis_label = {}
-
-                # leaf = axes.orig_axes._node_from_path(new_target_path)
-                # target_path_with_axes = axes.orig_axes.path_with_nodes(
-                #     *leaf, ordered=True
-                # )
-                # for target_axis, target_component in target_path_with_axes:
-                # breakpoint()
-                # for myaxis, mycomponent in new_mini_path:
-                #     index_expr = axes.index_exprs[myaxis.id, mycomponent]
-                #     jname_expr = JnameSubstitutor(new_array_jnames, ctx)(index_expr)
-                #     breakpoint()
-                #     jname_expr_per_target_axis_label[target_axis.label] = jname_expr
-                # jname_expr_per_target_axis_label = pmap(
-                #     jname_expr_per_target_axis_label
-                # )
 
                 # now use this as the replace map to get the right layout expression
                 layout_fn = IndexExpressionReplacer(jname_expr_per_target_axis_label)(
