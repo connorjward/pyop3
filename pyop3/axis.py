@@ -711,35 +711,33 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
                 new_layout_expr_per_target = {}
 
                 if indexed_axes.is_empty:
-                    raise NotImplementedError("TODO")
-                    leaf_key = pmap()
-
-                    # this is a map from axis label to new expression
-                    index_exprs = index_exprs_per_leaf[leaf_key]
-
-                    # map from axis label to index expression but it is the "inverse"
-                    layout_expr = layout_expr_per_leaf[leaf_key]
-                    target_path = target_path_per_leaf[leaf_key]
-
-                    new_index_expr_per_axis = {}
-                    for axis_label, index_expr in self.index_exprs[target_path].items():
-                        new_index_expr = IndexExpressionReplacer(index_exprs)(
-                            index_expr
-                        )
-                        new_index_expr_per_axis[axis_label] = new_index_expr
-                    new_index_expr_per_axis_per_leaf[pmap()] = new_index_expr_per_axis
-                    #
-                    # newlayout_expr_per_leaf[pmap()] = new_layout_expr
-                    newlayout_expr_per_leaf[pmap()] = pmap({None: 0})
-
-                    new_target_path_per_leaf[pmap()] = target_path_per_leaf[leaf_key]
-                else:
-                    # this is the wrong loop
-                    for target, orig_index_expr in self.index_exprs.items():
+                    target_path = target_path_per_axis_tuple[()]
+                    target_path_with_axes = self.path_with_nodes(
+                        *self._node_from_path(target_path), ordered=True
+                    )
+                    new_index_expr_per_target = {}
+                    for target_axis, target_component in target_path_with_axes:
+                        orig_index_expr = self.index_exprs[
+                            target_axis.id, target_component
+                        ]
                         new_index_expr = IndexExpressionReplacer(
                             index_expr_replace_map
                         )(orig_index_expr)
-                        new_index_expr_per_target[target] = new_index_expr
+                        new_index_expr_per_target[
+                            target_axis.id, target_component
+                        ] = new_index_expr
+                    new_index_expr_per_target = pmap(new_index_expr_per_target)
+
+                    # TODO
+                    new_layout_expr_per_target = NotImplemented
+                else:
+                    new_index_expr_per_target = self.parse_index_exprs(
+                        indexed_axes,
+                        indexed_axes.root,
+                        target_path_per_axis_tuple,
+                        index_expr_replace_map,
+                        target_path=target_path_per_axis_tuple.get((), pmap()),
+                    )
 
                 axis_trees[loop_context] = indexed_axes.copy(
                     target_paths=target_path_per_axis_tuple,
@@ -752,53 +750,44 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
     def __call__(self, *args):
         return CalledAxisTree(self, *args)
 
-    def parse_target_paths(
+    def parse_index_exprs(
         self,
         indexed_axes,
         indexed_axis,
-        indexed_target_paths,
-        indexed_index_exprs,
-        path=pmap(),
+        target_path_per_axis_tuple,
+        index_expr_replace_map,
+        target_path=pmap(),
+        minipath=(),
     ):
         from pyop3.distarray.multiarray import IndexExpressionReplacer
 
-        new_target_paths = {None: []}
-        new_index_exprs = {}
-
-        if indexed_axis is indexed_axes.root:
-            # this needs to be an iterable of separate paths
-            for tpath in indexed_target_paths[None]:
-                axis, cpt = self._node_from_path(path | tpath)
-                new_target_paths[None].append(self.target_paths[axis.id, cpt.label])
-                path |= tpath
-
-        for idxd_cpt in indexed_axis.components:
-            idxd_target_path = indexed_target_paths[indexed_axis.id, idxd_cpt.label]
-
-            axis, cpt = self._node_from_path(path | idxd_target_path)
-            new_target_paths[indexed_axis.id, idxd_cpt.label] = self.target_paths[
-                axis.id, cpt.label
-            ]
-
-            # TODO pass this down the tree
-            myreplacemap = indexed_index_exprs[indexed_axis.id, idxd_cpt.label]
-            orig_index_expr = self.index_exprs[axis.id, cpt.label]
-            new_index_expr = IndexExpressionReplacer(myreplacemap)(orig_index_expr)
-            new_index_exprs[axis.id, cpt.label] = new_index_expr
-
-            if indexed_axes.child(indexed_axis, idxd_cpt):
-                raise NotImplementedError
-
-        return pmap(new_target_paths), pmap(new_index_exprs)
-
-    def parse_index_exprs(
-        self, indexed_axes, indexed_axis, indexed_index_exprs, path=pmap()
-    ):
-        new_index_exprs = {}
+        new_index_expr_per_target = {}
         for cpt in indexed_axis.components:
-            for key, orig_index_expr in self.index_exprs.items():
-                new_index_exprs[key] = new_index_expr
-        return pmap(new_index_exprs)
+            new_target_path = target_path
+            new_minipath = minipath + ((indexed_axis, cpt),)
+            if new_minipath in target_path_per_axis_tuple:
+                new_target_path = target_path | target_path_per_axis_tuple[new_minipath]
+                new_minipath = ()
+
+            if subaxis := indexed_axes.child(indexed_axis, cpt):
+                subresult = self.parse_index_exprs(
+                    indexed_axes, subaxis, index_expr_replace_map, new_minipath
+                )
+                new_index_expr_per_target |= subresult
+            else:
+                assert not new_minipath
+
+                leaf = self._node_from_path(new_target_path)
+                target_path_with_axes = self.path_with_nodes(*leaf, ordered=True)
+                for target_axis, target_component in target_path_with_axes:
+                    index_expr = self.index_exprs[target_axis.id, target_component]
+                    new_index_expr = IndexExpressionReplacer(index_expr_replace_map)(
+                        index_expr
+                    )
+                    new_index_expr_per_target[
+                        target_axis.id, target_component
+                    ] = new_index_expr
+        return pmap(new_index_expr_per_target)
 
     @property
     def axis_trees(self):

@@ -475,7 +475,9 @@ def parse_loop_final_rec(
                         loop_indices
                         | {
                             loop.index: (
-                                new_path,  # needed to select the right context
+                                # FIXME this is wrong!
+                                # new_path,  # needed to select the right context
+                                new_target_path,
                                 jname_expr_per_target_axis_label,
                                 pmap(
                                     new_jnames
@@ -690,7 +692,8 @@ def _parse_assignment_final(
         # it as a separate loop index
         tpath, target_jnames, src_jnames = loop_indices[loop_index]
         target_path |= tpath
-        for axis_label, jname in target_jnames.items():
+        # for axis_label, jname in target_jnames.items():
+        for axis_label, jname in src_jnames.items():
             array_axis_labels_to_jnames[axis_label] = jname
     target_path = pmap(target_path)
 
@@ -703,10 +706,23 @@ def _parse_assignment_final(
     temp_path = pmap()
 
     if not axes.root:  # catch empty axes here
-        targetpath = axes.target_path_per_leaf[temp_path]
-        layout_fn = IndexExpressionReplacer(axes.index_exprs[temp_path])(
-            axes.orig_layout_fn[targetpath]
+        jname_expr_per_target_axis_label = {}
+
+        new_target_path = target_path
+        target_path_with_axes = axes.orig_axes.path_with_nodes(
+            *axes.orig_axes._node_from_path(new_target_path), ordered=True
         )
+        for target_axis, target_component in target_path_with_axes:
+            index_expr = axes.index_exprs[target_axis.id, target_component]
+            jname_expr = JnameSubstitutor(array_axis_labels_to_jnames, ctx)(index_expr)
+            jname_expr_per_target_axis_label[target_axis.label] = jname_expr
+        jname_expr_per_target_axis_label = pmap(jname_expr_per_target_axis_label)
+
+        # now use this as the replace map to get the right layout expression
+        layout_fn = IndexExpressionReplacer(jname_expr_per_target_axis_label)(
+            axes.orig_layout_fn[new_target_path]
+        )
+
         array_insns, array_expr = _assignment_array_insn(
             assignment,
             layout_fn,
@@ -1132,8 +1148,13 @@ def _(loop_index: LoopIndex, preorder_ctx, *, loop_indices, **kwargs):
     #     global_index = global_index.global_index
     path = loop_indices[loop_index]
 
-    myleaf = loop_index.iterset._node_from_path(path)
-    visited_nodes = loop_index.iterset.path_with_nodes(*myleaf, ordered=True)
+    if isinstance(loop_index.iterset, IndexedAxisTree):
+        iterset = just_one(loop_index.iterset.values.values())
+    else:
+        iterset = loop_index.iterset
+
+    myleaf = iterset.orig_axes._node_from_path(path)
+    visited_nodes = iterset.orig_axes.path_with_nodes(*myleaf, ordered=True)
 
     target_path_per_axis_tuple = pmap(
         {(): pmap({node.label: cpt_label for node, cpt_label in visited_nodes})}
@@ -1142,7 +1163,7 @@ def _(loop_index: LoopIndex, preorder_ctx, *, loop_indices, **kwargs):
     # make LoopIndex property?
     index_expr_per_target = pmap(
         {
-            node.label: loop_index.iterset.index_exprs[node.id, cpt_label]
+            node.label: iterset.index_exprs[node.id, cpt_label]
             for node, cpt_label in visited_nodes
         }
     )

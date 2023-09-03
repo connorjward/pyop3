@@ -505,9 +505,16 @@ class StrictLabelledTree(LabelledTree):
         else:
             return pmap(path_)
 
-    def path_with_nodes(self, node, component_label, ordered=False):
+    def path_with_nodes(
+        self, node, component_label, ordered=False, and_components=False
+    ):
         node_id = self._as_node_id(node)
         path_ = self._paths_with_nodes[node_id, component_label]
+        if and_components:
+            path_ = tuple(
+                (ax, just_one(cpt for cpt in ax.components if cpt.label == clabel))
+                for ax, clabel in path_
+            )
         if ordered:
             return path_
         else:

@@ -408,11 +408,44 @@ class GlobalLoopIndex(LoopIndex):
 
     def target_paths(self, context):
         iterset = self.iterset.with_context(context)
+
+        # myleaf = loop_index.iterset._node_from_path(path)
+        # visited_nodes = loop_index.iterset.path_with_nodes(*myleaf, ordered=True)
+        # for leaf in iterset.leaves:
+        #     paths
+
+        # but actually *target path*
         paths = []
         for leaf in iterset.leaves:
-            path = iterset.path(*leaf)
-            paths.append(path)
+            fullpath = list(
+                iterset.path_with_nodes(*leaf, ordered=True, and_components=True)
+            )
+            minipath = ()
+
+            targetpath = {}
+
+            if minipath in iterset.target_paths:
+                paths.append(iterset.target_paths[minipath])
+
+            for item in fullpath:
+                minipath = minipath + ((item),)
+
+                if minipath in iterset.target_paths:
+                    targetpath |= iterset.target_paths[minipath]
+                    minipath = ()
+            paths.append(pmap(targetpath))
+
         return tuple(paths)
+
+        # target_path_per_axis_tuple = pmap(
+        #     {(): pmap({node.label: cpt_label for node, cpt_label in visited_nodes})}
+        # )
+        #
+        # paths = []
+        # for leaf in iterset.leaves:
+        #     path = iterset.path(*leaf)
+        #     paths.append(path)
+        # return tuple(paths)
 
 
 class LocalLoopIndex(LoopIndex):
@@ -676,12 +709,12 @@ def _(arg: LoopIndex):
     if isinstance(arg.iterset, IndexedAxisTree):
         loop_contexts = []
         for loop_context, axis_tree in arg.iterset.axis_trees.items():
-            for leaf in axis_tree.leaves:
-                loop_contexts.append(loop_context | pmap({arg: axis_tree.path(*leaf)}))
+            for target_path in axis_tree.target_paths.values():
+                loop_contexts.append(loop_context | pmap({arg: target_path}))
         return loop_contexts
     else:
         assert isinstance(arg.iterset, AxisTree)
-        return [pmap({arg: arg.iterset.path(*leaf)}) for leaf in arg.iterset.leaves]
+        return [pmap({arg: target_path}) for target_path in arg.target_paths(pmap())]
 
 
 @collect_loop_context.register
