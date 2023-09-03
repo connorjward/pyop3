@@ -1329,9 +1329,8 @@ def _(slice_: Slice, preorder_ctx, *, prev_axes, **kwargs):
                 newvar - subslice.start
             ) // subslice.step
         else:
-            raise NotImplementedError
-            index_expr_per_leaf.append(pmap({slice_.axis: subslice.array}))
-            layout_expr_per_leaf.append(pmap({slice_.axis: "inverse search"}))
+            index_expr_per_target.append(pmap({slice_.axis: subslice.array}))
+            layout_expr_per_target[slice_.axis] = "inverse search"
 
     # breakpoint()
 
