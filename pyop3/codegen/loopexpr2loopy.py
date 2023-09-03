@@ -1164,8 +1164,12 @@ def _(loop_index: LoopIndex, preorder_ctx, *, loop_indices, **kwargs):
     # make LoopIndex property?
     index_expr_per_target = pmap(
         {
-            node.label: iterset.index_exprs[node.id, cpt_label]
-            for node, cpt_label in visited_nodes
+            (): pmap(
+                {
+                    node.label: iterset.index_exprs[node.id, cpt_label]
+                    for node, cpt_label in visited_nodes
+                }
+            )
         }
     )
 
@@ -1187,8 +1191,6 @@ def _(local_index: LocalLoopIndex, *, loop_indices, **kwargs):
     )
 
 
-# TODO this could be done with callbacks so we share code with when
-# we also want to emit instructions
 @collect_shape_index_callback.register
 def _(called_map: CalledMap, preorder_ctx, **kwargs):
     leaves, index_data = collect_shape_index_callback(
@@ -1203,21 +1205,20 @@ def _(called_map: CalledMap, preorder_ctx, **kwargs):
     layout_expr_per_leaf = []
     for from_leaf_key, leaf in leaves.items():
         components = []
-        (from_src_path, from_path, from_index_expr, _) = leaf
+        (from_path_per_node, from_index_expr, _) = leaf
+
+        from_path = from_path_per_node.get((), pmap())
+        if not axes.is_empty:
+            for node, cpt in axes.path(*from_leaf_key):
+                from_path |= from_path_per_node[node, cpt]
+
+        # breakpoint()
 
         # clean this up, we know some of this at an earlier point (loop context)
         bits = called_map.map.bits[pmap(from_path)]
         for map_component in bits:  # each one of these is a new "leaf"
             cpt = AxisComponent(map_component.arity, label=map_component.label)
             components.append(cpt)
-            path_per_leaf.append(
-                pmap({map_component.target_axis: map_component.target_component})
-            )
-
-            # this can be inferred, don't need it here
-            src_path_per_leaf.append(
-                from_src_path | {called_map.name: map_component.label}
-            )
 
             map_var = MapVariable(called_map, map_component)
             axisvar = AxisVariable(called_map.name)
@@ -1239,20 +1240,36 @@ def _(called_map: CalledMap, preorder_ctx, **kwargs):
 
         axis = Axis(components, label=called_map.name)
         if axes.root:
+            breakpoint()
             axes = axes.add_subaxis(axis, *from_leaf_key)
         else:
             axes = AxisTree(axis)
 
-        for i, cpt in enumerate(components):
+        new_index_expr_per_leaf = []
+        for i, (cpt, mapcpt) in enumerate(checked_zip(components, bits)):
             leaf_keys.append((axis.id, cpt.label))
 
+            # FIXME I think that this path is wrong if the inner bit has shape
+            # breakpoint()
+            path_per_leaf.append(
+                pmap(
+                    {
+                        ((axis, cpt),): pmap(
+                            {mapcpt.target_axis: mapcpt.target_component}
+                        )
+                    }
+                )
+            )
+            new_index_expr_per_leaf.append(
+                pmap({((axis, cpt),): index_expr_per_leaf[i]})
+            )
+
     leaves = {
-        leaf_key: (src_path, path, index_exprs, layout_exprs)
-        for (leaf_key, src_path, path, index_exprs, layout_exprs) in checked_zip(
+        leaf_key: (path, index_exprs, layout_exprs)
+        for (leaf_key, path, index_exprs, layout_exprs) in checked_zip(
             leaf_keys,
-            src_path_per_leaf,
             path_per_leaf,
-            index_expr_per_leaf,
+            new_index_expr_per_leaf,
             layout_expr_per_leaf,
         )
     }
@@ -1263,7 +1280,7 @@ def _(called_map: CalledMap, preorder_ctx, **kwargs):
 def _(slice_: Slice, preorder_ctx, *, prev_axes, **kwargs):
     components = []
     target_path_per_axis_tuple = {}
-    index_expr_per_target = {}
+    index_expr_per_target = []
     layout_expr_per_target = {}
 
     for subslice in slice_.slices:
@@ -1288,7 +1305,9 @@ def _(slice_: Slice, preorder_ctx, *, prev_axes, **kwargs):
         newvar = AxisVariable(slice_.label)
         if isinstance(subslice, AffineSliceComponent):
             target = target_axis.id, target_cpt.label
-            index_expr_per_target[slice_.axis] = newvar * subslice.step + subslice.start
+            index_expr_per_target.append(
+                pmap({slice_.axis: newvar * subslice.step + subslice.start})
+            )
             layout_expr_per_target[slice_.axis] = (
                 newvar - subslice.start
             ) // subslice.step
@@ -1304,14 +1323,16 @@ def _(slice_: Slice, preorder_ctx, *, prev_axes, **kwargs):
     for (
         cpt,
         subslice,
-    ) in checked_zip(components, slice_.slices):
+        iexpr,
+    ) in checked_zip(components, slice_.slices, index_expr_per_target):
         # must be multiple of source!
         target_path_per_axis_tuple[((axes.root, cpt),)] = pmap(
             {slice_.axis: subslice.component}
         )
+        myindexexpr = pmap({((axes.root, cpt),): iexpr})
         leaves[axes.root.id, cpt.label] = (
             target_path_per_axis_tuple,
-            index_expr_per_target,
+            myindexexpr,
             layout_expr_per_target,
         )
 

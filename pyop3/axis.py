@@ -722,7 +722,7 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
                             target_axis.id, target_component
                         ]
                         new_index_expr = IndexExpressionReplacer(
-                            index_expr_replace_map
+                            index_expr_replace_map[()]
                         )(orig_index_expr)
                         new_index_expr_per_target[
                             target_axis.id, target_component
@@ -750,8 +750,11 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
                         indexed_axes.root,
                         new_target_path_per_axis_tuple,
                         index_expr_replace_map,
-                        target_path=new_target_path_per_axis_tuple.get((), pmap()),
                     )
+                    # if () in index_expr_replace_map:
+                    #     new_index_expr_per_target |= {
+                    #         (): index_expr_replace_map[()]
+                    #     }
 
                 # breakpoint()
                 axis_trees[loop_context] = indexed_axes.copy(
@@ -778,13 +781,14 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
 
         for cpt in indexed_axis.components:
             new_minipath = minipath + ((indexed_axis, cpt),)
+            newmypath = mypath
             found = False
             if new_minipath in target_path_per_axis_tuple:
                 found = True
                 pathextras = target_path_per_axis_tuple[new_minipath]
                 new_targetpath = targetpath | pathextras
                 node, ncpt = self._node_from_path(new_targetpath)
-                newmypath = mypath + ((node, ncpt),)
+                newmypath += ((node, ncpt),)
 
             if newmypath in self.target_paths:
                 new_target_path_per_axis_tuple[new_minipath] = self.target_paths[
@@ -822,15 +826,59 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         index_expr_replace_map,
         target_path=pmap(),
         minipath=(),
+        first=True,
     ):
         from pyop3.distarray.multiarray import IndexExpressionReplacer
 
         new_index_expr_per_target = {}
+
+        ###
+        if first and () in target_path_per_axis_tuple:
+            target_path = target_path | target_path_per_axis_tuple[()]
+
+            leaf = self.orig_axes._node_from_path(target_path)
+            target_path_with_axes = self.orig_axes.path_with_nodes(*leaf, ordered=True)
+            assert len(target_path_with_axes) == len(target_path)
+
+            for target_axis, target_component in target_path_with_axes:
+                index_expr = self.index_exprs[target_axis.id, target_component]
+                # breakpoint()
+                new_index_expr = IndexExpressionReplacer(index_expr_replace_map[()])(
+                    index_expr
+                )
+                new_index_expr_per_target[
+                    target_axis.id, target_component
+                ] = new_index_expr
+
+            minipath = ()
+
+        ###
+
         for cpt in indexed_axis.components:
             new_target_path = target_path
             new_minipath = minipath + ((indexed_axis, cpt),)
             if new_minipath in target_path_per_axis_tuple:
+                # not needed?
                 new_target_path = target_path | target_path_per_axis_tuple[new_minipath]
+
+                leaf = self.orig_axes._node_from_path(new_target_path)
+                target_path_with_axes = self.orig_axes.path_with_nodes(
+                    *leaf, ordered=True
+                )
+
+                # FIXME should have loop here so I don't miss anything
+
+                target_axis, target_component = target_path_with_axes[-1]
+
+                index_expr = self.index_exprs[target_axis.id, target_component]
+                # breakpoint()
+                new_index_expr = IndexExpressionReplacer(
+                    index_expr_replace_map[new_minipath]
+                )(index_expr)
+                new_index_expr_per_target[
+                    target_axis.id, target_component
+                ] = new_index_expr
+
                 new_minipath = ()
 
             if subaxis := indexed_axes.child(indexed_axis, cpt):
@@ -841,23 +889,26 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
                     index_expr_replace_map,
                     new_target_path,
                     new_minipath,
+                    first=False,
                 )
                 new_index_expr_per_target |= subresult
             else:
                 assert not new_minipath
-
-                leaf = self.orig_axes._node_from_path(new_target_path)
-                target_path_with_axes = self.orig_axes.path_with_nodes(
-                    *leaf, ordered=True
-                )
-                for target_axis, target_component in target_path_with_axes:
-                    index_expr = self.index_exprs[target_axis.id, target_component]
-                    new_index_expr = IndexExpressionReplacer(index_expr_replace_map)(
-                        index_expr
-                    )
-                    new_index_expr_per_target[
-                        target_axis.id, target_component
-                    ] = new_index_expr
+                pass
+                #
+                # leaf = self.orig_axes._node_from_path(new_target_path)
+                # target_path_with_axes = self.orig_axes.path_with_nodes(
+                #     *leaf, ordered=True
+                # )
+                # for target_axis, target_component in target_path_with_axes:
+                #     index_expr = self.index_exprs[target_axis.id, target_component]
+                #     breakpoint()
+                #     new_index_expr = IndexExpressionReplacer(index_expr_replace_map)(
+                #         index_expr
+                #     )
+                #     new_index_expr_per_target[
+                #         target_axis.id, target_component
+                #     ] = new_index_expr
         return pmap(new_index_expr_per_target)
 
     @property
