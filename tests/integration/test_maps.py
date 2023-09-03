@@ -152,10 +152,7 @@ def test_inc_from_multi_component_temporary(vector_inc_kernel):
         "map0",
     )
 
-    # do_loop(p := axes1.index(), vector_inc_kernel(dat0[map0(p)], dat1[p]))
-    l = loop(p := axes1.index(), vector_inc_kernel(dat0[map0(p)], dat1[p]))
-    l()
-    breakpoint()
+    do_loop(p := axes1.index(), vector_inc_kernel(dat0[map0(p)], dat1[p]))
 
     # The expected value is the current index (from the identity map), plus the values
     # from the map. Since the indices in the map are offset in the actual array we
@@ -230,7 +227,10 @@ def test_inc_with_multiple_maps(vector_inc_kernel):
         "map0",
     )
 
-    do_loop(p := axes.index(), vector_inc_kernel(dat0[map0(p)], dat1[p]))
+    # do_loop(p := axes.index(), vector_inc_kernel(dat0[map0(p)], dat1[p]))
+    l = loop(p := axes.index(), vector_inc_kernel(dat0[map0(p)], dat1[p]))
+    l()
+    breakpoint()
     assert np.allclose(dat1.data, np.sum(mapdata0, axis=1) + np.sum(mapdata1, axis=1))
 
 

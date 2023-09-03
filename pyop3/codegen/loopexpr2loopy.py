@@ -764,10 +764,14 @@ def _parse_assignment_final_rec(
     ctx,
     target_path=pmap(),
     mini_path=(),
+    jname_expr_per_target_axis_label=None,
     *,
     current_axis,
 ):
     from pyop3.distarray.multiarray import IndexExpressionReplacer
+
+    if not jname_expr_per_target_axis_label:
+        jname_expr_per_target_axis_label = {}
 
     for axcpt in current_axis.components:
         size = register_extent(axcpt.count, array_path, array_jnames, ctx)
@@ -784,7 +788,26 @@ def _parse_assignment_final_rec(
         new_target_path = target_path
         new_mini_path = mini_path + ((current_axis, axcpt),)
         if new_mini_path in axes.target_paths:
-            new_target_path = target_path | axes.target_paths[new_mini_path]
+            mytargetpath = axes.target_paths[new_mini_path]
+            new_target_path = target_path | mytargetpath
+
+            # for now, can in theory target multiple target axes
+            target_axis = just_one(mytargetpath.keys())
+
+            # breakpoint()
+            # just in case
+            found = False
+            for myaxis, mycomponent in new_mini_path:
+                if (myaxis.id, mycomponent.label) in axes.index_exprs:
+                    assert not found
+                    index_expr = axes.index_exprs[myaxis.id, mycomponent.label]
+                    jname_expr = JnameSubstitutor(new_array_jnames, ctx)(index_expr)
+                    jname_expr_per_target_axis_label[target_axis] = jname_expr
+                    found = True
+            # jname_expr_per_target_axis_label = pmap(
+            #     jname_expr_per_target_axis_label
+            # )
+
             new_mini_path = ()
 
         with ctx.within_inames({iname}):
@@ -799,6 +822,7 @@ def _parse_assignment_final_rec(
                     ctx,
                     new_target_path,
                     new_mini_path,
+                    jname_expr_per_target_axis_label,
                     current_axis=subaxis,
                 )
             else:
@@ -813,19 +837,22 @@ def _parse_assignment_final_rec(
                 # create a map from target axis labels to index_expression
                 # we currently have indexed axis labels to jnames and, from the axes,
                 # a map of target axis label to indexed expression
-                jname_expr_per_target_axis_label = {}
+                # jname_expr_per_target_axis_label = {}
 
-                leaf = axes.orig_axes._node_from_path(new_target_path)
-                target_path_with_axes = axes.orig_axes.path_with_nodes(
-                    *leaf, ordered=True
-                )
-                for target_axis, target_component in target_path_with_axes:
-                    index_expr = axes.index_exprs[target_axis.id, target_component]
-                    jname_expr = JnameSubstitutor(new_array_jnames, ctx)(index_expr)
-                    jname_expr_per_target_axis_label[target_axis.label] = jname_expr
-                jname_expr_per_target_axis_label = pmap(
-                    jname_expr_per_target_axis_label
-                )
+                # leaf = axes.orig_axes._node_from_path(new_target_path)
+                # target_path_with_axes = axes.orig_axes.path_with_nodes(
+                #     *leaf, ordered=True
+                # )
+                # for target_axis, target_component in target_path_with_axes:
+                # breakpoint()
+                # for myaxis, mycomponent in new_mini_path:
+                #     index_expr = axes.index_exprs[myaxis.id, mycomponent]
+                #     jname_expr = JnameSubstitutor(new_array_jnames, ctx)(index_expr)
+                #     breakpoint()
+                #     jname_expr_per_target_axis_label[target_axis.label] = jname_expr
+                # jname_expr_per_target_axis_label = pmap(
+                #     jname_expr_per_target_axis_label
+                # )
 
                 # now use this as the replace map to get the right layout expression
                 layout_fn = IndexExpressionReplacer(jname_expr_per_target_axis_label)(
@@ -1205,12 +1232,19 @@ def _(called_map: CalledMap, preorder_ctx, **kwargs):
     layout_expr_per_leaf = []
     for from_leaf_key, leaf in leaves.items():
         components = []
-        (from_path_per_node, from_index_expr, _) = leaf
+        (from_path_per_node, from_index_expr_per_node, _) = leaf
 
         from_path = from_path_per_node.get((), pmap())
+        from_index_expr = from_index_expr_per_node.get((), pmap())
         if not axes.is_empty:
-            for node, cpt in axes.path(*from_leaf_key):
-                from_path |= from_path_per_node[node, cpt]
+            # FIXME I think that this will break if we have something with multiple axes
+            mypath = axes.path_with_nodes(
+                *from_leaf_key, ordered=True, and_components=True
+            )
+            from_path |= from_path_per_node[mypath]
+            from_index_expr |= from_index_expr_per_node[mypath]
+        else:
+            mypath = ()
 
         # breakpoint()
 
@@ -1240,7 +1274,7 @@ def _(called_map: CalledMap, preorder_ctx, **kwargs):
 
         axis = Axis(components, label=called_map.name)
         if axes.root:
-            breakpoint()
+            # breakpoint()
             axes = axes.add_subaxis(axis, *from_leaf_key)
         else:
             axes = AxisTree(axis)
@@ -1254,14 +1288,15 @@ def _(called_map: CalledMap, preorder_ctx, **kwargs):
             path_per_leaf.append(
                 pmap(
                     {
-                        ((axis, cpt),): pmap(
+                        mypath
+                        + ((axis, cpt),): pmap(
                             {mapcpt.target_axis: mapcpt.target_component}
                         )
                     }
                 )
             )
             new_index_expr_per_leaf.append(
-                pmap({((axis, cpt),): index_expr_per_leaf[i]})
+                pmap({mypath + ((axis, cpt),): index_expr_per_leaf[i]})
             )
 
     leaves = {

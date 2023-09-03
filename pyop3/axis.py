@@ -735,16 +735,17 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
                     # TODO
                     new_layout_expr_per_target = NotImplemented
                 else:
-                    new_target_path_per_axis_tuple = self.parse_target_paths(
-                        indexed_axes,
-                        indexed_axes.root,
-                        target_path_per_axis_tuple,
-                        target_path_per_axis_tuple.get((), pmap()),
-                    )
-                    if () in target_path_per_axis_tuple:
-                        new_target_path_per_axis_tuple |= {
-                            (): target_path_per_axis_tuple[()]
-                        }
+                    new_target_path_per_axis_tuple = target_path_per_axis_tuple
+                    # new_target_path_per_axis_tuple = self.parse_target_paths(
+                    #     indexed_axes,
+                    #     indexed_axes.root,
+                    #     target_path_per_axis_tuple,
+                    #     target_path_per_axis_tuple.get((), pmap()),
+                    # )
+                    # if () in target_path_per_axis_tuple:
+                    #     new_target_path_per_axis_tuple |= {
+                    #         (): target_path_per_axis_tuple[()]
+                    #     }
                     new_index_expr_per_target = self.parse_index_exprs(
                         indexed_axes,
                         indexed_axes.root,
@@ -846,15 +847,14 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
                 new_index_expr = IndexExpressionReplacer(index_expr_replace_map[()])(
                     index_expr
                 )
-                new_index_expr_per_target[
-                    target_axis.id, target_component
-                ] = new_index_expr
+                new_index_expr_per_target[()] = new_index_expr
 
             minipath = ()
 
         ###
 
         for cpt in indexed_axis.components:
+            # breakpoint()
             new_target_path = target_path
             new_minipath = minipath + ((indexed_axis, cpt),)
             if new_minipath in target_path_per_axis_tuple:
@@ -862,9 +862,7 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
                 new_target_path = target_path | target_path_per_axis_tuple[new_minipath]
 
                 leaf = self.orig_axes._node_from_path(new_target_path)
-                target_path_with_axes = self.orig_axes.path_with_nodes(
-                    *leaf, ordered=True
-                )
+                target_path_with_axes = self.path_with_nodes(*leaf, ordered=True)
 
                 # FIXME should have loop here so I don't miss anything
 
@@ -875,9 +873,7 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
                 new_index_expr = IndexExpressionReplacer(
                     index_expr_replace_map[new_minipath]
                 )(index_expr)
-                new_index_expr_per_target[
-                    target_axis.id, target_component
-                ] = new_index_expr
+                new_index_expr_per_target[indexed_axis.id, cpt.label] = new_index_expr
 
                 new_minipath = ()
 
