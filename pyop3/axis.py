@@ -735,27 +735,24 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
                     # TODO
                     new_layout_expr_per_target = NotImplemented
                 else:
-                    new_target_path_per_axis_tuple = target_path_per_axis_tuple
-                    # new_target_path_per_axis_tuple = self.parse_target_paths(
-                    #     indexed_axes,
-                    #     indexed_axes.root,
-                    #     target_path_per_axis_tuple,
-                    #     target_path_per_axis_tuple.get((), pmap()),
-                    # )
-                    # if () in target_path_per_axis_tuple:
-                    #     new_target_path_per_axis_tuple |= {
-                    #         (): target_path_per_axis_tuple[()]
-                    #     }
+                    # compose target paths
+                    new_target_path_per_axis_tuple = self.parse_target_paths(
+                        indexed_axes,
+                        indexed_axes.root,
+                        target_path_per_axis_tuple,
+                        target_path_per_axis_tuple.get((), pmap()),
+                    )
+                    if () in target_path_per_axis_tuple:
+                        new_target_path_per_axis_tuple |= {
+                            (): target_path_per_axis_tuple[()]
+                        }
+
                     new_index_expr_per_target = self.parse_index_exprs(
                         indexed_axes,
                         indexed_axes.root,
-                        new_target_path_per_axis_tuple,
+                        target_path_per_axis_tuple,  # note this is the original one
                         index_expr_replace_map,
                     )
-                    # if () in index_expr_replace_map:
-                    #     new_index_expr_per_target |= {
-                    #         (): index_expr_replace_map[()]
-                    #     }
 
                 # breakpoint()
                 axis_trees[loop_context] = indexed_axes.copy(
@@ -790,6 +787,8 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
                 new_targetpath = targetpath | pathextras
                 node, ncpt = self._node_from_path(new_targetpath)
                 newmypath += ((node, ncpt),)
+            else:
+                new_targetpath = targetpath
 
             if newmypath in self.target_paths:
                 new_target_path_per_axis_tuple[new_minipath] = self.target_paths[
@@ -861,7 +860,7 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
                 # not needed?
                 new_target_path = target_path | target_path_per_axis_tuple[new_minipath]
 
-                leaf = self.orig_axes._node_from_path(new_target_path)
+                leaf = self._node_from_path(new_target_path)
                 target_path_with_axes = self.path_with_nodes(*leaf, ordered=True)
 
                 # FIXME should have loop here so I don't miss anything

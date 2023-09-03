@@ -379,12 +379,13 @@ class CalledMap(Index, LoopIterable, UniquelyIdentifiedImmutableRecord):
         return self.map.bits
 
     def target_paths(self, context):
-        raise NotImplementedError("I think this will break")
-        targets = {}
+        targets = []
         for src_path in self.from_index.target_paths(context):
             for map_component in self.bits[src_path]:
-                targets[map_component.target_axis] = map_component.target_component
-        return (pmap(targets),)
+                targets.append(
+                    pmap({map_component.target_axis: map_component.target_component})
+                )
+        return tuple(targets)
 
 
 class LoopIndex(Index, abc.ABC):
