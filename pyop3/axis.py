@@ -688,6 +688,7 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         from pyop3.distarray.multiarray import IndexExpressionReplacer
         from pyop3.index import IndexedAxisTree, as_index_forest, collect_loop_context
 
+        # FIXME I have a weird double loop here over loop contexts
         axis_trees = {}
         loop_contexts = collect_loop_context(indices)
         if not loop_contexts:
@@ -702,7 +703,7 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
                 loop_context = index_tree.loop_context
                 (
                     indexed_axes,
-                    target_path_per_axis_tuple,
+                    target_path_per_axis_tuple,  # this is for the current axes, not orig
                     index_expr_replace_map,
                     itree_layout_expr_per_target,
                 ) = index_axes(self, index_tree, loop_context)
@@ -728,19 +729,33 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
                         ] = new_index_expr
                     new_index_expr_per_target = pmap(new_index_expr_per_target)
 
+                    # since only () is in this thing
+                    new_target_path_per_axis_tuple = target_path_per_axis_tuple
+
                     # TODO
                     new_layout_expr_per_target = NotImplemented
                 else:
-                    new_index_expr_per_target = self.parse_index_exprs(
+                    new_target_path_per_axis_tuple = self.parse_target_paths(
                         indexed_axes,
                         indexed_axes.root,
                         target_path_per_axis_tuple,
+                        target_path_per_axis_tuple.get((), pmap()),
+                    )
+                    if () in target_path_per_axis_tuple:
+                        new_target_path_per_axis_tuple |= {
+                            (): target_path_per_axis_tuple[()]
+                        }
+                    new_index_expr_per_target = self.parse_index_exprs(
+                        indexed_axes,
+                        indexed_axes.root,
+                        new_target_path_per_axis_tuple,
                         index_expr_replace_map,
-                        target_path=target_path_per_axis_tuple.get((), pmap()),
+                        target_path=new_target_path_per_axis_tuple.get((), pmap()),
                     )
 
+                # breakpoint()
                 axis_trees[loop_context] = indexed_axes.copy(
-                    target_paths=target_path_per_axis_tuple,
+                    target_paths=new_target_path_per_axis_tuple,
                     index_exprs=new_index_expr_per_target,
                     layout_exprs=new_layout_expr_per_target,  # not used currently
                     orig_axes=self.orig_axes,
@@ -749,6 +764,55 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
 
     def __call__(self, *args):
         return CalledAxisTree(self, *args)
+
+    def parse_target_paths(
+        self,
+        indexed_axes,
+        indexed_axis,
+        target_path_per_axis_tuple,
+        targetpath,
+        minipath=(),
+        mypath=(),
+    ):
+        new_target_path_per_axis_tuple = {}
+
+        for cpt in indexed_axis.components:
+            new_minipath = minipath + ((indexed_axis, cpt),)
+            found = False
+            if new_minipath in target_path_per_axis_tuple:
+                found = True
+                pathextras = target_path_per_axis_tuple[new_minipath]
+                new_targetpath = targetpath | pathextras
+                node, ncpt = self._node_from_path(new_targetpath)
+                newmypath = mypath + ((node, ncpt),)
+
+            if newmypath in self.target_paths:
+                new_target_path_per_axis_tuple[new_minipath] = self.target_paths[
+                    newmypath
+                ]
+                newmypath = ()
+
+            if found:
+                new_minipath = ()
+
+            if subaxis := indexed_axes.child(indexed_axis, cpt):
+                retval = self.parse_target_paths(
+                    indexed_axes,
+                    subaxis,
+                    target_path_per_axis_tuple,
+                    new_targetpath,
+                    new_minipath,
+                    newmypath,
+                )
+                new_target_path_per_axis_tuple |= retval
+
+            else:
+                assert not new_minipath
+                assert not newmypath
+
+                # should have handled above
+                pass
+        return pmap(new_target_path_per_axis_tuple)
 
     def parse_index_exprs(
         self,
@@ -771,14 +835,21 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
 
             if subaxis := indexed_axes.child(indexed_axis, cpt):
                 subresult = self.parse_index_exprs(
-                    indexed_axes, subaxis, index_expr_replace_map, new_minipath
+                    indexed_axes,
+                    subaxis,
+                    target_path_per_axis_tuple,
+                    index_expr_replace_map,
+                    new_target_path,
+                    new_minipath,
                 )
                 new_index_expr_per_target |= subresult
             else:
                 assert not new_minipath
 
-                leaf = self._node_from_path(new_target_path)
-                target_path_with_axes = self.path_with_nodes(*leaf, ordered=True)
+                leaf = self.orig_axes._node_from_path(new_target_path)
+                target_path_with_axes = self.orig_axes.path_with_nodes(
+                    *leaf, ordered=True
+                )
                 for target_axis, target_component in target_path_with_axes:
                     index_expr = self.index_exprs[target_axis.id, target_component]
                     new_index_expr = IndexExpressionReplacer(index_expr_replace_map)(

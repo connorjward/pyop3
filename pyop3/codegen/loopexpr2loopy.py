@@ -685,17 +685,18 @@ def _parse_assignment_final(
 ):
     from pyop3.distarray.multiarray import IndexExpressionReplacer
 
-    target_path = {}
+    # target_path = {}
     array_axis_labels_to_jnames = {}
     for loop_index in loop_context.keys():
         # we don't do anything with src_jnames currently. I should probably just register
         # it as a separate loop index
         tpath, target_jnames, src_jnames = loop_indices[loop_index]
-        target_path |= tpath
+        # target_path |= tpath
         # for axis_label, jname in target_jnames.items():
         for axis_label, jname in src_jnames.items():
             array_axis_labels_to_jnames[axis_label] = jname
-    target_path = pmap(target_path)
+    # target_path = pmap(target_path)
+    target_path = axes.target_paths.get((), pmap())
 
     # loop indices aren't included in the temporary
     temp_axis_labels_to_jnames = {}
