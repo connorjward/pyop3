@@ -698,68 +698,130 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
                 loop_context = index_tree.loop_context
                 (
                     indexed_axes,
-                    target_path_per_axis_tuple,  # this is for the current axes, not orig
-                    index_expr_replace_map,
-                    itree_layout_expr_per_target,
+                    target_path_per_leaf,
+                    index_exprs_per_leaf,
+                    layout_exprs_per_leaf,
                 ) = index_axes(self, index_tree, loop_context)
 
-                new_index_expr_per_target = {}
-                new_layout_expr_per_target = {}
-
                 if indexed_axes.is_empty:
-                    target_path = target_path_per_axis_tuple[()]
-                    target_path_with_axes = self.path_with_nodes(
-                        *self._node_from_path(target_path), ordered=True
-                    )
-                    new_index_expr_per_target = {}
-                    for target_axis, target_component in target_path_with_axes:
-                        orig_index_expr = self.index_exprs[
-                            target_axis.id, target_component
-                        ]
+                    source_path = pmap()
+
+                    # 1. target path
+                    # TODO This might need some composition if we are indexing twice.
+                    new_target_path_per_leaf = target_path_per_leaf
+
+                    # 2. index exprs
+                    new_index_exprs_per_leaf = {}
+
+                    index_expr_replace_map = index_exprs_per_leaf[source_path]
+
+                    target_path = target_path_per_leaf[source_path]
+
+                    new_index_exprs = {}
+                    index_exprs = self.index_exprs_per_leaf[target_path]
+                    for axis_label, index_expr in index_exprs.items():
                         new_index_expr = IndexExpressionReplacer(
-                            index_expr_replace_map[()]
-                        )(orig_index_expr)
-                        new_index_expr_per_target[
-                            target_axis.id, target_component
-                        ] = new_index_expr
-                    new_index_expr_per_target = pmap(new_index_expr_per_target)
+                            index_expr_replace_map
+                        )(index_expr)
+                        new_index_exprs[axis_label] = new_index_expr
+                    new_index_exprs = pmap(new_index_exprs)
 
-                    # since only () is in this thing
-                    new_target_path_per_axis_tuple = target_path_per_axis_tuple
+                    new_index_exprs_per_leaf[source_path] = new_index_exprs
 
-                    # TODO
-                    new_layout_expr_per_target = NotImplemented
+                    new_index_exprs_per_leaf = pmap(new_index_exprs_per_leaf)
+
+                    # 3. layout exprs
+                    new_layout_exprs_per_leaf = {}
                 else:
-                    # compose target paths
-                    new_target_path_per_axis_tuple = self.parse_target_paths(
+                    (
+                        new_target_path_per_leaf,
+                        new_index_exprs_per_leaf,
+                        new_layout_exprs_per_leaf,
+                    ) = self.parse_bits(
                         indexed_axes,
-                        indexed_axes.root,
-                        target_path_per_axis_tuple,
-                        target_path_per_axis_tuple.get((), pmap()),
-                    )
-                    if () in target_path_per_axis_tuple:
-                        new_target_path_per_axis_tuple |= {
-                            (): target_path_per_axis_tuple[()]
-                        }
-
-                    new_index_expr_per_target = self.parse_index_exprs(
-                        indexed_axes,
-                        indexed_axes.root,
-                        target_path_per_axis_tuple,  # note this is the original one
-                        index_expr_replace_map,
+                        target_path_per_leaf,
+                        index_exprs_per_leaf,
+                        layout_exprs_per_leaf,
                     )
 
                 # breakpoint()
                 axis_trees[loop_context] = indexed_axes.copy(
-                    target_paths=new_target_path_per_axis_tuple,
-                    index_exprs=new_index_expr_per_target,
-                    layout_exprs=new_layout_expr_per_target,  # not used currently
+                    target_paths=new_target_path_per_leaf,
+                    index_exprs=new_index_exprs_per_leaf,
+                    layout_exprs=new_layout_exprs_per_leaf,  # not used currently
                     orig_axes=self.orig_axes,
                 )
         return IndexedAxisTree(axis_trees)
 
     def __call__(self, *args):
         return CalledAxisTree(self, *args)
+
+    def parse_bits(
+        self,
+        axes,
+        target_path_per_leaf,
+        index_exprs_per_leaf,
+        layout_exprs_per_leaf,
+        *,
+        axis=None,
+        source_path=pmap(),
+    ):
+        from pyop3.distarray.multiarray import IndexExpressionReplacer
+
+        assert not axes.is_empty, "handled outside"
+
+        axis = axis or axes.root
+
+        new_target_path_per_leaf = {}
+        new_index_exprs_per_leaf = {}
+        new_layout_exprs_per_leaf = {}
+        for component in axis.components:
+            new_source_path = source_path | {axis.label: component.label}
+
+            if subaxis := axes.child(axis, component):
+                retval = self.parse_bits(
+                    axes,
+                    target_path_per_leaf,
+                    index_exprs_per_leaf,
+                    layout_exprs_per_leaf,
+                    axis=subaxis,
+                    source_path=new_source_path,
+                )
+
+                new_target_path_per_leaf |= retval[0]
+                new_index_exprs_per_leaf |= retval[1]
+                new_layout_exprs_per_leaf |= retval[2]
+
+            else:
+                # NOTE: This is NOT the final target path. This only targets
+                # the thing *before* the indexing took place. Subsequent indexing
+                # requires composition.
+                path = target_path_per_leaf[new_source_path]
+
+                # 1. target path
+                new_target_path = self.target_path_per_leaf[path]
+                new_target_path_per_leaf[new_source_path] = new_target_path
+
+                # 2. index exprs
+                index_expr_replace_map = index_exprs_per_leaf[new_source_path]
+                new_index_exprs = {}
+                for axis_label, index_expr in self.index_exprs_per_leaf[path].items():
+                    new_index_expr = IndexExpressionReplacer(index_expr_replace_map)(
+                        index_expr
+                    )
+                    new_index_exprs[axis_label] = new_index_expr
+                new_index_exprs_per_leaf[new_source_path] = pmap(new_index_exprs)
+
+                # 3. layout exprs
+                new_layout_exprs_per_leaf[new_source_path] = pmap()  # TODO
+        new_target_path_per_leaf = pmap(new_target_path_per_leaf)
+        new_index_exprs_per_leaf = pmap(new_index_exprs_per_leaf)
+        new_layout_exprs_per_leaf = pmap(new_layout_exprs_per_leaf)
+        return (
+            new_target_path_per_leaf,
+            new_index_exprs_per_leaf,
+            new_layout_exprs_per_leaf,
+        )
 
     def parse_target_paths(
         self,
@@ -910,14 +972,19 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
     @property
     def index_exprs(self):
         if not self._index_exprs:
-            self._index_exprs = pmap(
-                {
-                    (axis.id, cpt.label): AxisVariable(axis.label)
-                    for axis in self.nodes
-                    for cpt in axis.components
-                }
-            )
+            exprs_per_leaf = {}
+            for leaf in self.leaves:
+                path = self.path(*leaf)
+                exprs_per_leaf[path] = pmap(
+                    {axis: AxisVariable(axis) for axis in path.keys()}
+                )
+            self._index_exprs = exprs_per_leaf
         return self._index_exprs
+
+    @property
+    def index_exprs_per_leaf(self):
+        # better alias for index_exprs
+        return self.index_exprs
 
     @property
     def layout_exprs(self):
@@ -957,12 +1024,16 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         if not self._target_paths:
             self._target_paths = pmap(
                 {
-                    ((axis, cpt),): pmap({axis.label: cpt.label})
-                    for axis in self.nodes
-                    for cpt in axis.components
+                    self.path(*leaf): self.path(*leaf)  # inefficient
+                    for leaf in self.leaves
                 }
             )
         return self._target_paths
+
+    @property
+    def target_path_per_leaf(self):
+        # better alias for target_paths
+        return self.target_paths
 
     @functools.cached_property
     def datamap(self) -> dict[str:DistributedArray]:
@@ -978,10 +1049,11 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
 
         # TODO
         # for cleverdict in [self.index_exprs, self.layout_exprs]:
-        for cleverdict in [self.index_exprs]:
-            for layout in cleverdict.values():
-                for array in MultiArrayCollector()(layout):
-                    dmap |= array.datamap
+        for cleverdict in [self.index_exprs_per_leaf]:
+            for exprs in cleverdict.values():
+                for expr in exprs.values():
+                    for array in MultiArrayCollector()(layout):
+                        dmap |= array.datamap
         # breakpoint()
         return dmap
 
@@ -1652,11 +1724,16 @@ def _tabulate_count_array_tree(
         selected_component_num = point_to_component_num[pt]
         selected_component = axis.components[selected_component_id]
 
-        new_path = path | axes.target_paths[((axis, selected_component),)]
+        new_path = (
+            path
+            | axes.target_path_per_leaf[pmap({axis.label: selected_component.label})]
+        )
         # new_other_path = other_path | {axis.label: selected_component.label}
         new_indices = indices | {
             just_one(
-                axes.target_paths[((axis, selected_component),)].keys()
+                axes.target_path_per_leaf[
+                    pmap({axis.label: selected_component.label})
+                ].keys()
             ): selected_component_num
         }
         # new_indices = indices | {axis.label: selected_component_num}
@@ -1746,15 +1823,13 @@ def _axis_component_size(
     indices: Mapping = pyrsistent.pmap(),
 ):
     count = _as_int(component.count, path, indices)
-    target_path = axes.target_paths[((axis, component),)]
-    target_axis = just_one(target_path.keys())
     if subaxis := axes.child(axis, component):
         return sum(
             _axis_size(
                 axes,
                 subaxis,
-                path | target_path,
-                indices | {target_axis: i},
+                path | {axis.label: component.label},
+                indices | {axis.label: i},
             )
             for i in range(count)
         )
@@ -1768,6 +1843,9 @@ def _as_int(arg: Any, path: Mapping, indices: Mapping):
 
     # cyclic import
     if isinstance(arg, MultiArray):
+        # TODO this might break if we have something like [:, subset]
+        # I will need to map the "source" axis (e.g. slice_label0) back
+        # to the "target" axis
         return arg.get_value(path, indices)
     else:
         raise TypeError

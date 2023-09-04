@@ -409,44 +409,11 @@ class GlobalLoopIndex(LoopIndex):
 
     def target_paths(self, context):
         iterset = self.iterset.with_context(context)
-
-        # myleaf = loop_index.iterset._node_from_path(path)
-        # visited_nodes = loop_index.iterset.path_with_nodes(*myleaf, ordered=True)
-        # for leaf in iterset.leaves:
-        #     paths
-
-        # but actually *target path*
         paths = []
         for leaf in iterset.leaves:
-            fullpath = list(
-                iterset.path_with_nodes(*leaf, ordered=True, and_components=True)
-            )
-            minipath = ()
-
-            targetpath = {}
-
-            if minipath in iterset.target_paths:
-                paths.append(iterset.target_paths[minipath])
-
-            for item in fullpath:
-                minipath = minipath + ((item),)
-
-                if minipath in iterset.target_paths:
-                    targetpath |= iterset.target_paths[minipath]
-                    minipath = ()
-            paths.append(pmap(targetpath))
-
+            path = iterset.path(*leaf)
+            paths.append(iterset.target_path_per_leaf[path])
         return tuple(paths)
-
-        # target_path_per_axis_tuple = pmap(
-        #     {(): pmap({node.label: cpt_label for node, cpt_label in visited_nodes})}
-        # )
-        #
-        # paths = []
-        # for leaf in iterset.leaves:
-        #     path = iterset.path(*leaf)
-        #     paths.append(path)
-        # return tuple(paths)
 
 
 class LocalLoopIndex(LoopIndex):
@@ -708,6 +675,7 @@ def _(arg: LoopIndex):
     from pyop3.axis import AxisTree
 
     if isinstance(arg.iterset, IndexedAxisTree):
+        raise NotImplementedError
         loop_contexts = []
         for loop_context, axis_tree in arg.iterset.axis_trees.items():
             extracontext = {}
@@ -718,7 +686,10 @@ def _(arg: LoopIndex):
         return loop_contexts
     else:
         assert isinstance(arg.iterset, AxisTree)
-        return [pmap({arg: target_path}) for target_path in arg.target_paths(pmap())]
+        return [
+            pmap({arg: target_path})
+            for target_path in arg.iterset.target_path_per_leaf.values()
+        ]
 
 
 @collect_loop_context.register
@@ -828,6 +799,7 @@ def index_tree_from_iterable(
         subtrees = []
         # used to be leaves...
         for target_path in index.target_paths(loop_context):
+            assert target_path
             new_path = path | target_path
             child, subtree = index_tree_from_iterable(
                 subindices, loop_context, axes, new_path
