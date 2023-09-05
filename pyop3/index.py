@@ -675,14 +675,12 @@ def _(arg: LoopIndex):
     from pyop3.axis import AxisTree
 
     if isinstance(arg.iterset, IndexedAxisTree):
-        raise NotImplementedError
         loop_contexts = []
         for loop_context, axis_tree in arg.iterset.axis_trees.items():
             extracontext = {}
             for target_path in axis_tree.target_paths.values():
                 extracontext |= target_path
             loop_contexts.append(loop_context | {arg: pmap(extracontext)})
-        # breakpoint()
         return loop_contexts
     else:
         assert isinstance(arg.iterset, AxisTree)

@@ -1052,7 +1052,7 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         for cleverdict in [self.index_exprs_per_leaf]:
             for exprs in cleverdict.values():
                 for expr in exprs.values():
-                    for array in MultiArrayCollector()(layout):
+                    for array in MultiArrayCollector()(expr):
                         dmap |= array.datamap
         # breakpoint()
         return dmap
@@ -1602,7 +1602,8 @@ def _compute_layouts(
             # super ick
             bits = []
             for cpt in axis.components:
-                axlabel, clabel = just_one(axes.target_paths[((axis, cpt),)].items())
+                # axlabel, clabel = just_one(axes.target_paths[((axis, cpt),)].items())
+                axlabel, clabel = axis.label, cpt.label
                 bits.append((cpt.count, axlabel, clabel))
             croot = CustomNode(bits)
             if strictly_all(sub is not None for sub in csubtrees):
@@ -1726,15 +1727,17 @@ def _tabulate_count_array_tree(
 
         new_path = (
             path
-            | axes.target_path_per_leaf[pmap({axis.label: selected_component.label})]
+            # | axes.target_path_per_leaf[pmap({axis.label: selected_component.label})]
+            | {axis.label: selected_component.label}
         )
         # new_other_path = other_path | {axis.label: selected_component.label}
         new_indices = indices | {
-            just_one(
-                axes.target_path_per_leaf[
-                    pmap({axis.label: selected_component.label})
-                ].keys()
-            ): selected_component_num
+            # just_one(
+            #     axes.target_path_per_leaf[
+            #         pmap({axis.label: selected_component.label})
+            #     ].keys()
+            # ): selected_component_num
+            axis.label: selected_component_num
         }
         # new_indices = indices | {axis.label: selected_component_num}
         if new_path in count_arrays:

@@ -183,7 +183,16 @@ class LoopyCodegenContext(CodegenContext):
         else:
             assert nargs == 2
             start, stop = args[0], args[1]
-        self._domains.append(f"{{ [{iname}]: {start} <= {iname} < {stop} }}")
+        domain_str = f"{{ [{iname}]: {start} <= {iname} < {stop} }}"
+
+        if domain_str in self._domains:
+            logger.warn(
+                "Trying to register a domain twice. This currently happens "
+                "when looping over something with multiple components. Ideally this "
+                "shouldn't happen."
+            )
+        else:
+            self._domains.append(domain_str)
 
     def add_assignment(self, assignee, expression, prefix="insn"):
         insn = lp.Assignment(
@@ -433,6 +442,7 @@ def parse_loop_properly_this_time(
             parse_loop_properly_this_time(
                 loop,
                 axes,
+                loop_indices,
                 codegen_context,
                 axis=subaxis,
                 prev_source_path=source_path,
@@ -440,11 +450,20 @@ def parse_loop_properly_this_time(
                 prev_domains=domains,
             )
         else:
+            target_path = axes.target_path_per_leaf[source_path]
+
+            new_index_exprs = {}
+            for axis_label, index_expr in axes.index_exprs_per_leaf[
+                source_path
+            ].items():
+                new_index_expr = JnameSubstitutor(iname_replace_map, codegen_context)(
+                    index_expr
+                )
+                new_index_exprs[axis_label] = new_index_expr
+            new_index_exprs = pmap(new_index_exprs)
+
             # register domains
             for size, iname, within_inames in domains:
-                if not isinstance(size, int):
-                    raise NotImplementedError
-
                 selected_inames = {
                     i.name
                     for i in within_inames
@@ -452,19 +471,10 @@ def parse_loop_properly_this_time(
                 }
 
                 with codegen_context.within_inames(selected_inames):
-                    # size = register_extent(???)
-                    codegen_context.add_domain(iname, size)
+                    size_var = register_extent(size, new_index_exprs, codegen_context)
+                    codegen_context.add_domain(iname, size_var)
 
-            target_path = axes.target_path_per_leaf[source_path]
-
-            new_index_exprs = {}
-            for axis_label, index_expr in axes.index_exprs_per_leaf[
-                source_path
-            ].items():
-                new_index_expr = IndexExpressionReplacer(iname_replace_map)(index_expr)
-                new_index_exprs[axis_label] = new_index_expr
-            new_index_exprs = pmap(new_index_exprs)
-
+            # FIXME I think saving the state in the context manager should remove the need for this
             selected_inames = {
                 i.name
                 for i in iname_replace_map.values()
@@ -483,93 +493,6 @@ def parse_loop_properly_this_time(
                             )
                         },
                         codegen_context,
-                    )
-
-
-def parse_loop_final_rec(
-    loop,
-    axes,
-    current_jnames,
-    current_path,  # is this needed?
-    codegen_ctx,
-    loop_indices,
-    target_path=pmap(),
-    mini_path=(),
-    jname_expr_per_axis_label=None,
-    *,
-    current_axis,
-):
-    assert False, "old code"
-    if not jname_expr_per_axis_label:
-        jname_expr_per_axis_label = {}
-    for axcpt in current_axis.components:
-        size = register_extent(axcpt.count, jname_expr_per_axis_label, codegen_ctx)
-        iname = codegen_ctx.unique_name("i")
-        codegen_ctx.add_domain(iname, size)
-
-        new_jname_expr_per_target_axis_label = jname_expr_per_axis_label.copy()
-
-        new_path = current_path | {current_axis.label: axcpt.label}
-        current_jname = iname
-        new_jnames = current_jnames | {current_axis.label: pym.var(current_jname)}
-
-        new_target_path = target_path
-        new_mini_path = mini_path + ((current_axis, axcpt),)
-        if new_mini_path in axes.target_paths:
-            mytargetpath = axes.target_paths[new_mini_path]
-            new_target_path = target_path | mytargetpath
-
-            # for now, can in theory target multiple target axes
-            target_axis = just_one(mytargetpath.keys())
-
-            # breakpoint()
-            # just in case
-            found = False
-            for myaxis, mycomponent in new_mini_path:
-                if (myaxis.id, mycomponent.label) in axes.index_exprs:
-                    assert not found
-                    index_expr = axes.index_exprs[myaxis.id, mycomponent.label]
-                    # no confidence that this will work
-                    # jname_expr = JnameSubstitutor(new_jnames, codegen_ctx)(index_expr)
-                    jname_expr = JnameSubstitutor(
-                        new_jnames | new_jname_expr_per_target_axis_label, codegen_ctx
-                    )(index_expr)
-                    new_jname_expr_per_target_axis_label[target_axis] = jname_expr
-                    found = True
-
-            new_mini_path = ()
-
-        with codegen_ctx.within_inames({iname}):
-            if subaxis := axes.child(current_axis, axcpt):
-                parse_loop_final_rec(
-                    loop,
-                    axes,
-                    new_jnames,
-                    new_path,
-                    codegen_ctx,
-                    loop_indices,
-                    new_target_path,
-                    new_mini_path,
-                    new_jname_expr_per_target_axis_label,
-                    current_axis=subaxis,
-                )
-            else:
-                assert not new_mini_path
-
-                for stmt in loop.statements:
-                    _compile(
-                        stmt,
-                        loop_indices
-                        | {
-                            loop.index: (
-                                new_target_path,
-                                pmap(new_jname_expr_per_target_axis_label),
-                                pmap(
-                                    new_jnames
-                                ),  # "local index", should probably also be a variable
-                            )
-                        },
-                        codegen_ctx,
                     )
 
 
@@ -813,7 +736,7 @@ def parse_assignment_properly_this_time(
         }
 
         if subaxis := axes.child(axis, component):
-            self.parse_assignment_properly_this_time(
+            parse_assignment_properly_this_time(
                 assignment,
                 axes,
                 loop_indices,
@@ -838,6 +761,7 @@ def parse_assignment_properly_this_time(
                 }
                 with codegen_context.within_inames(selected_inames):
                     # size = register_extent(???)
+                    # if we are multi-component then we end up registering identical domains twice
                     codegen_context.add_domain(iname, size)
 
             target_path = axes.target_path_per_leaf[new_source_path]
@@ -1431,7 +1355,6 @@ def _(loop_index: LoopIndex, preorder_ctx, *, loop_indices, **kwargs):
     path = loop_indices[loop_index]
 
     if isinstance(loop_index.iterset, IndexedAxisTree):
-        raise NotImplementedError
         iterset = just_one(loop_index.iterset.values.values())
     else:
         iterset = loop_index.iterset
@@ -1466,87 +1389,6 @@ def _(local_index: LocalLoopIndex, *, loop_indices, **kwargs):
 
 
 @collect_shape_index_callback.register
-def _(called_map: CalledMap, preorder_ctx, **kwargs):
-    leaves, index_data = collect_shape_index_callback(
-        called_map.from_index, preorder_ctx, **kwargs
-    )
-    axes, from_target_path_per_cpt, from_index_expr_per_cpt, _ = index_data
-
-    leaf_keys = []
-    target_path_per_component = {}
-    index_expr_per_component = {}
-    layout_expr_per_component = {}
-
-    for from_leaf_key, leaf in leaves.items():
-        from_path = from_target_path_per_cpt.get((), pmap())
-        from_index_expr = from_index_expr_per_cpt.get((), pmap())
-        if not axes.is_empty:
-            # FIXME I think that this will break if we have something with multiple axes
-            mypath = axes.path_with_nodes(
-                *from_leaf_key, ordered=True, and_components=True
-            )
-            from_path |= from_target_path_per_cpt[mypath]
-            from_index_expr |= from_index_expr_per_cpt[mypath]
-        else:
-            mypath = ()
-
-        # breakpoint()
-
-        # clean this up, we know some of this at an earlier point (loop context)
-        components = []
-        index_exprs = []
-        layout_exprs = []
-
-        bits = called_map.map.bits[pmap(from_path)]
-        for map_component in bits:  # each one of these is a new "leaf"
-            cpt = AxisComponent(map_component.arity, label=map_component.label)
-            components.append(cpt)
-
-            map_var = MapVariable(called_map, map_component)
-            axisvar = AxisVariable(called_map.name)
-
-            index_exprs.append(
-                # not super happy about this use of values. The called variable doesn't now
-                # necessarily know the right axis labels
-                pmap(
-                    {
-                        map_component.target_axis: map_var(
-                            *from_index_expr.values(), axisvar
-                        )
-                    }
-                )
-            )
-
-            # don't think that this is possible for maps
-            layout_exprs.append(pmap())
-
-        axis = Axis(components, label=called_map.name)
-        if axes.root:
-            # breakpoint()
-            axes = axes.add_subaxis(axis, *from_leaf_key)
-        else:
-            axes = AxisTree(axis)
-
-        for i, (cpt, mapcpt) in enumerate(checked_zip(components, bits)):
-            leaf_keys.append((axis.id, cpt.label))
-
-            otherkey = mypath + ((axis, cpt),)
-            target_path_per_component[otherkey] = pmap(
-                {mapcpt.target_axis: mapcpt.target_component}
-            )
-            index_expr_per_component[otherkey] = index_exprs[i]
-            layout_expr_per_component[otherkey] = layout_exprs[i]
-
-    leaves = {leaf_key: () for leaf_key in leaf_keys}
-    return leaves, (
-        axes,
-        target_path_per_component,
-        index_expr_per_component,
-        layout_expr_per_component,
-    )
-
-
-@collect_shape_index_callback.register
 def _(slice_: Slice, preorder_ctx, *, prev_axes, **kwargs):
     components = []
     target_path_per_leaf = []
@@ -1572,10 +1414,10 @@ def _(slice_: Slice, preorder_ctx, *, prev_axes, **kwargs):
         cpt = AxisComponent(size, label=subslice.label)
         components.append(cpt)
 
+        target_path_per_leaf.append({target_axis.label: target_cpt.label})
+
         newvar = AxisVariable(slice_.label)
         if isinstance(subslice, AffineSliceComponent):
-            target = target_axis.id, target_cpt.label
-            target_path_per_leaf.append({target_axis.label: target_cpt.label})
             index_exprs_per_leaf.append(
                 pmap({slice_.axis: newvar * subslice.step + subslice.start})
             )
@@ -1607,6 +1449,77 @@ def _(slice_: Slice, preorder_ctx, *, prev_axes, **kwargs):
             layout_exprs,
         )
 
+    return leaves, (axes,)
+
+
+@collect_shape_index_callback.register
+def _(called_map: CalledMap, preorder_ctx, **kwargs):
+    leaves, index_data = collect_shape_index_callback(
+        called_map.from_index, preorder_ctx, **kwargs
+    )
+    (axes,) = index_data
+
+    leaf_keys = []
+    target_path_per_leaf = []
+    index_exprs_per_leaf = []
+    layout_exprs_per_leaf = []
+
+    for from_leaf_key, leaf in leaves.items():
+        _, from_target_path, from_index_exprs, _ = leaf
+
+        # clean this up, we know some of this at an earlier point (loop context)
+        components = []
+        index_exprs = []
+        layout_exprs = []
+
+        bits = called_map.map.bits[pmap(from_target_path)]
+        for map_component in bits:  # each one of these is a new "leaf"
+            cpt = AxisComponent(map_component.arity, label=map_component.label)
+            components.append(cpt)
+
+            map_var = MapVariable(called_map, map_component)
+            axisvar = AxisVariable(called_map.name)
+
+            index_exprs.append(
+                # not super happy about this use of values. The called variable doesn't now
+                # necessarily know the right axis labels
+                pmap(
+                    {
+                        map_component.target_axis: map_var(
+                            *from_index_exprs.values(), axisvar
+                        )
+                    }
+                )
+            )
+
+            # don't think that this is possible for maps
+            layout_exprs.append(pmap())
+
+        axis = Axis(components, label=called_map.name)
+        if axes.root:
+            axes = axes.add_subaxis(axis, *from_leaf_key)
+        else:
+            axes = AxisTree(axis)
+
+        for i, (cpt, mapcpt) in enumerate(checked_zip(components, bits)):
+            leaf_keys.append((axis.id, cpt.label))
+
+            target_path_per_leaf.append(
+                pmap({mapcpt.target_axis: mapcpt.target_component})
+            )
+            index_exprs_per_leaf.append(index_exprs[i])
+            layout_exprs_per_leaf.append(layout_exprs[i])
+
+    leaves = {}
+    for leaf_key, source_leaf, target_path, index_exprs, layout_exprs in checked_zip(
+        leaf_keys,
+        axes.leaves,
+        target_path_per_leaf,
+        index_exprs_per_leaf,
+        layout_exprs_per_leaf,
+    ):
+        source_path = axes.path(*source_leaf)
+        leaves[leaf_key] = (source_path, target_path, index_exprs, layout_exprs)
     return leaves, (axes,)
 
 
