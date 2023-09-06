@@ -7,7 +7,7 @@ import pytest
 from pyrsistent import pmap
 
 from pyop3.axis import Axis, AxisComponent, AxisTree
-from pyop3.codegen import LOOPY_LANG_VERSION, LOOPY_TARGET
+from pyop3.codegen import loopy_lang_version, loopy_target
 from pyop3.distarray import MultiArray
 from pyop3.dtypes import IntType, ScalarType
 from pyop3.index import AffineSliceComponent, IndexTree, Slice
@@ -25,8 +25,8 @@ def vec2_copy_kernel():
             lp.GlobalArg("y", ScalarType, (2,), is_input=False, is_output=True),
         ],
         name="copy",
-        target=LOOPY_TARGET,
-        lang_version=LOOPY_LANG_VERSION,
+        target=loopy_target(),
+        lang_version=loopy_lang_version(),
     )
     return LoopyKernel(lpy_kernel, [READ, WRITE])
 

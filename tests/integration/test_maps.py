@@ -23,7 +23,7 @@ from pyop3 import (
     do_loop,
     loop,
 )
-from pyop3.codegen import LOOPY_LANG_VERSION, LOOPY_TARGET
+from pyop3.codegen import loopy_lang_version, loopy_target
 from pyop3.utils import flatten
 
 
@@ -37,8 +37,8 @@ def vector_inc_kernel():
             lp.GlobalArg("y", ScalarType, (1,), is_input=True, is_output=True),
         ],
         name="vector_inc",
-        target=LOOPY_TARGET,
-        lang_version=LOOPY_LANG_VERSION,
+        target=loopy_target(),
+        lang_version=loopy_lang_version(),
     )
     return LoopyKernel(lpy_kernel, [READ, INC])
 
@@ -53,8 +53,8 @@ def vec2_inc_kernel():
             lp.GlobalArg("y", ScalarType, (2,), is_input=True, is_output=True),
         ],
         name="vec2_inc",
-        target=LOOPY_TARGET,
-        lang_version=LOOPY_LANG_VERSION,
+        target=loopy_target(),
+        lang_version=loopy_lang_version(),
     )
     return LoopyKernel(lpy_kernel, [READ, INC])
 
@@ -69,8 +69,8 @@ def vec6_inc_kernel():
             lp.GlobalArg("y", ScalarType, (1,), is_input=True, is_output=True),
         ],
         name="vector_inc",
-        target=LOOPY_TARGET,
-        lang_version=LOOPY_LANG_VERSION,
+        target=loopy_target(),
+        lang_version=loopy_lang_version(),
     )
     return LoopyKernel(code, [READ, INC])
 
@@ -85,8 +85,8 @@ def vec12_inc_kernel():
             lp.GlobalArg("y", ScalarType, (2,), is_input=True, is_output=True),
         ],
         name="vector_inc",
-        target=LOOPY_TARGET,
-        lang_version=LOOPY_LANG_VERSION,
+        target=loopy_target(),
+        lang_version=loopy_lang_version(),
     )
     return LoopyKernel(code, [READ, INC])
 
@@ -528,8 +528,8 @@ def test_recursive_multi_component_maps():
             lp.GlobalArg("y", ScalarType, (1,), is_input=False, is_output=True),
         ],
         name="sum_kernel",
-        target=LOOPY_TARGET,
-        lang_version=LOOPY_LANG_VERSION,
+        target=loopy_target(),
+        lang_version=loopy_lang_version(),
     )
     sum_kernel = LoopyKernel(lpy_kernel, [READ, WRITE])
 
@@ -605,8 +605,8 @@ def test_sum_with_consecutive_maps():
             lp.GlobalArg("y", ScalarType, (1,), is_input=False, is_output=True),
         ],
         name="sum",
-        target=LOOPY_TARGET,
-        lang_version=LOOPY_LANG_VERSION,
+        target=loopy_target(),
+        lang_version=loopy_lang_version(),
     )
     sum_kernel = LoopyKernel(lpy_kernel, [READ, WRITE])
 

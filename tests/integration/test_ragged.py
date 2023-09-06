@@ -7,7 +7,7 @@ import pytest
 from pyrsistent import pmap
 
 from pyop3.axis import Axis, AxisComponent, AxisTree
-from pyop3.codegen import LOOPY_LANG_VERSION, LOOPY_TARGET
+from pyop3.codegen import loopy_lang_version, loopy_target
 from pyop3.distarray import MultiArray
 from pyop3.dtypes import IntType, ScalarType
 from pyop3.loopexpr import INC, READ, WRITE, LoopyKernel, do_loop, loop
@@ -23,9 +23,9 @@ def scalar_copy_kernel():
             lp.GlobalArg("x", ScalarType, (1,), is_input=True, is_output=False),
             lp.GlobalArg("y", ScalarType, (1,), is_input=False, is_output=True),
         ],
-        target=LOOPY_TARGET,
         name="scalar_copy",
-        lang_version=(2018, 2),
+        target=loopy_target(),
+        lang_version=loopy_lang_version(),
     )
     return LoopyKernel(code, [READ, WRITE])
 

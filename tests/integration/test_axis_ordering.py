@@ -8,7 +8,7 @@ from pyrsistent import pmap
 
 from pyop3 import AffineSliceComponent, IndexTree, Slice, SplitLoopIndex
 from pyop3.axis import Axis, AxisComponent, AxisTree
-from pyop3.codegen import LOOPY_LANG_VERSION, LOOPY_TARGET
+from pyop3.codegen import loopy_lang_version, loopy_target
 from pyop3.distarray import MultiArray
 from pyop3.dtypes import IntType, ScalarType
 from pyop3.index import SplitIndexTree
@@ -27,9 +27,9 @@ def test_different_axis_orderings_do_not_change_packing_order():
             lp.GlobalArg("x", np.float64, (m1, m2), is_input=True, is_output=False),
             lp.GlobalArg("y", np.float64, (m1, m2), is_input=False, is_output=True),
         ],
-        target=LOOPY_TARGET,
         name="copy",
-        lang_version=(2018, 2),
+        target=loopy_target(),
+        lang_version=loopy_lang_version(),
     )
     copy_kernel = LoopyKernel(lpy_kernel, [READ, WRITE])
 

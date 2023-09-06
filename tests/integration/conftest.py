@@ -2,7 +2,7 @@ import loopy as lp
 import pytest
 
 from pyop3 import INC, READ, WRITE, IntType, LoopyKernel, ScalarType
-from pyop3.codegen import LOOPY_LANG_VERSION, LOOPY_TARGET
+from pyop3.codegen import loopy_lang_version, loopy_target
 
 
 @pytest.fixture
@@ -15,8 +15,8 @@ def scalar_copy_kernel():
             lp.GlobalArg("y", ScalarType, (1,), is_input=False, is_output=True),
         ],
         name="scalar_copy",
-        target=LOOPY_TARGET,
-        lang_version=LOOPY_LANG_VERSION,
+        target=loopy_target(),
+        lang_version=loopy_lang_version(),
     )
     return LoopyKernel(code, [READ, WRITE])
 
@@ -31,8 +31,8 @@ def scalar_copy_kernel_int():
             lp.GlobalArg("y", IntType, (1,), is_input=False, is_output=True),
         ],
         name="scalar_copy_int",
-        target=LOOPY_TARGET,
-        lang_version=LOOPY_LANG_VERSION,
+        target=loopy_target(),
+        lang_version=loopy_lang_version(),
     )
     return LoopyKernel(code, [READ, WRITE])
 
@@ -47,7 +47,7 @@ def scalar_inc_kernel():
             lp.GlobalArg("y", ScalarType, (1,), is_input=True, is_output=True),
         ],
         name="scalar_inc",
-        target=LOOPY_TARGET,
-        lang_version=LOOPY_LANG_VERSION,
+        target=loopy_target(),
+        lang_version=loopy_lang_version(),
     )
     return LoopyKernel(lpy_kernel, [READ, INC])

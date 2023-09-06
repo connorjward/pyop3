@@ -28,6 +28,7 @@ from pyop3.axis import (
     CalledAxisTree,
     TabulatedLayout,
 )
+from pyop3.device import OffloadingDevice, offloading_device
 from pyop3.distarray import IndexedMultiArray, MultiArray
 from pyop3.dtypes import IntType
 from pyop3.index import (
@@ -70,10 +71,22 @@ from pyop3.utils import (
     strictly_all,
 )
 
+
 # FIXME this needs to be synchronised with TSFC, tricky
 # shared base package? or both set by Firedrake - better solution
-LOOPY_TARGET = lp.CWithGNULibcTarget()
-LOOPY_LANG_VERSION = (2018, 2)
+def loopy_target():
+    if offloading_device == OffloadingDevice.CPU:
+        return lp.CWithGNULibcTarget()
+    elif offloading_device == OffloadingDevice.CUDA:
+        return lp.CudaTarget()
+    elif offloading_device == OffloadingDevice.OPENCL:
+        return lp.PyOpenCLTarget()
+    else:
+        raise AssertionError
+
+
+def loopy_lang_version():
+    return (2018, 2)
 
 
 def _noop(leaf, preorder_ctx, **kwargs):
@@ -292,8 +305,8 @@ def compile(expr: LoopExpr, name="mykernel"):
         ctx.instructions,
         ctx.arguments,
         name=name,
-        target=LOOPY_TARGET,
-        lang_version=LOOPY_LANG_VERSION,
+        target=loopy_target(),
+        lang_version=loopy_lang_version(),
         # options=lp.Options(check_dep_resolution=False),
     )
     tu = lp.merge((translation_unit, *ctx.subkernels))

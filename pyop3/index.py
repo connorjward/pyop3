@@ -102,7 +102,7 @@ class Indexed:
     """
 
     def __init__(self, obj, indices):
-        from pyop3.codegen.loopexpr2loopy import _indexed_axes
+        from pyop3.codegen.loopy import _indexed_axes
 
         # The following tricksy bit of code builds a pretend AxisTree for the
         # indexed object. It is complicated because the resultant AxisTree will
@@ -444,7 +444,7 @@ class IndexedAxisTree:
     @property
     def target_paths(self):
         # should move somewhere else
-        from pyop3.codegen.loopexpr2loopy import collect_target_paths
+        from pyop3.codegen.loopy import collect_target_paths
 
         # TODO I don't think I need to pass loop_indices here (pmap() here)
         _, paths = collect_target_paths(self, pmap())

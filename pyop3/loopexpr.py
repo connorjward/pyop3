@@ -118,7 +118,7 @@ class Loop(LoopExpr):
 
     @functools.cached_property
     def loopy_code(self):
-        from pyop3.codegen.loopexpr2loopy import compile
+        from pyop3.codegen.loopy import compile
 
         return compile(self)
 
