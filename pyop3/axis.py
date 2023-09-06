@@ -713,21 +713,18 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
                     # 2. index exprs
                     new_index_exprs_per_leaf = {}
 
-                    index_expr_replace_map = index_exprs_per_leaf[source_path]
+                    index_expr_replace_map = dict(index_exprs_per_leaf[source_path])
 
                     target_path = target_path_per_leaf[source_path]
 
-                    new_index_exprs = {}
+                    new_index_exprs = []
                     index_exprs = self.index_exprs_per_leaf[target_path]
-                    for axis_label, index_expr in index_exprs.items():
+                    for axis_label, index_expr in index_exprs:
                         new_index_expr = IndexExpressionReplacer(
                             index_expr_replace_map
                         )(index_expr)
-                        new_index_exprs[axis_label] = new_index_expr
-                    new_index_exprs = pmap(new_index_exprs)
-
-                    new_index_exprs_per_leaf[source_path] = new_index_exprs
-
+                        new_index_exprs.append((axis_label, new_index_expr))
+                    new_index_exprs_per_leaf[source_path] = tuple(new_index_exprs)
                     new_index_exprs_per_leaf = pmap(new_index_exprs_per_leaf)
 
                     # 3. layout exprs
@@ -803,14 +800,14 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
                 new_target_path_per_leaf[new_source_path] = new_target_path
 
                 # 2. index exprs
-                index_expr_replace_map = index_exprs_per_leaf[new_source_path]
-                new_index_exprs = {}
-                for axis_label, index_expr in self.index_exprs_per_leaf[path].items():
+                index_expr_replace_map = dict(index_exprs_per_leaf[new_source_path])
+                new_index_exprs = []
+                for axis_label, index_expr in self.index_exprs_per_leaf[path]:
                     new_index_expr = IndexExpressionReplacer(index_expr_replace_map)(
                         index_expr
                     )
-                    new_index_exprs[axis_label] = new_index_expr
-                new_index_exprs_per_leaf[new_source_path] = pmap(new_index_exprs)
+                    new_index_exprs.append((axis_label, new_index_expr))
+                new_index_exprs_per_leaf[new_source_path] = tuple(new_index_exprs)
 
                 # 3. layout exprs
                 new_layout_exprs_per_leaf[new_source_path] = pmap()  # TODO
@@ -975,8 +972,8 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
             exprs_per_leaf = {}
             for leaf in self.leaves:
                 path = self.path(*leaf)
-                exprs_per_leaf[path] = pmap(
-                    {axis: AxisVariable(axis) for axis in path.keys()}
+                exprs_per_leaf[path] = tuple(
+                    (axis, AxisVariable(axis)) for axis in path.keys()
                 )
             self._index_exprs = exprs_per_leaf
         return self._index_exprs
@@ -1051,7 +1048,7 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         # for cleverdict in [self.index_exprs, self.layout_exprs]:
         for cleverdict in [self.index_exprs_per_leaf]:
             for exprs in cleverdict.values():
-                for expr in exprs.values():
+                for _, expr in exprs:
                     for array in MultiArrayCollector()(expr):
                         dmap |= array.datamap
         # breakpoint()

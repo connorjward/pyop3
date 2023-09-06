@@ -452,15 +452,27 @@ def parse_loop_properly_this_time(
         else:
             target_path = axes.target_path_per_leaf[source_path]
 
-            new_index_exprs = {}
-            for axis_label, index_expr in axes.index_exprs_per_leaf[
-                source_path
-            ].items():
-                new_index_expr = JnameSubstitutor(iname_replace_map, codegen_context)(
-                    index_expr
-                )
-                new_index_exprs[axis_label] = new_index_expr
-            new_index_exprs = pmap(new_index_exprs)
+            """
+            Algorithm:
+
+            1. Replace the outermost index_expr (per target axis) first and work inwards.
+            2. The inner index exprs need to be replaced using the *next several* entries in the
+               replace map and then all of the previously replaced expressions. I think that it
+               would be safe to pass the full replace map through.
+
+            """
+
+            new_index_exprs_per_target_axis = []
+            for i, (axis_label, index_expr) in enumerate(
+                axes.index_exprs_per_leaf[source_path]
+            ):
+                new_index_expr = JnameSubstitutor(
+                    pmap(axes.index_exprs_per_leaf[source_path][:i])
+                    | iname_replace_map,
+                    codegen_context,
+                )(index_expr)
+                new_index_exprs_per_target_axis.append((axis_label, new_index_expr))
+            new_index_exprs_per_target_axis = pmap(new_index_exprs_per_target_axis)
 
             # register domains
             for size, iname, within_inames in domains:
@@ -471,7 +483,9 @@ def parse_loop_properly_this_time(
                 }
 
                 with codegen_context.within_inames(selected_inames):
-                    size_var = register_extent(size, new_index_exprs, codegen_context)
+                    size_var = register_extent(
+                        size, pmap(new_index_exprs_per_target_axis), codegen_context
+                    )
                     codegen_context.add_domain(iname, size_var)
 
             # FIXME I think saving the state in the context manager should remove the need for this
@@ -488,7 +502,7 @@ def parse_loop_properly_this_time(
                         | {
                             loop.index: (
                                 target_path,
-                                new_index_exprs,
+                                pmap(new_index_exprs_per_target_axis),
                                 iname_replace_map,
                             )
                         },
@@ -701,7 +715,7 @@ def parse_assignment_properly_this_time(
         # 1. Substitute the index expressions into the layout expression (this could
         #    be done in advance)
         layout_index_expr = IndexExpressionReplacer(
-            axes.index_exprs_per_leaf[source_path]
+            dict(axes.index_exprs_per_leaf[source_path])
         )(axes.orig_layout_fn[target_path])
 
         # 2. Substitute in the right inames
@@ -806,8 +820,8 @@ def parse_assignment_properly_this_time(
 class ParseAssignmentPreorderContext:
     source_path: pmap = pmap()
     target_paths: pmap = pmap()
-    index_expr_per_target: pmap = pmap()
-    layout_expr_per_target: pmap = pmap()
+    index_expr_per_target: tuple = ()
+    layout_expr_per_target: tuple = ()
 
 
 def _parse_assignment_final(
@@ -1366,18 +1380,14 @@ def _(loop_index: LoopIndex, preorder_ctx, *, loop_indices, **kwargs):
     target_path = pmap({node.label: cpt_label for node, cpt_label in visited_nodes})
 
     # make LoopIndex property?
-    index_exprs = pmap(
-        {
-            # node.label: iterset.index_exprs[node.id, cpt_label]
-            node.label: AxisVariable(node.label)
-            for node, cpt_label in visited_nodes
-        }
+    index_expr_per_target_axis = tuple(
+        (node.label, AxisVariable(node.label)) for node, _ in visited_nodes
     )
 
-    layout_exprs = pmap()  # not allowed I believe, or zero?
-    return {pmap(): (source_path, target_path, index_exprs, layout_exprs)}, (
-        AxisTree(),
-    )
+    layout_exprs = ((),)  # not allowed I believe, or zero?
+    return {
+        pmap(): (source_path, target_path, index_expr_per_target_axis, layout_exprs)
+    }, (AxisTree(),)
 
 
 @collect_shape_index_callback.register
@@ -1419,14 +1429,14 @@ def _(slice_: Slice, preorder_ctx, *, prev_axes, **kwargs):
         newvar = AxisVariable(slice_.label)
         if isinstance(subslice, AffineSliceComponent):
             index_exprs_per_leaf.append(
-                pmap({slice_.axis: newvar * subslice.step + subslice.start})
+                ((slice_.axis, newvar * subslice.step + subslice.start),)
             )
             layout_exprs_per_leaf.append(
-                pmap({slice_.axis: (newvar - subslice.start) // subslice.step})
+                ((slice_.axis, (newvar - subslice.start) // subslice.step),)
             )
         else:
-            index_exprs_per_leaf.append(pmap({slice_.axis: subslice.array}))
-            layout_exprs_per_leaf.append(pmap({slice_.axis: "inverse search"}))
+            index_exprs_per_leaf.append(((slice_.axis, subslice.array),))
+            layout_exprs_per_leaf.append(((slice_.axis, "inverse search"),))
 
     # breakpoint()
 
@@ -1483,12 +1493,11 @@ def _(called_map: CalledMap, preorder_ctx, **kwargs):
             index_exprs.append(
                 # not super happy about this use of values. The called variable doesn't now
                 # necessarily know the right axis labels
-                pmap(
-                    {
-                        map_component.target_axis: map_var(
-                            *from_index_exprs.values(), axisvar
-                        )
-                    }
+                (
+                    (
+                        map_component.target_axis,
+                        map_var(*from_index_exprs.values(), axisvar),
+                    ),
                 )
             )
 
@@ -1531,8 +1540,8 @@ def collect_shape_pre_callback(leaf, preorder_ctx, **kwargs):
     return ParseAssignmentPreorderContext(
         preorder_ctx.source_path | source_path,
         preorder_ctx.target_paths | target_path_per_axis_tuple,
-        preorder_ctx.index_expr_per_target | index_exprs,
-        preorder_ctx.layout_expr_per_target | layout_exprs,
+        preorder_ctx.index_expr_per_target + index_exprs,
+        preorder_ctx.layout_expr_per_target + layout_exprs,
     )
 
 
