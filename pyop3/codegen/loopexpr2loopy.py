@@ -783,7 +783,7 @@ def parse_assignment_properly_this_time(
             # 1. Substitute the index expressions into the layout expression (this could
             #    be done in advance)
             layout_index_expr = IndexExpressionReplacer(
-                axes.index_exprs_per_leaf[new_source_path]
+                dict(axes.index_exprs_per_leaf[new_source_path])
             )(axes.orig_layout_fn[target_path])
 
             # 2. Substitute in the right inames
@@ -1490,19 +1490,23 @@ def _(called_map: CalledMap, preorder_ctx, **kwargs):
             map_var = MapVariable(called_map, map_component)
             axisvar = AxisVariable(called_map.name)
 
+            # not super happy about this. The called variable doesn't now
+            # necessarily know the right axis labels
+            from_indices = tuple(
+                index_expr for axis_label, index_expr in from_index_exprs
+            )
+
             index_exprs.append(
-                # not super happy about this use of values. The called variable doesn't now
-                # necessarily know the right axis labels
                 (
                     (
                         map_component.target_axis,
-                        map_var(*from_index_exprs.values(), axisvar),
+                        map_var(*from_indices, axisvar),
                     ),
                 )
             )
 
             # don't think that this is possible for maps
-            layout_exprs.append(pmap())
+            layout_exprs.append((map_component.target_axis, NotImplemented))
 
         axis = Axis(components, label=called_map.name)
         if axes.root:
