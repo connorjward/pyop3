@@ -68,33 +68,14 @@ LOOPY_TARGET = lp.CWithGNULibcTarget()
 LOOPY_LANG_VERSION = (2018, 2)
 
 
-def _noop(leaf, preorder_ctx, **kwargs):
-    return preorder_ctx
-
-
-def _none(*args, **kwargs):
-    pass
-
-
 def visit_indices(
     indices,
     pre_ctx,
-    *,
-    index_callback=_none,  # FIXME bad default, will break
-    pre_callback=_noop,
-    post_callback_nonterminal=_noop,
-    post_callback_terminal=_none,
-    final_callback=_none,
     **kwargs,
 ):
     return _visit_indices_rec(
         indices,
         pre_ctx,
-        index_callback=index_callback,
-        pre_callback=pre_callback,
-        post_callback_nonterminal=post_callback_nonterminal,
-        post_callback_terminal=post_callback_terminal,
-        final_callback=final_callback,
         current_index=indices.root,
         **kwargs,
     )
@@ -104,43 +85,34 @@ def _visit_indices_rec(
     indices,
     preorder_ctx,
     *,
-    index_callback,
-    pre_callback,
-    post_callback_nonterminal,
-    post_callback_terminal,
-    final_callback,
     current_index,
     **kwargs,
 ):
-    leaves, index_data = index_callback(current_index, preorder_ctx, **kwargs)
+    leaves, index_data = collect_shape_index_callback(
+        current_index, preorder_ctx, **kwargs
+    )
 
     leafdata = {}
     for i, (leafkey, leaf) in enumerate(leaves.items()):
-        preorder_ctx_ = pre_callback(leaf, preorder_ctx, **kwargs)
+        preorder_ctx_ = collect_shape_pre_callback(leaf, preorder_ctx, **kwargs)
 
         if current_index.id in indices.parent_to_children:
             for subindex in indices.parent_to_children[current_index.id]:
                 retval = _visit_indices_rec(
                     indices,
                     preorder_ctx_,
-                    index_callback=index_callback,
-                    pre_callback=pre_callback,
-                    post_callback_nonterminal=post_callback_nonterminal,
-                    post_callback_terminal=post_callback_terminal,
-                    final_callback=final_callback,
                     current_index=subindex,
                     **kwargs,
                 )
-                # this is now a no-op
-                leafdata[leafkey] = post_callback_nonterminal(
+                leafdata[leafkey] = collect_shape_post_callback_nonterminal(
                     retval, leaf, preorder_ctx_, **kwargs
                 )
         else:
-            leafdata[leafkey] = post_callback_terminal(
+            leafdata[leafkey] = collect_shape_post_callback_terminal(
                 leafkey, leaf, preorder_ctx_, **kwargs
             )
 
-    return final_callback(index_data, leafdata)
+    return collect_shape_final_callback(index_data, leafdata)
 
 
 class CodegenContext(abc.ABC):
@@ -1617,11 +1589,6 @@ def index_axes(axes: AxisTree, indices: IndexTree, loop_context):
     ) = visit_indices(
         indices,
         ParseAssignmentPreorderContext(),
-        index_callback=collect_shape_index_callback,
-        pre_callback=collect_shape_pre_callback,
-        post_callback_terminal=collect_shape_post_callback_terminal,
-        post_callback_nonterminal=collect_shape_post_callback_nonterminal,
-        final_callback=collect_shape_final_callback,
         loop_indices=loop_context,
         prev_axes=axes,
     )
