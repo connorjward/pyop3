@@ -378,11 +378,8 @@ def _finalize_parse_loop_rec(
         loop, axes, loop_indices, codegen_context
     )
 
-    # FIXME, not leaf data!
-    iname_replace_map = leaf_data[0][2]
-
     # register the domains
-    for array, var, within_inames in domain_insns:
+    for array, var, within_inames, iname_replace_map in domain_insns:
         mypath = array.axes.path(*array.axes.leaf)
 
         # we assume that axis expressions match here...
@@ -472,7 +469,12 @@ def parse_loop_properly_this_time(
             loop_size_var = codegen_context.unique_name("n")
             codegen_context.add_temporary(loop_size_var)
             domain_insns.append(
-                (loop_size, loop_size_var, codegen_context._within_inames)
+                (
+                    loop_size,
+                    loop_size_var,
+                    codegen_context._within_inames,
+                    iname_replace_map,
+                )
             )
         else:
             assert isinstance(loop_size, numbers.Integral)
