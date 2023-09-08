@@ -2,17 +2,17 @@ import numpy as np
 import pytest
 
 from pyop3 import (
+    AffineSliceComponent,
     Axis,
     AxisComponent,
     AxisTree,
     IntType,
     MultiArray,
     ScalarType,
+    Slice,
     do_loop,
     loop,
 )
-
-pytest.skip(allow_module_level=True)
 
 
 def test_copy_with_local_indices(scalar_copy_kernel):
@@ -23,28 +23,34 @@ def test_copy_with_local_indices(scalar_copy_kernel):
 
     do_loop(
         p := axes.enumerate(),
-        scalar_copy_kernel(dat0[p.global_index], dat1[p.local_index]),
+        scalar_copy_kernel(dat0[p.value], dat1[p.index]),
     )
     assert np.allclose(dat1.data, dat0.data)
 
 
 def test_copy_slice(scalar_copy_kernel):
     big_axes = Axis([AxisComponent(10, "pt0")], "ax0")
-    small_axes = Axis([AxisComponent(5, "pt0")], "ax0")
+    small_axes = Axis([AxisComponent(5, "pt0")], "ax1")
 
     array0 = MultiArray(
         big_axes, name="array0", data=np.arange(big_axes.size, dtype=ScalarType)
     )
     array1 = MultiArray(small_axes, name="array1", dtype=array0.dtype)
 
+    slice0 = Slice(
+        "ax0", [AffineSliceComponent("pt0", step=2, label="pt0")], label="ax1"
+    )
+
     do_loop(
-        p := big_axes[::2].enumerate(),
-        scalar_copy_kernel(array0[p.global_index], array1[p.local_index]),
+        # p := big_axes[::2].enumerate(),
+        p := big_axes[slice0].enumerate(),
+        scalar_copy_kernel(array0[p.value], array1[p.index]),
     )
     assert np.allclose(array1.data, array0.data[::2])
 
 
 # this isn't a very meaningful test since the local and global loop indices are identical
+@pytest.mark.skip(reason="loop composition not currently supported")
 def test_inc_into_small_array(scalar_inc_kernel):
     m, n = 10, 3
 
@@ -65,8 +71,9 @@ def test_inc_into_small_array(scalar_inc_kernel):
     do_loop(
         p := big_axes.root.index(),
         loop(
+            # I think that q.value and q.index are actually exactly the same
             q := small_axes.enumerate(),
-            scalar_inc_kernel(big[p, q.global_index], small[q.local_index]),
+            scalar_inc_kernel(big[p, q.value], small[q.index]),
         ),
     )
 
@@ -77,7 +84,14 @@ def test_inc_into_small_array(scalar_inc_kernel):
     assert np.allclose(small.data, expected)
 
 
+"""
+The following tests are for expressing axis offsets in the loops. I need it
+for map tabulation to work nicely. This doesn't currently work.
+"""
+
+
 # TODO this does not belong in this test file
+@pytest.mark.skip(reason="see above")
 def test_copy_offset(scalar_copy_kernel_int):
     m = 10
     axes = Axis(m)
@@ -98,6 +112,7 @@ def test_copy_offset(scalar_copy_kernel_int):
 
 
 # TODO this does not belong in this test file
+@pytest.mark.skip(reason="see above")
 def test_copy_vec_offset(scalar_copy_kernel_int):
     m, n = 10, 3
     # axes = AxisTree(Axis(m, id="root"), {"root": Axis(n)})

@@ -27,7 +27,6 @@ from pyop3.index import (
     AffineMapComponent,
     AffineSliceComponent,
     CalledMap,
-    GlobalLoopIndex,
     Index,
     IndexedArray,
     IndexedAxisTree,
@@ -275,7 +274,12 @@ def _parse_loop_rec(
             codegen_context.add_assignment(var, final_var)
 
     # do per leaf
-    for target_path, index_exprs_per_target_axis, iname_replace_map in leaf_data:
+    for source_leaf, (
+        target_path,
+        index_exprs_per_target_axis,
+        iname_replace_map,
+    ) in checked_zip(axes.leaves, leaf_data):
+        source_path = axes.path(*source_leaf)
         within_inames = frozenset(iname.name for iname in iname_replace_map.values())
 
         with codegen_context.within_inames(within_inames):
@@ -293,6 +297,7 @@ def _parse_loop_rec(
                     loop_indices
                     | {
                         loop.index: (
+                            source_path,
                             target_path,
                             jname_replace_map,
                             iname_replace_map,
@@ -410,8 +415,8 @@ def _(call: FunctionCall, loop_indices, ctx: LoopyCodegenContext) -> None:
         #     )
 
         loop_context = {}
-        for loop_index, (path, _, _) in loop_indices.items():
-            loop_context[loop_index] = pmap(path)
+        for loop_index, (source_path, target_path, _, _) in loop_indices.items():
+            loop_context[loop_index] = source_path, target_path
         loop_context = pmap(loop_context)
 
         axes = arg.axes.with_context(loop_context).copy(
@@ -548,14 +553,21 @@ def build_assignment(
 
     # get the right index tree given the loop context
     loop_context = {}
-    for loop_index, (path, _, _) in loop_indices.items():
-        loop_context[loop_index] = pmap(path)
+    for loop_index, (source_path, target_path, _, _) in loop_indices.items():
+        loop_context[loop_index] = source_path, target_path
     loop_context = pmap(loop_context)
 
+    source_iname_replace_map = pmap(
+        {
+            axis_label: iname_var
+            for _, _, _, replace_map in loop_indices.values()
+            for axis_label, iname_var in replace_map.items()
+        }
+    )
     iname_replace_map = pmap(
         {
             axis_label: iname_var
-            for _, replace_map, _ in loop_indices.values()
+            for _, _, replace_map, _ in loop_indices.values()
             for axis_label, iname_var in replace_map.items()
         }
     )
@@ -565,6 +577,7 @@ def build_assignment(
         assignment.array.axes.with_context(loop_context),
         loop_indices,
         codegen_ctx,
+        source_iname_replace_map=source_iname_replace_map,
         iname_replace_map=iname_replace_map,
     )
 
@@ -601,7 +614,7 @@ def parse_assignment_properly_this_time(
             assignment,
             layout_fn,
             target_path,
-            iname_replace_map,
+            source_iname_replace_map | iname_replace_map,
             codegen_context,
         )
         temp_expr = _assignment_temp_insn(

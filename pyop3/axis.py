@@ -649,6 +649,8 @@ class AxisVariable(pym.primitives.Variable):
 
 
 class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
+    # FIXME this causes a recursive hash error...
+    # fields = StrictLabelledTree.fields | {"target_paths", "index_exprs", "layout_exprs", "orig_axes", "sf", "shared_sf", "comm"}
     def __init__(
         self,
         root: MultiAxis | None = None,
@@ -955,15 +957,15 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
 
     def index(self):
         # cyclic import
-        from pyop3.index import GlobalLoopIndex
+        from pyop3.index import LoopIndex
 
-        return GlobalLoopIndex(self)
+        return LoopIndex(self)
 
     def enumerate(self):
         # cyclic import
         from pyop3.index import EnumeratedLoopIndex
 
-        return EnumeratedLoopIndex(self)
+        return EnumeratedLoopIndex(self.index())
 
     @property
     def axes(self):
@@ -1022,18 +1024,24 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         # map from indexed axis IDs and component labels to {target_axis: target_component}
         # we always have the right IDs for the search but need the labels for the target
         if not self._target_paths:
-            self._target_paths = pmap(
-                {
-                    self.path(*leaf): self.path(*leaf)  # inefficient
-                    for leaf in self.leaves
-                }
-            )
+            self._target_paths = self.source_paths
         return self._target_paths
 
     @property
     def target_path_per_leaf(self):
         # better alias for target_paths
         return self.target_paths
+
+    @property
+    def source_paths(self):
+        return pmap(
+            {self.path(*leaf): self.path(*leaf) for leaf in self.leaves}  # inefficient
+        )
+
+    # alias
+    @property
+    def source_path_per_leaf(self):
+        return self.source_paths
 
     @functools.cached_property
     def datamap(self) -> dict[str:DistributedArray]:
@@ -1909,11 +1917,13 @@ def _trim_path(axes: AxisTree, path: Mapping) -> pyrsistent.pmap:
 
 
 def loop_indices(axes: AxisTree) -> IndexTree:
+    assert False, "dead code"
     """Return a loop nest over an axis tree."""
     return _loop_indices_rec(axes, axes.root)
 
 
 def _loop_indices_rec(axes: AxisTree, axis: Axis) -> IndexTree:
+    assert False, "dead code"
     # cyclic import
     from pyop3.index import Index, IndexTree, LoopIndex
 

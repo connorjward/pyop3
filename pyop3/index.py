@@ -348,13 +348,13 @@ class CalledMap(Index, LoopIterable, UniquelyIdentifiedImmutableRecord):
         return tuple(targets)
 
 
-class LoopIndex(Index, abc.ABC):
+class AbstractLoopIndex(Index, abc.ABC):
     pass
 
 
 # TODO just call this LoopIndex (inherit from AbstractLoopIndex)
-class GlobalLoopIndex(LoopIndex):
-    fields = LoopIndex.fields | {"iterset"}
+class LoopIndex(AbstractLoopIndex):
+    fields = AbstractLoopIndex.fields | {"iterset"}
 
     def __init__(self, iterset, **kwargs):
         # FIXME I think that an IndexTree should not know its component labels
@@ -376,11 +376,12 @@ class GlobalLoopIndex(LoopIndex):
         return tuple(paths)
 
 
-class LocalLoopIndex(LoopIndex):
+class LocalLoopIndex(AbstractLoopIndex):
     """Class representing a 'local' index."""
 
-    def __init__(self, loop_index: LoopIndex):
-        self.global_index = loop_index
+    def __init__(self, loop_index: LoopIndex, **kwargs):
+        super().__init__(**kwargs)
+        self.loop_index = loop_index
 
     @property
     def target_paths(self):
@@ -389,7 +390,7 @@ class LocalLoopIndex(LoopIndex):
 
     @property
     def datamap(self):
-        return self.global_index.datamap
+        return self.loop_index.datamap
 
 
 # TODO I want a Slice to have "bits" like a Map/CalledMap does
@@ -442,12 +443,9 @@ class Slice(Index):
 
 
 class EnumeratedLoopIndex:
-    def __init__(self, iterset: AxisTree):
-        global_index = GlobalLoopIndex(iterset)
-        local_index = LocalLoopIndex(global_index)
-
-        self.global_index = global_index
-        self.local_index = local_index
+    def __init__(self, value: LoopIndex):
+        self.index = LocalLoopIndex(value)
+        self.value = value
 
 
 # move with other axis trees
@@ -469,10 +467,10 @@ class IndexedAxisTree(ContextSensitive):
         return IndexedAxisTree(new_axis_trees)
 
     def index(self):
-        return GlobalLoopIndex(self)
+        return LoopIndex(self)
 
     def enumerate(self):
-        return EnumeratedLoopIndex(self)
+        return EnumeratedLoopIndex(self.index())
 
     @functools.cached_property
     def datamap(self):
@@ -574,22 +572,36 @@ def _(index_tree: IndexTree):
 
 
 @collect_loop_context.register
+def _(arg: LocalLoopIndex):
+    return collect_loop_context(arg.loop_index)
+
+
+@collect_loop_context.register
 def _(arg: LoopIndex):
     from pyop3.axis import AxisTree
 
     if isinstance(arg.iterset, IndexedAxisTree):
         loop_contexts = []
         for loop_context, axis_tree in arg.iterset.axis_trees.items():
+            extra_source_context = {}
             extracontext = {}
-            for target_path in axis_tree.target_paths.values():
+            for source_path, target_path in checked_zip(
+                axis_tree.source_paths.values(), axis_tree.target_paths.values()
+            ):
+                extra_source_context |= source_path
                 extracontext |= target_path
-            loop_contexts.append(loop_context | {arg: pmap(extracontext)})
+            loop_contexts.append(
+                loop_context | {arg: (pmap(extra_source_context), pmap(extracontext))}
+            )
         return loop_contexts
     else:
         assert isinstance(arg.iterset, AxisTree)
         return [
-            pmap({arg: target_path})
-            for target_path in arg.iterset.target_path_per_leaf.values()
+            pmap({arg: (source_path, target_path)})
+            for source_path, target_path in checked_zip(
+                arg.iterset.source_path_per_leaf.values(),
+                arg.iterset.target_path_per_leaf.values(),
+            )
         ]
 
 
@@ -787,10 +799,7 @@ def collect_shape_index_callback(index, *args, **kwargs):
 
 @collect_shape_index_callback.register
 def _(loop_index: LoopIndex, preorder_ctx, *, loop_indices, **kwargs):
-    # global_index = loop_index.loop_index
-    # if isinstance(global_index, LocalLoopIndex):
-    #     global_index = global_index.global_index
-    path = loop_indices[loop_index]
+    _, path = loop_indices[loop_index]
 
     if isinstance(loop_index.iterset, IndexedAxisTree):
         iterset = just_one(loop_index.iterset.values.values())
@@ -804,6 +813,8 @@ def _(loop_index: LoopIndex, preorder_ctx, *, loop_indices, **kwargs):
     target_path = pmap({node.label: cpt_label for node, cpt_label in visited_nodes})
 
     # make LoopIndex property?
+    # should this actually be the current jnames??? use the full loop context...
+    # that isn't available at this point.
     index_expr_per_target_axis = {
         node.label: AxisVariable(node.label) for node, _ in visited_nodes
     }
@@ -815,11 +826,30 @@ def _(loop_index: LoopIndex, preorder_ctx, *, loop_indices, **kwargs):
 
 
 @collect_shape_index_callback.register
-def _(local_index: LocalLoopIndex, *, loop_indices, **kwargs):
-    raise NotImplementedError
-    return collect_shape_index_callback(
-        local_index.loop_index, loop_indices=loop_indices, **kwargs
-    )
+def _(local_index: LocalLoopIndex, *args, loop_indices, **kwargs):
+    loop_index = local_index.loop_index
+    path, _ = loop_indices[loop_index]
+
+    if isinstance(loop_index.iterset, IndexedAxisTree):
+        iterset = just_one(loop_index.iterset.values.values())
+    else:
+        iterset = loop_index.iterset
+
+    myleaf = iterset._node_from_path(path)
+    visited_nodes = iterset.path_with_nodes(*myleaf, ordered=True)
+
+    source_path = pmap()
+    target_path = pmap({node.label: cpt_label for node, cpt_label in visited_nodes})
+
+    # make LoopIndex property?
+    index_expr_per_target_axis = {
+        node.label: AxisVariable(node.label) for node, _ in visited_nodes
+    }
+
+    layout_exprs = {}  # not allowed I believe, or zero?
+    return {
+        pmap(): (source_path, target_path, index_expr_per_target_axis, layout_exprs)
+    }, (AxisTree(),)
 
 
 @collect_shape_index_callback.register
