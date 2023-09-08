@@ -373,7 +373,6 @@ def _finalize_parse_loop_rec(
     current_path,
     current_jnames,
 ):
-    # domain_insns, target_path_per_leaf, index_exprs_per_target_axis_per_leaf, iname_replace_map_per_leaf = parse_loop_properly_this_time(loop, axes, loop_indices, codegen_context)
     domain_insns, leaf_data = parse_loop_properly_this_time(
         loop, axes, loop_indices, codegen_context
     )
@@ -382,21 +381,14 @@ def _finalize_parse_loop_rec(
     for array, var, within_inames, iname_replace_map in domain_insns:
         mypath = array.axes.path(*array.axes.leaf)
 
-        # we assume that axis expressions match here...
-        index_exprs = []
+        index_exprs = {}
         for axis_label in mypath:
-            index_exprs.append(
-                (
-                    axis_label,
-                    single_valued(
-                        dict(leaf_datum[1])[axis_label] for leaf_datum in leaf_data
-                    ),
-                )
+            index_exprs[axis_label] = single_valued(
+                leaf_datum[1][axis_label] for leaf_datum in leaf_data
             )
 
         jname_replace_map = {}
-        # must be ordered
-        for axis_label, index_expr in index_exprs:
+        for axis_label, index_expr in index_exprs.items():
             jname_expr = JnameSubstitutor(
                 iname_replace_map | jname_replace_map, codegen_context
             )(index_expr)
@@ -417,7 +409,7 @@ def _finalize_parse_loop_rec(
         with codegen_context.within_inames(within_inames):
             jname_replace_map = {}
             # must be ordered
-            for axis_label, index_expr in index_exprs_per_target_axis:
+            for axis_label, index_expr in index_exprs_per_target_axis.items():
                 jname_expr = JnameSubstitutor(
                     iname_replace_map | jname_replace_map, codegen_context
                 )(index_expr)
@@ -499,17 +491,14 @@ def parse_loop_properly_this_time(
                 target_path = axes.target_path_per_leaf[source_path]
 
                 # Make a mapping from target axis label to jname expression
-                new_index_exprs_per_target_axis = []
-                for i, (axis_label, index_expr) in enumerate(
-                    axes.index_exprs_per_leaf[source_path]
-                ):
+                new_index_exprs_per_target_axis = {}
+                for axis_label, index_expr in axes.index_exprs_per_leaf[
+                    source_path
+                ].items():
                     new_index_expr = IndexExpressionReplacer(
-                        # pmap(axes.index_exprs_per_leaf[source_path][:i])
-                        # | iname_replace_map,
-                        # iname_replace_map,
-                        dict(axes.index_exprs_per_leaf[source_path]),
+                        axes.index_exprs_per_leaf[source_path],
                     )(index_expr)
-                    new_index_exprs_per_target_axis.append((axis_label, new_index_expr))
+                    new_index_exprs_per_target_axis[axis_label] = new_index_expr
 
                 # target_path_per_leaf[source_path] = target_path
                 # index_exprs_per_target_axis_per_leaf[source_path] = new_index_exprs_per_target_axis
@@ -833,8 +822,8 @@ def parse_assignment_properly_this_time(
 class ParseAssignmentPreorderContext:
     source_path: pmap = pmap()
     target_paths: pmap = pmap()
-    index_expr_per_target: tuple = ()
-    layout_expr_per_target: tuple = ()
+    index_expr_per_target: dict = dataclasses.field(default_factory=dict)
+    layout_expr_per_target: dict = dataclasses.field(default_factory=dict)
 
 
 def _parse_assignment_final(
@@ -1393,11 +1382,11 @@ def _(loop_index: LoopIndex, preorder_ctx, *, loop_indices, **kwargs):
     target_path = pmap({node.label: cpt_label for node, cpt_label in visited_nodes})
 
     # make LoopIndex property?
-    index_expr_per_target_axis = tuple(
-        (node.label, AxisVariable(node.label)) for node, _ in visited_nodes
-    )
+    index_expr_per_target_axis = {
+        node.label: AxisVariable(node.label) for node, _ in visited_nodes
+    }
 
-    layout_exprs = ((),)  # not allowed I believe, or zero?
+    layout_exprs = {}  # not allowed I believe, or zero?
     return {
         pmap(): (source_path, target_path, index_expr_per_target_axis, layout_exprs)
     }, (AxisTree(),)
@@ -1442,14 +1431,14 @@ def _(slice_: Slice, preorder_ctx, *, prev_axes, **kwargs):
         newvar = AxisVariable(slice_.label)
         if isinstance(subslice, AffineSliceComponent):
             index_exprs_per_leaf.append(
-                ((slice_.axis, newvar * subslice.step + subslice.start),)
+                {slice_.axis: newvar * subslice.step + subslice.start}
             )
             layout_exprs_per_leaf.append(
-                ((slice_.axis, (newvar - subslice.start) // subslice.step),)
+                {slice_.axis: (newvar - subslice.start) // subslice.step}
             )
         else:
-            index_exprs_per_leaf.append(((slice_.axis, subslice.array),))
-            layout_exprs_per_leaf.append(((slice_.axis, "inverse search"),))
+            index_exprs_per_leaf.append({slice_.axis: subslice.array})
+            layout_exprs_per_leaf.append({slice_.axis: "inverse search"})
 
     # breakpoint()
 
@@ -1506,20 +1495,15 @@ def _(called_map: CalledMap, preorder_ctx, **kwargs):
             # not super happy about this. The called variable doesn't now
             # necessarily know the right axis labels
             from_indices = tuple(
-                index_expr for axis_label, index_expr in from_index_exprs
+                index_expr for axis_label, index_expr in from_index_exprs.items()
             )
 
             index_exprs.append(
-                (
-                    (
-                        map_component.target_axis,
-                        map_var(*from_indices, axisvar),
-                    ),
-                )
+                {map_component.target_axis: map_var(*from_indices, axisvar)}
             )
 
             # don't think that this is possible for maps
-            layout_exprs.append((map_component.target_axis, NotImplemented))
+            layout_exprs.append({map_component.target_axis: NotImplemented})
 
         axis = Axis(components, label=called_map.name)
         if axes.root:
@@ -1557,8 +1541,8 @@ def collect_shape_pre_callback(leaf, preorder_ctx, **kwargs):
     return ParseAssignmentPreorderContext(
         preorder_ctx.source_path | source_path,
         preorder_ctx.target_paths | target_path_per_axis_tuple,
-        preorder_ctx.index_expr_per_target + index_exprs,
-        preorder_ctx.layout_expr_per_target + layout_exprs,
+        preorder_ctx.index_expr_per_target | index_exprs,
+        preorder_ctx.layout_expr_per_target | layout_exprs,
     )
 
 
@@ -1594,7 +1578,6 @@ def collect_shape_post_callback_nonterminal(retval, *args, **kwargs):
     return retval
 
 
-# leafdata is return values here
 def collect_shape_final_callback(index_data, leafdata):
     target_path_per_leaf = {}
     index_exprs_per_leaf = {}
@@ -1613,9 +1596,9 @@ def collect_shape_final_callback(index_data, leafdata):
         layout_exprs_per_leaf |= layout_exprs
     return (
         axes,
-        pmap(target_path_per_leaf),
-        pmap(index_exprs_per_leaf),
-        pmap(layout_exprs_per_leaf),
+        target_path_per_leaf,
+        index_exprs_per_leaf,
+        layout_exprs_per_leaf,
     )
 
 
