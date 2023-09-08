@@ -971,9 +971,9 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         if not self._index_exprs:
             exprs_per_leaf = {}
             for leaf in self.leaves:
-                path = self.path(*leaf)
-                exprs_per_leaf[path] = tuple(
-                    (axis, AxisVariable(axis)) for axis in path.keys()
+                path = self.path(*leaf, ordered=True)
+                exprs_per_leaf[pmap(path)] = tuple(
+                    (axis, AxisVariable(axis)) for axis, component in path
                 )
             self._index_exprs = exprs_per_leaf
         return self._index_exprs
