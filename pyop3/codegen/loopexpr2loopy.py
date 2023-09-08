@@ -68,19 +68,6 @@ LOOPY_TARGET = lp.CWithGNULibcTarget()
 LOOPY_LANG_VERSION = (2018, 2)
 
 
-def visit_indices(
-    indices,
-    pre_ctx,
-    **kwargs,
-):
-    return _visit_indices_rec(
-        indices,
-        pre_ctx,
-        current_index=indices.root,
-        **kwargs,
-    )
-
-
 def _visit_indices_rec(
     indices,
     preorder_ctx,
@@ -94,7 +81,13 @@ def _visit_indices_rec(
 
     leafdata = {}
     for i, (leafkey, leaf) in enumerate(leaves.items()):
-        preorder_ctx_ = collect_shape_pre_callback(leaf, preorder_ctx, **kwargs)
+        source_path, target_path_per_axis_tuple, index_exprs, layout_exprs = leaf
+        preorder_ctx_ = ParseAssignmentPreorderContext(
+            preorder_ctx.source_path | source_path,
+            preorder_ctx.target_paths | target_path_per_axis_tuple,
+            preorder_ctx.index_expr_per_target | index_exprs,
+            preorder_ctx.layout_expr_per_target | layout_exprs,
+        )
 
         if current_index.id in indices.parent_to_children:
             for subindex in indices.parent_to_children[current_index.id]:
@@ -104,15 +97,36 @@ def _visit_indices_rec(
                     current_index=subindex,
                     **kwargs,
                 )
-                leafdata[leafkey] = collect_shape_post_callback_nonterminal(
-                    retval, leaf, preorder_ctx_, **kwargs
-                )
+                leafdata[leafkey] = retval
         else:
-            leafdata[leafkey] = collect_shape_post_callback_terminal(
-                leafkey, leaf, preorder_ctx_, **kwargs
+            leafdata[leafkey] = (
+                None,
+                {preorder_ctx_.source_path: preorder_ctx_.target_paths},
+                {preorder_ctx_.source_path: preorder_ctx_.index_expr_per_target},
+                {preorder_ctx_.source_path: preorder_ctx_.layout_expr_per_target},
             )
 
-    return collect_shape_final_callback(index_data, leafdata)
+    target_path_per_leaf = {}
+    index_exprs_per_leaf = {}
+    layout_exprs_per_leaf = {}
+
+    (axes,) = index_data
+    for k, (subax, target_path, index_exprs, layout_exprs) in leafdata.items():
+        if subax is not None:
+            if axes.root:
+                axes = axes.add_subtree(subax, *k)
+            else:
+                axes = subax
+
+        target_path_per_leaf |= target_path
+        index_exprs_per_leaf |= index_exprs
+        layout_exprs_per_leaf |= layout_exprs
+    return (
+        axes,
+        target_path_per_leaf,
+        index_exprs_per_leaf,
+        layout_exprs_per_leaf,
+    )
 
 
 class CodegenContext(abc.ABC):
@@ -1505,75 +1519,6 @@ def _(called_map: CalledMap, preorder_ctx, **kwargs):
     return leaves, (axes,)
 
 
-def collect_shape_pre_callback(leaf, preorder_ctx, **kwargs):
-    source_path, target_path_per_axis_tuple, index_exprs, layout_exprs = leaf
-
-    # breakpoint()
-
-    return ParseAssignmentPreorderContext(
-        preorder_ctx.source_path | source_path,
-        preorder_ctx.target_paths | target_path_per_axis_tuple,
-        preorder_ctx.index_expr_per_target | index_exprs,
-        preorder_ctx.layout_expr_per_target | layout_exprs,
-    )
-
-
-def collect_shape_post_callback_terminal(
-    leafkey, leaf, preorder_ctx, *, prev_axes, **kwargs
-):
-    # leaf is a 2-tuple of path and index_exprs. We don't need the path any more
-    # return axis and index exprs
-    # if preorder_ctx.path:
-    #     leaf_axis, leaf_cpt = prev_axes._node_from_path(preorder_ctx.path)
-    #     axis_path = prev_axes.path_with_nodes(leaf_axis, leaf_cpt)
-    # else:
-    #     axis_path = pmap()
-    #
-    # target_path_per_leaf = {leafkey: preorder_ctx.path}
-    # expr_per_leaf = {leafkey: preorder_ctx.jname_exprs}
-    # layoutexpr_per_leaf = {leafkey: preorder_ctx.layout_exprs}
-    # return None, target_path_per_leaf, expr_per_leaf, layoutexpr_per_leaf
-    return (
-        None,
-        {preorder_ctx.source_path: preorder_ctx.target_paths},
-        {preorder_ctx.source_path: preorder_ctx.index_expr_per_target},
-        {preorder_ctx.source_path: preorder_ctx.layout_expr_per_target},
-    )
-
-
-def collect_shape_post_callback_nonterminal(retval, *args, **kwargs):
-    """Accumulate results
-
-    We just return an axis tree from below. No special treatment is needed here.
-
-    """
-    return retval
-
-
-def collect_shape_final_callback(index_data, leafdata):
-    target_path_per_leaf = {}
-    index_exprs_per_leaf = {}
-    layout_exprs_per_leaf = {}
-
-    (axes,) = index_data
-    for k, (subax, target_path, index_exprs, layout_exprs) in leafdata.items():
-        if subax is not None:
-            if axes.root:
-                axes = axes.add_subtree(subax, *k)
-            else:
-                axes = subax
-
-        target_path_per_leaf |= target_path
-        index_exprs_per_leaf |= index_exprs
-        layout_exprs_per_leaf |= layout_exprs
-    return (
-        axes,
-        target_path_per_leaf,
-        index_exprs_per_leaf,
-        layout_exprs_per_leaf,
-    )
-
-
 # FIXME doesn't belong here
 def index_axes(axes: AxisTree, indices: IndexTree, loop_context):
     # offsets are always scalar
@@ -1586,9 +1531,10 @@ def index_axes(axes: AxisTree, indices: IndexTree, loop_context):
         tpaths,
         index_expr_per_target,
         layout_expr_per_target,
-    ) = visit_indices(
+    ) = _visit_indices_rec(
         indices,
         ParseAssignmentPreorderContext(),
+        current_index=indices.root,
         loop_indices=loop_context,
         prev_axes=axes,
     )
