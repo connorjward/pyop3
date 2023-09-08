@@ -319,60 +319,6 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
     # maybe I could check types here and use instead of get_value?
     def __getitem__(self, indices):
         return self.copy(axes=self.axes[indices])
-        if indices is Ellipsis:
-            axis_trees = pmap({pmap(): self.axes})
-            layout_expr_per_leaf = {}
-            for leaf_axis, leaf_cpt in self.axes.leaves:
-                target_path = self.axes.path(leaf_axis, leaf_cpt)
-                layout_expr = sum(self.axes.layouts[target_path])
-                layout_expr_per_leaf[leaf_axis.id, leaf_cpt] = layout_expr
-            return IndexedArray(self, axis_trees, {pmap(): layout_expr_per_leaf})
-
-        # FIXME, move code
-        from pyop3.codegen.loopexpr2loopy import index_axes
-
-        index_forest = as_index_forest(indices, axes=self.axes)
-
-        axis_trees = {}
-        layout_expr_per_axis_tree_per_leaf = {}
-        for index_tree in index_forest:
-            loop_context = index_tree.loop_context
-            indexed_axes, target_path_per_leaf, index_exprs_per_leaf = index_axes(
-                self.axes, index_tree, loop_context
-            )
-
-            layout_expr_per_leaf = {}
-            if indexed_axes.is_empty:
-                leaf_key = None
-
-                # this is a map from axis label to new expression
-                index_exprs = index_exprs_per_leaf[leaf_key]
-                target_path = target_path_per_leaf[leaf_key]
-
-                # sum here because we have a tuple of things at present, should fix
-                orig_layout_expr = sum(self.axes.layouts[target_path])
-                new_layout_expr = IndexExpressionReplacer(index_exprs)(orig_layout_expr)
-
-                layout_expr_per_leaf[leaf_key] = new_layout_expr
-            else:
-                for indexed_leaf_axis, indexed_leaf_cpt_label in indexed_axes.leaves:
-                    leaf_key = indexed_leaf_axis.id, indexed_leaf_cpt_label
-                    # this is a map from axis label to new expression
-                    index_exprs = index_exprs_per_leaf[leaf_key]
-                    target_path = target_path_per_leaf[leaf_key]
-
-                    # sum here because we have a tuple of things at present, should fix
-                    orig_layout_expr = sum(self.axes.layouts[target_path])
-                    new_layout_expr = IndexExpressionReplacer(index_exprs)(
-                        orig_layout_expr
-                    )
-
-                    layout_expr_per_leaf[leaf_key] = new_layout_expr
-
-            axis_trees[loop_context] = indexed_axes
-            layout_expr_per_axis_tree_per_leaf[loop_context] = layout_expr_per_leaf
-
-        return IndexedArray(self, axis_trees, layout_expr_per_axis_tree_per_leaf)
 
     def select_axes(self, indices):
         selected = []

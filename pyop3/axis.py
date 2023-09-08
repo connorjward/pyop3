@@ -24,7 +24,7 @@ from pyrsistent import pmap
 
 from pyop3 import utils
 from pyop3.dtypes import IntType, PointerType, get_mpi_dtype
-from pyop3.index import ContextFree, ContextSensitive, LoopIterable
+from pyop3.loops import ContextFree, ContextSensitive, LoopIterable
 
 # from pyop3.index import Index, IndexTree, Map, Slice, TabulatedMap
 from pyop3.tree import (
@@ -679,9 +679,13 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         if indices is Ellipsis:
             return self
         # FIXME
-        from pyop3.codegen.loopexpr2loopy import index_axes
         from pyop3.distarray.multiarray import IndexExpressionReplacer
-        from pyop3.index import IndexedAxisTree, as_index_forest, collect_loop_context
+        from pyop3.index import (
+            IndexedAxisTree,
+            as_index_forest,
+            collect_loop_context,
+            index_axes,
+        )
 
         # FIXME I have a weird double loop here over loop contexts
         axis_trees = {}
