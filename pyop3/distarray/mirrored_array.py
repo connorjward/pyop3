@@ -17,7 +17,7 @@ except ImportError:
     pass
 
 
-class MirroredArray(abc.ABC):
+class MirroredArray:
     """An array that is available on both host and device
     copying values where necessary.
 
@@ -103,17 +103,14 @@ class MirroredArray(abc.ABC):
         return self.device_data_rw
 
     @property
-    @abc.abstractmethod
     def device_data_rw(self):
         pass
 
     @property
-    @abc.abstractmethod
     def device_data_ro(self):
         pass
 
     @property
-    @abc.abstractmethod
     def device_data_wo(self):
         pass
 
@@ -142,29 +139,23 @@ class MirroredArray(abc.ABC):
         return self.host_data_wo.ctypes.data
 
     @property
-    @abc.abstractmethod
     def device_ptr_rw(self):
         pass
 
     @property
-    @abc.abstractmethod
     def device_ptr_ro(self):
         pass
 
     @property
-    @abc.abstractmethod
     def device_ptr_wo(self):
         pass
 
-    @abc.abstractmethod
     def host_to_device_copy(self):
         pass
 
-    @abc.abstractmethod
     def device_to_host_copy(self):
         pass
 
-    @abc.abstractmethod
     def alloc_device_data(self, shape, dtype):
         pass
 
