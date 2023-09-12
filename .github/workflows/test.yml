@@ -69,7 +69,7 @@ jobs:
         shell: bash
         working-directory: pyop3
         run: |
-          pip install .
+          pip install --no-build-isolation .
           pip install pytest-cov pytest-timeout pytest-xdist pytest-timeout
 
       - name: Run tests
