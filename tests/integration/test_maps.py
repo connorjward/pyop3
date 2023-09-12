@@ -406,7 +406,7 @@ def test_map_composition(vec2_inc_kernel):
 
     mapaxes0 = iterset.add_node(Axis(arity0), *iterset.leaf)
     mapdata0 = np.asarray([[2, 4, 0], [6, 7, 1]], dtype=int)
-    maparray0 = MultiArray(mapaxes0, name="map0", data=flatten(mapdata0))
+    maparray0 = MultiArray(mapaxes0, name="map0", data=mapdata0.flatten())
     map0 = Map(
         {
             pmap({iterset.root.label: "cpt0"}): [
