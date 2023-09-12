@@ -33,6 +33,7 @@
 # OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
+import collections
 import ctypes
 import os
 import platform
@@ -42,6 +43,7 @@ import subprocess
 import sys
 from abc import ABC
 from hashlib import md5
+from pathlib import Path
 
 import loopy as lp
 from mpi4py import MPI
@@ -187,6 +189,38 @@ def sniff_compiler(exe):
     else:
         compiler = AnonymousCompiler
     return compiler
+
+
+def code2hash(code, compiler, cflags, ld=None, ldflags=()):
+    return stuff2hash(code, compiler, ld, cflags, ldflags)
+
+
+def gpu_code2hash(code, compiler, cflags, ld=None, ldflags=()):
+    return stuff2hash(code, compiler, ld, cflags, ldflags)
+
+
+def stuff2hash(*args):
+    """Hash all args
+
+    The order of the ``args`` is determined by a wrapper function
+
+    Return pre-digested hash as a string
+    """
+    hash_ = md5()
+    for a in args:
+        if a is None:
+            continue
+        elif isinstance(a, collections.abc.Iterable):
+            hash_.update("".join(a).encode())
+        else:
+            hash_.update(a.encode())
+    return hash_.hexdigest()
+
+
+def hash2path(hash_):
+    cachedir = config["cache_dir"]
+    dirpart, filename = hash_[:2], hash_[2:]
+    return Path(cachedir).join(dirpart, filename)
 
 
 class Compiler(ABC):
@@ -346,28 +380,29 @@ class Compiler(ABC):
             compiler_flags = self.cflags
 
         # Determine cache key
-        hsh = md5(code.encode())
-        hsh.update(compiler.encode())
-        if self.ld:
-            hsh.update(self.ld.encode())
-        hsh.update("".join(compiler_flags).encode())
-        hsh.update("".join(self.ldflags).encode())
-        basename = hsh.hexdigest()
-
-        cachedir = config["cache_dir"]
-        dirpart, basename = basename[:2], basename[2:]
-        cachedir = os.path.join(cachedir, dirpart)
+        hash_ = code2hash(code, compiler, compiler_flags, self.ld, self.ldflags)
+        path = hash2path(hash_)
         pid = os.getpid()
-        cname = os.path.join(cachedir, "%s_p%d.%s" % (basename, pid, self.extension))
-        oname = os.path.join(cachedir, "%s_p%d.o" % (basename, pid))
-        soname = os.path.join(cachedir, "%s.so" % basename)
+
+        # Set all filenames
+        cachedir = path.parent
+        filename = path.stem
+        base = Path(f"{path}_p{pid}")
+        # cname = os.path.join(cachedir, "%s_p%d.%s" % (basename, pid, self.extension))
+        cname = base.with_suffix(f".{self.extension}")
+        # oname = os.path.join(cachedir, "%s_p%d.o" % (basename, pid))
+        oname = base.with_suffix(".o")
+        # soname = os.path.join(cachedir, "%s.so" % basename)
+        soname = path.with_suffix(".so")
         # Link into temporary file, then rename to shared library
         # atomically (avoiding races).
-        tmpname = os.path.join(cachedir, "%s_p%d.so.tmp" % (basename, pid))
+        tmpname = base.with_suffix(".so.tmp")
+        logfile = base.with_suffix(".log")
+        errfile = base.with_suffix(".err")
 
         if config["check_src_hashes"]:
-            matching = self.comm.allreduce(basename, op=_check_op)
-            if matching != basename:
+            matching = self.comm.allreduce(filename, op=_check_op)
+            if matching != filename:
                 # Dump all src code to disk for debugging
                 output = os.path.join(cachedir, "mismatching-kernels")
                 srcfile = os.path.join(
@@ -390,8 +425,6 @@ class Compiler(ABC):
             if self.comm.rank == 0:
                 # No need to do this on all ranks
                 os.makedirs(cachedir, exist_ok=True)
-                logfile = os.path.join(cachedir, "%s_p%d.log" % (basename, pid))
-                errfile = os.path.join(cachedir, "%s_p%d.err" % (basename, pid))
                 with progress(INFO, "Compiling wrapper"):
                     with open(cname, "w") as f:
                         f.write(code)
@@ -629,6 +662,79 @@ class AnonymousCompiler(Compiler):
     variables"""
 
     _name = "Unknown"
+
+
+class GPUException(Exception):
+    pass
+
+
+class GPUCompiler(Compiler):
+    """Intermediate class to represent GPU compilers"""
+
+    _name = "unknown GPU"
+
+
+class CUDACompiler(GPUCompiler):
+    _name = "CUDA"
+
+    _cc = "nvcc"
+    _cxx = None
+
+    _cflags = ("-use_fast_math", "-w")
+    _cxx_flags = None
+    # _ldflags = ()
+
+    # _optflags = ()
+    # _debugflags = ()
+
+    def __init__(*args, **kwargs):
+        from pycuda.compiler import SourceModule
+
+        super().__init__(*args, **kwargs)
+
+    def sniff_compiler_version(self, cpp=False):
+        if cpp:
+            raise GPUException("NO!")
+
+        self.version = None
+        # nvcc does not have `-dumpversion` or `-dumpfullversion` flags
+        try:
+            output = subprocess.run(
+                [self.cc, "--version"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+                encoding="utf-8",
+            )
+
+            version_list = [v for v in output.stdout.split() if ver.startswith("V")]
+            if version_list:
+                self.version = Version(version_list[-1])
+        except (subprocess.CalledProcessError, UnicodeDecodeError, InvalidVersion):
+            pass
+
+    @property
+    def extension(self) -> str:
+        # Might not be needed???
+        return "cu"
+
+    def compile_library(self, code: str, name: str, argtypes, restype):
+        # TODO: Implement disk caching!
+        # Determine cache key
+        hash_ = gpu_code2hash(code, self.cc, self.cflags, self.ldflags, self.ld)
+        cachedir = hash2path(hsh).parent
+        source_module = SourceModule(code, options=self.cflags, cache_dir=cachedir)
+
+        fn = source_module.get_function(name)
+        type_map = {ctypes.c_void_p: "P", ctypes.c_int: "i"}
+        argtypes = "".join(type_map[t] for t in argtypes)
+        fn.prepare(argtypes)
+
+        return fn
+
+
+class OpenCLCompiler(GPUCompiler):
+    _name = "OpenCL"
 
 
 def _add_profiling_events(dll, events):
