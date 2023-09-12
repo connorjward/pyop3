@@ -52,13 +52,15 @@ jobs:
           ./configure ${PETSC_CONFIGURE_OPTIONS}
           make
 
-      #~ - name: Build and install petsc4py
-        #~ shell: bash
-        #~ working-directory: ${{ env.PETSC_DIR }}/src/binding/petsc4py
-        #~ run: |
-          #~ pip install --upgrade pip
-          #~ pip install --upgrade wheel 'cython<3' numpy
-          #~ pip install --no-deps .
+      - name: Build and install petsc4py
+        # Remove this step when Firedrake PETSc branch is updated to support
+        # building petsc4py with Cython>=3.0
+        shell: bash
+        working-directory: ${{ env.PETSC_DIR }}/src/binding/petsc4py
+        run: |
+          pip install --upgrade pip
+          pip install --upgrade wheel 'cython<3' numpy
+          pip install --no-deps .
 
       - name: Checkout pyop3
         uses: actions/checkout@v4
@@ -69,7 +71,7 @@ jobs:
         shell: bash
         working-directory: pyop3
         run: |
-          pip install .
+          pip install --no-build-isolation .
           pip install pytest-cov pytest-timeout pytest-xdist pytest-timeout
 
       - name: Run tests

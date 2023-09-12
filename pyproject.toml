@@ -14,6 +14,7 @@ dependencies = [
   "pyrsistent",
   "numpy",
   "loopy",
+  "mpi4py",
   "petsc4py"
 ]
 
