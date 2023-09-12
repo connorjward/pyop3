@@ -687,10 +687,9 @@ class CUDACompiler(GPUCompiler):
     # _optflags = ()
     # _debugflags = ()
 
-    def __init__(*args, **kwargs):
-        from pycuda.compiler import SourceModule
+    # ~ def __init__(*args, **kwargs):
 
-        super().__init__(*args, **kwargs)
+    # ~ super().__init__(*args, **kwargs)
 
     def sniff_compiler_version(self, cpp=False):
         if cpp:
@@ -707,7 +706,7 @@ class CUDACompiler(GPUCompiler):
                 encoding="utf-8",
             )
 
-            version_list = [v for v in output.stdout.split() if ver.startswith("V")]
+            version_list = [v for v in output.stdout.split() if v.startswith("V")]
             if version_list:
                 self.version = Version(version_list[-1])
         except (subprocess.CalledProcessError, UnicodeDecodeError, InvalidVersion):
@@ -719,10 +718,12 @@ class CUDACompiler(GPUCompiler):
         return "cu"
 
     def compile_library(self, code: str, name: str, argtypes, restype):
+        from pycuda.compiler import SourceModule
+
         # TODO: Implement disk caching!
         # Determine cache key
         hash_ = gpu_code2hash(code, self.cc, self.cflags, self.ldflags, self.ld)
-        cachedir = hash2path(hsh).parent
+        cachedir = hash2path(hash_).parent
         source_module = SourceModule(code, options=self.cflags, cache_dir=cachedir)
 
         fn = source_module.get_function(name)
