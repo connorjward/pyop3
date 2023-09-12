@@ -220,7 +220,7 @@ def stuff2hash(*args):
 def hash2path(hash_):
     cachedir = config["cache_dir"]
     dirpart, filename = hash_[:2], hash_[2:]
-    return Path(cachedir).join(dirpart, filename)
+    return Path(cachedir).joinpath(dirpart, filename)
 
 
 class Compiler(ABC):
@@ -433,7 +433,7 @@ class Compiler(ABC):
                         cc = (
                             (compiler,)
                             + compiler_flags
-                            + ("-o", tmpname, cname)
+                            + ("-o", str(tmpname), str(cname))
                             + self.ldflags
                         )
                         debug("Compilation command: %s", " ".join(cc))
@@ -443,7 +443,7 @@ class Compiler(ABC):
                             log.write("\n\n")
                             try:
                                 if config["no_fork_available"]:
-                                    cc += ["2>", errfile, ">", logfile]
+                                    cc += ["2>", str(errfile), ">", str(logfile)]
                                     cmd = " ".join(cc)
                                     status = os.system(cmd)
                                     if status != 0:
@@ -459,11 +459,15 @@ Compile errors in %s"""
                                     % (e.cmd, e.returncode, logfile, errfile)
                                 )
                     else:
-                        cc = (compiler,) + compiler_flags + ("-c", "-o", oname, cname)
+                        cc = (
+                            (compiler,)
+                            + compiler_flags
+                            + ("-c", "-o", str(oname), str(cname))
+                        )
                         # Extract linker specific "cflags" from ldflags
                         ld = (
                             tuple(shlex.split(self.ld))
-                            + ("-o", tmpname, oname)
+                            + ("-o", str(tmpname), str(oname))
                             + tuple(self.expandWl(self.ldflags))
                         )
                         debug("Compilation command: %s", " ".join(cc))
@@ -477,8 +481,8 @@ Compile errors in %s"""
                             log.write("\n\n")
                             try:
                                 if config["no_fork_available"]:
-                                    cc += ["2>", errfile, ">", logfile]
-                                    ld += ["2>>", errfile, ">>", logfile]
+                                    cc += ["2>", str(errfile), ">", str(logfile)]
+                                    ld += ["2>>", str(errfile), ">>", str(logfile)]
                                     cccmd = " ".join(cc)
                                     ldcmd = " ".join(ld)
                                     status = os.system(cccmd)
