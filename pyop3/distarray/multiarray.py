@@ -27,6 +27,7 @@ from pyop3.index import (
     as_split_index_tree,
     is_fully_indexed,
 )
+from pyop3.mirrored_array import MirroredArray
 from pyop3.utils import (
     PrettyTuple,
     as_tuple,
@@ -80,7 +81,10 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
             raise ValueError("Can only specify one of name and prefix")
         dim = as_axis_tree(dim)
 
-        data = MirroredArray(data or (dim.size,), dtype)
+        if data is not None:
+            data = MirroredArray(data, dtype)
+        else:
+            data = MirroredArray((dim.size,), dtype)
 
         # add prefix as an existing name so it is a true prefix
         if prefix:
@@ -93,7 +97,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
         pym.primitives.Variable.__init__(self, name)
 
         self._data = data
-        self.dtype = dtype
+        self.dtype = data.dtype
 
         self.indicess = indicess
 
@@ -123,17 +127,17 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
 
     @property
     def data_rw(self):
-        return self._data
+        return self._data.data_rw
 
     @property
     def data_ro(self):
         # TODO
-        return self._data
+        return self._data.data_ro
 
     @property
     def data_wo(self):
         # TODO
-        return self._data
+        return self._data.data_wo
 
     @functools.cached_property
     def datamap(self) -> dict[str:DistributedArray]:

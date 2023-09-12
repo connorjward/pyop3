@@ -1,9 +1,16 @@
 import collections
+import functools
 import weakref
 
 import numpy as np
 
-from pyop3.device import OffloadingDevice, host_device, offloading_device
+from pyop3.device import (
+    CPUDevice,
+    CUDADevice,
+    OpenCLDevice,
+    host_device,
+    offloading_device,
+)
 from pyop3.dtypes import ScalarType
 
 try:
@@ -49,7 +56,7 @@ class MirroredArray:
         # option 3: passed a CUDA array
         elif pycuda and isinstance(data_or_shape, pycuda.gpuarray.GPUArray):
             # TODO I suppose the device could be passed as a kwarg
-            if not isinstance(offloading_device, OffloadingDevice.CUDADevice):
+            if not isinstance(offloading_device, CUDADevice):
                 raise InvalidDeviceError(
                     "Cannot pass a CUDA array to the MirroredArray constructor "
                     "outside a CUDA offloading context"
@@ -64,7 +71,7 @@ class MirroredArray:
             device_validity = collections.defaultdict(bool, {offloading_device: True})
         # option 4: passed an OpenCL array
         elif pyopencl and isinstance(data_or_shape, pyopencl.array.Array):
-            if not isinstance(offloading_device, OffloadingDevice.OpenCLDevice):
+            if not isinstance(offloading_device, OpenCLDevice):
                 raise InvalidDeviceError(
                     "Cannot pass an OpenCL array to the MirroredArray constructor "
                     "outside an OpenCL offloading context"
@@ -95,21 +102,27 @@ class MirroredArray:
     @property
     def data_rw(self):
         self.state += 1
+        # FIXME this needs to come before ensuring validity for now
+        array = self._device_array(offloading_device)
         self._ensure_valid_on_device(offloading_device)
         self._invalidate_other_devices(offloading_device)
-        return self._as_rw_array(self._device_array(offloading_device))
+        return self._as_rw_array(array)
 
     @property
     def data_ro(self):
+        # FIXME this needs to come before ensuring validity for now
+        array = self._device_array(offloading_device)
         self._ensure_valid_on_device(offloading_device)
-        return self._as_ro_array(self._device_array(offloading_device))
+        return self._as_ro_array(array)
 
     @property
     def data_wo(self):
         self.state += 1
+        # FIXME this needs to come before ensuring validity for now
+        array = self._device_array(offloading_device)
         self._invalidate_other_devices(offloading_device)
         self._device_validity[offloading_device] = True
-        return self._as_wo_array(self._device_array(offloading_device))
+        return self._as_wo_array(array)
 
     @property
     def ptr_rw(self):
@@ -127,7 +140,7 @@ class MirroredArray:
     def size(self):
         return np.prod(self.shape, dtype=int)
 
-    def _ensure_valid_on_device(device):
+    def _ensure_valid_on_device(self, device):
         if not self._device_validity[device]:
             if self._device_validity[host_device]:
                 self._host_to_device_copy(device)
@@ -137,7 +150,7 @@ class MirroredArray:
                 self._host_to_device_copy(device)
             self._device_validity[device] = True
 
-    def _invalidate_other_devices(device):
+    def _invalidate_other_devices(self, device):
         for dev in self._device_validity.keys():
             if dev is not device:
                 self._device_validity[dev] = False
@@ -146,38 +159,38 @@ class MirroredArray:
     def _host_to_device_copy(self, device):
         raise TypeError(f"No handler registered for {type(device).__name__}")
 
-    @host_to_device_copy.register(OffloadingDevice.CPUDevice)
-    def _(self, device):
+    @_host_to_device_copy.register
+    def _(self, device: CPUDevice):
         if device is host_device:
             return
         else:
             raise NotImplementedError("Cannot offload to other CPUs")
 
-    @host_to_device_copy.register(OffloadingDevice.CUDADevice)
-    def _(self, device):
+    @_host_to_device_copy.register
+    def _(self, device: CUDADevice):
         self._data_per_device[device].set(self._data_per_device[host_device])
 
-    @host_to_device_copy.register
-    def _(self, device: OffloadingDevice.OpenCLDevice):
+    @_host_to_device_copy.register
+    def _(self, device: OpenCLDevice):
         self._data_per_device[device].set(self._data_per_device[host_device])
 
     @functools.singledispatchmethod
-    def device_to_host_copy(self, device):
+    def _device_to_host_copy(self, device):
         raise TypeError(f"No handler registered for {type(device).__name__}")
 
-    @device_to_host_copy.register
-    def _(self, device: OffloadingDevice.CPUDevice):
+    @_device_to_host_copy.register
+    def _(self, device: CPUDevice):
         if device is host_device:
             return
         else:
             raise NotImplementedError("Cannot offload to other CPUs")
 
-    @device_to_host_copy.register
-    def _(self, device: OffloadingDevice.CUDADevice):
+    @_device_to_host_copy.register
+    def _(self, device: CUDADevice):
         self._data_per_device[device].get(self._data_per_device[host_device])
 
-    @device_to_host_copy.register
-    def _(self, device: OffloadingDevice.OpenCLDevice):
+    @_device_to_host_copy.register
+    def _(self, device: OpenCLDevice):
         self._data_per_device[device].get(self._data_per_device[host_device])
 
     @property
@@ -191,14 +204,19 @@ class MirroredArray:
         try:
             return self._data_per_device[device]
         except KeyError:
-            if isinstance(device, OffloadingDevice.CPUDevice):
+            if isinstance(device, CPUDevice):
                 data = self._alloc_cpu()
-            elif isinstance(device, OffloadingDevice.CUDADevice):
+            elif isinstance(device, CUDADevice):
                 data = self._alloc_cuda()
-            elif isinstance(device, OffloadingDevice.OpenCLDevice):
+            elif isinstance(device, OpenCLDevice):
                 data = self._alloc_opencl(device.queue)
             else:
                 raise AssertionError
+
+            # this is valid if nothing is already there
+            if not self._device_validity:
+                self._device_validity[device] = True
+
             return self._data_per_device.setdefault(offloading_device, data)
 
     def _alloc_cpu(self):

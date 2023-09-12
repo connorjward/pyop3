@@ -279,7 +279,7 @@ def _as_pointer(array: DistributedArray) -> int:
 
 @_as_pointer.register
 def _(array: MultiArray):
-    return array.data.ctypes.data
+    return array._data.ptr_rw
 
 
 def fix_intents(tunit, accesses):

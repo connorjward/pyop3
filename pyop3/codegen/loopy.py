@@ -28,7 +28,7 @@ from pyop3.axis import (
     CalledAxisTree,
     TabulatedLayout,
 )
-from pyop3.device import OffloadingDevice, offloading_device
+from pyop3.device import CPUDevice, CUDADevice, OpenCLDevice, offloading_device
 from pyop3.distarray import IndexedMultiArray, MultiArray
 from pyop3.dtypes import IntType
 from pyop3.index import (
@@ -72,14 +72,12 @@ from pyop3.utils import (
 )
 
 
-# FIXME this needs to be synchronised with TSFC, tricky
-# shared base package? or both set by Firedrake - better solution
 def loopy_target():
-    if offloading_device == OffloadingDevice.CPU:
+    if isinstance(offloading_device, CPUDevice):
         return lp.CWithGNULibcTarget()
-    elif offloading_device == OffloadingDevice.CUDA:
+    elif isinstance(offloading_device, CUDADevice):
         return lp.CudaTarget()
-    elif offloading_device == OffloadingDevice.OPENCL:
+    elif isinstance(offloading_device, OpenCLDevice):
         return lp.PyOpenCLTarget()
     else:
         raise AssertionError

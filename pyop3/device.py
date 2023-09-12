@@ -23,7 +23,8 @@ class OpenCLDevice(GPUDevice):
     pass
 
 
-offloading_device = OffloadingDevice.CPU
+host_device = CPUDevice()
+offloading_device = host_device
 
 
 @contextlib.contextmanager
@@ -31,7 +32,7 @@ def offloading(device: OffloadingDevice):
     global offloading_device
 
     orig_offloading_device = offloading_device
-    if not isinstance(orig_offloading_device, OffloadingDevice.CPU):
+    if not isinstance(orig_offloading_device, CPUDevice):
         raise NotImplementedError("Not sure what to do when offloading from not a CPU")
 
     offloading_device = device
