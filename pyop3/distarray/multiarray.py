@@ -80,25 +80,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
             raise ValueError("Can only specify one of name and prefix")
         dim = as_axis_tree(dim)
 
-        if isinstance(data, np.ndarray):
-            if dtype:
-                data = np.asarray(data, dtype=dtype)
-            else:
-                dtype = data.dtype
-        elif isinstance(data, Sequence):
-            data = np.asarray(data, dtype=dtype)
-            dtype = data.dtype
-        elif data is None:
-            if not dtype:
-                raise ValueError("Must either specify a dtype or provide an array")
-            dtype = np.dtype(dtype)
-            # debug
-            # data = np.zeros(dim.size, dtype=dtype)
-            from pyop3.axis import axis_tree_size
-
-            data = np.zeros(axis_tree_size(dim), dtype=dtype)
-        else:
-            raise TypeError("data argument not recognised")
+        data = MirroredArray(data or (dim.size,), dtype)
 
         # add prefix as an existing name so it is a true prefix
         if prefix:
