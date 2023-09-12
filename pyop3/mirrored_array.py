@@ -3,8 +3,8 @@ import weakref
 
 import numpy as np
 
+from pyop3.device import OffloadingDevice, host_device, offloading_device
 from pyop3.dtypes import ScalarType
-from pyop3.device import host_device, offloading_device, OffloadingDevice
 
 try:
     import pycuda
@@ -42,7 +42,9 @@ class MirroredArray:
             shape = data.shape
             if not dtype:
                 dtype = data.dtype
-            data_per_device = weakref.WeakKeyDictionary({host_device: np.asarray(data, dtype)})
+            data_per_device = weakref.WeakKeyDictionary(
+                {host_device: np.asarray(data, dtype)}
+            )
             device_validity = collections.defaultdict(bool, {host_device: True})
         # option 3: passed a CUDA array
         elif pycuda and isinstance(data_or_shape, pycuda.gpuarray.GPUArray):
@@ -56,7 +58,9 @@ class MirroredArray:
             shape = data.shape
             if not dtype:
                 dtype = data.dtype
-            data_per_device = weakref.WeakKeyDictionary({offloading_device: data.astype(dtype)})
+            data_per_device = weakref.WeakKeyDictionary(
+                {offloading_device: data.astype(dtype)}
+            )
             device_validity = collections.defaultdict(bool, {offloading_device: True})
         # option 4: passed an OpenCL array
         elif pyopencl and isinstance(data_or_shape, pyopencl.array.Array):
@@ -69,7 +73,9 @@ class MirroredArray:
             shape = data.shape
             if not dtype:
                 dtype = data.dtype
-            data_per_device = weakref.WeakKeyDictionary({offloading_device: data.astype(dtype)})
+            data_per_device = weakref.WeakKeyDictionary(
+                {offloading_device: data.astype(dtype)}
+            )
             device_validity = collections.defaultdict(bool, {offloading_device: True})
         else:
             raise ValueError("Unexpected arguments encountered")
@@ -199,14 +205,10 @@ class MirroredArray:
         return np.zeros(self.shape, self.dtype)
 
     def _alloc_cuda(self):
-        return pycuda.gpuarray.zeros(
-            shape=self.shape, dtype=self.dtype
-        )
+        return pycuda.gpuarray.zeros(shape=self.shape, dtype=self.dtype)
 
     def _alloc_opencl(self, queue):
-        raise return pyopencl.array.zeros(
-            queue, shape=self.shape, dtype=self.dtype
-        )
+        return pyopencl.array.zeros(queue, shape=self.shape, dtype=self.dtype)
 
     @staticmethod
     def _as_rw_array(array):
@@ -214,7 +216,12 @@ class MirroredArray:
         if isinstance(array, np.ndarray):
             rw_array = array.view()
             rw_array.setflags(write=True)
-        elif pycuda and isinstance(array, pycuda.gpuarray.GPUArray) or pyopencl and isinstance(array, pyopencl.array.Array):
+        elif (
+            pycuda
+            and isinstance(array, pycuda.gpuarray.GPUArray)
+            or pyopencl
+            and isinstance(array, pyopencl.array.Array)
+        ):
             rw_array = array
         else:
             raise TypeError(f"No handler provided for {type(array).__name__}")
@@ -226,7 +233,12 @@ class MirroredArray:
         if isinstance(array, np.ndarray):
             ro_array = array.view()
             ro_array.setflags(write=False)
-        elif pycuda and isinstance(array, pycuda.gpuarray.GPUArray) or pyopencl and isinstance(array, pyopencl.array.Array):
+        elif (
+            pycuda
+            and isinstance(array, pycuda.gpuarray.GPUArray)
+            or pyopencl
+            and isinstance(array, pyopencl.array.Array)
+        ):
             # don't have specific readonly arrays
             ro_array = array
         else:
