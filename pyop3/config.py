@@ -36,8 +36,6 @@
 import os
 from tempfile import gettempdir
 
-from loopy.target.c import CWithGNULibcTarget
-
 
 class ConfigurationError(RuntimeError):
     pass
@@ -155,5 +153,3 @@ class Configuration(dict):
 
 
 config = Configuration()
-
-target = CWithGNULibcTarget()
