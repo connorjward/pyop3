@@ -73,8 +73,6 @@ jobs:
         run: |
           # Gross:
           pip install toml
-          ls
-          cat pyproject.toml
           python scripts/requirements.py build | pip install -r /dev/stdin
           pip install --no-build-isolation .
           python scripts/requirements.py run | pip install -r /dev/stdin
@@ -82,7 +80,6 @@ jobs:
 
       - name: Run tests
         shell: bash
-        working-directory: pyop3
         run: |
           pytest \
             --durations=200 \
