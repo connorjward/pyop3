@@ -73,9 +73,9 @@ jobs:
         run: |
           # Gross:
           pip install toml
-          python scripts/requirements.py | pip install -r /dev/stdin
+          python scripts/requirements.py build | pip install -r /dev/stdin
           pip install --no-build-isolation .
-          python scripts/requirements.py | pip install -r /dev/stdin
+          python scripts/requirements.py run | pip install -r /dev/stdin
           pip install pytest-cov pytest-timeout pytest-xdist pytest-timeout
 
       - name: Run tests
