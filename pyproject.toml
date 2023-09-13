@@ -13,7 +13,7 @@ version = "0.1"
 dependencies = [
   "pyrsistent",
   "numpy",
-  "loopy",
+  "loopy @ git+https://github.com/firedrakeproject/loopy.git",
   "mpi4py",
   "petsc4py"
 ]
