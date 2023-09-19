@@ -7,6 +7,7 @@ del pytools.RecordWithoutPickling.__getattr__
 del pytools
 
 
+import pyop3.transforms
 from pyop3.axis import Axis, AxisComponent, AxisTree  # noqa: F401
 from pyop3.distarray import MultiArray  # noqa: F401
 from pyop3.dtypes import IntType, ScalarType  # noqa: F401

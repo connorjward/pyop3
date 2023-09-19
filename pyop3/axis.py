@@ -959,7 +959,7 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         # cyclic import
         from pyop3.index import LoopIndex
 
-        return LoopIndex(self)
+        return LoopIndex.from_iterset(self)
 
     def enumerate(self):
         # cyclic import
