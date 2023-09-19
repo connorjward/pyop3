@@ -12,9 +12,15 @@ import pymbolic as pym
 import pytools
 from pyrsistent import pmap
 
-# cyclic import, avoid
-from pyop3.axis import Axis, AxisComponent, AxisTree, AxisVariable
-from pyop3.loops import ContextFree, ContextSensitive, LoopIterable
+from pyop3.axis import (
+    Axis,
+    AxisComponent,
+    AxisTree,
+    AxisVariable,
+    ContextFree,
+    ContextSensitive,
+    LoopIterable,
+)
 from pyop3.tree import LabelledNode, LabelledTree, postvisit
 from pyop3.utils import (
     LabelledImmutableRecord,
@@ -330,9 +336,18 @@ class CalledMap(Index, LoopIterable, UniquelyIdentifiedImmutableRecord):
     def enumerate(self):
         raise NotImplementedError
 
+    # FIXME should be context-sensitive!
     @property
-    def index_exprs(self):
-        raise NotImplementedError
+    def target_path_per_component(self):
+        raise NotImplementedError("TODO")
+
+    @property
+    def index_exprs_per_component(self):
+        raise NotImplementedError("TODO")
+
+    @property
+    def layout_exprs_per_component(self):
+        raise NotImplementedError("TODO")
 
     @property
     def bits(self):

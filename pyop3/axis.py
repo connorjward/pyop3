@@ -24,7 +24,6 @@ from pyrsistent import pmap
 
 from pyop3 import utils
 from pyop3.dtypes import IntType, PointerType, get_mpi_dtype
-from pyop3.loops import ContextFree, ContextSensitive, LoopIterable
 
 # from pyop3.index import Index, IndexTree, Map, Slice, TabulatedMap
 from pyop3.tree import (
@@ -45,6 +44,7 @@ from pyop3.utils import (
     checked_zip,
     flatten,
     has_unique_entries,
+    is_single_valued,
     just_one,
     merge_dicts,
     single_valued,
@@ -53,6 +53,7 @@ from pyop3.utils import (
     strictly_all,
     unique,
 )
+
 
 # def is_distributed(axtree, axis=None):
 #     """Return ``True`` if any part of a :class:`MultiAxis` is distributed across ranks."""
@@ -65,6 +66,95 @@ from pyop3.utils import (
 #         ):
 #             return True
 #     return False
+class LoopIterable(abc.ABC):
+    """Class representing something that can be looped over.
+
+    In order for an object to be loop-able over it needs to have shape
+    (``axes``) and an index expression per leaf of the shape. The simplest
+    case is `AxisTree` since the index expression is just identity. This
+    contrasts with something like an `IndexedLoopIterable` or `CalledMap`.
+    For the former the index expression for ``axes[::2]`` would be ``2*i``
+    and for the latter ``map(p)`` would be something like ``map[i, j]``.
+
+    """
+
+    def index(self) -> LoopIndex:
+        return LoopIndex(self)
+
+    def enumerate(self) -> EnumeratedLoopIndex:
+        return EnumeratedLoopIndex(self)
+
+    @property
+    @abc.abstractmethod
+    def target_path_per_component(self):
+        pass
+
+    @property
+    @abc.abstractmethod
+    def index_exprs_per_component(self):
+        pass
+
+    @property
+    @abc.abstractmethod
+    def layout_exprs_per_component(self):
+        pass
+
+
+class ContextSensitive(pytools.ImmutableRecord, abc.ABC):
+    #     """Container of `IndexTree`s distinguished by outer loop information.
+    #
+    #     This class is required because multi-component outer loops can lead to
+    #     ambiguity in the shape of the resulting `IndexTree`. Consider the loop:
+    #
+    #     .. code:: python
+    #
+    #         loop(p := mesh.points, kernel(dat0[closure(p)]))
+    #
+    #     In this case, assuming ``mesh`` to be at least 1-dimensional, ``p`` will
+    #     loop over multiple components (cells, edges, vertices, etc) and each
+    #     component will have a differently sized temporary. This is because
+    #     vertices map to themselves whereas, for example, edges map to themselves
+    #     *and* the incident vertices.
+    #
+    #     A `SplitIndexTree` is therefore useful as it allows the description of
+    #     an `IndexTree` *per possible configuration of relevant loop indices*.
+    #
+    #     """
+    #
+    #     def __init__(self, index_trees: pmap[pmap[LoopIndex, pmap[str, str]], IndexTree]):
+    fields = {"values"}  # bad name
+
+    def __init__(self, values):
+        super().__init__()
+        # this is terribly unclear
+        if not is_single_valued([set(key.keys()) for key in values.keys()]):
+            raise ValueError("Loop contexts must contain the same loop indices")
+
+        assert all(isinstance(v, ContextFree) for v in values.values())
+
+        self.values = pmap(values)
+
+    @functools.cached_property
+    def keys(self):
+        # loop is used just for unpacking
+        for context in self.values.keys():
+            indices = set()
+            for loop_index in context.keys():
+                indices.add(loop_index)
+            return frozenset(indices)
+
+    def with_context(self, context):
+        key = {}
+        for loop_index, path in context.items():
+            if loop_index in self.keys:
+                key |= {loop_index: path}
+        key = pmap(key)
+        return self.values[key]
+
+
+class ContextFree(ContextSensitive, abc.ABC):
+    def with_context(self, context):
+        return self
 
 
 class ExpressionEvaluator(pym.mapper.evaluator.EvaluationMapper):
@@ -596,6 +686,18 @@ class Axis(StrictLabelledNode, LoopIterable):
     def enumerate(self):
         return as_axis_tree(self).enumerate()
 
+    @property
+    def target_path_per_component(self):
+        return as_axis_tree(self).target_path_per_component
+
+    @property
+    def index_exprs_per_component(self):
+        return as_axis_tree(self).index_exprs_per_component
+
+    @property
+    def layout_exprs_per_component(self):
+        return as_axis_tree(self).layout_exprs_per_component
+
     # cached?
     @property
     def axes(self):
@@ -670,6 +772,7 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         self.shared_sf = shared_sf
         self.comm = comm  # FIXME DTRT with internal comms
 
+        # TODO: evaluate these eagerly!
         self._layout_exprs = layout_exprs
         self._layouts = None
 
@@ -959,13 +1062,25 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         # cyclic import
         from pyop3.index import LoopIndex
 
-        return LoopIndex.from_iterset(self)
+        return LoopIndex(self)
 
     def enumerate(self):
         # cyclic import
         from pyop3.index import EnumeratedLoopIndex
 
         return EnumeratedLoopIndex(self.index())
+
+    @property
+    def target_path_per_component(self):
+        return self._target_paths
+
+    @property
+    def index_exprs_per_component(self):
+        return self._index_exprs
+
+    @property
+    def layout_exprs_per_component(self):
+        return self._layout_exprs
 
     @property
     def axes(self):
