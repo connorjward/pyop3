@@ -619,14 +619,9 @@ def add_leaf_assignment(
 ):
     from pyop3.distarray.multiarray import IndexExpressionReplacer
 
-    array_layout_fn = IndexExpressionReplacer(jname_replace_map)(
-        axes.orig_layout_fn[target_path]
-    )
-    # temp_layout_fn = assignment.temporary.axes.layouts[source_path]
-
     array_expr = make_array_expr(
         assignment,
-        array_layout_fn,
+        axes.orig_layout_fn[target_path],
         target_path,
         jname_replace_map,
         codegen_context,
