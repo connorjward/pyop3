@@ -493,28 +493,11 @@ def build_assignment(
         loop_context[loop_index] = source_path, target_path
     loop_context = pmap(loop_context)
 
-    iname_replace_map = pmap(
-        {
-            axis_label: iname_var
-            for _, _, _, replace_map in loop_indices.values()
-            for axis_label, iname_var in replace_map.items()
-        }
-    )
-    jname_replace_map = pmap(
-        {
-            axis_label: iname_var
-            for _, _, replace_map, _ in loop_indices.values()
-            for axis_label, iname_var in replace_map.items()
-        }
-    )
-
     parse_assignment_properly_this_time(
         assignment,
         assignment.array.axes.with_context(loop_context),
         loop_indices,
         codegen_ctx,
-        iname_replace_map=iname_replace_map,
-        jname_replace_map=jname_replace_map,
     )
 
 
@@ -526,44 +509,57 @@ def parse_assignment_properly_this_time(
     *,
     axis=None,
     source_path=pmap(),
-    target_path=pmap(),
+    target_path=None,
     iname_replace_map=pmap(),
-    jname_replace_map=pmap(),
+    jname_replace_map=None,
 ):
     from pyop3.distarray.multiarray import IndexExpressionReplacer
 
+    if axis is None:
+        axis = axes.root
+        target_path = axes.target_path_per_component.get(None, pmap())
+        iname_replace_map = pmap(
+            {
+                axis_label: iname_var
+                for _, _, _, replace_map in loop_indices.values()
+                for axis_label, iname_var in replace_map.items()
+            }
+        )
+        jname_replace_map = pmap(
+            {
+                axis_label: iname_var
+                for _, _, replace_map, _ in loop_indices.values()
+                for axis_label, iname_var in replace_map.items()
+            }
+        )
+
+        my_index_exprs = axes.index_exprs_per_component.get(None, pmap())
+        jname_extras = {}
+        for axis_label, index_expr in my_index_exprs.items():
+            jname_expr = JnameSubstitutor(
+                iname_replace_map | jname_replace_map, codegen_context
+            )(index_expr)
+            jname_extras[axis_label] = jname_expr
+        jname_replace_map = jname_replace_map | jname_extras
+
     if axes.is_empty:
-        new_target_path = axes.target_path_per_component[None]
-
-        # 1. Substitute the index expressions into the layout expression (this could
-        #    be done in advance)
-        layout_index_expr = IndexExpressionReplacer(
-            axes.index_exprs_per_component[None]
-        )(axes.orig_layout_fn[new_target_path])
-
         # 2. Substitute in the right inames
-        layout_fn = IndexExpressionReplacer(jname_replace_map)(layout_index_expr)
+        layout_fn = IndexExpressionReplacer(jname_replace_map)(
+            axes.orig_layout_fn[target_path]
+        )
 
-        # for non-empty also need to register domains here
-
-        array_expr = _assignment_array_insn(
+        array_expr = make_array_expr(
             assignment,
             layout_fn,
-            new_target_path,
-            iname_replace_map | jname_replace_map,
+            target_path,
+            jname_replace_map,
             codegen_context,
         )
-        temp_expr = _assignment_temp_insn(
+        temp_expr = make_temp_expr(
             assignment, source_path, iname_replace_map, codegen_context
         )
         _shared_assignment_insn(assignment, array_expr, temp_expr, codegen_context)
         return
-
-    axis = axis or axes.root
-
-    if axis == axes.root:
-        source_path = pmap()
-        target_path = axes.target_path_per_component.get(None, pmap())
 
     for component in axis.components:
         iname = codegen_context.unique_name("i")
@@ -618,14 +614,14 @@ def parse_assignment_properly_this_time(
 
                 # for non-empty also need to register domains here
 
-                array_expr = _assignment_array_insn(
+                array_expr = make_array_expr(
                     assignment,
                     layout_fn,
                     new_target_path,
-                    new_iname_replace_map | new_jname_replace_map,
+                    new_jname_replace_map,
                     codegen_context,
                 )
-                temp_expr = _assignment_temp_insn(
+                temp_expr = make_temp_expr(
                     assignment, new_source_path, new_iname_replace_map, codegen_context
                 )
                 _shared_assignment_insn(
@@ -633,260 +629,7 @@ def parse_assignment_properly_this_time(
                 )
 
 
-def _parse_assignment_final(
-    assignment,
-    axes,
-    loop_context,
-    loop_indices,
-    ctx: LoopyCodegenContext,
-):
-    from pyop3.distarray.multiarray import IndexExpressionReplacer
-
-    # target_path = {}
-    array_axis_labels_to_jnames = {}
-    for loop_index in loop_context.keys():
-        # we don't do anything with src_jnames currently. I should probably just register
-        # it as a separate loop index
-        tpath, target_jnames, src_jnames = loop_indices[loop_index]
-        # target_path |= tpath
-        # for axis_label, jname in src_jnames.items():
-        #     array_axis_labels_to_jnames[axis_label] = jname
-
-        # is this right??? I think this must be wrong
-        for axis_label, jname in target_jnames.items():
-            assert axis_label not in array_axis_labels_to_jnames
-            array_axis_labels_to_jnames[axis_label] = jname
-    # target_path = pmap(target_path)
-    target_path = axes.target_paths.get((), pmap())
-
-    # array_axis_labels_to_jnames = ???
-    # breakpoint()
-
-    # loop indices aren't included in the temporary
-    temp_axis_labels_to_jnames = {}
-
-    # breakpoint()
-    # array_path = pmap(
-    #     {ax: cpt for path in loop_context.values() for ax, cpt in path.items()}
-    # )
-    array_path = pmap()
-    temp_path = pmap()
-
-    ###
-
-    iname_replace_map_per_leaf = make_iname_replace_map_per_leaf(axes, ctx)
-
-    # breakpoint()
-
-    ###
-
-    if axes.is_empty:
-        source_path = pmap()
-        target_path = axes.target_path_per_leaf[source_path]
-
-        # 1. Substitute the index expressions into the layout expression (this could
-        #    be done in advance)
-        layout_index_expr = IndexExpressionReplacer(
-            axes.index_exprs_per_leaf[source_path]
-        )(axes.orig_layout_fn[target_path])
-
-        # 2. Substitute in the right inames
-        layout_fn = IndexExpressionReplacer(iname_replace_map_per_leaf[source_path])(
-            layout_index_expr
-        )
-
-        # breakpoint()
-
-        array_insns, array_expr = _assignment_array_insn(
-            assignment,
-            layout_fn,
-            array_path,
-            array_axis_labels_to_jnames,
-            ctx,
-        )
-        temp_insns, temp_expr = _assignment_temp_insn(
-            assignment, temp_path, temp_axis_labels_to_jnames, ctx
-        )
-        for insn in array_insns:
-            ctx.add_assignment(*insn)
-        for insn in temp_insns:
-            ctx.add_assignment(*insn)
-        _shared_assignment_insn(assignment, array_expr, temp_expr, ctx)
-
-    else:
-        _parse_assignment_final_rec(
-            assignment,
-            axes,
-            array_axis_labels_to_jnames,
-            array_path,
-            temp_axis_labels_to_jnames,
-            temp_path,
-            ctx,
-            target_path,
-            current_axis=axes.root,
-        )
-
-
-def make_iname_replace_map_per_leaf(
-    axes, codegen_ctx, *, axis=None, prev_path=pmap(), prev_inames=pmap()
-):
-    if axes.is_empty:
-        return pmap({pmap(): pmap()})
-
-    axis = axis or axes.root
-
-    iname_replace_map = {}
-    for component in axis.components:
-        path = prev_path | {axis.label: component.label}
-        inames = prev_inames | {axis.label: ctx.unique_name("i")}
-
-        if subaxis := axes.child(axis, component):
-            iname_replace_map |= make_iname_replace_map_per_leaf(
-                axes,
-                codegen_ctx,
-                axis=subaxis,
-                prev_path=path,
-                prev_inames=inames,
-            )
-        else:
-            iname_replace_map[path] = inames
-    return pmap(iname_replace_map)
-
-
-def _parse_assignment_collect_bits(
-    axes,
-    XXX,
-):
-    """Traverse the indexed axes and collect some jname expressions at the bottom.
-
-    We need to have, for each leaf, ???
-
-    * a map from target axis label -> jname expr - this is different to composing this
-      with the layout function.
-    * a map from source axis label -> iname - note that extents/domains cannot be registered
-      since we need the full target -> jname expr map first.
-
-    Arguably this function can be run as early as when we index the thing originally.
-    No but we need to generate the right inames which requires a codegen context.
-
-    But I suppose that, apart from that, all of the expressions will be in terms of these
-    variables. We can do a substitution for all of them?
-
-    When we register the extent we will have:
-
-        * a number of target axes requiring addressing
-        * a map from target axis -> index expr  (index_exprs)
-        * a map from index var (inside index expr) -> iname
-
-    """
-    ...
-
-
-def _parse_assignment_final_rec(
-    assignment,
-    axes,
-    array_jnames,
-    array_path,
-    temp_jnames,
-    temp_path,
-    ctx,
-    target_path=pmap(),
-    mini_path=(),
-    jname_expr_per_target_axis_label=None,
-    *,
-    current_axis,
-):
-    from pyop3.distarray.multiarray import IndexExpressionReplacer
-
-    if not jname_expr_per_target_axis_label:
-        jname_expr_per_target_axis_label = {}
-
-    for axcpt in current_axis.components:
-        size = register_extent(axcpt.count, array_jnames, ctx)
-        iname = ctx.unique_name("i")
-        ctx.add_domain(iname, size)
-
-        with ctx.within_inames({iname}):
-            # definitely don't need to track both of these
-            current_jname = iname
-            new_array_jnames = array_jnames | {
-                current_axis.label: pym.var(current_jname)
-            }
-            new_temp_jnames = temp_jnames | {current_axis.label: pym.var(current_jname)}
-            new_array_path = array_path | {current_axis.label: axcpt.label}
-            new_temp_path = temp_path | {current_axis.label: axcpt.label}
-
-            new_target_path = target_path
-            new_mini_path = mini_path + ((current_axis, axcpt),)
-            if new_mini_path in axes.target_paths:
-                mytargetpath = axes.target_paths[new_mini_path]
-                new_target_path = target_path | mytargetpath
-
-                # for now, can in theory target multiple target axes
-                target_axis = just_one(mytargetpath.keys())
-
-                # breakpoint()
-                # just in case
-                found = False
-                for myaxis, mycomponent in new_mini_path:
-                    if (myaxis.id, mycomponent.label) in axes.index_exprs:
-                        assert not found
-                        index_expr = axes.index_exprs[myaxis.id, mycomponent.label]
-                        jname_expr = JnameSubstitutor(new_array_jnames, ctx)(index_expr)
-                        jname_expr_per_target_axis_label[target_axis] = jname_expr
-                        found = True
-                # jname_expr_per_target_axis_label = pmap(
-                #     jname_expr_per_target_axis_label
-                # )
-
-                new_mini_path = ()
-
-            if subaxis := axes.child(current_axis, axcpt):
-                _parse_assignment_final_rec(
-                    assignment,
-                    axes,
-                    new_array_jnames,
-                    new_array_path,
-                    new_temp_jnames,
-                    new_temp_path,
-                    ctx,
-                    new_target_path,
-                    new_mini_path,
-                    jname_expr_per_target_axis_label,
-                    current_axis=subaxis,
-                )
-            else:
-                assert not new_mini_path
-                # if isinstance(assignment.array, CalledAxisTree):
-                #     temp_insns, temp_expr = _assignment_temp_insn(
-                #         assignment, pmap(), pmap(), ctx
-                #     )
-                #     for insn in temp_insns:
-                #         ctx.add_assignment(*insn)
-
-                # now use this as the replace map to get the right layout expression
-                layout_fn = IndexExpressionReplacer(jname_expr_per_target_axis_label)(
-                    axes.orig_layout_fn[new_target_path]
-                )
-
-                array_insns, array_expr = _assignment_array_insn(
-                    assignment,
-                    layout_fn,
-                    new_array_path,
-                    new_array_jnames,
-                    ctx,
-                )
-                temp_insns, temp_expr = _assignment_temp_insn(
-                    assignment, new_temp_path, new_temp_jnames, ctx
-                )
-                for insn in array_insns:
-                    ctx.add_assignment(*insn)
-                for insn in temp_insns:
-                    ctx.add_assignment(*insn)
-                _shared_assignment_insn(assignment, array_expr, temp_expr, ctx)
-
-
-def _assignment_array_insn(assignment, layouts, path, jnames, ctx):
+def make_array_expr(assignment, layouts, path, jnames, ctx):
     """
 
     Return a list of (assignee, expression) tuples and the array expr used
@@ -907,7 +650,7 @@ def _assignment_array_insn(assignment, layouts, path, jnames, ctx):
     return array_expr
 
 
-def _assignment_temp_insn(assignment, path, jnames, ctx):
+def make_temp_expr(assignment, path, jnames, ctx):
     """
 
     Return a list of (assignee, expression) tuples and the temp expr used
