@@ -594,31 +594,14 @@ def parse_assignment_properly_this_time(
                 )
 
             else:
-                # 1. Substitute the index expressions into the layout expression (this could
-                #    be done in advance)
-                layout_index_expr = IndexExpressionReplacer(new_jname_replace_map)(
-                    axes.orig_layout_fn[new_target_path]
-                )
-
-                layout_fn = layout_index_expr  # what's the difference?
-
-                # 2. Substitute in the right inames
-                # layout_fn = IndexExpressionReplacer(new_jname_replace_map)(layout_index_expr)
-
-                # for non-empty also need to register domains here
-
-                array_expr = make_array_expr(
+                add_leaf_assignment(
                     assignment,
-                    layout_fn,
+                    axes,
+                    new_source_path,
                     new_target_path,
+                    new_iname_replace_map,
                     new_jname_replace_map,
                     codegen_context,
-                )
-                temp_expr = make_temp_expr(
-                    assignment, new_source_path, new_iname_replace_map, codegen_context
-                )
-                _shared_assignment_insn(
-                    assignment, array_expr, temp_expr, codegen_context
                 )
 
 
