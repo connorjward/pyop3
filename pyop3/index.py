@@ -384,11 +384,13 @@ class LoopIndex(AbstractLoopIndex):
 
     def target_paths(self, context):
         iterset = self.iterset.with_context(context)
-        paths = []
+        target_paths_ = []
         for leaf in iterset.leaves:
-            path = iterset.path(*leaf)
-            paths.append(iterset.target_path_per_leaf[path])
-        return tuple(paths)
+            target_path = {}
+            for axis, cpt in iterset.path_with_nodes(*leaf).items():
+                target_path |= iterset.target_path_per_component.get((axis.id, cpt), {})
+            target_paths_.append(target_path)
+        return tuple(target_paths_)
 
 
 class LocalLoopIndex(AbstractLoopIndex):
@@ -600,9 +602,15 @@ def _(arg: LoopIndex):
         for loop_context, axis_tree in arg.iterset.axis_trees.items():
             extra_source_context = {}
             extracontext = {}
-            for source_path, target_path in checked_zip(
-                axis_tree.source_paths.values(), axis_tree.target_paths.values()
-            ):
+            for leaf in axis_tree.leaves:
+                source_path = axis_tree.path(*leaf)
+                target_path = {}
+                for axis, cpt in axis_tree.path_with_nodes(
+                    *leaf, and_components=True
+                ).items():
+                    target_path |= axis_tree.target_path_per_component[
+                        axis.id, cpt.label
+                    ]
                 extra_source_context |= source_path
                 extracontext |= target_path
             loop_contexts.append(
@@ -872,9 +880,9 @@ def _(local_index: LocalLoopIndex, *args, loop_indices, **kwargs):
 @collect_shape_index_callback.register
 def _(slice_: Slice, *, prev_axes, **kwargs):
     components = []
-    target_path_per_component = {}
-    index_exprs_per_component = {}
-    layout_exprs_per_component = {}
+    target_path_per_subslice = []
+    index_exprs_per_subslice = []
+    layout_exprs_per_subslice = []
 
     for subslice in slice_.slices:
         # we are assuming that axes with the same label *must* be identical. They are
@@ -895,21 +903,33 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
         cpt = AxisComponent(size, label=subslice.label)
         components.append(cpt)
 
-        target_path_per_component[cpt] = pmap({target_axis.label: target_cpt.label})
+        target_path_per_subslice.append(pmap({target_axis.label: target_cpt.label}))
 
         newvar = AxisVariable(slice_.label)
         if isinstance(subslice, AffineSliceComponent):
-            index_exprs_per_component[cpt] = pmap(
-                {slice_.axis: newvar * subslice.step + subslice.start}
+            index_exprs_per_subslice.append(
+                pmap({slice_.axis: newvar * subslice.step + subslice.start})
             )
-            layout_exprs_per_component[cpt] = pmap(
-                {slice_.axis: (newvar - subslice.start) // subslice.step}
+            layout_exprs_per_subslice.append(
+                pmap({slice_.axis: (newvar - subslice.start) // subslice.step})
             )
         else:
-            index_exprs_per_component[cpt] = pmap({slice_.axis: subslice.array})
-            layout_exprs_per_component[cpt] = pmap({slice_.axis: "inverse search"})
+            index_exprs_per_subslice.append(pmap({slice_.axis: subslice.array}))
+            layout_exprs_per_subslice.append(pmap({slice_.axis: "inverse search"}))
 
     axes = AxisTree(Axis(components, label=slice_.label))
+    target_path_per_component = {}
+    index_exprs_per_component = {}
+    layout_exprs_per_component = {}
+    for cpt, target_path, index_exprs, layout_exprs in checked_zip(
+        components,
+        target_path_per_subslice,
+        index_exprs_per_subslice,
+        layout_exprs_per_subslice,
+    ):
+        target_path_per_component[axes.root.id, cpt.label] = target_path
+        index_exprs_per_component[axes.root.id, cpt.label] = index_exprs
+        layout_exprs_per_component[axes.root.id, cpt.label] = layout_exprs
     return (
         axes,
         target_path_per_component,
@@ -1034,16 +1054,13 @@ def _index_axes_rec(
         index_exprs_per_cpt_per_index,
         layout_exprs_per_cpt_per_index,
     ) = rest
-    # new_target_path_per_cpt = target_path_per_component | target_path_per_cpt_per_index
-    # new_index_exprs_per_cpt = index_exprs_per_component | index_exprs_per_cpt_per_index
-    # new_layout_exprs_per_cpt = layout_exprs_per_component | layout_exprs_per_cpt_per_index
 
     if not axes_per_index.is_empty:
-        leafkeys = [(ax.id, cpt.label) for ax, cpt in axes_per_index.leaves]
+        leafkeys = [(ax.id, cpt) for ax, cpt in axes_per_index.leaves]
     else:
         leafkeys = [None]
 
-    leafdata = {}
+    subaxes = {}
     for leafkey in leafkeys:
         if current_index.id in indices.parent_to_children:
             for subindex in indices.parent_to_children[current_index.id]:
@@ -1055,31 +1072,23 @@ def _index_axes_rec(
                     # layout_exprs_per_component=new_layout_exprs_per_cpt,
                     **kwargs,
                 )
-                leafdata[leafkey] = retval
-        else:
-            leafdata[leafkey] = (
-                AxisTree(),
-                target_path_per_cpt_per_index,
-                index_exprs_per_cpt_per_index,
-                layout_exprs_per_cpt_per_index,
-            )
+                subaxes[leafkey] = retval[0]
+                target_path_per_cpt_per_index |= retval[1]
+                index_exprs_per_cpt_per_index |= retval[2]
+                layout_exprs_per_cpt_per_index |= retval[3]
 
-    target_path_per_component = {}
-    index_exprs_per_component = {}
-    layout_exprs_per_component = {}
+    target_path_per_component = target_path_per_cpt_per_index
+    index_exprs_per_component = index_exprs_per_cpt_per_index
+    layout_exprs_per_component = layout_exprs_per_cpt_per_index
 
     axes = axes_per_index
-    # this is overly complicated, can be done above.
-    for k, (subax, target_path, index_exprs, layout_exprs) in leafdata.items():
+    for k, subax in subaxes.items():
         if subax is not None:
             if axes.root:
                 axes = axes.add_subtree(subax, *k)
             else:
                 axes = subax
 
-        target_path_per_component |= target_path
-        index_exprs_per_component |= index_exprs
-        layout_exprs_per_component |= layout_exprs
     return (
         axes,
         target_path_per_component,

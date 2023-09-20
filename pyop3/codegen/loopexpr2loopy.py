@@ -271,7 +271,6 @@ def parse_loop_properly_this_time(
 
     for component in axis.components:
         iname = codegen_context.unique_name("i")
-        # should these include the new bits?
         extent_var = register_extent(
             component.count, iname_replace_map | jname_replace_map, codegen_context
         )
@@ -560,81 +559,71 @@ def parse_assignment_properly_this_time(
         _shared_assignment_insn(assignment, array_expr, temp_expr, codegen_context)
         return
 
-    raise NotImplementedError("TODO ASAP")
     axis = axis or axes.root
 
     for component in axis.components:
-        new_source_path = source_path | {axis.label: component.label}
         iname = codegen_context.unique_name("i")
-        within_inames = tuple(iname_replace_map.values())
-        new_domains = domains + ((component.count, iname, within_inames),)
+        extent_var = register_extent(
+            component.count, iname_replace_map | jname_replace_map, codegen_context
+        )
+        codegen_context.add_domain(iname, extent_var)
+
+        new_source_path = source_path | {axis.label: component.label}  # not used
+        new_target_path = target_path | axes.target_path_per_component.get(
+            (axis.id, component.label), {}
+        )
+
         new_iname_replace_map = iname_replace_map | {axis.label: pym.var(iname)}
 
-        new_source_iname_replace_map = source_iname_replace_map | {
-            axis.label: pym.var(iname)
-        }
+        my_index_exprs = axes.index_exprs_per_component.get(
+            (axis.id, component.label), {}
+        )
+        jname_extras = {}
+        for axis_label, index_expr in my_index_exprs.items():
+            jname_expr = JnameSubstitutor(
+                new_iname_replace_map | jname_replace_map, codegen_context
+            )(index_expr)
+            jname_extras[axis_label] = jname_expr
+        new_jname_replace_map = jname_replace_map | jname_extras
 
-        if subaxis := axes.child(axis, component):
-            parse_assignment_properly_this_time(
-                assignment,
-                axes,
-                loop_indices,
-                codegen_context,
-                axis=subaxis,
-                source_path=new_source_path,
-                iname_replace_map=new_iname_replace_map,
-                source_iname_replace_map=new_source_iname_replace_map,
-                domains=new_domains,
-            )
+        with codegen_context.within_inames({iname}):
+            if subaxis := axes.child(axis, component):
+                parse_assignment_properly_this_time(
+                    assignment,
+                    axes,
+                    loop_indices,
+                    codegen_context,
+                    axis=subaxis,
+                    source_path=new_source_path,
+                    target_path=new_target_path,
+                    iname_replace_map=new_iname_replace_map,
+                    jname_replace_map=new_jname_replace_map,
+                    domains=new_domains,
+                )
 
-        else:
-            # register domains
-            for size, iname, within_inames in new_domains:
-                if not isinstance(size, int):
-                    raise NotImplementedError
+            else:
+                # 1. Substitute the index expressions into the layout expression (this could
+                #    be done in advance)
+                layout_index_expr = IndexExpressionReplacer(new_jname_replace_map)(
+                    axes.orig_layout_fn[new_target_path]
+                )
 
-                selected_inames = {
-                    i.name
-                    for i in within_inames
-                    if i.name not in codegen_context._within_inames
-                }
-                with codegen_context.within_inames(selected_inames):
-                    # size = register_extent(???)
-                    # if we are multi-component then we end up registering identical domains twice
-                    codegen_context.add_domain(iname, size)
+                layout_fn = layout_index_expr  # what's the difference?
 
-            target_path = axes.target_path_per_leaf[new_source_path]
+                # 2. Substitute in the right inames
+                # layout_fn = IndexExpressionReplacer(new_jname_replace_map)(layout_index_expr)
 
-            # 1. Substitute the index expressions into the layout expression (this could
-            #    be done in advance)
-            layout_index_expr = IndexExpressionReplacer(
-                dict(axes.index_exprs_per_leaf[new_source_path])
-            )(axes.orig_layout_fn[target_path])
+                # for non-empty also need to register domains here
 
-            # 2. Substitute in the right inames
-            layout_fn = IndexExpressionReplacer(new_iname_replace_map)(
-                layout_index_expr
-            )
-
-            selected_inames = {
-                i.name
-                for i in new_iname_replace_map.values()
-                if i.name not in codegen_context._within_inames
-            }
-
-            with codegen_context.within_inames(selected_inames):
                 array_expr = _assignment_array_insn(
                     assignment,
                     layout_fn,
-                    target_path,
-                    new_iname_replace_map,
+                    new_target_path,
+                    new_iname_replace_map | new_jname_replace_map,
                     codegen_context,
                 )
                 temp_expr = _assignment_temp_insn(
-                    assignment,
-                    new_source_path,
-                    new_source_iname_replace_map,
-                    codegen_context,
+                    assignment, new_source_path, new_iname_replace_map, codegen_context
                 )
                 _shared_assignment_insn(
                     assignment, array_expr, temp_expr, codegen_context
