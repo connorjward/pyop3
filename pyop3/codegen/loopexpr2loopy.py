@@ -636,14 +636,12 @@ def make_array_expr(assignment, layouts, path, jnames, ctx):
     in the assignment.
 
     """
-    offset_insns, array_offset = emit_assignment_insn(
+    array_offset = emit_assignment_insn(
         layouts,
         path,
         jnames,
         ctx,
     )
-    for insn in offset_insns:
-        ctx.add_assignment(*insn)
     array = assignment.array
     array_expr = pym.subscript(pym.var(array.name), pym.var(array_offset))
 
@@ -657,15 +655,12 @@ def make_temp_expr(assignment, path, jnames, ctx):
     in the assignment.
 
     """
-    offset_insns, temp_offset = emit_assignment_insn(
+    temp_offset = emit_assignment_insn(
         assignment.temporary.axes.layouts[path],
         path,
         jnames,
         ctx,
     )
-
-    for insn in offset_insns:
-        ctx.add_assignment(*insn)
 
     temporary = assignment.temporary
 
@@ -705,17 +700,15 @@ def emit_assignment_insn(
 ):
     offset = ctx.unique_name("off")
     ctx.add_temporary(offset, IntType)
-    # ctx.add_assignment(pym.var(offset), 0)
 
-    return (
-        emit_layout_insns(
-            layouts,
-            offset,
-            labels_to_jnames,
-            ctx,
-        ),
+    emit_layout_insns(
+        layouts,
         offset,
+        labels_to_jnames,
+        ctx,
     )
+
+    return offset
 
 
 class JnameSubstitutor(pym.mapper.IdentityMapper):
@@ -769,14 +762,12 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
             axis = axes.child(axis, cpt)
         trimmed_jnames = pmap(trimmed_jnames)
 
-        insns, varname = _scalar_assignment(
+        varname = _scalar_assignment(
             array,
             path,
             trimmed_jnames,
             self._codegen_context,
         )
-        for insn in insns:
-            self._codegen_context.add_assignment(*insn)
         return varname
 
     def map_called_map(self, expr):
@@ -800,15 +791,13 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         # j0 is now fixed but j1 can still be changed
         rootaxis = map_array.axes.root
         inner_axis, inner_cpt = map_array.axes.leaf
-        insns, jname_expr = _scalar_assignment(
+        jname_expr = _scalar_assignment(
             map_array,
             pmap({rootaxis.label: just_one(rootaxis.components).label})
             | pmap({inner_axis.label: inner_cpt.label}),
             {rootaxis.label: inner_expr[0]} | {inner_axis.label: inner_expr[1]},
             self._codegen_context,
         )
-        for insn in insns:
-            self._codegen_context.add_assignment(*insn)
         return jname_expr
 
 
@@ -823,7 +812,7 @@ def emit_layout_insns(
     if expr == ():
         expr = 0
 
-    return ((pym.var(offset_var), expr),)
+    ctx.add_assignment(pym.var(offset_var), expr)
 
 
 def register_extent(extent, jnames, ctx):
@@ -835,10 +824,7 @@ def register_extent(extent, jnames, ctx):
         raise NotImplementedError("need to tidy up assignment logic")
 
     path = extent.axes.path(*extent.axes.leaf)
-    insns, expr = _scalar_assignment(extent, path, jnames, ctx)
-
-    for lhs, rhs in insns:
-        ctx.add_assignment(lhs, rhs)
+    expr = _scalar_assignment(extent, path, jnames, ctx)
 
     varname = ctx.unique_name("p")
     ctx.add_temporary(varname)
@@ -882,14 +868,14 @@ def _scalar_assignment(
     offset = ctx.unique_name("off")
     ctx.add_temporary(offset, IntType)
 
-    layout_insns = emit_layout_insns(
+    emit_layout_insns(
         array.axes.layouts[path],
         offset,
         array_labels_to_jnames,
         ctx,
     )
     rexpr = pym.subscript(pym.var(array.name), pym.var(offset))
-    return layout_insns, rexpr
+    return rexpr
 
 
 def find_axis(axes, path, target, current_axis=None):
