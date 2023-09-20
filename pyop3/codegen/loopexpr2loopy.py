@@ -244,67 +244,7 @@ def _parse_loop_rec(
     current_path,
     current_jnames,
 ):
-    domain_insns, leaf_data = parse_loop_properly_this_time(
-        loop, axes, loop_indices, codegen_context
-    )
-
-    # register the domains
-    for array, var, within_inames, iname_replace_map in domain_insns:
-        mypath = array.axes.path(*array.axes.leaf)
-
-        index_exprs = {}
-        for axis_label in mypath:
-            index_exprs[axis_label] = single_valued(
-                leaf_datum[1][axis_label] for leaf_datum in leaf_data
-            )
-
-        jname_replace_map = {}
-        for axis_label, index_expr in index_exprs.items():
-            jname_expr = JnameSubstitutor(
-                iname_replace_map | jname_replace_map, codegen_context
-            )(index_expr)
-            jname_replace_map[axis_label] = jname_expr
-
-        with codegen_context.within_inames(within_inames):
-            insns, final_var = _scalar_assignment(
-                array, mypath, jname_replace_map, codegen_context
-            )
-            for insn in insns:
-                codegen_context.add_assignment(*insn)
-            codegen_context.add_assignment(var, final_var)
-
-    # do per leaf
-    for source_leaf, (
-        target_path,
-        index_exprs_per_target_axis,
-        iname_replace_map,
-    ) in checked_zip(axes.leaves, leaf_data):
-        source_path = axes.path(*source_leaf)
-        within_inames = frozenset(iname.name for iname in iname_replace_map.values())
-
-        with codegen_context.within_inames(within_inames):
-            jname_replace_map = {}
-            # must be ordered
-            for axis_label, index_expr in index_exprs_per_target_axis.items():
-                jname_expr = JnameSubstitutor(
-                    iname_replace_map | jname_replace_map, codegen_context
-                )(index_expr)
-                jname_replace_map[axis_label] = jname_expr
-
-            for stmt in loop.statements:
-                _compile(
-                    stmt,
-                    loop_indices
-                    | {
-                        loop.index: (
-                            source_path,
-                            target_path,
-                            jname_replace_map,
-                            iname_replace_map,
-                        )
-                    },
-                    codegen_context,
-                )
+    parse_loop_properly_this_time(loop, axes, loop_indices, codegen_context)
 
 
 def parse_loop_properly_this_time(
@@ -314,8 +254,10 @@ def parse_loop_properly_this_time(
     codegen_context,
     *,
     axis=None,
-    prev_source_path=pmap(),
-    prev_iname_replace_map=pmap(),
+    source_path=pmap(),
+    target_path=pmap(),
+    iname_replace_map=pmap(),
+    jname_replace_map=pmap(),
 ):
     from pyop3.distarray.multiarray import IndexExpressionReplacer
 
@@ -328,65 +270,60 @@ def parse_loop_properly_this_time(
     leaf_data = []
 
     for component in axis.components:
-        source_path = prev_source_path | {axis.label: component.label}
         iname = codegen_context.unique_name("i")
-        iname_replace_map = prev_iname_replace_map | {axis.label: pym.var(iname)}
-        within_inames = codegen_context._within_inames
+        # should these include the new bits?
+        extent_var = register_extent(
+            component.count, iname_replace_map | jname_replace_map, codegen_context
+        )
+        codegen_context.add_domain(iname, extent_var)
 
-        loop_size = component.count
-        if isinstance(loop_size, MultiArray):
-            loop_size_var = codegen_context.unique_name("n")
-            codegen_context.add_temporary(loop_size_var)
-            domain_insns.append(
-                (
-                    loop_size,
-                    loop_size_var,
-                    codegen_context._within_inames,
-                    iname_replace_map,
-                )
-            )
-        else:
-            assert isinstance(loop_size, numbers.Integral)
-            loop_size_var = loop_size
+        new_source_path = source_path | {axis.label: component.label}
+        new_target_path = target_path | axes.target_path_per_component.get(
+            (axis.id, component.label), {}
+        )
+        new_iname_replace_map = iname_replace_map | {axis.label: pym.var(iname)}
 
-        codegen_context.add_domain(iname, loop_size_var)
+        # these aren't jnames!
+        my_index_exprs = axes.index_exprs_per_component.get(
+            (axis.id, component.label), {}
+        )
+        jname_extras = {}
+        for axis_label, index_expr in my_index_exprs.items():
+            jname_expr = JnameSubstitutor(
+                new_iname_replace_map | jname_replace_map, codegen_context
+            )(index_expr)
+            jname_extras[axis_label] = jname_expr
+
+        new_jname_replace_map = jname_replace_map | jname_extras
 
         with codegen_context.within_inames({iname}):
             if subaxis := axes.child(axis, component):
-                retval = parse_loop_properly_this_time(
+                parse_loop_properly_this_time(
                     loop,
                     axes,
                     loop_indices,
                     codegen_context,
                     axis=subaxis,
-                    prev_source_path=source_path,
-                    prev_iname_replace_map=iname_replace_map,
+                    source_path=new_source_path,
+                    target_path=new_target_path,
+                    iname_replace_map=new_iname_replace_map,
+                    jname_replace_map=new_jname_replace_map,
                 )
-                domain_insns += retval[0]
-                leaf_data.extend(retval[1])
             else:
-                target_path = axes.target_path_per_leaf[source_path]
-
-                # Make a mapping from target axis label to jname expression
-                new_index_exprs_per_target_axis = {}
-                for axis_label, index_expr in axes.index_exprs_per_leaf[
-                    source_path
-                ].items():
-                    new_index_expr = IndexExpressionReplacer(
-                        axes.index_exprs_per_leaf[source_path],
-                    )(index_expr)
-                    new_index_exprs_per_target_axis[axis_label] = new_index_expr
-
-                # target_path_per_leaf[source_path] = target_path
-                # index_exprs_per_target_axis_per_leaf[source_path] = new_index_exprs_per_target_axis
-                # iname_replace_map_per_leaf[source_path] = iname_replace_map
-                # TODO iname_replace_map is not leaf data
-                leaf_data.append(
-                    (target_path, new_index_exprs_per_target_axis, iname_replace_map)
-                )
-
-    # return domain_insns, pmap(target_path_per_leaf), pmap(index_exprs_per_target_axis_per_leaf), pmap(iname_replace_map_per_leaf)
-    return domain_insns, tuple(leaf_data)
+                for stmt in loop.statements:
+                    _compile(
+                        stmt,
+                        loop_indices
+                        | {
+                            loop.index: (
+                                new_source_path,
+                                new_target_path,
+                                new_jname_replace_map,
+                                new_iname_replace_map,
+                            )
+                        },
+                        codegen_context,
+                    )
 
 
 @_compile.register
@@ -557,14 +494,14 @@ def build_assignment(
         loop_context[loop_index] = source_path, target_path
     loop_context = pmap(loop_context)
 
-    source_iname_replace_map = pmap(
+    iname_replace_map = pmap(
         {
             axis_label: iname_var
             for _, _, _, replace_map in loop_indices.values()
             for axis_label, iname_var in replace_map.items()
         }
     )
-    iname_replace_map = pmap(
+    jname_replace_map = pmap(
         {
             axis_label: iname_var
             for _, _, replace_map, _ in loop_indices.values()
@@ -577,8 +514,8 @@ def build_assignment(
         assignment.array.axes.with_context(loop_context),
         loop_indices,
         codegen_ctx,
-        source_iname_replace_map=source_iname_replace_map,
         iname_replace_map=iname_replace_map,
+        jname_replace_map=jname_replace_map,
     )
 
 
@@ -590,39 +527,40 @@ def parse_assignment_properly_this_time(
     *,
     axis=None,
     source_path=pmap(),
+    target_path=pmap(),
     iname_replace_map=pmap(),
-    source_iname_replace_map=pmap(),
-    domains=(),
+    jname_replace_map=pmap(),
 ):
     from pyop3.distarray.multiarray import IndexExpressionReplacer
 
     if axes.is_empty:
-        target_path = axes.target_path_per_leaf[source_path]
+        new_target_path = axes.target_path_per_component[None]
 
         # 1. Substitute the index expressions into the layout expression (this could
         #    be done in advance)
         layout_index_expr = IndexExpressionReplacer(
-            dict(axes.index_exprs_per_leaf[source_path])
-        )(axes.orig_layout_fn[target_path])
+            axes.index_exprs_per_component[None]
+        )(axes.orig_layout_fn[new_target_path])
 
         # 2. Substitute in the right inames
-        layout_fn = IndexExpressionReplacer(iname_replace_map)(layout_index_expr)
+        layout_fn = IndexExpressionReplacer(jname_replace_map)(layout_index_expr)
 
         # for non-empty also need to register domains here
 
         array_expr = _assignment_array_insn(
             assignment,
             layout_fn,
-            target_path,
-            source_iname_replace_map | iname_replace_map,
+            new_target_path,
+            iname_replace_map | jname_replace_map,
             codegen_context,
         )
         temp_expr = _assignment_temp_insn(
-            assignment, source_path, source_iname_replace_map, codegen_context
+            assignment, source_path, iname_replace_map, codegen_context
         )
         _shared_assignment_insn(assignment, array_expr, temp_expr, codegen_context)
         return
 
+    raise NotImplementedError("TODO ASAP")
     axis = axis or axes.root
 
     for component in axis.components:
