@@ -187,6 +187,7 @@ def compile(expr: LoopExpr, name="mykernel"):
         read_variables=frozenset({a.name for a in ctx.arguments}),
         within_inames=frozenset(),
         within_inames_is_final=True,
+        depends_on=ctx._depends_on,
     )
     ctx._insns.append(noop)
 
@@ -643,14 +644,13 @@ def make_array_expr(assignment, layouts, path, jnames, ctx):
     in the assignment.
 
     """
-    array_offset = emit_assignment_insn(
+    array_offset = make_offset_expr(
         layouts,
-        path,
         jnames,
         ctx,
     )
     array = assignment.array
-    array_expr = pym.subscript(pym.var(array.name), pym.var(array_offset))
+    array_expr = pym.subscript(pym.var(array.name), array_offset)
 
     return array_expr
 
@@ -663,9 +663,8 @@ def make_temp_expr(assignment, path, jnames, ctx):
 
     """
     layout = assignment.temporary.axes.layouts[path]
-    temp_offset = emit_assignment_insn(
+    temp_offset = make_offset_expr(
         layout,
-        path,
         jnames,
         ctx,
     )
@@ -675,8 +674,13 @@ def make_temp_expr(assignment, path, jnames, ctx):
     # hack to handle the fact that temporaries can have shape but we want to
     # linearly index it here
     extra_indices = (0,) * (len(assignment.shape) - 1)
+    # also has to be a scalar, not an expression
+    temp_offset_var = ctx.unique_name("off")
+    ctx.add_temporary(temp_offset_var)
+    ctx.add_assignment(temp_offset_var, temp_offset)
+    temp_offset_var = pym.var(temp_offset_var)
     temp_expr = pym.subscript(
-        pym.var(temporary.name), extra_indices + (pym.var(temp_offset),)
+        pym.var(temporary.name), extra_indices + (temp_offset_var,)
     )
     return temp_expr
 
@@ -698,25 +702,6 @@ def _shared_assignment_insn(assignment, array_expr, temp_expr, ctx):
         raise NotImplementedError
 
     ctx.add_assignment(lexpr, rexpr)
-
-
-def emit_assignment_insn(
-    layouts,
-    path,
-    labels_to_jnames,
-    ctx,
-):
-    offset = ctx.unique_name("off")
-    ctx.add_temporary(offset, IntType)
-
-    emit_layout_insns(
-        layouts,
-        offset,
-        labels_to_jnames,
-        ctx,
-    )
-
-    return offset
 
 
 class JnameSubstitutor(pym.mapper.IdentityMapper):
@@ -809,18 +794,19 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         return jname_expr
 
 
-def emit_layout_insns(
+def make_offset_expr(
     layouts,
-    offset_var,
-    labels_to_jnames,
-    ctx,
+    jname_replace_map,
+    codegen_context,
 ):
-    expr = JnameSubstitutor(labels_to_jnames, ctx)(layouts)
+    # this is already done (in some cases)
+    expr = JnameSubstitutor(jname_replace_map, codegen_context)(layouts)
+    # expr = layouts
 
     if expr == ():
         expr = 0
 
-    ctx.add_assignment(pym.var(offset_var), expr)
+    return expr
 
 
 def register_extent(extent, jnames, ctx):
@@ -873,16 +859,12 @@ def _scalar_assignment(
     # Register data
     ctx.add_argument(array.name, array.dtype)
 
-    offset = ctx.unique_name("off")
-    ctx.add_temporary(offset, IntType)
-
-    emit_layout_insns(
+    offset_expr = make_offset_expr(
         array.axes.layouts[path],
-        offset,
         array_labels_to_jnames,
         ctx,
     )
-    rexpr = pym.subscript(pym.var(array.name), pym.var(offset))
+    rexpr = pym.subscript(pym.var(array.name), offset_expr)
     return rexpr
 
 
