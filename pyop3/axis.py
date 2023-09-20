@@ -874,6 +874,7 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         partial_target_path=pmap(),
         partial_index_exprs=pmap(),
         partial_layout_exprs=pmap(),
+        visited_target_axes=frozenset(),
     ):
         from pyop3.distarray.multiarray import IndexExpressionReplacer
 
@@ -905,37 +906,45 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
             )
 
             # if target_path is "complete" then do stuff, else pass responsibility to next func down
+            valid = True
             try:
                 target_node_path = self.path_with_nodes(
                     *self._node_from_path(new_partial_target_path), and_components=True
                 )
             except:
-                raise NotImplementedError("TODO")
+                valid = False
 
             new_target_path_per_cpt[axis.id, component.label] = {}
             new_index_exprs_per_cpt[axis.id, component.label] = {}
             new_layout_exprs_per_cpt[axis.id, component.label] = {}
-            for target_axis, target_cpt in target_node_path.items():
-                new_target_path_per_cpt[
-                    axis.id, component.label
-                ] |= self.target_path_per_component[target_axis.id, target_cpt.label]
+            new_visited_target_axes = visited_target_axes
+            if valid:
+                for target_axis, target_cpt in target_node_path.items():
+                    if target_axis.id in new_visited_target_axes:
+                        continue
+                    new_visited_target_axes |= {target_axis.id}
+                    new_target_path_per_cpt[
+                        axis.id, component.label
+                    ] |= self.target_path_per_component[
+                        target_axis.id, target_cpt.label
+                    ]
 
-                # do a replacement
-                orig_index_exprs = self.index_exprs_per_component[
-                    target_axis.id, target_cpt.label
-                ]
-                for axis_label, index_expr in orig_index_exprs.items():
-                    new_index_expr = IndexExpressionReplacer(new_partial_index_exprs)(
-                        index_expr
-                    )
-                    new_index_exprs_per_cpt[axis.id, component.label][
-                        axis_label
-                    ] = new_index_expr
+                    # do a replacement
+                    orig_index_exprs = self.index_exprs_per_component[
+                        target_axis.id, target_cpt.label
+                    ]
+                    for axis_label, index_expr in orig_index_exprs.items():
+                        new_index_expr = IndexExpressionReplacer(
+                            new_partial_index_exprs
+                        )(index_expr)
+                        new_index_exprs_per_cpt[axis.id, component.label][
+                            axis_label
+                        ] = new_index_expr
 
-                # TODO
-                new_layout_exprs_per_cpt[axis.id, component.label][
-                    target_axis.label
-                ] = NotImplemented
+                    # TODO
+                    new_layout_exprs_per_cpt[axis.id, component.label][
+                        target_axis.label
+                    ] = NotImplemented
 
             # NOTE: This is NOT the final target path. This only targets
             # the thing *before* the indexing took place. Subsequent indexing
@@ -951,6 +960,7 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
                     partial_target_path=new_partial_target_path,
                     partial_index_exprs=new_partial_index_exprs,
                     partial_layout_exprs=new_partial_layout_exprs,
+                    visited_target_axes=new_visited_target_axes,
                 )
                 new_target_path_per_cpt |= retval[0]
                 new_index_exprs_per_cpt |= retval[1]

@@ -561,6 +561,10 @@ def parse_assignment_properly_this_time(
 
     axis = axis or axes.root
 
+    if axis == axes.root:
+        source_path = pmap()
+        target_path = axes.target_path_per_component.get(None, pmap())
+
     for component in axis.components:
         iname = codegen_context.unique_name("i")
         extent_var = register_extent(
@@ -598,7 +602,6 @@ def parse_assignment_properly_this_time(
                     target_path=new_target_path,
                     iname_replace_map=new_iname_replace_map,
                     jname_replace_map=new_jname_replace_map,
-                    domains=new_domains,
                 )
 
             else:

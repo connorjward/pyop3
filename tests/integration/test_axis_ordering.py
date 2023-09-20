@@ -53,7 +53,7 @@ def test_different_axis_orderings_do_not_change_packing_order():
     p = axis0.index()
     path = pmap({axis0.label: just_one(axis0.components).label})
 
-    loop_context = pmap({p: path})
+    loop_context = pmap({p: (path, path)})
     q = IndexTree(
         p,
         {
