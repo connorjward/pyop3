@@ -543,22 +543,15 @@ def parse_assignment_properly_this_time(
         jname_replace_map = jname_replace_map | jname_extras
 
     if axes.is_empty:
-        # 2. Substitute in the right inames
-        layout_fn = IndexExpressionReplacer(jname_replace_map)(
-            axes.orig_layout_fn[target_path]
-        )
-
-        array_expr = make_array_expr(
+        add_leaf_assignment(
             assignment,
-            layout_fn,
+            axes,
+            source_path,
             target_path,
+            iname_replace_map,
             jname_replace_map,
             codegen_context,
         )
-        temp_expr = make_temp_expr(
-            assignment, source_path, iname_replace_map, codegen_context
-        )
-        _shared_assignment_insn(assignment, array_expr, temp_expr, codegen_context)
         return
 
     for component in axis.components:
@@ -629,6 +622,37 @@ def parse_assignment_properly_this_time(
                 )
 
 
+# TODO I should disable emitting instructions for things like zero where we
+# don't want insns for the array
+def add_leaf_assignment(
+    assignment,
+    axes,
+    source_path,
+    target_path,
+    iname_replace_map,
+    jname_replace_map,
+    codegen_context,
+):
+    from pyop3.distarray.multiarray import IndexExpressionReplacer
+
+    array_layout_fn = IndexExpressionReplacer(jname_replace_map)(
+        axes.orig_layout_fn[target_path]
+    )
+    # temp_layout_fn = assignment.temporary.axes.layouts[source_path]
+
+    array_expr = make_array_expr(
+        assignment,
+        array_layout_fn,
+        target_path,
+        jname_replace_map,
+        codegen_context,
+    )
+    temp_expr = make_temp_expr(
+        assignment, source_path, iname_replace_map, codegen_context
+    )
+    _shared_assignment_insn(assignment, array_expr, temp_expr, codegen_context)
+
+
 def make_array_expr(assignment, layouts, path, jnames, ctx):
     """
 
@@ -655,8 +679,9 @@ def make_temp_expr(assignment, path, jnames, ctx):
     in the assignment.
 
     """
+    layout = assignment.temporary.axes.layouts[path]
     temp_offset = emit_assignment_insn(
-        assignment.temporary.axes.layouts[path],
+        layout,
         path,
         jnames,
         ctx,
