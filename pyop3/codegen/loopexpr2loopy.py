@@ -222,30 +222,7 @@ def _(
     loop_context = pmap(loop_context)
 
     iterset = loop.index.iterset.with_context(loop_context)
-    _parse_loop_rec(
-        loop,
-        iterset,
-        codegen_context,
-        loop_context,
-        loop_indices,
-        current_axis=iterset.root,
-        current_path=(),
-        current_jnames=pmap(),
-    )
-
-
-def _parse_loop_rec(
-    loop,
-    axes,
-    codegen_context,
-    loop_context,
-    loop_indices,
-    *,
-    current_axis,
-    current_path,
-    current_jnames,
-):
-    parse_loop_properly_this_time(loop, axes, loop_indices, codegen_context)
+    parse_loop_properly_this_time(loop, iterset, loop_indices, codegen_context)
 
 
 def parse_loop_properly_this_time(
@@ -794,9 +771,7 @@ def make_offset_expr(
     jname_replace_map,
     codegen_context,
 ):
-    # this is already done (in some cases)
     expr = JnameSubstitutor(jname_replace_map, codegen_context)(layouts)
-    # expr = layouts
 
     if expr == ():
         expr = 0
