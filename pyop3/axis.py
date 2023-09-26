@@ -81,9 +81,6 @@ class LoopIterable(abc.ABC):
     def index(self) -> LoopIndex:
         return LoopIndex(self)
 
-    def enumerate(self) -> EnumeratedLoopIndex:
-        return EnumeratedLoopIndex(self)
-
     @property
     @abc.abstractmethod
     def target_path_per_component(self):
@@ -983,12 +980,6 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         from pyop3.index import LoopIndex
 
         return LoopIndex(self)
-
-    def enumerate(self):
-        # cyclic import
-        from pyop3.index import EnumeratedLoopIndex
-
-        return EnumeratedLoopIndex(self.index())
 
     @property
     def target_path_per_component(self):

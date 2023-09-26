@@ -14,7 +14,7 @@ import numpy as np
 import pytools
 
 from pyop3.distarray import DistributedArray, MultiArray
-from pyop3.index import EnumeratedLoopIndex, IndexedArray
+from pyop3.index import IndexedArray
 from pyop3.utils import as_tuple, checked_zip, merge_dicts
 
 
@@ -79,9 +79,6 @@ class Loop(LoopExpr):
             id = self.id_generator("loop")
 
         super().__init__()
-
-        if isinstance(index, EnumeratedLoopIndex):
-            index = index.value
 
         self.index = index
         self.statements = as_tuple(statements)

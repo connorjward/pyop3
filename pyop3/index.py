@@ -332,10 +332,6 @@ class CalledMap(Index, LoopIterable, UniquelyIdentifiedImmutableRecord):
     def index(self):
         raise NotImplementedError
 
-    @property
-    def enumerate(self):
-        raise NotImplementedError
-
     # FIXME should be context-sensitive!
     @property
     def target_path_per_component(self):
@@ -377,6 +373,16 @@ class LoopIndex(AbstractLoopIndex):
         # for now just use one label (assume single component)
         super().__init__(**kwargs)
         self.iterset = iterset
+        self.local_index = LocalLoopIndex(self)
+
+    @property
+    def i(self):
+        return self.local_index
+
+    @property
+    def j(self):
+        # is this evil?
+        return self
 
     @property
     def datamap(self):
@@ -459,12 +465,6 @@ class Slice(Index):
 #         return targets
 
 
-class EnumeratedLoopIndex:
-    def __init__(self, value: LoopIndex):
-        self.index = LocalLoopIndex(value)
-        self.value = value
-
-
 # move with other axis trees
 # A better name for this is "ContextSensitiveAxisTree"
 class IndexedAxisTree(ContextSensitive):
@@ -485,9 +485,6 @@ class IndexedAxisTree(ContextSensitive):
 
     def index(self):
         return LoopIndex(self)
-
-    def enumerate(self):
-        return EnumeratedLoopIndex(self.index())
 
     @functools.cached_property
     def datamap(self):
@@ -863,18 +860,20 @@ def _(local_index: LocalLoopIndex, *args, loop_indices, **kwargs):
     myleaf = iterset._node_from_path(path)
     visited_nodes = iterset.path_with_nodes(*myleaf, ordered=True)
 
-    source_path = pmap()
-    target_path = pmap({node.label: cpt_label for node, cpt_label in visited_nodes})
+    target_path_per_cpt = pmap(
+        {None: pmap({node.label: cpt_label for node, cpt_label in visited_nodes})}
+    )
+    index_exprs_per_cpt = pmap(
+        {None: {node.label: AxisVariable(node.label) for node, _ in visited_nodes}}
+    )
 
-    # make LoopIndex property?
-    index_expr_per_target_axis = {
-        node.label: AxisVariable(node.label) for node, _ in visited_nodes
-    }
-
-    layout_exprs = {}  # not allowed I believe, or zero?
-    return {
-        pmap(): (source_path, target_path, index_expr_per_target_axis, layout_exprs)
-    }, (AxisTree(),)
+    layout_exprs_per_cpt = pmap()  # not allowed I believe, or zero?
+    return (
+        AxisTree(),
+        target_path_per_cpt,
+        index_exprs_per_cpt,
+        layout_exprs_per_cpt,
+    )
 
 
 @collect_shape_index_callback.register

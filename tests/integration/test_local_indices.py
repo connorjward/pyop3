@@ -22,8 +22,8 @@ def test_copy_with_local_indices(scalar_copy_kernel):
     dat1 = MultiArray(axes, dtype=dat0.dtype)
 
     do_loop(
-        p := axes.enumerate(),
-        scalar_copy_kernel(dat0[p.value], dat1[p.index]),
+        p := axes.index(),
+        scalar_copy_kernel(dat0[p.j], dat1[p.i]),
     )
     assert np.allclose(dat1.data, dat0.data)
 
@@ -43,8 +43,8 @@ def test_copy_slice(scalar_copy_kernel):
 
     do_loop(
         # p := big_axes[::2].enumerate(),
-        p := big_axes[slice0].enumerate(),
-        scalar_copy_kernel(array0[p.value], array1[p.index]),
+        p := big_axes[slice0].index(),
+        scalar_copy_kernel(array0[p], array1[p.i]),
     )
     assert np.allclose(array1.data, array0.data[::2])
 
