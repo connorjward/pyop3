@@ -546,6 +546,8 @@ def parse_assignment_properly_this_time(
 
         new_iname_replace_map = iname_replace_map | {axis.label: pym.var(iname)}
 
+        # I don't like that I need to do this here and also when I emit the layout
+        # instructions.
         my_index_exprs = axes.index_exprs_per_component.get(
             (axis.id, component.label), {}
         )

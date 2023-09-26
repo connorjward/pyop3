@@ -34,7 +34,11 @@ class UniquelyIdentifiedImmutableRecord(pytools.ImmutableRecord):
 
     def __init__(self, id: Id | None = None):
         super().__init__()
-        self.id = id if id is not None else unique_name(f"_{type(self).__name__}_id")
+        self.id = id if id is not None else self.unique_id()
+
+    @classmethod
+    def unique_id(cls):
+        return unique_name(f"_{cls.__name__}_id")
 
 
 class LabelledImmutableRecord(UniquelyIdentifiedImmutableRecord):

@@ -389,7 +389,7 @@ class LoopIndex(AbstractLoopIndex):
             target_path = {}
             for axis, cpt in iterset.path_with_nodes(*leaf).items():
                 target_path |= iterset.target_path_per_component.get((axis.id, cpt), {})
-            target_paths_.append(target_path)
+            target_paths_.append(pmap(target_path))
         return tuple(target_paths_)
 
 
@@ -939,72 +939,94 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
 
 
 @collect_shape_index_callback.register
-def _(called_map: CalledMap, preorder_ctx, **kwargs):
-    leaves, index_data = collect_shape_index_callback(
-        called_map.from_index, preorder_ctx, **kwargs
-    )
-    (axes,) = index_data
+def _(called_map: CalledMap, **kwargs):
+    (
+        prior_axes,
+        prior_target_path_per_cpt,
+        prior_index_exprs_per_cpt,
+        _,
+    ) = collect_shape_index_callback(called_map.from_index, **kwargs)
 
-    leaf_keys = []
-    target_path_per_leaf = []
-    index_exprs_per_leaf = []
-    layout_exprs_per_leaf = []
+    if prior_axes.is_empty:
+        prior_target_path = prior_target_path_per_cpt[None]
+        prior_index_exprs = prior_index_exprs_per_cpt[None]
+        (
+            axis,
+            target_path_per_cpt,
+            index_exprs_per_cpt,
+            layout_exprs_per_cpt,
+        ) = _make_leaf_axis_from_called_map(
+            called_map, prior_target_path, prior_index_exprs
+        )
+        axes = AxisTree(axis)
+    else:
+        axes = prior_axes
+        target_path_per_cpt = {}
+        index_exprs_per_cpt = {}
+        layout_exprs_per_cpt = {}
+        for prior_leaf_axis, prior_leaf_cpt in prior_axes.leaves:
+            prior_target_path = prior_target_path_per_cpt.get(None, pmap())
+            prior_index_exprs = prior_index_exprs_per_cpt.get(None, pmap())
 
-    for from_leaf_key, leaf in leaves.items():
-        _, from_target_path, from_index_exprs, _ = leaf
+            for myaxis, mycomponent_label in prior_axes.path_with_nodes(
+                prior_leaf_axis.id, prior_leaf_cpt
+            ).items():
+                prior_target_path |= prior_target_path_per_cpt[
+                    myaxis.id, mycomponent_label
+                ]
+                prior_index_exprs |= prior_index_exprs_per_cpt[
+                    myaxis.id, mycomponent_label
+                ]
 
-        # clean this up, we know some of this at an earlier point (loop context)
-        components = []
-        index_exprs = []
-        layout_exprs = []
-
-        bits = called_map.map.bits[pmap(from_target_path)]
-        for map_component in bits:  # each one of these is a new "leaf"
-            cpt = AxisComponent(map_component.arity, label=map_component.label)
-            components.append(cpt)
-
-            map_var = MapVariable(called_map, map_component)
-            axisvar = AxisVariable(called_map.name)
-
-            # not super happy about this. The called variable doesn't now
-            # necessarily know the right axis labels
-            from_indices = tuple(
-                index_expr for axis_label, index_expr in from_index_exprs.items()
+            (
+                subaxis,
+                subtarget_paths,
+                subindex_exprs,
+                sublayout_exprs,
+            ) = _make_leaf_axis_from_called_map(
+                called_map, prior_target_path, prior_index_exprs
             )
+            axes = axes.add_subaxis(subaxis, prior_leaf_axis, prior_leaf_cpt)
+            target_path_per_cpt |= subtarget_paths
+            index_exprs_per_cpt |= subindex_exprs
+            layout_exprs_per_cpt |= sublayout_exprs
 
-            index_exprs.append(
-                {map_component.target_axis: map_var(*from_indices, axisvar)}
-            )
+    return (axes, target_path_per_cpt, index_exprs_per_cpt, layout_exprs_per_cpt)
 
-            # don't think that this is possible for maps
-            layout_exprs.append({map_component.target_axis: NotImplemented})
 
-        axis = Axis(components, label=called_map.name)
-        if axes.root:
-            axes = axes.add_subaxis(axis, *from_leaf_key)
-        else:
-            axes = AxisTree(axis)
+def _make_leaf_axis_from_called_map(called_map, prior_target_path, prior_index_exprs):
+    axis_id = Axis.unique_id()
+    components = []
+    target_path_per_cpt = {}
+    index_exprs_per_cpt = {}
+    layout_exprs_per_cpt = {}
 
-        for i, (cpt, mapcpt) in enumerate(checked_zip(components, bits)):
-            leaf_keys.append((axis.id, cpt.label))
+    for map_cpt in called_map.map.bits[prior_target_path]:
+        cpt = AxisComponent(map_cpt.arity, label=map_cpt.label)
+        components.append(cpt)
 
-            target_path_per_leaf.append(
-                pmap({mapcpt.target_axis: mapcpt.target_component})
-            )
-            index_exprs_per_leaf.append(index_exprs[i])
-            layout_exprs_per_leaf.append(layout_exprs[i])
+        target_path_per_cpt[axis_id, cpt.label] = pmap(
+            {map_cpt.target_axis: map_cpt.target_component}
+        )
 
-    leaves = {}
-    for leaf_key, source_leaf, target_path, index_exprs, layout_exprs in checked_zip(
-        leaf_keys,
-        axes.leaves,
-        target_path_per_leaf,
-        index_exprs_per_leaf,
-        layout_exprs_per_leaf,
-    ):
-        source_path = axes.path(*source_leaf)
-        leaves[leaf_key] = (source_path, target_path, index_exprs, layout_exprs)
-    return leaves, (axes,)
+        map_var = MapVariable(called_map, map_cpt)
+        axisvar = AxisVariable(called_map.name)
+        # not super happy about this. The called variable doesn't now
+        # necessarily know the right axis labels
+        from_indices = tuple(
+            index_expr for axis_label, index_expr in prior_index_exprs.items()
+        )
+
+        index_exprs_per_cpt[axis_id, cpt.label] = {
+            map_cpt.target_axis: map_var(*from_indices, axisvar)
+        }
+
+        # don't think that this is possible for maps
+        layout_exprs_per_cpt[axis_id, cpt.label] = {map_cpt.target_axis: NotImplemented}
+
+    axis = Axis(components, label=called_map.name, id=axis_id)
+
+    return axis, target_path_per_cpt, index_exprs_per_cpt, layout_exprs_per_cpt
 
 
 def index_axes(axes: AxisTree, indices: IndexTree, loop_context):
