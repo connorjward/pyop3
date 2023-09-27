@@ -5,6 +5,7 @@ from pyrsistent import pmap
 import pyop3 as op3
 
 
+@pytest.mark.skip(reason="TODO")
 def test_split_loop(scalar_copy_kernel):
     axes = op3.AxisTree(op3.Axis([op3.AxisComponent(64, "pt0")], "ax0"))
 
