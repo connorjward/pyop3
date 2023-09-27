@@ -33,7 +33,7 @@ class UniquelyIdentifiedImmutableRecord(pytools.ImmutableRecord):
     fields = {"id"}
 
     def __init__(self, id: Id | None = None):
-        super().__init__()
+        pytools.ImmutableRecord.__init__(self)
         self.id = id if id is not None else self.unique_id()
 
     @classmethod

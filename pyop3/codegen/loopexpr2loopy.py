@@ -217,8 +217,8 @@ def _(
     codegen_context: LoopyCodegenContext,
 ) -> None:
     loop_context = {}
-    for loop_index, (path, _) in loop_indices.items():
-        loop_context[loop_index] = pmap(path)
+    for loop_index, (source_path, target_path, _, _) in loop_indices.items():
+        loop_context[loop_index] = source_path, target_path
     loop_context = pmap(loop_context)
 
     iterset = loop.index.iterset.with_context(loop_context)

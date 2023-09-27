@@ -7,7 +7,6 @@ def test_transpose(scalar_copy_kernel):
     npoints = 5
     axis0 = Axis(npoints)
     axis1 = Axis(npoints)
-
     axes0 = AxisTree(axis0, {axis0.id: axis1})
     axes1 = AxisTree(axis1, {axis1.id: axis0})
 

@@ -4,6 +4,7 @@ import abc
 import collections
 import dataclasses
 import functools
+import itertools
 import numbers
 import sys
 from typing import Any, Collection, Hashable, Mapping, Sequence
@@ -359,7 +360,8 @@ class CalledMap(Index, LoopIterable, UniquelyIdentifiedImmutableRecord):
         return tuple(targets)
 
 
-class AbstractLoopIndex(Index, abc.ABC):
+# no clue if this should be context free, only really makes sense for iterables
+class AbstractLoopIndex(Index, ContextFree, abc.ABC):
     pass
 
 
@@ -469,7 +471,6 @@ class Slice(Index):
 # A better name for this is "ContextSensitiveAxisTree"
 class IndexedAxisTree(ContextSensitive):
     def __init__(self, axis_trees):
-        ContextSensitive.__init__(self, axis_trees)
         self.axis_trees = pmap(axis_trees)
 
     def __getitem__(self, indices):
@@ -479,9 +480,13 @@ class IndexedAxisTree(ContextSensitive):
             for (
                 new_loop_context,
                 ctx_free_axes,
-            ) in context_sensitive_axes.values.items():
+            ) in context_sensitive_axes.context_map.items():
                 new_axis_trees[loop_context | new_loop_context] = ctx_free_axes
         return IndexedAxisTree(new_axis_trees)
+
+    @property
+    def context_map(self):
+        return self.axis_trees
 
     def index(self):
         return LoopIndex(self)
@@ -542,61 +547,87 @@ def _(slice_: slice, loop_context, axes, path):
     return Slice(target_axis.label, slice_cpts)
 
 
-"""
-FIXME This function is currently not really fit for purpose. It cannot cope
-with multiple loop indices as they are not merged into the same context.
-
-If we pass index trees here then we could get incompatible loop contexts
-Probably should collect unrestricted loop indices as well as complete contexts?
-"""
+def combine_contexts(contexts):
+    new_contexts = {}
+    for context in contexts:
+        for loop_index, pathss in context.items():
+            if loop_index in new_contexts:
+                assert new_contexts[loop_index] == pathss
+            else:
+                new_contexts[loop_index] = pathss
+    return new_contexts
 
 
 def loop_contexts_from_iterable(indices):
-    # this is a bit tricky/unpleasant to write
-    # FIXME this is currently very naive/limited, need to check for conflicts etc
-    loop_contexts = []
+    # combine context-sensitive loop contexts
+    all_contexts = combine_contexts(
+        [
+            collect_loop_contexts(index)
+            for index in indices
+            if isinstance(index, ContextFree)
+        ]
+    )
+
+    # add on context-free contexts, these cannot already be included
     for index in indices:
-        # TODO Should check the type of index here as it is more restrictive than at a top
-        # level. One cannot have another iterable.
-        ctx = collect_loop_context(index)
-        if len(ctx) > 1:
-            raise NotImplementedError("TODO")
-        loop_contexts.extend(ctx)
-    return tuple(loop_contexts)
+        if isinstance(index, ContextFree):
+            continue
+        if isinstance(index, int):
+            continue
+        # TODO
+        assert (
+            isinstance(index, ContextSensitive)
+            or isinstance(index, AbstractLoopIndex)
+            or isinstance(index, slice)
+            or isinstance(index, CalledMap)
+            or isinstance(index, Slice)
+        )
+        ctx = collect_loop_contexts(index)
+        # assert all(loop_index not in all_contexts for loop_index in ctx.keys())
+        all_contexts |= ctx
+
+    return all_contexts
 
 
 @functools.singledispatch
-def collect_loop_context(arg, *args, **kwargs):
+def collect_loop_contexts(arg, *args, **kwargs):
     # cyclic import
     from pyop3.distarray import MultiArray
 
     if isinstance(arg, (MultiArray, numbers.Integral)):
-        return ()
+        return {}
     elif isinstance(arg, collections.abc.Iterable):
         return loop_contexts_from_iterable(arg)
     if arg is Ellipsis:
-        return ()
+        return {}
     else:
         raise TypeError
 
 
-@collect_loop_context.register
+@collect_loop_contexts.register
 def _(index_tree: IndexTree):
-    return index_tree.loop_context
+    contexts = {}
+    for loop_index, paths in index_tree.loop_context.items():
+        contexts[loop_index] = [paths]
+    return contexts
 
 
-@collect_loop_context.register
+@collect_loop_contexts.register
 def _(arg: LocalLoopIndex):
-    return collect_loop_context(arg.loop_index)
+    return collect_loop_contexts(arg.loop_index)
 
 
-@collect_loop_context.register
+@collect_loop_contexts.register
 def _(arg: LoopIndex):
     from pyop3.axis import AxisTree
 
     if isinstance(arg.iterset, IndexedAxisTree):
-        loop_contexts = []
+        contexts = collections.defaultdict(list)
         for loop_context, axis_tree in arg.iterset.axis_trees.items():
+            # recombine the prior bits, this is really yucky
+            for outer_loop_index, paths in loop_context.items():
+                contexts[outer_loop_index].append(paths)
+
             extra_source_context = {}
             extracontext = {}
             for leaf in axis_tree.leaves:
@@ -610,15 +641,14 @@ def _(arg: LoopIndex):
                     ]
                 extra_source_context |= source_path
                 extracontext |= target_path
-            loop_contexts.append(
-                loop_context | {arg: (pmap(extra_source_context), pmap(extracontext))}
-            )
-        return loop_contexts
+            contexts[arg].append((pmap(extra_source_context), pmap(extracontext)))
+        return contexts
     else:
-        assert isinstance(arg.iterset, AxisTree)
+        if not isinstance(arg.iterset, AxisTree):
+            raise NotImplementedError
 
         iterset = arg.iterset
-        contexts = []
+        contexts = collections.defaultdict(list)
         for leaf in iterset.leaves:
             source_path = iterset.path(*leaf)
             target_path = {}
@@ -626,53 +656,34 @@ def _(arg: LoopIndex):
                 *leaf, and_components=True
             ).items():
                 target_path |= iterset.target_path_per_component[axis.id, cpt.label]
-            contexts.append((source_path, pmap(target_path)))
-        return [
-            pmap({arg: (source_path, target_path)})
-            for source_path, target_path in contexts
-        ]
+            contexts[arg].append((source_path, pmap(target_path)))
+        return contexts
 
 
-@collect_loop_context.register
+@collect_loop_contexts.register
 def _(called_map: CalledMap):
-    return collect_loop_context(called_map.from_index)
+    return collect_loop_contexts(called_map.from_index)
 
 
-@collect_loop_context.register
+@collect_loop_contexts.register
 def _(slice_: slice):
-    return ()
+    return {}
 
 
-@collect_loop_context.register
+@collect_loop_contexts.register
 def _(slice_: Slice):
-    return ()
+    return {}
 
 
-def _split_index_tree_from_ellipsis(
-    axes: AxisTree,
-    current_axis: Axis | None = None,
-    loop_context=pmap(),
-) -> IndexTree:
-    assert False, "old code"
-    current_axis = current_axis or axes.root
-
-    subslices = []
-    subtrees = []
-    for cpt in current_axis.components:
-        subslices.append(AffineSliceComponent(cpt.label))
-
-        subaxis = axes.child(current_axis, cpt)
-        if subaxis:
-            subtrees.append(_index_tree_from_ellipsis(axes, subaxis, loop_context))
-        else:
-            subtrees.append(None)
-
-    slice_ = Slice(current_axis.label, subslices)
-    tree = IndexTree(slice_)
-    for subslice, subtree in checked_zip(subslices, subtrees):
-        if subtree is not None:
-            tree = tree.add_subtree(subtree, slice_, subslice.component)
-    return pmap({pmap(): tree})
+def unroll_contexts(contexts):
+    mypacked = [
+        [(loop_index, paths) for paths in pathss]
+        for loop_index, pathss in contexts.items()
+    ]
+    unrolled = []
+    for pairs in itertools.product(*mypacked):
+        unrolled.append(pmap(pairs))
+    return unrolled
 
 
 def is_fully_indexed(axes: AxisTree, indices: IndexTree) -> bool:
@@ -769,7 +780,7 @@ def as_index_tree(arg, loop_context, **kwargs):
 
 
 @as_index_tree.register
-def _(index: Index, ctx):
+def _(index: Index, ctx, **kwargs):
     return IndexTree(index, loop_context=ctx)
 
 
@@ -783,10 +794,11 @@ def as_index_forest(arg: Any, *, axes, **kwargs):
         )
         return (IndexTree(slice_),)
     elif isinstance(arg, collections.abc.Iterable):
-        loop_contexts = collect_loop_context(arg) or [pmap()]
-        return tuple(
-            as_index_tree(arg, ctx, axes=axes, **kwargs) for ctx in loop_contexts
-        )
+        loop_contexts = collect_loop_contexts(arg)
+        forest = []
+        for context in unroll_contexts(loop_contexts):
+            forest.append(as_index_tree(arg, context, axes=axes, **kwargs))
+        return tuple(forest)
     elif arg is Ellipsis:
         assert False, "dont go this way"
         return (index_tree_from_ellipsis(axes, axes.root),)
@@ -801,8 +813,11 @@ def _(index_tree: IndexTree, **kwargs):
 
 @as_index_forest.register
 def _(index: Index, **kwargs):
-    loop_contexts = collect_loop_context(index) or [pmap()]
-    return tuple(as_index_tree(index, ctx) for ctx in loop_contexts)
+    loop_contexts = collect_loop_contexts(index)
+    forest = []
+    for context in unroll_contexts(loop_contexts):
+        forest.append(as_index_tree(index, context, **kwargs))
+    return tuple(forest)
 
 
 @as_index_forest.register
@@ -821,7 +836,7 @@ def _(loop_index: LoopIndex, *, loop_indices, **kwargs):
     _, path = loop_indices[loop_index]
 
     if isinstance(loop_index.iterset, IndexedAxisTree):
-        iterset = just_one(loop_index.iterset.values.values())
+        iterset = just_one(loop_index.iterset.axis_trees.values())
     else:
         iterset = loop_index.iterset
 
@@ -838,7 +853,7 @@ def _(loop_index: LoopIndex, *, loop_indices, **kwargs):
             )
         }
     )
-    layout_exprs_per_component = pmap()  # not implemented
+    layout_exprs_per_component = pmap({None: pmap()})  # not implemented
     return (
         AxisTree(),
         target_path_per_component,
@@ -853,7 +868,7 @@ def _(local_index: LocalLoopIndex, *args, loop_indices, **kwargs):
     path, _ = loop_indices[loop_index]
 
     if isinstance(loop_index.iterset, IndexedAxisTree):
-        iterset = just_one(loop_index.iterset.values.values())
+        iterset = just_one(loop_index.iterset.axis_trees.values())
     else:
         iterset = loop_index.iterset
 
@@ -867,7 +882,7 @@ def _(local_index: LocalLoopIndex, *args, loop_indices, **kwargs):
         {None: {node.label: AxisVariable(node.label) for node, _ in visited_nodes}}
     )
 
-    layout_exprs_per_cpt = pmap()  # not allowed I believe, or zero?
+    layout_exprs_per_cpt = pmap({None: pmap()})  # not allowed I believe, or zero?
     return (
         AxisTree(),
         target_path_per_cpt,
@@ -1074,7 +1089,7 @@ def _index_axes_rec(
         target_path_per_cpt_per_index,
         index_exprs_per_cpt_per_index,
         layout_exprs_per_cpt_per_index,
-    ) = rest
+    ) = tuple(map(dict, rest))
 
     if not axes_per_index.is_empty:
         leafkeys = [(ax.id, cpt) for ax, cpt in axes_per_index.leaves]
@@ -1094,13 +1109,26 @@ def _index_axes_rec(
                     **kwargs,
                 )
                 subaxes[leafkey] = retval[0]
-                target_path_per_cpt_per_index |= retval[1]
-                index_exprs_per_cpt_per_index |= retval[2]
-                layout_exprs_per_cpt_per_index |= retval[3]
 
-    target_path_per_component = target_path_per_cpt_per_index
-    index_exprs_per_component = index_exprs_per_cpt_per_index
-    layout_exprs_per_component = layout_exprs_per_cpt_per_index
+                for key in retval[1].keys():
+                    if key in target_path_per_cpt_per_index:
+                        target_path_per_cpt_per_index[key] = (
+                            target_path_per_cpt_per_index[key] | retval[1][key]
+                        )
+                        index_exprs_per_cpt_per_index[key] = (
+                            index_exprs_per_cpt_per_index[key] | retval[2][key]
+                        )
+                        layout_exprs_per_cpt_per_index[key] = (
+                            layout_exprs_per_cpt_per_index[key] | retval[3][key]
+                        )
+                    else:
+                        target_path_per_cpt_per_index |= {key: retval[1][key]}
+                        index_exprs_per_cpt_per_index |= {key: retval[2][key]}
+                        layout_exprs_per_cpt_per_index |= {key: retval[3][key]}
+
+    target_path_per_component = pmap(target_path_per_cpt_per_index)
+    index_exprs_per_component = pmap(index_exprs_per_cpt_per_index)
+    layout_exprs_per_component = pmap(layout_exprs_per_cpt_per_index)
 
     axes = axes_per_index
     for k, subax in subaxes.items():

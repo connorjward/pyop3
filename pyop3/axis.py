@@ -97,7 +97,7 @@ class LoopIterable(abc.ABC):
         pass
 
 
-class ContextSensitive(pytools.ImmutableRecord, abc.ABC):
+class ContextSensitive(abc.ABC):
     #     """Container of `IndexTree`s distinguished by outer loop information.
     #
     #     This class is required because multi-component outer loops can lead to
@@ -119,26 +119,20 @@ class ContextSensitive(pytools.ImmutableRecord, abc.ABC):
     #     """
     #
     #     def __init__(self, index_trees: pmap[pmap[LoopIndex, pmap[str, str]], IndexTree]):
-    fields = {"values"}  # bad name
-
-    def __init__(self, values):
-        super().__init__()
-        # this is terribly unclear
-        if not is_single_valued([set(key.keys()) for key in values.keys()]):
-            raise ValueError("Loop contexts must contain the same loop indices")
-
-        assert all(isinstance(v, ContextFree) for v in values.values())
-
-        self.values = pmap(values)
 
     @functools.cached_property
     def keys(self):
         # loop is used just for unpacking
-        for context in self.values.keys():
+        for context in self.context_map.keys():
             indices = set()
             for loop_index in context.keys():
                 indices.add(loop_index)
             return frozenset(indices)
+
+    @property
+    @abc.abstractmethod
+    def context_map(self):
+        pass
 
     def with_context(self, context):
         key = {}
@@ -146,12 +140,13 @@ class ContextSensitive(pytools.ImmutableRecord, abc.ABC):
             if loop_index in self.keys:
                 key |= {loop_index: path}
         key = pmap(key)
-        return self.values[key]
+        return self.context_map[key]
 
 
 class ContextFree(ContextSensitive, abc.ABC):
-    def with_context(self, context):
-        return self
+    @property
+    def context_map(self):
+        return pmap({pmap(): self})
 
 
 class ExpressionEvaluator(pym.mapper.evaluator.EvaluationMapper):
@@ -778,19 +773,20 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
 
     def __getitem__(self, indices):
         if indices is Ellipsis:
+            raise NotImplementedError("TODO needs to return a full slice, not self")
             return self
         # FIXME
         from pyop3.distarray.multiarray import IndexExpressionReplacer
         from pyop3.index import (
             IndexedAxisTree,
             as_index_forest,
-            collect_loop_context,
+            collect_loop_contexts,
             index_axes,
         )
 
         # FIXME I have a weird double loop here over loop contexts
         axis_trees = {}
-        loop_contexts = collect_loop_context(indices)
+        loop_contexts = collect_loop_contexts(indices)
         if not loop_contexts:
             loop_contexts = [pmap()]
         for loop_context in loop_contexts:
