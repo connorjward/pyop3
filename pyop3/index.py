@@ -361,7 +361,7 @@ class CalledMap(Index, LoopIterable, UniquelyIdentifiedImmutableRecord):
 
 
 # no clue if this should be context free, only really makes sense for iterables
-class AbstractLoopIndex(Index, ContextFree, abc.ABC):
+class AbstractLoopIndex(Index, abc.ABC):
     pass
 
 
@@ -548,45 +548,46 @@ def _(slice_: slice, loop_context, axes, path):
 
 
 def combine_contexts(contexts):
-    new_contexts = {}
-    for context in contexts:
-        for loop_index, pathss in context.items():
-            if loop_index in new_contexts:
-                assert new_contexts[loop_index] == pathss
-            else:
-                new_contexts[loop_index] = pathss
+    new_contexts = []
+    for mycontexts in itertools.product(*contexts):
+        new_contexts.append(pmap(merge_dicts(mycontexts)))
     return new_contexts
 
 
+@functools.singledispatch
+def collect_loop_indices(arg):
+    return ()
+
+
+@collect_loop_indices.register
+def _(arg: LoopIndex):
+    return (arg,)
+
+
+@collect_loop_indices.register
+def _(arg: CalledMap):
+    return collect_loop_indices(arg.from_index)
+
+
 def loop_contexts_from_iterable(indices):
-    # combine context-sensitive loop contexts
-    all_contexts = combine_contexts(
-        [
-            collect_loop_contexts(index)
-            for index in indices
-            if isinstance(index, ContextFree)
-        ]
+    all_loop_indices = tuple(
+        loop_index for index in indices for loop_index in collect_loop_indices(index)
+    )
+
+    contexts = combine_contexts(
+        [collect_loop_contexts(idx) for idx in all_loop_indices]
     )
 
     # add on context-free contexts, these cannot already be included
     for index in indices:
-        if isinstance(index, ContextFree):
+        if not isinstance(index, ContextSensitive):
             continue
-        if isinstance(index, int):
-            continue
-        # TODO
-        # assert (
-        #     isinstance(index, ContextSensitive)
-        #     or isinstance(index, AbstractLoopIndex)
-        #     or isinstance(index, slice)
-        #     or isinstance(index, CalledMap)
-        #     or isinstance(index, Slice)
-        # )
-        ctx = collect_loop_contexts(index)
-        # assert all(loop_index not in all_contexts for loop_index in ctx.keys())
-        all_contexts |= ctx
-
-    return all_contexts
+        loop_index, paths = index.loop_context
+        if loop_index in contexts[0].keys():
+            raise AssertionError
+        for ctx in contexts:
+            ctx[loop_index] = paths
+    return contexts
 
 
 @functools.singledispatch
@@ -622,12 +623,8 @@ def _(arg: LoopIndex):
     from pyop3.axis import AxisTree
 
     if isinstance(arg.iterset, IndexedAxisTree):
-        contexts = collections.defaultdict(list)
+        contexts = []
         for loop_context, axis_tree in arg.iterset.axis_trees.items():
-            # recombine the prior bits, this is really yucky
-            for outer_loop_index, paths in loop_context.items():
-                contexts[outer_loop_index].append(paths)
-
             extra_source_context = {}
             extracontext = {}
             for leaf in axis_tree.leaves:
@@ -641,14 +638,16 @@ def _(arg: LoopIndex):
                     ]
                 extra_source_context |= source_path
                 extracontext |= target_path
-            contexts[arg].append((pmap(extra_source_context), pmap(extracontext)))
-        return contexts
+            contexts.append(
+                loop_context | {arg: (pmap(extra_source_context), pmap(extracontext))}
+            )
+        return tuple(contexts)
     else:
         if not isinstance(arg.iterset, AxisTree):
             raise NotImplementedError
 
         iterset = arg.iterset
-        contexts = collections.defaultdict(list)
+        contexts = []
         for leaf in iterset.leaves:
             source_path = iterset.path(*leaf)
             target_path = {}
@@ -656,8 +655,8 @@ def _(arg: LoopIndex):
                 *leaf, and_components=True
             ).items():
                 target_path |= iterset.target_path_per_component[axis.id, cpt.label]
-            contexts[arg].append((source_path, pmap(target_path)))
-        return contexts
+            contexts.append(pmap({arg: (source_path, pmap(target_path))}))
+        return tuple(contexts)
 
 
 @collect_loop_contexts.register
@@ -667,23 +666,12 @@ def _(called_map: CalledMap):
 
 @collect_loop_contexts.register
 def _(slice_: slice):
-    return {}
+    return ()
 
 
 @collect_loop_contexts.register
 def _(slice_: Slice):
-    return {}
-
-
-def unroll_contexts(contexts):
-    mypacked = [
-        [(loop_index, paths) for paths in pathss]
-        for loop_index, pathss in contexts.items()
-    ]
-    unrolled = []
-    for pairs in itertools.product(*mypacked):
-        unrolled.append(pmap(pairs))
-    return unrolled
+    return ()
 
 
 def is_fully_indexed(axes: AxisTree, indices: IndexTree) -> bool:
@@ -794,9 +782,9 @@ def as_index_forest(arg: Any, *, axes, **kwargs):
         )
         return (IndexTree(slice_),)
     elif isinstance(arg, collections.abc.Iterable):
-        loop_contexts = collect_loop_contexts(arg)
+        loop_contexts = collect_loop_contexts(arg) or [pmap()]
         forest = []
-        for context in unroll_contexts(loop_contexts):
+        for context in loop_contexts:
             forest.append(as_index_tree(arg, context, axes=axes, **kwargs))
         return tuple(forest)
     elif arg is Ellipsis:
@@ -813,9 +801,9 @@ def _(index_tree: IndexTree, **kwargs):
 
 @as_index_forest.register
 def _(index: Index, **kwargs):
-    loop_contexts = collect_loop_contexts(index)
+    loop_contexts = collect_loop_contexts(index) or [pmap()]
     forest = []
-    for context in unroll_contexts(loop_contexts):
+    for context in loop_contexts:
         forest.append(as_index_tree(index, context, **kwargs))
     return tuple(forest)
 
