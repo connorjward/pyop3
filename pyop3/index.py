@@ -575,13 +575,13 @@ def loop_contexts_from_iterable(indices):
         if isinstance(index, int):
             continue
         # TODO
-        assert (
-            isinstance(index, ContextSensitive)
-            or isinstance(index, AbstractLoopIndex)
-            or isinstance(index, slice)
-            or isinstance(index, CalledMap)
-            or isinstance(index, Slice)
-        )
+        # assert (
+        #     isinstance(index, ContextSensitive)
+        #     or isinstance(index, AbstractLoopIndex)
+        #     or isinstance(index, slice)
+        #     or isinstance(index, CalledMap)
+        #     or isinstance(index, Slice)
+        # )
         ctx = collect_loop_contexts(index)
         # assert all(loop_index not in all_contexts for loop_index in ctx.keys())
         all_contexts |= ctx

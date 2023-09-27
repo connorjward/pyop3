@@ -84,8 +84,8 @@ def test_sparse_copy(scalar_copy_kernel):
     #   dat1[i, j] = dat0[p, q]
     # do_loop(p := axes0[:, subset].enumerate(), scalar_copy_kernel(dat0[p.value], dat1[p.index]))
     do_loop(
-        p := axes0[slice0, slice1].enumerate(),
-        scalar_copy_kernel(dat0[p.value], dat1[p.index]),
+        p := axes0[slice0, slice1].index(),
+        scalar_copy_kernel(dat0[p], dat1[p.i]),
     )
 
     # Since we are looping over the matrix [[0, 1, 2], [3, 4, 5], [6, 7, 8]] and

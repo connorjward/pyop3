@@ -602,7 +602,7 @@ def add_leaf_assignment(
         assignment,
         axes.orig_layout_fn[target_path],
         target_path,
-        jname_replace_map,
+        iname_replace_map | jname_replace_map,
         codegen_context,
     )
     temp_expr = make_temp_expr(
