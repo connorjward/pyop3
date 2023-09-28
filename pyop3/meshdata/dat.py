@@ -4,7 +4,7 @@ from typing import FrozenSet, Hashable, Sequence
 
 import pytools
 
-from pyop3.axis import Axis, AxisTree
+from pyop3.axes import Axis, AxisTree
 from pyop3.distarray import MultiArray
 from pyop3.meshdata.base import MeshDataCarrier
 

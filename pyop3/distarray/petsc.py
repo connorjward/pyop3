@@ -6,7 +6,7 @@ import numpy as np
 from petsc4py import PETSc
 
 from pyop3.distarray.base import DistributedArray
-from pyop3.index import IndexTree
+from pyop3.indices import IndexTree
 from pyop3.utils import single_valued, strictly_all
 
 

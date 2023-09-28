@@ -7,6 +7,7 @@ from pyop3 import (
     INC,
     READ,
     WRITE,
+    AffineSliceComponent,
     Axis,
     AxisComponent,
     AxisTree,
@@ -23,8 +24,7 @@ from pyop3 import (
     do_loop,
     loop,
 )
-from pyop3.codegen import LOOPY_LANG_VERSION, LOOPY_TARGET
-from pyop3.index import AffineSliceComponent
+from pyop3.codegen.ir import LOOPY_LANG_VERSION, LOOPY_TARGET
 from pyop3.utils import flatten
 
 
