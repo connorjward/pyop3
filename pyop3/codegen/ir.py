@@ -765,7 +765,7 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
             map_array,
             pmap({rootaxis.label: just_one(rootaxis.components).label})
             | pmap({inner_axis.label: inner_cpt.label}),
-            {rootaxis.label: inner_expr[0]} | {inner_axis.label: inner_expr[1]},
+            {rootaxis.label: inner_expr[0], inner_axis.label: inner_expr[1]},
             self._codegen_context,
         )
         return jname_expr

@@ -153,13 +153,12 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
 
     @functools.cached_property
     def datamap(self) -> dict[str:DistributedArray]:
-        # FIXME when we use proper index trees
-        # return {self.name: self} | self.axes.datamap | merge_dicts([idxs.datamap for idxs in self.indicess])
-        return (
-            {self.name: self}
-            | self.axes.datamap
-            | merge_dicts([idx.datamap for idxs in self.indicess for idx in idxs])
+        datamap = {self.name: self}
+        datamap.update(self.axes.datamap)
+        datamap.update(
+            merge_dicts([idx.datamap for idxs in self.indicess for idx in idxs])
         )
+        return datamap
 
     @property
     def alloc_size(self):
