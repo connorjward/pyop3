@@ -20,16 +20,16 @@ from pyop3 import utils
 from pyop3.axis import Axis, AxisComponent, AxisTree, as_axis_tree, get_bottom_part
 from pyop3.distarray.base import DistributedArray
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
-from pyop3.index import (
-    Indexed,
+from pyop3.index import (  # index_axes,
+    IndexedArray,
     IndexTree,
-    SplitIndexTree,
-    as_split_index_tree,
+    as_index_forest,
     is_fully_indexed,
 )
 from pyop3.mirrored_array import MirroredArray
 from pyop3.utils import (
     PrettyTuple,
+    UniqueNameGenerator,
     as_tuple,
     just_one,
     merge_dicts,
@@ -37,6 +37,15 @@ from pyop3.utils import (
     strict_int,
     strictly_all,
 )
+
+
+# should be elsewhere, this is copied from loopexpr2loopy VariableReplacer
+class IndexExpressionReplacer(pym.mapper.IdentityMapper):
+    def __init__(self, replace_map):
+        self._replace_map = replace_map
+
+    def map_axis_variable(self, expr):
+        return self._replace_map.get(expr.axis_label, expr)
 
 
 class MultiArray(DistributedArray, pym.primitives.Variable):
@@ -51,7 +60,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
     """
 
     fields = DistributedArray.fields | {
-        "dim",
+        "axes",
         "dtype",
         "name",
         "data",
@@ -62,12 +71,12 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
 
     mapper_method = sys.intern("map_multi_array")
 
-    prefix = "ten"
-    name_generator = pytools.UniqueNameGenerator()
+    prefix = "array"
+    name_generator = UniqueNameGenerator()
 
     def __init__(
         self,
-        dim,
+        axes,
         dtype=None,
         *,
         name: str = None,
@@ -79,12 +88,12 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
     ):
         if name and prefix:
             raise ValueError("Can only specify one of name and prefix")
-        dim = as_axis_tree(dim)
+        axes = as_axis_tree(axes)
 
         if data is not None:
             data = MirroredArray(data, dtype)
         else:
-            data = MirroredArray((dim.size,), dtype)
+            data = MirroredArray((axes.size,), dtype)
 
         # add prefix as an existing name so it is a true prefix
         if prefix:
@@ -92,8 +101,6 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
         name = name or self.name_generator(prefix or self.prefix)
 
         DistributedArray.__init__(self, name)
-
-        # make a property instead? bit ugly like this
         pym.primitives.Variable.__init__(self, name)
 
         self._data = data
@@ -101,7 +108,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
 
         self.indicess = indicess
 
-        self.dim = dim
+        self.axes = axes
 
         self.max_value = max_value
         self.sf = sf
@@ -244,7 +251,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
 
         Notes
         -----
-        This is a blocking operation. For the non-blocking alternative use
+        This is a blocking operation. F.labelor the non-blocking alternative use
         :meth:`sync_begin` and :meth:`sync_end` (FIXME)
 
         Note that this method should only be called when one needs to read from
@@ -293,20 +300,11 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
         return self.data[self.axes.get_offset(*args, **kwargs)]
 
     def set_value(self, path, indices, value):
-        self.data[self.root.get_offset(path, indices)] = value
-
-    # aliases, this is preferred to dim
-    @property
-    def axes(self):
-        return self.dim
-
-    @property
-    def root(self):
-        return self.dim
+        self.data[self.axes.get_offset(path, indices)] = value
 
     # maybe I could check types here and use instead of get_value?
-    def __getitem__(self, indices: IndexTree | Index):
-        return Indexed(self, indices)
+    def __getitem__(self, indices):
+        return self.copy(axes=self.axes[indices])
 
     def select_axes(self, indices):
         selected = []
@@ -318,67 +316,6 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
 
     def __str__(self):
         return self.name
-
-    @property
-    def is_indexed(self):
-        assert False, "not touched"
-        return all(self._check_indexed(self.dim, idxs) for idxs in self.indicess)
-
-    def _check_indexed(self, dim, indices):
-        assert False, "not touched"
-        for label, size in zip(dim.labels, dim.sizes):
-            try:
-                ((index, subindices),) = [
-                    (idx, subidxs) for idx, subidxs in indices if idx.label == label
-                ]
-
-                npart = dim.labels.index(index.label)
-
-                if subdims := self.dim.get_children(dim):
-                    subdim = subdims[npart]
-                    return self._check_indexed(subdim, subindices)
-                else:
-                    return index.size != size
-            except:
-                return True
-
-    @property
-    def indexed_shape(self):
-        assert False, "not touched"
-        try:
-            (sh,) = self.indexed_shapes
-            return sh
-        except ValueError:
-            raise RuntimeError
-
-    @property
-    def indexed_shapes(self):
-        assert False, "not touched"
-        return indexed_shapes(self)
-
-    @property
-    def indexed_size(self):
-        assert False, "not touched"
-        return functools.reduce(operator.mul, self.indexed_shape, 1)
-
-    @property
-    def shape(self):
-        assert False, "not touched"
-        try:
-            (sh,) = self.shapes
-            return sh
-        except ValueError:
-            raise RuntimeError
-
-    @property
-    def shapes(self):
-        assert False, "not touched"
-        return self._compute_shapes(self.dim)
-
-    @property
-    def size(self):
-        assert False, "not touched"
-        return functools.reduce(operator.mul, self.shape, 1)
 
 
 def make_sparsity(

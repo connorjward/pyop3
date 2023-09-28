@@ -12,7 +12,7 @@ from pyop3.distarray import MultiArray
 from pyop3.dtypes import IntType, ScalarType
 
 # ultimately shouldn't be needed here
-from pyop3.index import AffineSliceComponent, Index, IndexTree, Slice, SplitIndexTree
+from pyop3.index import AffineSliceComponent, Index, IndexTree, Slice
 from pyop3.loopexpr import INC, READ, WRITE, LoopyKernel, do_loop, loop
 from pyop3.utils import flatten
 

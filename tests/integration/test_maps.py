@@ -434,11 +434,18 @@ def test_map_composition(vec2_inc_kernel):
     )
     dat1 = MultiArray(daxes1, name="dat1", dtype=dat0.dtype)
 
-    do_loop(p := iterset.index(), vec2_inc_kernel(dat0[map0(p)][map1(p)], dat1[...]))
+    do_loop(p := iterset.index(), vec2_inc_kernel(dat0[map0(p)][map1(p)], dat1[:]))
 
     expected = np.zeros_like(dat1.data)
     for i in range(iterset.size):
         expected += dat0.data[mapdata0[i]][mapdata1[i]]
+        # i = 0
+        # [2, 4, 0][[0, 2]]
+        # [2, 0]
+        # i = 1
+        # [6, 7, 1][[2, 1]]
+        # [1, 7]
+        # so dat1 is [0, 0] then [2, 0] then [3, 7], it is not indexed by i
     assert np.allclose(dat1.data, expected)
 
 

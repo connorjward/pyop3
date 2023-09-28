@@ -6,12 +6,11 @@ import pymbolic as pym
 import pytest
 from pyrsistent import pmap
 
-from pyop3 import AffineSliceComponent, IndexTree, Slice, SplitLoopIndex
+from pyop3 import AffineSliceComponent, IndexTree, Slice
 from pyop3.axis import Axis, AxisComponent, AxisTree
 from pyop3.codegen import loopy_lang_version, loopy_target
 from pyop3.distarray import MultiArray
 from pyop3.dtypes import IntType, ScalarType
-from pyop3.index import SplitIndexTree
 from pyop3.loopexpr import INC, READ, WRITE, LoopyKernel, do_loop, loop
 from pyop3.utils import flatten, just_one
 
@@ -52,15 +51,25 @@ def test_different_axis_orderings_do_not_change_packing_order():
     dat1 = MultiArray(axes0, name="dat1", data=np.zeros(npoints, dtype=ScalarType))
 
     p = axis0.index()
-    path = just_one(axis0.target_paths)
-    q = IndexTree(SplitLoopIndex(p, path))
-    q = q.put_node(
-        Slice("ax1", [AffineSliceComponent(axis1.component_labels[0])]), *q.leaf
+    path = pmap({axis0.label: just_one(axis0.components).label})
+
+    loop_context = pmap({p: (path, path)})
+    q = IndexTree(
+        p,
+        {
+            p.id: [
+                Slice(
+                    "ax1",
+                    [AffineSliceComponent(just_one(axis1.component_labels))],
+                    id="slice0",
+                )
+            ],
+            "slice0": [
+                Slice("ax2", [AffineSliceComponent(just_one(axis2.component_labels))])
+            ],
+        },
+        loop_context=loop_context,
     )
-    q = q.put_node(
-        Slice("ax2", [AffineSliceComponent(axis2.component_labels[0])]), *q.leaf
-    )
-    q = SplitIndexTree({pmap({p: path}): q})
 
     do_loop(p, copy_kernel(dat0_0[q], dat1[q]))
     assert np.allclose(dat1.data, dat0_0.data)

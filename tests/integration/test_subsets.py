@@ -24,7 +24,7 @@ from pyop3 import (
     loop,
 )
 from pyop3.codegen import loopy_lang_version, loopy_target
-from pyop3.index import AffineSliceComponent, SplitIndexTree, SplitLoopIndex
+from pyop3.index import AffineSliceComponent
 from pyop3.utils import flatten
 
 

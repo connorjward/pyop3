@@ -37,10 +37,14 @@ ComponentLabel = Label
 
 
 class LabelledNode(LabelledImmutableRecord):
-    fields = {"component_labels"} | LabelledImmutableRecord.fields
+    pass
+
+
+class StrictLabelledNode(LabelledNode):
+    fields = LabelledNode.fields | {"component_labels"}
 
     def __init__(self, component_labels, **kwargs):
-        LabelledImmutableRecord.__init__(self, **kwargs)
+        super().__init__(**kwargs)
         self.component_labels = as_tuple(component_labels)
 
     @property
@@ -55,6 +59,47 @@ Node = LabelledNode
 class LabelledTree(pytools.ImmutableRecord):
     fields = {"root", "parent_to_children"}
 
+    def __init__(self, root, parent_to_children):
+        self.root = root
+        self.parent_to_children = pmap(parent_to_children)
+
+    def __str__(self):
+        return self._stringify()
+
+    def __contains__(self, node: Node | str) -> bool:
+        return self._as_node(node) in self.nodes
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.root
+
+    def _stringify(
+        self,
+        node: Node | Hashable | None = None,
+        begin_prefix: str = "",
+        cont_prefix: str = "",
+    ) -> list[str] | str:
+        if self.is_empty:
+            return "empty"
+        node = self._as_node(node) if node else self.root
+
+        nodestr = [f"{begin_prefix}{node}"]
+        for i, child in enumerate(children := self.children(node)):
+            last_child = i == len(children) - 1
+            next_begin_prefix = f"{cont_prefix}{'└' if last_child else '├'}──➤ "
+            next_cont_prefix = f"{cont_prefix}{' ' if last_child else '│'}    "
+            if child is not None:
+                nodestr += self._stringify(child, next_begin_prefix, next_cont_prefix)
+            else:
+                nodestr += [f"{next_begin_prefix}None"]
+
+        if not strictly_all([begin_prefix, cont_prefix]):
+            return "\n".join(nodestr)
+        else:
+            return nodestr
+
+
+class StrictLabelledTree(LabelledTree):
     def __init__(
         self,
         root: Node | None = None,
@@ -94,19 +139,7 @@ class LabelledTree(pytools.ImmutableRecord):
             else:
                 parent_to_children = {}
 
-        super().__init__()
-        self.root = root
-        self.parent_to_children = pyrsistent.freeze(parent_to_children)
-
-    def __str__(self):
-        return self._stringify()
-
-    def __contains__(self, node: Node | str) -> bool:
-        return self._as_node(node) in self.nodes
-
-    @property
-    def is_empty(self) -> bool:
-        return not self.root
+        super().__init__(root, parent_to_children)
 
     @property
     def depth(self) -> int:
@@ -318,29 +351,6 @@ class LabelledTree(pytools.ImmutableRecord):
     def _as_node_id(self, node: Node | Id) -> Id:
         return node.id if isinstance(node, Node) else node
 
-    def _stringify(
-        self,
-        node: Node | Hashable | None = None,
-        begin_prefix: str = "",
-        cont_prefix: str = "",
-    ) -> list[str] | str:
-        node = self._as_node(node) if node else self.root
-
-        nodestr = [f"{begin_prefix}{node}"]
-        for i, child in enumerate(children := self.children(node)):
-            last_child = i == len(children) - 1
-            next_begin_prefix = f"{cont_prefix}{'└' if last_child else '├'}──➤ "
-            next_cont_prefix = f"{cont_prefix}{' ' if last_child else '│'}    "
-            if child is not None:
-                nodestr += self._stringify(child, next_begin_prefix, next_cont_prefix)
-            else:
-                nodestr += [f"{next_begin_prefix}None"]
-
-        if not strictly_all([begin_prefix, cont_prefix]):
-            return "\n".join(nodestr)
-        else:
-            return nodestr
-
     def with_modified_node(self, node: Node | Id, **kwargs):
         return self.replace_node(node, node.copy(**kwargs))
 
@@ -432,8 +442,8 @@ class LabelledTree(pytools.ImmutableRecord):
     def _paths(self):
         def paths_fn(node, component_label, current_path):
             if current_path is None:
-                current_path = pmap()
-            new_path = current_path | {node.label: component_label}
+                current_path = ()
+            new_path = current_path + ((node.label, component_label),)
             paths_[node.id, component_label] = new_path
             return new_path
 
@@ -447,8 +457,8 @@ class LabelledTree(pytools.ImmutableRecord):
     def _paths_with_nodes(self):
         def paths_fn(node, component_label, current_path):
             if current_path is None:
-                current_path = pmap()
-            new_path = current_path | {node: component_label}
+                current_path = ()
+            new_path = current_path + ((node, component_label),)
             paths_[node.id, component_label] = new_path
             return new_path
 
@@ -477,17 +487,38 @@ class LabelledTree(pytools.ImmutableRecord):
         self._check_exists(node)
         return all(child is None for child in self.parent_to_children[node.id])
 
-    def ancestors(self, node, component_index):
+    def ancestors(self, node, component_label):
         """Return the ancestors of a ``(node_id, component_label)`` 2-tuple."""
-        return self.path(node, component_index)[:-1]
+        return pmap(
+            {
+                nd: cpt
+                for nd, cpt in self.path(node, component_label).items()
+                if nd != node.label
+            }
+        )
 
-    def path(self, node, component_label):
+    def path(self, node, component_label, ordered=False):
         node_id = self._as_node_id(node)
-        return self._paths[node_id, component_label]
+        path_ = self._paths[node_id, component_label]
+        if ordered:
+            return path_
+        else:
+            return pmap(path_)
 
-    def path_with_nodes(self, node, component_label):
+    def path_with_nodes(
+        self, node, component_label, ordered=False, and_components=False
+    ):
         node_id = self._as_node_id(node)
-        return self._paths_with_nodes[node_id, component_label]
+        path_ = self._paths_with_nodes[node_id, component_label]
+        if and_components:
+            path_ = tuple(
+                (ax, just_one(cpt for cpt in ax.components if cpt.label == clabel))
+                for ax, clabel in path_
+            )
+        if ordered:
+            return path_
+        else:
+            return pmap(path_)
 
     def _node_from_path(self, path: Mapping[Node | Hashable, int]) -> Node:
         if not path:
