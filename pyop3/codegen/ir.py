@@ -617,6 +617,7 @@ def add_leaf_assignment(
             codegen_context,
         )
     else:
+        assert isinstance(assignment.array, Offset)
         array_expr = make_offset_expr(
             axes.orig_layout_fn[target_path],
             iname_replace_map | jname_replace_map,
