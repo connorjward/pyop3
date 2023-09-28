@@ -136,7 +136,7 @@ class ContextSensitive(abc.ABC):
         key = {}
         for loop_index, path in context.items():
             if loop_index in self.keys:
-                key |= {loop_index: path}
+                key.update({loop_index: path})
         key = pmap(key)
         return self.context_map[key]
 
@@ -474,9 +474,10 @@ def _collect_datamap(axis, *subdatamaps, axes):
     datamap = {}
     for cidx, component in enumerate(axis.components):
         if isinstance(count := component.count, MultiArray):
-            datamap |= count.datamap
+            datamap.update(count.datamap)
 
-    return datamap | merge_dicts(subdatamaps)
+    datamap.update(merge_dicts(subdatamaps))
+    return datamap
 
 
 class AxisComponent(LabelledImmutableRecord):
@@ -516,7 +517,7 @@ class AxisComponent(LabelledImmutableRecord):
     def __init__(
         self,
         count,
-        label: Hashable | None = None,
+        label: Optional[Hashable] = None,
         *,
         indices=None,
         overlap=None,
@@ -623,10 +624,10 @@ class Axis(StrictLabelledNode, LoopIterable):
 
     def __init__(
         self,
-        components: Sequence[AxisComponent] | AxisComponent | int,
-        label: Hashable | None = None,
+        components: Union[Sequence[AxisComponent], AxisComponent, int],
+        label: Optional[Hashable] = None,
         *,
-        permutation: Sequence[int] | None = None,
+        permutation: Optional[Sequence[int]] = None,
         **kwargs,
     ):
         components = tuple(_as_axis_component(cpt) for cpt in as_tuple(components))
@@ -745,8 +746,8 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
     # fields = StrictLabelledTree.fields | {"target_paths", "index_exprs", "layout_exprs", "orig_axes", "sf", "shared_sf", "comm"}
     def __init__(
         self,
-        root: MultiAxis | None = None,
-        parent_to_children: dict | None = None,
+        root: Optional[MultiAxis] = None,
+        parent_to_children: Optional[Dict] = None,
         *,
         target_paths=None,
         index_exprs=None,
@@ -914,11 +915,9 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
                     if target_axis.id in new_visited_target_axes:
                         continue
                     new_visited_target_axes |= {target_axis.id}
-                    new_target_path_per_cpt[
-                        axis.id, component.label
-                    ] |= self.target_path_per_component[
-                        target_axis.id, target_cpt.label
-                    ]
+                    new_target_path_per_cpt[axis.id, component.label].update(
+                        self.target_path_per_component[target_axis.id, target_cpt.label]
+                    )
 
                     # do a replacement
                     orig_index_exprs = self.index_exprs_per_component[
@@ -953,9 +952,9 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
                     partial_layout_exprs=new_partial_layout_exprs,
                     visited_target_axes=new_visited_target_axes,
                 )
-                new_target_path_per_cpt |= retval[0]
-                new_index_exprs_per_cpt |= retval[1]
-                new_layout_exprs_per_cpt |= retval[2]
+                new_target_path_per_cpt.update(retval[0])
+                new_index_exprs_per_cpt.update(retval[1])
+                new_layout_exprs_per_cpt.update(retval[2])
 
             else:
                 pass
@@ -1061,7 +1060,7 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         for cleverdict in [self.layouts, self.orig_layout_fn]:
             for layout in cleverdict.values():
                 for array in MultiArrayCollector()(layout):
-                    dmap |= array.datamap
+                    dmap.update(array.datamap)
 
         # TODO
         # for cleverdict in [self.index_exprs, self.layout_exprs]:
@@ -1069,9 +1068,8 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
             for exprs in cleverdict.values():
                 for expr in exprs.values():
                     for array in MultiArrayCollector()(expr):
-                        dmap |= array.datamap
-        # breakpoint()
-        return dmap
+                        dmap.update(array.datamap)
+        return pmap(dmap)
 
     def _make_target_paths(self):
         return tuple(self.path(ax, cpt) for ax, cpt in self.leaves)
@@ -1191,8 +1189,8 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         return self.leaf[1]
 
     def child(
-        self, parent: Axis, component: AxisComponent | ComponentLabel
-    ) -> Axis | None:
+        self, parent: Axis, component: Union[AxisComponent, ComponentLabel]
+    ) -> Optional[Axis]:
         cpt_label = _as_axis_component_label(component)
         return super().child(parent, cpt_label)
 
@@ -1540,7 +1538,7 @@ def _compute_layouts(
             )
             sublayoutss.append(sublayouts)
             csubtrees.append(csubtree)
-            steps |= substeps
+            steps.update(substeps)
         else:
             csubtrees.append(None)
             sublayoutss.append(collections.defaultdict(list))
@@ -1584,26 +1582,29 @@ def _compute_layouts(
             ctree = None
             for c in axis.components:
                 step = step_size(axes, axis, c)
-                layouts |= {
-                    path
-                    # | {axis.label: c.label}: AffineLayout(axis.label, c.label, step)
-                    | {axis.label: c.label}: AxisVariable(axis.label) * step
-                }
+                layouts.update(
+                    {
+                        path
+                        # | {axis.label: c.label}: AffineLayout(axis.label, c.label, step)
+                        | {axis.label: c.label}: AxisVariable(axis.label) * step
+                    }
+                )
 
         else:
             croot = CustomNode(
                 [(cpt.count, axis.label, cpt.label) for cpt in axis.components]
             )
             if strictly_all(sub is not None for sub in csubtrees):
-                cparent_to_children = {
-                    croot.id: [sub.root for sub in csubtrees]
-                } | merge_dicts(sub.parent_to_children for sub in csubtrees)
+                cparent_to_children = pmap(
+                    {croot.id: [sub.root for sub in csubtrees]}
+                ) | merge_dicts(sub.parent_to_children for sub in csubtrees)
             else:
                 cparent_to_children = {}
             ctree = StrictLabelledTree(croot, cparent_to_children)
 
         # layouts and steps are just propagated from below
-        return layouts | merge_dicts(sublayoutss), ctree, steps
+        layouts.update(merge_dicts(sublayoutss))
+        return layouts, ctree, steps
 
     # 2. add layouts here
     else:
@@ -1623,9 +1624,9 @@ def _compute_layouts(
                 bits.append((cpt.count, axlabel, clabel))
             croot = CustomNode(bits)
             if strictly_all(sub is not None for sub in csubtrees):
-                cparent_to_children = {
-                    croot.id: [sub.root for sub in csubtrees]
-                } | merge_dicts(sub.parent_to_children for sub in csubtrees)
+                cparent_to_children = pmap(
+                    {croot.id: [sub.root for sub in csubtrees]}
+                ) | merge_dicts(sub.parent_to_children for sub in csubtrees)
             else:
                 cparent_to_children = {}
             ctree = StrictLabelledTree(croot, cparent_to_children)
@@ -1641,7 +1642,8 @@ def _compute_layouts(
             ctree = None
             steps = {path: _axis_size(axes, axis)}
 
-            return layouts | merge_dicts(sublayoutss), ctree, steps
+            layouts.update(merge_dicts(sublayoutss))
+            return layouts, ctree, steps
 
         # must therefore be affine
         else:
@@ -1661,7 +1663,7 @@ def _compute_layouts(
                 sublayouts[path | {axis.label: mycomponent.label}] = new_layout
                 start += _axis_component_size(axes, axis, mycomponent)
 
-                layouts |= sublayouts
+                layouts.update(sublayouts)
             steps = {path: _axis_size(axes, axis)}
             return layouts, None, steps
 
@@ -1698,11 +1700,13 @@ def _create_count_array_tree(
             )
             arrays[new_path] = countarray
         else:
-            arrays |= _create_count_array_tree(
-                ctree,
-                child,
-                counts | current_node.counts[cidx],
-                new_path,
+            arrays.update(
+                _create_count_array_tree(
+                    ctree,
+                    child,
+                    counts | current_node.counts[cidx],
+                    new_path,
+                )
             )
 
     return arrays
@@ -1790,7 +1794,7 @@ def _tabulate_count_array_tree(
 def _collect_at_leaves(
     axes,
     values,
-    axis: Axis | None = None,
+    axis: Optional[Axis] = None,
     path=pmap(),
     prior=0,
 ):
@@ -1804,7 +1808,7 @@ def _collect_at_leaves(
         else:
             prior_ = prior
         if subaxis := axes.child(axis, cpt):
-            acc |= _collect_at_leaves(axes, values, subaxis, new_path, prior_)
+            acc.update(_collect_at_leaves(axes, values, subaxis, new_path, prior_))
         else:
             acc[new_path] = prior_
 
@@ -1877,7 +1881,7 @@ def _(arg: numbers.Real, path: Mapping, indices: Mapping):
 
 def _path_and_indices_from_index_tuple(
     axes, index_tuple
-) -> tuple[pmap[Label, Label], pmap[Label, int]]:
+) -> Tuple[pmap[Label, Label], pmap[Label, int]]:
     path = pmap()
     indices = pmap()
     axis = axes.root

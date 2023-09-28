@@ -3,7 +3,7 @@ from __future__ import annotations
 import collections
 import functools
 from collections.abc import Hashable, Sequence
-from typing import Any, Mapping
+from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Tuple, Union
 
 import pyrsistent
 import pytools
@@ -66,7 +66,7 @@ class LabelledTree(pytools.ImmutableRecord):
     def __str__(self):
         return self._stringify()
 
-    def __contains__(self, node: Node | str) -> bool:
+    def __contains__(self, node: Union[Node, str]) -> bool:
         return self._as_node(node) in self.nodes
 
     @property
@@ -75,10 +75,10 @@ class LabelledTree(pytools.ImmutableRecord):
 
     def _stringify(
         self,
-        node: Node | Hashable | None = None,
+        node: Optional[Union[Node, Hashable]] = None,
         begin_prefix: str = "",
         cont_prefix: str = "",
-    ) -> list[str] | str:
+    ) -> Union[List[str], str]:
         if self.is_empty:
             return "empty"
         node = self._as_node(node) if node else self.root
@@ -102,8 +102,8 @@ class LabelledTree(pytools.ImmutableRecord):
 class StrictLabelledTree(LabelledTree):
     def __init__(
         self,
-        root: Node | None = None,
-        parent_to_children: Mapping[Id, Node] | None = None,
+        root: Optional[Node] = None,
+        parent_to_children: Optional[Mapping[Id, Node]] = None,
     ) -> None:
         if root:
             if parent_to_children:
@@ -112,11 +112,15 @@ class StrictLabelledTree(LabelledTree):
                     for parent_id, children in parent_to_children.items()
                 }
 
-                parent_to_children |= {
-                    node.id: (None,) * node.degree
-                    for node in filter(None, flatten(list(parent_to_children.values())))
-                    if node.id not in parent_to_children
-                }
+                parent_to_children.update(
+                    {
+                        node.id: (None,) * node.degree
+                        for node in filter(
+                            None, flatten(list(parent_to_children.values()))
+                        )
+                        if node.id not in parent_to_children
+                    }
+                )
 
                 node_ids = [
                     node.id
@@ -148,12 +152,12 @@ class StrictLabelledTree(LabelledTree):
         count = lambda _, *o: max(o or [0]) + 1
         return postvisit(self, count)
 
-    def children(self, node: Node | str) -> tuple[Node]:
+    def children(self, node: Union[Node, str]) -> Tuple[Node]:
         node_id = self._as_node_id(node)
         return self.parent_to_children[node_id]
 
     def child(
-        self, parent: LabelledNode | NodeId, component_label: ComponentLabel
+        self, parent: Union[LabelledNode, NodeId], component_label: ComponentLabel
     ) -> LabelledNode:
         parent = self._as_node(parent)
         cpt_index = parent.component_labels.index(component_label)
@@ -162,8 +166,8 @@ class StrictLabelledTree(LabelledTree):
     def add_node(
         self,
         node: Node,
-        parent: Node | Id | None = None,
-        parent_component: Label | None = None,
+        parent: Optional[Union[Node, Id]] = None,
+        parent_component: Optional[Label] = None,
         uniquify: bool = False,
     ) -> None:
         if parent is None:
@@ -205,7 +209,7 @@ class StrictLabelledTree(LabelledTree):
     # old alias
     put_node = add_node
 
-    def replace_node(self, old: Node | Id, new: Node) -> LabelledTree:
+    def replace_node(self, old: Union[Node, Id], new: Node) -> LabelledTree:
         old = self._as_node(old)
 
         new_root = self.root
@@ -231,7 +235,7 @@ class StrictLabelledTree(LabelledTree):
         return frozenset(node.id for node in self.nodes)
 
     @functools.cached_property
-    def child_to_parent(self) -> dict[Node, tuple[Node, NodeComponent]]:
+    def child_to_parent(self) -> Dict[Node, Tuple[Node, NodeComponent]]:
         child_to_parent_ = {}
         for parent_id, children in self.parent_to_children.items():
             parent = self._as_node(parent_id)
@@ -246,20 +250,20 @@ class StrictLabelledTree(LabelledTree):
         return {node.id: node for node in self.nodes}
 
     @functools.cached_property
-    def nodes(self) -> frozenset[Node]:
+    def nodes(self) -> Frozenset[Node]:
         return frozenset({self.root}) | {
             node
             for node in filter(None, flatten(list(self.parent_to_children.values())))
         }
 
-    def parent(self, node: Node | Id) -> tuple[Node, NodeComponent] | None:
+    def parent(self, node: Union[Node, Id]) -> Optional[Tuple[Node, NodeComponent]]:
         node = self._as_node(node)
         if node == self.root:
             return None
         else:
             return self.child_to_parent[node]
 
-    def pop_subtree(self, subroot: Node | str) -> "Tree":
+    def pop_subtree(self, subroot: Union[Node, str]) -> Tree:
         subroot = self._as_node(subroot)
         self._check_exists(subroot)
 
@@ -293,8 +297,8 @@ class StrictLabelledTree(LabelledTree):
     def add_subtree(
         self,
         subtree: LabelledTree,
-        parent: Node | Id | None = None,
-        component: NodeComponent | Label | None = None,
+        parent: Optional[Union[Node, Id]] = None,
+        component: Optional[Union[NodeComponent, Label]] = None,
         uniquify: bool = False,
     ) -> None:
         """
@@ -322,18 +326,18 @@ class StrictLabelledTree(LabelledTree):
                 p: list(ch) for p, ch in self.parent_to_children.items()
             }
             new_parent_to_children[parent.id][cpt_index] = subtree.root
-            new_parent_to_children |= subtree.parent_to_children
+            new_parent_to_children.update(subtree.parent_to_children)
             return self.copy(parent_to_children=new_parent_to_children)
 
     # alias, better?
     def _to_node_id(self, arg):
         return self._as_node_id(arg)
 
-    def _check_exists(self, node: Node | str) -> None:
+    def _check_exists(self, node: Union[Node, str]) -> None:
         if (node_id := self._as_node(node).id) not in self.node_ids:
             raise NodeNotFoundException(f"{node_id} is not present in the tree")
 
-    def _first_unique_id(self, node: Node | Hashable, sep: str = "_") -> str:
+    def _first_unique_id(self, node: Union[Node, Hashable], sep: str = "_") -> str:
         orig_node_id = self._as_node_id(node)
         if orig_node_id not in self:
             return orig_node_id
@@ -345,23 +349,26 @@ class StrictLabelledTree(LabelledTree):
             node_id = f"{orig_node_id}{sep}{counter}"
         return node_id
 
-    def _as_node(self, node: LabelledNode | Id) -> Node:
+    def _as_node(self, node: Union[LabelledNode, Id]) -> Node:
         return node if isinstance(node, Node) else self.id_to_node[node]
 
-    def _as_node_id(self, node: Node | Id) -> Id:
+    def _as_node_id(self, node: Union[Node, Id]) -> Id:
         return node.id if isinstance(node, Node) else node
 
-    def with_modified_node(self, node: Node | Id, **kwargs):
+    def with_modified_node(self, node: Union[Node, Id], **kwargs):
         return self.replace_node(node, node.copy(**kwargs))
 
     def with_modified_component(
-        self, node: Node, component: NodeComponent | Label | None = None, **kwargs
+        self,
+        node: Node,
+        component: Optional[Union[NodeComponent, Label]] = None,
+        **kwargs,
     ):
         return self.replace_node(
             node, node.with_modified_component(component, **kwargs)
         )
 
-    def pop_subtree(self, subroot: Node | str) -> "Tree":
+    def pop_subtree(self, subroot: Union[Node, str]) -> "Tree":
         subroot = self._as_node(subroot)
         self._check_exists(subroot)
 
@@ -399,7 +406,7 @@ class StrictLabelledTree(LabelledTree):
 
         return subtree
 
-    def child_by_label(self, node: LabelledNode | Hashable, label: Hashable):
+    def child_by_label(self, node: Union[LabelledNode, Hashable], label: Hashable):
         node_id = self._as_node_id(node)
         child = self._parent_and_label_to_child[node_id, label]
         if child is not None:
@@ -410,7 +417,7 @@ class StrictLabelledTree(LabelledTree):
     @classmethod
     def from_dict(
         cls,
-        node_dict: dict[Node, Hashable],
+        node_dict: Dict[Node, Hashable],
         set_up: bool = False,
     ) -> "LabelledTree":  # -> subclass?
         tree = cls()
@@ -467,7 +474,7 @@ class StrictLabelledTree(LabelledTree):
         return pmap(paths_)
 
     @functools.cached_property
-    def leaves(self) -> tuple[tuple[Node, ComponentLabel]]:
+    def leaves(self) -> Tuple[Tuple[Node, ComponentLabel]]:
         """Return the leaves of the tree."""
         leaves_ = []
 
@@ -482,7 +489,7 @@ class StrictLabelledTree(LabelledTree):
     def leaf(self) -> Node:
         return just_one(self.leaves)
 
-    def is_leaf(self, node: Node | str) -> bool:
+    def is_leaf(self, node: Union[Node, str]) -> bool:
         node = self._as_node(node)
         self._check_exists(node)
         return all(child is None for child in self.parent_to_children[node.id])
@@ -520,7 +527,7 @@ class StrictLabelledTree(LabelledTree):
         else:
             return pmap(path_)
 
-    def _node_from_path(self, path: Mapping[Node | Hashable, int]) -> Node:
+    def _node_from_path(self, path: Mapping[Union[Node, Hashable], int]) -> Node:
         if not path:
             return None
 
@@ -539,28 +546,15 @@ class StrictLabelledTree(LabelledTree):
         assert False, "shouldn't get this far"
 
 
-NodePath = dict[Hashable, Hashable]
+NodePath = Dict[Hashable, Hashable]
 """Mapping from axis labels to component labels."""
 # wrong now
 
 
-# def previsit(
-#     tree, fn, current_node: Node | None = None, prev_result: Any | None = None
-# ) -> Any:
-#     if tree.is_empty:
-#         raise RuntimeError("Cannot traverse an empty tree")
-#
-#     current_node = current_node or tree.root
-#
-#     result = fn(current_node, prev_result)
-#     for child in tree.children(current_node):
-#         previsit(tree, fn, child, result)
-#
-#
 def previsit(
     tree,
     fn,
-    current_node: Node | None = None,
+    current_node: Optional[Node] = None,
     prev=None,
 ) -> Any:
     if tree.is_empty:
@@ -573,7 +567,7 @@ def previsit(
             previsit(tree, fn, subnode, next)
 
 
-def postvisit(tree, fn, current_node: Node | None = None, **kwargs) -> Any:
+def postvisit(tree, fn, current_node: Optional[Node] = None, **kwargs) -> Any:
     """Traverse the tree in postorder.
 
     # TODO rewrite

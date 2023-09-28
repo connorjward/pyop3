@@ -77,8 +77,8 @@ def parse_parent_to_children(parent_to_children, parent, loop_context):
                 parse_parent_to_children(parent_to_children, child, loop_context)
             )
 
-        return pmap(
-            {parent.id: tuple(new_children)} | merge_dicts(subparents_to_children)
+        return pmap({parent.id: tuple(new_children)}) | merge_dicts(
+            subparents_to_children
         )
     else:
         return pmap()
@@ -155,12 +155,9 @@ class IndexedArray:
         for expr_per_leaf in self.layout_exprs.values():
             for expr in expr_per_leaf.values():
                 dmap |= collect_datamap_from_expression(expr)
-
-        return (
-            dmap
-            | self.array.datamap
-            | merge_dicts([axes.datamap for axes in self.axis_trees.values()])
-        )
+        dmap.update(self.array.datamap)
+        dmap.update(merge_dicts([axes.datamap for axes in self.axis_trees.values()]))
+        return pmap(dmap)
 
     @property
     def name(self):
@@ -191,7 +188,7 @@ class AffineSliceComponent(SliceComponent):
 
     @property
     def datamap(self):
-        return {}
+        return pmap()
 
 
 class Subset(SliceComponent):
@@ -301,8 +298,8 @@ class Map(pytools.ImmutableRecord):
         data = {}
         for bit in self.connectivity.values():
             for map_cpt in bit:
-                data |= map_cpt.datamap
-        return data
+                data.update(map_cpt.datamap)
+        return pmap(data)
 
 
 class Index(LabelledNode):
@@ -395,7 +392,9 @@ class LoopIndex(AbstractLoopIndex):
         for leaf in iterset.leaves:
             target_path = {}
             for axis, cpt in iterset.path_with_nodes(*leaf).items():
-                target_path |= iterset.target_path_per_component.get((axis.id, cpt), {})
+                target_path.update(
+                    iterset.target_path_per_component.get((axis.id, cpt), {})
+                )
             target_paths_.append(pmap(target_path))
         return tuple(target_paths_)
 
@@ -607,11 +606,11 @@ def _(arg: LoopIndex):
                 for axis, cpt in axis_tree.path_with_nodes(
                     *leaf, and_components=True
                 ).items():
-                    target_path |= axis_tree.target_path_per_component[
-                        axis.id, cpt.label
-                    ]
-                extra_source_context |= source_path
-                extracontext |= target_path
+                    target_path.update(
+                        axis_tree.target_path_per_component[axis.id, cpt.label]
+                    )
+                extra_source_context.update(source_path)
+                extracontext.update(target_path)
             contexts.append(
                 loop_context | {arg: (pmap(extra_source_context), pmap(extracontext))}
             )
@@ -628,7 +627,9 @@ def _(arg: LoopIndex):
             for axis, cpt in iterset.path_with_nodes(
                 *leaf, and_components=True
             ).items():
-                target_path |= iterset.target_path_per_component[axis.id, cpt.label]
+                target_path.update(
+                    iterset.target_path_per_component[axis.id, cpt.label]
+                )
             contexts.append(pmap({arg: (source_path, pmap(target_path))}))
         return tuple(contexts)
 
@@ -722,7 +723,7 @@ def index_tree_from_iterable(
             subtrees.append(subtree)
 
         root = index
-        parent_to_children = pmap({index.id: children} | merge_dicts(subtrees))
+        parent_to_children = pmap({index.id: children}) | merge_dicts(subtrees)
     else:
         root = index
         parent_to_children = pmap()
@@ -963,9 +964,9 @@ def _(called_map: CalledMap, **kwargs):
                 called_map, prior_target_path, prior_index_exprs
             )
             axes = axes.add_subaxis(subaxis, prior_leaf_axis, prior_leaf_cpt)
-            target_path_per_cpt |= subtarget_paths
-            index_exprs_per_cpt |= subindex_exprs
-            layout_exprs_per_cpt |= sublayout_exprs
+            target_path_per_cpt.update(subtarget_paths)
+            index_exprs_per_cpt.update(subindex_exprs)
+            layout_exprs_per_cpt.update(sublayout_exprs)
 
     return (axes, target_path_per_cpt, index_exprs_per_cpt, layout_exprs_per_cpt)
 
@@ -1084,9 +1085,9 @@ def _index_axes_rec(
                             layout_exprs_per_cpt_per_index[key] | retval[3][key]
                         )
                     else:
-                        target_path_per_cpt_per_index |= {key: retval[1][key]}
-                        index_exprs_per_cpt_per_index |= {key: retval[2][key]}
-                        layout_exprs_per_cpt_per_index |= {key: retval[3][key]}
+                        target_path_per_cpt_per_index.update({key: retval[1][key]})
+                        index_exprs_per_cpt_per_index.update({key: retval[2][key]})
+                        layout_exprs_per_cpt_per_index.update({key: retval[3][key]})
 
     target_path_per_component = pmap(target_path_per_cpt_per_index)
     index_exprs_per_component = pmap(index_exprs_per_cpt_per_index)

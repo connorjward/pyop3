@@ -2,9 +2,10 @@ import collections
 import functools
 import itertools
 import operator
-from typing import Any, Collection, Hashable
+from typing import Any, Collection, Hashable, Optional
 
 import pytools
+from pyrsistent import pmap
 
 
 class UniqueNameGenerator(pytools.UniqueNameGenerator):
@@ -32,7 +33,7 @@ Label = Hashable
 class UniquelyIdentifiedImmutableRecord(pytools.ImmutableRecord):
     fields = {"id"}
 
-    def __init__(self, id: Id | None = None):
+    def __init__(self, id: Optional[Id] = None):
         pytools.ImmutableRecord.__init__(self)
         self.id = id if id is not None else self.unique_id()
 
@@ -44,7 +45,7 @@ class UniquelyIdentifiedImmutableRecord(pytools.ImmutableRecord):
 class LabelledImmutableRecord(UniquelyIdentifiedImmutableRecord):
     fields = {"label"} | UniquelyIdentifiedImmutableRecord.fields
 
-    def __init__(self, label: Label | None = None, **kwargs):
+    def __init__(self, label: Optional[Label] = None, **kwargs):
         super().__init__(**kwargs)
         self.label = (
             label if label is not None else unique_name(f"_{type(self).__name__}_label")
@@ -95,12 +96,11 @@ single_valued = pytools.single_valued
 is_single_valued = pytools.is_single_valued
 
 
-def merge_dicts(dicts):
+def merge_dicts(dicts, persistent=True):
     merged = {}
     for dict_ in dicts:
         merged.update(dict_)
-    return merged
-    # return functools.reduce(operator.or_, dicts, {})
+    return pmap(merged) if persistent else merged
 
 
 def unique(iterable):

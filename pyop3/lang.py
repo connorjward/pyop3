@@ -220,9 +220,7 @@ class FunctionCall(Terminal):
 
     @functools.cached_property
     def datamap(self) -> dict[str, DistributedArray]:
-        return functools.reduce(
-            operator.or_, [arg.datamap for arg in self.arguments], {}
-        )
+        return merge_dicts([arg.datamap for arg in self.arguments])
 
     # @property
     # def operands(self):
