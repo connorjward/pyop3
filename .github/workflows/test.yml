@@ -72,11 +72,11 @@ jobs:
         working-directory: pyop3
         run: |
           # Gross:
-          pip install toml
-          python scripts/requirements.py build | pip install -r /dev/stdin
-          pip install --no-build-isolation .
-          python scripts/requirements.py run | pip install -r /dev/stdin
+          # pip install toml
+          # python scripts/requirements.py build | pip install -r /dev/stdin
+          # pip install --no-build-isolation .
           pip install pytest pytest-cov pytest-timeout pytest-xdist pytest-timeout
+          pip install .
 
       - name: Run tests
         shell: bash
@@ -92,5 +92,3 @@ jobs:
             -n 12 --dist worksteal \
             -v tests
         timeout-minutes: 10
-
-

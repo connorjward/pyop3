@@ -1,9 +1,6 @@
 [build-system]
 requires = [
   "setuptools",
-  "cython<3",
-  "numpy",
-  "petsc4py"
 ]
 build-backend = "setuptools.build_meta"
 
@@ -11,11 +8,11 @@ build-backend = "setuptools.build_meta"
 name = "pyop3"
 version = "0.1"
 dependencies = [
-  "pyrsistent",
-  "numpy",
-  "loopy @ git+https://github.com/firedrakeproject/loopy.git",
   "mpi4py",
-  "petsc4py"
+  "numpy",
+  "petsc4py",
+  "pyrsistent",
+  "loopy @ git+https://github.com/firedrakeproject/loopy.git",
 ]
 
 [project.optional-dependencies]
