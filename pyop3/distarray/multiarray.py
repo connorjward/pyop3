@@ -17,15 +17,9 @@ from petsc4py import PETSc
 from pyrsistent import pmap
 
 from pyop3 import utils
-from pyop3.axis import Axis, AxisComponent, AxisTree, as_axis_tree, get_bottom_part
+from pyop3.axes import Axis, AxisComponent, AxisTree, as_axis_tree
 from pyop3.distarray.base import DistributedArray
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
-from pyop3.index import (  # index_axes,
-    IndexedArray,
-    IndexTree,
-    as_index_forest,
-    is_fully_indexed,
-)
 from pyop3.mirrored_array import MirroredArray
 from pyop3.utils import (
     PrettyTuple,

@@ -8,10 +8,10 @@ del pytools
 
 
 import pyop3.transforms
-from pyop3.axis import Axis, AxisComponent, AxisTree  # noqa: F401
+from pyop3.axes import Axis, AxisComponent, AxisTree  # noqa: F401
 from pyop3.distarray import MultiArray  # noqa: F401
 from pyop3.dtypes import IntType, ScalarType  # noqa: F401
-from pyop3.index import (  # noqa: F401
+from pyop3.indices import (  # noqa: F401
     AffineSliceComponent,
     Index,
     IndexTree,
@@ -21,7 +21,7 @@ from pyop3.index import (  # noqa: F401
     Subset,
     TabulatedMapComponent,
 )
-from pyop3.loopexpr import (  # noqa: F401
+from pyop3.lang import (  # noqa: F401
     INC,
     MAX_RW,
     MAX_WRITE,

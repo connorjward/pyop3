@@ -16,7 +16,7 @@ from pyop3 import (
     ScalarType,
     do_loop,
 )
-from pyop3.codegen import loopy_lang_version, loopy_target
+from pyop3.codegen.ir import loopy_lang_version, loopy_target
 
 
 # NOTE: It is only meaningful to test min/max in parallel as otherwise they behave the

@@ -19,7 +19,6 @@ import pymbolic as pym
 import pytools
 from pyrsistent import pmap
 
-from pyop3 import utils
 from pyop3.axes import Axis, AxisComponent, AxisTree, AxisVariable, CalledAxisTree
 from pyop3.device import CPUDevice, CUDADevice, OpenCLDevice, offloading_device
 from pyop3.distarray import MultiArray

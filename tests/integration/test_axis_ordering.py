@@ -6,12 +6,24 @@ import pymbolic as pym
 import pytest
 from pyrsistent import pmap
 
-from pyop3 import AffineSliceComponent, IndexTree, Slice
-from pyop3.axis import Axis, AxisComponent, AxisTree
-from pyop3.codegen import loopy_lang_version, loopy_target
-from pyop3.distarray import MultiArray
-from pyop3.dtypes import IntType, ScalarType
-from pyop3.loopexpr import INC, READ, WRITE, LoopyKernel, do_loop, loop
+from pyop3 import (
+    INC,
+    READ,
+    WRITE,
+    AffineSliceComponent,
+    Axis,
+    AxisComponent,
+    AxisTree,
+    IndexTree,
+    IntType,
+    LoopyKernel,
+    MultiArray,
+    ScalarType,
+    Slice,
+    do_loop,
+    loop,
+)
+from pyop3.codegen.ir import loopy_lang_version, loopy_target
 from pyop3.utils import flatten, just_one
 
 

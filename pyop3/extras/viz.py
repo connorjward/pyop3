@@ -5,7 +5,6 @@ import graphviz
 import numpy as np
 from matplotlib import cm
 
-from pyop3 import tlang
 from pyop3.distarray import IndexedMultiArray, MultiArray
 from pyop3.dtypes import IntType
 from pyop3.utils import PrettyTuple, strict_int

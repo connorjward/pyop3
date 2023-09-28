@@ -24,8 +24,6 @@ from pyrsistent import pmap
 
 from pyop3 import utils
 from pyop3.dtypes import IntType, PointerType, get_mpi_dtype
-
-# from pyop3.index import Index, IndexTree, Map, Slice, TabulatedMap
 from pyop3.tree import (
     ComponentLabel,
     LabelledNode,
@@ -777,7 +775,7 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
             return self
         # FIXME
         from pyop3.distarray.multiarray import IndexExpressionReplacer
-        from pyop3.index import (
+        from pyop3.indices import (
             IndexedAxisTree,
             as_index_forest,
             collect_loop_contexts,
@@ -973,7 +971,7 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
 
     def index(self):
         # cyclic import
-        from pyop3.index import LoopIndex
+        from pyop3.indices import LoopIndex
 
         return LoopIndex(self)
 
@@ -1451,7 +1449,7 @@ def create_lgmap(axes):
 
 @functools.singledispatch
 def as_axis_tree(arg: Any):
-    from pyop3.index import IndexedAxisTree
+    from pyop3.indices import IndexedAxisTree
 
     if isinstance(arg, IndexedAxisTree):
         return arg
@@ -1935,7 +1933,7 @@ def loop_indices(axes: AxisTree) -> IndexTree:
 def _loop_indices_rec(axes: AxisTree, axis: Axis) -> IndexTree:
     assert False, "dead code"
     # cyclic import
-    from pyop3.index import Index, IndexTree, LoopIndex
+    from pyop3.indices import Index, IndexTree, LoopIndex
 
     icpts = []
     isubtrees = []
