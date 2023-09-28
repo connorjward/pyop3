@@ -286,12 +286,11 @@ class Map(pytools.ImmutableRecord):
     `CalledMap` which can be formed from a `Map` using call syntax.
     """
 
-    # FIXME, naturally this is a placeholder
-    fields = {"bits", "name"}
+    fields = {"connectivity", "name"}
 
-    def __init__(self, bits, name, **kwargs) -> None:
+    def __init__(self, connectivity, name, **kwargs) -> None:
         super().__init__(**kwargs)
-        self.bits = bits
+        self.connectivity = connectivity
         self.name = name
 
     def __call__(self, index):
@@ -300,7 +299,7 @@ class Map(pytools.ImmutableRecord):
     @functools.cached_property
     def datamap(self):
         data = {}
-        for bit in self.bits.values():
+        for bit in self.connectivity.values():
             for map_cpt in bit:
                 data |= map_cpt.datamap
         return data
@@ -347,13 +346,13 @@ class CalledMap(Index, LoopIterable, UniquelyIdentifiedImmutableRecord):
         raise NotImplementedError("TODO")
 
     @property
-    def bits(self):
-        return self.map.bits
+    def connectivity(self):
+        return self.map.connectivity
 
     def target_paths(self, context):
         targets = []
         for src_path in self.from_index.target_paths(context):
-            for map_component in self.bits[src_path]:
+            for map_component in self.connectivity[src_path]:
                 targets.append(
                     pmap({map_component.target_axis: map_component.target_component})
                 )
@@ -442,29 +441,6 @@ class Slice(Index):
     @property
     def datamap(self):
         return merge_dicts([s.datamap for s in self.slices])
-
-
-# class ContextFreeCalledMap(Index, ContextFreeIndex):
-#     def __init__(self, component_labels, map: CalledMap, from_index: ContextFreeIndex):
-#         super().__init__(component_labels)
-#         self.map = map
-#         self.from_index = from_index
-#
-#     @property
-#     def target_paths(self):
-#         # hopefully I shouldn't have to do this introspection here, make a class attribute
-#         all_map_components = {}
-#         for map_components in self.map.bits.values():
-#             for map_component in map_components:
-#                 all_map_components[map_component.label] = map_component
-#
-#         targets = []
-#         for component_label in self.component_labels:
-#             map_component_label = component_label[-1]
-#             selected_cpt = all_map_components[map_component_label]
-#             target = pmap({selected_cpt.target_axis: selected_cpt.target_component})
-#             targets.append(target)
-#         return targets
 
 
 # move with other axis trees
@@ -1003,7 +979,7 @@ def _make_leaf_axis_from_called_map(called_map, prior_target_path, prior_index_e
     index_exprs_per_cpt = {}
     layout_exprs_per_cpt = {}
 
-    for map_cpt in called_map.map.bits[prior_target_path]:
+    for map_cpt in called_map.map.connectivity[prior_target_path]:
         cpt = AxisComponent(map_cpt.arity, label=map_cpt.label)
         components.append(cpt)
 
