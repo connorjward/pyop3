@@ -13,7 +13,7 @@ import pymbolic as pym
 import pytools
 from pyrsistent import pmap
 
-from pyop3.axis import (
+from pyop3.axes import (
     Axis,
     AxisComponent,
     AxisTree,
@@ -596,8 +596,6 @@ def _(arg: LocalLoopIndex):
 
 @collect_loop_contexts.register
 def _(arg: LoopIndex):
-    from pyop3.axis import AxisTree
-
     if isinstance(arg.iterset, IndexedAxisTree):
         contexts = []
         for loop_context, axis_tree in arg.iterset.axis_trees.items():

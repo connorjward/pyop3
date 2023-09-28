@@ -2,7 +2,7 @@ import loopy as lp
 import pytest
 
 from pyop3 import INC, READ, WRITE, IntType, LoopyKernel, ScalarType
-from pyop3.codegen import LOOPY_LANG_VERSION, LOOPY_TARGET
+from pyop3.codegen.ir import LOOPY_LANG_VERSION, LOOPY_TARGET
 
 
 @pytest.fixture

@@ -6,7 +6,8 @@ import numpy as np
 import pytools
 from petsc4py import PETSc
 
-from pyop3.axis import Axis, AxisTree, has_independently_indexed_subaxis_parts
+from pyop3.axes import Axis, AxisTree
+from pyop3.axes.tree import has_independently_indexed_subaxis_parts
 from pyop3.utils import as_tuple
 
 DEFAULT_AXIS_PRIORITY = 100

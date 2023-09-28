@@ -17,15 +17,10 @@ from petsc4py import PETSc
 from pyrsistent import pmap
 
 from pyop3 import utils
-from pyop3.axis import Axis, AxisComponent, AxisTree, as_axis_tree, get_bottom_part
+from pyop3.axes import Axis, AxisComponent, AxisTree, as_axis_tree
 from pyop3.distarray.base import DistributedArray
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
-from pyop3.index import (  # index_axes,
-    IndexedArray,
-    IndexTree,
-    as_index_forest,
-    is_fully_indexed,
-)
+from pyop3.indices import IndexedArray, IndexTree, as_index_forest  # index_axes,
 from pyop3.utils import (
     PrettyTuple,
     UniqueNameGenerator,
@@ -101,11 +96,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
             if not dtype:
                 raise ValueError("Must either specify a dtype or provide an array")
             dtype = np.dtype(dtype)
-            # debug
-            # data = np.zeros(axes.size, dtype=dtype)
-            from pyop3.axis import axis_tree_size
-
-            data = np.zeros(axis_tree_size(axes), dtype=dtype)
+            data = np.zeros(axes.size, dtype=dtype)
         else:
             raise TypeError("data argument not recognised")
 

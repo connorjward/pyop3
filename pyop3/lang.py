@@ -14,7 +14,7 @@ import numpy as np
 import pytools
 
 from pyop3.distarray import DistributedArray, MultiArray
-from pyop3.index import IndexedArray
+from pyop3.indices import IndexedArray
 from pyop3.utils import as_tuple, checked_zip, merge_dicts
 
 
@@ -117,19 +117,19 @@ class Loop(LoopExpr):
 
     @functools.cached_property
     def loopy_code(self):
-        from pyop3.codegen.loopexpr2loopy import compile
+        from pyop3.codegen.ir import compile
 
         return compile(self)
 
     @functools.cached_property
     def c_code(self):
-        from pyop3.codegen.loopy2exe import compile_loopy
+        from pyop3.codegen.exe import compile_loopy
 
         return compile_loopy(self.loopy_code, stop_at_c=True)
 
     @functools.cached_property
     def executable(self):
-        from pyop3.codegen.loopy2exe import compile_loopy
+        from pyop3.codegen.exe import compile_loopy
 
         return compile_loopy(self.loopy_code)
 
@@ -261,6 +261,67 @@ class FunctionCall(Terminal):
     #             self.argspec,
     #         )
     #     )
+
+
+class Instruction(pytools.ImmutableRecord):
+    fields = set()
+
+
+class Assignment(Instruction):
+    fields = Instruction.fields | {"tensor", "temporary", "shape"}
+
+    def __init__(self, tensor, temporary, shape, **kwargs):
+        self.tensor = tensor
+        self.temporary = temporary
+        self.shape = shape
+        super().__init__(**kwargs)
+
+    # better name
+    @property
+    def array(self):
+        return self.tensor
+
+
+class Read(Assignment):
+    @property
+    def lhs(self):
+        return self.temporary
+
+    @property
+    def rhs(self):
+        return self.tensor
+
+
+class Write(Assignment):
+    @property
+    def lhs(self):
+        return self.tensor
+
+    @property
+    def rhs(self):
+        return self.temporary
+
+
+class Increment(Assignment):
+    @property
+    def lhs(self):
+        return self.tensor
+
+    @property
+    def rhs(self):
+        return self.temporary
+
+
+class Zero(Assignment):
+    @property
+    def lhs(self):
+        return self.temporary
+
+    # FIXME
+    @property
+    def rhs(self):
+        # return 0
+        return self.tensor
 
 
 def loop(*args, **kwargs):

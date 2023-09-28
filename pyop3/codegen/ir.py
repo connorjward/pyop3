@@ -19,11 +19,11 @@ import pymbolic as pym
 import pytools
 from pyrsistent import pmap
 
-from pyop3 import tlang, utils
-from pyop3.axis import Axis, AxisComponent, AxisTree, AxisVariable, CalledAxisTree
-from pyop3.distarray import IndexedMultiArray, MultiArray
+from pyop3 import utils
+from pyop3.axes import Axis, AxisComponent, AxisTree, AxisVariable, CalledAxisTree
+from pyop3.distarray import MultiArray
 from pyop3.dtypes import IntType
-from pyop3.index import (
+from pyop3.indices import (
     AffineMapComponent,
     AffineSliceComponent,
     CalledMap,
@@ -39,8 +39,7 @@ from pyop3.index import (
     Subset,
     TabulatedMapComponent,
 )
-from pyop3.log import logger
-from pyop3.loopexpr import (
+from pyop3.lang import (
     INC,
     MAX_RW,
     MAX_WRITE,
@@ -50,8 +49,13 @@ from pyop3.loopexpr import (
     RW,
     WRITE,
     FunctionCall,
+    Increment,
     Loop,
+    Read,
+    Write,
+    Zero,
 )
+from pyop3.log import logger
 from pyop3.utils import (
     PrettyTuple,
     checked_zip,
@@ -403,14 +407,13 @@ def _(call: FunctionCall, loop_indices, ctx: LoopyCodegenContext) -> None:
         + tuple(extents.values()),
     )
 
-    # TODO get rid of tlang entirely
     # gathers
     for arg, temp, access, shape in temporaries:
         if access in {READ, RW, MIN_RW, MAX_RW}:
-            gather = tlang.Read(arg, temp, shape)
+            gather = Read(arg, temp, shape)
         else:
             assert access in {WRITE, INC, MIN_WRITE, MAX_WRITE}
-            gather = tlang.Zero(arg, temp, shape)
+            gather = Zero(arg, temp, shape)
         build_assignment(gather, loop_indices, ctx)
 
     ctx.add_function_call(assignees, expression)
@@ -421,10 +424,10 @@ def _(call: FunctionCall, loop_indices, ctx: LoopyCodegenContext) -> None:
         if access == READ:
             continue
         elif access in {WRITE, RW, MIN_RW, MIN_WRITE, MAX_RW, MAX_WRITE}:
-            scatter = tlang.Write(arg, temp, shape)
+            scatter = Write(arg, temp, shape)
         else:
             assert access == INC
-            scatter = tlang.Increment(arg, temp, shape)
+            scatter = Increment(arg, temp, shape)
         build_assignment(scatter, loop_indices, ctx)
 
 
@@ -660,16 +663,16 @@ def make_temp_expr(assignment, path, jnames, ctx):
 
 
 def _shared_assignment_insn(assignment, array_expr, temp_expr, ctx):
-    if isinstance(assignment, tlang.Read):
+    if isinstance(assignment, Read):
         lexpr = temp_expr
         rexpr = array_expr
-    elif isinstance(assignment, tlang.Write):
+    elif isinstance(assignment, Write):
         lexpr = array_expr
         rexpr = temp_expr
-    elif isinstance(assignment, tlang.Increment):
+    elif isinstance(assignment, Increment):
         lexpr = array_expr
         rexpr = array_expr + temp_expr
-    elif isinstance(assignment, tlang.Zero):
+    elif isinstance(assignment, Zero):
         lexpr = temp_expr
         rexpr = 0
     else:
