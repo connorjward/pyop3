@@ -195,7 +195,7 @@ def delcomm_outer(comm, keyval, icomm):
             raise PyOP2CommError("Inner comm has reference to non-matching outer comm")
         icomm.Delete_attr(outercomm_keyval)
 
-        # Once we have removed the reference to the inner/compilation comm we can free it
+        # Once we have removed the ref to the inner/compilation comm we can free it
         cidx = icomm.Get_attr(cidx_keyval)
         cidx = cidx[0]
         del _DUPED_COMM_DICT[cidx]
@@ -236,7 +236,8 @@ def is_pyop2_comm(comm):
         ispyop2comm = bool(comm.Get_attr(refcount_keyval))
     else:
         raise PyOP2CommError(
-            f"Argument passed to is_pyop2_comm() is a {type(comm)}, which is not a recognised comm type"
+            f"Argument passed to is_pyop2_comm() is a {type(comm)}, which is not a "
+            "recognised comm type"
         )
     return ispyop2comm
 
@@ -437,7 +438,7 @@ def set_compilation_comm(comm, comp_comm):
 
     if not is_pyop2_comm(comp_comm):
         raise PyOP2CommError(
-            "Communicator used for compilation communicator must be a PyOP2 communicator.\n"
+            "Communicator used for compilation must be a PyOP2 communicator.\n"
             "Use pyop2.mpi.dup_comm() to create a PyOP2 comm from an existing comm."
         )
     else:
@@ -445,7 +446,8 @@ def set_compilation_comm(comm, comp_comm):
             # Clean up old_comp_comm before setting new one
             if not is_pyop2_comm(old_comp_comm):
                 raise PyOP2CommError(
-                    "Compilation communicator is not a PyOP2 comm, something is very broken!"
+                    "Compilation communicator is not a PyOP2 comm, something is "
+                    "very broken!"
                 )
             gc.collect()
             decref(old_comp_comm)
@@ -508,7 +510,8 @@ def _free_comms():
         if comm != MPI.COMM_NULL:
             refcount = comm.Get_attr(refcount_keyval)
             debug(
-                f"Freeing {comm.name}, with index {key}, which has refcount {refcount[0]}"
+                f"Freeing {comm.name}, with index {key}, which has "
+                f"refcount {refcount[0]}"
             )
             comm.Free()
         del _DUPED_COMM_DICT[key]
