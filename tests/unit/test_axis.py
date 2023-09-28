@@ -1,13 +1,64 @@
 import numpy as np
+import pymbolic as pym
 import pytest
 from pyrsistent import pmap
 
-from pyop3.axis import AffineLayout, Axis, AxisComponent, AxisTree, TabulatedLayout
+from pyop3.axis import Axis, AxisComponent, AxisTree
 from pyop3.distarray import MultiArray
 from pyop3.dtypes import IntType
-from pyop3.utils import flatten, just_one
+from pyop3.utils import UniqueNameGenerator, flatten, just_one
 
-# TODO make axis a subpackage and layouts a submodule
+
+class RenameMapper(pym.mapper.IdentityMapper):
+    """Mapper that renames variables in layout expressions.
+
+    This enables one to obtain a consistent string representation of
+    an expression.
+
+    """
+
+    def __init__(self):
+        self.name_generator = None
+
+    def __call__(self, expr):
+        # reset the counter each time the mapper is used
+        self.name_generator = UniqueNameGenerator()
+        return super().__call__(expr)
+
+    def map_axis_variable(self, expr):
+        return pym.var(self.name_generator("var"))
+
+    def map_multi_array(self, expr):
+        return pym.var(self.name_generator("array"))
+
+
+class OrderedCollector(pym.mapper.CombineMapper):
+    def combine(self, values):
+        return sum(values, ())
+
+    def map_constant(self, expr):
+        return ()
+
+    map_variable = map_constant
+    map_wildcard = map_constant
+    map_dot_wildcard = map_constant
+    map_star_wildcard = map_constant
+    map_function_symbol = map_constant
+
+    def map_multi_array(self, expr):
+        return (expr,)
+
+
+_rename_mapper = RenameMapper()
+_ordered_collector = OrderedCollector()
+
+
+def as_str(expr):
+    return str(_rename_mapper(expr))
+
+
+def collect_multi_arrays(expr):
+    return _ordered_collector(expr)
 
 
 def check_offsets(axes, indices_and_offsets):
@@ -24,11 +75,9 @@ def check_invalid_indices(axes, indicess):
 def test_1d_affine_layout():
     axes = AxisTree(Axis([AxisComponent(5, "pt0")], "ax0"))
 
-    layout0 = just_one(axes.layouts[pmap({"ax0": "pt0"})])
-    assert isinstance(layout0, AffineLayout)
-    assert layout0.start == 0
-    assert layout0.step == 1
+    layout0 = axes.layouts[pmap({"ax0": "pt0"})]
 
+    assert as_str(layout0) == "var_0"
     check_offsets(
         axes,
         [
@@ -48,16 +97,9 @@ def test_2d_affine_layout():
         {"root": Axis([AxisComponent(2, "pt0")], "ax1")},
     )
 
-    layout0, layout1 = axes.layouts[pmap({"ax0": "pt0", "ax1": "pt0"})]
+    layout0 = axes.layouts[pmap({"ax0": "pt0", "ax1": "pt0"})]
 
-    assert isinstance(layout0, AffineLayout)
-    assert layout0.start == 0
-    assert layout0.step == 2
-
-    assert isinstance(layout1, AffineLayout)
-    assert layout1.start == 0
-    assert layout1.step == 1
-
+    assert as_str(layout0) == "var_0*2 + var_1"
     check_offsets(
         axes,
         [
@@ -75,16 +117,11 @@ def test_2d_affine_layout():
 def test_1d_multi_component_layout():
     axes = AxisTree(Axis([AxisComponent(3, "pt0"), AxisComponent(2, "pt1")], "ax0"))
 
-    layout0 = just_one(axes.layouts[pmap({"ax0": "pt0"})])
-    assert isinstance(layout0, AffineLayout)
-    assert layout0.start == 0
-    assert layout0.step == 1
+    layout0 = axes.layouts[pmap({"ax0": "pt0"})]
+    layout1 = axes.layouts[pmap({"ax0": "pt1"})]
 
-    layout1 = just_one(axes.layouts[pmap({"ax0": "pt1"})])
-    assert isinstance(layout1, AffineLayout)
-    assert layout1.start == 3
-    assert layout1.step == 1
-
+    assert as_str(layout0) == "var_0"
+    assert as_str(layout1) == "var_0 + 3"
     check_offsets(
         axes,
         [
@@ -111,10 +148,10 @@ def test_1d_multi_component_layout():
 def test_1d_permuted_layout():
     axes = AxisTree(Axis([AxisComponent(3, "pt0")], "ax0", permutation=[1, 2, 0]))
 
-    layout0 = just_one(axes.layouts[pmap({"ax0": "pt0"})])
-    assert isinstance(layout0, TabulatedLayout)
-    assert np.allclose(layout0.data.data, [1, 2, 0])
+    layout0 = axes.layouts[pmap({"ax0": "pt0"})]
 
+    assert as_str(layout0) == "array_0"
+    assert np.allclose(layout0.data_ro, [1, 2, 0])
     check_offsets(
         axes,
         [
@@ -141,14 +178,13 @@ def test_1d_multi_component_permuted_layout():
         )
     )
 
-    layout0 = just_one(axes.layouts[pmap({"ax0": "pt0"})])
-    assert isinstance(layout0, TabulatedLayout)
-    assert np.allclose(layout0.data.data, [1, 4, 3])
+    layout0 = axes.layouts[pmap({"ax0": "pt0"})]
+    layout1 = axes.layouts[pmap({"ax0": "pt1"})]
 
-    layout1 = just_one(axes.layouts[pmap({"ax0": "pt1"})])
-    assert isinstance(layout1, TabulatedLayout)
-    assert np.allclose(layout1.data.data, [2, 0])
-
+    assert as_str(layout0) == "array_0"
+    assert as_str(layout1) == "array_0"
+    assert np.allclose(layout0.data_ro, [1, 4, 3])
+    assert np.allclose(layout1.data_ro, [2, 0])
     check_offsets(
         axes,
         [
@@ -173,11 +209,9 @@ def test_1d_multi_component_permuted_layout():
 def test_1d_zero_sized_layout():
     axes = AxisTree(Axis([AxisComponent(0, "pt0")], "ax0"))
 
-    layout0 = just_one(axes.layouts[pmap({"ax0": "pt0"})])
-    assert isinstance(layout0, AffineLayout)
-    assert layout0.start == 0
-    assert layout0.step == 1
+    layout0 = axes.layouts[pmap({"ax0": "pt0"})]
 
+    assert as_str(layout0) == "var_0"
     check_invalid_indices(axes, [[], [0]])
 
 
@@ -283,13 +317,11 @@ def test_ragged_layout():
     nnz = MultiArray(nnzaxes, data=np.asarray([2, 1, 2], dtype=IntType))
     axes = nnzaxes.add_subaxis(Axis([AxisComponent(nnz, "pt0")], "ax1"), *nnzaxes.leaf)
 
-    layout0, layout1 = axes.layouts[pmap({"ax0": "pt0", "ax1": "pt0"})]
-    assert isinstance(layout0, TabulatedLayout)
-    assert np.allclose(layout0.data.data, [0, 2, 3])
-    assert isinstance(layout1, AffineLayout)
-    assert layout1.start == 0
-    assert layout1.step == 1
+    layout0 = axes.layouts[pmap({"ax0": "pt0", "ax1": "pt0"})]
+    array0 = just_one(collect_multi_arrays(layout0))
 
+    assert as_str(layout0) == "array_0 + var_0"
+    assert np.allclose(array0.data_ro, [0, 2, 3])
     check_offsets(
         axes,
         [
@@ -334,13 +366,11 @@ def test_ragged_layout_with_two_outer_axes():
 
     axes = nnzaxes.add_subaxis(Axis([AxisComponent(nnz, "pt0")], "ax2"), *nnzaxes.leaf)
 
-    layout1, layout2 = axes.layouts[pmap({"ax0": "pt0", "ax1": "pt0", "ax2": "pt0"})]
-    assert isinstance(layout1, TabulatedLayout)
-    assert np.allclose(layout1.data.data, flatten([[0, 2], [3, 4]]))
-    assert isinstance(layout2, AffineLayout)
-    assert layout2.start == 0
-    assert layout2.step == 1
+    layout0 = axes.layouts[pmap({"ax0": "pt0", "ax1": "pt0", "ax2": "pt0"})]
+    array0 = just_one(collect_multi_arrays(layout0))
 
+    assert as_str(layout0) == "array_0 + var_0"
+    assert np.allclose(array0.data_ro, flatten([[0, 2], [3, 4]]))
     check_offsets(
         axes,
         [

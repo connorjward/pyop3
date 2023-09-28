@@ -32,7 +32,6 @@ def vec2_copy_kernel():
 
 
 def test_1d_slice_composition(vec2_copy_kernel):
-    # equivalent to dat1[...] = dat0[::2][1:3] (== [2, 4])
     m, n = 10, 2
     dat0 = MultiArray(
         AxisTree(Axis([(m, "cpt0")], "ax0")),
@@ -41,7 +40,7 @@ def test_1d_slice_composition(vec2_copy_kernel):
     )
     dat1 = MultiArray(Axis([(n, "cpt0")], "ax0"), name="dat1", dtype=dat0.dtype)
 
-    do_loop(Axis(1).index(), vec2_copy_kernel(dat0[::2][1:3], dat1[...]))
+    do_loop(Axis(1).index(), vec2_copy_kernel(dat0[::2][1:3], dat1[:]))
     assert np.allclose(dat1.data, dat0.data[::2][1:3])
 
 
@@ -61,7 +60,7 @@ def test_2d_slice_composition(vec2_copy_kernel):
         Axis(1).index(),
         vec2_copy_kernel(
             dat0[::2, 1:][2:4, 1],
-            dat1[...],
+            dat1[:],
         ),
     )
 
