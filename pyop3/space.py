@@ -1,6 +1,6 @@
 import functools
 import numbers
-from typing import Any, Hashable
+from typing import Any, Dict, FrozenSet, Hashable, Optional
 
 import numpy as np
 import pytools
@@ -27,7 +27,7 @@ class ConstrainedAxis(pytools.ImmutableRecord):
         axis: Axis,
         *,
         priority: int = DEFAULT_AXIS_PRIORITY,
-        within_labels: frozenset[Hashable] = frozenset(),
+        within_labels: FrozenSet[Hashable] = frozenset(),
     ):
         self.axis = axis
         self.priority = priority
@@ -184,8 +184,8 @@ def _insert_axis(
     axes: AxisTree,
     new_caxis: ConstrainedAxis,
     current_axis: Axis,
-    axis_to_caxis: dict[Axis, ConstrainedAxis],
-    path: dict[Hashable] | None = None,
+    axis_to_caxis: Dict[Axis, ConstrainedAxis],
+    path: Optional[Dict[Hashable, Dict]] = None,
 ):
     path = path or {}
 
