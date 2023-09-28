@@ -620,7 +620,10 @@ class AxisComponent(LabelledImmutableRecord):
 
 
 class Axis(StrictLabelledNode, LoopIterable):
-    fields = LabelledNode.fields - {"component_labels"} | {"components", "permutation"}
+    fields = StrictLabelledNode.fields - {"component_labels"} | {
+        "components",
+        "permutation",
+    }
 
     def __init__(
         self,
@@ -706,27 +709,6 @@ class MultiArrayCollector(pym.mapper.Collector):
 
     def map_multi_array(self, expr):
         return {expr}
-
-
-# this is supposed to be used in place of an array to represent the offset
-# of an axis at a given index
-class CalledAxisTree:
-    def __init__(self, axes, indices):
-        self.axes = axes
-        self.indices = indices
-
-    # FIXME
-    @property
-    def name(self):
-        return "my_called_axis"
-
-    @property
-    def dtype(self):
-        return IntType
-
-    @functools.cached_property
-    def datamap(self):
-        return self.axes.datamap | self.indices.datamap
 
 
 # hacky class for index_exprs to work, needs cleaning up
@@ -851,9 +833,6 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
                     orig_axes=self.orig_axes,
                 )
         return IndexedAxisTree(axis_trees)
-
-    def __call__(self, *args):
-        return CalledAxisTree(self, *args)
 
     def parse_bits(
         self,

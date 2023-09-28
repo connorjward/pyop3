@@ -20,7 +20,7 @@ import pytools
 from pyrsistent import pmap
 
 from pyop3 import utils
-from pyop3.axes import Axis, AxisComponent, AxisTree, AxisVariable, CalledAxisTree
+from pyop3.axes import Axis, AxisComponent, AxisTree, AxisVariable
 from pyop3.distarray import MultiArray
 from pyop3.dtypes import IntType
 from pyop3.indices import (
@@ -48,9 +48,11 @@ from pyop3.lang import (
     READ,
     RW,
     WRITE,
-    FunctionCall,
+    Assignment,
+    CalledFunction,
     Increment,
     Loop,
+    Offset,
     Read,
     Write,
     Zero,
@@ -308,7 +310,7 @@ def parse_loop_properly_this_time(
 
 
 @_compile.register
-def _(call: FunctionCall, loop_indices, ctx: LoopyCodegenContext) -> None:
+def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
     """
     Turn an exprs.FunctionCall into a series of assignment instructions etc.
     Handles packing/accessor logic.
@@ -337,9 +339,13 @@ def _(call: FunctionCall, loop_indices, ctx: LoopyCodegenContext) -> None:
             loop_context[loop_index] = source_path, target_path
         loop_context = pmap(loop_context)
 
-        axes = arg.axes.with_context(loop_context).copy(
-            index_exprs=None, layout_exprs=None
-        )
+        if isinstance(arg, MultiArray):
+            axes = arg.axes.with_context(loop_context).copy(
+                index_exprs=None, layout_exprs=None
+            )
+        else:
+            assert isinstance(arg, Offset)
+            axes = AxisTree()
         temporary = MultiArray(
             axes,
             name=ctx.unique_name("t"),
@@ -357,7 +363,8 @@ def _(call: FunctionCall, loop_indices, ctx: LoopyCodegenContext) -> None:
         temporaries.append((arg, indexed_temp, spec.access, shape))
 
         # Register data
-        if not isinstance(arg, CalledAxisTree):
+        # TODO more generic check
+        if not isinstance(arg, Offset):
             ctx.add_argument(arg.name, arg.dtype)
 
         ctx.add_temporary(temporary.name, temporary.dtype, shape)
@@ -601,13 +608,20 @@ def add_leaf_assignment(
 ):
     from pyop3.distarray.multiarray import IndexExpressionReplacer
 
-    array_expr = make_array_expr(
-        assignment,
-        axes.orig_layout_fn[target_path],
-        target_path,
-        iname_replace_map | jname_replace_map,
-        codegen_context,
-    )
+    if isinstance(assignment.array, MultiArray):
+        array_expr = make_array_expr(
+            assignment,
+            axes.orig_layout_fn[target_path],
+            target_path,
+            iname_replace_map | jname_replace_map,
+            codegen_context,
+        )
+    else:
+        array_expr = make_offset_expr(
+            axes.orig_layout_fn[target_path],
+            iname_replace_map | jname_replace_map,
+            codegen_context,
+        )
     temp_expr = make_temp_expr(
         assignment, source_path, iname_replace_map, codegen_context
     )

@@ -30,10 +30,11 @@ from pyop3.lang import (  # noqa: F401
     READ,
     RW,
     WRITE,
+    Function,
     Loop,
-    LoopyKernel,
     do_loop,
     loop,
+    offset,
 )
 from pyop3.meshdata import Const, Dat, Mat  # noqa: F401
 from pyop3.space import ConstrainedAxis, Space  # noqa: F401

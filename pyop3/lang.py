@@ -13,7 +13,9 @@ import loopy as lp
 import numpy as np
 import pytools
 
+from pyop3.axes import as_axis_tree
 from pyop3.distarray import DistributedArray, MultiArray
+from pyop3.dtypes import IntType
 from pyop3.indices import IndexedArray
 from pyop3.utils import as_tuple, checked_zip, merge_dicts
 
@@ -166,7 +168,7 @@ class FunctionArgument:
         return self.tensor.indices
 
 
-class LoopyKernel:
+class Function:
     """A callable function."""
 
     def __init__(self, loopy_kernel, access_descrs):
@@ -193,7 +195,7 @@ class LoopyKernel:
             for spec, arg in checked_zip(self.argspec, args)
         ):
             raise ValueError("Arguments to the kernel have the wrong dtype")
-        return FunctionCall(self, args)
+        return CalledFunction(self, args)
 
     @property
     def argspec(self):
@@ -209,11 +211,7 @@ class LoopyKernel:
         return self.code.default_entrypoint.name
 
 
-class Terminal(LoopExpr):
-    pass
-
-
-class FunctionCall(Terminal):
+class CalledFunction(LoopExpr):
     def __init__(self, function, arguments):
         self.function = function
         self.arguments = arguments
@@ -259,6 +257,31 @@ class FunctionCall(Terminal):
     #             self.argspec,
     #         )
     #     )
+
+
+class Offset(LoopExpr):
+    """Terminal containing the offset of some axis tree given some multi-index."""
+
+    def __init__(self, axes: AxisTree, indices):
+        self.orig_axes = as_axis_tree(axes)
+        self.axes = self.orig_axes[indices]
+
+    # FIXME
+    @property
+    def name(self):
+        return "my_offset"
+
+    @property
+    def dtype(self):
+        return IntType
+
+    @functools.cached_property
+    def datamap(self):
+        return self.orig_axes.datamap | self.axes.datamap
+
+
+def offset(axes, indices):
+    return Offset(axes, indices)
 
 
 class Instruction(pytools.ImmutableRecord):
