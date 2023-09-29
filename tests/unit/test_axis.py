@@ -53,12 +53,14 @@ _rename_mapper = RenameMapper()
 _ordered_collector = OrderedCollector()
 
 
-def as_str(expr):
-    return str(_rename_mapper(expr))
+def as_str(layout):
+    layout_expr = sum(layout[k] for k in sorted(layout.keys()))
+    return str(_rename_mapper(layout_expr))
 
 
-def collect_multi_arrays(expr):
-    return _ordered_collector(expr)
+def collect_multi_arrays(layout):
+    layout_expr = sum(layout[k] for k in sorted(layout.keys()))
+    return _ordered_collector(layout_expr)
 
 
 def check_offsets(axes, indices_and_offsets):
@@ -151,7 +153,7 @@ def test_1d_permuted_layout():
     layout0 = axes.layouts[pmap({"ax0": "pt0"})]
 
     assert as_str(layout0) == "array_0"
-    assert np.allclose(layout0.data_ro, [1, 2, 0])
+    assert np.allclose(layout0["ax0"].data_ro, [1, 2, 0])
     check_offsets(
         axes,
         [
@@ -183,8 +185,8 @@ def test_1d_multi_component_permuted_layout():
 
     assert as_str(layout0) == "array_0"
     assert as_str(layout1) == "array_0"
-    assert np.allclose(layout0.data_ro, [1, 4, 3])
-    assert np.allclose(layout1.data_ro, [2, 0])
+    assert np.allclose(layout0["ax0"].data_ro, [1, 4, 3])
+    assert np.allclose(layout1["ax0"].data_ro, [2, 0])
     check_offsets(
         axes,
         [
