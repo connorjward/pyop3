@@ -10,6 +10,7 @@ import sys
 from typing import Any, Collection, Hashable, Mapping, Sequence
 
 import pymbolic as pym
+import pyrsistent
 import pytools
 from pyrsistent import pmap
 
@@ -751,22 +752,13 @@ def _(loop_index: LoopIndex, *, loop_indices, **kwargs):
     else:
         iterset = loop_index.iterset
 
-    myleaf = iterset.orig_axes._node_from_path(path)
-    visited_nodes = iterset.orig_axes.path_with_nodes(*myleaf, ordered=True)
-
     target_path_per_component = pmap(
-        {None: pmap({node.label: cpt_label for node, cpt_label in visited_nodes})}
+        {None: pmap({axis: cpt for axis, cpt in path.items()})}
     )
     index_exprs_per_component = pmap(
-        {
-            None: pmap(
-                {node.label: AxisVariable(node.label) for node, _ in visited_nodes}
-            )
-        }
+        {None: pmap({axis: AxisVariable(axis) for axis in path.keys()})}
     )
-    layout_exprs_per_component = pmap(
-        {None: pmap({node.label: 0 for node, _ in visited_nodes})}
-    )
+    layout_exprs_per_component = pmap({None: pmap({axis: 0 for axis in path.keys()})})
     return (
         AxisTree(),
         target_path_per_component,
@@ -1098,32 +1090,33 @@ def completely_index_axes(orig_axes, indices, keep_labels=False):
             ) = index_axes(orig_axes, index_tree, loop_context, keep_labels=keep_labels)
 
             if indexed_axes.is_empty:
-                # 1. target path
-                # TODO This might need some composition if we are indexing twice.
-                target_path_per_cpt = target_path_per_indexed_cpt
-
-                # 2. index exprs
                 target_path = target_path_per_indexed_cpt[None]
+                target_node_path = orig_axes.path_with_nodes(
+                    *orig_axes._node_from_path(target_path), and_components=True
+                )
                 index_expr_replace_map = index_exprs_per_indexed_cpt[None]
 
-                index_exprs_per_cpt = {}
-                for axis, cpt in orig_axes.path_with_nodes(
-                    *orig_axes._node_from_path(target_path), and_components=True
-                ).items():
+                target_path_per_cpt = {None: {}}
+                index_exprs_per_cpt = {None: {}}
+                for target_axis, target_cpt in target_node_path.items():
+                    target_path_per_cpt[None].update(
+                        orig_axes.target_path_per_component[
+                            target_axis.id, target_cpt.label
+                        ]
+                    )
+
+                    # do a replacement
                     orig_index_exprs = orig_axes.index_exprs_per_component[
-                        axis.id, cpt.label
+                        target_axis.id, target_cpt.label
                     ]
-                    new_index_exprs = {}
                     for axis_label, index_expr in orig_index_exprs.items():
                         new_index_expr = IndexExpressionReplacer(
                             index_expr_replace_map
                         )(index_expr)
-                        new_index_exprs[axis_label] = new_index_expr
-                    index_exprs_per_cpt[None] = new_index_exprs
-                index_exprs_per_cpt = pmap(index_exprs_per_cpt)
+                        index_exprs_per_cpt[None][axis_label] = new_index_expr
 
-                # 3. layout exprs
-                layout_exprs_per_cpt = {}
+                target_path_per_cpt = pyrsistent.freeze(target_path_per_cpt)
+                index_exprs_per_cpt = pyrsistent.freeze(index_exprs_per_cpt)
             else:
                 # TODO make this a tree traversal combined with the empty case
                 (
@@ -1157,6 +1150,7 @@ def completely_index_axes(orig_axes, indices, keep_labels=False):
             else:
                 new_layouts = orig_axes.layouts
 
+            # breakpoint()
             axis_trees[loop_context] = indexed_axes.copy(
                 target_paths=target_path_per_cpt,
                 index_exprs=index_exprs_per_cpt,
@@ -1232,10 +1226,6 @@ def parse_bits(
                     new_index_exprs_per_cpt[axis.id, component.label][
                         axis_label
                     ] = new_index_expr
-
-        # NOTE: This is NOT the final target path. This only targets
-        # the thing *before* the indexing took place. Subsequent indexing
-        # requires composition.
 
         if subaxis := indexed_axes.child(axis, component):
             retval = parse_bits(
