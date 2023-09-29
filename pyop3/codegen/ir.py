@@ -538,6 +538,7 @@ def parse_assignment_properly_this_time(
             iname_replace_map,
             jname_replace_map,
             codegen_context,
+            loop_indices,
         )
         return
 
@@ -591,6 +592,7 @@ def parse_assignment_properly_this_time(
                     new_iname_replace_map,
                     new_jname_replace_map,
                     codegen_context,
+                    loop_indices,
                 )
 
 
@@ -604,13 +606,22 @@ def add_leaf_assignment(
     iname_replace_map,
     jname_replace_map,
     codegen_context,
+    loop_indices,
 ):
     from pyop3.distarray.multiarray import IndexExpressionReplacer
+
+    # TODO get rid
+    # loop_context = {}
+    # for loop_index, (source_path, target_path, _, _) in loop_indices.items():
+    #     loop_context[loop_index] = source_path, target_path
+    # loop_context = pmap(loop_context)
 
     if isinstance(assignment.array, MultiArray):
         array_expr = make_array_expr(
             assignment,
-            axes.orig_layout_fn[target_path],
+            # assignment.array.layouts[loop_context][target_path],
+            # will fail for sparse
+            assignment.array.layouts[pmap()][target_path],
             target_path,
             iname_replace_map | jname_replace_map,
             codegen_context,
@@ -618,7 +629,7 @@ def add_leaf_assignment(
     else:
         assert isinstance(assignment.array, Offset)
         array_expr = make_offset_expr(
-            axes.orig_layout_fn[target_path],
+            assignment.array.layouts[loop_context][target_path],
             iname_replace_map | jname_replace_map,
             codegen_context,
         )

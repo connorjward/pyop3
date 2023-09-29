@@ -732,6 +732,7 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         orig_axes=None,
         sf=None,
         shared_sf=None,
+        unindexed_axes=None,
         comm=None,
     ):
         super().__init__(root, parent_to_children)
@@ -744,6 +745,7 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         self._target_paths = target_paths or self._default_target_path_per_component()
         self._index_exprs = index_exprs or self._default_index_exprs_per_component()
         self._layouts = layouts or self._default_layouts()
+        self.unindexed_axes = unindexed_axes or self
 
     def __getitem__(self, indices):
         from pyop3.distarray.multiarray import IndexExpressionReplacer
@@ -766,6 +768,7 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
                 # actually used to find some path info
                 orig_axes=self.orig_axes,
                 layouts=indexed_axes._layouts,
+                unindexed_axes=self.unindexed_axes,
             )
             axess[loop_context] = indexed_axes
         return IndexedAxisTree(axess)

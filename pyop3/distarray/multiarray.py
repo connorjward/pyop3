@@ -80,28 +80,52 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
         sf=None,
         indicess=(),
         from_index=False,
+        layouts=None,
     ):
         if name and prefix:
             raise ValueError("Can only specify one of name and prefix")
         axes = as_axis_tree(axes)
 
+        # save this here as we change what axes is if we index this.
+        if not from_index:
+            assert layouts is None
+            if isinstance(axes, IndexedAxisTree):
+                self.layouts = {ctx: ax.layouts for ctx, ax in axes.axis_trees.items()}
+            else:
+                self.layouts = {pmap(): axes.layouts}
+        else:
+            self.layouts = layouts
+
         # reset index exprs if we are creating something using an indexed axis tree
         # i.e. MultiArray(axes[::2], ...). This does not apply when we index the array
         # itself (hence `from_index`).
-        if not from_index and isinstance(axes, IndexedAxisTree):
-            trees = {}
-            for loop_context, tree in axes.axis_trees.items():
-                tree = tree.copy(
+        if not from_index:
+            if isinstance(axes, IndexedAxisTree):
+                trees = {}
+                for loop_context, tree in axes.axis_trees.items():
+                    tree = tree.copy(
+                        index_exprs=None,
+                        target_paths=tree._target_paths,
+                        # target_paths=None,
+                        layouts=tree._layouts,
+                        orig_axes=tree.orig_axes,
+                        unindexed_axes=tree.unindexed_axes,
+                    )
+                    trees[loop_context] = tree
+                axes = IndexedAxisTree(trees)
+            else:
+                axes = axes.copy(
                     index_exprs=None,
-                    target_paths=tree._target_paths,
-                    layouts=tree._layouts,
-                    orig_axes=tree.orig_axes,
+                    target_paths=axes._target_paths,
+                    # target_paths=None,
+                    layouts=axes._layouts,
+                    orig_axes=axes.orig_axes,
+                    unindexed_axes=axes.unindexed_axes,
                 )
-                trees[loop_context] = tree
-            axes = IndexedAxisTree(trees)
         else:
-            # axes = axes.copy(index_exprs=None, target_paths=axes._target_paths, layouts=axes._layouts, orig_axes=axes.orig_axes)
             pass
+
+        # breakpoint()
 
         if isinstance(data, np.ndarray):
             if dtype:
@@ -342,6 +366,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
                         # index_exprs=None,
                         orig_axes=axis_tree.orig_axes,
                         layouts=indexed_axes._layouts,
+                        unindexed_axes=axis_tree.unindexed_axes,
                     )
                     new_axis_trees[loop_context | new_loop_context] = indexed_axes
             axess = IndexedAxisTree(new_axis_trees)
@@ -356,6 +381,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
                     # index_exprs=None,
                     orig_axes=self.axes.orig_axes,
                     layouts=indexed_axes._layouts,
+                    unindexed_axes=self.axes.unindexed_axes,
                 )
                 axess[loop_context] = indexed_axes
             # what is the difference between indexed_axes.orig_axes and self.axes.orig_axes??
@@ -363,7 +389,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
             axess = IndexedAxisTree(axess)
         # TODO we should raise an error if any of the layout functions are None (and hence
         # not valid to build an array off of).
-        return self.copy(axes=axess, from_index=True)
+        return self.copy(axes=axess, from_index=True, layouts=self.layouts)
 
     def select_axes(self, indices):
         selected = []
