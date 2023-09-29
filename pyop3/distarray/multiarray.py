@@ -321,8 +321,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
                         target_paths=indexed_axes._target_paths,
                         # index_exprs=indexed_axes._index_exprs,
                         index_exprs=None,
-                        orig_axes=indexed_axes.orig_axes,
-                        # orig_axes=axis_tree.orig_axes,
+                        orig_axes=axis_tree.orig_axes,
                         layouts=indexed_axes._layouts,
                     )
                     new_axis_trees[loop_context | new_loop_context] = indexed_axes
@@ -336,8 +335,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
                     target_paths=indexed_axes._target_paths,
                     # index_exprs=indexed_axes._index_exprs,
                     index_exprs=None,
-                    orig_axes=indexed_axes.orig_axes,
-                    # orig_axes=self.axes.orig_axes,
+                    orig_axes=self.axes.orig_axes,
                     layouts=indexed_axes._layouts,
                 )
                 axess[loop_context] = indexed_axes
