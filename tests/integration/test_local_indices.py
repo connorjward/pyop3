@@ -42,7 +42,6 @@ def test_copy_slice(scalar_copy_kernel):
     )
 
     do_loop(
-        # p := big_axes[::2].enumerate(),
         p := big_axes[slice0].index(),
         scalar_copy_kernel(array0[p], array1[p.i]),
     )

@@ -751,7 +751,11 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
 
         axess = {}
         for loop_context, indexed_axes in completely_index_axes(
-            self, indices, keep_labels=True
+            # FIXME, I shouldn't be doing setting keep_labels to True
+            # self, indices, keep_labels=True
+            self,
+            indices,
+            keep_labels=False,
         ).items():
             indexed_axes = indexed_axes.copy(
                 # FIXME
@@ -759,7 +763,8 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
                 index_exprs=indexed_axes._index_exprs,
                 # index_exprs=None,
                 # don't think I want this here, only used to recover layout functions
-                # orig_axes=self.orig_axes,
+                # actually used to find some path info
+                orig_axes=self.orig_axes,
                 layouts=indexed_axes._layouts,
             )
             axess[loop_context] = indexed_axes
@@ -1702,34 +1707,6 @@ def _trim_path(axes: AxisTree, path: Mapping) -> pyrsistent.pmap:
         new_path[axis.label] = cpt_label
         axis = axes.child(axis, cpt_label)
     return pyrsistent.pmap(new_path)
-
-
-def loop_indices(axes: AxisTree) -> IndexTree:
-    assert False, "dead code"
-    """Return a loop nest over an axis tree."""
-    return _loop_indices_rec(axes, axes.root)
-
-
-def _loop_indices_rec(axes: AxisTree, axis: Axis) -> IndexTree:
-    assert False, "dead code"
-    # cyclic import
-    from pyop3.indices import Index, IndexTree, LoopIndex
-
-    icpts = []
-    isubtrees = []
-    for cpt in axis.components:
-        icpts.append(LoopIndex(axis, cpt))
-        if subaxis := axes.child(axis, cpt):
-            isubtrees.append(_loop_indices_rec(axes, subaxis))
-        else:
-            isubtrees.append(IndexTree())
-
-    iroot = Index(icpts)
-    iparent_to_children = {iroot.id: [isubtree.root for isubtree in isubtrees]}
-    iparent_to_children |= merge_dicts(
-        [isubtree.parent_to_children for isubtree in isubtrees]
-    )
-    return IndexTree(iroot, iparent_to_children)
 
 
 def collect_sizes(axes: AxisTree) -> pmap:  # TODO value-type of returned pmap?
