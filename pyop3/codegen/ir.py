@@ -566,6 +566,7 @@ def parse_assignment_properly_this_time(
                 new_iname_replace_map | jname_replace_map, codegen_context
             )(index_expr)
             jname_extras[axis_label] = jname_expr
+        breakpoint()
         new_jname_replace_map = jname_replace_map | jname_extras
 
         with codegen_context.within_inames({iname}):

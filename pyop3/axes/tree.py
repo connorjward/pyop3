@@ -757,7 +757,9 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
                 # FIXME
                 target_paths=indexed_axes._target_paths,
                 index_exprs=indexed_axes._index_exprs,
-                orig_axes=self.orig_axes,
+                # index_exprs=None,
+                # don't think I want this here, only used to recover layout functions
+                # orig_axes=self.orig_axes,
                 layouts=indexed_axes._layouts,
             )
             axess[loop_context] = indexed_axes
@@ -821,8 +823,6 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
 
     @property
     def orig_axes(self):
-        if not self._orig_axes:
-            self._orig_axes = self
         return self._orig_axes
 
     @property

@@ -104,5 +104,7 @@ def test_sliced_array(scalar_copy_kernel):
     )
     array1 = MultiArray(axes[::2][1:], name="array1", dtype=array0.dtype)
 
-    do_loop(p := axes[::2][1:].index(), scalar_copy_kernel(array0[p], array1[p]))
+    # do_loop(p := axes[::2][1:].index(), scalar_copy_kernel(array0[p], array1[p]))
+    l = loop(p := axes[::2][1:].index(), scalar_copy_kernel(array0[p], array1[p]))
+    l()
     assert np.allclose(array1.data_ro, array0.data_ro[::2][1:])
