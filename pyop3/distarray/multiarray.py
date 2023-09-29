@@ -85,7 +85,9 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
             raise ValueError("Can only specify one of name and prefix")
         axes = as_axis_tree(axes)
 
-        # reset index exprs
+        # reset index exprs if we are creating something using an indexed axis tree
+        # i.e. MultiArray(axes[::2], ...). This does not apply when we index the array
+        # itself (hence `from_index`).
         if not from_index and isinstance(axes, IndexedAxisTree):
             trees = {}
             for loop_context, tree in axes.axis_trees.items():
