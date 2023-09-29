@@ -10,10 +10,10 @@ from pyop3 import (
     Axis,
     AxisComponent,
     AxisTree,
+    Function,
     Index,
     IndexTree,
     IntType,
-    LoopyKernel,
     Map,
     MultiArray,
     ScalarType,
@@ -40,7 +40,7 @@ def vector_inc_kernel():
         target=LOOPY_TARGET,
         lang_version=LOOPY_LANG_VERSION,
     )
-    return LoopyKernel(lpy_kernel, [READ, INC])
+    return Function(lpy_kernel, [READ, INC])
 
 
 @pytest.fixture
@@ -56,7 +56,7 @@ def vec2_inc_kernel():
         target=LOOPY_TARGET,
         lang_version=LOOPY_LANG_VERSION,
     )
-    return LoopyKernel(lpy_kernel, [READ, INC])
+    return Function(lpy_kernel, [READ, INC])
 
 
 @pytest.fixture
@@ -72,7 +72,7 @@ def vec6_inc_kernel():
         target=LOOPY_TARGET,
         lang_version=LOOPY_LANG_VERSION,
     )
-    return LoopyKernel(code, [READ, INC])
+    return Function(code, [READ, INC])
 
 
 @pytest.fixture
@@ -88,7 +88,7 @@ def vec12_inc_kernel():
         target=LOOPY_TARGET,
         lang_version=LOOPY_LANG_VERSION,
     )
-    return LoopyKernel(code, [READ, INC])
+    return Function(code, [READ, INC])
 
 
 def test_inc_from_tabulated_map(vector_inc_kernel):
@@ -538,7 +538,7 @@ def test_recursive_multi_component_maps():
         target=LOOPY_TARGET,
         lang_version=LOOPY_LANG_VERSION,
     )
-    sum_kernel = LoopyKernel(lpy_kernel, [READ, WRITE])
+    sum_kernel = Function(lpy_kernel, [READ, WRITE])
 
     do_loop(p := dat1_axes.index(), sum_kernel(dat0[map1(map0(p))], dat1[p]))
 
@@ -615,7 +615,7 @@ def test_sum_with_consecutive_maps():
         target=LOOPY_TARGET,
         lang_version=LOOPY_LANG_VERSION,
     )
-    sum_kernel = LoopyKernel(lpy_kernel, [READ, WRITE])
+    sum_kernel = Function(lpy_kernel, [READ, WRITE])
 
     do_loop(p := iterset.index(), sum_kernel(dat0[map0(p), map1(p)], dat1[p]))
 

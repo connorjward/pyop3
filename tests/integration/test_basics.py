@@ -14,10 +14,10 @@ from pyop3 import (
     Axis,
     AxisComponent,
     AxisTree,
+    Function,
     Index,
     IndexTree,
     IntType,
-    LoopyKernel,
     MultiArray,
     ScalarType,
     Slice,
@@ -41,7 +41,7 @@ def scalar_copy_kernel():
         name="scalar_copy",
         lang_version=(2018, 2),
     )
-    return LoopyKernel(code, [READ, WRITE])
+    return Function(code, [READ, WRITE])
 
 
 @pytest.fixture
@@ -57,7 +57,7 @@ def vector_copy_kernel():
         name="vector_copy",
         lang_version=(2018, 2),
     )
-    return LoopyKernel(code, [READ, WRITE])
+    return Function(code, [READ, WRITE])
 
 
 def test_scalar_copy(scalar_copy_kernel):
@@ -205,7 +205,7 @@ def test_inc_with_shared_global_value():
         name="plus_one",
         lang_version=(2018, 2),
     )
-    plus_one = LoopyKernel(knl, [INC])
+    plus_one = Function(knl, [INC])
 
     p = IndexTree(Index(Range("ax0", m0)))
 

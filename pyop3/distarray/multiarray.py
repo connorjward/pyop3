@@ -20,7 +20,7 @@ from pyop3 import utils
 from pyop3.axes import Axis, AxisComponent, AxisTree, as_axis_tree
 from pyop3.distarray.base import DistributedArray
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
-from pyop3.indices import IndexedArray, IndexTree, as_index_forest  # index_axes,
+from pyop3.indices import IndexTree, as_index_forest  # index_axes,
 from pyop3.utils import (
     PrettyTuple,
     UniqueNameGenerator,
@@ -308,7 +308,42 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
 
     # maybe I could check types here and use instead of get_value?
     def __getitem__(self, indices):
-        return self.copy(axes=self.axes[indices])
+        from pyop3.indices.tree import IndexedAxisTree, completely_index_axes
+
+        # in this case we do not modify the layout expression
+        if isinstance(self.axes, IndexedAxisTree):
+            new_axis_trees = {}
+            for loop_context, axis_tree in self.axes.axis_trees.items():
+                for new_loop_context, indexed_axes in completely_index_axes(
+                    axis_tree, indices
+                ).items():
+                    indexed_axes = indexed_axes.copy(
+                        # FIXME
+                        target_paths=indexed_axes._target_paths,
+                        # index_exprs=None,
+                        orig_axes=indexed_axes.orig_axes,
+                        layouts=indexed_axes._layouts,
+                    )
+                    new_axis_trees[loop_context | new_loop_context] = indexed_axes
+            axess = IndexedAxisTree(new_axis_trees)
+        else:
+            axess = {}
+            for loop_context, indexed_axes in completely_index_axes(
+                self.axes, indices
+            ).items():
+                indexed_axes = indexed_axes.copy(
+                    # FIXME
+                    target_paths=indexed_axes._target_paths,
+                    # index_exprs=None,
+                    orig_axes=indexed_axes.orig_axes,
+                    layouts=indexed_axes._layouts,
+                )
+                axess[loop_context] = indexed_axes
+            axess = pmap(axess)
+            axess = IndexedAxisTree(axess)
+        # TODO we should raise an error if any of the layout functions are None (and hence
+        # not valid to build an array off of).
+        return self.copy(axes=axess)
 
     def select_axes(self, indices):
         selected = []

@@ -16,7 +16,6 @@ import pytools
 from pyop3.axes import as_axis_tree
 from pyop3.distarray import DistributedArray, MultiArray
 from pyop3.dtypes import IntType
-from pyop3.indices import IndexedArray
 from pyop3.utils import as_tuple, checked_zip, merge_dicts
 
 

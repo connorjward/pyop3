@@ -93,3 +93,19 @@ def test_sparse_copy(scalar_copy_kernel):
     # to have [[0, 1], [3, 4, 5], [7, 8]]
     expected = np.asarray([0, 1, 3, 4, 5, 7, 8])
     assert np.allclose(dat1.data, expected)
+
+
+def test_sliced_array(scalar_copy_kernel):
+    n = 10
+    axes = Axis([AxisComponent(n, "pt0")], "ax0")
+
+    array0 = MultiArray(
+        axes, name="array0", data=np.arange(axes.size, dtype=ScalarType)
+    )
+    array1 = MultiArray(axes[::2][1:], name="array1", dtype=array0.dtype)
+
+    # do_loop(p := axes[::2][1:].index(), scalar_copy_kernel(array0[p], array1[p]))
+    l = loop(p := axes[::2][1:].index(), scalar_copy_kernel(array0[p], array1[p]))
+    l()
+    breakpoint()
+    assert np.allclose(array1.data_ro, array0.data_ro[::2][1:])

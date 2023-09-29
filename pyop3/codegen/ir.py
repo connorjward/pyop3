@@ -28,7 +28,6 @@ from pyop3.indices import (
     AffineSliceComponent,
     CalledMap,
     Index,
-    IndexedArray,
     IndexedAxisTree,
     IndexTree,
     LocalLoopIndex,
@@ -341,7 +340,7 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
 
         if isinstance(arg, MultiArray):
             axes = arg.axes.with_context(loop_context).copy(
-                index_exprs=None, layout_exprs=None
+                index_exprs=None,
             )
         else:
             assert isinstance(arg, Offset)

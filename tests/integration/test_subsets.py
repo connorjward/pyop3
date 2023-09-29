@@ -14,7 +14,6 @@ from pyop3 import (
     Index,
     IndexTree,
     IntType,
-    LoopyKernel,
     Map,
     MultiArray,
     ScalarType,

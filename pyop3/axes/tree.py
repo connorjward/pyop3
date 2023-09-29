@@ -89,11 +89,6 @@ class LoopIterable(abc.ABC):
     def index_exprs_per_component(self):
         pass
 
-    @property
-    @abc.abstractmethod
-    def layout_exprs_per_component(self):
-        pass
-
 
 class ContextSensitive(abc.ABC):
     #     """Container of `IndexTree`s distinguished by outer loop information.
@@ -733,7 +728,7 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         *,
         target_paths=None,
         index_exprs=None,
-        layout_exprs=None,
+        layouts=None,
         orig_axes=None,
         sf=None,
         shared_sf=None,
@@ -745,203 +740,28 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         self.shared_sf = shared_sf
         self.comm = comm  # FIXME DTRT with internal comms
 
-        self._layouts = None
-
+        self._orig_axes = orig_axes or self
         self._target_paths = target_paths or self._default_target_path_per_component()
         self._index_exprs = index_exprs or self._default_index_exprs_per_component()
-        self._layout_exprs = layout_exprs or pmap()  # not implemented
-        self._orig_axes = orig_axes
+        self._layouts = layouts or self._default_layouts()
 
     def __getitem__(self, indices):
-        if indices is Ellipsis:
-            raise NotImplementedError("TODO needs to return a full slice, not self")
-            return self
-        # FIXME
         from pyop3.distarray.multiarray import IndexExpressionReplacer
-        from pyop3.indices import (
-            IndexedAxisTree,
-            as_index_forest,
-            collect_loop_contexts,
-            index_axes,
-        )
+        from pyop3.indices.tree import IndexedAxisTree, completely_index_axes
 
-        # FIXME I have a weird double loop here over loop contexts
-        axis_trees = {}
-        loop_contexts = collect_loop_contexts(indices)
-        if not loop_contexts:
-            loop_contexts = [pmap()]
-        for loop_context in loop_contexts:
-            # should probably include old_loop_context in this
-            index_forest = as_index_forest(indices, axes=self)
-
-            assert len(index_forest) > 0
-
-            for index_tree in index_forest:
-                loop_context = index_tree.loop_context
-                (
-                    indexed_axes,
-                    target_path_per_indexed_cpt,
-                    index_exprs_per_indexed_cpt,
-                    layout_exprs_per_indexed_cpt,
-                ) = index_axes(self, index_tree, loop_context)
-
-                if indexed_axes.is_empty:
-                    # 1. target path
-                    # TODO This might need some composition if we are indexing twice.
-                    target_path_per_cpt = target_path_per_indexed_cpt
-
-                    # 2. index exprs
-                    target_path = target_path_per_indexed_cpt[None]
-                    index_expr_replace_map = index_exprs_per_indexed_cpt[None]
-
-                    index_exprs_per_cpt = {}
-                    for axis, cpt in self.path_with_nodes(
-                        *self._node_from_path(target_path), and_components=True
-                    ).items():
-                        orig_index_exprs = self.index_exprs_per_component[
-                            axis.id, cpt.label
-                        ]
-                        new_index_exprs = {}
-                        for axis_label, index_expr in orig_index_exprs.items():
-                            new_index_expr = IndexExpressionReplacer(
-                                index_expr_replace_map
-                            )(index_expr)
-                            new_index_exprs[axis_label] = new_index_expr
-                        index_exprs_per_cpt[None] = new_index_exprs
-                    index_exprs_per_cpt = pmap(index_exprs_per_cpt)
-
-                    # 3. layout exprs
-                    layout_exprs_per_cpt = {}
-                else:
-                    # TODO make this a tree traversal combined with the empty case
-                    (
-                        target_path_per_cpt,
-                        index_exprs_per_cpt,
-                        layout_exprs_per_cpt,
-                    ) = self.parse_bits(
-                        indexed_axes,
-                        target_path_per_indexed_cpt,
-                        index_exprs_per_indexed_cpt,
-                        layout_exprs_per_indexed_cpt,
-                    )
-
-                # breakpoint()
-                axis_trees[loop_context] = indexed_axes.copy(
-                    target_paths=target_path_per_cpt,
-                    index_exprs=index_exprs_per_cpt,
-                    layout_exprs=layout_exprs_per_cpt,  # not used currently
-                    orig_axes=self.orig_axes,
-                )
-        return IndexedAxisTree(axis_trees)
-
-    def parse_bits(
-        self,
-        indexed_axes,
-        target_path_per_indexed_component,
-        index_exprs_per_indexed_component,
-        layout_exprs_per_indexed_component,
-        *,
-        axis=None,
-        partial_target_path=pmap(),
-        partial_index_exprs=pmap(),
-        partial_layout_exprs=pmap(),
-        visited_target_axes=frozenset(),
-    ):
-        from pyop3.distarray.multiarray import IndexExpressionReplacer
-
-        # TODO should handle here
-        assert not indexed_axes.is_empty, "handled outside"
-
-        new_target_path_per_cpt = {}
-        new_index_exprs_per_cpt = {}
-        new_layout_exprs_per_cpt = {}
-        if axis is None:
-            partial_target_path |= target_path_per_indexed_component.get(None, {})
-            partial_index_exprs |= index_exprs_per_indexed_component.get(None, {})
-            partial_layout_exprs |= layout_exprs_per_indexed_component.get(None, {})
-
-        axis = axis or indexed_axes.root
-        for component in axis.components:
-            new_partial_target_path = (
-                partial_target_path
-                | target_path_per_indexed_component.get((axis.id, component.label), {})
+        axess = {}
+        for loop_context, indexed_axes in completely_index_axes(
+            self, indices, keep_labels=True
+        ).items():
+            indexed_axes = indexed_axes.copy(
+                # FIXME
+                target_paths=indexed_axes._target_paths,
+                index_exprs=indexed_axes._index_exprs,
+                orig_axes=self.orig_axes,
+                layouts=indexed_axes._layouts,
             )
-
-            new_partial_index_exprs = (
-                partial_index_exprs
-                | index_exprs_per_indexed_component.get((axis.id, component.label), {})
-            )
-            new_partial_layout_exprs = (
-                partial_layout_exprs
-                | layout_exprs_per_indexed_component.get((axis.id, component.label), {})
-            )
-
-            # if target_path is "complete" then do stuff, else pass responsibility to next func down
-            valid = True
-            try:
-                target_node_path = self.path_with_nodes(
-                    *self._node_from_path(new_partial_target_path), and_components=True
-                )
-            except:
-                valid = False
-
-            new_target_path_per_cpt[axis.id, component.label] = {}
-            new_index_exprs_per_cpt[axis.id, component.label] = {}
-            new_layout_exprs_per_cpt[axis.id, component.label] = {}
-            new_visited_target_axes = visited_target_axes
-            if valid:
-                for target_axis, target_cpt in target_node_path.items():
-                    if target_axis.id in new_visited_target_axes:
-                        continue
-                    new_visited_target_axes |= {target_axis.id}
-                    new_target_path_per_cpt[axis.id, component.label].update(
-                        self.target_path_per_component[target_axis.id, target_cpt.label]
-                    )
-
-                    # do a replacement
-                    orig_index_exprs = self.index_exprs_per_component[
-                        target_axis.id, target_cpt.label
-                    ]
-                    for axis_label, index_expr in orig_index_exprs.items():
-                        new_index_expr = IndexExpressionReplacer(
-                            new_partial_index_exprs
-                        )(index_expr)
-                        new_index_exprs_per_cpt[axis.id, component.label][
-                            axis_label
-                        ] = new_index_expr
-
-                    # TODO
-                    new_layout_exprs_per_cpt[axis.id, component.label][
-                        target_axis.label
-                    ] = NotImplemented
-
-            # NOTE: This is NOT the final target path. This only targets
-            # the thing *before* the indexing took place. Subsequent indexing
-            # requires composition.
-
-            if subaxis := indexed_axes.child(axis, component):
-                retval = self.parse_bits(
-                    indexed_axes,
-                    target_path_per_indexed_component,
-                    index_exprs_per_indexed_component,
-                    layout_exprs_per_indexed_component,
-                    axis=subaxis,
-                    partial_target_path=new_partial_target_path,
-                    partial_index_exprs=new_partial_index_exprs,
-                    partial_layout_exprs=new_partial_layout_exprs,
-                    visited_target_axes=new_visited_target_axes,
-                )
-                new_target_path_per_cpt.update(retval[0])
-                new_index_exprs_per_cpt.update(retval[1])
-                new_layout_exprs_per_cpt.update(retval[2])
-
-            else:
-                pass
-        return (
-            new_target_path_per_cpt,
-            new_index_exprs_per_cpt,
-            new_layout_exprs_per_cpt,
-        )
+            axess[loop_context] = indexed_axes
+        return IndexedAxisTree(axess)
 
     @property
     def axis_trees(self):
@@ -960,10 +780,6 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
     @property
     def index_exprs_per_component(self):
         return self._index_exprs
-
-    @property
-    def layout_exprs_per_component(self):
-        return self._layout_exprs
 
     @property
     def axes(self):
@@ -1038,6 +854,9 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
 
         for cleverdict in [self.layouts, self.orig_layout_fn]:
             for layout in cleverdict.values():
+                # catch invalid layouts
+                if layout is None:
+                    continue
                 for array in MultiArrayCollector()(layout):
                     dmap.update(array.datamap)
 
@@ -1055,11 +874,11 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
 
     @property
     def layouts(self):
-        # if self.layout_exprs:
-        #     return self.layout_exprs
-        if not self.orig_axes._layouts:
-            self.orig_axes.set_up()
-        return self.orig_axes._layouts
+        return self._layouts
+
+    def _default_layouts(self):
+        # ick
+        return self.orig_axes.set_up()
 
     def find_part(self, label):
         return self._parts_by_label[label]
@@ -1198,13 +1017,12 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
 
         # catch empyt axis tree
         if self.root is None:
-            self._layouts = pmap({pmap(): 0})
-            return self
+            return pmap({pmap(): 0})
 
         layouts, _, _ = _compute_layouts(self, self.root)
         layoutsnew = _collect_at_leaves(self, layouts)
         # self.apply_layouts(layouts)
-        self._layouts = pyrsistent.freeze(dict(layoutsnew))
+        return pyrsistent.freeze(dict(layoutsnew))
         # assert is_set_up(self)
 
         # FIXME reinsert this code
@@ -1224,7 +1042,6 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         #     self.replace_node(new_part.copy(lgmap=lgmap))
         # self.copy(parts=[new_axis.part.copy(lgmap=lgmap)])
         # new_axis = attach_owned_star_forest(new_axis)
-        return self
 
     @classmethod
     def from_layout(cls, layout: Sequence[ConstrainedMultiAxis]) -> Any:  # TODO

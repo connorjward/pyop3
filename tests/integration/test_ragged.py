@@ -13,8 +13,8 @@ from pyop3 import (
     Axis,
     AxisComponent,
     AxisTree,
+    Function,
     IntType,
-    LoopyKernel,
     MultiArray,
     ScalarType,
     do_loop,
@@ -37,7 +37,7 @@ def scalar_copy_kernel():
         name="scalar_copy",
         lang_version=(2018, 2),
     )
-    return LoopyKernel(code, [READ, WRITE])
+    return Function(code, [READ, WRITE])
 
 
 def test_scalar_copy_with_ragged_axis(scalar_copy_kernel):
