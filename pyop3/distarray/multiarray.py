@@ -20,7 +20,7 @@ from pyop3 import utils
 from pyop3.axes import Axis, AxisComponent, AxisTree, as_axis_tree
 from pyop3.distarray.base import DistributedArray
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
-from pyop3.indices import IndexTree, as_index_forest  # index_axes,
+from pyop3.indices import IndexedAxisTree, IndexTree, as_index_forest  # index_axes,
 from pyop3.utils import (
     PrettyTuple,
     UniqueNameGenerator,
@@ -79,10 +79,27 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
         max_value=None,
         sf=None,
         indicess=(),
+        from_index=False,
     ):
         if name and prefix:
             raise ValueError("Can only specify one of name and prefix")
         axes = as_axis_tree(axes)
+
+        # reset index exprs
+        if not from_index and isinstance(axes, IndexedAxisTree):
+            trees = {}
+            for loop_context, tree in axes.axis_trees.items():
+                tree = tree.copy(
+                    index_exprs=None,
+                    target_paths=tree._target_paths,
+                    layouts=tree._layouts,
+                    orig_axes=tree.orig_axes,
+                )
+                trees[loop_context] = tree
+            axes = IndexedAxisTree(trees)
+        else:
+            # axes = axes.copy(index_exprs=None, target_paths=axes._target_paths, layouts=axes._layouts, orig_axes=axes.orig_axes)
+            pass
 
         if isinstance(data, np.ndarray):
             if dtype:
@@ -344,7 +361,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
             axess = IndexedAxisTree(axess)
         # TODO we should raise an error if any of the layout functions are None (and hence
         # not valid to build an array off of).
-        return self.copy(axes=axess)
+        return self.copy(axes=axess, from_index=True)
 
     def select_axes(self, indices):
         selected = []
