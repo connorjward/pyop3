@@ -610,12 +610,6 @@ def add_leaf_assignment(
 ):
     from pyop3.distarray.multiarray import IndexExpressionReplacer
 
-    # TODO get rid
-    # loop_context = {}
-    # for loop_index, (source_path, target_path, _, _) in loop_indices.items():
-    #     loop_context[loop_index] = source_path, target_path
-    # loop_context = pmap(loop_context)
-
     if isinstance(assignment.array, MultiArray):
         array_expr = make_array_expr(
             assignment,
@@ -629,7 +623,7 @@ def add_leaf_assignment(
     else:
         assert isinstance(assignment.array, Offset)
         array_expr = make_offset_expr(
-            assignment.array.layouts[loop_context][target_path],
+            assignment.array.orig_axes.layouts[target_path],
             iname_replace_map | jname_replace_map,
             codegen_context,
         )
