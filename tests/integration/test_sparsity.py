@@ -38,7 +38,11 @@ def test_loop_over_ragged_subset(scalar_copy_kernel):
     dat0 = MultiArray(axes, name="dat0", data=np.arange(axes.size, dtype=ScalarType))
     dat1 = MultiArray(axes, name="dat1", dtype=dat0.dtype)
 
-    do_loop(p := axes[:, subset].index(), scalar_copy_kernel(dat0[p], dat1[p]))
+    slice0 = Slice("ax0", [AffineSliceComponent("pt0", label="pt0")], label="ax0")
+
+    # this is ambiguous
+    # do_loop(p := axes[:, subset].index(), scalar_copy_kernel(dat0[p], dat1[p]))
+    do_loop(p := axes[slice0, subset].index(), scalar_copy_kernel(dat0[p], dat1[p]))
 
     expected = np.zeros_like(dat0.data)
     subset_offset = 0
