@@ -788,9 +788,7 @@ def _(local_index: LocalLoopIndex, *args, loop_indices, **kwargs):
         {None: {node.label: AxisVariable(node.label) for node, _ in visited_nodes}}
     )
 
-    layout_exprs_per_cpt = pmap(
-        {None: pmap({node.label: 0 for node, _ in visited_nodes})}
-    )
+    layout_exprs_per_cpt = pmap({None: pmap()})
     return (
         AxisTree(),
         target_path_per_cpt,
@@ -952,7 +950,7 @@ def _make_leaf_axis_from_called_map(called_map, prior_target_path, prior_index_e
 
         # don't think that this is possible for maps
         layout_exprs_per_cpt[axis_id, cpt.label] = {
-            map_cpt.target_axis: pym.primitives.NaN(IntType)
+            called_map.name: pym.primitives.NaN(IntType)
         }
 
     axis = Axis(components, label=called_map.name, id=axis_id)
@@ -1159,9 +1157,12 @@ def completely_index_axes(orig_axes, indices, keep_labels=False):
                     for source_axis, source_cpt in indexed_axes.path_with_nodes(
                         leaf_axis, leaf_cpt
                     ).items():
-                        for myaxislabel, mylayoutexpr in layout_exprs_per_indexed_cpt[
-                            source_axis.id, source_cpt
-                        ].items():
+                        for (
+                            myaxislabel,
+                            mylayoutexpr,
+                        ) in layout_exprs_per_indexed_cpt.get(
+                            (source_axis.id, source_cpt), {}
+                        ).items():
                             new_layout[source_axis.label] = IndexExpressionReplacer(
                                 layout_replace_map
                             )(mylayoutexpr)

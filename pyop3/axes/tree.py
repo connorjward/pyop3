@@ -864,7 +864,7 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
             for layout in cleverdict.values():
                 for layout_expr in layout.values():
                     # catch invalid layouts
-                    if layout_expr is None:
+                    if isinstance(layout_expr, pym.primitives.NaN):
                         continue
                     for array in MultiArrayCollector()(layout_expr):
                         dmap.update(array.datamap)
