@@ -835,14 +835,14 @@ def _(slice_: Slice, *, prev_axes, keep_labels, **kwargs):
         newvar = AxisVariable(axis_label)
         if isinstance(subslice, AffineSliceComponent):
             index_exprs_per_subslice.append(
-                pmap({axis_label: newvar * subslice.step + subslice.start})
+                pmap({slice_.axis: newvar * subslice.step + subslice.start})
             )
             layout_exprs_per_subslice.append(
-                pmap({axis_label: (newvar - subslice.start) // subslice.step})
+                pmap({slice_.axis: (newvar - subslice.start) // subslice.step})
             )
         else:
-            index_exprs_per_subslice.append(pmap({axis_label: subslice.array}))
-            layout_exprs_per_subslice.append(pmap({axis_label: NotImplemented}))
+            index_exprs_per_subslice.append(pmap({slice_.axis: subslice.array}))
+            layout_exprs_per_subslice.append(pmap({slice_.axis: NotImplemented}))
 
     axes = AxisTree(Axis(components, label=axis_label))
     target_path_per_component = {}

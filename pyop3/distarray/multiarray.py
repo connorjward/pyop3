@@ -319,8 +319,8 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
                 ).items():
                     indexed_axes = indexed_axes.copy(
                         target_paths=indexed_axes._target_paths,
-                        # index_exprs=indexed_axes._index_exprs,
-                        index_exprs=None,
+                        index_exprs=indexed_axes._index_exprs,
+                        # index_exprs=None,
                         orig_axes=axis_tree.orig_axes,
                         layouts=indexed_axes._layouts,
                     )
@@ -333,8 +333,8 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
             ).items():
                 indexed_axes = indexed_axes.copy(
                     target_paths=indexed_axes._target_paths,
-                    # index_exprs=indexed_axes._index_exprs,
-                    index_exprs=None,
+                    index_exprs=indexed_axes._index_exprs,
+                    # index_exprs=None,
                     orig_axes=self.axes.orig_axes,
                     layouts=indexed_axes._layouts,
                 )
@@ -342,7 +342,6 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
             # what is the difference between indexed_axes.orig_axes and self.axes.orig_axes??
             axess = pmap(axess)
             axess = IndexedAxisTree(axess)
-        breakpoint()
         # TODO we should raise an error if any of the layout functions are None (and hence
         # not valid to build an array off of).
         return self.copy(axes=axess)
