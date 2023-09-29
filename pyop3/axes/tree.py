@@ -895,31 +895,10 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         if allow_unused:
             path = _trim_path(self, path)
 
-        offset = pym.evaluate(self.layouts[path], (path, indices), ExpressionEvaluator)
+        offset = 0
+        for layout_expr in self.layouts[path].values():
+            offset += pym.evaluate(layout_expr, (path, indices), ExpressionEvaluator)
         return strict_int(offset)
-
-        offset_ = 0
-
-        for layout in self.layouts[path]:
-            if isinstance(layout, TabulatedLayout):
-                offset_ += layout.data.get_value(path, indices, allow_unused=True)
-            else:
-                assert isinstance(layout, AffineLayout)
-
-                index = indices[layout.axis]
-                start = layout.start
-
-                # handle sparsity
-                # if component.indices is not None:
-                #     bstart, bend = get_slice_bounds(component.indices, prior_indices)
-                #
-                #     last_index = bisect.bisect_left(
-                #         component.indices.data, last_index, bstart, bend
-                #     )
-                #     last_index -= bstart
-
-                offset_ += index * layout.step + start
-        return strict_int(offset_)
 
     # old alias
     get_offset = offset

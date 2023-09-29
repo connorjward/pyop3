@@ -763,7 +763,9 @@ def _(loop_index: LoopIndex, *, loop_indices, **kwargs):
             )
         }
     )
-    layout_exprs_per_component = pmap({None: pmap()})  # not implemented
+    layout_exprs_per_component = pmap(
+        {None: pmap({node.label: 0 for node, _ in visited_nodes})}
+    )
     return (
         AxisTree(),
         target_path_per_component,
@@ -792,7 +794,9 @@ def _(local_index: LocalLoopIndex, *args, loop_indices, **kwargs):
         {None: {node.label: AxisVariable(node.label) for node, _ in visited_nodes}}
     )
 
-    layout_exprs_per_cpt = pmap({None: pmap()})  # not allowed I believe, or zero?
+    layout_exprs_per_cpt = pmap(
+        {None: pmap({node.label: 0 for node, _ in visited_nodes})}
+    )
     return (
         AxisTree(),
         target_path_per_cpt,
@@ -842,7 +846,10 @@ def _(slice_: Slice, *, prev_axes, keep_labels, **kwargs):
             )
         else:
             index_exprs_per_subslice.append(pmap({slice_.axis: subslice.array}))
-            layout_exprs_per_subslice.append(pmap({slice_.axis: NotImplemented}))
+            # TODO, binary search
+            layout_exprs_per_subslice.append(
+                pmap({slice_.axis: pym.primitives.NaN(IntType)})
+            )
 
     axes = AxisTree(Axis(components, label=axis_label))
     target_path_per_component = {}
@@ -949,7 +956,9 @@ def _make_leaf_axis_from_called_map(called_map, prior_target_path, prior_index_e
         }
 
         # don't think that this is possible for maps
-        layout_exprs_per_cpt[axis_id, cpt.label] = {map_cpt.target_axis: NotImplemented}
+        layout_exprs_per_cpt[axis_id, cpt.label] = {
+            map_cpt.target_axis: pym.primitives.NaN(IntType)
+        }
 
     axis = Axis(components, label=called_map.name, id=axis_id)
 
