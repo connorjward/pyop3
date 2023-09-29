@@ -22,6 +22,7 @@ from pyop3.axes import (
     ContextSensitive,
     LoopIterable,
 )
+from pyop3.dtypes import IntType
 from pyop3.tree import LabelledNode, LabelledTree, postvisit
 from pyop3.utils import (
     LabelledImmutableRecord,
