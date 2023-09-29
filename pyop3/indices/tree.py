@@ -837,10 +837,12 @@ def _(slice_: Slice, *, prev_axes, keep_labels, **kwargs):
             index_exprs_per_subslice.append(
                 pmap({axis_label: newvar * subslice.step + subslice.start})
             )
-            layout_exprs_per_subslice.append((newvar - subslice.start) // subslice.step)
+            layout_exprs_per_subslice.append(
+                pmap({axis_label: (newvar - subslice.start) // subslice.step})
+            )
         else:
             index_exprs_per_subslice.append(pmap({axis_label: subslice.array}))
-            layout_exprs_per_subslice.append(NotImplemented)
+            layout_exprs_per_subslice.append(pmap({axis_label: NotImplemented}))
 
     axes = AxisTree(Axis(components, label=axis_label))
     target_path_per_component = {}
@@ -1127,17 +1129,19 @@ def completely_index_axes(orig_axes, indices, keep_labels=False):
             if keep_labels:
                 new_layouts = {}
                 for leaf_axis, leaf_cpt in indexed_axes.leaves:
-                    new_layout = 0
+                    # this is the opposite to index exprs
+                    mypath = indexed_axes.path(leaf_axis, leaf_cpt)
+                    layout_replace_map = orig_axes.layouts[mypath]
+                    new_layout = {}
                     for source_axis, source_cpt in indexed_axes.path_with_nodes(
                         leaf_axis, leaf_cpt
                     ).items():
-                        # try:
-                        new_layout += layout_exprs_per_indexed_cpt[
+                        for myaxislabel, mylayoutexpr in layout_exprs_per_indexed_cpt[
                             source_axis.id, source_cpt
-                        ]
-                        # except:
-                        # new_layout = None
-                        # break
+                        ].items():
+                            new_layout[myaxislabel] = IndexExpressionReplacer(
+                                layout_replace_map
+                            )(mylayoutexpr)
                     new_layouts[indexed_axes.path(leaf_axis, leaf_cpt)] = new_layout
                 new_layouts = pmap(new_layouts)
             else:

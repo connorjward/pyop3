@@ -790,10 +790,13 @@ def make_offset_expr(
     jname_replace_map,
     codegen_context,
 ):
-    expr = JnameSubstitutor(jname_replace_map, codegen_context)(layouts)
+    expr = 0
+    for axis_label, layout_expr in layouts.items():
+        jname_expr = JnameSubstitutor(jname_replace_map, codegen_context)(layout_expr)
+        expr += jname_expr
 
-    if expr == ():
-        expr = 0
+    # if expr == ():
+    #     expr = 0
 
     return expr
 

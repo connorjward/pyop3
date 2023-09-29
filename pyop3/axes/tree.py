@@ -854,11 +854,12 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
 
         for cleverdict in [self.layouts, self.orig_layout_fn]:
             for layout in cleverdict.values():
-                # catch invalid layouts
-                if layout is None:
-                    continue
-                for array in MultiArrayCollector()(layout):
-                    dmap.update(array.datamap)
+                for layout_expr in layout.values():
+                    # catch invalid layouts
+                    if layout_expr is None:
+                        continue
+                    for array in MultiArrayCollector()(layout_expr):
+                        dmap.update(array.datamap)
 
         # TODO
         # for cleverdict in [self.index_exprs, self.layout_exprs]:
@@ -1017,7 +1018,7 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
 
         # catch empyt axis tree
         if self.root is None:
-            return pmap({pmap(): 0})
+            return pmap({pmap(): pmap()})
 
         layouts, _, _ = _compute_layouts(self, self.root)
         layoutsnew = _collect_at_leaves(self, layouts)
@@ -1592,7 +1593,7 @@ def _collect_at_leaves(
     values,
     axis: Optional[Axis] = None,
     path=pmap(),
-    prior=0,
+    prior=pmap(),
 ):
     axis = axis or axes.root
     acc = {}
@@ -1600,7 +1601,7 @@ def _collect_at_leaves(
     for cpt in axis.components:
         new_path = path | {axis.label: cpt.label}
         if new_path in values:
-            prior_ = prior + values[new_path]
+            prior_ = prior | {axis.label: values[new_path]}
         else:
             prior_ = prior
         if subaxis := axes.child(axis, cpt):
