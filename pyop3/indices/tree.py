@@ -5,6 +5,7 @@ import collections
 import dataclasses
 import functools
 import itertools
+import math
 import numbers
 import sys
 from typing import Any, Collection, Hashable, Mapping, Sequence
@@ -814,12 +815,11 @@ def _(slice_: Slice, *, prev_axes, keep_labels, **kwargs):
             slice_.axis, subslice.component, also_node=True
         )
         if isinstance(subslice, AffineSliceComponent):
-            # FIXME should be ceiling
             if subslice.stop is None:
                 stop = target_cpt.count
             else:
                 stop = subslice.stop
-            size = (stop - subslice.start) // subslice.step
+            size = math.ceil((stop - subslice.start) / subslice.step)
         else:
             assert isinstance(subslice, Subset)
             size = subslice.array.axes.leaf_component.count
