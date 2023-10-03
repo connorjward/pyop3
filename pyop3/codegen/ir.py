@@ -22,7 +22,7 @@ from pyrsistent import pmap
 from pyop3 import utils
 from pyop3.axes import Axis, AxisComponent, AxisTree, AxisVariable
 from pyop3.distarray import MultiArray
-from pyop3.dtypes import IntType
+from pyop3.dtypes import IntType, PointerType
 from pyop3.indices import (
     AffineMapComponent,
     AffineSliceComponent,
@@ -127,6 +127,18 @@ class LoopyCodegenContext(CodegenContext):
         )
         self._add_instruction(insn)
 
+    def add_cinstruction(self, insn_str, read_variables):
+        cinsn = lp.CInstruction(
+            (),
+            insn_str,
+            read_variables=frozenset(read_variables),
+            id=self.unique_name("insn"),
+            within_inames=self._within_inames,
+            within_inames_is_final=True,
+            depends_on=self._depends_on,
+        )
+        self._add_instruction(cinsn)
+
     def add_function_call(self, assignees, expression, prefix="insn"):
         insn = lp.CallInstruction(
             assignees,
@@ -180,6 +192,55 @@ class LoopyCodegenContext(CodegenContext):
         self._last_insn_id = insn.id
 
 
+class BinarySearchCallable(lp.ScalarCallable):
+    def __init__(self, name="bsearch", **kwargs):
+        super().__init__(name, **kwargs)
+
+    def with_types(self, arg_id_to_dtype, callables_table):
+        new_arg_id_to_dtype = arg_id_to_dtype.copy()
+        new_arg_id_to_dtype[-1] = int
+        return (
+            self.copy(name_in_target="bsearch", arg_id_to_dtype=new_arg_id_to_dtype),
+            callables_table,
+        )
+
+    def with_descrs(self, arg_id_to_descr, callables_table):
+        return self.copy(arg_id_to_descr=arg_id_to_descr), callables_table
+
+    def emit_call_insn(self, insn, target, expression_to_code_mapper):
+        assert False
+        from pymbolic import var
+
+        mat_descr = self.arg_id_to_descr[0]
+        m, n = mat_descr.shape
+        ecm = expression_to_code_mapper
+        mat, vec = insn.expression.parameters
+        (result,) = insn.assignees
+
+        c_parameters = [
+            var("CblasRowMajor"),
+            var("CblasNoTrans"),
+            m,
+            n,
+            1,
+            ecm(mat).expr,
+            1,
+            ecm(vec).expr,
+            1,
+            ecm(result).expr,
+            1,
+        ]
+        return (
+            var(self.name_in_target)(*c_parameters),
+            False,  # cblas_gemv does not return anything
+        )
+
+    def generate_preambles(self, target):
+        assert isinstance(target, lp.CTarget)
+        yield ("20_stdlib", "#include <stdlib.h>")
+        return
+
+
 def compile(expr: LoopExpr, name="mykernel"):
     ctx = LoopyCodegenContext()
     _compile(expr, pmap(), ctx)
@@ -196,6 +257,21 @@ def compile(expr: LoopExpr, name="mykernel"):
     )
     ctx._insns.append(noop)
 
+    preambles = [
+        (
+            "30_bsearch",
+            """
+#include <stdlib.h>
+
+
+int32_t cmpfunc(const void * a, const void * b) {
+   return ( *(int32_t*)a - *(int32_t*)b );
+}
+
+            """,
+        )
+    ]
+
     translation_unit = lp.make_kernel(
         ctx.domains,
         ctx.instructions,
@@ -203,9 +279,14 @@ def compile(expr: LoopExpr, name="mykernel"):
         name=name,
         target=LOOPY_TARGET,
         lang_version=LOOPY_LANG_VERSION,
+        preambles=preambles,
         # options=lp.Options(check_dep_resolution=False),
     )
     tu = lp.merge((translation_unit, *ctx.subkernels))
+
+    # add callables
+    tu = lp.register_callable(tu, "bsearch", BinarySearchCallable())
+
     # breakpoint()
     return tu.with_entrypoints("mykernel")
 
@@ -701,40 +782,12 @@ def _shared_assignment_insn(assignment, array_expr, temp_expr, ctx):
 
 
 class JnameSubstitutor(pym.mapper.IdentityMapper):
-    # def __init__(self, path, jnames, codegen_context):
     def __init__(self, replace_map, codegen_context):
-        # self._path = path
         self._labels_to_jnames = replace_map
         self._codegen_context = codegen_context
 
     def map_axis_variable(self, expr):
         return self._labels_to_jnames[expr.axis_label]
-
-    # I don't think that this should be required.
-    # def map_subscript(self, subscript):
-    #     index = self.rec(subscript.index)
-    #
-    #     trimmed_path = {}
-    #     trimmed_jnames = {}
-    #     axes = subscript.aggregate.axes
-    #     axis = axes.root
-    #     while axis:
-    #         trimmed_path[axis.label] = self._path[axis.label]
-    #         trimmed_jnames[axis.label] = self._labels_to_jnames[axis.label]
-    #         cpt = just_one(axis.components)
-    #         axis = axes.child(axis, cpt)
-    #     trimmed_path = pmap(trimmed_path)
-    #     trimmed_jnames = pmap(trimmed_jnames)
-    #
-    #     insns, varname = _scalar_assignment(
-    #         subscript.aggregate,
-    #         trimmed_path,
-    #         trimmed_jnames,
-    #         self._codegen_context,
-    #     )
-    #     for insn in insns:
-    #         self._codegen_context.add_assignment(*insn)
-    #     return varname
 
     # this is cleaner if I do it as a single line expression
     # rather than register assignments for things.
@@ -788,6 +841,75 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
             self._codegen_context,
         )
         return jname_expr
+
+    def map_call(self, expr):
+        if expr.function.name != "mybsearch":
+            raise NotImplementedError("hmm")
+
+        indices, axis_var = expr.parameters
+
+        leaf_axis, leaf_component = indices.axes.leaf
+        ctx = self._codegen_context
+
+        # should do elsewhere?
+        ctx.add_argument(indices.name, indices.dtype)
+
+        """
+        void *bsearch(
+            const void *key,
+            const void *base,
+            size_t nitems,
+            size_t size,
+            int (*compar)(const void *, const void *)
+        )
+        """
+        # key
+        key_varname = ctx.unique_name("key")
+        ctx.add_temporary(key_varname)
+        key_var = pym.var(key_varname)
+        key_expr = self._labels_to_jnames[axis_var.axis_label]
+        ctx.add_assignment(key_var, key_expr)
+
+        # base
+        start_expr = make_offset_expr(
+            indices.layouts[pmap()][indices.axes.path(leaf_axis, leaf_component)],
+            self._labels_to_jnames | {leaf_axis.label: 0},
+            self._codegen_context,
+        )
+        base_varname = ctx.unique_name("base")
+        # breaks if unsigned
+        # ctx.add_temporary(base_varname, dtype=np.int64)
+        # base_var = pym.var(base_varname)
+        ctx.add_cinstruction(
+            f"int32_t* {base_varname} = {indices.name} + {start_expr};", {indices.name}
+        )
+
+        # nitems
+        nitems_varname = ctx.unique_name("nitems")
+        ctx.add_temporary(nitems_varname)
+        nitems_expr = register_extent(leaf_component.count, self._labels_to_jnames, ctx)
+
+        # result
+        found_varname = ctx.unique_name("ptr")
+        # ctx.add_temporary(found_varname, dtype=np.int64)
+        # found_var = pym.var(found_varname)
+
+        # call
+        bsearch_str = f"int32_t* {found_varname} = (int32_t*) bsearch(&{key_var}, {base_varname}, {nitems_expr}, sizeof(int32_t), cmpfunc);"
+        ctx.add_cinstruction(bsearch_str, {indices.name})
+
+        # equivalent to offset_var = found_var - base_var (but pointer arithmetic is hard in loopy)
+        offset_varname = ctx.unique_name("offset")
+        ctx.add_temporary(offset_varname)
+        offset_var = pym.var(offset_varname)
+        offset_str = f"size_t {offset_varname} = {found_varname} - {base_varname};"
+        ctx.add_cinstruction(offset_str, {indices.name})
+
+        # This gives us a pointer to the right place in the array. To recover
+        # the offset we need to subtract the initial offset (if nested) and also
+        # the address of the array itself.
+        return offset_var
+        # return offset_var - start_expr
 
 
 def make_offset_expr(

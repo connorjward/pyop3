@@ -18,6 +18,7 @@ from pyrsistent import pmap
 
 from pyop3 import utils
 from pyop3.axes import Axis, AxisComponent, AxisTree, as_axis_tree
+from pyop3.axes.tree import MultiArrayCollector  # definitely should be in this file
 from pyop3.distarray.base import DistributedArray
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
 from pyop3.indices import IndexedAxisTree, IndexTree, as_index_forest  # index_axes,
@@ -198,8 +199,21 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
     def datamap(self) -> dict[str:DistributedArray]:
         datamap = {self.name: self}
         datamap.update(self.axes.datamap)
+        # never used?
         datamap.update(
             merge_dicts([idx.datamap for idxs in self.indicess for idx in idxs])
+        )
+
+        datamap.update(
+            merge_dicts(
+                [
+                    marray.datamap
+                    for layout_per_ctx in self.layouts.values()
+                    for layout_map in layout_per_ctx.values()
+                    for layout_expr in layout_map.values()
+                    for marray in MultiArrayCollector()(layout_expr)
+                ]
+            )
         )
         return datamap
 

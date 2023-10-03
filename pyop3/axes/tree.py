@@ -744,7 +744,8 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         self._orig_axes = orig_axes or self
         self._target_paths = target_paths or self._default_target_path_per_component()
         self._index_exprs = index_exprs or self._default_index_exprs_per_component()
-        self._layouts = layouts or self._default_layouts()
+        # self._layouts = layouts or self._default_layouts()
+        self._layouts = layouts
         self.unindexed_axes = unindexed_axes or self
 
     def __getitem__(self, indices):
@@ -883,6 +884,8 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
 
     @property
     def layouts(self):
+        if self._layouts is None:
+            self._layouts = self._default_layouts()
         return self._layouts
 
     def _default_layouts(self):

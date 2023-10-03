@@ -36,6 +36,8 @@ from pyop3.utils import (
     merge_dicts,
 )
 
+bsearch = pym.var("mybsearch")
+
 # just use a pmap for this
 # class IndexForest:
 #     def __init__(self, trees: Mapping[Mapping, IndexTree]):
@@ -839,9 +841,8 @@ def _(slice_: Slice, *, prev_axes, keep_labels, **kwargs):
             )
         else:
             index_exprs_per_subslice.append(pmap({slice_.axis: subslice.array}))
-            # TODO, binary search
             layout_exprs_per_subslice.append(
-                pmap({slice_.axis: pym.primitives.NaN(IntType)})
+                pmap({slice_.axis: bsearch(subslice.array, layout_var)})
             )
 
     axes = AxisTree(Axis(components, label=axis_label))
@@ -1152,7 +1153,11 @@ def completely_index_axes(orig_axes, indices, keep_labels=False):
                         fulltargetpath.update(target_path_per_cpt[myaxis.id, mycpt])
                     fulltargetpath = pmap(fulltargetpath)
 
-                    layout_replace_map = orig_axes.layouts[fulltargetpath]
+                    # is this right???
+                    # layout_replace_map = orig_axes.layouts[fulltargetpath]
+                    layout_replace_map = indexed_axes.layouts[
+                        indexed_axes.path(leaf_axis, leaf_cpt)
+                    ]
                     new_layout = {}
                     for source_axis, source_cpt in indexed_axes.path_with_nodes(
                         leaf_axis, leaf_cpt
