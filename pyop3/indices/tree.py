@@ -1153,8 +1153,6 @@ def completely_index_axes(orig_axes, indices, keep_labels=False):
                         fulltargetpath.update(target_path_per_cpt[myaxis.id, mycpt])
                     fulltargetpath = pmap(fulltargetpath)
 
-                    # is this right???
-                    # layout_replace_map = orig_axes.layouts[fulltargetpath]
                     layout_replace_map = indexed_axes.layouts[
                         indexed_axes.path(leaf_axis, leaf_cpt)
                     ]
@@ -1172,11 +1170,22 @@ def completely_index_axes(orig_axes, indices, keep_labels=False):
                                 layout_replace_map
                             )(mylayoutexpr)
 
+                    # now substitute "old" layout expression stuff
+                    layout_replace_map = orig_axes.layouts[fulltargetpath]
+                    new_layout2 = {}
+                    for (
+                        myaxislabel,
+                        mylayoutexpr,
+                    ) in new_layout.items():
+                        new_layout2[myaxislabel] = IndexExpressionReplacer(
+                            layout_replace_map
+                        )(mylayoutexpr)
+
                     fulltargetpath2 = {}
                     for myaxis, mycpt in mypath.items():
                         fulltargetpath2.update(target_path_per_cpt[myaxis.id, mycpt])
                     fulltargetpath2 = pmap(fulltargetpath2)
-                    new_layouts[fulltargetpath2] = new_layout
+                    new_layouts[fulltargetpath2] = new_layout2
                 new_layouts = pmap(new_layouts)
 
             # breakpoint()
