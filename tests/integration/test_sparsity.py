@@ -107,28 +107,10 @@ def test_sliced_array(scalar_copy_kernel):
         axes, name="array0", data=np.arange(axes.size, dtype=ScalarType)
     )
     # array1 expects indices [2, 4, 6, ...]
-    # array1 = MultiArray(axes[::2][1:], name="array1", dtype=array0.dtype)
-    slice0 = Slice(
-        "ax0", [AffineSliceComponent("pt0", step=2, label="pt0")], label="ax0_sliced"
-    )
-    slice1 = Slice(
-        "ax0_sliced", [AffineSliceComponent("pt0", start=1, label="pt0")], label="ax0"
-    )
-    array1 = MultiArray(axes[slice0][slice1], name="array1", dtype=array0.dtype)
+    array1 = MultiArray(axes[::2][1:], name="array1", dtype=array0.dtype)
 
     # loop over [4, 8, 12, 16, ...]
-    # do_loop(p := axes[::4][1:].index(), scalar_copy_kernel(array0[p], array1[p]))
-    slice2 = Slice(
-        "ax0", [AffineSliceComponent("pt0", step=4, label="pt0")], label="ax3"
-    )
-    slice3 = Slice(
-        "ax3", [AffineSliceComponent("pt0", start=1, label="pt0")], label="ax4"
-    )
-    # do_loop(p := axes[slice2][slice3].index(), scalar_copy_kernel(array0[p], array1[p]))
-    l = loop(
-        p := axes[slice2][slice3].index(), scalar_copy_kernel(array0[p], array1[p])
-    )
-    l()
+    do_loop(p := axes[::4][1:].index(), scalar_copy_kernel(array0[p], array1[p]))
     assert np.allclose(array1.data_ro[::2], 0)
     assert np.allclose(array1.data_ro[1::2], array0.data_ro[::4][1:])
 
