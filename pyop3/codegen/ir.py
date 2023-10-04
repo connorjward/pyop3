@@ -303,8 +303,8 @@ def _(
     codegen_context: LoopyCodegenContext,
 ) -> None:
     loop_context = {}
-    for loop_index, (source_path, target_path, _, _) in loop_indices.items():
-        loop_context[loop_index] = source_path, target_path
+    for loop_index, (path, _) in loop_indices.items():
+        loop_context[loop_index] = path
     loop_context = pmap(loop_context)
 
     iterset = loop.index.iterset.with_context(loop_context)
@@ -320,7 +320,7 @@ def _(
                 new_indices[loop_index] = value
 
     loop_index_replace_map = {}
-    for _, _, replace_map, _ in new_indices.values():
+    for _, replace_map in new_indices.values():
         loop_index_replace_map.update(replace_map)
     loop_index_replace_map = pmap(loop_index_replace_map)
 
@@ -402,17 +402,20 @@ def parse_loop_properly_this_time(
                     jname_replace_map=new_jname_replace_map,
                 )
             else:
+                # breakpoint()
                 for stmt in loop.statements:
                     _compile(
                         stmt,
                         loop_indices
                         | {
                             loop.index: (
-                                new_source_path,
                                 new_target_path,
                                 new_jname_replace_map,
+                            ),
+                            loop.index.local_index: (
+                                new_source_path,
                                 new_iname_replace_map,
-                            )
+                            ),
                         },
                         codegen_context,
                     )
@@ -444,8 +447,8 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
         #     )
 
         loop_context = {}
-        for loop_index, (source_path, target_path, _, _) in loop_indices.items():
-            loop_context[loop_index] = source_path, target_path
+        for loop_index, (path, _) in loop_indices.items():
+            loop_context[loop_index] = path
         loop_context = pmap(loop_context)
 
         if isinstance(arg, MultiArray):
@@ -571,8 +574,8 @@ def build_assignment(
 
     # get the right index tree given the loop context
     loop_context = {}
-    for loop_index, (source_path, target_path, _, _) in loop_indices.items():
-        loop_context[loop_index] = source_path, target_path
+    for loop_index, (path, _) in loop_indices.items():
+        loop_context[loop_index] = path
     loop_context = pmap(loop_context)
 
     axes = assignment.array.axes.with_context(loop_context)
@@ -588,16 +591,16 @@ def build_assignment(
                 new_indices[loop_index] = value
     new_indices = pmap(new_indices)
 
-    iname_replace_map = {}
+    # iname_replace_map = {}
     jname_replace_map = {}
-    for _, _, jnames, inames in new_indices.values():
-        if any(k in iname_replace_map for k in inames):
-            assert False
+    for _, jnames in new_indices.values():
+        # if any(k in iname_replace_map for k in inames):
+        #     assert False
         if any(k in jname_replace_map for k in jnames):
             assert False
-        iname_replace_map.update(inames)
+        # iname_replace_map.update(inames)
         jname_replace_map.update(jnames)
-    iname_replace_map = pmap(iname_replace_map)
+    # iname_replace_map = pmap(iname_replace_map)
     jname_replace_map = pmap(jname_replace_map)
 
     parse_assignment_properly_this_time(
@@ -605,7 +608,8 @@ def build_assignment(
         axes,
         new_indices,
         codegen_ctx,
-        iname_replace_map=iname_replace_map,
+        # iname_replace_map=iname_replace_map,
+        iname_replace_map=pmap(),
         jname_replace_map=jname_replace_map,
     )
 

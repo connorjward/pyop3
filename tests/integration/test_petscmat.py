@@ -41,7 +41,7 @@ def test_map_compression(scalar_copy_kernel_int):
     )
     pt_to_dofs = op3.MultiArray(pt_to_dofs_axes, dtype=op3.IntType)
 
-    # op3.do_loop(
+    # op3.do_loop
     loop = op3.loop(
         p := points_axis.index(),
         op3.loop(

@@ -402,6 +402,7 @@ class Slice(Index):
 # A better name for this is "ContextSensitiveAxisTree"
 class IndexedAxisTree(ContextSensitive):
     def __init__(self, axis_trees):
+        # breakpoint()
         self.axis_trees = pmap(axis_trees)
 
     def __getitem__(self, indices):
@@ -517,7 +518,7 @@ def _(arg: LoopIndex):
 
 @collect_loop_indices.register
 def _(arg: LocalLoopIndex):
-    return (arg.loop_index,)
+    return (arg,)
 
 
 @collect_loop_indices.register
@@ -602,7 +603,9 @@ def _(arg: LoopIndex):
                 extra_source_context.update(source_path)
                 extracontext.update(target_path)
             contexts.append(
-                loop_context | {arg: (pmap(extra_source_context), pmap(extracontext))}
+                # loop_context | {arg: (pmap(extra_source_context), pmap(extracontext))}
+                loop_context
+                | {arg: pmap(extracontext), arg.local_index: pmap(extra_source_context)}
             )
         return tuple(contexts)
     elif isinstance(arg.iterset, AxisTree):
@@ -617,7 +620,10 @@ def _(arg: LoopIndex):
                 target_path.update(
                     iterset.target_path_per_component[axis.id, cpt.label]
                 )
-            contexts.append(pmap({arg: (source_path, pmap(target_path))}))
+            # contexts.append(pmap({arg: (source_path, pmap(target_path))}))
+            contexts.append(
+                pmap({arg: pmap(target_path), arg.local_index: source_path})
+            )
         return tuple(contexts)
     else:
         assert False, "other way to do it?"
@@ -811,7 +817,7 @@ def collect_shape_index_callback(index, *args, **kwargs):
 
 @collect_shape_index_callback.register
 def _(loop_index: LoopIndex, *, loop_indices, **kwargs):
-    _, path = loop_indices[loop_index]
+    path = loop_indices[loop_index]
 
     if isinstance(loop_index.iterset, IndexedAxisTree):
         iterset = just_one(loop_index.iterset.axis_trees.values())
@@ -835,9 +841,9 @@ def _(loop_index: LoopIndex, *, loop_indices, **kwargs):
 
 @collect_shape_index_callback.register
 def _(local_index: LocalLoopIndex, *args, loop_indices, **kwargs):
-    loop_index = local_index.loop_index
-    path, _ = loop_indices[loop_index]
+    path = loop_indices[local_index]
 
+    loop_index = local_index.loop_index
     if isinstance(loop_index.iterset, IndexedAxisTree):
         iterset = just_one(loop_index.iterset.axis_trees.values())
     else:
@@ -1280,7 +1286,7 @@ def parse_bits(
     new_index_exprs_per_cpt = {}
     if axis is None:
         partial_target_path |= target_path_per_indexed_component.get(None, {})
-        partial_index_exprs |= index_exprs_per_indexed_component.get(None, {})
+    #     partial_index_exprs |= index_exprs_per_indexed_component.get(None, {})
 
     axis = axis or indexed_axes.root
     for component in axis.components:
@@ -1320,12 +1326,15 @@ def parse_bits(
                     target_axis.id, target_cpt.label
                 ]
                 for axis_label, index_expr in orig_index_exprs.items():
+                    if axis_label not in new_partial_index_exprs:
+                        continue
                     new_index_expr = IndexExpressionReplacer(new_partial_index_exprs)(
                         index_expr
                     )
                     new_index_exprs_per_cpt[axis.id, component.label][
                         axis_label
                     ] = new_index_expr
+                # breakpoint()
 
         if subaxis := indexed_axes.child(axis, component):
             retval = parse_bits(
