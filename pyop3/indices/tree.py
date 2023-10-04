@@ -1203,6 +1203,8 @@ def completely_index_axes(orig_axes, indices, keep_labels=False):
                     index_exprs_per_indexed_cpt,
                 )
 
+            shapeless_target_path = target_path_per_indexed_cpt.get(None, pmap())
+
             """
             I reckon that layouts should map from source -> target expression. This
             is the opposite to what we do for index expressions. I think it makes the
@@ -1219,6 +1221,7 @@ def completely_index_axes(orig_axes, indices, keep_labels=False):
                     # this is the opposite to index exprs
                     mypath = indexed_axes.path_with_nodes(leaf_axis, leaf_cpt)
                     fulltargetpath = {}
+                    # fulltargetpath.update(target_path_per_cpt[None])
                     for myaxis, mycpt in mypath.items():
                         fulltargetpath.update(target_path_per_cpt[myaxis.id, mycpt])
                     fulltargetpath = pmap(fulltargetpath)
@@ -1264,6 +1267,7 @@ def completely_index_axes(orig_axes, indices, keep_labels=False):
                 index_exprs=index_exprs_per_cpt,
                 orig_axes=orig_axes,
                 layouts=new_layouts,
+                shapeless_target_path=shapeless_target_path,
             )
     return axis_trees
 
@@ -1328,16 +1332,14 @@ def parse_bits(
                     target_axis.id, target_cpt.label
                 ]
                 for axis_label, index_expr in orig_index_exprs.items():
-                    # BAD
-                    # if axis_label not in new_partial_index_exprs:
-                    #     continue
                     new_index_expr = IndexExpressionReplacer(new_partial_index_exprs)(
                         index_expr
                     )
                     new_index_exprs_per_cpt[axis.id, component.label][
                         axis_label
                     ] = new_index_expr
-                # breakpoint()
+            # new_partial_target_path = pmap()
+            new_partial_index_exprs = pmap()
 
         if subaxis := indexed_axes.child(axis, component):
             retval = parse_bits(
@@ -1354,7 +1356,9 @@ def parse_bits(
             new_index_exprs_per_cpt.update(retval[1])
 
         else:
-            pass
+            assert valid
+            # assert not new_partial_target_path
+            assert not new_partial_index_exprs
     return (
         new_target_path_per_cpt,
         new_index_exprs_per_cpt,

@@ -376,6 +376,7 @@ def parse_loop_properly_this_time(
         )
         jname_extras = {}
         for axis_label, index_expr in my_index_exprs.items():
+            # this does not do the right thing
             # if axis_label in outer_replace_map:
             #     continue
             jname_expr = JnameSubstitutor(
@@ -401,7 +402,10 @@ def parse_loop_properly_this_time(
                     jname_replace_map=new_jname_replace_map,
                 )
             else:
-                # breakpoint()
+                # dont emit expressions for shapeless bits
+                for axis_label in axes.shapeless_target_path:
+                    new_jname_replace_map = new_jname_replace_map.remove(axis_label)
+
                 for stmt in loop.statements:
                     _compile(
                         stmt,

@@ -724,6 +724,8 @@ class AxisVariable(pym.primitives.Variable):
 class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
     # FIXME this causes a recursive hash error...
     # fields = StrictLabelledTree.fields | {"target_paths", "index_exprs", "layout_exprs", "orig_axes", "sf", "shared_sf", "comm"}
+    fields = StrictLabelledTree.fields | {"shapeless_target_path"}
+
     def __init__(
         self,
         root: Optional[MultiAxis] = None,
@@ -737,6 +739,7 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         shared_sf=None,
         unindexed_axes=None,
         comm=None,
+        shapeless_target_path=pmap(),
     ):
         super().__init__(root, parent_to_children)
 
@@ -750,6 +753,7 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         # self._layouts = layouts or self._default_layouts()
         self._layouts = layouts
         self.unindexed_axes = unindexed_axes or self
+        self.shapeless_target_path = shapeless_target_path
 
     def __getitem__(self, indices):
         from pyop3.distarray.multiarray import IndexExpressionReplacer
