@@ -754,7 +754,11 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
 
     def __getitem__(self, indices):
         from pyop3.distarray.multiarray import IndexExpressionReplacer
-        from pyop3.indices.tree import IndexedAxisTree, completely_index_axes
+        from pyop3.indices.tree import (
+            IndexedAxisTree,
+            collect_loop_indices,
+            completely_index_axes,
+        )
 
         axess = {}
         for loop_context, indexed_axes in completely_index_axes(
@@ -775,7 +779,7 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
                 layouts=indexed_axes._layouts,
                 unindexed_axes=self.unindexed_axes,
             )
-            axess[loop_context] = indexed_axes
+            axess[loop_context] = indexed_axes, collect_loop_indices(indices)
         return IndexedAxisTree(axess)
 
     @property

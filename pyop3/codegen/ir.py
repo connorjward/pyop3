@@ -308,7 +308,29 @@ def _(
     loop_context = pmap(loop_context)
 
     iterset = loop.index.iterset.with_context(loop_context)
-    parse_loop_properly_this_time(loop, iterset, loop_indices, codegen_context)
+    minimal_context = loop.index.iterset.filter_context(loop_context)
+
+    # filter the loop indices, we don't want to have entries for loop indices that aren't
+    # used in the indexing
+    new_indices = {}
+    if isinstance(loop.index.iterset, IndexedAxisTree):
+        used_indices = loop.index.iterset.axis_trees[minimal_context][1]
+        for loop_index, value in loop_indices.items():
+            if loop_index in used_indices:
+                new_indices[loop_index] = value
+
+    loop_index_replace_map = {}
+    for _, _, replace_map, _ in new_indices.values():
+        loop_index_replace_map.update(replace_map)
+    loop_index_replace_map = pmap(loop_index_replace_map)
+
+    parse_loop_properly_this_time(
+        loop,
+        iterset,
+        loop_indices,
+        codegen_context,
+        outer_replace_map=loop_index_replace_map,
+    )
 
 
 def parse_loop_properly_this_time(
@@ -317,6 +339,7 @@ def parse_loop_properly_this_time(
     loop_indices,
     codegen_context,
     *,
+    outer_replace_map,
     axis=None,
     source_path=pmap(),
     target_path=pmap(),
@@ -328,10 +351,6 @@ def parse_loop_properly_this_time(
     if axes.is_empty:
         raise NotImplementedError("does this even make sense?")
 
-    loop_index_replace_map = {}
-    for _, _, replace_map, _ in loop_indices.values():
-        loop_index_replace_map.update(replace_map)
-
     axis = axis or axes.root
 
     domain_insns = []
@@ -341,7 +360,7 @@ def parse_loop_properly_this_time(
         iname = codegen_context.unique_name("i")
         extent_var = register_extent(
             component.count,
-            iname_replace_map | jname_replace_map | loop_index_replace_map,
+            iname_replace_map | jname_replace_map | outer_replace_map,
             codegen_context,
         )
         codegen_context.add_domain(iname, extent_var)
@@ -358,8 +377,10 @@ def parse_loop_properly_this_time(
         )
         jname_extras = {}
         for axis_label, index_expr in my_index_exprs.items():
+            # if axis_label in outer_replace_map:
+            #     continue
             jname_expr = JnameSubstitutor(
-                new_iname_replace_map | jname_replace_map | loop_index_replace_map,
+                new_iname_replace_map | jname_replace_map | outer_replace_map,
                 codegen_context,
             )(index_expr)
             jname_extras[axis_label] = jname_expr
@@ -373,6 +394,7 @@ def parse_loop_properly_this_time(
                     axes,
                     loop_indices,
                     codegen_context,
+                    outer_replace_map=outer_replace_map,
                     axis=subaxis,
                     source_path=new_source_path,
                     target_path=new_target_path,
@@ -554,21 +576,37 @@ def build_assignment(
     loop_context = pmap(loop_context)
 
     axes = assignment.array.axes.with_context(loop_context)
+    minimal_context = assignment.array.axes.filter_context(loop_context)
 
     # filter the loop indices, we don't want to have entries for loop indices that aren't
     # used in the indexing
-    minimal_loop_context = assignment.array.axes.filter_context(loop_context)
     new_indices = {}
-    for loop_index, value in loop_indices.items():
-        if loop_index in minimal_loop_context:
-            new_indices[loop_index] = value
+    if isinstance(assignment.array.axes, IndexedAxisTree):
+        used_indices = assignment.array.axes.axis_trees[minimal_context][1]
+        for loop_index, value in loop_indices.items():
+            if loop_index in used_indices:
+                new_indices[loop_index] = value
     new_indices = pmap(new_indices)
+
+    iname_replace_map = {}
+    jname_replace_map = {}
+    for _, _, jnames, inames in new_indices.values():
+        if any(k in iname_replace_map for k in inames):
+            assert False
+        if any(k in jname_replace_map for k in jnames):
+            assert False
+        iname_replace_map.update(inames)
+        jname_replace_map.update(jnames)
+    iname_replace_map = pmap(iname_replace_map)
+    jname_replace_map = pmap(jname_replace_map)
 
     parse_assignment_properly_this_time(
         assignment,
         axes,
         new_indices,
         codegen_ctx,
+        iname_replace_map=iname_replace_map,
+        jname_replace_map=jname_replace_map,
     )
 
 
@@ -578,31 +616,31 @@ def parse_assignment_properly_this_time(
     loop_indices,
     codegen_context,
     *,
+    iname_replace_map,
+    jname_replace_map,
     axis=None,
     source_path=pmap(),
     target_path=None,
-    iname_replace_map=pmap(),
-    jname_replace_map=None,
 ):
     from pyop3.distarray.multiarray import IndexExpressionReplacer
 
     if axis is None:
         axis = axes.root
         target_path = axes.target_path_per_component.get(None, pmap())
-        iname_replace_map = pmap(
-            {
-                axis_label: iname_var
-                for _, _, _, replace_map in loop_indices.values()
-                for axis_label, iname_var in replace_map.items()
-            }
-        )
-        jname_replace_map = pmap(
-            {
-                axis_label: iname_var
-                for _, _, replace_map, _ in loop_indices.values()
-                for axis_label, iname_var in replace_map.items()
-            }
-        )
+        # iname_replace_map = pmap(
+        #     {
+        #         axis_label: iname_var
+        #         for _, _, _, replace_map in loop_indices.values()
+        #         for axis_label, iname_var in replace_map.items()
+        #     }
+        # )
+        # jname_replace_map = pmap(
+        #     {
+        #         axis_label: iname_var
+        #         for _, _, replace_map, _ in loop_indices.values()
+        #         for axis_label, iname_var in replace_map.items()
+        #     }
+        # )
 
         my_index_exprs = axes.index_exprs_per_component.get(None, pmap())
         jname_extras = {}
@@ -697,13 +735,12 @@ def add_leaf_assignment(
     if isinstance(assignment.array, MultiArray):
         array_expr = make_array_expr(
             assignment,
-            # assignment.array.layouts[loop_context][target_path],
-            # will fail for sparse
             assignment.array.layouts[pmap()][target_path],
             target_path,
             iname_replace_map | jname_replace_map,
             codegen_context,
         )
+        print(array_expr)
     else:
         assert isinstance(assignment.array, Offset)
         array_expr = make_offset_expr(

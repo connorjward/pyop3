@@ -21,7 +21,8 @@ from pyop3.axes import Axis, AxisComponent, AxisTree, as_axis_tree
 from pyop3.axes.tree import MultiArrayCollector  # definitely should be in this file
 from pyop3.distarray.base import DistributedArray
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
-from pyop3.indices import IndexedAxisTree, IndexTree, as_index_forest  # index_axes,
+from pyop3.indices import IndexedAxisTree, IndexTree, as_index_forest
+from pyop3.indices.tree import collect_loop_indices
 from pyop3.utils import (
     PrettyTuple,
     UniqueNameGenerator,
@@ -91,7 +92,9 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
         if not from_index:
             assert layouts is None
             if isinstance(axes, IndexedAxisTree):
-                self.layouts = {ctx: ax.layouts for ctx, ax in axes.axis_trees.items()}
+                self.layouts = {
+                    ctx: ax.layouts for ctx, (ax, _) in axes.axis_trees.items()
+                }
             else:
                 self.layouts = {pmap(): axes.layouts}
         else:
@@ -103,7 +106,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
         if not from_index:
             if isinstance(axes, IndexedAxisTree):
                 trees = {}
-                for loop_context, tree in axes.axis_trees.items():
+                for loop_context, (tree, used_loop_indices) in axes.axis_trees.items():
                     tree = tree.copy(
                         index_exprs=None,
                         target_paths=tree._target_paths,
@@ -112,7 +115,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
                         orig_axes=tree.orig_axes,
                         unindexed_axes=tree.unindexed_axes,
                     )
-                    trees[loop_context] = tree
+                    trees[loop_context] = tree, used_loop_indices
                 axes = IndexedAxisTree(trees)
             else:
                 axes = axes.copy(
@@ -370,7 +373,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
         # in this case we do not modify the layout expression
         if isinstance(self.axes, IndexedAxisTree):
             new_axis_trees = {}
-            for loop_context, axis_tree in self.axes.axis_trees.items():
+            for loop_context, (axis_tree, _) in self.axes.axis_trees.items():
                 for new_loop_context, indexed_axes in completely_index_axes(
                     axis_tree, indices
                 ).items():
@@ -382,7 +385,9 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
                         layouts=indexed_axes._layouts,
                         unindexed_axes=axis_tree.unindexed_axes,
                     )
-                    new_axis_trees[loop_context | new_loop_context] = indexed_axes
+                    new_axis_trees[
+                        loop_context | new_loop_context
+                    ] = indexed_axes, collect_loop_indices(indices)
             axess = IndexedAxisTree(new_axis_trees)
         else:
             axess = {}
@@ -397,7 +402,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
                     layouts=indexed_axes._layouts,
                     unindexed_axes=self.axes.unindexed_axes,
                 )
-                axess[loop_context] = indexed_axes
+                axess[loop_context] = indexed_axes, collect_loop_indices(indices)
             # what is the difference between indexed_axes.orig_axes and self.axes.orig_axes??
             axess = pmap(axess)
             axess = IndexedAxisTree(axess)

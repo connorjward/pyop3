@@ -272,7 +272,11 @@ class CalledMap(Index, LoopIterable):
 
         # ignore layouts for now
         axes = axes.copy(target_paths=target_paths, index_exprs=index_exprs)
-        return LoopIndex(axes)
+
+        loop_indices = collect_loop_indices(self)
+        # loop_indices = ()
+        indexed_axes = IndexedAxisTree({context: (axes, loop_indices)})
+        return LoopIndex(indexed_axes)
 
     @property
     def name(self):
@@ -361,8 +365,7 @@ class LocalLoopIndex(AbstractLoopIndex):
 
     @property
     def target_paths(self):
-        assert False, "dead code"
-        return self.global_index.target_paths
+        return self.loop_index.target_paths
 
     @property
     def datamap(self):
@@ -403,19 +406,22 @@ class IndexedAxisTree(ContextSensitive):
 
     def __getitem__(self, indices):
         new_axis_trees = {}
-        for loop_context, axis_tree in self.axis_trees.items():
+        for loop_context, (axis_tree, _) in self.axis_trees.items():
             context_sensitive_axes = axis_tree[indices]
             for (
                 new_loop_context,
                 ctx_free_axes,
             ) in context_sensitive_axes.context_map.items():
-                new_axis_trees[loop_context | new_loop_context] = ctx_free_axes
+                new_axis_trees[loop_context | new_loop_context] = (
+                    ctx_free_axes,
+                    collect_loop_indices(indices),
+                )
         return IndexedAxisTree(new_axis_trees)
 
     @functools.cached_property
     def size(self):
         if len(self.axis_trees) == 1:
-            return just_one(self.axis_trees.values()).size
+            return just_one(self.axis_trees.values())[0].size
         else:
             raise RuntimeError("multiple loop contexts exist, size may vary")
 
@@ -428,7 +434,12 @@ class IndexedAxisTree(ContextSensitive):
 
     @functools.cached_property
     def datamap(self):
-        return merge_dicts(axis_tree.datamap for axis_tree in self.axis_trees.values())
+        return merge_dicts(
+            axis_tree.datamap for axis_tree, _ in self.axis_trees.values()
+        )
+
+    def with_context(self, context):
+        return super().with_context(context)[0]
 
 
 @functools.singledispatch
@@ -491,12 +502,31 @@ def combine_contexts(contexts):
 
 @functools.singledispatch
 def collect_loop_indices(arg):
-    return ()
+    if isinstance(arg, collections.abc.Iterable):
+        return sum(map(collect_loop_indices, arg), ())
+    elif isinstance(arg, (slice, Slice)):
+        return ()
+    else:
+        raise NotImplementedError
 
 
 @collect_loop_indices.register
 def _(arg: LoopIndex):
     return (arg,)
+
+
+@collect_loop_indices.register
+def _(arg: LocalLoopIndex):
+    return (arg.loop_index,)
+
+
+@collect_loop_indices.register
+def _(arg: IndexTree):
+    return collect_loop_indices(arg.root) + tuple(
+        loop_index
+        for child in arg.parent_to_children.values()
+        for loop_index in collect_loop_indices(child)
+    )
 
 
 @collect_loop_indices.register
@@ -557,7 +587,7 @@ def _(arg: LocalLoopIndex):
 def _(arg: LoopIndex):
     if isinstance(arg.iterset, IndexedAxisTree):
         contexts = []
-        for loop_context, axis_tree in arg.iterset.axis_trees.items():
+        for loop_context, (axis_tree, _) in arg.iterset.axis_trees.items():
             extra_source_context = {}
             extracontext = {}
             for leaf in axis_tree.leaves:
@@ -794,7 +824,6 @@ def _(loop_index: LoopIndex, *, loop_indices, **kwargs):
     index_exprs_per_component = pmap(
         {None: pmap({axis: AxisVariable(axis) for axis in path.keys()})}
     )
-    # layout_exprs_per_component = pmap({None: pmap({axis: 0 for axis in path.keys()})})
     layout_exprs_per_component = pmap({None: pmap()})
     return (
         AxisTree(),
@@ -814,14 +843,9 @@ def _(local_index: LocalLoopIndex, *args, loop_indices, **kwargs):
     else:
         iterset = loop_index.iterset
 
-    myleaf = iterset._node_from_path(path)
-    visited_nodes = iterset.path_with_nodes(*myleaf, ordered=True)
-
-    target_path_per_cpt = pmap(
-        {None: pmap({node.label: cpt_label for node, cpt_label in visited_nodes})}
-    )
+    target_path_per_cpt = pmap({None: pmap({axis: cpt for axis, cpt in path.items()})})
     index_exprs_per_cpt = pmap(
-        {None: {node.label: AxisVariable(node.label) for node, _ in visited_nodes}}
+        {None: pmap({axis: AxisVariable(axis) for axis in path.keys()})}
     )
 
     layout_exprs_per_cpt = pmap({None: pmap()})
@@ -952,7 +976,12 @@ def _(called_map: CalledMap, **kwargs):
             index_exprs_per_cpt.update(subindex_exprs)
             layout_exprs_per_cpt.update(sublayout_exprs)
 
-    return (axes, target_path_per_cpt, index_exprs_per_cpt, layout_exprs_per_cpt)
+    return (
+        axes,
+        pmap(target_path_per_cpt),
+        pmap(index_exprs_per_cpt),
+        pmap(layout_exprs_per_cpt),
+    )
 
 
 def _make_leaf_axis_from_called_map(called_map, prior_target_path, prior_index_exprs):
