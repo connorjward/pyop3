@@ -77,6 +77,8 @@ class LoopIterable(abc.ABC):
     """
 
     def index(self) -> LoopIndex:
+        from pyop3.indices import LoopIndex
+
         return LoopIndex(self)
 
     @property
@@ -128,12 +130,14 @@ class ContextSensitive(abc.ABC):
         pass
 
     def with_context(self, context):
+        return self.context_map[self.filter_context(context)]
+
+    def filter_context(self, context):
         key = {}
         for loop_index, path in context.items():
             if loop_index in self.keys:
                 key.update({loop_index: path})
-        key = pmap(key)
-        return self.context_map[key]
+        return pmap(key)
 
 
 class ContextFree(ContextSensitive, abc.ABC):

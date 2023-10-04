@@ -328,6 +328,10 @@ def parse_loop_properly_this_time(
     if axes.is_empty:
         raise NotImplementedError("does this even make sense?")
 
+    loop_index_replace_map = {}
+    for _, _, replace_map, _ in loop_indices.values():
+        loop_index_replace_map.update(replace_map)
+
     axis = axis or axes.root
 
     domain_insns = []
@@ -336,7 +340,9 @@ def parse_loop_properly_this_time(
     for component in axis.components:
         iname = codegen_context.unique_name("i")
         extent_var = register_extent(
-            component.count, iname_replace_map | jname_replace_map, codegen_context
+            component.count,
+            iname_replace_map | jname_replace_map | loop_index_replace_map,
+            codegen_context,
         )
         codegen_context.add_domain(iname, extent_var)
 
@@ -353,7 +359,8 @@ def parse_loop_properly_this_time(
         jname_extras = {}
         for axis_label, index_expr in my_index_exprs.items():
             jname_expr = JnameSubstitutor(
-                new_iname_replace_map | jname_replace_map, codegen_context
+                new_iname_replace_map | jname_replace_map | loop_index_replace_map,
+                codegen_context,
             )(index_expr)
             jname_extras[axis_label] = jname_expr
 
@@ -525,17 +532,6 @@ def build_assignment(
     loop_indices,
     codegen_ctx,
 ):
-    # each application of an index tree takes an input axis tree and the
-    # jnames that apply to each axis component and then filters/transforms the
-    # tree and determines instructions that generate these jnames. The resulting
-    # axis tree also has unspecified jnames. These are parsed in a final step into
-    # actual loops.
-    # The first step is therefore to generate these initial jnames, and the last
-    # is to emit the loops for the final tree.
-    # jnames_per_cpt, array_expr_per_leaf, insns_per_leaf = _prepare_assignment(
-    #     assignment, codegen_ctx
-    # )
-
     """
     The difference between iterating over map0(map1(p)).index() and axes.index()
     is that the former may emit multiple loops but only a single jname is produced. For
@@ -549,10 +545,6 @@ def build_assignment(
 
     In both cases though the pattern is "loop over this object as if it were a tree".
     I want to generalise this to both of these.
-
-    This seems like a natural thing to do. In the rest of this we maintain the concept of
-    "prior" things and transform between indexed axes. In these cases we do not have to. It
-    is equivalent to a single step of this mapping. Sort of.
     """
 
     # get the right index tree given the loop context
@@ -561,10 +553,21 @@ def build_assignment(
         loop_context[loop_index] = source_path, target_path
     loop_context = pmap(loop_context)
 
+    axes = assignment.array.axes.with_context(loop_context)
+
+    # filter the loop indices, we don't want to have entries for loop indices that aren't
+    # used in the indexing
+    minimal_loop_context = assignment.array.axes.filter_context(loop_context)
+    new_indices = {}
+    for loop_index, value in loop_indices.items():
+        if loop_index in minimal_loop_context:
+            new_indices[loop_index] = value
+    new_indices = pmap(new_indices)
+
     parse_assignment_properly_this_time(
         assignment,
-        assignment.array.axes.with_context(loop_context),
-        loop_indices,
+        axes,
+        new_indices,
         codegen_ctx,
     )
 

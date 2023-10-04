@@ -254,13 +254,25 @@ class Index(LabelledNode):
 
 
 # ImmutableRecord?
-class CalledMap(Index, LoopIterable, UniquelyIdentifiedImmutableRecord):
+class CalledMap(Index, LoopIterable):
     # This function cannot be part of an index tree because it has not specialised
     # to a particular loop index path.
-    def __init__(self, map, from_index):
+    def __init__(self, map, from_index, **kwargs):
         self.map = map
         self.from_index = from_index
-        UniquelyIdentifiedImmutableRecord.__init__(self)
+        Index.__init__(self, **kwargs)
+
+    def index(self):
+        contexts = collect_loop_contexts(self)
+        # FIXME this assumption is not always true
+        context = just_one(contexts)
+        axes, target_paths, index_exprs, layout_exprs = collect_shape_index_callback(
+            self, loop_indices=context
+        )
+
+        # ignore layouts for now
+        axes = axes.copy(target_paths=target_paths, index_exprs=index_exprs)
+        return LoopIndex(axes)
 
     @property
     def name(self):
@@ -268,10 +280,6 @@ class CalledMap(Index, LoopIterable, UniquelyIdentifiedImmutableRecord):
 
     @property
     def axes(self):
-        raise NotImplementedError
-
-    @property
-    def index(self):
         raise NotImplementedError
 
     # FIXME should be context-sensitive!
@@ -567,10 +575,7 @@ def _(arg: LoopIndex):
                 loop_context | {arg: (pmap(extra_source_context), pmap(extracontext))}
             )
         return tuple(contexts)
-    else:
-        if not isinstance(arg.iterset, AxisTree):
-            raise NotImplementedError
-
+    elif isinstance(arg.iterset, AxisTree):
         iterset = arg.iterset
         contexts = []
         for leaf in iterset.leaves:
@@ -584,6 +589,34 @@ def _(arg: LoopIndex):
                 )
             contexts.append(pmap({arg: (source_path, pmap(target_path))}))
         return tuple(contexts)
+    else:
+        assert False, "other way to do it?"
+        assert isinstance(arg.iterset, CalledMap)
+        prior_contexts = collect_loop_contexts(arg.iterset)
+        contexts = []
+        for prior_context in prior_contexts:
+            paths = _paths_from_called_map_loop_index(arg.iterset, prior_context)
+            for path in paths:
+                contexts.append(prior_context | {arg: path})
+        return tuple(contexts)
+
+
+def _paths_from_called_map_loop_index(index, context):
+    # terminal
+    if isinstance(index, LoopIndex):
+        return (context[index][1],)
+
+    assert isinstance(index, CalledMap)
+    paths = []
+    for from_path in _paths_from_called_map_loop_index(index.from_index, context):
+        for map_component in index.connectivity[from_path]:
+            paths.append(
+                (
+                    pmap({index.label: map_component.label}),
+                    pmap({map_component.target_axis: map_component.target_component}),
+                )
+            )
+    return tuple(paths)
 
 
 @collect_loop_contexts.register

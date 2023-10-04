@@ -91,7 +91,8 @@ def vec12_inc_kernel():
     return Function(code, [READ, INC])
 
 
-def test_inc_from_tabulated_map(vector_inc_kernel):
+@pytest.mark.parametrize("nested", [True, False])
+def test_inc_from_tabulated_map(scalar_inc_kernel, vector_inc_kernel, nested):
     m, n = 4, 3
     mapdata = np.asarray([[1, 2, 0], [2, 0, 1], [3, 2, 3], [2, 0, 1]], dtype=IntType)
 
@@ -114,7 +115,14 @@ def test_inc_from_tabulated_map(vector_inc_kernel):
         "map0",
     )
 
-    do_loop(p := axes.index(), vector_inc_kernel(dat0[map0(p)], dat1[p]))
+    if nested:
+        l = loop(
+            p := axes.index(),
+            loop(q := map0(p).index(), scalar_inc_kernel(dat0[q], dat1[p])),
+        )
+        l()
+    else:
+        do_loop(p := axes.index(), vector_inc_kernel(dat0[map0(p)], dat1[p]))
 
     # Since dat0.data is simply arange, accessing index i of it will also just be i.
     # Therefore, accessing multiple entries and storing the sum of them is
