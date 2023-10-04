@@ -76,10 +76,9 @@ class LoopIterable(abc.ABC):
 
     """
 
+    @abc.abstractmethod
     def index(self) -> LoopIndex:
-        from pyop3.indices import LoopIndex
-
-        return LoopIndex(self)
+        pass
 
     @property
     @abc.abstractmethod
@@ -758,7 +757,11 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
             IndexedAxisTree,
             collect_loop_indices,
             completely_index_axes,
+            index_tree_from_ellipsis,
         )
+
+        if indices is Ellipsis:
+            indices = index_tree_from_ellipsis(self, self.root)
 
         axess = {}
         for loop_context, indexed_axes in completely_index_axes(
@@ -779,8 +782,8 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
                 layouts=indexed_axes._layouts,
                 unindexed_axes=self.unindexed_axes,
             )
-            axess[loop_context] = indexed_axes, collect_loop_indices(indices)
-        return IndexedAxisTree(axess)
+            axess[loop_context] = indexed_axes
+        return IndexedAxisTree(axess, collect_loop_indices(indices))
 
     @property
     def axis_trees(self):
@@ -790,6 +793,8 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         # cyclic import
         from pyop3.indices import LoopIndex
 
+        # TODO this would be nice but it breaks some layout stuff
+        # return LoopIndex(self[...])
         return LoopIndex(self)
 
     @property

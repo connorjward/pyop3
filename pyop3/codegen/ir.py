@@ -314,9 +314,8 @@ def _(
     # used in the indexing
     new_indices = {}
     if isinstance(loop.index.iterset, IndexedAxisTree):
-        used_indices = loop.index.iterset.axis_trees[minimal_context][1]
         for loop_index, value in loop_indices.items():
-            if loop_index in used_indices:
+            if loop_index in loop.index.iterset.required_loop_indices:
                 new_indices[loop_index] = value
 
     loop_index_replace_map = {}
@@ -585,9 +584,8 @@ def build_assignment(
     # used in the indexing
     new_indices = {}
     if isinstance(assignment.array.axes, IndexedAxisTree):
-        used_indices = assignment.array.axes.axis_trees[minimal_context][1]
         for loop_index, value in loop_indices.items():
-            if loop_index in used_indices:
+            if loop_index in assignment.array.axes.required_loop_indices:
                 new_indices[loop_index] = value
     new_indices = pmap(new_indices)
 
@@ -609,7 +607,7 @@ def build_assignment(
         new_indices,
         codegen_ctx,
         # iname_replace_map=iname_replace_map,
-        iname_replace_map=pmap(),
+        iname_replace_map=jname_replace_map,
         jname_replace_map=jname_replace_map,
     )
 

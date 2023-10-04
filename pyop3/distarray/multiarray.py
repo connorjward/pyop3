@@ -92,9 +92,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
         if not from_index:
             assert layouts is None
             if isinstance(axes, IndexedAxisTree):
-                self.layouts = {
-                    ctx: ax.layouts for ctx, (ax, _) in axes.axis_trees.items()
-                }
+                self.layouts = {ctx: ax.layouts for ctx, ax in axes.axis_trees.items()}
             else:
                 self.layouts = {pmap(): axes.layouts}
         else:
@@ -106,7 +104,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
         if not from_index:
             if isinstance(axes, IndexedAxisTree):
                 trees = {}
-                for loop_context, (tree, used_loop_indices) in axes.axis_trees.items():
+                for loop_context, tree in axes.axis_trees.items():
                     tree = tree.copy(
                         index_exprs=None,
                         target_paths=tree._target_paths,
@@ -115,8 +113,8 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
                         orig_axes=tree.orig_axes,
                         unindexed_axes=tree.unindexed_axes,
                     )
-                    trees[loop_context] = tree, used_loop_indices
-                axes = IndexedAxisTree(trees)
+                    trees[loop_context] = tree
+                axes = IndexedAxisTree(trees, axes.required_loop_indices)
             else:
                 axes = axes.copy(
                     index_exprs=None,
@@ -373,7 +371,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
         # in this case we do not modify the layout expression
         if isinstance(self.axes, IndexedAxisTree):
             new_axis_trees = {}
-            for loop_context, (axis_tree, _) in self.axes.axis_trees.items():
+            for loop_context, axis_tree in self.axes.axis_trees.items():
                 for new_loop_context, indexed_axes in completely_index_axes(
                     axis_tree, indices
                 ).items():
@@ -385,10 +383,8 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
                         layouts=indexed_axes._layouts,
                         unindexed_axes=axis_tree.unindexed_axes,
                     )
-                    new_axis_trees[
-                        loop_context | new_loop_context
-                    ] = indexed_axes, collect_loop_indices(indices)
-            axess = IndexedAxisTree(new_axis_trees)
+                    new_axis_trees[loop_context | new_loop_context] = indexed_axes
+            axess = IndexedAxisTree(new_axis_trees, collect_loop_indices(indices))
         else:
             axess = {}
             for loop_context, indexed_axes in completely_index_axes(
@@ -402,10 +398,10 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
                     layouts=indexed_axes._layouts,
                     unindexed_axes=self.axes.unindexed_axes,
                 )
-                axess[loop_context] = indexed_axes, collect_loop_indices(indices)
+                axess[loop_context] = indexed_axes
             # what is the difference between indexed_axes.orig_axes and self.axes.orig_axes??
             axess = pmap(axess)
-            axess = IndexedAxisTree(axess)
+            axess = IndexedAxisTree(axess, collect_loop_indices(indices))
         # TODO we should raise an error if any of the layout functions are None (and hence
         # not valid to build an array off of).
         return self.copy(axes=axess, from_index=True, layouts=self.layouts)

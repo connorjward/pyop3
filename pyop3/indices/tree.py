@@ -275,7 +275,7 @@ class CalledMap(Index, LoopIterable):
 
         loop_indices = collect_loop_indices(self)
         # loop_indices = ()
-        indexed_axes = IndexedAxisTree({context: (axes, loop_indices)})
+        indexed_axes = IndexedAxisTree({context: axes}, loop_indices)
         return LoopIndex(indexed_axes)
 
     @property
@@ -401,28 +401,28 @@ class Slice(Index):
 # move with other axis trees
 # A better name for this is "ContextSensitiveAxisTree"
 class IndexedAxisTree(ContextSensitive):
-    def __init__(self, axis_trees):
-        # breakpoint()
+    def __init__(self, axis_trees, required_loop_indices):
         self.axis_trees = pmap(axis_trees)
+        self.required_loop_indices = required_loop_indices
 
     def __getitem__(self, indices):
         new_axis_trees = {}
-        for loop_context, (axis_tree, _) in self.axis_trees.items():
+        for loop_context, axis_tree in self.axis_trees.items():
             context_sensitive_axes = axis_tree[indices]
             for (
                 new_loop_context,
                 ctx_free_axes,
             ) in context_sensitive_axes.context_map.items():
-                new_axis_trees[loop_context | new_loop_context] = (
-                    ctx_free_axes,
-                    collect_loop_indices(indices),
-                )
-        return IndexedAxisTree(new_axis_trees)
+                new_axis_trees[loop_context | new_loop_context] = ctx_free_axes
+
+        loop_indices = collect_loop_indices(indices)
+
+        return IndexedAxisTree(new_axis_trees, loop_indices)
 
     @functools.cached_property
     def size(self):
         if len(self.axis_trees) == 1:
-            return just_one(self.axis_trees.values())[0].size
+            return just_one(self.axis_trees.values()).size
         else:
             raise RuntimeError("multiple loop contexts exist, size may vary")
 
@@ -435,12 +435,7 @@ class IndexedAxisTree(ContextSensitive):
 
     @functools.cached_property
     def datamap(self):
-        return merge_dicts(
-            axis_tree.datamap for axis_tree, _ in self.axis_trees.values()
-        )
-
-    def with_context(self, context):
-        return super().with_context(context)[0]
+        return merge_dicts(axis_tree.datamap for axis_tree in self.axis_trees.values())
 
 
 @functools.singledispatch
@@ -503,10 +498,13 @@ def combine_contexts(contexts):
 
 @functools.singledispatch
 def collect_loop_indices(arg):
-    if isinstance(arg, collections.abc.Iterable):
-        return sum(map(collect_loop_indices, arg), ())
-    elif isinstance(arg, (slice, Slice)):
+    # cyclic import
+    from pyop3.distarray import MultiArray
+
+    if isinstance(arg, (MultiArray, Slice, slice)):
         return ()
+    elif isinstance(arg, collections.abc.Iterable):
+        return sum(map(collect_loop_indices, arg), ())
     else:
         raise NotImplementedError
 
@@ -533,6 +531,11 @@ def _(arg: IndexTree):
 @collect_loop_indices.register
 def _(arg: CalledMap):
     return collect_loop_indices(arg.from_index)
+
+
+@collect_loop_indices.register
+def _(arg: int):
+    return ()
 
 
 def loop_contexts_from_iterable(indices):
@@ -581,14 +584,14 @@ def _(index_tree: IndexTree):
 
 @collect_loop_contexts.register
 def _(arg: LocalLoopIndex):
-    return collect_loop_contexts(arg.loop_index)
+    return collect_loop_contexts(arg.loop_index, local=True)
 
 
 @collect_loop_contexts.register
-def _(arg: LoopIndex):
+def _(arg: LoopIndex, local=False):
     if isinstance(arg.iterset, IndexedAxisTree):
         contexts = []
-        for loop_context, (axis_tree, _) in arg.iterset.axis_trees.items():
+        for loop_context, axis_tree in arg.iterset.axis_trees.items():
             extra_source_context = {}
             extracontext = {}
             for leaf in axis_tree.leaves:
@@ -602,11 +605,12 @@ def _(arg: LoopIndex):
                     )
                 extra_source_context.update(source_path)
                 extracontext.update(target_path)
-            contexts.append(
-                # loop_context | {arg: (pmap(extra_source_context), pmap(extracontext))}
-                loop_context
-                | {arg: pmap(extracontext), arg.local_index: pmap(extra_source_context)}
-            )
+            if local:
+                contexts.append(
+                    loop_context | {arg.local_index: pmap(extra_source_context)}
+                )
+            else:
+                contexts.append(loop_context | {arg: pmap(extracontext)})
         return tuple(contexts)
     elif isinstance(arg.iterset, AxisTree):
         iterset = arg.iterset
@@ -620,10 +624,10 @@ def _(arg: LoopIndex):
                 target_path.update(
                     iterset.target_path_per_component[axis.id, cpt.label]
                 )
-            # contexts.append(pmap({arg: (source_path, pmap(target_path))}))
-            contexts.append(
-                pmap({arg: pmap(target_path), arg.local_index: source_path})
-            )
+            if local:
+                contexts.append(pmap({arg.local_index: source_path}))
+            else:
+                contexts.append(pmap({arg: pmap(target_path)}))
         return tuple(contexts)
     else:
         assert False, "other way to do it?"
@@ -699,7 +703,6 @@ def _collect_datamap(index, *subdatamaps, itree):
 
 
 def index_tree_from_ellipsis(axes, current_axis, first_call=True):
-    assert False, "not needed"
     slice_components = []
     subroots = []
     subtrees = []
@@ -718,9 +721,9 @@ def index_tree_from_ellipsis(axes, current_axis, first_call=True):
     myslice = fullslice
 
     if first_call:
-        return IndexTree(myslice, {myslice.id: subroots} | merge_dicts(subtrees))
+        return IndexTree(myslice, pmap({myslice.id: subroots}) | merge_dicts(subtrees))
     else:
-        return myslice, {myslice.id: subroots} | merge_dicts(subtrees)
+        return myslice, pmap({myslice.id: subroots}) | merge_dicts(subtrees)
 
 
 def index_tree_from_iterable(
@@ -1133,8 +1136,7 @@ def _index_axes_rec(
 
 def completely_index_axes(orig_axes, indices, keep_labels=False):
     if indices is Ellipsis:
-        raise NotImplementedError("TODO needs to return a full slice, not self")
-        return self
+        indices = index_tree_from_ellipsis(orig_axes, orig_axes.root)
     # FIXME
     from pyop3.distarray.multiarray import IndexExpressionReplacer
 
@@ -1286,7 +1288,7 @@ def parse_bits(
     new_index_exprs_per_cpt = {}
     if axis is None:
         partial_target_path |= target_path_per_indexed_component.get(None, {})
-    #     partial_index_exprs |= index_exprs_per_indexed_component.get(None, {})
+        partial_index_exprs |= index_exprs_per_indexed_component.get(None, {})
 
     axis = axis or indexed_axes.root
     for component in axis.components:
@@ -1326,8 +1328,9 @@ def parse_bits(
                     target_axis.id, target_cpt.label
                 ]
                 for axis_label, index_expr in orig_index_exprs.items():
-                    if axis_label not in new_partial_index_exprs:
-                        continue
+                    # BAD
+                    # if axis_label not in new_partial_index_exprs:
+                    #     continue
                     new_index_expr = IndexExpressionReplacer(new_partial_index_exprs)(
                         index_expr
                     )
