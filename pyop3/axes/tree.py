@@ -731,15 +731,11 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         root: Optional[MultiAxis] = None,
         parent_to_children: Optional[Dict] = None,
         *,
-        target_paths=None,
         index_exprs=None,
-        layouts=None,
-        orig_axes=None,
+        layout_exprs=None,
         sf=None,
         shared_sf=None,
-        unindexed_axes=None,
         comm=None,
-        shapeless_target_path=pmap(),
     ):
         super().__init__(root, parent_to_children)
 
@@ -747,33 +743,25 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         self.shared_sf = shared_sf
         self.comm = comm  # FIXME DTRT with internal comms
 
-        self._orig_axes = orig_axes or self
-        self._target_paths = target_paths or self._default_target_path_per_component()
         self._index_exprs = index_exprs or self._default_index_exprs_per_component()
-        # self._layouts = layouts or self._default_layouts()
-        self._layouts = layouts
-        self.unindexed_axes = unindexed_axes or self
-        self.shapeless_target_path = shapeless_target_path
+        self._layout_exprs = layout_exprs or self._default_layout_exprs()
 
     def __getitem__(self, indices):
         from pyop3.distarray.multiarray import IndexExpressionReplacer
         from pyop3.indices.tree import (
             IndexedAxisTree,
             collect_loop_indices,
-            completely_index_axes,
+            index_axes,
             index_tree_from_ellipsis,
         )
 
         if indices is Ellipsis:
-            indices = index_tree_from_ellipsis(self, self.root)
+            indices = index_tree_from_ellipsis(self)
 
         axess = {}
-        for loop_context, indexed_axes in completely_index_axes(
-            # FIXME, I shouldn't be doing setting keep_labels to True
-            # self, indices, keep_labels=True
+        for loop_context, indexed_axes in index_axes(
             self,
             indices,
-            keep_labels=False,
         ).items():
             indexed_axes = indexed_axes.copy(
                 # FIXME
@@ -836,6 +824,9 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
                 for cpt in axis.components
             }
         )
+
+    def _default_layout_exprs(self):
+        return self._default_index_exprs_per_component()
 
     @property
     def layout_exprs(self):
@@ -901,13 +892,12 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
 
     @property
     def layouts(self):
-        if self._layouts is None:
-            self._layouts = self._default_layouts()
-        return self._layouts
+        # FIXME function not property
+        return self._default_layouts()
 
     def _default_layouts(self):
         # ick
-        return self.orig_axes.set_up()
+        return self.set_up()
 
     def find_part(self, label):
         return self._parts_by_label[label]
@@ -977,6 +967,22 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
     def path_with_nodes(self, axis: Axis, component: AxisComponent, **kwargs):
         cpt_label = _as_axis_component_label(component)
         return super().path_with_nodes(axis, cpt_label, **kwargs)
+
+    # bad name
+    def detailed_path(self, path):
+        node = self._node_from_path(path)
+        if node is None:
+            return pmap()
+        else:
+            return self.path_with_nodes(*node, and_components=True)
+
+    def is_valid_path(self, path):
+        try:
+            self._node_from_path(path)
+        except:
+            return False
+        finally:
+            return True
 
     @property
     def leaf(self):

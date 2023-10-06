@@ -702,7 +702,8 @@ def _collect_datamap(index, *subdatamaps, itree):
     return index.datamap | merge_dicts(subdatamaps)
 
 
-def index_tree_from_ellipsis(axes, current_axis, first_call=True):
+def index_tree_from_ellipsis(axes, current_axis=None, first_call=True):
+    current_axis = current_axis or axes.root
     slice_components = []
     subroots = []
     subtrees = []
@@ -867,18 +868,18 @@ def _(local_index: LocalLoopIndex, *args, loop_indices, **kwargs):
 
 
 @collect_shape_index_callback.register
-def _(slice_: Slice, *, prev_axes, keep_labels, **kwargs):
+def _(slice_: Slice, *, prev_axes, **kwargs):
     components = []
     target_path_per_subslice = []
     index_exprs_per_subslice = []
     layout_exprs_per_subslice = []
 
-    axis_label = slice_.axis if keep_labels else slice_.label
+    axis_label = slice_.label
 
     for subslice in slice_.slices:
         # we are assuming that axes with the same label *must* be identical. They are
         # only allowed to differ in that they have different IDs.
-        cpt_label = subslice.component if keep_labels else subslice.label
+        cpt_label = subslice.label
         target_axis, target_cpt = prev_axes.find_component(
             slice_.axis, subslice.component, also_node=True
         )
@@ -1030,12 +1031,7 @@ def _make_leaf_axis_from_called_map(called_map, prior_target_path, prior_index_e
     return axis, target_path_per_cpt, index_exprs_per_cpt, layout_exprs_per_cpt
 
 
-def index_axes(axes: AxisTree, indices: IndexTree, loop_context, keep_labels):
-    # offsets are always scalar
-    # if isinstance(indexed, CalledAxisTree):
-    #     raise NotImplementedError
-    # return AxisTree()
-
+def _index_axes(axes: AxisTree, indices: IndexTree, loop_context):
     (
         indexed_axes,
         tpaths,
@@ -1046,7 +1042,6 @@ def index_axes(axes: AxisTree, indices: IndexTree, loop_context, keep_labels):
         current_index=indices.root,
         loop_indices=loop_context,
         prev_axes=axes,
-        keep_labels=keep_labels,
     )
 
     if indexed_axes is None:
@@ -1134,7 +1129,219 @@ def _index_axes_rec(
     )
 
 
-def completely_index_axes(orig_axes, indices, keep_labels=False):
+def index_axes(axes, indices):
+    if indices is Ellipsis:
+        indices = index_tree_from_ellipsis(axes)
+
+    # FIXME I have a weird double loop here over loop contexts
+    axis_trees = {}
+    loop_contexts = collect_loop_contexts(indices)
+    if not loop_contexts:
+        loop_contexts = [pmap()]
+    for loop_context in loop_contexts:
+        # should probably include old_loop_context in this
+        index_forest = as_index_forest(indices, axes=axes)
+
+        assert len(index_forest) > 0
+
+        for index_tree in index_forest:
+            loop_context = index_tree.loop_context
+            (
+                indexed_axes,
+                target_path_per_indexed_cpt,
+                index_exprs_per_indexed_cpt,
+                layout_exprs_per_indexed_cpt,
+            ) = _index_axes(axes, index_tree, loop_context)
+
+            index_exprs, layout_exprs = _compose_bits(
+                axes,
+                indexed_axes,
+                target_path_per_indexed_cpt,
+                index_exprs_per_indexed_cpt,
+                layout_exprs_per_indexed_cpt,
+            )
+
+            breakpoint()
+            # below is old code
+
+            # TODO can I perform some of the composition inside the inner func?
+            # we can drop the None bits here
+
+            # target_path_per_cpt = _compose_target_paths(indexed_axes, target_path_per_indexed_cpt, axes)
+
+            # compose index expressions, this does an *inside* substitution
+            # so the final replace map is target -> f(src)
+            # loop over the original replace map and substitute each value
+
+            # index_exprs_per_cpt = _compose_index_expressions(indexed_axes, index_exprs_per_indexed_cpt, axes, target_path_per_cpt)
+
+            # compose layout expressions, this does an *outside* substitution
+            # so the final replace map is src -> g(target)
+            # loop over the new replace map and substitute each value
+
+            # if indexed_axes.is_empty:
+            #     target_path = target_path_per_indexed_cpt[None]
+            #     target_node_path = orig_axes.unindexed_axes.path_with_nodes(
+            #         *orig_axes.unindexed_axes._node_from_path(target_path),
+            #         and_components=True,
+            #     )
+            #     index_expr_replace_map = index_exprs_per_indexed_cpt[None]
+            #
+            #     target_path_per_cpt = {None: {}}
+            #     index_exprs_per_cpt = {None: {}}
+            #     for target_axis, target_cpt in target_node_path.items():
+            #         target_path_per_cpt[None].update(
+            #             orig_axes.unindexed_axes.target_path_per_component[
+            #                 target_axis.id, target_cpt.label
+            #             ]
+            #         )
+            #
+            #         # do a replacement
+            #         orig_index_exprs = (
+            #             orig_axes.unindexed_axes.index_exprs_per_component[
+            #                 target_axis.id, target_cpt.label
+            #             ]
+            #         )
+            #         for axis_label, index_expr in orig_index_exprs.items():
+            #             new_index_expr = IndexExpressionReplacer(
+            #                 index_expr_replace_map
+            #             )(index_expr)
+            #             index_exprs_per_cpt[None][axis_label] = new_index_expr
+            #
+            #     target_path_per_cpt = pyrsistent.freeze(target_path_per_cpt)
+            #     index_exprs_per_cpt = pyrsistent.freeze(index_exprs_per_cpt)
+            # else:
+            #     # TODO make this a tree traversal combined with the empty case
+            #     (
+            #         target_path_per_cpt,
+            #         index_exprs_per_cpt,
+            #     ) = parse_bits(
+            #         orig_axes,
+            #         indexed_axes,
+            #         target_path_per_indexed_cpt,
+            #         index_exprs_per_indexed_cpt,
+            #     )
+            #
+            # shapeless_target_path = target_path_per_indexed_cpt.get(None, pmap())
+            #
+            # """
+            # I reckon that layouts should map from source -> target expression. This
+            # is the opposite to what we do for index expressions. I think it makes the
+            # substitution make sense.
+            #
+            # Therefore here we must loop over the bits of indexed axes and store a map
+            # for each of those.
+            # """
+            # if indexed_axes.is_empty:
+            #     new_layouts = {pmap(): pmap({pmap(): 0})}
+            # else:
+            #     new_layouts = {}
+            #     for leaf_axis, leaf_cpt in indexed_axes.leaves:
+            #         # this is the opposite to index exprs
+            #         mypath = indexed_axes.path_with_nodes(leaf_axis, leaf_cpt)
+            #         fulltargetpath = {}
+            #         # fulltargetpath.update(target_path_per_cpt[None])
+            #         for myaxis, mycpt in mypath.items():
+            #             fulltargetpath.update(target_path_per_cpt[myaxis.id, mycpt])
+            #         fulltargetpath = pmap(fulltargetpath)
+            #
+            #         layout_replace_map = indexed_axes.layouts[
+            #             indexed_axes.path(leaf_axis, leaf_cpt)
+            #         ]
+            #         new_layout = {}
+            #         for source_axis, source_cpt in indexed_axes.path_with_nodes(
+            #             leaf_axis, leaf_cpt
+            #         ).items():
+            #             for (
+            #                 myaxislabel,
+            #                 mylayoutexpr,
+            #             ) in layout_exprs_per_indexed_cpt.get(
+            #                 (source_axis.id, source_cpt), {}
+            #             ).items():
+            #                 new_layout[source_axis.label] = IndexExpressionReplacer(
+            #                     layout_replace_map
+            #                 )(mylayoutexpr)
+            #
+            #         # now substitute "old" layout expression stuff
+            #         layout_replace_map = orig_axes.layouts[fulltargetpath]
+            #         new_layout2 = {}
+            #         for (
+            #             myaxislabel,
+            #             mylayoutexpr,
+            #         ) in new_layout.items():
+            #             new_layout2[myaxislabel] = IndexExpressionReplacer(
+            #                 layout_replace_map
+            #             )(mylayoutexpr)
+            #
+            #         fulltargetpath2 = {}
+            #         for myaxis, mycpt in mypath.items():
+            #             fulltargetpath2.update(target_path_per_cpt[myaxis.id, mycpt])
+            #         fulltargetpath2 = pmap(fulltargetpath2)
+            #         new_layouts[fulltargetpath2] = new_layout2
+            #     new_layouts = pmap(new_layouts)
+
+            # breakpoint()
+            axis_trees[loop_context] = indexed_axes.copy(
+                index_exprs=index_exprs,
+                layout_exprs=layout_exprs,
+            )
+    return axis_trees
+
+
+def _compose_target_paths(
+    iaxes,
+    itarget_paths,
+    orig_axes,
+    iaxis=None,
+    orig_path=pmap(),
+    orig_visited=frozenset(),
+):
+    iaxis = iaxis or iaxes.root
+    target_paths_per_icpt = {}
+    for icpt in iaxis.components:
+        new_visited = orig_visited
+        target_paths = {}
+        new_orig_path = orig_path | itarget_paths[iaxis.id, icpt.label]
+        if orig_axes.is_valid_path(new_orig_path):
+            for orig_axis, orig_cpt in orig_axes.detailed_path(new_orig_path).items():
+                if orig_axis.id in orig_visited:
+                    continue
+                new_visited |= {orig_axis.id}
+
+                target_paths.update(
+                    orig_axes.target_path_per_component[orig_axis.id, orig_cpt.label]
+                )
+        target_paths_per_icpt[iaxis.id, icpt.label] = pmap(target_paths)
+
+        if isubaxis := iaxes.child(iaxis, icpt):
+            target_paths_per_icpt |= _compose_target_paths(
+                iaxes,
+                itarget_paths,
+                orig_axes,
+                iaxis=isubaxis,
+                orig_path=new_orig_path,
+                orig_visited=new_visited,
+            )
+    return pmap(target_paths_per_icpt)
+
+
+def _compose_index_expressions(iaxes, iindex_exprs, axes, target_paths, axis=None):
+    # compose index expressions, this does an *inside* substitution
+    # so the final replace map is target -> f(src)
+    # loop over the original replace map and substitute each value
+    # but drop some bits if indexed out... and final map is per component of the new axtree
+
+    assert False
+
+
+def index_array(orig_axes, indices):
+    """
+    Notes:
+
+        I don't think that I need to do anything with target paths here. I can
+        just substitute the index expressions that I need?
+    """
+    raise NotImplementedError
     if indices is Ellipsis:
         indices = index_tree_from_ellipsis(orig_axes, orig_axes.root)
     # FIXME
@@ -1158,7 +1365,7 @@ def completely_index_axes(orig_axes, indices, keep_labels=False):
                 target_path_per_indexed_cpt,
                 index_exprs_per_indexed_cpt,
                 layout_exprs_per_indexed_cpt,
-            ) = index_axes(orig_axes, index_tree, loop_context, keep_labels=keep_labels)
+            ) = index_axes(orig_axes, index_tree, loop_context)
 
             if indexed_axes.is_empty:
                 target_path = target_path_per_indexed_cpt[None]
@@ -1272,94 +1479,112 @@ def completely_index_axes(orig_axes, indices, keep_labels=False):
     return axis_trees
 
 
-def parse_bits(
-    self,
+def _compose_bits(
+    axes,
     indexed_axes,
-    target_path_per_indexed_component,
-    index_exprs_per_indexed_component,
+    itarget_paths,
+    iindex_exprs,
+    ilayout_exprs,
     *,
-    axis=None,
-    partial_target_path=pmap(),
+    iaxis=None,
+    target_path=pmap(),
     partial_index_exprs=pmap(),
+    partial_layout_exprs=pmap(),
     visited_target_axes=frozenset(),
 ):
     from pyop3.distarray.multiarray import IndexExpressionReplacer
 
-    # TODO should handle here
-    assert not indexed_axes.is_empty, "handled outside"
+    if iaxis is None:
+        target_path |= itarget_paths.get(None, {})
+        # skip these ones
+        visited_target_axes = visited_target_axes.union(target_path.keys())
+        iaxis = indexed_axes.root
 
-    new_target_path_per_cpt = {}
-    new_index_exprs_per_cpt = {}
-    if axis is None:
-        partial_target_path |= target_path_per_indexed_component.get(None, {})
-        partial_index_exprs |= index_exprs_per_indexed_component.get(None, {})
+    index_exprs = {}
+    layout_exprs = {}
 
-    axis = axis or indexed_axes.root
-    for component in axis.components:
-        new_partial_target_path = (
-            partial_target_path
-            | target_path_per_indexed_component.get((axis.id, component.label), {})
+    for icpt in iaxis.components:
+        new_target_path = target_path | itarget_paths.get((iaxis.id, icpt.label), {})
+
+        new_partial_index_exprs = partial_index_exprs | iindex_exprs.get(
+            (iaxis.id, icpt.label), {}
         )
-
-        new_partial_index_exprs = (
-            partial_index_exprs
-            | index_exprs_per_indexed_component.get((axis.id, component.label), {})
-        )
+        new_partial_layout_exprs = dict(partial_layout_exprs)
+        new_partial_layout_exprs[iaxis.id, icpt.label] = ilayout_exprs[
+            (iaxis.id, icpt.label)
+        ]
 
         # if target_path is "complete" then do stuff, else pass responsibility to next func down
-        valid = True
-        try:
-            target_node_path = self.path_with_nodes(
-                *self._node_from_path(new_partial_target_path), and_components=True
-            )
-        except:
-            valid = False
-
-        new_target_path_per_cpt[axis.id, component.label] = {}
-        new_index_exprs_per_cpt[axis.id, component.label] = {}
+        index_exprs[iaxis.id, icpt.label] = {}
+        layout_exprs[iaxis.id, icpt.label] = {}
         new_visited_target_axes = visited_target_axes
-        if valid:
-            for target_axis, target_cpt in target_node_path.items():
-                if target_axis.id in new_visited_target_axes:
-                    continue
-                new_visited_target_axes |= {target_axis.id}
-                new_target_path_per_cpt[axis.id, component.label].update(
-                    self.target_path_per_component[target_axis.id, target_cpt.label]
-                )
+        if axes.is_valid_path(new_target_path):
+            detailed_path = axes.detailed_path(new_target_path)
 
-                # do a replacement
-                orig_index_exprs = self.index_exprs_per_component[
+            for target_axis, target_cpt in detailed_path.items():
+                if target_axis.label in new_visited_target_axes:
+                    continue
+                new_visited_target_axes |= {target_axis.label}
+
+                # do a replacement for index exprs
+                # compose index expressions, this does an *inside* substitution
+                # so the final replace map is target -> f(src)
+                # loop over the original replace map and substitute each value
+                # but drop some bits if indexed out... and final map is per component of the new axtree
+                orig_index_exprs = axes.index_exprs_per_component[
                     target_axis.id, target_cpt.label
                 ]
                 for axis_label, index_expr in orig_index_exprs.items():
                     new_index_expr = IndexExpressionReplacer(new_partial_index_exprs)(
                         index_expr
                     )
-                    new_index_exprs_per_cpt[axis.id, component.label][
-                        axis_label
+                    index_exprs[iaxis.id, icpt.label][
+                        axis_label  # this axis label is the *final* target, unlike the intermediate target called target_axis here
                     ] = new_index_expr
-            # new_partial_target_path = pmap()
             new_partial_index_exprs = pmap()
 
-        if subaxis := indexed_axes.child(axis, component):
-            retval = parse_bits(
-                self,
+            # now do the layout expressions, this is simpler since target path magic isnt needed
+            # compose layout expressions, this does an *outside* substitution
+            # so the final replace map is src -> h(final)
+            # we start with src -> f(intermediate)
+            # and intermediate -> g(final)
+            full_replace_map = merge_dicts(
+                [
+                    axes._layout_exprs[tgt_ax.id, tgt_cpt.label]
+                    for tgt_ax, tgt_cpt in detailed_path.items()
+                ]
+            )
+            for ikey, layout_expr in new_partial_layout_exprs.items():
+                # always 1:1 for layouts
+                mykey, myvalue = just_one(layout_expr.items())
+                mytargetpath = just_one(itarget_paths[ikey].keys())
+                layout_expr_replace_map = {mytargetpath: full_replace_map[mytargetpath]}
+                new_layout_expr = IndexExpressionReplacer(layout_expr_replace_map)(
+                    myvalue
+                )
+                layout_exprs[ikey][mykey] = new_layout_expr
+
+            new_partial_layout_exprs = pmap()
+
+        if subaxis := indexed_axes.child(iaxis, icpt):
+            subindex_exprs, sublayout_exprs = parse_bits(
+                axes,
                 indexed_axes,
                 target_path_per_indexed_component,
                 index_exprs_per_indexed_component,
                 axis=subaxis,
-                partial_target_path=new_partial_target_path,
+                target_path=new_target_path,
                 partial_index_exprs=new_partial_index_exprs,
+                partial_layout_exprs=new_partial_layout_exprs,
                 visited_target_axes=new_visited_target_axes,
             )
-            new_target_path_per_cpt.update(retval[0])
-            new_index_exprs_per_cpt.update(retval[1])
+            index_exprs.update(subindex_exprs)
+            layout_exprs.update(sublayout_exprs)
 
         else:
-            assert valid
-            # assert not new_partial_target_path
             assert not new_partial_index_exprs
+            assert not new_partial_layout_exprs
     return (
-        new_target_path_per_cpt,
-        new_index_exprs_per_cpt,
+        pmap(index_exprs),
+        pmap(layout_exprs),
     )

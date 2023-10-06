@@ -96,7 +96,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
             else:
                 self.layouts = {pmap(): axes.layouts}
         else:
-            self.layouts = layouts
+            self.layouts = layouts or axes.layouts
 
         # reset index exprs if we are creating something using an indexed axis tree
         # i.e. MultiArray(axes[::2], ...). This does not apply when we index the array
@@ -116,14 +116,15 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
                     trees[loop_context] = tree
                 axes = IndexedAxisTree(trees, axes.required_loop_indices)
             else:
-                axes = axes.copy(
-                    index_exprs=None,
-                    target_paths=axes._target_paths,
-                    # target_paths=None,
-                    layouts=axes._layouts,
-                    orig_axes=axes.orig_axes,
-                    unindexed_axes=axes.unindexed_axes,
-                )
+                # axes = axes.copy(
+                #     index_exprs=None,
+                #     target_paths=axes._target_paths,
+                #     # target_paths=None,
+                #     layouts=axes._layouts,
+                #     orig_axes=axes.orig_axes,
+                #     unindexed_axes=axes.unindexed_axes,
+                # )
+                pass
         else:
             pass
 
@@ -366,7 +367,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
 
     # maybe I could check types here and use instead of get_value?
     def __getitem__(self, indices):
-        from pyop3.indices.tree import IndexedAxisTree, completely_index_axes
+        from pyop3.indices.tree import IndexedAxisTree  # , completely_index_axes
 
         # in this case we do not modify the layout expression
         if isinstance(self.axes, IndexedAxisTree):
