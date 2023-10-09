@@ -936,10 +936,9 @@ class AxisTree(StrictLabelledTree, ContextFreeLoopIterable):
     def is_valid_path(self, path):
         try:
             self._node_from_path(path)
+            return True
         except:
             return False
-        finally:
-            return True
 
     @property
     def leaf(self):

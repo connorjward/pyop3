@@ -1496,8 +1496,8 @@ def _compose_bits(
     index_exprs_per_leaf = {}
     layout_exprs_per_leaf = {}
     target_path_per_cpt = {}
-    index_exprs = {}
-    layout_exprs = {}
+    index_exprs = collections.defaultdict(dict)
+    layout_exprs = collections.defaultdict(dict)
 
     for icpt in iaxis.components:
         new_target_path_acc = target_path_acc
@@ -1515,8 +1515,8 @@ def _compose_bits(
         ]
 
         # if target_path is "complete" then do stuff, else pass responsibility to next func down
-        index_exprs[iaxis.id, icpt.label] = {}
-        layout_exprs[iaxis.id, icpt.label] = {}
+        # index_exprs[iaxis.id, icpt.label] = {}
+        # layout_exprs[iaxis.id, icpt.label] = {}
         new_visited_target_axes = visited_target_axes
         if axes.is_valid_path(new_target_path):
             detailed_path = axes.detailed_path(new_target_path)
@@ -1579,13 +1579,20 @@ def _compose_bits(
 
             new_partial_layout_exprs = pmap()
 
-        if subaxis := indexed_axes.child(iaxis, icpt):
-            subtarget_path, subindex_exprs, sublayout_exprs, leafdata = parse_bits(
+        if isubaxis := indexed_axes.child(iaxis, icpt):
+            (
+                subtarget_path,
+                subindex_exprs,
+                sublayout_exprs,
+                leaf_target_path,
+                leaf_index_exprs,
+            ) = _compose_bits(
                 axes,
                 indexed_axes,
-                target_path_per_indexed_component,
-                index_exprs_per_indexed_component,
-                axis=subaxis,
+                itarget_paths,
+                iindex_exprs,
+                ilayout_exprs,
+                iaxis=isubaxis,
                 target_path=new_target_path,
                 partial_index_exprs=new_partial_index_exprs,
                 partial_layout_exprs=new_partial_layout_exprs,
@@ -1596,7 +1603,8 @@ def _compose_bits(
             target_path_per_cpt.update(subtarget_path)
             index_exprs.update(subindex_exprs)
             layout_exprs.update(sublayout_exprs)
-            target_path_per_leaf.update(leafdata)
+            target_path_per_leaf.update(leaf_target_path)
+            index_exprs_per_leaf.update(leaf_index_exprs)
 
         else:
             assert not new_partial_index_exprs
@@ -1608,8 +1616,9 @@ def _compose_bits(
     # breakpoint()
     return (
         freeze(target_path_per_cpt),
-        freeze(index_exprs),
-        freeze(layout_exprs),
+        # bug, should work
+        freeze(dict(index_exprs)),
+        freeze(dict(layout_exprs)),
         freeze(target_path_per_leaf),
         freeze(index_exprs_per_leaf),
     )
