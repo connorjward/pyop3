@@ -1135,7 +1135,7 @@ def index_axes(axes, indices):
             layout_exprs_per_indexed_cpt,
         ) = _index_axes(axes, index_tree, loop_context=pmap())
 
-        target_paths, index_exprs, layout_exprs, target_path_per_leaf = _compose_bits(
+        target_paths, index_exprs, layout_exprs, _, _ = _compose_bits(
             axes,
             indexed_axes,
             target_path_per_indexed_cpt,
@@ -1158,7 +1158,7 @@ def index_axes(axes, indices):
             layout_exprs_per_indexed_cpt,
         ) = _index_axes(axes, index_tree, loop_context)
 
-        target_paths, index_exprs, layout_exprs = _compose_bits(
+        target_paths, index_exprs, layout_exprs, _, _ = _compose_bits(
             axes,
             indexed_axes,
             target_path_per_indexed_cpt,
