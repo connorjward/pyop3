@@ -24,7 +24,11 @@ from pyop3.axes import (
     ContextSensitive,
     LoopIterable,
 )
-from pyop3.axes.tree import ContextSensitiveAxisTree, ContextSensitiveLoopIterable
+from pyop3.axes.tree import (
+    ContextSensitiveAxisTree,
+    ContextSensitiveLoopIterable,
+    IndexedAxisTree,
+)
 from pyop3.dtypes import IntType
 from pyop3.tree import LabelledNode, LabelledTree, postvisit
 from pyop3.utils import (
@@ -386,47 +390,6 @@ class Slice(Index):
         return merge_dicts([s.datamap for s in self.slices])
 
 
-# move with other axis trees
-# A better name for this is "ContextSensitiveAxisTree"
-class IndexedAxisTree(ContextSensitive):
-    def __init__(self, axis_trees, required_loop_indices):
-        assert False, "old code"
-        self.axis_trees = pmap(axis_trees)
-        self.required_loop_indices = required_loop_indices
-
-    def __getitem__(self, indices):
-        new_axis_trees = {}
-        for loop_context, axis_tree in self.axis_trees.items():
-            context_sensitive_axes = axis_tree[indices]
-            for (
-                new_loop_context,
-                ctx_free_axes,
-            ) in context_sensitive_axes.context_map.items():
-                new_axis_trees[loop_context | new_loop_context] = ctx_free_axes
-
-        loop_indices = collect_loop_indices(indices)
-
-        return IndexedAxisTree(new_axis_trees, loop_indices)
-
-    @functools.cached_property
-    def size(self):
-        if len(self.axis_trees) == 1:
-            return just_one(self.axis_trees.values()).size
-        else:
-            raise RuntimeError("multiple loop contexts exist, size may vary")
-
-    @property
-    def context_map(self):
-        return self.axis_trees
-
-    def index(self):
-        return LoopIndex(self)
-
-    @functools.cached_property
-    def datamap(self):
-        return merge_dicts(axis_tree.datamap for axis_tree in self.axis_trees.values())
-
-
 @functools.singledispatch
 def apply_loop_context(arg, loop_context, *, axes, path):
     from pyop3.distarray import MultiArray
@@ -578,7 +541,7 @@ def _(arg: LocalLoopIndex):
 
 @collect_loop_contexts.register
 def _(arg: LoopIndex, local=False):
-    if isinstance(arg.iterset, IndexedAxisTree):
+    if False:  # isinstance(arg.iterset, IndexedAxisTree):
         contexts = []
         for loop_context, axis_tree in arg.iterset.axis_trees.items():
             extra_source_context = {}
@@ -601,7 +564,7 @@ def _(arg: LoopIndex, local=False):
             else:
                 contexts.append(loop_context | {arg: pmap(extracontext)})
         return tuple(contexts)
-    elif isinstance(arg.iterset, AxisTree):
+    elif isinstance(arg.iterset, (AxisTree, IndexedAxisTree)):
         iterset = arg.iterset
         contexts = []
         for leaf in iterset.leaves:
@@ -813,7 +776,7 @@ def _(loop_index: LoopIndex, *, loop_indices, **kwargs):
     # breakpoint()
     path = loop_indices[loop_index]
 
-    if isinstance(loop_index.iterset, IndexedAxisTree):
+    if False:  # isinstance(loop_index.iterset, IndexedAxisTree):
         iterset = just_one(loop_index.iterset.axis_trees.values())
     else:
         iterset = loop_index.iterset
@@ -1143,10 +1106,11 @@ def index_axes(axes, indices):
             layout_exprs_per_indexed_cpt,
         )
         # breakpoint()
-        return indexed_axes.copy(
-            target_paths=target_paths,
-            index_exprs=index_exprs,
-            layout_exprs=layout_exprs,
+        return IndexedAxisTree(
+            indexed_axes,
+            target_paths,
+            index_exprs,
+            layout_exprs,
         )
 
     for index_tree in as_index_forest(indices, axes=axes):
@@ -1171,130 +1135,6 @@ def index_axes(axes, indices):
             index_exprs=index_exprs,
             layout_exprs=layout_exprs,
         )
-
-        # below is old code
-
-        # TODO can I perform some of the composition inside the inner func?
-        # we can drop the None bits here
-
-        # target_path_per_cpt = _compose_target_paths(indexed_axes, target_path_per_indexed_cpt, axes)
-
-        # compose index expressions, this does an *inside* substitution
-        # so the final replace map is target -> f(src)
-        # loop over the original replace map and substitute each value
-
-        # index_exprs_per_cpt = _compose_index_expressions(indexed_axes, index_exprs_per_indexed_cpt, axes, target_path_per_cpt)
-
-        # compose layout expressions, this does an *outside* substitution
-        # so the final replace map is src -> g(target)
-        # loop over the new replace map and substitute each value
-
-        # if indexed_axes.is_empty:
-        #     target_path = target_path_per_indexed_cpt[None]
-        #     target_node_path = orig_axes.unindexed_axes.path_with_nodes(
-        #         *orig_axes.unindexed_axes._node_from_path(target_path),
-        #         and_components=True,
-        #     )
-        #     index_expr_replace_map = index_exprs_per_indexed_cpt[None]
-        #
-        #     target_path_per_cpt = {None: {}}
-        #     index_exprs_per_cpt = {None: {}}
-        #     for target_axis, target_cpt in target_node_path.items():
-        #         target_path_per_cpt[None].update(
-        #             orig_axes.unindexed_axes.target_path_per_component[
-        #                 target_axis.id, target_cpt.label
-        #             ]
-        #         )
-        #
-        #         # do a replacement
-        #         orig_index_exprs = (
-        #             orig_axes.unindexed_axes.index_exprs_per_component[
-        #                 target_axis.id, target_cpt.label
-        #             ]
-        #         )
-        #         for axis_label, index_expr in orig_index_exprs.items():
-        #             new_index_expr = IndexExpressionReplacer(
-        #                 index_expr_replace_map
-        #             )(index_expr)
-        #             index_exprs_per_cpt[None][axis_label] = new_index_expr
-        #
-        #     target_path_per_cpt = pyrsistent.freeze(target_path_per_cpt)
-        #     index_exprs_per_cpt = pyrsistent.freeze(index_exprs_per_cpt)
-        # else:
-        #     # TODO make this a tree traversal combined with the empty case
-        #     (
-        #         target_path_per_cpt,
-        #         index_exprs_per_cpt,
-        #     ) = parse_bits(
-        #         orig_axes,
-        #         indexed_axes,
-        #         target_path_per_indexed_cpt,
-        #         index_exprs_per_indexed_cpt,
-        #     )
-        #
-        # shapeless_target_path = target_path_per_indexed_cpt.get(None, pmap())
-        #
-        # """
-        # I reckon that layouts should map from source -> target expression. This
-        # is the opposite to what we do for index expressions. I think it makes the
-        # substitution make sense.
-        #
-        # Therefore here we must loop over the bits of indexed axes and store a map
-        # for each of those.
-        # """
-        # if indexed_axes.is_empty:
-        #     new_layouts = {pmap(): pmap({pmap(): 0})}
-        # else:
-        #     new_layouts = {}
-        #     for leaf_axis, leaf_cpt in indexed_axes.leaves:
-        #         # this is the opposite to index exprs
-        #         mypath = indexed_axes.path_with_nodes(leaf_axis, leaf_cpt)
-        #         fulltargetpath = {}
-        #         # fulltargetpath.update(target_path_per_cpt[None])
-        #         for myaxis, mycpt in mypath.items():
-        #             fulltargetpath.update(target_path_per_cpt[myaxis.id, mycpt])
-        #         fulltargetpath = pmap(fulltargetpath)
-        #
-        #         layout_replace_map = indexed_axes.layouts[
-        #             indexed_axes.path(leaf_axis, leaf_cpt)
-        #         ]
-        #         new_layout = {}
-        #         for source_axis, source_cpt in indexed_axes.path_with_nodes(
-        #             leaf_axis, leaf_cpt
-        #         ).items():
-        #             for (
-        #                 myaxislabel,
-        #                 mylayoutexpr,
-        #             ) in layout_exprs_per_indexed_cpt.get(
-        #                 (source_axis.id, source_cpt), {}
-        #             ).items():
-        #                 new_layout[source_axis.label] = IndexExpressionReplacer(
-        #                     layout_replace_map
-        #                 )(mylayoutexpr)
-        #
-        #         # now substitute "old" layout expression stuff
-        #         layout_replace_map = orig_axes.layouts[fulltargetpath]
-        #         new_layout2 = {}
-        #         for (
-        #             myaxislabel,
-        #             mylayoutexpr,
-        #         ) in new_layout.items():
-        #             new_layout2[myaxislabel] = IndexExpressionReplacer(
-        #                 layout_replace_map
-        #             )(mylayoutexpr)
-        #
-        #         fulltargetpath2 = {}
-        #         for myaxis, mycpt in mypath.items():
-        #             fulltargetpath2.update(target_path_per_cpt[myaxis.id, mycpt])
-        #         fulltargetpath2 = pmap(fulltargetpath2)
-        #         new_layouts[fulltargetpath2] = new_layout2
-        #     new_layouts = pmap(new_layouts)
-
-        # breakpoint()
-        # axis_trees[loop_context] = indexed_axes.copy(
-        #     index_exprs=index_exprs,
-        #     layout_exprs=layout_exprs,
-        # )
     return ContextSensitiveAxisTree(axis_trees)
 
 

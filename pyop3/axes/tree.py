@@ -20,7 +20,7 @@ import pyrsistent
 import pytools
 from mpi4py import MPI
 from petsc4py import PETSc
-from pyrsistent import pmap
+from pyrsistent import freeze, pmap
 
 from pyop3 import utils
 from pyop3.dtypes import IntType, PointerType, get_mpi_dtype
@@ -722,17 +722,13 @@ class AxisVariable(pym.primitives.Variable):
 
 class AxisTree(StrictLabelledTree, ContextFreeLoopIterable):
     # FIXME this causes a recursive hash error...
-    # fields = StrictLabelledTree.fields | {"target_paths", "index_exprs", "layout_exprs", "orig_axes", "sf", "shared_sf", "comm"}
-    fields = StrictLabelledTree.fields | {"target_paths", "index_exprs", "layout_exprs"}
+    fields = StrictLabelledTree.fields | {"sf", "shared_sf", "comm"}
 
     def __init__(
         self,
         root: Optional[MultiAxis] = None,
         parent_to_children: Optional[Dict] = None,
         *,
-        target_paths=None,
-        index_exprs=None,
-        layout_exprs=None,
         sf=None,
         shared_sf=None,
         comm=None,
@@ -743,11 +739,11 @@ class AxisTree(StrictLabelledTree, ContextFreeLoopIterable):
         self.shared_sf = shared_sf
         self.comm = comm  # FIXME DTRT with internal comms
 
-        self._target_paths = target_paths or self._default_target_path_per_component()
-        self._index_exprs = index_exprs or self._default_index_exprs_per_component()
-        self._layout_exprs = layout_exprs or self._default_layout_exprs()
+        self._target_paths = self._default_target_path_per_component()
+        self._index_exprs = self._default_index_exprs_per_component()
+        self._layout_exprs = self._default_layout_exprs()
 
-    def __getitem__(self, indices) -> Union[AxisTree, ContextSensitiveAxisTree]:
+    def __getitem__(self, indices) -> Union[IndexedAxisTree, ContextSensitiveAxisTree]:
         from pyop3.indices.tree import index_axes
 
         return index_axes(self, indices)
@@ -757,11 +753,8 @@ class AxisTree(StrictLabelledTree, ContextFreeLoopIterable):
         return pmap({pmap(): self})
 
     def index(self):
-        # cyclic import
         from pyop3.indices import LoopIndex
 
-        # TODO this would be nice but it breaks some layout stuff
-        # return LoopIndex(self[...])
         return LoopIndex(self)
 
     @property
@@ -870,9 +863,7 @@ class AxisTree(StrictLabelledTree, ContextFreeLoopIterable):
         if allow_unused:
             path = _trim_path(self, path)
 
-        offset = 0
-        for layout_expr in self.layouts[path].values():
-            offset += pym.evaluate(layout_expr, (path, indices), ExpressionEvaluator)
+        offset = pym.evaluate(self.layouts[path], (path, indices), ExpressionEvaluator)
         return strict_int(offset)
 
     # old alias
@@ -1057,6 +1048,83 @@ class AxisTree(StrictLabelledTree, ContextFreeLoopIterable):
 
         warnings.warn("deprecated")
         return self.add_node(subaxis, *loc)
+
+
+# TODO: Inherit things from AxisTree
+class IndexedAxisTree(ContextFreeLoopIterable, pytools.ImmutableRecord):
+    fields = {"axes", "target_paths", "index_exprs", "layout_exprs"}
+
+    def __init__(self, axes, target_paths, index_exprs, layout_exprs):
+        self.axes = axes
+        self.target_paths = target_paths
+        self.index_exprs = index_exprs
+        self.layout_exprs = layout_exprs
+
+    def __getitem__(self, indices):
+        from pyop3.indices.tree import index_axes
+
+        return index_axes(self, indices)
+
+    def index(self) -> LoopIndex:
+        from pyop3.indices import LoopIndex
+
+        return LoopIndex(self)
+
+    # TODO Is this a property? _default_layouts?
+    @property
+    def layouts(self):
+        return self.axes.layouts
+
+    @property
+    def datamap(self):
+        datamap_ = self.axes.datamap
+        for index_exprs in self.index_exprs.values():
+            for index_expr in index_exprs.values():
+                for array in MultiArrayCollector()(index_expr):
+                    datamap_.update(array.datamap)
+        for layout_exprs in self.layout_exprs.values():
+            for layout_expr in layout_exprs.values():
+                for array in MultiArrayCollector()(layout_expr):
+                    datamap_.update(array.datamap)
+        return freeze(datamap_)
+
+    @property
+    def size(self):
+        return self.axes.size
+
+    @property
+    def alloc_size(self):
+        return self.axes.alloc_size
+
+    @property
+    def root(self):
+        return self.axes.root
+
+    @property
+    def leaves(self):
+        return self.axes.leaves
+
+    def child(self, axis, component):
+        return self.axes.child(axis, component)
+
+    def path(self, axis, component):
+        return self.axes.path(axis, component)
+
+    def path_with_nodes(self, axis, component, **kwargs):
+        return self.axes.path_with_nodes(axis, component, **kwargs)
+
+    @property
+    def is_empty(self):
+        return self.axes.is_empty
+
+    ### deprecated aliases
+    @property
+    def target_path_per_component(self):
+        return self.target_paths
+
+    @property
+    def index_exprs_per_component(self):
+        return self.index_exprs
 
 
 class ContextSensitiveAxisTree(ContextSensitiveLoopIterable):

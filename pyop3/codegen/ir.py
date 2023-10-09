@@ -787,7 +787,7 @@ def make_temp_expr(assignment, path, jnames, ctx):
     in the assignment.
 
     """
-    layout = assignment.temporary.axes.layouts[path]
+    layout = assignment.temporary.layouts[path]
     temp_offset = make_offset_expr(
         layout,
         jnames,
