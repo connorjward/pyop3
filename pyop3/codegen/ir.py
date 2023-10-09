@@ -17,11 +17,12 @@ import loopy.symbolic
 import numpy as np
 import pymbolic as pym
 import pytools
-from pyrsistent import pmap
+from pyrsistent import freeze, pmap
 
 from pyop3 import utils
 from pyop3.axes import Axis, AxisComponent, AxisTree, AxisVariable
 from pyop3.distarray import MultiArray
+from pyop3.distarray.multiarray import ContextSensitiveMultiArray
 from pyop3.dtypes import IntType, PointerType
 from pyop3.indices import (
     AffineMapComponent,
@@ -403,8 +404,8 @@ def parse_loop_properly_this_time(
                 )
             else:
                 # dont emit expressions for shapeless bits
-                for axis_label in axes.shapeless_target_path:
-                    new_jname_replace_map = new_jname_replace_map.remove(axis_label)
+                # for axis_label in axes.shapeless_target_path:
+                #     new_jname_replace_map = new_jname_replace_map.remove(axis_label)
 
                 for stmt in loop.statements:
                     _compile(
@@ -449,13 +450,10 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
         #         "Need to handle indices to create temp shape differently"
         #     )
 
-        loop_context = {}
-        for loop_index, (path, _) in loop_indices.items():
-            loop_context[loop_index] = path
-        loop_context = pmap(loop_context)
+        loop_context = context_from_indices(loop_indices)
 
-        if isinstance(arg, MultiArray):
-            axes = arg.axes.with_context(loop_context).copy(
+        if isinstance(arg, (MultiArray, ContextSensitiveMultiArray)):
+            axes = arg.with_context(loop_context).axes.copy(
                 index_exprs=None,
             )
         else:
@@ -577,38 +575,41 @@ def build_assignment(
 
     # get the right index tree given the loop context
     loop_context = {}
-    for loop_index, (path, _) in loop_indices.items():
+    jname_replace_map = {}
+    for loop_index, (path, jnames) in loop_indices.items():
         loop_context[loop_index] = path
-    loop_context = pmap(loop_context)
+        jname_replace_map.update(jnames)
+    loop_context = freeze(loop_context)
+    jname_replace_map = freeze(jname_replace_map)
 
-    axes = assignment.array.axes.with_context(loop_context)
-    minimal_context = assignment.array.axes.filter_context(loop_context)
+    axes = assignment.array.with_context(loop_context).axes
+    # minimal_context = assignment.array.filter_context(loop_context)
 
     # filter the loop indices, we don't want to have entries for loop indices that aren't
     # used in the indexing
-    new_indices = {}
-    if isinstance(assignment.array.axes, IndexedAxisTree):
-        for loop_index, value in loop_indices.items():
-            if loop_index in assignment.array.axes.required_loop_indices:
-                new_indices[loop_index] = value
-    new_indices = pmap(new_indices)
+    # new_indices = {}
+    # if isinstance(assignment.array, ContextSensitiveMultiArray):
+    #     for loop_index, value in loop_indices.items():
+    #         if loop_index in assignment.array.axes.required_loop_indices:
+    #             new_indices[loop_index] = value
+    # new_indices = pmap(new_indices)
 
     # iname_replace_map = {}
-    jname_replace_map = {}
-    for _, jnames in new_indices.values():
-        # if any(k in iname_replace_map for k in inames):
-        #     assert False
-        if any(k in jname_replace_map for k in jnames):
-            assert False
-        # iname_replace_map.update(inames)
-        jname_replace_map.update(jnames)
-    # iname_replace_map = pmap(iname_replace_map)
-    jname_replace_map = pmap(jname_replace_map)
+    # jname_replace_map = {}
+    # for _, jnames in new_indices.values():
+    #     # if any(k in iname_replace_map for k in inames):
+    #     #     assert False
+    #     if any(k in jname_replace_map for k in jnames):
+    #         assert False
+    #     # iname_replace_map.update(inames)
+    #     jname_replace_map.update(jnames)
+    # # iname_replace_map = pmap(iname_replace_map)
+    # jname_replace_map = pmap(jname_replace_map)
 
     parse_assignment_properly_this_time(
         assignment,
         axes,
-        new_indices,
+        loop_indices,
         codegen_ctx,
         # iname_replace_map=iname_replace_map,
         iname_replace_map=jname_replace_map,
@@ -738,15 +739,16 @@ def add_leaf_assignment(
 ):
     from pyop3.distarray.multiarray import IndexExpressionReplacer
 
-    if isinstance(assignment.array, MultiArray):
+    context = context_from_indices(loop_indices)
+
+    if isinstance(assignment.array, (MultiArray, ContextSensitiveMultiArray)):
         array_expr = make_array_expr(
             assignment,
-            assignment.array.layouts[pmap()][target_path],
+            assignment.array.with_context(context).layouts[source_path],
             target_path,
             iname_replace_map | jname_replace_map,
             codegen_context,
         )
-        print(array_expr)
     else:
         assert isinstance(assignment.array, Offset)
         array_expr = make_offset_expr(
@@ -963,10 +965,7 @@ def make_offset_expr(
     jname_replace_map,
     codegen_context,
 ):
-    expr = 0
-    for axis_label, layout_expr in layouts.items():
-        jname_expr = JnameSubstitutor(jname_replace_map, codegen_context)(layout_expr)
-        expr += jname_expr
+    expr = JnameSubstitutor(jname_replace_map, codegen_context)(layouts)
 
     # if expr == ():
     #     expr = 0
@@ -1047,3 +1046,10 @@ def find_axis(axes, path, target, current_axis=None):
         if not subaxis:
             assert False, "oops"
         return find_axis(axes, path, target, subaxis)
+
+
+def context_from_indices(loop_indices):
+    loop_context = {}
+    for loop_index, (path, _) in loop_indices.items():
+        loop_context[loop_index] = path
+    return freeze(loop_context)

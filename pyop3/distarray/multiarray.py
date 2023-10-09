@@ -14,10 +14,10 @@ import pymbolic as pym
 import pytools
 from mpi4py import MPI
 from petsc4py import PETSc
-from pyrsistent import pmap
+from pyrsistent import freeze, pmap
 
 from pyop3 import utils
-from pyop3.axes import Axis, AxisComponent, AxisTree, as_axis_tree
+from pyop3.axes import Axis, AxisComponent, AxisTree, ContextSensitive, as_axis_tree
 from pyop3.axes.tree import MultiArrayCollector  # definitely should be in this file
 from pyop3.distarray.base import DistributedArray
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
@@ -62,7 +62,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
         "data",
         "max_value",
         "sf",
-        "indicess",
+        "layouts",
     }
 
     mapper_method = sys.intern("map_multi_array")
@@ -72,7 +72,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
 
     def __init__(
         self,
-        axes,
+        axes: AxisTree,
         dtype=None,
         *,
         name: str = None,
@@ -80,55 +80,17 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
         data=None,
         max_value=None,
         sf=None,
-        indicess=(),
-        from_index=False,
         layouts=None,
     ):
         if name and prefix:
             raise ValueError("Can only specify one of name and prefix")
         axes = as_axis_tree(axes)
 
-        # save this here as we change what axes is if we index this.
-        if not from_index:
-            assert layouts is None
-            if isinstance(axes, IndexedAxisTree):
-                self.layouts = {ctx: ax.layouts for ctx, ax in axes.axis_trees.items()}
-            else:
-                self.layouts = {pmap(): axes.layouts}
-        else:
-            self.layouts = layouts or axes.layouts
+        if not isinstance(axes, AxisTree):
+            # must be context-free
+            raise TypeError()
 
-        # reset index exprs if we are creating something using an indexed axis tree
-        # i.e. MultiArray(axes[::2], ...). This does not apply when we index the array
-        # itself (hence `from_index`).
-        if not from_index:
-            if isinstance(axes, IndexedAxisTree):
-                trees = {}
-                for loop_context, tree in axes.axis_trees.items():
-                    tree = tree.copy(
-                        index_exprs=None,
-                        target_paths=tree._target_paths,
-                        # target_paths=None,
-                        layouts=tree._layouts,
-                        orig_axes=tree.orig_axes,
-                        unindexed_axes=tree.unindexed_axes,
-                    )
-                    trees[loop_context] = tree
-                axes = IndexedAxisTree(trees, axes.required_loop_indices)
-            else:
-                # axes = axes.copy(
-                #     index_exprs=None,
-                #     target_paths=axes._target_paths,
-                #     # target_paths=None,
-                #     layouts=axes._layouts,
-                #     orig_axes=axes.orig_axes,
-                #     unindexed_axes=axes.unindexed_axes,
-                # )
-                pass
-        else:
-            pass
-
-        # breakpoint()
+        self.layouts = layouts or axes.layouts
 
         if isinstance(data, np.ndarray):
             if dtype:
@@ -156,8 +118,6 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
 
         self._data = data
         self.dtype = dtype
-
-        self.indicess = indicess
 
         self.axes = axes
 
@@ -199,25 +159,14 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
 
     @functools.cached_property
     def datamap(self) -> dict[str:DistributedArray]:
-        datamap = {self.name: self}
-        datamap.update(self.axes.datamap)
-        # never used?
-        datamap.update(
-            merge_dicts([idx.datamap for idxs in self.indicess for idx in idxs])
-        )
-
-        datamap.update(
-            merge_dicts(
-                [
-                    marray.datamap
-                    for layout_per_ctx in self.layouts.values()
-                    for layout_map in layout_per_ctx.values()
-                    for layout_expr in layout_map.values()
-                    for marray in MultiArrayCollector()(layout_expr)
-                ]
-            )
-        )
-        return datamap
+        datamap_ = {self.name: self}
+        datamap_.update(self.axes.datamap)
+        for layout_expr in self.layouts.values():
+            if isinstance(layout_expr, pym.primitives.NaN):
+                continue
+            for array in MultiArrayCollector()(layout_expr):
+                datamap_.update(array.datamap)
+        return freeze(datamap_)
 
     @property
     def alloc_size(self):
@@ -365,47 +314,136 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
     def set_value(self, path, indices, value):
         self.data[self.axes.get_offset(path, indices)] = value
 
-    # maybe I could check types here and use instead of get_value?
-    def __getitem__(self, indices):
-        from pyop3.indices.tree import IndexedAxisTree  # , completely_index_axes
+    def __getitem__(self, indices) -> Union[MultiArray, ContextSensitiveMultiArray]:
+        from pyop3.indices.tree import (
+            _compose_bits,
+            _index_axes,
+            as_index_tree,
+            collect_loop_contexts,
+            index_axes,
+        )
+
+        loop_contexts = collect_loop_contexts(indices)
+        if not loop_contexts:
+            (
+                indexed_axes,
+                target_paths_per_indexed_cpt,
+                index_exprs_per_indexed_cpt,
+                layout_exprs_per_indexed_cpt,
+            ) = _index_axes(self.axes, indices, pmap())
+            target_paths, index_exprs, layout_exprs = _compose_bits(
+                self.axes,
+                indexed_axes,
+                target_path_per_indexed_cpt,
+                index_exprs_per_indexed_cpt,
+                layout_exprs_per_indexed_cpt,
+            )
+
+            new_axes = indexed_axes.copy(
+                target_paths=target_paths,
+                index_exprs=index_exprs,
+                layout_exprs=layout_exprs,
+            )
+
+            raise NotImplementedError
+            new_layouts = IndexExpressionReplacer(leaf_index_exprs)(NotImplemented)
+            return self.copy(axes=new_axes, layouts=new_layouts)
+
+        array_per_context = {}
+        for index_tree in as_index_forest(indices, axes=self.axes):
+            loop_context = index_tree.loop_context
+            (
+                indexed_axes,
+                target_path_per_indexed_cpt,
+                index_exprs_per_indexed_cpt,
+                layout_exprs_per_indexed_cpt,
+            ) = _index_axes(self.axes, index_tree, loop_context)
+
+            (
+                target_paths,
+                index_exprs,
+                layout_exprs,
+                leaf_target_paths,
+                leaf_index_exprs,
+            ) = _compose_bits(
+                self.axes,
+                indexed_axes,
+                target_path_per_indexed_cpt,
+                index_exprs_per_indexed_cpt,
+                layout_exprs_per_indexed_cpt,
+            )
+
+            new_axes = indexed_axes.copy(
+                target_paths=target_paths,
+                index_exprs=index_exprs,
+                layout_exprs=layout_exprs,
+            )
+
+            # replace layout
+            if indexed_axes.is_empty:
+                new_layouts = {}
+                orig_path = leaf_target_paths[None]
+                new_path = pmap()
+
+                orig_layout = self.layouts[orig_path]
+                new_layout = IndexExpressionReplacer(leaf_index_exprs[None])(
+                    orig_layout
+                )
+                new_layouts[new_path] = new_layout
+            else:
+                new_layouts = {}
+                for leaf_axis, leaf_cpt in indexed_axes.leaves:
+                    orig_path = leaf_target_paths[leaf_axis.id, leaf_cpt]
+                    new_path = indexed_axes.path(leaf_axis, leaf_cpt)
+
+                    orig_layout = self.layouts[orig_path]
+                    new_layout = IndexExpressionReplacer(
+                        leaf_index_exprs[leaf_axis.id, leaf_cpt]
+                    )(orig_layout)
+                    new_layouts[new_path] = new_layout
+
+            array_per_context[loop_context] = self.copy(
+                axes=new_axes, layouts=new_layouts
+            )
+        return ContextSensitiveMultiArray(array_per_context)
 
         # in this case we do not modify the layout expression
-        if isinstance(self.axes, IndexedAxisTree):
-            new_axis_trees = {}
-            for loop_context, axis_tree in self.axes.axis_trees.items():
-                for new_loop_context, indexed_axes in completely_index_axes(
-                    axis_tree, indices
-                ).items():
-                    indexed_axes = indexed_axes.copy(
-                        target_paths=indexed_axes._target_paths,
-                        index_exprs=indexed_axes._index_exprs,
-                        # index_exprs=None,
-                        orig_axes=axis_tree.orig_axes,
-                        layouts=indexed_axes._layouts,
-                        unindexed_axes=axis_tree.unindexed_axes,
-                    )
-                    new_axis_trees[loop_context | new_loop_context] = indexed_axes
-            axess = IndexedAxisTree(new_axis_trees, collect_loop_indices(indices))
-        else:
-            axess = {}
-            for loop_context, indexed_axes in completely_index_axes(
-                self.axes, indices
-            ).items():
-                indexed_axes = indexed_axes.copy(
-                    target_paths=indexed_axes._target_paths,
-                    index_exprs=indexed_axes._index_exprs,
-                    # index_exprs=None,
-                    orig_axes=self.axes.orig_axes,
-                    layouts=indexed_axes._layouts,
-                    unindexed_axes=self.axes.unindexed_axes,
-                )
-                axess[loop_context] = indexed_axes
-            # what is the difference between indexed_axes.orig_axes and self.axes.orig_axes??
-            axess = pmap(axess)
-            axess = IndexedAxisTree(axess, collect_loop_indices(indices))
-        # TODO we should raise an error if any of the layout functions are None (and hence
-        # not valid to build an array off of).
-        return self.copy(axes=axess, from_index=True, layouts=self.layouts)
+        # if isinstance(self.axes, IndexedAxisTree):
+        #     new_axis_trees = {}
+        #     for loop_context, axis_tree in self.axes.axis_trees.items():
+        #         for new_loop_context, indexed_axes in completely_index_axes(
+        #             axis_tree, indices
+        #         ).items():
+        #             indexed_axes = indexed_axes.copy(
+        #                 target_paths=indexed_axes._target_paths,
+        #                 index_exprs=indexed_axes._index_exprs,
+        #                 # index_exprs=None,
+        #                 orig_axes=axis_tree.orig_axes,
+        #                 layouts=indexed_axes._layouts,
+        #                 unindexed_axes=axis_tree.unindexed_axes,
+        #             )
+        #             new_axis_trees[loop_context | new_loop_context] = indexed_axes
+        #     axess = IndexedAxisTree(new_axis_trees, collect_loop_indices(indices))
+        # else:
+        #     axess = {}
+        #     for loop_context, indexed_axes in completely_index_axes(
+        #         self.axes, indices
+        #     ).items():
+        #         indexed_axes = indexed_axes.copy(
+        #             target_paths=indexed_axes._target_paths,
+        #             index_exprs=indexed_axes._index_exprs,
+        #             # index_exprs=None,
+        #             orig_axes=self.axes.orig_axes,
+        #             layouts=indexed_axes._layouts,
+        #             unindexed_axes=self.axes.unindexed_axes,
+        #         )
+        #         axess[loop_context] = indexed_axes
+        #     # what is the difference between indexed_axes.orig_axes and self.axes.orig_axes??
+        #     axess = pmap(axess)
+        #     axess = IndexedAxisTree(axess, collect_loop_indices(indices))
+        # # TODO we should raise an error if any of the layout functions are None (and hence
+        # # not valid to build an array off of).
+        # return self.copy(axes=axess, from_index=True, layouts=self.layouts)
 
     def select_axes(self, indices):
         selected = []
@@ -417,6 +455,24 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
 
     def __str__(self):
         return self.name
+
+
+class ContextSensitiveMultiArray(ContextSensitive):
+    @property
+    def dtype(self):
+        return single_valued(array.dtype for array in self.context_map.values())
+
+    @property
+    def name(self):
+        return single_valued(array.name for array in self.context_map.values())
+
+    @functools.cached_property
+    def datamap(self):
+        return merge_dicts(array.datamap for array in self.context_map.values())
+
+
+def replace_layout(orig_layout, replace_map):
+    return IndexExpressionReplacer(replace_map)(orig_layout)
 
 
 def make_sparsity(

@@ -53,45 +53,13 @@ from pyop3.utils import (
 )
 
 
-# def is_distributed(axtree, axis=None):
-#     """Return ``True`` if any part of a :class:`MultiAxis` is distributed across ranks."""
-#     axis = axis or axtree.root
-#     for cpt in axis.components:
-#         if (
-#             cpt.is_distributed
-#             or (subaxis := axtree.child(axis, cpt))
-#             and is_distributed(axtree, subaxis)
-#         ):
-#             return True
-#     return False
-class LoopIterable(abc.ABC):
-    """Class representing something that can be looped over.
-
-    In order for an object to be loop-able over it needs to have shape
-    (``axes``) and an index expression per leaf of the shape. The simplest
-    case is `AxisTree` since the index expression is just identity. This
-    contrasts with something like an `IndexedLoopIterable` or `CalledMap`.
-    For the former the index expression for ``axes[::2]`` would be ``2*i``
-    and for the latter ``map(p)`` would be something like ``map[i, j]``.
-
-    """
-
+class ContextAware(abc.ABC):
     @abc.abstractmethod
-    def index(self) -> LoopIndex:
-        pass
-
-    @property
-    @abc.abstractmethod
-    def target_path_per_component(self):
-        pass
-
-    @property
-    @abc.abstractmethod
-    def index_exprs_per_component(self):
+    def with_context(self, context):
         pass
 
 
-class ContextSensitive(abc.ABC):
+class ContextSensitive(ContextAware, abc.ABC):
     #     """Container of `IndexTree`s distinguished by outer loop information.
     #
     #     This class is required because multi-component outer loops can lead to
@@ -112,7 +80,8 @@ class ContextSensitive(abc.ABC):
     #
     #     """
     #
-    #     def __init__(self, index_trees: pmap[pmap[LoopIndex, pmap[str, str]], IndexTree]):
+    def __init__(self, context_map: pmap[pmap[LoopIndex, pmap[str, str]], ContextFree]):
+        self.context_map = pmap(context_map)
 
     @functools.cached_property
     def keys(self):
@@ -122,11 +91,6 @@ class ContextSensitive(abc.ABC):
             for loop_index in context.keys():
                 indices.add(loop_index)
             return frozenset(indices)
-
-    @property
-    @abc.abstractmethod
-    def context_map(self):
-        pass
 
     def with_context(self, context):
         return self.context_map[self.filter_context(context)]
@@ -139,10 +103,45 @@ class ContextSensitive(abc.ABC):
         return pmap(key)
 
 
-class ContextFree(ContextSensitive, abc.ABC):
-    @property
-    def context_map(self):
-        return pmap({pmap(): self})
+# this is basically just syntactic sugar, might not be needed
+# avoids the need for
+# if isinstance(obj, ContextSensitive):
+#     obj = obj.with_context(...)
+class ContextFree(ContextAware, abc.ABC):
+    def with_context(self, context):
+        return self
+
+    def filter_context(self, context):
+        return pmap()
+
+
+class LoopIterable(abc.ABC):
+    """Class representing something that can be looped over.
+
+    In order for an object to be loop-able over it needs to have shape
+    (``axes``) and an index expression per leaf of the shape. The simplest
+    case is `AxisTree` since the index expression is just identity. This
+    contrasts with something like an `IndexedLoopIterable` or `CalledMap`.
+    For the former the index expression for ``axes[::2]`` would be ``2*i``
+    and for the latter ``map(p)`` would be something like ``map[i, j]``.
+
+    """
+
+    @abc.abstractmethod
+    def index(self) -> LoopIndex:
+        pass
+
+    @abc.abstractmethod
+    def __getitem__(self, indices) -> Union[LoopIterable, ContextSensitiveLoopIterable]:
+        raise NotImplementedError
+
+
+class ContextFreeLoopIterable(LoopIterable, ContextFree):
+    pass
+
+
+class ContextSensitiveLoopIterable(LoopIterable, ContextSensitive):
+    pass
 
 
 class ExpressionEvaluator(pym.mapper.evaluator.EvaluationMapper):
@@ -721,16 +720,17 @@ class AxisVariable(pym.primitives.Variable):
         self.axis_label = axis_label
 
 
-class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
+class AxisTree(StrictLabelledTree, ContextFreeLoopIterable):
     # FIXME this causes a recursive hash error...
     # fields = StrictLabelledTree.fields | {"target_paths", "index_exprs", "layout_exprs", "orig_axes", "sf", "shared_sf", "comm"}
-    fields = StrictLabelledTree.fields | {"shapeless_target_path"}
+    fields = StrictLabelledTree.fields | {"target_paths", "index_exprs", "layout_exprs"}
 
     def __init__(
         self,
         root: Optional[MultiAxis] = None,
         parent_to_children: Optional[Dict] = None,
         *,
+        target_paths=None,
         index_exprs=None,
         layout_exprs=None,
         sf=None,
@@ -743,39 +743,14 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         self.shared_sf = shared_sf
         self.comm = comm  # FIXME DTRT with internal comms
 
+        self._target_paths = target_paths or self._default_target_path_per_component()
         self._index_exprs = index_exprs or self._default_index_exprs_per_component()
         self._layout_exprs = layout_exprs or self._default_layout_exprs()
 
-    def __getitem__(self, indices):
-        from pyop3.distarray.multiarray import IndexExpressionReplacer
-        from pyop3.indices.tree import (
-            IndexedAxisTree,
-            collect_loop_indices,
-            index_axes,
-            index_tree_from_ellipsis,
-        )
+    def __getitem__(self, indices) -> Union[AxisTree, ContextSensitiveAxisTree]:
+        from pyop3.indices.tree import index_axes
 
-        if indices is Ellipsis:
-            indices = index_tree_from_ellipsis(self)
-
-        axess = {}
-        for loop_context, indexed_axes in index_axes(
-            self,
-            indices,
-        ).items():
-            indexed_axes = indexed_axes.copy(
-                # FIXME
-                target_paths=indexed_axes._target_paths,
-                index_exprs=indexed_axes._index_exprs,
-                # index_exprs=None,
-                # don't think I want this here, only used to recover layout functions
-                # actually used to find some path info
-                orig_axes=self.orig_axes,
-                layouts=indexed_axes._layouts,
-                unindexed_axes=self.unindexed_axes,
-            )
-            axess[loop_context] = indexed_axes
-        return IndexedAxisTree(axess, collect_loop_indices(indices))
+        return index_axes(self, indices)
 
     @property
     def axis_trees(self):
@@ -790,12 +765,22 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         return LoopIndex(self)
 
     @property
-    def target_path_per_component(self):
+    def target_paths(self):
         return self._target_paths
 
+    # deprecated alias
+    @property
+    def target_path_per_component(self):
+        return self.target_paths
+
+    @property
+    def index_exprs(self):
+        return self._index_exprs
+
+    # deprecated alias
     @property
     def index_exprs_per_component(self):
-        return self._index_exprs
+        return self.index_exprs
 
     @property
     def axes(self):
@@ -834,34 +819,6 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
             self._layout_exprs = self._make_index_exprs()
         return self._layout_exprs
 
-    @property
-    def orig_layout_fn(self):
-        return self.orig_axes.layouts
-
-    @property
-    def orig_axes(self):
-        return self._orig_axes
-
-    @property
-    def target_paths(self):
-        # map from indexed axis IDs and component labels to {target_axis: target_component}
-        # we always have the right IDs for the search but need the labels for the target
-        if not self._target_paths:
-            self._target_paths = self.source_paths
-        return self._target_paths
-
-    @property
-    def source_paths(self):
-        assert False, "old code"
-        return pmap(
-            {self.path(*leaf): self.path(*leaf) for leaf in self.leaves}  # inefficient
-        )
-
-    # alias
-    @property
-    def source_path_per_leaf(self):
-        return self.source_paths
-
     @functools.cached_property
     def datamap(self) -> dict[str:DistributedArray]:
         if self.is_empty:
@@ -869,14 +826,14 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
         else:
             dmap = postvisit(self, _collect_datamap, axes=self)
 
-        for cleverdict in [self.layouts, self.orig_layout_fn]:
-            for layout in cleverdict.values():
-                for layout_expr in layout.values():
-                    # catch invalid layouts
-                    if isinstance(layout_expr, pym.primitives.NaN):
-                        continue
-                    for array in MultiArrayCollector()(layout_expr):
-                        dmap.update(array.datamap)
+        # for cleverdict in [self.layouts, self.orig_layout_fn]:
+        #     for layout in cleverdict.values():
+        #         for layout_expr in layout.values():
+        #             # catch invalid layouts
+        #             if isinstance(layout_expr, pym.primitives.NaN):
+        #                 continue
+        #             for array in MultiArrayCollector()(layout_expr):
+        #                 dmap.update(array.datamap)
 
         # TODO
         # for cleverdict in [self.index_exprs, self.layout_exprs]:
@@ -1031,7 +988,7 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
 
         # catch empyt axis tree
         if self.root is None:
-            return pmap({pmap(): pmap()})
+            return pmap({pmap(): 0})
 
         layouts, _, _ = _compute_layouts(self, self.root)
         layoutsnew = _collect_at_leaves(self, layouts)
@@ -1101,6 +1058,24 @@ class AxisTree(StrictLabelledTree, LoopIterable, ContextFree):
 
         warnings.warn("deprecated")
         return self.add_node(subaxis, *loc)
+
+
+class ContextSensitiveAxisTree(ContextSensitiveLoopIterable):
+    def __getitem__(self, indices) -> ContextSensitiveAxisTree:
+        from pyop3.indices import index_axes
+
+        raise NotImplementedError
+
+        new_context_map = {}
+        for context, axes in self.context_map.items():
+            for context_, axes_ in index_axes(axes, indices).items():
+                new_context_map[context | context_] = axes_
+        return ContextSensitiveAxisTree(new_context_map)
+
+    def index(self) -> LoopIndex:
+        from pyop3.indices import LoopIndex
+
+        return LoopIndex(self)
 
 
 def get_slice_bounds(array, indices):
@@ -1606,7 +1581,7 @@ def _collect_at_leaves(
     values,
     axis: Optional[Axis] = None,
     path=pmap(),
-    prior=pmap(),
+    prior=0,
 ):
     axis = axis or axes.root
     acc = {}
@@ -1614,7 +1589,8 @@ def _collect_at_leaves(
     for cpt in axis.components:
         new_path = path | {axis.label: cpt.label}
         if new_path in values:
-            prior_ = prior | {axis.label: values[new_path]}
+            # prior_ = prior | {axis.label: values[new_path]}
+            prior_ = prior + values[new_path]
         else:
             prior_ = prior
         if subaxis := axes.child(axis, cpt):
