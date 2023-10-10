@@ -607,16 +607,18 @@ def build_assignment(
     # new_indices = pmap(new_indices)
 
     # iname_replace_map = {}
-    jname_replace_map = {}
+    # jname_replace_map = {}
     target_path = {}
     # for _, jnames in new_indices.values():
     for loop_index, (path, iname_expr) in loop_indices.items():
         if loop_index in minimal_context:
             # assert all(k not in jname_replace_map for k in iname_expr)
-            jname_replace_map.update(iname_expr)
+            # jname_replace_map.update(iname_expr)
             target_path.update(path)
-    jname_replace_map = freeze(jname_replace_map)
+    # jname_replace_map = freeze(jname_replace_map)
     target_path = freeze(target_path)
+
+    jname_replace_map = merge_dicts(mymap for _, mymap in loop_indices.values())
 
     parse_assignment_properly_this_time(
         assignment,

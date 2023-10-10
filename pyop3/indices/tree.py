@@ -822,12 +822,16 @@ def _(local_index: LocalLoopIndex, *args, loop_indices, **kwargs):
     else:
         iterset = loop_index.iterset
 
-    target_path_per_cpt = pmap({None: pmap({axis: cpt for axis, cpt in path.items()})})
+    target_path_per_cpt = pmap({None: path})
     index_exprs_per_cpt = pmap(
-        {None: pmap({axis: AxisVariable(axis) for axis in path.keys()})}
+        {
+            None: pmap(
+                {axis: LoopIndexVariable(local_index, axis) for axis in path.keys()}
+            )
+        }
     )
 
-    layout_exprs_per_cpt = pmap({None: pmap()})
+    layout_exprs_per_cpt = pmap({None: 0})
     return (
         AxisTree(),
         target_path_per_cpt,
@@ -876,9 +880,11 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
                 pmap({slice_.axis: (layout_var - subslice.start) // subslice.step})
             )
         else:
-            index_exprs_per_subslice.append(pmap({slice_.axis: subslice.array}))
+            index_exprs_per_subslice.append(
+                pmap({slice_.axis: subslice.array.as_var()})
+            )
             layout_exprs_per_subslice.append(
-                pmap({slice_.axis: bsearch(subslice.array, layout_var)})
+                pmap({slice_.axis: bsearch(subslice.array.as_var(), layout_var)})
             )
 
     axes = AxisTree(Axis(components, label=axis_label))
@@ -1143,10 +1149,11 @@ def index_axes(axes, indices):
             layout_exprs_per_indexed_cpt,
         )
 
-        axis_trees[loop_context] = indexed_axes.copy(
-            target_paths=target_paths,
-            index_exprs=index_exprs,
-            layout_exprs=layout_exprs,
+        axis_trees[loop_context] = IndexedAxisTree(
+            indexed_axes,
+            target_paths,
+            index_exprs,
+            layout_exprs,
         )
     return ContextSensitiveAxisTree(axis_trees)
 
@@ -1318,7 +1325,7 @@ def _compose_bits(
         leaf_target_path = {}
         leaf_index_exprs = {}
 
-        for axis, cpt in axes.detailed_path(itarget_paths[None]).items():
+        for axis, cpt in axes.detailed_path(itarget_paths.get(None, {})).items():
             # target path
             leaf_target_path.update(axes.target_paths.get((axis.id, cpt.label), {}))
 
@@ -1336,8 +1343,8 @@ def _compose_bits(
             pmap(),
             pmap(),
             pmap(),
-            freeze({None: leaf_target_path}),
-            freeze({None: leaf_index_exprs}),
+            freeze({pmap(): leaf_target_path}),
+            freeze({pmap(): leaf_index_exprs}),
         )
 
     if iaxis is None:

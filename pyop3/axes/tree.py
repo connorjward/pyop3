@@ -1132,6 +1132,12 @@ class IndexedAxisTree(ContextFreeLoopIterable, pytools.ImmutableRecord):
     def is_valid_path(self, path):
         return self.axes.is_valid_path(path)
 
+    def find_component(self, *args, **kwargs):
+        return self.axes.find_component(*args, **kwargs)
+
+    def _node_from_path(self, path, **kwargs):
+        return self.axes._node_from_path(path, **kwargs)
+
     @property
     def is_empty(self):
         return self.axes.is_empty

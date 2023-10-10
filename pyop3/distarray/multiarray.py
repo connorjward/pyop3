@@ -259,11 +259,10 @@ class MultiArray(DistributedArray):
             # replace layout bits that disappear with loop index
             if indexed_axes.is_empty:
                 new_layouts = {}
-                orig_path = leaf_target_paths[None]
+                orig_path = target_path_per_indexed_cpt[None]
                 new_path = pmap()
 
                 orig_layout = self.layouts[orig_path]
-                # new_layout = IndexExpressionReplacer(leaf_index_exprs[None])(
                 new_layout = IndexExpressionReplacer(index_exprs_per_indexed_cpt[None])(
                     orig_layout
                 )
