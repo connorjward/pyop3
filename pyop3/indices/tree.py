@@ -1346,9 +1346,10 @@ def _compose_bits(
             (iaxis.id, icpt.label), {}
         )
         new_partial_layout_exprs = dict(partial_layout_exprs)
-        new_partial_layout_exprs[iaxis.id, icpt.label] = ilayout_exprs[
-            (iaxis.id, icpt.label)
-        ]
+        if (iaxis.id, icpt.label) in ilayout_exprs:
+            new_partial_layout_exprs[iaxis.id, icpt.label] = ilayout_exprs[
+                iaxis.id, icpt.label
+            ]
 
         # if target_path is "complete" then do stuff, else pass responsibility to next func down
         # index_exprs[iaxis.id, icpt.label] = {}
