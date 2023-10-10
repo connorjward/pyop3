@@ -1116,6 +1116,12 @@ class IndexedAxisTree(ContextFreeLoopIterable, pytools.ImmutableRecord):
     def path_with_nodes(self, axis, component, **kwargs):
         return self.axes.path_with_nodes(axis, component, **kwargs)
 
+    def detailed_path(self, path):
+        return self.axes.detailed_path(path)
+
+    def is_valid_path(self, path):
+        return self.axes.is_valid_path(path)
+
     @property
     def is_empty(self):
         return self.axes.is_empty
@@ -1134,8 +1140,7 @@ class ContextSensitiveAxisTree(ContextSensitiveLoopIterable):
     def __getitem__(self, indices) -> ContextSensitiveAxisTree:
         from pyop3.indices import index_axes
 
-        raise NotImplementedError
-
+        # TODO think harder about composing context maps
         new_context_map = {}
         for context, axes in self.context_map.items():
             for context_, axes_ in index_axes(axes, indices).items():

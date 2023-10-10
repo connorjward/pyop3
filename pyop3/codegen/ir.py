@@ -23,7 +23,7 @@ from pyop3 import utils
 from pyop3.axes import Axis, AxisComponent, AxisTree, AxisVariable
 from pyop3.axes.tree import ContextSensitiveAxisTree
 from pyop3.distarray import MultiArray
-from pyop3.distarray.multiarray import ContextSensitiveMultiArray
+from pyop3.distarray.multiarray import ContextSensitiveMultiArray, IndexedMultiArray
 from pyop3.dtypes import IntType, PointerType
 from pyop3.indices import (
     AffineMapComponent,
@@ -405,9 +405,18 @@ def parse_loop_properly_this_time(
                     jname_replace_map=new_jname_replace_map,
                 )
             else:
-                # dont emit expressions for shapeless bits
-                # for axis_label in axes.shapeless_target_path:
-                #     new_jname_replace_map = new_jname_replace_map.remove(axis_label)
+                new_iname_replace_map = pmap(
+                    {
+                        (loop.index.local_index.id, myaxislabel): jname_expr
+                        for myaxislabel, jname_expr in new_iname_replace_map.items()
+                    }
+                )
+                new_jname_replace_map = pmap(
+                    {
+                        (loop.index.id, myaxislabel): jname_expr
+                        for myaxislabel, jname_expr in new_jname_replace_map.items()
+                    }
+                )
 
                 for stmt in loop.statements:
                     _compile(
@@ -454,7 +463,7 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
 
         loop_context = context_from_indices(loop_indices)
 
-        if isinstance(arg, (MultiArray, ContextSensitiveMultiArray)):
+        if isinstance(arg, (MultiArray, IndexedMultiArray, ContextSensitiveMultiArray)):
             axes = arg.with_context(loop_context).axes.copy(
                 index_exprs=None,
             )
@@ -895,6 +904,9 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
             self._codegen_context,
         )
         return jname_expr
+
+    def map_loop_index(self, expr):
+        return self._labels_to_jnames[expr.name, expr.axis]
 
     def map_call(self, expr):
         if expr.function.name != "mybsearch":

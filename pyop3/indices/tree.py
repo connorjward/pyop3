@@ -315,6 +315,18 @@ class AbstractLoopIndex(Index, abc.ABC):
     pass
 
 
+class LoopIndexVariable(pym.primitives.Variable):
+    mapper_method = sys.intern("map_loop_index")
+
+    def __init__(self, id, axis):
+        super().__init__(id)
+        self.axis = axis
+
+    @property
+    def id(self):
+        return self.name
+
+
 # TODO just call this LoopIndex (inherit from AbstractLoopIndex)
 class LoopIndex(AbstractLoopIndex):
     fields = AbstractLoopIndex.fields | {"iterset"}
@@ -778,13 +790,15 @@ def _(loop_index: LoopIndex, *, loop_indices, **kwargs):
         iterset = loop_index.iterset
 
     # I dont know if this is mapping from the right thing
-    target_path_per_component = pmap(
-        {None: pmap({axis: cpt for axis, cpt in path.items()})}
-    )
+    target_path_per_component = pmap({None: path})
     index_exprs_per_component = pmap(
-        {None: pmap({axis: AxisVariable(axis) for axis in path.keys()})}
+        {
+            None: pmap(
+                {axis: LoopIndexVariable(loop_index.id, axis) for axis in path.keys()}
+            )
+        }
     )
-    layout_exprs_per_component = pmap({None: pmap()})
+    layout_exprs_per_component = pmap({None: 0})
     return (
         AxisTree(),
         target_path_per_component,
@@ -961,14 +975,12 @@ def _make_leaf_axis_from_called_map(called_map, prior_target_path, prior_index_e
 
         map_var = MapVariable(called_map, map_cpt)
         axisvar = AxisVariable(called_map.name)
-        # not super happy about this. The called variable doesn't now
-        # necessarily know the right axis labels
-        from_indices = tuple(
-            index_expr for axis_label, index_expr in prior_index_exprs.items()
-        )
+
+        # maps can only take one input?
+        from_indices = just_one(prior_index_exprs.values())
 
         index_exprs_per_cpt[axis_id, cpt.label] = {
-            map_cpt.target_axis: map_var(*from_indices, axisvar)
+            map_cpt.target_axis: map_var(from_indices, axisvar)
         }
 
         # don't think that this is possible for maps
@@ -1402,7 +1414,7 @@ def _compose_bits(
             # and intermediate -> g(final)
             full_replace_map = merge_dicts(
                 [
-                    axes._layout_exprs[tgt_ax.id, tgt_cpt.label]
+                    axes.layout_exprs[tgt_ax.id, tgt_cpt.label]
                     for tgt_ax, tgt_cpt in detailed_path.items()
                 ]
             )
