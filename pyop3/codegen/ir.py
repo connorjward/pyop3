@@ -755,10 +755,12 @@ def add_leaf_assignment(
 
     context = context_from_indices(loop_indices)
 
-    if isinstance(assignment.array, (MultiArray, ContextSensitiveMultiArray)):
+    if isinstance(
+        assignment.array, (MultiArray, IndexedMultiArray, ContextSensitiveMultiArray)
+    ):
         array_expr = make_array_expr(
             assignment,
-            assignment.array.with_context(context).layouts[target_path],
+            assignment.array.with_context(context).layouts[source_path],
             target_path,
             iname_replace_map | jname_replace_map,
             codegen_context,

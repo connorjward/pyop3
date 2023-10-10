@@ -192,7 +192,38 @@ class MultiArray(DistributedArray):
                 layout_exprs,
             )
 
-            return IndexedMultiArray(self, new_axes)
+            # replace layout bits that disappear with loop index
+            if indexed_axes.is_empty:
+                new_layouts = {}
+                orig_path = leaf_target_paths[None]
+                new_path = pmap()
+
+                orig_layout = self.layouts[orig_path]
+                # new_layout = IndexExpressionReplacer(leaf_index_exprs[None])(
+                new_layout = IndexExpressionReplacer(index_exprs_per_indexed_cpt[None])(
+                    orig_layout
+                )
+                new_layouts[orig_path] = new_layout
+            else:
+                new_layouts = {}
+                for leaf_axis, leaf_cpt in indexed_axes.leaves:
+                    target_path = dict(target_path_per_indexed_cpt.get(None, {}))
+                    for myaxis, mycpt in indexed_axes.path_with_nodes(
+                        leaf_axis, leaf_cpt
+                    ).items():
+                        for target_axis, target_cpt in target_paths.get(
+                            (myaxis.id, mycpt), {}
+                        ).items():
+                            target_path[target_axis] = target_cpt
+                    target_path = freeze(target_path)
+
+                    orig_layout = self.layouts[target_path]
+                    new_layout = IndexExpressionReplacer(
+                        index_exprs_per_indexed_cpt.get(None, {})
+                    )(orig_layout)
+                    new_layouts[indexed_axes.path(leaf_axis, leaf_cpt)] = new_layout
+
+            return IndexedMultiArray(self, new_axes, new_layouts)
 
         array_per_context = {}
         for index_tree in as_index_forest(indices, axes=self.axes):
@@ -236,25 +267,34 @@ class MultiArray(DistributedArray):
                 new_layout = IndexExpressionReplacer(index_exprs_per_indexed_cpt[None])(
                     orig_layout
                 )
-                new_layouts[orig_path] = new_layout
+                new_layouts[new_path] = new_layout
             else:
                 new_layouts = {}
                 for leaf_axis, leaf_cpt in indexed_axes.leaves:
-                    target_path = dict(target_path_per_indexed_cpt[None])
+                    # target_path = dict(target_path_per_indexed_cpt.get(None, {}))
+                    # for myaxis, mycpt in indexed_axes.path_with_nodes(
+                    #     leaf_axis, leaf_cpt
+                    # ).items():
+                    #     for target_axis, target_cpt in target_paths.get(
+                    #         (myaxis.id, mycpt), {}
+                    #     ).items():
+                    #         target_path[target_axis] = target_cpt
+                    # target_path = freeze(target_path)
+
+                    target_path = dict(target_path_per_indexed_cpt.get(None, {}))
                     for myaxis, mycpt in indexed_axes.path_with_nodes(
                         leaf_axis, leaf_cpt
                     ).items():
-                        for target_axis, target_cpt in target_paths.get(
-                            (myaxis.id, mycpt), {}
-                        ).items():
-                            target_path[target_axis] = target_cpt
+                        target_path.update(
+                            target_path_per_indexed_cpt.get((myaxis.id, mycpt), {})
+                        )
                     target_path = freeze(target_path)
 
                     orig_layout = self.layouts[target_path]
                     new_layout = IndexExpressionReplacer(
                         index_exprs_per_indexed_cpt.get(None, {})
                     )(orig_layout)
-                    new_layouts[target_path] = new_layout
+                    new_layouts[indexed_axes.path(leaf_axis, leaf_cpt)] = new_layout
 
             # breakpoint()
             array_per_context[loop_context] = IndexedMultiArray(
@@ -652,8 +692,50 @@ class ContextSensitiveMultiArray(ContextSensitive):
                 layout_exprs,
             )
 
-            array_per_context[context | loop_context] = IndexedMultiArray(
-                array, new_axes
+            # replace layout bits that disappear with loop index
+            if indexed_axes.is_empty:
+                new_layouts = {}
+                orig_path = leaf_target_paths[None]
+                new_path = pmap()
+
+                orig_layout = array.layouts[orig_path]
+                # new_layout = IndexExpressionReplacer(leaf_index_exprs[None])(
+                new_layout = IndexExpressionReplacer(index_exprs_per_indexed_cpt[None])(
+                    orig_layout
+                )
+                new_layouts[orig_path] = new_layout
+            else:
+                new_layouts = {}
+                for leaf_axis, leaf_cpt in indexed_axes.leaves:
+                    # target_path = dict(target_path_per_indexed_cpt.get(None, {}))
+                    # for myaxis, mycpt in indexed_axes.path_with_nodes(
+                    #     leaf_axis, leaf_cpt
+                    # ).items():
+                    #     for target_axis, target_cpt in target_paths.get(
+                    #         (myaxis.id, mycpt), {}
+                    #     ).items():
+                    #         target_path[target_axis] = target_cpt
+                    # target_path = freeze(target_path)
+                    target_path = dict(target_path_per_indexed_cpt.get(None, {}))
+                    for myaxis, mycpt in indexed_axes.path_with_nodes(
+                        leaf_axis, leaf_cpt
+                    ).items():
+                        target_path.update(
+                            target_path_per_indexed_cpt.get((myaxis.id, mycpt), {})
+                        )
+                    target_path = freeze(target_path)
+
+                    # breakpoint()
+
+                    orig_layout = array.layouts[target_path]
+                    new_layout = IndexExpressionReplacer(
+                        index_exprs_per_indexed_cpt.get(None, {})
+                    )(orig_layout)
+                    new_layouts[indexed_axes.path(leaf_axis, leaf_cpt)] = new_layout
+
+            # breakpoint()
+            array_per_context[loop_context] = IndexedMultiArray(
+                array, new_axes, new_layouts
             )
         return ContextSensitiveMultiArray(array_per_context)
 
