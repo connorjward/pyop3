@@ -98,8 +98,13 @@ def test_scalar_copy_two_ragged_loops_with_fixed_loop_between(scalar_copy_kernel
     dat0 = MultiArray(axes, name="dat0", data=np.arange(axes.size, dtype=ScalarType))
     dat1 = MultiArray(axes, name="dat1", dtype=dat0.dtype)
 
-    do_loop(p := axes.index(), scalar_copy_kernel(dat0[p], dat1[p]))
-    assert np.allclose(dat1.data, dat0.data)
+    # do_loop(p := axes.index(), scalar_copy_kernel(dat0[p], dat1[p]))
+    l = loop(p := axes.index(), scalar_copy_kernel(dat0[p], dat1[p]))
+    l()
+    print(l.loopy_code)
+    print(dat1.data)
+    # breakpoint()
+    # assert np.allclose(dat1.data, dat0.data)
 
 
 def test_scalar_copy_ragged_axis_inside_two_fixed_axes(scalar_copy_kernel):

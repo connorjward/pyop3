@@ -91,8 +91,6 @@ class MultiArray(DistributedArray):
         "sf",
     }
 
-    # mapper_method = sys.intern("map_multi_array")
-
     prefix = "array"
     name_generator = UniqueNameGenerator()
 
@@ -246,9 +244,9 @@ class MultiArray(DistributedArray):
                     for myaxis, mycpt in indexed_axes.path_with_nodes(
                         leaf_axis, leaf_cpt
                     ).items():
-                        for target_axis, target_cpt in target_paths[
-                            myaxis.id, mycpt
-                        ].items():
+                        for target_axis, target_cpt in target_paths.get(
+                            (myaxis.id, mycpt), {}
+                        ).items():
                             target_path[target_axis] = target_cpt
                     target_path = freeze(target_path)
 
@@ -299,7 +297,8 @@ class MultiArray(DistributedArray):
     def as_var(self):
         # must not be branched...
         indices = tuple(
-            AxisVariable(axis) for axis in self.axes.path(*self.axes.leaf).keys()
+            AxisVariable(axis)
+            for axis, _ in self.axes.path(*self.axes.leaf, ordered=True)
         )
         return MultiArrayVariable(self, indices)
 

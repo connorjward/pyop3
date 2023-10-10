@@ -46,7 +46,7 @@ class OrderedCollector(pym.mapper.CombineMapper):
     map_function_symbol = map_constant
 
     def map_multi_array(self, expr):
-        return (expr,)
+        return (expr.array,)
 
 
 _rename_mapper = RenameMapper()
@@ -54,13 +54,11 @@ _ordered_collector = OrderedCollector()
 
 
 def as_str(layout):
-    layout_expr = sum(layout[k] for k in sorted(layout.keys()))
-    return str(_rename_mapper(layout_expr))
+    return str(_rename_mapper(layout))
 
 
 def collect_multi_arrays(layout):
-    layout_expr = sum(layout[k] for k in sorted(layout.keys()))
-    return _ordered_collector(layout_expr)
+    return _ordered_collector(layout)
 
 
 def check_offsets(axes, indices_and_offsets):
@@ -153,7 +151,7 @@ def test_1d_permuted_layout():
     layout0 = axes.layouts[pmap({"ax0": "pt0"})]
 
     assert as_str(layout0) == "array_0"
-    assert np.allclose(layout0["ax0"].data_ro, [1, 2, 0])
+    assert np.allclose(layout0.array.data_ro, [1, 2, 0])
     check_offsets(
         axes,
         [
@@ -185,8 +183,8 @@ def test_1d_multi_component_permuted_layout():
 
     assert as_str(layout0) == "array_0"
     assert as_str(layout1) == "array_0"
-    assert np.allclose(layout0["ax0"].data_ro, [1, 4, 3])
-    assert np.allclose(layout1["ax0"].data_ro, [2, 0])
+    assert np.allclose(layout0.array.data_ro, [1, 4, 3])
+    assert np.allclose(layout1.array.data_ro, [2, 0])
     check_offsets(
         axes,
         [

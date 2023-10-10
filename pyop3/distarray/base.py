@@ -3,7 +3,9 @@ import abc
 import pytools
 
 
-class DistributedArray(abc.ABC, pytools.Record):
+# don't make a Record, copy() should be reserved for other stuff
+# class DistributedArray(abc.ABC, pytools.Record):
+class DistributedArray(abc.ABC):
     """Base class for all :mod:`pyop3` parallel objects."""
 
     fields = {"name"}

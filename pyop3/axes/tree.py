@@ -148,12 +148,14 @@ class ExpressionEvaluator(pym.mapper.evaluator.EvaluationMapper):
     def map_axis_variable(self, expr):
         return self.context[1][expr.axis_label]
 
-    def map_multi_array(self, array):
-        path = _trim_path(array.axes, self.context[0])
+    def map_multi_array(self, expr):
+        # path = _trim_path(array.axes, self.context[0])
+        # not multi-component for now, is that useful to add?
+        path = expr.array.axes.path(*expr.array.axes.leaf)
         # context = []
         # for keyval in self.context.items():
         #     context.append(keyval)
-        return array.get_value(path, self.context[1])
+        return expr.array.get_value(path, self.context[1])
 
 
 class IntRef:
