@@ -318,13 +318,18 @@ class AbstractLoopIndex(Index, abc.ABC):
 class LoopIndexVariable(pym.primitives.Variable):
     mapper_method = sys.intern("map_loop_index")
 
-    def __init__(self, id, axis):
-        super().__init__(id)
+    def __init__(self, loop_index, axis):
+        super().__init__(loop_index.id)
+        self.index = loop_index
         self.axis = axis
 
     @property
     def id(self):
         return self.name
+
+    @property
+    def datamap(self):
+        return self.index.datamap
 
 
 # TODO just call this LoopIndex (inherit from AbstractLoopIndex)
@@ -794,7 +799,7 @@ def _(loop_index: LoopIndex, *, loop_indices, **kwargs):
     index_exprs_per_component = pmap(
         {
             None: pmap(
-                {axis: LoopIndexVariable(loop_index.id, axis) for axis in path.keys()}
+                {axis: LoopIndexVariable(loop_index, axis) for axis in path.keys()}
             )
         }
     )

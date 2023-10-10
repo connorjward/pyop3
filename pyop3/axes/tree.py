@@ -722,6 +722,14 @@ class AxisVariable(pym.primitives.Variable):
         self.__class__.mycounter += 1  # ugly
         self.axis_label = axis_label
 
+    @property
+    def axis(self):
+        return self.axis_label
+
+    @property
+    def datamap(self):
+        return pmap()
+
 
 class AxisTree(StrictLabelledTree, ContextFreeLoopIterable):
     # FIXME this causes a recursive hash error...
@@ -1502,7 +1510,7 @@ def _compute_layouts(
             _tabulate_count_array_tree(axes, axis, fulltree, offset)
 
             for subpath, offset_data in fulltree.items():
-                layouts[path | subpath] = offset_data
+                layouts[path | subpath] = offset_data.as_var()
             ctree = None
             steps = {path: _axis_size(axes, axis)}
 

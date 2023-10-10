@@ -854,23 +854,16 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
 
     # this is cleaner if I do it as a single line expression
     # rather than register assignments for things.
-    def map_multi_array(self, array):
-        # must be single-component here
-        path = array.axes.path(*array.axes.leaf)
-
-        trimmed_jnames = {}
-        axes = array.axes
-        axis = axes.root
-        while axis:
-            trimmed_jnames[axis.label] = self._labels_to_jnames[axis.label]
-            cpt = just_one(axis.components)
-            axis = axes.child(axis, cpt)
-        trimmed_jnames = pmap(trimmed_jnames)
-
+    def map_multi_array(self, expr):
+        path = expr.array.axes.path(*expr.array.axes.leaf, ordered=True)
+        replace_map = {
+            axis: self.rec(index)
+            for (axis, _), index in checked_zip(path, expr.index_tuple)
+        }
         varname = _scalar_assignment(
-            array,
-            path,
-            trimmed_jnames,
+            expr.array,
+            pmap(path),
+            replace_map,
             self._codegen_context,
         )
         return varname

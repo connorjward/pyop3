@@ -25,7 +25,7 @@ from pyop3.axes import (
     ContextSensitive,
     as_axis_tree,
 )
-from pyop3.axes.tree import MultiArrayCollector  # definitely should be in this file
+from pyop3.axes.tree import AxisVariable, MultiArrayCollector
 from pyop3.distarray.base import DistributedArray
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
 from pyop3.indices import IndexedAxisTree, IndexTree, as_index_forest, index_axes
@@ -50,8 +50,28 @@ class IndexExpressionReplacer(pym.mapper.IdentityMapper):
     def map_axis_variable(self, expr):
         return self._replace_map.get(expr.axis_label, expr)
 
+    def map_multi_array(self, expr):
+        indices = tuple(self.rec(index) for index in expr.index_tuple)
+        return MultiArrayVariable(expr.array, indices)
 
-class MultiArray(DistributedArray, pym.primitives.Variable):
+
+class MultiArrayVariable(pym.primitives.Subscript):
+    mapper_method = sys.intern("map_multi_array")
+
+    def __init__(self, array, indices):
+        super().__init__(pym.var(array.name), indices)
+        self.array = array
+
+        # alias
+        self.indices = indices
+
+    @property
+    def datamap(self):
+        return self.array.datamap | merge_dicts(idx.datamap for idx in self.indices)
+
+
+# class MultiArray(DistributedArray, pym.primitives.Variable):
+class MultiArray(DistributedArray):
     """Multi-dimensional, hierarchical array.
 
     Parameters
@@ -71,7 +91,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
         "sf",
     }
 
-    mapper_method = sys.intern("map_multi_array")
+    # mapper_method = sys.intern("map_multi_array")
 
     prefix = "array"
     name_generator = UniqueNameGenerator()
@@ -123,7 +143,7 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
         #     breakpoint()
 
         DistributedArray.__init__(self, name)
-        pym.primitives.Variable.__init__(self, name)
+        # pym.primitives.Variable.__init__(self, name)
 
         self._data = data
         self.dtype = dtype
@@ -275,6 +295,13 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
             for array in MultiArrayCollector()(layout_expr):
                 datamap_.update(array.datamap)
         return freeze(datamap_)
+
+    def as_var(self):
+        # must not be branched...
+        indices = tuple(
+            AxisVariable(axis) for axis in self.axes.path(*self.axes.leaf).keys()
+        )
+        return MultiArrayVariable(self, indices)
 
     @property
     def alloc_size(self):
