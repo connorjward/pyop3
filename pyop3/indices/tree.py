@@ -267,6 +267,9 @@ class CalledMap(Index, LoopIterable):
         self.from_index = from_index
         Index.__init__(self, **kwargs)
 
+    def __getitem__(self, indices):
+        raise NotImplementedError("TODO")
+
     def index(self) -> LoopIndex:
         contexts = collect_loop_contexts(self)
         # FIXME this assumption is not always true
@@ -275,13 +278,15 @@ class CalledMap(Index, LoopIterable):
             self, loop_indices=context
         )
 
-        # ignore layouts for now
-        axes = axes.copy(target_paths=target_paths, index_exprs=index_exprs)
+        axes = IndexedAxisTree(
+            axes,
+            target_paths=target_paths,
+            index_exprs=index_exprs,
+            layout_exprs=layout_exprs,
+        )
 
-        loop_indices = collect_loop_indices(self)
-        # loop_indices = ()
-        indexed_axes = IndexedAxisTree({context: axes}, loop_indices)
-        return LoopIndex(indexed_axes)
+        context_sensitive_axes = ContextSensitiveAxisTree({context: axes})
+        return LoopIndex(context_sensitive_axes)
 
     @property
     def name(self):
@@ -541,9 +546,9 @@ def _(arg: LocalLoopIndex):
 
 @collect_loop_contexts.register
 def _(arg: LoopIndex, local=False):
-    if False:  # isinstance(arg.iterset, IndexedAxisTree):
+    if isinstance(arg.iterset, ContextSensitiveAxisTree):
         contexts = []
-        for loop_context, axis_tree in arg.iterset.axis_trees.items():
+        for loop_context, axis_tree in arg.iterset.context_map.items():
             extra_source_context = {}
             extracontext = {}
             for leaf in axis_tree.leaves:
@@ -564,7 +569,8 @@ def _(arg: LoopIndex, local=False):
             else:
                 contexts.append(loop_context | {arg: pmap(extracontext)})
         return tuple(contexts)
-    elif isinstance(arg.iterset, (AxisTree, IndexedAxisTree)):
+    else:
+        assert isinstance(arg.iterset, (AxisTree, IndexedAxisTree))
         iterset = arg.iterset
         contexts = []
         for leaf in iterset.leaves:
@@ -580,16 +586,6 @@ def _(arg: LoopIndex, local=False):
                 contexts.append(pmap({arg.local_index: source_path}))
             else:
                 contexts.append(pmap({arg: pmap(target_path)}))
-        return tuple(contexts)
-    else:
-        assert False, "other way to do it?"
-        assert isinstance(arg.iterset, CalledMap)
-        prior_contexts = collect_loop_contexts(arg.iterset)
-        contexts = []
-        for prior_context in prior_contexts:
-            paths = _paths_from_called_map_loop_index(arg.iterset, prior_context)
-            for path in paths:
-                contexts.append(prior_context | {arg: path})
         return tuple(contexts)
 
 
@@ -1335,7 +1331,7 @@ def _compose_bits(
     target_path_per_leaf = {}
     index_exprs_per_leaf = {}
     layout_exprs_per_leaf = {}
-    target_path_per_cpt = {}
+    target_path_per_cpt = collections.defaultdict(dict)
     index_exprs = collections.defaultdict(dict)
     layout_exprs = collections.defaultdict(dict)
 
@@ -1370,9 +1366,12 @@ def _compose_bits(
                 )
 
                 if not skip:
-                    target_path_per_cpt[iaxis.id, icpt.label] = axes.target_paths.get(
+                    for myaxlabel, mycptlabel in axes.target_paths.get(
                         (target_axis.id, target_cpt.label), {}
-                    )
+                    ).items():
+                        target_path_per_cpt[iaxis.id, icpt.label][
+                            myaxlabel
+                        ] = mycptlabel
 
                 # do a replacement for index exprs
                 # compose index expressions, this does an *inside* substitution

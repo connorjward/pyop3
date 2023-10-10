@@ -707,6 +707,9 @@ class MultiArrayCollector(pym.mapper.Collector):
     def map_multi_array(self, expr):
         return {expr}
 
+    def map_nan(self, expr):
+        return set()
+
 
 # hacky class for index_exprs to work, needs cleaning up
 class AxisVariable(pym.primitives.Variable):
@@ -1050,7 +1053,7 @@ class AxisTree(StrictLabelledTree, ContextFreeLoopIterable):
         return self.add_node(subaxis, *loc)
 
 
-# TODO: Inherit things from AxisTree
+# TODO: Inherit things from AxisTree, StaticAxisTree?
 class IndexedAxisTree(ContextFreeLoopIterable, pytools.ImmutableRecord):
     fields = {"axes", "target_paths", "index_exprs", "layout_exprs"}
 
@@ -1077,7 +1080,7 @@ class IndexedAxisTree(ContextFreeLoopIterable, pytools.ImmutableRecord):
 
     @property
     def datamap(self):
-        datamap_ = self.axes.datamap
+        datamap_ = dict(self.axes.datamap)
         for index_exprs in self.index_exprs.values():
             for index_expr in index_exprs.values():
                 for array in MultiArrayCollector()(index_expr):
@@ -1143,6 +1146,10 @@ class ContextSensitiveAxisTree(ContextSensitiveLoopIterable):
         from pyop3.indices import LoopIndex
 
         return LoopIndex(self)
+
+    @functools.cached_property
+    def datamap(self):
+        return merge_dicts(axes.datamap for axes in self.context_map.values())
 
 
 def get_slice_bounds(array, indices):
