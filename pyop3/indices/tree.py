@@ -1454,8 +1454,7 @@ def _compose_bits(
 
     # breakpoint()
     return (
-        freeze(target_path_per_cpt),
-        # bug, should work
+        freeze(dict(target_path_per_cpt)),
         freeze(dict(index_exprs)),
         freeze(dict(layout_exprs)),
         freeze(target_path_per_leaf),

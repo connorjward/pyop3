@@ -597,20 +597,15 @@ def build_assignment(
     #             new_indices[loop_index] = value
     # new_indices = pmap(new_indices)
 
-    iname_replace_map = {}
+    # iname_replace_map = {}
     jname_replace_map = {}
     target_path = {}
     # for _, jnames in new_indices.values():
     for loop_index, (path, iname_expr) in loop_indices.items():
-        if isinstance(loop_index, LocalLoopIndex):
-            # assert all(k not in iname_replace_map for k in iname_expr)
-            iname_replace_map.update(iname_expr)
-        else:
-            assert isinstance(loop_index, LoopIndex)
+        if loop_index in minimal_context:
             # assert all(k not in jname_replace_map for k in iname_expr)
             jname_replace_map.update(iname_expr)
-        target_path.update(path)
-    iname_replace_map = freeze(iname_replace_map)
+            target_path.update(path)
     jname_replace_map = freeze(jname_replace_map)
     target_path = freeze(target_path)
 
@@ -619,7 +614,7 @@ def build_assignment(
         axes,
         loop_indices,
         codegen_ctx,
-        iname_replace_map=iname_replace_map,
+        iname_replace_map=jname_replace_map,
         jname_replace_map=jname_replace_map,
         target_path=target_path,
     )
