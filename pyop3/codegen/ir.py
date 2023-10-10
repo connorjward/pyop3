@@ -779,6 +779,7 @@ def make_array_expr(assignment, layouts, path, jnames, ctx):
         jnames,
         ctx,
     )
+    # breakpoint()
     array = assignment.array
     array_expr = pym.subscript(pym.var(array.name), array_offset)
 
@@ -1029,7 +1030,7 @@ def _scalar_assignment(
     ctx.add_argument(array.name, array.dtype)
 
     offset_expr = make_offset_expr(
-        array.axes.layouts[path],
+        array.layouts[path],
         array_labels_to_jnames,
         ctx,
     )

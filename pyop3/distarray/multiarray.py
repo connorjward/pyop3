@@ -112,6 +112,9 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
             self.name_generator.add_name(prefix, conflicting_ok=True)
         name = name or self.name_generator(prefix or self.prefix)
 
+        # if name == "array_48":
+        #     breakpoint()
+
         DistributedArray.__init__(self, name)
         pym.primitives.Variable.__init__(self, name)
 
