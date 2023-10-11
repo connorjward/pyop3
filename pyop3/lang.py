@@ -11,11 +11,21 @@ from weakref import WeakValueDictionary
 
 import loopy as lp
 import numpy as np
+import pymbolic as pym
 import pytools
+from pyrsistent import freeze, pmap
 
 from pyop3.axes import as_axis_tree
+from pyop3.axes.tree import ContextFree, ContextSensitive, MultiArrayCollector
 from pyop3.distarray import DistributedArray, MultiArray
+from pyop3.distarray.multiarray import IndexExpressionReplacer
 from pyop3.dtypes import IntType
+from pyop3.indices.tree import (
+    IndexedAxisTree,
+    _compose_bits,
+    _index_axes,
+    as_index_forest,
+)
 from pyop3.utils import as_tuple, checked_zip, merge_dicts
 
 
@@ -258,12 +268,12 @@ class CalledFunction(LoopExpr):
     #     )
 
 
-class Offset(LoopExpr):
+class Offset(LoopExpr, ContextSensitive):
     """Terminal containing the offset of some axis tree given some multi-index."""
 
-    def __init__(self, axes: AxisTree, indices):
-        self.orig_axes = as_axis_tree(axes)
-        self.axes = self.orig_axes[indices]
+    def __init__(self, per_context):
+        LoopExpr.__init__(self)
+        ContextSensitive.__init__(self, per_context)
 
     # FIXME
     @property
@@ -276,11 +286,92 @@ class Offset(LoopExpr):
 
     @functools.cached_property
     def datamap(self):
-        return self.orig_axes.datamap | self.axes.datamap
+        # awful, need to do better than a tuple
+        datamap_ = {}
+        for offset_tuple in self.context_map.values():
+            for layout_expr in offset_tuple[2].values():
+                if isinstance(layout_expr, pym.primitives.NaN):
+                    continue
+                for array in MultiArrayCollector()(layout_expr):
+                    datamap_.update(array.datamap)
+        return freeze(datamap_)
 
 
 def offset(axes, indices):
-    return Offset(axes, indices)
+    axes = as_axis_tree(axes)
+    array_per_context = {}
+    for index_tree in as_index_forest(indices, axes=axes):
+        loop_context = index_tree.loop_context
+        (
+            indexed_axes,
+            target_path_per_indexed_cpt,
+            index_exprs_per_indexed_cpt,
+            layout_exprs_per_indexed_cpt,
+        ) = _index_axes(axes, index_tree, loop_context)
+
+        (
+            target_paths,
+            index_exprs,
+            layout_exprs,
+            leaf_target_paths,
+            leaf_index_exprs,
+        ) = _compose_bits(
+            axes,
+            indexed_axes,
+            target_path_per_indexed_cpt,
+            index_exprs_per_indexed_cpt,
+            layout_exprs_per_indexed_cpt,
+        )
+
+        new_axes = IndexedAxisTree(
+            indexed_axes,
+            target_paths,
+            index_exprs,
+            layout_exprs,
+        )
+
+        # replace layout bits that disappear with loop index
+        if indexed_axes.is_empty:
+            new_layouts = {}
+            orig_path = target_path_per_indexed_cpt[None]
+            new_path = pmap()
+
+            orig_layout = axes.layouts[orig_path]
+            new_layout = IndexExpressionReplacer(index_exprs_per_indexed_cpt[None])(
+                orig_layout
+            )
+            new_layouts[new_path] = new_layout
+        else:
+            new_layouts = {}
+            for leaf_axis, leaf_cpt in indexed_axes.leaves:
+                # target_path = dict(target_path_per_indexed_cpt.get(None, {}))
+                # for myaxis, mycpt in indexed_axes.path_with_nodes(
+                #     leaf_axis, leaf_cpt
+                # ).items():
+                #     for target_axis, target_cpt in target_paths.get(
+                #         (myaxis.id, mycpt), {}
+                #     ).items():
+                #         target_path[target_axis] = target_cpt
+                # target_path = freeze(target_path)
+
+                target_path = dict(target_path_per_indexed_cpt.get(None, {}))
+                for myaxis, mycpt in indexed_axes.path_with_nodes(
+                    leaf_axis, leaf_cpt
+                ).items():
+                    target_path.update(
+                        target_path_per_indexed_cpt.get((myaxis.id, mycpt), {})
+                    )
+                target_path = freeze(target_path)
+
+                orig_layout = axes.layouts[target_path]
+                new_layout = IndexExpressionReplacer(
+                    index_exprs_per_indexed_cpt.get(None, {})
+                )(orig_layout)
+                new_layouts[indexed_axes.path(leaf_axis, leaf_cpt)] = new_layout
+
+        # breakpoint()
+        array_per_context[loop_context] = (axes, new_axes, new_layouts)
+    return Offset(array_per_context)
 
 
 class Instruction(pytools.ImmutableRecord):

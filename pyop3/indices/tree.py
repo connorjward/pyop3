@@ -817,7 +817,7 @@ def _(local_index: LocalLoopIndex, *args, loop_indices, **kwargs):
     path = loop_indices[local_index]
 
     loop_index = local_index.loop_index
-    if isinstance(loop_index.iterset, IndexedAxisTree):
+    if False:  # isinstance(loop_index.iterset, IndexedAxisTree):
         iterset = just_one(loop_index.iterset.axis_trees.values())
     else:
         iterset = loop_index.iterset

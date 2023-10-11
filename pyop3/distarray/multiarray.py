@@ -211,7 +211,7 @@ class MultiArray(DistributedArray):
                     for myaxis, mycpt in indexed_axes.path_with_nodes(
                         leaf_axis, leaf_cpt
                     ).items():
-                        for target_axis, target_cpt in target_paths.get(
+                        for target_axis, target_cpt in target_path_per_indexed_cpt.get(
                             (myaxis.id, mycpt), {}
                         ).items():
                             target_path[target_axis] = target_cpt
@@ -521,14 +521,14 @@ class IndexedMultiArray(pytools.ImmutableRecord, ContextFree):
 
         loop_contexts = collect_loop_contexts(indices)
         if not loop_contexts:
-            raise NotImplementedError
+            index_tree = just_one(as_index_forest(indices, axes=self.axes))
             (
                 indexed_axes,
-                target_paths_per_indexed_cpt,
+                target_path_per_indexed_cpt,
                 index_exprs_per_indexed_cpt,
                 layout_exprs_per_indexed_cpt,
-            ) = _index_axes(self.axes, indices, pmap())
-            target_paths, index_exprs, layout_exprs = _compose_bits(
+            ) = _index_axes(self.axes, index_tree, pmap())
+            target_paths, index_exprs, layout_exprs, *oldleafdata = _compose_bits(
                 self.axes,
                 indexed_axes,
                 target_path_per_indexed_cpt,
@@ -536,14 +536,45 @@ class IndexedMultiArray(pytools.ImmutableRecord, ContextFree):
                 layout_exprs_per_indexed_cpt,
             )
 
-            new_axes = indexed_axes.copy(
-                target_paths=target_paths,
-                index_exprs=index_exprs,
-                layout_exprs=layout_exprs,
+            new_axes = IndexedAxisTree(
+                indexed_axes,
+                target_paths,
+                index_exprs,
+                layout_exprs,
             )
 
-            new_layouts = IndexExpressionReplacer(leaf_index_exprs)(NotImplemented)
-            return self.copy(axes=new_axes, layouts=new_layouts)
+            # replace layout bits that disappear with loop index
+            if indexed_axes.is_empty:
+                new_layouts = {}
+                orig_path = leaf_target_paths[None]
+                new_path = pmap()
+
+                orig_layout = self.layouts[orig_path]
+                # new_layout = IndexExpressionReplacer(leaf_index_exprs[None])(
+                new_layout = IndexExpressionReplacer(index_exprs_per_indexed_cpt[None])(
+                    orig_layout
+                )
+                new_layouts[orig_path] = new_layout
+            else:
+                new_layouts = {}
+                for leaf_axis, leaf_cpt in indexed_axes.leaves:
+                    target_path = dict(target_path_per_indexed_cpt.get(None, {}))
+                    for myaxis, mycpt in indexed_axes.path_with_nodes(
+                        leaf_axis, leaf_cpt
+                    ).items():
+                        for target_axis, target_cpt in target_path_per_indexed_cpt.get(
+                            (myaxis.id, mycpt), {}
+                        ).items():
+                            target_path[target_axis] = target_cpt
+                    target_path = freeze(target_path)
+
+                    orig_layout = self.layouts[target_path]
+                    new_layout = IndexExpressionReplacer(
+                        index_exprs_per_indexed_cpt.get(None, {})
+                    )(orig_layout)
+                    new_layouts[indexed_axes.path(leaf_axis, leaf_cpt)] = new_layout
+
+            return IndexedMultiArray(self.array, new_axes, new_layouts)
 
         array_per_context = {}
         for index_tree in as_index_forest(indices, axes=self.axes):

@@ -593,8 +593,13 @@ def build_assignment(
     loop_context = freeze(loop_context)
     # jname_replace_map = freeze(jname_replace_map)
 
-    axes = assignment.array.with_context(loop_context).axes
-    minimal_context = assignment.array.filter_context(loop_context)
+    # TODO cleanup
+    if isinstance(assignment.array, Offset):
+        axes = assignment.array.with_context(loop_context)[1]
+        minimal_context = assignment.array.filter_context(loop_context)
+    else:
+        axes = assignment.array.with_context(loop_context).axes
+        minimal_context = assignment.array.filter_context(loop_context)
 
     # filter the loop indices, we don't want to have entries for loop indices that aren't
     # used in the indexing
@@ -770,7 +775,8 @@ def add_leaf_assignment(
     else:
         assert isinstance(assignment.array, Offset)
         array_expr = make_offset_expr(
-            assignment.array.orig_axes.layouts[target_path],
+            # assignment.array.orig_axes.layouts[target_path],
+            assignment.array.with_context(context)[2][source_path],
             iname_replace_map | jname_replace_map,
             codegen_context,
         )
