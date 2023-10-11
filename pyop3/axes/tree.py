@@ -1065,10 +1065,11 @@ class AxisTree(StrictLabelledTree, ContextFreeLoopIterable):
 
 # TODO: Inherit things from AxisTree, StaticAxisTree?
 class IndexedAxisTree(ContextFreeLoopIterable, pytools.ImmutableRecord):
-    fields = {"axes", "target_paths", "index_exprs", "layout_exprs"}
+    fields = {"axes", "paths", "target_paths", "index_exprs", "layout_exprs"}
 
-    def __init__(self, axes, target_paths, index_exprs, layout_exprs):
+    def __init__(self, axes, paths, target_paths, index_exprs, layout_exprs):
         self.axes = axes
+        self.paths = paths
         self.target_paths = target_paths
         self.index_exprs = index_exprs
         self.layout_exprs = layout_exprs
@@ -1116,6 +1117,10 @@ class IndexedAxisTree(ContextFreeLoopIterable, pytools.ImmutableRecord):
     @property
     def leaves(self):
         return self.axes.leaves
+
+    @property
+    def leaf(self):
+        return self.axes.leaf
 
     def child(self, axis, component):
         return self.axes.child(axis, component)

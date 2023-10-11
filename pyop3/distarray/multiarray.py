@@ -187,6 +187,7 @@ class MultiArray(DistributedArray):
 
             new_axes = IndexedAxisTree(
                 indexed_axes,
+                target_path_per_indexed_cpt,
                 target_paths,
                 index_exprs,
                 layout_exprs,
@@ -251,6 +252,7 @@ class MultiArray(DistributedArray):
 
             new_axes = IndexedAxisTree(
                 indexed_axes,
+                target_path_per_indexed_cpt,
                 target_paths,
                 index_exprs,
                 layout_exprs,
@@ -538,6 +540,7 @@ class IndexedMultiArray(pytools.ImmutableRecord, ContextFree):
 
             new_axes = IndexedAxisTree(
                 indexed_axes,
+                target_path_per_indexed_cpt,
                 target_paths,
                 index_exprs,
                 layout_exprs,
@@ -602,6 +605,7 @@ class IndexedMultiArray(pytools.ImmutableRecord, ContextFree):
 
             new_axes = IndexedAxisTree(
                 indexed_axes,
+                target_path_per_indexed_cpt,
                 target_paths,
                 index_exprs,
                 layout_exprs,
@@ -717,6 +721,7 @@ class ContextSensitiveMultiArray(ContextSensitive):
 
             new_axes = IndexedAxisTree(
                 indexed_axes,
+                target_path_per_indexed_cpt,
                 target_paths,
                 index_exprs,
                 layout_exprs,

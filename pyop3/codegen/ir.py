@@ -386,6 +386,7 @@ def parse_loop_properly_this_time(
                 new_iname_replace_map | jname_replace_map | outer_replace_map,
                 codegen_context,
             )(index_expr)
+            # jname_extras[axis_label] = jname_expr
             jname_extras[axis_label] = jname_expr
 
         new_jname_replace_map = jname_replace_map | jname_extras
@@ -417,6 +418,7 @@ def parse_loop_properly_this_time(
                         for myaxislabel, jname_expr in new_jname_replace_map.items()
                     }
                 )
+                # breakpoint()
 
                 for stmt in loop.statements:
                     _compile(

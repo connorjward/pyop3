@@ -280,9 +280,10 @@ class CalledMap(Index, LoopIterable):
 
         axes = IndexedAxisTree(
             axes,
-            target_paths=target_paths,
-            index_exprs=index_exprs,
-            layout_exprs=layout_exprs,
+            paths,
+            target_paths,
+            index_exprs,
+            layout_exprs,
         )
 
         context_sensitive_axes = ContextSensitiveAxisTree({context: axes})
@@ -564,6 +565,7 @@ def _(arg: LocalLoopIndex):
 @collect_loop_contexts.register
 def _(arg: LoopIndex, local=False):
     if isinstance(arg.iterset, ContextSensitiveAxisTree):
+        raise NotImplementedError
         contexts = []
         for loop_context, axis_tree in arg.iterset.context_map.items():
             extra_source_context = {}
@@ -598,6 +600,7 @@ def _(arg: LoopIndex, local=False):
             ).items():
                 target_path.update(
                     iterset.target_path_per_component[axis.id, cpt.label]
+                    # iterset.paths[axis.id, cpt.label]
                 )
             if local:
                 contexts.append(pmap({arg.local_index: source_path}))
@@ -785,9 +788,9 @@ def collect_shape_index_callback(index, *args, **kwargs):
 
 
 @collect_shape_index_callback.register
-def _(loop_index: LoopIndex, *, loop_indices, **kwargs):
+def _(loop_index: LoopIndex, *, prev_axes, loop_indices, **kwargs):
     # breakpoint()
-    path = loop_indices[loop_index]
+    # path = loop_indices[loop_index]
 
     if False:  # isinstance(loop_index.iterset, IndexedAxisTree):
         iterset = just_one(loop_index.iterset.axis_trees.values())
@@ -795,11 +798,21 @@ def _(loop_index: LoopIndex, *, loop_indices, **kwargs):
         iterset = loop_index.iterset
 
     # I dont know if this is mapping from the right thing
+    # should target the input axes???
+    # target_path_per_component = pmap({None: path})
+    # breakpoint()
+    # testing, assumes single component
+    path = prev_axes.path(*prev_axes.leaf)
     target_path_per_component = pmap({None: path})
+    # fairly sure that here I want the *output* path of the loop indices
     index_exprs_per_component = pmap(
         {
             None: pmap(
-                {axis: LoopIndexVariable(loop_index, axis) for axis in path.keys()}
+                {
+                    axis: LoopIndexVariable(loop_index, axis)
+                    for axis in loop_indices[loop_index].keys()
+                }
+                # {axis: LoopIndexVariable(loop_index, axis) for axis in path.keys()}
             )
         }
     )
@@ -1127,6 +1140,7 @@ def index_axes(axes, indices):
         # breakpoint()
         return IndexedAxisTree(
             indexed_axes,
+            target_path_per_indexed_cpt,
             target_paths,
             index_exprs,
             layout_exprs,
@@ -1151,6 +1165,7 @@ def index_axes(axes, indices):
 
         axis_trees[loop_context] = IndexedAxisTree(
             indexed_axes,
+            target_path_per_indexed_cpt,
             target_paths,
             index_exprs,
             layout_exprs,
@@ -1326,10 +1341,10 @@ def _compose_bits(
         leaf_index_exprs = {}
 
         for axis, cpt in axes.detailed_path(itarget_paths.get(None, {})).items():
-            # target path
+            #     # target path
             leaf_target_path.update(axes.target_paths.get((axis.id, cpt.label), {}))
-
-            # index exprs
+            #
+            #     # index exprs
             leaf_index_exprs.update(axes.index_exprs.get((axis.id, cpt.label), {}))
 
             # for axis_label, index_expr in axes.index_exprs[axis.id, cpt.label].items():
@@ -1345,6 +1360,8 @@ def _compose_bits(
             pmap(),
             freeze({pmap(): leaf_target_path}),
             freeze({pmap(): leaf_index_exprs}),
+            # pmap(),
+            # pmap(),
         )
 
     if iaxis is None:
