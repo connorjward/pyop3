@@ -113,8 +113,7 @@ class MultiArray(DistributedArray):
             # must be context-free
             raise TypeError()
 
-        # lazy? needed?
-        self.layouts = axes.layouts
+        self.layouts = layout_from_axes(axes)
 
         if isinstance(data, np.ndarray):
             if dtype:
@@ -136,9 +135,6 @@ class MultiArray(DistributedArray):
         if prefix:
             self.name_generator.add_name(prefix, conflicting_ok=True)
         name = name or self.name_generator(prefix or self.prefix)
-
-        # if name == "array_48":
-        #     breakpoint()
 
         DistributedArray.__init__(self, name)
         # pym.primitives.Variable.__init__(self, name)
@@ -269,6 +265,8 @@ class MultiArray(DistributedArray):
                     orig_layout
                 )
                 new_layouts[new_path] = new_layout
+                # don't silently do nothing
+                assert new_layout != orig_layout
             else:
                 new_layouts = {}
                 for leaf_axis, leaf_cpt in indexed_axes.leaves:
@@ -297,7 +295,9 @@ class MultiArray(DistributedArray):
                     )(orig_layout)
                     new_layouts[indexed_axes.path(leaf_axis, leaf_cpt)] = new_layout
 
-            # breakpoint()
+                    # don't silently do nothing
+                    assert new_layout != orig_layout
+
             array_per_context[loop_context] = IndexedMultiArray(
                 self, new_axes, new_layouts
             )
@@ -789,6 +789,10 @@ class ContextSensitiveMultiArray(ContextSensitive):
 
 def replace_layout(orig_layout, replace_map):
     return IndexExpressionReplacer(replace_map)(orig_layout)
+
+
+def layout_from_axes(axes):
+    return axes.layouts
 
 
 def make_sparsity(

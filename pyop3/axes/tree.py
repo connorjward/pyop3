@@ -1087,7 +1087,11 @@ class IndexedAxisTree(ContextFreeLoopIterable, pytools.ImmutableRecord):
     # TODO Is this a property? _default_layouts?
     @property
     def layouts(self):
-        return self.axes.layouts
+        # no! need to do some substitution
+        if self.layout_exprs:
+            raise NotImplementedError
+        else:
+            return self.axes.layouts
 
     @property
     def datamap(self):
