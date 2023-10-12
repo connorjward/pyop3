@@ -113,8 +113,6 @@ class MultiArray(DistributedArray):
             # must be context-free
             raise TypeError()
 
-        self.layouts = layout_from_axes(axes)
-
         if isinstance(data, np.ndarray):
             if dtype:
                 data = np.asarray(data, dtype=dtype)
@@ -142,7 +140,7 @@ class MultiArray(DistributedArray):
         self._data = data
         self.dtype = dtype
 
-        self.axes = axes
+        self.axes = layout_axes(axes)
 
         self.max_value = max_value
         self.sf = sf
@@ -296,12 +294,17 @@ class MultiArray(DistributedArray):
                     new_layouts[indexed_axes.path(leaf_axis, leaf_cpt)] = new_layout
 
                     # don't silently do nothing
-                    assert new_layout != orig_layout
+                    # assert new_layout != orig_layout
 
             array_per_context[loop_context] = IndexedMultiArray(
                 self, new_axes, new_layouts
             )
         return ContextSensitiveMultiArray(array_per_context)
+
+    # TODO remove this
+    @property
+    def layouts(self):
+        return self.axes.layouts
 
     @property
     def data(self):
@@ -508,6 +511,7 @@ class IndexedMultiArray(pytools.ImmutableRecord, ContextFree):
         super().__init__()
         self.array = array
         self.axes = axes
+        # TODO where is this used? Does a LayoutAxisTree resolve this?
         self.layouts = layouts
 
     def __getitem__(
@@ -628,7 +632,6 @@ class IndexedMultiArray(pytools.ImmutableRecord, ContextFree):
             #         orig_path = leaf_target_paths[leaf_axis.id, leaf_cpt]
             #         new_path = indexed_axes.path(leaf_axis, leaf_cpt)
             #
-            #         # breakpoint()
             #         orig_layout = self.layouts[orig_path]
             #         new_layout = IndexExpressionReplacer(
             #             leaf_index_exprs[leaf_axis.id, leaf_cpt]
@@ -730,15 +733,16 @@ class ContextSensitiveMultiArray(ContextSensitive):
             # replace layout bits that disappear with loop index
             if indexed_axes.is_empty:
                 new_layouts = {}
-                orig_path = leaf_target_paths[None]
+                orig_path = target_path_per_indexed_cpt[None]
                 new_path = pmap()
 
                 orig_layout = array.layouts[orig_path]
-                # new_layout = IndexExpressionReplacer(leaf_index_exprs[None])(
                 new_layout = IndexExpressionReplacer(index_exprs_per_indexed_cpt[None])(
                     orig_layout
                 )
-                new_layouts[orig_path] = new_layout
+                new_layouts[new_path] = new_layout
+                # don't silently do nothing
+                assert new_layout != orig_layout
             else:
                 new_layouts = {}
                 for leaf_axis, leaf_cpt in indexed_axes.leaves:
@@ -760,15 +764,12 @@ class ContextSensitiveMultiArray(ContextSensitive):
                         )
                     target_path = freeze(target_path)
 
-                    # breakpoint()
-
                     orig_layout = array.layouts[target_path]
                     new_layout = IndexExpressionReplacer(
                         index_exprs_per_indexed_cpt.get(None, {})
                     )(orig_layout)
                     new_layouts[indexed_axes.path(leaf_axis, leaf_cpt)] = new_layout
 
-            # breakpoint()
             array_per_context[loop_context] = IndexedMultiArray(
                 array, new_axes, new_layouts
             )
@@ -791,8 +792,87 @@ def replace_layout(orig_layout, replace_map):
     return IndexExpressionReplacer(replace_map)(orig_layout)
 
 
-def layout_from_axes(axes):
-    return axes.layouts
+class LayoutAxisTree(pytools.ImmutableRecord):
+    fields = {"axes", "layouts"}
+
+    def __init__(self, axes, layouts):
+        super().__init__()
+        self.axes = axes
+        self.layouts = layouts
+
+    # TODO I think inheritance should allow us to undo a lot of the property passthrough stuff
+    def __getattr__(self, name):
+        return getattr(self.axes, name)
+
+
+@functools.singledispatch
+def layout_axes(axes) -> LayoutAxisTree:
+    if isinstance(axes, LayoutAxisTree):
+        return axes
+    else:
+        assert isinstance(axes, AxisTree)
+        return LayoutAxisTree(axes, axes._default_layouts())
+
+
+@layout_axes.register
+def _(axes: IndexedAxisTree) -> LayoutAxisTree:
+    from pyop3.distarray.multiarray import IndexExpressionReplacer
+
+    if axes.is_empty:
+        # return LayoutAxisTree(axes, freeze({pmap(): 0}))
+        return LayoutAxisTree(axes, NotImplemented)
+
+    # relabel the axis tree, note that the strong statements (i.e. just_one(...), etc)
+    # are *required* rather than me being lazy. If these conditions do not hold then
+    # it is not valid to use this axis tree as a layout.
+    new_root_labels = set()
+    new_root_cpts = []
+    for orig_cpt in axes.root.components:
+        axlabel, clabel = just_one(
+            axes.target_paths[axes.root.id, orig_cpt.label].items()
+        )
+        new_root_labels.add(axlabel)
+        new_root_cpts.append(orig_cpt.copy(label=clabel))
+    new_root_label = just_one(new_root_labels)
+    new_root = axes.root.copy(label=new_root_label, components=new_root_cpts)
+
+    new_parent_to_children = {}
+    for axis_id, subaxes in axes.parent_to_children.items():
+        new_subaxes = []
+        for subaxis in subaxes:
+            if subaxis is None:
+                new_subaxes.append(None)
+                continue
+            axis_labels = set()
+            cpts = []
+            for orig_cpt in subaxis.components:
+                axlabel, clabel = just_one(
+                    axes.target_paths[subaxis.id, orig_cpt.label].items()
+                )
+                axis_labels.add(axlabel)
+                cpts.append(orig_cpt.copy(label=clabel))
+            axis_label = just_one(axis_labels)
+            new_subaxes.append(subaxis.copy(label=axis_label, components=cpts))
+        new_parent_to_children[axis_id] = new_subaxes
+
+    new_axes = axes.axes.copy(root=new_root, parent_to_children=new_parent_to_children)
+
+    assert axes.layout_exprs
+    layouts_ = {}
+    for leaf in axes.leaves:
+        orig_path = axes.path(*leaf)
+        new_path = {}
+        replace_map = {}
+        for axis, cpt in axes.path_with_nodes(*leaf).items():
+            new_path.update(axes.target_paths[axis.id, cpt])
+            replace_map.update(axes.layout_exprs[axis.id, cpt])
+        new_path = freeze(new_path)
+
+        orig_layout = axes.axes._default_layouts()[orig_path]
+        new_layout = IndexExpressionReplacer(replace_map)(orig_layout)
+        assert new_layout != orig_layout
+        layouts_[new_path] = new_layout
+    return LayoutAxisTree(new_axes, layouts_)
 
 
 def make_sparsity(

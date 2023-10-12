@@ -466,9 +466,10 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
         loop_context = context_from_indices(loop_indices)
 
         if isinstance(arg, (MultiArray, IndexedMultiArray, ContextSensitiveMultiArray)):
-            axes = arg.with_context(loop_context).axes.copy(
-                index_exprs=None,
-            )
+            axes = arg.with_context(loop_context).axes.axes
+            # axes = arg.with_context(loop_context).axes.copy(
+            #     index_exprs=None,
+            # )
         else:
             assert isinstance(arg, Offset)
             axes = AxisTree()

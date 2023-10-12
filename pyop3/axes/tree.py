@@ -24,6 +24,7 @@ from pyrsistent import freeze, pmap
 
 from pyop3 import utils
 from pyop3.dtypes import IntType, PointerType, get_mpi_dtype
+from pyop3.extras.debug import deprecated
 from pyop3.tree import (
     ComponentLabel,
     LabelledNode,
@@ -853,9 +854,9 @@ class AxisTree(StrictLabelledTree, ContextFreeLoopIterable):
     def _make_target_paths(self):
         return tuple(self.path(ax, cpt) for ax, cpt in self.leaves)
 
-    @property
+    @functools.cached_property
+    @deprecated
     def layouts(self):
-        # FIXME function not property
         return self._default_layouts()
 
     def _default_layouts(self):
@@ -1087,11 +1088,20 @@ class IndexedAxisTree(ContextFreeLoopIterable, pytools.ImmutableRecord):
     # TODO Is this a property? _default_layouts?
     @property
     def layouts(self):
-        # no! need to do some substitution
-        if self.layout_exprs:
-            raise NotImplementedError
-        else:
+        assert False, "dont touch"
+        from pyop3.distarray.multiarray import IndexExpressionReplacer
+
+        if self.axes.is_empty:
             return self.axes.layouts
+
+        assert self.layout_exprs
+        layouts_ = {}
+        for leaf in self.axes.leaves:
+            path = self.axes.path(*leaf)
+            orig_layout = self.axes.layouts[path]
+            new_layout = IndexExpressionReplacer(self.layout_exprs)(orig_layout)
+            layouts_[path] = new_layout
+        return freeze(layouts_)
 
     @property
     def datamap(self):
@@ -1117,6 +1127,10 @@ class IndexedAxisTree(ContextFreeLoopIterable, pytools.ImmutableRecord):
     @property
     def root(self):
         return self.axes.root
+
+    @property
+    def parent_to_children(self):
+        return self.axes.parent_to_children
 
     @property
     def leaves(self):

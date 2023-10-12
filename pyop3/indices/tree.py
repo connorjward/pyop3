@@ -278,6 +278,8 @@ class CalledMap(Index, LoopIterable):
             self, loop_indices=context
         )
 
+        paths = NotImplemented
+
         axes = IndexedAxisTree(
             axes,
             paths,
@@ -357,6 +359,13 @@ class LoopIndex(AbstractLoopIndex):
     @property
     def datamap(self):
         return self.iterset.datamap
+
+    def mypaths(self, context):
+        iterset = self.iterset.with_context(context)
+        paths = []
+        for leaf in iterset.leaves:
+            paths.append(iterset.path(*leaf))
+        return tuple(paths)
 
     def target_paths(self, context):
         iterset = self.iterset.with_context(context)
@@ -565,7 +574,6 @@ def _(arg: LocalLoopIndex):
 @collect_loop_contexts.register
 def _(arg: LoopIndex, local=False):
     if isinstance(arg.iterset, ContextSensitiveAxisTree):
-        raise NotImplementedError
         contexts = []
         for loop_context, axis_tree in arg.iterset.context_map.items():
             extra_source_context = {}
@@ -788,7 +796,7 @@ def collect_shape_index_callback(index, *args, **kwargs):
 
 
 @collect_shape_index_callback.register
-def _(loop_index: LoopIndex, *, prev_axes, loop_indices, **kwargs):
+def _(loop_index: LoopIndex, *, loop_indices, **kwargs):
     # breakpoint()
     # path = loop_indices[loop_index]
 
@@ -800,10 +808,14 @@ def _(loop_index: LoopIndex, *, prev_axes, loop_indices, **kwargs):
     # I dont know if this is mapping from the right thing
     # should target the input axes???
     # target_path_per_component = pmap({None: path})
-    # breakpoint()
     # testing, assumes single component
-    path = prev_axes.path(*prev_axes.leaf)
-    target_path_per_component = pmap({None: path})
+    # the following is wrong. for vector stuff this breaks things as prev_axes is
+    # bigger than what the loop index is touching. I think I need to add a new attribute
+    # to LoopIndex
+    # breakpoint()
+    # path = prev_axes.path(*prev_axes.leaf)
+    # target_path_per_component = pmap({None: just_one(loop_index.mypaths(loop_indices))})
+    target_path_per_component = pmap({None: loop_indices[loop_index]})
     # fairly sure that here I want the *output* path of the loop indices
     index_exprs_per_component = pmap(
         {
@@ -1381,6 +1393,7 @@ def _compose_bits(
         new_index_exprs_acc = index_exprs_acc
 
         itarget_path = itarget_paths.get((iaxis.id, icpt.label), {})
+        # turn this into something else...
         new_target_path = target_path | itarget_path
 
         new_partial_index_exprs = partial_index_exprs | iindex_exprs.get(
@@ -1441,6 +1454,9 @@ def _compose_bits(
             # so the final replace map is src -> h(final)
             # we start with src -> f(intermediate)
             # and intermediate -> g(final)
+
+            # this sometimes misses bits, something is poorly ordered...
+            # print(axes.layout_exprs)
             full_replace_map = merge_dicts(
                 [
                     axes.layout_exprs[tgt_ax.id, tgt_cpt.label]
@@ -1455,8 +1471,7 @@ def _compose_bits(
                 new_layout_expr = IndexExpressionReplacer(layout_expr_replace_map)(
                     myvalue
                 )
-                if not skip:
-                    layout_exprs[ikey][iaxis.label] = new_layout_expr
+                layout_exprs[ikey][iaxis.label] = new_layout_expr
 
             new_partial_layout_exprs = pmap()
 
