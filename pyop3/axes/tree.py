@@ -764,9 +764,23 @@ class AxisTree(StrictLabelledTree, ContextFreeLoopIterable):
         self._layout_exprs = self._default_layout_exprs()
 
     def __getitem__(self, indices) -> Union[IndexedAxisTree, ContextSensitiveAxisTree]:
-        from pyop3.indices.tree import index_axes
+        from pyop3.indices.tree import (
+            as_index_forest,
+            collect_loop_contexts,
+            index_axes,
+        )
 
-        return index_axes(self, indices)
+        if indices is Ellipsis:
+            indices = index_tree_from_ellipsis(self)
+
+        if not collect_loop_contexts(indices):
+            index_tree = just_one(as_index_forest(indices, axes=self))
+            return index_axes(self, index_tree)
+
+        axis_trees = {}
+        for index_tree in as_index_forest(indices, axes=self):
+            axis_trees[index_tree.loop_context] = index_axes(self, index_tree)
+        return ContextSensitiveAxisTree(axis_trees)
 
     @property
     def axis_trees(self):
@@ -1082,9 +1096,24 @@ class IndexedAxisTree(ContextFreeLoopIterable, pytools.ImmutableRecord):
         self.layout_exprs = layout_exprs
 
     def __getitem__(self, indices):
-        from pyop3.indices.tree import index_axes
+        from pyop3.indices.tree import (
+            as_index_forest,
+            collect_loop_contexts,
+            index_axes,
+            index_tree_from_ellipsis,
+        )
 
-        return index_axes(self, indices)
+        if indices is Ellipsis:
+            indices = index_tree_from_ellipsis(self)
+
+        if not collect_loop_contexts(indices):
+            index_tree = just_one(as_index_forest(indices, axes=self))
+            return index_axes(self, index_tree)
+
+        axis_trees = {}
+        for index_tree in as_index_forest(indices, axes=self):
+            axis_trees[index_tree.loop_context] = index_axes(self, index_tree)
+        return ContextSensitiveAxisTree(axis_trees)
 
     def index(self) -> LoopIndex:
         from pyop3.indices import LoopIndex
@@ -1183,14 +1212,14 @@ class IndexedAxisTree(ContextFreeLoopIterable, pytools.ImmutableRecord):
 
 class ContextSensitiveAxisTree(ContextSensitiveLoopIterable):
     def __getitem__(self, indices) -> ContextSensitiveAxisTree:
-        from pyop3.indices import index_axes
-
+        raise NotImplementedError
         # TODO think harder about composing context maps
-        new_context_map = {}
-        for context, axes in self.context_map.items():
-            for context_, axes_ in index_axes(axes, indices).items():
-                new_context_map[context | context_] = axes_
-        return ContextSensitiveAxisTree(new_context_map)
+        # answer is something like:
+        # new_context_map = {}
+        # for context, axes in self.context_map.items():
+        #     for context_, axes_ in index_axes(axes, indices).items():
+        #         new_context_map[context | context_] = axes_
+        # return ContextSensitiveAxisTree(new_context_map)
 
     def index(self) -> LoopIndex:
         from pyop3.indices import LoopIndex
