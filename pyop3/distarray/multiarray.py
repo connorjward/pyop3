@@ -188,7 +188,6 @@ class MultiArray(DistributedArray, ContextFree):
             layout_axes = substitute_layouts(
                 self.axes,
                 new_axes,
-                indexed_axes,
                 target_path_per_indexed_cpt,
                 index_exprs_per_indexed_cpt,
             )
@@ -229,7 +228,6 @@ class MultiArray(DistributedArray, ContextFree):
             layout_axes = substitute_layouts(
                 self.axes,
                 new_axes,
-                indexed_axes,
                 target_path_per_indexed_cpt,
                 index_exprs_per_indexed_cpt,
             )
@@ -544,7 +542,6 @@ class ContextSensitiveMultiArray(ContextSensitive):
             layout_axes = substitute_layouts(
                 array.axes,
                 new_axes,
-                indexed_axes,
                 target_path_per_indexed_cpt,
                 index_exprs_per_indexed_cpt,
             )
@@ -879,10 +876,9 @@ def overlap_axes(ax1, ax2, sparsity=None):
     return MultiAxis(new_parts).set_up(with_sf=False)
 
 
-# TODO I think I can drop indexed_axes
-def substitute_layouts(orig_axes, new_axes, indexed_axes, target_paths, index_exprs):
+def substitute_layouts(orig_axes, new_axes, target_paths, index_exprs):
     # replace layout bits that disappear with loop index
-    if indexed_axes.is_empty:
+    if new_axes.is_empty:
         new_layouts = {}
         orig_path = target_paths[None]
         new_path = pmap()
@@ -894,16 +890,14 @@ def substitute_layouts(orig_axes, new_axes, indexed_axes, target_paths, index_ex
         assert new_layout != orig_layout
     else:
         new_layouts = {}
-        for leaf_axis, leaf_cpt in indexed_axes.leaves:
+        for leaf_axis, leaf_cpt in new_axes.leaves:
             orig_path = dict(target_paths.get(None, {}))
-            for myaxis, mycpt in indexed_axes.path_with_nodes(
-                leaf_axis, leaf_cpt
-            ).items():
+            for myaxis, mycpt in new_axes.path_with_nodes(leaf_axis, leaf_cpt).items():
                 orig_path.update(target_paths.get((myaxis.id, mycpt), {}))
 
             orig_layout = orig_axes.layouts[freeze(orig_path)]
             new_layout = IndexExpressionReplacer(index_exprs.get(None, {}))(orig_layout)
-            new_layouts[indexed_axes.path(leaf_axis, leaf_cpt)] = new_layout
+            new_layouts[new_axes.path(leaf_axis, leaf_cpt)] = new_layout
             # TODO, this sometimes fails, is that valid?
             # don't silently do nothing
             # assert new_layout != orig_layout
