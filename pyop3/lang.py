@@ -18,7 +18,7 @@ from pyrsistent import freeze, pmap
 from pyop3.axes import as_axis_tree
 from pyop3.axes.tree import ContextFree, ContextSensitive, MultiArrayCollector
 from pyop3.distarray import DistributedArray, MultiArray
-from pyop3.distarray.multiarray import IndexExpressionReplacer
+from pyop3.distarray.multiarray import IndexExpressionReplacer, substitute_layouts
 from pyop3.dtypes import IntType
 from pyop3.indices.tree import (
     IndexedAxisTree,
@@ -286,20 +286,12 @@ class Offset(LoopExpr, ContextSensitive):
 
     @functools.cached_property
     def datamap(self):
-        # awful, need to do better than a tuple
-        datamap_ = {}
-        for offset_tuple in self.context_map.values():
-            for layout_expr in offset_tuple[2].values():
-                if isinstance(layout_expr, pym.primitives.NaN):
-                    continue
-                for array in MultiArrayCollector()(layout_expr):
-                    datamap_.update(array.datamap)
-        return freeze(datamap_)
+        return merge_dicts(axes.datamap for axes in self.context_map.values())
 
 
 def offset(axes, indices):
     axes = as_axis_tree(axes)
-    array_per_context = {}
+    axes_per_context = {}
     for index_tree in as_index_forest(indices, axes=axes):
         loop_context = index_tree.loop_context
         (
@@ -331,48 +323,15 @@ def offset(axes, indices):
             layout_exprs,
         )
 
-        # replace layout bits that disappear with loop index
-        if indexed_axes.is_empty:
-            new_layouts = {}
-            orig_path = target_path_per_indexed_cpt[None]
-            new_path = pmap()
-
-            orig_layout = axes.layouts[orig_path]
-            new_layout = IndexExpressionReplacer(index_exprs_per_indexed_cpt[None])(
-                orig_layout
-            )
-            new_layouts[new_path] = new_layout
-        else:
-            new_layouts = {}
-            for leaf_axis, leaf_cpt in indexed_axes.leaves:
-                # target_path = dict(target_path_per_indexed_cpt.get(None, {}))
-                # for myaxis, mycpt in indexed_axes.path_with_nodes(
-                #     leaf_axis, leaf_cpt
-                # ).items():
-                #     for target_axis, target_cpt in target_paths.get(
-                #         (myaxis.id, mycpt), {}
-                #     ).items():
-                #         target_path[target_axis] = target_cpt
-                # target_path = freeze(target_path)
-
-                target_path = dict(target_path_per_indexed_cpt.get(None, {}))
-                for myaxis, mycpt in indexed_axes.path_with_nodes(
-                    leaf_axis, leaf_cpt
-                ).items():
-                    target_path.update(
-                        target_path_per_indexed_cpt.get((myaxis.id, mycpt), {})
-                    )
-                target_path = freeze(target_path)
-
-                orig_layout = axes.layouts[target_path]
-                new_layout = IndexExpressionReplacer(
-                    index_exprs_per_indexed_cpt.get(None, {})
-                )(orig_layout)
-                new_layouts[indexed_axes.path(leaf_axis, leaf_cpt)] = new_layout
-
-        # breakpoint()
-        array_per_context[loop_context] = (axes, new_axes, new_layouts)
-    return Offset(array_per_context)
+        layout_axes = substitute_layouts(
+            axes,
+            new_axes,
+            indexed_axes,
+            target_path_per_indexed_cpt,
+            index_exprs_per_indexed_cpt,
+        )
+        axes_per_context[loop_context] = layout_axes
+    return Offset(axes_per_context)
 
 
 class Instruction(pytools.ImmutableRecord):

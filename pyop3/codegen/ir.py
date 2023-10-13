@@ -467,10 +467,8 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
         loop_context = context_from_indices(loop_indices)
 
         if isinstance(arg, (MultiArray, IndexedMultiArray, ContextSensitiveMultiArray)):
-            axes = arg.with_context(loop_context).axes.axes
-            # axes = arg.with_context(loop_context).axes.copy(
-            #     index_exprs=None,
-            # )
+            # FIXME: layout axes -> indexed axes -> axes we want
+            axes = arg.with_context(loop_context).axes.axes.axes
         else:
             assert isinstance(arg, Offset)
             axes = AxisTree()
@@ -599,7 +597,7 @@ def build_assignment(
 
     # TODO cleanup
     if isinstance(assignment.array, Offset):
-        axes = assignment.array.with_context(loop_context)[1]
+        axes = assignment.array.with_context(loop_context).axes
         minimal_context = assignment.array.filter_context(loop_context)
     else:
         axes = assignment.array.with_context(loop_context).axes
@@ -779,8 +777,7 @@ def add_leaf_assignment(
     else:
         assert isinstance(assignment.array, Offset)
         array_expr = make_offset_expr(
-            # assignment.array.orig_axes.layouts[target_path],
-            assignment.array.with_context(context)[2][source_path],
+            assignment.array.with_context(context).layouts[source_path],
             iname_replace_map | jname_replace_map,
             codegen_context,
         )
@@ -964,8 +961,6 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         )
         base_varname = ctx.unique_name("base")
         # breaks if unsigned
-        # ctx.add_temporary(base_varname, dtype=np.int64)
-        # base_var = pym.var(base_varname)
         ctx.add_cinstruction(
             f"int32_t* {base_varname} = {indices.name} + {start_expr};", {indices.name}
         )
@@ -977,8 +972,6 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
 
         # result
         found_varname = ctx.unique_name("ptr")
-        # ctx.add_temporary(found_varname, dtype=np.int64)
-        # found_var = pym.var(found_varname)
 
         # call
         bsearch_str = f"int32_t* {found_varname} = (int32_t*) bsearch(&{key_var}, {base_varname}, {nitems_expr}, sizeof(int32_t), cmpfunc);"
@@ -1003,12 +996,7 @@ def make_offset_expr(
     jname_replace_map,
     codegen_context,
 ):
-    expr = JnameSubstitutor(jname_replace_map, codegen_context)(layouts)
-
-    # if expr == ():
-    #     expr = 0
-
-    return expr
+    return JnameSubstitutor(jname_replace_map, codegen_context)(layouts)
 
 
 def register_extent(extent, jnames, ctx):
