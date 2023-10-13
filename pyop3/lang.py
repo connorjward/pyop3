@@ -325,6 +325,7 @@ def offset(axes, indices):
 
         new_axes = IndexedAxisTree(
             indexed_axes,
+            target_path_per_indexed_cpt,
             target_paths,
             index_exprs,
             layout_exprs,

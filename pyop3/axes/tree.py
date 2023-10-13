@@ -716,14 +716,20 @@ class MultiArrayCollector(pym.mapper.Collector):
 
 # hacky class for index_exprs to work, needs cleaning up
 class AxisVariable(pym.primitives.Variable):
+    init_arg_names = ("axis",)
+
     mapper_method = sys.intern("map_axis_variable")
 
     mycounter = 0
 
-    def __init__(self, axis_label):
+    def __init__(self, axis):
         super().__init__(f"var{self.mycounter}")
         self.__class__.mycounter += 1  # ugly
-        self.axis_label = axis_label
+        self.axis_label = axis
+
+    def __getinitargs__(self):
+        # not very happy about this, is the name required?
+        return (self.axis,)
 
     @property
     def axis(self):

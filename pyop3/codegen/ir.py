@@ -40,6 +40,7 @@ from pyop3.indices import (
     Subset,
     TabulatedMapComponent,
 )
+from pyop3.indices.tree import LoopIndexVariable
 from pyop3.lang import (
     INC,
     MAX_RW,
@@ -918,7 +919,8 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         if expr.function.name != "mybsearch":
             raise NotImplementedError("hmm")
 
-        indices, axis_var = expr.parameters
+        indices_var, axis_var = expr.parameters
+        indices = indices_var.array
 
         leaf_axis, leaf_component = indices.axes.leaf
         ctx = self._codegen_context
@@ -939,13 +941,25 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         key_varname = ctx.unique_name("key")
         ctx.add_temporary(key_varname)
         key_var = pym.var(key_varname)
-        key_expr = self._labels_to_jnames[axis_var.axis_label]
+        key_expr = self._labels_to_jnames[(axis_var.index.id, axis_var.axis)]
         ctx.add_assignment(key_var, key_expr)
 
         # base
+        replace_map = {}
+        for key, replace_expr in self._labels_to_jnames.items():
+            # for (LoopIndex_id0, axis0)
+            if isinstance(key, tuple):
+                replace_map[key[1]] = replace_expr
+            else:
+                assert isinstance(key, str)
+                replace_map[key] = replace_expr
+        # and set start to zero
+        start_replace_map = replace_map.copy()
+        start_replace_map[leaf_axis.label] = 0
+
         start_expr = make_offset_expr(
-            indices.layouts[pmap()][indices.axes.path(leaf_axis, leaf_component)],
-            self._labels_to_jnames | {leaf_axis.label: 0},
+            indices.layouts[indices.axes.path(leaf_axis, leaf_component)],
+            start_replace_map,
             self._codegen_context,
         )
         base_varname = ctx.unique_name("base")
@@ -959,7 +973,7 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         # nitems
         nitems_varname = ctx.unique_name("nitems")
         ctx.add_temporary(nitems_varname)
-        nitems_expr = register_extent(leaf_component.count, self._labels_to_jnames, ctx)
+        nitems_expr = register_extent(leaf_component.count, replace_map, ctx)
 
         # result
         found_varname = ctx.unique_name("ptr")

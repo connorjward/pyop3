@@ -319,12 +319,19 @@ class AbstractLoopIndex(Index, abc.ABC):
 
 
 class LoopIndexVariable(pym.primitives.Variable):
+    init_arg_names = ("index", "axis")
+
     mapper_method = sys.intern("map_loop_index")
 
-    def __init__(self, loop_index, axis):
-        super().__init__(loop_index.id)
-        self.index = loop_index
+    def __init__(self, index, axis):
+        super().__init__(index.id)
+        self.index = index
         self.axis = axis
+
+    def __getinitargs__(self):
+        # FIXME The following is wrong, but it gives us the repr we want
+        # return (self.index, self.axis)
+        return (self.index.id, self.axis)
 
     @property
     def id(self):
@@ -526,6 +533,9 @@ def loop_contexts_from_iterable(indices):
     all_loop_indices = tuple(
         loop_index for index in indices for loop_index in collect_loop_indices(index)
     )
+
+    if len(all_loop_indices) == 0:
+        return {}
 
     contexts = combine_contexts(
         [collect_loop_contexts(idx) for idx in all_loop_indices]
@@ -1131,7 +1141,6 @@ def index_axes(axes, indices):
     if indices is Ellipsis:
         indices = index_tree_from_ellipsis(axes)
 
-    # FIXME I have a weird double loop here over loop contexts
     axis_trees = {}
     if not collect_loop_contexts(indices):
         index_tree = just_one(as_index_forest(indices, axes=axes))

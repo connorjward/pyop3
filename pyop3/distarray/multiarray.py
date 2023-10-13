@@ -51,7 +51,12 @@ class IndexExpressionReplacer(pym.mapper.IdentityMapper):
         return self._replace_map.get(expr.axis_label, expr)
 
     def map_multi_array(self, expr):
+        # orig_axes = expr.array.axes
+        # new_layouts = {path: self.rec(layout_expr) for path, layout_expr in orig_axes.layouts.items()}
+        # new_axes = orig_axes.copy(layouts=new_layouts)
+        # new_array = expr.array.copy_record(axes=new_axes)
         indices = tuple(self.rec(index) for index in expr.index_tuple)
+        # return MultiArrayVariable(new_array, indices)
         return MultiArrayVariable(expr.array, indices)
 
 
@@ -70,7 +75,6 @@ class MultiArrayVariable(pym.primitives.Subscript):
         return self.array.datamap | merge_dicts(idx.datamap for idx in self.indices)
 
 
-# class MultiArray(DistributedArray, pym.primitives.Variable):
 class MultiArray(DistributedArray):
     """Multi-dimensional, hierarchical array.
 
@@ -107,11 +111,10 @@ class MultiArray(DistributedArray):
     ):
         if name and prefix:
             raise ValueError("Can only specify one of name and prefix")
-        axes = as_axis_tree(axes)
 
-        if not isinstance(axes, (AxisTree, IndexedAxisTree)):
-            # must be context-free
-            raise TypeError()
+        # if not isinstance(axes, (AxisTree, IndexedAxisTree)):
+        #     # must be context-free
+        #     raise TypeError()
 
         if isinstance(data, np.ndarray):
             if dtype:
@@ -810,7 +813,7 @@ def layout_axes(axes) -> LayoutAxisTree:
     if isinstance(axes, LayoutAxisTree):
         return axes
     else:
-        assert isinstance(axes, AxisTree)
+        axes = as_axis_tree(axes)
         return LayoutAxisTree(axes, axes._default_layouts())
 
 
