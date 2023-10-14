@@ -129,19 +129,27 @@ class LoopIterable(abc.ABC):
     """
 
     @abc.abstractmethod
-    def index(self) -> LoopIndex:
-        pass
-
-    @abc.abstractmethod
     def __getitem__(self, indices) -> Union[LoopIterable, ContextSensitiveLoopIterable]:
         raise NotImplementedError
 
+    @abc.abstractmethod
+    def index(self) -> LoopIndex:
+        pass
 
-class ContextFreeLoopIterable(LoopIterable, ContextFree):
-    pass
+
+class ContextFreeLoopIterable(LoopIterable, ContextFree, abc.ABC):
+    @property
+    @abc.abstractmethod
+    def target_paths(self):
+        pass
+
+    @property
+    @abc.abstractmethod
+    def index_exprs(self):
+        pass
 
 
-class ContextSensitiveLoopIterable(LoopIterable, ContextSensitive):
+class ContextSensitiveLoopIterable(LoopIterable, ContextSensitive, abc.ABC):
     pass
 
 
@@ -740,208 +748,7 @@ class AxisVariable(pym.primitives.Variable):
         return pmap()
 
 
-class AxisTree(StrictLabelledTree, ContextFreeLoopIterable):
-    # FIXME this causes a recursive hash error...
-    fields = StrictLabelledTree.fields | {"sf", "shared_sf", "comm"}
-
-    def __init__(
-        self,
-        root: Optional[MultiAxis] = None,
-        parent_to_children: Optional[Dict] = None,
-        *,
-        sf=None,
-        shared_sf=None,
-        comm=None,
-    ):
-        super().__init__(root, parent_to_children)
-
-        self.sf = sf
-        self.shared_sf = shared_sf
-        self.comm = comm  # FIXME DTRT with internal comms
-
-        self._target_paths = self._default_target_path_per_component()
-        self._index_exprs = self._default_index_exprs_per_component()
-        self._layout_exprs = self._default_layout_exprs()
-
-    def __getitem__(self, indices) -> Union[IndexedAxisTree, ContextSensitiveAxisTree]:
-        from pyop3.indices.tree import (
-            as_index_forest,
-            collect_loop_contexts,
-            index_axes,
-        )
-
-        if indices is Ellipsis:
-            indices = index_tree_from_ellipsis(self)
-
-        if not collect_loop_contexts(indices):
-            index_tree = just_one(as_index_forest(indices, axes=self))
-            return index_axes(self, index_tree)
-
-        axis_trees = {}
-        for index_tree in as_index_forest(indices, axes=self):
-            axis_trees[index_tree.loop_context] = index_axes(self, index_tree)
-        return ContextSensitiveAxisTree(axis_trees)
-
-    @property
-    def axis_trees(self):
-        return pmap({pmap(): self})
-
-    def index(self):
-        from pyop3.indices import LoopIndex
-
-        return LoopIndex(self)
-
-    @property
-    def target_paths(self):
-        return self._target_paths
-
-    # deprecated alias
-    @property
-    def target_path_per_component(self):
-        return self.target_paths
-
-    @property
-    def index_exprs(self):
-        return self._index_exprs
-
-    # deprecated alias
-    @property
-    def index_exprs_per_component(self):
-        return self.index_exprs
-
-    @property
-    def axes(self):
-        return self
-
-    def _default_target_path_per_component(self):
-        if self.is_empty:
-            return pmap()
-
-        return pmap(
-            {
-                (axis.id, cpt.label): pmap({axis.label: cpt.label})
-                for axis in self.nodes
-                for cpt in axis.components
-            }
-        )
-
-    def _default_index_exprs_per_component(self):
-        if self.is_empty:
-            return pmap()
-
-        return pmap(
-            {
-                (axis.id, cpt.label): pmap({axis.label: AxisVariable(axis.label)})
-                for axis in self.nodes
-                for cpt in axis.components
-            }
-        )
-
-    def _default_layout_exprs(self):
-        return self._default_index_exprs_per_component()
-
-    @property
-    def layout_exprs(self):
-        if not self._layout_exprs:
-            self._layout_exprs = self._make_index_exprs()
-        return self._layout_exprs
-
-    @functools.cached_property
-    def datamap(self) -> dict[str:DistributedArray]:
-        if self.is_empty:
-            dmap = {}
-        else:
-            dmap = postvisit(self, _collect_datamap, axes=self)
-
-        # for cleverdict in [self.layouts, self.orig_layout_fn]:
-        #     for layout in cleverdict.values():
-        #         for layout_expr in layout.values():
-        #             # catch invalid layouts
-        #             if isinstance(layout_expr, pym.primitives.NaN):
-        #                 continue
-        #             for array in MultiArrayCollector()(layout_expr):
-        #                 dmap.update(array.datamap)
-
-        # TODO
-        # for cleverdict in [self.index_exprs, self.layout_exprs]:
-        for cleverdict in [self.index_exprs_per_component]:
-            for exprs in cleverdict.values():
-                for expr in exprs.values():
-                    for array in MultiArrayCollector()(expr):
-                        dmap.update(array.datamap)
-        return pmap(dmap)
-
-    def _make_target_paths(self):
-        return tuple(self.path(ax, cpt) for ax, cpt in self.leaves)
-
-    @functools.cached_property
-    @deprecated
-    def layouts(self):
-        return self._default_layouts()
-
-    def _default_layouts(self):
-        # ick
-        return self.set_up()
-
-    def find_part(self, label):
-        return self._parts_by_label[label]
-
-    def offset(self, *args, allow_unused=False):
-        nargs = len(args)
-        if nargs == 2:
-            path, indices = args[0], args[1]
-        else:
-            assert nargs == 1
-            path, indices = _path_and_indices_from_index_tuple(self, args[0])
-
-        if allow_unused:
-            path = _trim_path(self, path)
-
-        offset = pym.evaluate(self.layouts[path], (path, indices), ExpressionEvaluator)
-        return strict_int(offset)
-
-    # old alias
-    get_offset = offset
-
-    def find_component(self, node_label, cpt_label, also_node=False):
-        """Return the first component in the tree matching the given labels.
-
-        Notes
-        -----
-        This will return the first component matching the labels. Multiple may exist
-        but we assume that they are identical.
-
-        """
-        for node in self.nodes:
-            if node.label == node_label:
-                for cpt in node.components:
-                    if cpt.label == cpt_label:
-                        if also_node:
-                            return node, cpt
-                        else:
-                            return cpt
-        raise ValueError("Matching component not found")
-
-    def add_node(
-        self,
-        axis,
-        parent,
-        parent_component=None,
-        **kwargs,
-    ):
-        parent = self._as_node(parent)
-        if parent_component is None:
-            if len(parent.components) == 1:
-                parent_cpt_label = parent.components[0].label
-            else:
-                raise ValueError("Must specify parent component")
-        else:
-            parent_cpt_label = _as_axis_component_label(parent_component)
-        return super().add_node(axis, parent, parent_cpt_label, **kwargs)
-
-    # alias
-    add_subaxis = add_node
-
+class AxisTreeMixin(abc.ABC):
     def path(self, axis: Axis, component: AxisComponent, **kwargs):
         cpt_label = _as_axis_component_label(component)
         return super().path(axis, cpt_label, **kwargs)
@@ -964,6 +771,25 @@ class AxisTree(StrictLabelledTree, ContextFreeLoopIterable):
             return True
         except:
             return False
+
+    def find_component(self, node_label, cpt_label, also_node=False):
+        """Return the first component in the tree matching the given labels.
+
+        Notes
+        -----
+        This will return the first component matching the labels. Multiple may exist
+        but we assume that they are identical.
+
+        """
+        for node in self.nodes:
+            if node.label == node_label:
+                for cpt in node.components:
+                    if cpt.label == cpt_label:
+                        if also_node:
+                            return node, cpt
+                        else:
+                            return cpt
+        raise ValueError("Matching component not found")
 
     @property
     def leaf(self):
@@ -995,17 +821,336 @@ class AxisTree(StrictLabelledTree, ContextFreeLoopIterable):
         axis = axis or self.root
         return sum(cpt.alloc_size(self, axis) for cpt in axis.components)
 
-    def _check_labels(self):
-        def check(node, prev_labels):
-            if node == self.root:
-                return prev_labels
-            if node.label in prev_labels:
-                raise ValueError("shouldn't have the same label as above")
-            return prev_labels | {node.label}
+    def find_part(self, label):
+        return self._parts_by_label[label]
 
-        previsit(self, check, self.root, frozenset())
+    def offset(self, *args, allow_unused=False):
+        nargs = len(args)
+        if nargs == 2:
+            path, indices = args[0], args[1]
+        else:
+            assert nargs == 1
+            path, indices = _path_and_indices_from_index_tuple(self, args[0])
 
-    def set_up(self, with_sf=True):
+        if allow_unused:
+            path = _trim_path(self, path)
+
+        offset = pym.evaluate(self.layouts[path], (path, indices), ExpressionEvaluator)
+        return strict_int(offset)
+
+    # old alias
+    get_offset = offset
+
+
+# TODO Inherit from MutableLabelledTree or similar
+# class AxisTree(StrictLabelledTree, AxisTreeMixin, ContextFreeLoopIterable):
+class AxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable):
+    fields = StrictLabelledTree.fields | {"sf", "shared_sf", "comm"}
+
+    def __init__(
+        self,
+        root: Optional[MultiAxis] = None,
+        parent_to_children: Optional[Dict] = None,
+        *,
+        sf=None,
+        shared_sf=None,
+        comm=None,
+    ):
+        super().__init__(root, parent_to_children)
+
+        self.sf = sf
+        self.shared_sf = shared_sf
+        self.comm = comm  # FIXME DTRT with internal comms
+
+        self._layout_exprs = FrozenAxisTree._default_index_exprs(self)
+
+    def __getitem__(self, indices) -> IndexedAxisTree:
+        return self.freeze()[indices]
+
+    def index(self) -> LoopIndex:
+        return self.freeze().index()
+
+    # TODO is this the right way to deal with these properties?
+    @property
+    def target_paths(self):
+        raise RuntimeError("Should already be frozen")
+
+    @property
+    def index_exprs(self):
+        raise RuntimeError("Should already be frozen")
+
+    def freeze(self) -> FrozenAxisTree:
+        return FrozenAxisTree(self.root, self.parent_to_children)
+
+    def add_node(
+        self,
+        axis,
+        parent,
+        parent_component=None,
+        **kwargs,
+    ):
+        parent = self._as_node(parent)
+        if parent_component is None:
+            if len(parent.components) == 1:
+                parent_cpt_label = parent.components[0].label
+            else:
+                raise ValueError("Must specify parent component")
+        else:
+            parent_cpt_label = _as_axis_component_label(parent_component)
+        return super().add_node(axis, parent, parent_cpt_label, **kwargs)
+
+    # alias
+    add_subaxis = add_node
+
+    # currently untested but should keep
+    @classmethod
+    def from_layout(cls, layout: Sequence[ConstrainedMultiAxis]) -> Any:  # TODO
+        return order_axes(layout)
+
+    # TODO this is just a regular tree search
+    @deprecated  # I think?
+    def get_part_from_path(self, path, axis=None):
+        axis = axis or self.root
+
+        label, *sublabels = path
+
+        (component, component_index) = just_one(
+            [
+                (cpt, cidx)
+                for cidx, cpt in enumerate(axis.components)
+                if (axis.label, cidx) == label
+            ]
+        )
+        if sublabels:
+            return self.get_part_from_path(sublabels, self.child(axis, component))
+        else:
+            return axis, component
+
+    @deprecated
+    def drop_last(self):
+        """Remove the last subaxis"""
+        if not self.part.subaxis:
+            return None
+        else:
+            return self.copy(
+                parts=[self.part.copy(subaxis=self.part.subaxis.drop_last())]
+            )
+
+    @property
+    @deprecated
+    def is_linear(self):
+        """Return ``True`` if the multi-axis contains no branches at any level."""
+        if self.nparts == 1:
+            return self.part.subaxis.is_linear if self.part.subaxis else True
+        else:
+            return False
+
+    @deprecated
+    def add_subaxis(self, subaxis, *loc):
+        return self.add_node(subaxis, *loc)
+
+
+# TODO: Inherit things from AxisTree, StaticAxisTree?
+# class IndexedAxisTree(StrictLabelledTree, AxisTreeMixin, ContextFreeLoopIterable):
+class IndexedAxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable):
+    fields = StrictLabelledTree.fields | {
+        "paths",
+        "target_paths",
+        "index_exprs",
+        "layout_exprs",
+    }
+
+    def __init__(
+        self,
+        root,
+        parent_to_children,
+        paths,
+        target_paths,
+        index_exprs,
+        layout_exprs,
+        orig_axes,
+    ):
+        super().__init__(root, parent_to_children)
+        self.paths = paths
+        self._target_paths = target_paths
+        self._index_exprs = index_exprs
+        self.layout_exprs = layout_exprs
+        self.orig_axes = orig_axes
+
+    def __getitem__(self, indices):
+        from pyop3.indices.tree import (
+            as_index_forest,
+            collect_loop_contexts,
+            index_axes,
+            index_tree_from_ellipsis,
+        )
+
+        if indices is Ellipsis:
+            indices = index_tree_from_ellipsis(self)
+
+        if not collect_loop_contexts(indices):
+            index_tree = just_one(as_index_forest(indices, axes=self))
+            return index_axes(self, index_tree)
+
+        axis_trees = {}
+        for index_tree in as_index_forest(indices, axes=self):
+            axis_trees[index_tree.loop_context] = index_axes(self, index_tree)
+        return ContextSensitiveAxisTree(axis_trees)
+
+    # hacky
+    def restore(self):
+        return FrozenAxisTree(self.root, self.parent_to_children)
+
+    def index(self) -> LoopIndex:
+        from pyop3.indices import LoopIndex
+
+        return LoopIndex(self)
+
+    @property
+    def target_paths(self):
+        return self._target_paths
+
+    @property
+    def index_exprs(self):
+        return self._index_exprs
+
+    @property
+    def layouts(self):
+        # assert False, "indexed axes do not have layouts, they require transforming back"
+        return self.orig_axes.layouts
+
+    # TODO refactor
+    @property
+    def datamap(self):
+        if self.is_empty:
+            datamap_ = {}
+        else:
+            datamap_ = postvisit(self, _collect_datamap, axes=self)
+        for index_exprs in self.index_exprs.values():
+            for index_expr in index_exprs.values():
+                for array in MultiArrayCollector()(index_expr):
+                    datamap_.update(array.datamap)
+        for layout_exprs in self.layout_exprs.values():
+            for layout_expr in layout_exprs.values():
+                for array in MultiArrayCollector()(layout_expr):
+                    datamap_.update(array.datamap)
+        return freeze(datamap_)
+
+    def freeze(self):
+        return self
+
+
+# TODO Inherit from FrozenLabelledTree
+# TODO The order of inheritance is annoying here, mixin class currently needs to come first
+# class FrozenAxisTree(StrictLabelledTree, AxisTreeMixin, ContextFreeLoopIterable):
+class FrozenAxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable):
+    def __init__(
+        self,
+        root=None,
+        parent_to_children=pmap(),
+        target_paths=None,
+        index_exprs=None,
+        layouts=None,
+    ):
+        super().__init__(root, parent_to_children)
+        self._target_paths = target_paths or self._default_target_paths()
+        self._index_exprs = index_exprs or self._default_index_exprs()
+        # dont think I need this?
+        self.layout_exprs = self._default_index_exprs()
+        self.layouts = layouts or self._default_layouts()
+
+    def __getitem__(self, indices) -> Union[IndexedAxisTree, ContextSensitiveAxisTree]:
+        from pyop3.indices.tree import (
+            as_index_forest,
+            collect_loop_contexts,
+            index_axes,
+        )
+
+        if indices is Ellipsis:
+            indices = index_tree_from_ellipsis(self)
+
+        if not collect_loop_contexts(indices):
+            index_tree = just_one(as_index_forest(indices, axes=self))
+            return index_axes(self, index_tree)
+
+        axis_trees = {}
+        for index_tree in as_index_forest(indices, axes=self):
+            axis_trees[index_tree.loop_context] = index_axes(self, index_tree)
+        return ContextSensitiveAxisTree(axis_trees)
+
+    # hacky
+    def restore(self):
+        return FrozenAxisTree(self.root, self.parent_to_children)
+
+    def index(self):
+        from pyop3.indices import LoopIndex
+
+        return LoopIndex(self)
+
+    @property
+    def target_paths(self):
+        return self._target_paths
+
+    @property
+    def index_exprs(self):
+        return self._index_exprs
+
+    @functools.cached_property
+    def datamap(self) -> dict[str:DistributedArray]:
+        if self.is_empty:
+            dmap = {}
+        else:
+            dmap = postvisit(self, _collect_datamap, axes=self)
+
+        # for cleverdict in [self.layouts, self.orig_layout_fn]:
+        #     for layout in cleverdict.values():
+        #         for layout_expr in layout.values():
+        #             # catch invalid layouts
+        #             if isinstance(layout_expr, pym.primitives.NaN):
+        #                 continue
+        #             for array in MultiArrayCollector()(layout_expr):
+        #                 dmap.update(array.datamap)
+
+        # TODO
+        # for cleverdict in [self.index_exprs, self.layout_exprs]:
+        for cleverdict in [self.index_exprs]:
+            for exprs in cleverdict.values():
+                for expr in exprs.values():
+                    for array in MultiArrayCollector()(expr):
+                        dmap.update(array.datamap)
+        for layout_expr in self.layouts.values():
+            for array in MultiArrayCollector()(layout_expr):
+                dmap.update(array.datamap)
+        return pmap(dmap)
+
+    def freeze(self) -> FrozenAxisTree:
+        return self
+
+    def _default_target_paths(self):
+        if self.is_empty:
+            return pmap()
+
+        return pmap(
+            {
+                (axis.id, cpt.label): pmap({axis.label: cpt.label})
+                for axis in self.nodes
+                for cpt in axis.components
+            }
+        )
+
+    def _default_index_exprs(self):
+        if self.is_empty:
+            return pmap()
+
+        return pmap(
+            {
+                (axis.id, cpt.label): pmap({axis.label: AxisVariable(axis.label)})
+                for axis in self.nodes
+                for cpt in axis.components
+            }
+        )
+
+    def _default_layouts(self):
         """Initialise the multi-axis by computing the layout functions."""
         # TODO: put somewhere better
         # self._check_labels()
@@ -1038,176 +1183,15 @@ class AxisTree(StrictLabelledTree, ContextFreeLoopIterable):
         # self.copy(parts=[new_axis.part.copy(lgmap=lgmap)])
         # new_axis = attach_owned_star_forest(new_axis)
 
-    @classmethod
-    def from_layout(cls, layout: Sequence[ConstrainedMultiAxis]) -> Any:  # TODO
-        return order_axes(layout)
+    def _check_labels(self):
+        def check(node, prev_labels):
+            if node == self.root:
+                return prev_labels
+            if node.label in prev_labels:
+                raise ValueError("shouldn't have the same label as above")
+            return prev_labels | {node.label}
 
-    # TODO this is just a regular tree search
-    def get_part_from_path(self, path, axis=None):
-        axis = axis or self.root
-
-        label, *sublabels = path
-
-        (component, component_index) = just_one(
-            [
-                (cpt, cidx)
-                for cidx, cpt in enumerate(axis.components)
-                if (axis.label, cidx) == label
-            ]
-        )
-        if sublabels:
-            return self.get_part_from_path(sublabels, self.child(axis, component))
-        else:
-            return axis, component
-
-    def drop_last(self):
-        """Remove the last subaxis"""
-        if not self.part.subaxis:
-            return None
-        else:
-            return self.copy(
-                parts=[self.part.copy(subaxis=self.part.subaxis.drop_last())]
-            )
-
-    @property
-    def is_linear(self):
-        """Return ``True`` if the multi-axis contains no branches at any level."""
-        if self.nparts == 1:
-            return self.part.subaxis.is_linear if self.part.subaxis else True
-        else:
-            return False
-
-    def add_subaxis(self, subaxis, *loc):
-        import warnings
-
-        warnings.warn("deprecated")
-        return self.add_node(subaxis, *loc)
-
-
-# TODO: Inherit things from AxisTree, StaticAxisTree?
-class IndexedAxisTree(ContextFreeLoopIterable, pytools.ImmutableRecord):
-    fields = {"axes", "paths", "target_paths", "index_exprs", "layout_exprs"}
-
-    def __init__(self, axes, paths, target_paths, index_exprs, layout_exprs):
-        self.axes = axes
-        self.paths = paths
-        self.target_paths = target_paths
-        self.index_exprs = index_exprs
-        self.layout_exprs = layout_exprs
-
-    def __getitem__(self, indices):
-        from pyop3.indices.tree import (
-            as_index_forest,
-            collect_loop_contexts,
-            index_axes,
-            index_tree_from_ellipsis,
-        )
-
-        if indices is Ellipsis:
-            indices = index_tree_from_ellipsis(self)
-
-        if not collect_loop_contexts(indices):
-            index_tree = just_one(as_index_forest(indices, axes=self))
-            return index_axes(self, index_tree)
-
-        axis_trees = {}
-        for index_tree in as_index_forest(indices, axes=self):
-            axis_trees[index_tree.loop_context] = index_axes(self, index_tree)
-        return ContextSensitiveAxisTree(axis_trees)
-
-    def index(self) -> LoopIndex:
-        from pyop3.indices import LoopIndex
-
-        return LoopIndex(self)
-
-    # TODO Is this a property? _default_layouts?
-    @property
-    def layouts(self):
-        assert False, "dont touch"
-        from pyop3.distarray.multiarray import IndexExpressionReplacer
-
-        if self.axes.is_empty:
-            return self.axes.layouts
-
-        assert self.layout_exprs
-        layouts_ = {}
-        for leaf in self.axes.leaves:
-            path = self.axes.path(*leaf)
-            orig_layout = self.axes.layouts[path]
-            new_layout = IndexExpressionReplacer(self.layout_exprs)(orig_layout)
-            layouts_[path] = new_layout
-        return freeze(layouts_)
-
-    @property
-    def datamap(self):
-        datamap_ = dict(self.axes.datamap)
-        for index_exprs in self.index_exprs.values():
-            for index_expr in index_exprs.values():
-                for array in MultiArrayCollector()(index_expr):
-                    datamap_.update(array.datamap)
-        for layout_exprs in self.layout_exprs.values():
-            for layout_expr in layout_exprs.values():
-                for array in MultiArrayCollector()(layout_expr):
-                    datamap_.update(array.datamap)
-        return freeze(datamap_)
-
-    @property
-    def size(self):
-        return self.axes.size
-
-    @property
-    def alloc_size(self):
-        return self.axes.alloc_size
-
-    @property
-    def root(self):
-        return self.axes.root
-
-    @property
-    def parent_to_children(self):
-        return self.axes.parent_to_children
-
-    @property
-    def leaves(self):
-        return self.axes.leaves
-
-    @property
-    def leaf(self):
-        return self.axes.leaf
-
-    def child(self, axis, component):
-        return self.axes.child(axis, component)
-
-    def path(self, axis, component):
-        return self.axes.path(axis, component)
-
-    def path_with_nodes(self, axis, component, **kwargs):
-        return self.axes.path_with_nodes(axis, component, **kwargs)
-
-    def detailed_path(self, path):
-        return self.axes.detailed_path(path)
-
-    def is_valid_path(self, path):
-        return self.axes.is_valid_path(path)
-
-    def find_component(self, *args, **kwargs):
-        return self.axes.find_component(*args, **kwargs)
-
-    def _node_from_path(self, path, **kwargs):
-        return self.axes._node_from_path(path, **kwargs)
-
-    @property
-    def is_empty(self):
-        return self.axes.is_empty
-
-    ### deprecated aliases
-    @property
-    def target_path_per_component(self):
-        return self.target_paths
-
-    @property
-    def index_exprs_per_component(self):
-        return self.index_exprs
+        previsit(self, check, self.root, frozenset())
 
 
 class ContextSensitiveAxisTree(ContextSensitiveLoopIterable):
@@ -1393,7 +1377,7 @@ def as_axis_tree(arg: Any):
 
 
 @as_axis_tree.register
-def _(arg: AxisTree):
+def _(arg: AxisTreeMixin):
     return arg
 
 

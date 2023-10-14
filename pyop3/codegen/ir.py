@@ -23,7 +23,7 @@ from pyop3 import utils
 from pyop3.axes import Axis, AxisComponent, AxisTree, AxisVariable
 from pyop3.axes.tree import ContextSensitiveAxisTree
 from pyop3.distarray import MultiArray
-from pyop3.distarray.multiarray import ContextSensitiveMultiArray, IndexedMultiArray
+from pyop3.distarray.multiarray import ContextSensitiveMultiArray
 from pyop3.dtypes import IntType, PointerType
 from pyop3.indices import (
     AffineMapComponent,
@@ -369,15 +369,13 @@ def parse_loop_properly_this_time(
         codegen_context.add_domain(iname, extent_var)
 
         new_source_path = source_path | {axis.label: component.label}
-        new_target_path = target_path | axes.target_path_per_component.get(
+        new_target_path = target_path | axes.target_paths.get(
             (axis.id, component.label), {}
         )
         new_iname_replace_map = iname_replace_map | {axis.label: pym.var(iname)}
 
         # these aren't jnames!
-        my_index_exprs = axes.index_exprs_per_component.get(
-            (axis.id, component.label), {}
-        )
+        my_index_exprs = axes.index_exprs.get((axis.id, component.label), {})
         jname_extras = {}
         for axis_label, index_expr in my_index_exprs.items():
             # this does not do the right thing
@@ -466,9 +464,8 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
 
         loop_context = context_from_indices(loop_indices)
 
-        if isinstance(arg, (MultiArray, IndexedMultiArray, ContextSensitiveMultiArray)):
-            # FIXME: layout axes -> indexed axes -> axes we want
-            axes = arg.with_context(loop_context).axes.axes.axes
+        if isinstance(arg, (MultiArray, ContextSensitiveMultiArray)):
+            axes = arg.with_context(loop_context).temporary_axes.restore()
         else:
             assert isinstance(arg, Offset)
             axes = AxisTree()
@@ -597,24 +594,12 @@ def build_assignment(
 
     # TODO cleanup
     if isinstance(assignment.array, Offset):
-        axes = assignment.array.with_context(loop_context).axes
+        axes = assignment.array.with_context(loop_context)
         minimal_context = assignment.array.filter_context(loop_context)
     else:
         axes = assignment.array.with_context(loop_context).axes
         minimal_context = assignment.array.filter_context(loop_context)
 
-    # filter the loop indices, we don't want to have entries for loop indices that aren't
-    # used in the indexing
-    # FIXME this might still be needed...
-    # new_indices = {}
-    # if isinstance(assignment.array, ContextSensitiveMultiArray):
-    #     for loop_index, value in loop_indices.items():
-    #         if loop_index in assignment.array.axes.required_loop_indices:
-    #             new_indices[loop_index] = value
-    # new_indices = pmap(new_indices)
-
-    # iname_replace_map = {}
-    # jname_replace_map = {}
     target_path = {}
     # for _, jnames in new_indices.values():
     for loop_index, (path, iname_expr) in loop_indices.items():
@@ -654,23 +639,7 @@ def parse_assignment_properly_this_time(
 
     if axis is None:
         axis = axes.root
-        # target_path = axes.target_path_per_component.get(None, pmap())
-        # iname_replace_map = pmap(
-        #     {
-        #         axis_label: iname_var
-        #         for _, _, _, replace_map in loop_indices.values()
-        #         for axis_label, iname_var in replace_map.items()
-        #     }
-        # )
-        # jname_replace_map = pmap(
-        #     {
-        #         axis_label: iname_var
-        #         for _, _, replace_map, _ in loop_indices.values()
-        #         for axis_label, iname_var in replace_map.items()
-        #     }
-        # )
-
-        my_index_exprs = axes.index_exprs_per_component.get(None, pmap())
+        my_index_exprs = axes.index_exprs.get(None, pmap())
         jname_extras = {}
         for axis_label, index_expr in my_index_exprs.items():
             jname_expr = JnameSubstitutor(
@@ -700,7 +669,7 @@ def parse_assignment_properly_this_time(
         codegen_context.add_domain(iname, extent_var)
 
         new_source_path = source_path | {axis.label: component.label}  # not used
-        new_target_path = target_path | axes.target_path_per_component.get(
+        new_target_path = target_path | axes.target_paths.get(
             (axis.id, component.label), {}
         )
 
@@ -709,9 +678,7 @@ def parse_assignment_properly_this_time(
         # I don't like that I need to do this here and also when I emit the layout
         # instructions.
         # Do I need the jnames on the way down? Think so for things like ragged...
-        my_index_exprs = axes.index_exprs_per_component.get(
-            (axis.id, component.label), {}
-        )
+        my_index_exprs = axes.index_exprs.get((axis.id, component.label), {})
         jname_extras = {}
         for axis_label, index_expr in my_index_exprs.items():
             jname_expr = JnameSubstitutor(
@@ -764,9 +731,7 @@ def add_leaf_assignment(
 
     context = context_from_indices(loop_indices)
 
-    if isinstance(
-        assignment.array, (MultiArray, IndexedMultiArray, ContextSensitiveMultiArray)
-    ):
+    if isinstance(assignment.array, (MultiArray, ContextSensitiveMultiArray)):
         array_expr = make_array_expr(
             assignment,
             assignment.array.with_context(context).layouts[source_path],
@@ -813,7 +778,7 @@ def make_temp_expr(assignment, path, jnames, ctx):
     in the assignment.
 
     """
-    layout = assignment.temporary.layouts[path]
+    layout = assignment.temporary.layout_axes.layouts[path]
     temp_offset = make_offset_expr(
         layout,
         jnames,
@@ -1050,7 +1015,7 @@ def _scalar_assignment(
     ctx.add_argument(array.name, array.dtype)
 
     offset_expr = make_offset_expr(
-        array.layouts[path],
+        array.layout_axes.layouts[path],
         array_labels_to_jnames,
         ctx,
     )

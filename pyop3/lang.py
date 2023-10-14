@@ -16,7 +16,12 @@ import pytools
 from pyrsistent import freeze, pmap
 
 from pyop3.axes import as_axis_tree
-from pyop3.axes.tree import ContextFree, ContextSensitive, MultiArrayCollector
+from pyop3.axes.tree import (
+    ContextFree,
+    ContextSensitive,
+    FrozenAxisTree,
+    MultiArrayCollector,
+)
 from pyop3.distarray import DistributedArray, MultiArray
 from pyop3.distarray.multiarray import IndexExpressionReplacer, substitute_layouts
 from pyop3.dtypes import IntType
@@ -290,7 +295,7 @@ class Offset(LoopExpr, ContextSensitive):
 
 
 def offset(axes, indices):
-    axes = as_axis_tree(axes)
+    axes = as_axis_tree(axes).freeze()
     axes_per_context = {}
     for index_tree in as_index_forest(indices, axes=axes):
         loop_context = index_tree.loop_context
@@ -316,18 +321,27 @@ def offset(axes, indices):
         )
 
         new_axes = IndexedAxisTree(
-            indexed_axes,
+            indexed_axes.root,
+            indexed_axes.parent_to_children,
             target_path_per_indexed_cpt,
             target_paths,
             index_exprs,
             layout_exprs,
+            orig_axes=axes,
         )
 
-        layout_axes = substitute_layouts(
+        new_layouts = substitute_layouts(
             axes,
             new_axes,
             target_path_per_indexed_cpt,
             index_exprs_per_indexed_cpt,
+        )
+        layout_axes = FrozenAxisTree(
+            new_axes.root,
+            new_axes.parent_to_children,
+            target_paths,
+            index_exprs,
+            new_layouts,
         )
         axes_per_context[loop_context] = layout_axes
     return Offset(axes_per_context)
