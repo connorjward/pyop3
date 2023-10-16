@@ -310,8 +310,6 @@ def offset(axes, indices):
             target_paths,
             index_exprs,
             layout_exprs,
-            leaf_target_paths,
-            leaf_index_exprs,
         ) = _compose_bits(
             axes,
             indexed_axes,

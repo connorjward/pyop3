@@ -1117,7 +1117,7 @@ def index_axes(axes, index_tree):
         layout_exprs_per_indexed_cpt,
     ) = _index_axes(axes, index_tree, loop_context=index_tree.loop_context)
 
-    target_paths, index_exprs, layout_exprs, _, _ = _compose_bits(
+    target_paths, index_exprs, layout_exprs = _compose_bits(
         axes,
         indexed_axes,
         target_path_per_indexed_cpt,
@@ -1154,31 +1154,10 @@ def _compose_bits(
     from pyop3.distarray.multiarray import IndexExpressionReplacer
 
     if indexed_axes.is_empty:
-        leaf_target_path = {}
-        leaf_index_exprs = {}
-
-        for axis, cpt in axes.detailed_path(itarget_paths.get(None, {})).items():
-            #     # target path
-            leaf_target_path.update(axes.target_paths.get((axis.id, cpt.label), {}))
-            #
-            #     # index exprs
-            leaf_index_exprs.update(axes.index_exprs.get((axis.id, cpt.label), {}))
-
-            # for axis_label, index_expr in axes.index_exprs[axis.id, cpt.label].items():
-            #     new_index_expr = IndexExpressionReplacer(new_partial_index_exprs)(
-            #         index_expr
-            #     )
-            #     index_exprs[iaxis.id, icpt.label][
-            #         axis_label  # this axis label is the *final* target, unlike the intermediate target called target_axis here
-            #     ] = new_index_expr
         return (
             pmap(),
             pmap(),
             pmap(),
-            freeze({pmap(): leaf_target_path}),
-            freeze({pmap(): leaf_index_exprs}),
-            # pmap(),
-            # pmap(),
         )
 
     if iaxis is None:
@@ -1186,9 +1165,6 @@ def _compose_bits(
         visited_target_axes = visited_target_axes.union(target_path.keys())
         iaxis = indexed_axes.root
 
-    target_path_per_leaf = {}
-    index_exprs_per_leaf = {}
-    layout_exprs_per_leaf = {}
     target_path_per_cpt = collections.defaultdict(dict)
     index_exprs = collections.defaultdict(dict)
     layout_exprs = collections.defaultdict(dict)
@@ -1283,8 +1259,6 @@ def _compose_bits(
                 subtarget_path,
                 subindex_exprs,
                 sublayout_exprs,
-                leaf_target_path,
-                leaf_index_exprs,
             ) = _compose_bits(
                 axes,
                 indexed_axes,
@@ -1302,21 +1276,14 @@ def _compose_bits(
             target_path_per_cpt.update(subtarget_path)
             index_exprs.update(subindex_exprs)
             layout_exprs.update(sublayout_exprs)
-            target_path_per_leaf.update(leaf_target_path)
-            index_exprs_per_leaf.update(leaf_index_exprs)
 
         else:
             assert not new_partial_index_exprs
             assert not new_partial_layout_exprs
-            # breakpoint()
-            target_path_per_leaf[iaxis.id, icpt.label] = new_target_path_acc
-            index_exprs_per_leaf[iaxis.id, icpt.label] = new_index_exprs_acc
 
     # breakpoint()
     return (
         freeze(dict(target_path_per_cpt)),
         freeze(dict(index_exprs)),
         freeze(dict(layout_exprs)),
-        freeze(target_path_per_leaf),
-        freeze(index_exprs_per_leaf),
     )

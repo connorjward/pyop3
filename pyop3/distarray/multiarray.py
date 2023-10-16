@@ -169,7 +169,7 @@ class MultiArray(DistributedArray, ContextFree):
                 index_exprs_per_indexed_cpt,
                 layout_exprs_per_indexed_cpt,
             ) = _index_axes(self.layout_axes, index_tree, pmap())
-            target_paths, index_exprs, layout_exprs, *oldleafdata = _compose_bits(
+            target_paths, index_exprs, layout_exprs = _compose_bits(
                 self.layout_axes,
                 indexed_axes,
                 target_path_per_indexed_cpt,
@@ -217,8 +217,6 @@ class MultiArray(DistributedArray, ContextFree):
                 target_paths,
                 index_exprs,
                 layout_exprs,
-                leaf_target_paths,
-                leaf_index_exprs,
             ) = _compose_bits(
                 self.layout_axes,
                 indexed_axes,
@@ -466,28 +464,6 @@ class ContextSensitiveMultiArray(ContextSensitive):
         loop_contexts = collect_loop_contexts(indices)
         if not loop_contexts:
             raise NotImplementedError("code path untested")
-            (
-                indexed_axes,
-                target_paths_per_indexed_cpt,
-                index_exprs_per_indexed_cpt,
-                layout_exprs_per_indexed_cpt,
-            ) = _index_axes(self.axes, indices, pmap())
-            target_paths, index_exprs, layout_exprs = _compose_bits(
-                self.axes,
-                indexed_axes,
-                target_path_per_indexed_cpt,
-                index_exprs_per_indexed_cpt,
-                layout_exprs_per_indexed_cpt,
-            )
-
-            new_axes = indexed_axes.copy(
-                target_paths=target_paths,
-                index_exprs=index_exprs,
-                layout_exprs=layout_exprs,
-            )
-
-            new_layouts = IndexExpressionReplacer(leaf_index_exprs)(NotImplemented)
-            return self.copy(axes=new_axes, layouts=new_layouts)
 
         # FIXME for now assume that there is only one context
         context, array = just_one(self.context_map.items())
@@ -506,8 +482,6 @@ class ContextSensitiveMultiArray(ContextSensitive):
                 target_paths,
                 index_exprs,
                 layout_exprs,
-                leaf_target_paths,
-                leaf_index_exprs,
             ) = _compose_bits(
                 array.layout_axes,
                 indexed_axes,
