@@ -279,12 +279,9 @@ class CalledMap(Index, LoopIterable):
             self, loop_indices=context
         )
 
-        paths = NotImplemented
-
         axes = IndexedAxisTree(
             axes.root,
             axes.parent_to_children,
-            paths,
             target_paths,
             index_exprs,
             layout_exprs,
@@ -1127,7 +1124,6 @@ def index_axes(axes, index_tree):
     return IndexedAxisTree(
         indexed_axes.root,
         indexed_axes.parent_to_children,
-        target_path_per_indexed_cpt,
         target_paths,
         index_exprs,
         layout_exprs,

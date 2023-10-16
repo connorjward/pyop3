@@ -954,7 +954,6 @@ class AxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable):
 # class IndexedAxisTree(StrictLabelledTree, AxisTreeMixin, ContextFreeLoopIterable):
 class IndexedAxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable):
     fields = StrictLabelledTree.fields | {
-        "paths",
         "target_paths",
         "index_exprs",
         "layout_exprs",
@@ -964,14 +963,12 @@ class IndexedAxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable
         self,
         root,
         parent_to_children,
-        paths,
         target_paths,
         index_exprs,
         layout_exprs,
         orig_axes,
     ):
         super().__init__(root, parent_to_children)
-        self.paths = paths
         self._target_paths = target_paths
         self._index_exprs = index_exprs
         self.layout_exprs = layout_exprs

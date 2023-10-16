@@ -180,7 +180,6 @@ class MultiArray(DistributedArray, ContextFree):
             new_axes = IndexedAxisTree(
                 indexed_axes.root,
                 indexed_axes.parent_to_children,
-                target_path_per_indexed_cpt,
                 target_paths,
                 index_exprs,
                 layout_exprs,
@@ -228,7 +227,6 @@ class MultiArray(DistributedArray, ContextFree):
             new_axes = IndexedAxisTree(
                 indexed_axes.root,
                 indexed_axes.parent_to_children,
-                target_path_per_indexed_cpt,
                 target_paths,
                 index_exprs,
                 layout_exprs,
@@ -493,7 +491,6 @@ class ContextSensitiveMultiArray(ContextSensitive):
             new_axes = IndexedAxisTree(
                 indexed_axes.root,
                 indexed_axes.parent_to_children,
-                target_path_per_indexed_cpt,
                 target_paths,
                 index_exprs,
                 layout_exprs,
