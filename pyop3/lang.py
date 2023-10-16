@@ -324,7 +324,6 @@ def offset(axes, indices):
             target_paths,
             index_exprs,
             layout_exprs,
-            orig_axes=axes,
         )
 
         new_layouts = substitute_layouts(

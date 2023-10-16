@@ -285,7 +285,6 @@ class CalledMap(Index, LoopIterable):
             target_paths,
             index_exprs,
             layout_exprs,
-            orig_axes=axes,
         )
 
         context_sensitive_axes = ContextSensitiveAxisTree({context: axes})
@@ -1127,7 +1126,6 @@ def index_axes(axes, index_tree):
         target_paths,
         index_exprs,
         layout_exprs,
-        orig_axes=axes,
     )
 
 

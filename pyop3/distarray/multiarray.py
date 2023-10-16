@@ -183,9 +183,7 @@ class MultiArray(DistributedArray, ContextFree):
                 target_paths,
                 index_exprs,
                 layout_exprs,
-                orig_axes=self.layout_axes,
             )
-            # new_axes = indexed_axes
 
             new_layouts = substitute_layouts(
                 self.layout_axes,
@@ -230,9 +228,7 @@ class MultiArray(DistributedArray, ContextFree):
                 target_paths,
                 index_exprs,
                 layout_exprs,
-                orig_axes=self.layout_axes,
             )
-            # new_axes = indexed_axes
 
             new_layouts = substitute_layouts(
                 self.layout_axes,
@@ -494,7 +490,6 @@ class ContextSensitiveMultiArray(ContextSensitive):
                 target_paths,
                 index_exprs,
                 layout_exprs,
-                array.layout_axes,
             )
 
             new_layouts = substitute_layouts(

@@ -966,13 +966,11 @@ class IndexedAxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable
         target_paths,
         index_exprs,
         layout_exprs,
-        orig_axes,
     ):
         super().__init__(root, parent_to_children)
         self._target_paths = target_paths
         self._index_exprs = index_exprs
         self.layout_exprs = layout_exprs
-        self.orig_axes = orig_axes
 
     def __getitem__(self, indices):
         from pyop3.indices.tree import (
@@ -1010,11 +1008,6 @@ class IndexedAxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable
     @property
     def index_exprs(self):
         return self._index_exprs
-
-    @property
-    def layouts(self):
-        # assert False, "indexed axes do not have layouts, they require transforming back"
-        return self.orig_axes.layouts
 
     # TODO refactor
     @property
