@@ -88,28 +88,22 @@ class MultiArray(DistributedArray, ContextFree):
     fields = DistributedArray.fields | {
         "axes",
         "dtype",
-        "name",
         "data",
         "max_value",
         "sf",
     }
-
-    prefix = "array"
-    name_generator = UniqueNameGenerator()
 
     def __init__(
         self,
         axes: AxisTree,
         dtype=None,
         *,
-        name: str = None,
-        prefix: str = None,
         data=None,
         max_value=None,
         sf=None,
+        **kwargs,
     ):
-        if name and prefix:
-            raise ValueError("Can only specify one of name and prefix")
+        super().__init__(**kwargs)
 
         # if not isinstance(axes, (AxisTree, IndexedAxisTree)):
         #     # must be context-free
@@ -130,14 +124,6 @@ class MultiArray(DistributedArray, ContextFree):
             data = np.zeros(axes.size, dtype=dtype)
         else:
             raise TypeError("data argument not recognised")
-
-        # add prefix as an existing name so it is a true prefix
-        if prefix:
-            self.name_generator.add_name(prefix, conflicting_ok=True)
-        name = name or self.name_generator(prefix or self.prefix)
-
-        DistributedArray.__init__(self, name)
-        # pym.primitives.Variable.__init__(self, name)
 
         self._data = data
         self.dtype = dtype

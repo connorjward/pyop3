@@ -36,6 +36,8 @@ class PetscVecNest(PetscVec):
 
 
 class PetscMat(PetscObject):
+    prefix = "mat"
+
     def __new__(cls, *args, **kwargs):
         # TODO dispatch to different mat types based on -mat_type
         return object.__new__(PetscMatAIJ)
@@ -46,7 +48,8 @@ class PetscMatDense(PetscMat):
 
 
 class PetscMatAIJ(PetscMat):
-    def __init__(self, raxes, caxes, sparsity, *, comm=None):
+    def __init__(self, raxes, caxes, sparsity, *, comm=None, name: str = None):
+        super().__init__(name)
         if any(axes.depth > 1 for axes in [raxes, caxes]):
             # TODO, good exceptions
             # raise InvalidDimensionException("Cannot instantiate PetscMats with nested axis trees")
@@ -214,7 +217,7 @@ class PetscMatAIJ(PetscMat):
             new_layouts = freeze(
                 {
                     new_axes.path(*new_axes.leaf): pym.var("MatGetValues")(
-                        rlayout_expr, clayout_expr
+                        self, rlayout_expr, clayout_expr
                     )
                 }
             )

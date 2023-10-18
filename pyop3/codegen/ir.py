@@ -41,7 +41,7 @@ from pyop3.indices import (
     Subset,
     TabulatedMapComponent,
 )
-from pyop3.indices.tree import LoopIndexVariable
+from pyop3.indices.tree import CalledMapVariable, LoopIndexVariable
 from pyop3.lang import (
     INC,
     MAX_RW,
@@ -132,7 +132,7 @@ class LoopyCodegenContext(CodegenContext):
         )
         self._add_instruction(insn)
 
-    def add_cinstruction(self, insn_str, read_variables):
+    def add_cinstruction(self, insn_str, read_variables=frozenset()):
         cinsn = lp.CInstruction(
             (),
             insn_str,
@@ -864,7 +864,8 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
             raise NotImplementedError("hmm")
 
     def _map_matgetvalues(self, expr):
-        rexpr, cexpr = expr.parameters
+        ctx = self._codegen_context
+        mat, rexpr, cexpr = expr.parameters
 
         # need to generate code like map0[i0] instead of the usual map0[i0, i1]
         # this is because we are passing the full map through to the function call
@@ -876,13 +877,47 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         # expressions. We want to have already done any clever substitution for arity 1
         # objects.
 
-        rexpr = self._flatten(rexpr)
-        cexpr = self._flatten(cexpr)
+        # rexpr = self._flatten(rexpr)
+        # cexpr = self._flatten(cexpr)
 
-        call_str = f"MatGetValuesLocal(???);"
-        # self._codegen_context.add_cinstruction(call_str, {???})
+        # for now assume that we pass exactly the right map through, do no composition
+        if not isinstance(rexpr, CalledMapVariable) or len(rexpr.parameters) != 2:
+            raise NotImplementedError
+        rinner_axis_label = rexpr.parameters[1].axis
+        # substitute a zero for the inner axis, we want to avoid this inner loop
+        new_rexpr = JnameSubstitutor(
+            self._labels_to_jnames | {rinner_axis_label: 0}, self._codegen_context
+        )(rexpr)
 
-        raise NotImplementedError("incomplete")
+        if not isinstance(cexpr, CalledMapVariable) or len(cexpr.parameters) != 2:
+            raise NotImplementedError
+        cinner_axis_label = cexpr.parameters[1].axis
+        # substitute a zero for the inner axis, we want to avoid this inner loop
+        new_cexpr = JnameSubstitutor(
+            self._labels_to_jnames | {cinner_axis_label: 0}, self._codegen_context
+        )(cexpr)
+
+        # now emit the right line of code, this should properly be a lp.ScalarCallable
+        # https://petsc.org/release/manualpages/Mat/MatGetValuesLocal/
+        # PetscErrorCode MatGetValuesLocal(Mat mat, PetscInt nrow, const PetscInt irow[], PetscInt ncol, const PetscInt icol[], PetscScalar y[])
+        nrow = rexpr.function.map_component.arity
+        irow = new_rexpr
+        ncol = cexpr.function.map_component.arity
+        icol = new_cexpr
+
+        y = ctx.unique_name("t")
+        ctx.add_temporary(y, mat.dtype, (nrow, ncol))
+        yvar = pym.var(y)
+
+        call_str = (
+            f"MatGetValuesLocal({mat.name}, {nrow}, {irow}, {ncol}, {icol}, &{y});"
+        )
+        self._codegen_context.add_cinstruction(call_str)
+
+        return yvar
+
+    # def _flatten(self, expr):
+    #     for
 
     def _map_bsearch(self, expr):
         indices_var, axis_var = expr.parameters
