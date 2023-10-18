@@ -544,7 +544,7 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
         else:
             assert access in {WRITE, INC, MIN_WRITE, MAX_WRITE}
             gather = Zero(arg, temp, shape)
-        build_assignment(gather, loop_indices, ctx)
+        parse_assignment(gather, loop_indices, ctx)
 
     ctx.add_function_call(assignees, expression)
     ctx.add_subkernel(call.function.code)
@@ -558,12 +558,11 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
         else:
             assert access == INC
             scatter = Increment(arg, temp, shape)
-        build_assignment(scatter, loop_indices, ctx)
+        parse_assignment(scatter, loop_indices, ctx)
 
 
 # FIXME this is practically identical to what we do in build_loop
-# parse_assignment?
-def build_assignment(
+def parse_assignment(
     assignment,
     loop_indices,
     codegen_ctx,
