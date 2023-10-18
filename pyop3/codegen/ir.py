@@ -309,25 +309,11 @@ def _(
     loop_indices,
     codegen_context: LoopyCodegenContext,
 ) -> None:
-    loop_context = {}
-    for loop_index, (path, _) in loop_indices.items():
-        loop_context[loop_index] = path
-    loop_context = pmap(loop_context)
-
+    loop_context = context_from_indices(loop_indices)
     iterset = loop.index.iterset.with_context(loop_context)
-    minimal_context = loop.index.iterset.filter_context(loop_context)
-
-    # filter the loop indices, we don't want to have entries for loop indices that aren't
-    # used in the indexing
-    new_indices = {}
-    if isinstance(loop.index.iterset, ContextSensitiveAxisTree):
-        for loop_index, value in loop_indices.items():
-            # Do we need this any more? I think we still might...
-            # if loop_index in loop.index.iterset.required_loop_indices:
-            new_indices[loop_index] = value
 
     loop_index_replace_map = {}
-    for _, replace_map in new_indices.values():
+    for _, replace_map in loop_indices.values():
         loop_index_replace_map.update(replace_map)
     loop_index_replace_map = pmap(loop_index_replace_map)
 
@@ -336,7 +322,6 @@ def _(
         iterset,
         loop_indices,
         codegen_context,
-        outer_replace_map=loop_index_replace_map,
     )
 
 
@@ -346,7 +331,6 @@ def parse_loop_properly_this_time(
     loop_indices,
     codegen_context,
     *,
-    outer_replace_map,
     axis=None,
     source_path=pmap(),
     target_path=pmap(),
@@ -354,6 +338,11 @@ def parse_loop_properly_this_time(
     jname_replace_map=pmap(),
 ):
     from pyop3.distarray.multiarray import IndexExpressionReplacer
+
+    outer_replace_map = {}
+    for _, replace_map in loop_indices.values():
+        outer_replace_map.update(replace_map)
+    outer_replace_map = freeze(outer_replace_map)
 
     if axes.is_empty:
         raise NotImplementedError("does this even make sense?")
@@ -382,9 +371,6 @@ def parse_loop_properly_this_time(
         my_index_exprs = axes.index_exprs.get((axis.id, component.label), {})
         jname_extras = {}
         for axis_label, index_expr in my_index_exprs.items():
-            # this does not do the right thing
-            # if axis_label in outer_replace_map:
-            #     continue
             jname_expr = JnameSubstitutor(
                 new_iname_replace_map | jname_replace_map | outer_replace_map,
                 codegen_context,
@@ -401,7 +387,6 @@ def parse_loop_properly_this_time(
                     axes,
                     loop_indices,
                     codegen_context,
-                    outer_replace_map=outer_replace_map,
                     axis=subaxis,
                     source_path=new_source_path,
                     target_path=new_target_path,
@@ -583,19 +568,14 @@ def _(
     codegen_ctx,
 ):
     # TODO singledispatch
-    # if isinstance(assignment, PetscAssignment):
+    loop_context = context_from_indices(loop_indices)
+
+    # if isinstance(array, PetscAssignment):
     #     ...
     # else:
     # assert isinstance(assignment, MultiArrayAssignment
 
     # get the right index tree given the loop context
-    loop_context = {}
-    # jname_replace_map = {}
-    for loop_index, (path, jnames) in loop_indices.items():
-        loop_context[loop_index] = path
-        # jname_replace_map.update(jnames)
-    loop_context = freeze(loop_context)
-    # jname_replace_map = freeze(jname_replace_map)
 
     # TODO cleanup
     if isinstance(array, Offset):
@@ -631,9 +611,13 @@ def _(
     )
 
 
-@parse_assignment.register
-def _(array: PetscObject, temp, shape, op, loop_indices, codegen_context):
-    raise NotImplementedError
+# @parse_assignment.register
+# def _(array: PetscObject, temp, shape, op, loop_indices, codegen_context):
+#     raise NotImplementedError
+
+
+def parse_assignment_petscmat(mat):
+    ...
 
 
 def parse_assignment_properly_this_time(
