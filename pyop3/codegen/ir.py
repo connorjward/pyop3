@@ -568,20 +568,11 @@ def build_assignment(
     loop_indices,
     codegen_ctx,
 ):
-    """
-    The difference between iterating over map0(map1(p)).index() and axes.index()
-    is that the former may emit multiple loops but only a single jname is produced. For
-    the latter multiple jnames may result.
-
-    (This is not quite true. We produce multiple jnames but only a single "jname expr" that
-    gets used to index the "prior" thing)??? I suppose the distinction is between whether we
-    are indexing the thing (in which case we want the jnames), or using it to index something
-    else, where we would want the "jname expr". Maybe this can be thought of as a function from
-    jnames -> "jname expr" and we want to go backwards.
-
-    In both cases though the pattern is "loop over this object as if it were a tree".
-    I want to generalise this to both of these.
-    """
+    # TODO singledispatch
+    # if isinstance(assignment, PetscAssignment):
+    #     ...
+    # else:
+    # assert isinstance(assignment, MultiArrayAssignment
 
     # get the right index tree given the loop context
     loop_context = {}
@@ -878,9 +869,35 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         return self._labels_to_jnames[expr.name, expr.axis]
 
     def map_call(self, expr):
-        if expr.function.name != "mybsearch":
+        if expr.function.name == "mybsearch":
+            return self._map_bsearch(expr)
+        elif expr.function.name == "MatGetValues":
+            return self._map_matgetvalues(expr)
+        else:
             raise NotImplementedError("hmm")
 
+    def _map_matgetvalues(self, expr):
+        rexpr, cexpr = expr.parameters
+
+        # need to generate code like map0[i0] instead of the usual map0[i0, i1]
+        # this is because we are passing the full map through to the function call
+
+        # similarly we also need to be careful to interrupt this function early
+        # we don't want to emit loops for things!
+
+        # I believe that this is probably the right place to be flattening the map
+        # expressions. We want to have already done any clever substitution for arity 1
+        # objects.
+
+        rexpr = self._flatten(rexpr)
+        cexpr = self._flatten(cexpr)
+
+        call_str = f"MatGetValuesLocal(???);"
+        # self._codegen_context.add_cinstruction(call_str, {???})
+
+        raise NotImplementedError("incomplete")
+
+    def _map_bsearch(self, expr):
         indices_var, axis_var = expr.parameters
         indices = indices_var.array
 
@@ -890,6 +907,7 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         # should do elsewhere?
         ctx.add_argument(indices.name, indices.dtype)
 
+        # for reference
         """
         void *bsearch(
             const void *key,

@@ -754,23 +754,18 @@ def _(index: Index, ctx, **kwargs):
 
 
 @functools.singledispatch
-def as_index_forest(arg: Any, *, axes, **kwargs):
+def as_index_forest(arg: Any, **kwargs):
     from pyop3.distarray import MultiArray
 
     if isinstance(arg, MultiArray):
-        slice_ = apply_loop_context(
-            arg, loop_context=pmap(), path=pmap(), axes=axes, **kwargs
-        )
+        slice_ = apply_loop_context(arg, loop_context=pmap(), path=pmap(), **kwargs)
         return (IndexTree(slice_),)
     elif isinstance(arg, collections.abc.Iterable):
         loop_contexts = collect_loop_contexts(arg) or [pmap()]
         forest = []
         for context in loop_contexts:
-            forest.append(as_index_tree(arg, context, axes=axes, **kwargs))
+            forest.append(as_index_tree(arg, context, **kwargs))
         return tuple(forest)
-    elif arg is Ellipsis:
-        assert False, "dont go this way"
-        return (index_tree_from_ellipsis(axes, axes.root),)
     else:
         raise TypeError
 
