@@ -128,9 +128,7 @@ class LoopyCodegenContext(CodegenContext):
             expression,
             id=self._name_generator(prefix),
             within_inames=frozenset(self._within_inames),
-            within_inames_is_final=True,
             depends_on=self._depends_on,
-            depends_on_is_final=True,
         )
         self._add_instruction(insn)
 
@@ -550,16 +548,8 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
         parse_assignment(arg, temp, shape, op, loop_indices, ctx)
 
 
-@functools.singledispatch
-def parse_assignment(array, *args, **kwargs):
-    raise TypeError(f"No handler provided for {type(array).__name__}")
-
-
 # FIXME this is practically identical to what we do in build_loop
-@parse_assignment.register(MultiArray)
-@parse_assignment.register(ContextSensitiveMultiArray)
-@parse_assignment.register(Offset)
-def _(
+def parse_assignment(
     array,
     temp,
     shape,
@@ -609,15 +599,6 @@ def _(
         jname_replace_map=jname_replace_map,
         target_path=target_path,
     )
-
-
-# @parse_assignment.register
-# def _(array: PetscObject, temp, shape, op, loop_indices, codegen_context):
-#     raise NotImplementedError
-
-
-def parse_assignment_petscmat(mat):
-    ...
 
 
 def parse_assignment_properly_this_time(
