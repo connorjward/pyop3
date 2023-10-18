@@ -42,6 +42,10 @@ from pyop3.utils import (
 )
 
 
+class IncompatibleShapeError(Exception):
+    """TODO, also bad name"""
+
+
 # should be elsewhere, this is copied from loopexpr2loopy VariableReplacer
 class IndexExpressionReplacer(pym.mapper.IdentityMapper):
     def __init__(self, replace_map):
@@ -286,6 +290,12 @@ class MultiArray(DistributedArray, ContextFree):
             for axis, _ in self.axes.path(*self.axes.leaf, ordered=True)
         )
         return MultiArrayVariable(self, indices)
+
+    @property
+    def shape(self):
+        raise IncompatibleShapeError(
+            "Ragged and/or multi-component arrays do not have a well defined shape"
+        )
 
     @property
     def alloc_size(self):
