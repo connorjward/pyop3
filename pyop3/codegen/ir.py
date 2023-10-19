@@ -10,7 +10,7 @@ import functools
 import itertools
 import numbers
 import operator
-from typing import Any, Dict, FrozenSet, Optional, Sequence, Tuple
+from typing import Any, Dict, FrozenSet, Optional, Sequence, Tuple, Union
 
 import loopy as lp
 import loopy.symbolic
@@ -22,9 +22,9 @@ from pyrsistent import freeze, pmap
 from pyop3 import utils
 from pyop3.axes import Axis, AxisComponent, AxisTree, AxisVariable
 from pyop3.axes.tree import ContextSensitiveAxisTree
-from pyop3.distarray import MultiArray
+from pyop3.distarray import DistributedArray, MultiArray
 from pyop3.distarray.multiarray import ContextSensitiveMultiArray
-from pyop3.distarray.petsc import PetscObject
+from pyop3.distarray.petsc import IndexedPetscMat, PetscMat, PetscObject
 from pyop3.dtypes import IntType, PointerType
 from pyop3.indices import (
     AffineMapComponent,
@@ -70,6 +70,11 @@ from pyop3.utils import (
 # shared base package? or both set by Firedrake - better solution
 LOOPY_TARGET = lp.CWithGNULibcTarget()
 LOOPY_LANG_VERSION = (2018, 2)
+
+
+class OpaqueType(lp.types.OpaqueType):
+    def __repr__(self) -> str:
+        return f"OpaqueType('{self.name}')"
 
 
 class CodegenContext(abc.ABC):
@@ -156,15 +161,19 @@ class LoopyCodegenContext(CodegenContext):
         )
         self._add_instruction(insn)
 
-    def add_argument(self, name, dtype):
+    def add_argument(self, array):
         # FIXME if self._args is a set then we can add duplicates here provided
         # that we canonically renumber at a later point
-        if name in [a.name for a in self._args]:
+        if array.name in [a.name for a in self._args]:
             logger.debug(
-                f"Skipping adding {name} to the codegen context as it is already present"
+                f"Skipping adding {array.name} to the codegen context as it is already present"
             )
             return
-        arg = lp.GlobalArg(name, dtype=dtype, shape=None)
+
+        if isinstance(array.orig_array, PetscMat):
+            arg = lp.ValueArg(array.name, dtype=self._dtype(array))
+        else:
+            arg = lp.GlobalArg(array.name, dtype=self._dtype(array), shape=None)
         self._args.append(arg)
 
     def add_temporary(self, name, dtype=IntType, shape=()):
@@ -191,6 +200,33 @@ class LoopyCodegenContext(CodegenContext):
     @property
     def _depends_on(self):
         return frozenset({self._last_insn_id}) - {None}
+
+    # TODO Perhaps this should be made more public so external users can register
+    # arguments. I don't want to make it a property to attach to the objects since
+    # that would "tie us in" to loopy more than I would like.
+    @functools.singledispatchmethod
+    def _dtype(self, array):
+        """Return the dtype corresponding to a given kernel argument.
+
+        This function is required because we need to distinguish between the
+        dtype of the data stored in the array and that of the array itself. For
+        basic arrays loopy can figure this out but for complex types like `PetscMat`
+        it would otherwise get this wrong.
+
+        """
+        raise TypeError(f"No handler provided for {type(array).__name__}")
+
+    @_dtype.register
+    def _(self, array: ContextSensitiveMultiArray):
+        return self._dtype(array.orig_array)
+
+    @_dtype.register
+    def _(self, array: MultiArray):
+        return array.dtype
+
+    @_dtype.register
+    def _(self, array: PetscMat):
+        return OpaqueType("Mat")
 
     def _add_instruction(self, insn):
         self._insns.append(insn)
@@ -263,6 +299,8 @@ def compile(expr: LoopExpr, name="mykernel"):
     ctx._insns.append(noop)
 
     preambles = [
+        ("20_debug", "#include <stdio.h>"),  # dont always inject
+        ("30_petsc", "#include <petsc.h>"),  # perhaps only if petsc callable used?
         (
             "30_bsearch",
             """
@@ -274,7 +312,7 @@ int32_t cmpfunc(const void * a, const void * b) {
 }
 
             """,
-        )
+        ),
     ]
 
     translation_unit = lp.make_kernel(
@@ -475,7 +513,7 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
         # Register data
         # TODO more generic check
         if not isinstance(arg, Offset):
-            ctx.add_argument(arg.name, arg.dtype)
+            ctx.add_argument(arg)
 
         ctx.add_temporary(temporary.name, temporary.dtype, shape)
 
@@ -560,8 +598,11 @@ def parse_assignment(
     # TODO singledispatch
     loop_context = context_from_indices(loop_indices)
 
-    # if isinstance(array, PetscAssignment):
-    #     ...
+    if isinstance(array.with_context(loop_context), IndexedPetscMat):
+        parse_assignment_petscmat(
+            array.with_context(loop_context), temp, shape, op, loop_indices, codegen_ctx
+        )
+        return
     # else:
     # assert isinstance(assignment, MultiArrayAssignment
 
@@ -599,6 +640,67 @@ def parse_assignment(
         jname_replace_map=jname_replace_map,
         target_path=target_path,
     )
+
+
+def parse_assignment_petscmat(array, temp, shape, op, loop_indices, codegen_context):
+    ctx = codegen_context
+
+    expr = array.getvalues
+    matvar, rexpr, cexpr = expr.parameters
+
+    mat = matvar.obj
+
+    # need to generate code like map0[i0] instead of the usual map0[i0, i1]
+    # this is because we are passing the full map through to the function call
+
+    # similarly we also need to be careful to interrupt this function early
+    # we don't want to emit loops for things!
+
+    # I believe that this is probably the right place to be flattening the map
+    # expressions. We want to have already done any clever substitution for arity 1
+    # objects.
+
+    # rexpr = self._flatten(rexpr)
+    # cexpr = self._flatten(cexpr)
+
+    iname_expr_replace_map = {}
+    for _, replace_map in loop_indices.values():
+        iname_expr_replace_map.update(replace_map)
+
+    # for now assume that we pass exactly the right map through, do no composition
+    if not isinstance(rexpr, CalledMapVariable) or len(rexpr.parameters) != 2:
+        raise NotImplementedError
+    rinner_axis_label = rexpr.parameters[1].axis
+    # substitute a zero for the inner axis, we want to avoid this inner loop
+    new_rexpr = JnameSubstitutor(
+        iname_expr_replace_map | {rinner_axis_label: 0}, codegen_context
+    )(rexpr)
+
+    if not isinstance(cexpr, CalledMapVariable) or len(cexpr.parameters) != 2:
+        raise NotImplementedError
+    cinner_axis_label = cexpr.parameters[1].axis
+    # substitute a zero for the inner axis, we want to avoid this inner loop
+    new_cexpr = JnameSubstitutor(
+        iname_expr_replace_map | {cinner_axis_label: 0}, codegen_context
+    )(cexpr)
+
+    # now emit the right line of code, this should properly be a lp.ScalarCallable
+    # https://petsc.org/release/manualpages/Mat/MatGetValuesLocal/
+    # PetscErrorCode MatGetValuesLocal(Mat mat, PetscInt nrow, const PetscInt irow[], PetscInt ncol, const PetscInt icol[], PetscScalar y[])
+    nrow = rexpr.function.map_component.arity
+    irow = new_rexpr
+    ncol = cexpr.function.map_component.arity
+    icol = new_cexpr
+
+    # can only use GetValuesLocal when lgmaps are set (which I don't yet do)
+    call_str = (
+        # f"MatGetValuesLocal({mat.name}, {nrow}, &({irow}), {ncol}, &({icol}), &({temp.name}[0]));"
+        f"MatGetValues({mat.name}, {nrow}, &({irow}), {ncol}, &({icol}), &({temp.name}[0]));"
+    )
+    codegen_context.add_cinstruction(call_str)
+
+    # debug
+    # codegen_context.add_cinstruction("PetscAttachDebugger();")
 
 
 def parse_assignment_properly_this_time(
@@ -859,62 +961,10 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         if expr.function.name == "mybsearch":
             return self._map_bsearch(expr)
         elif expr.function.name == "MatGetValues":
+            assert False, "not here"
             return self._map_matgetvalues(expr)
         else:
             raise NotImplementedError("hmm")
-
-    def _map_matgetvalues(self, expr):
-        ctx = self._codegen_context
-        mat, rexpr, cexpr = expr.parameters
-
-        # need to generate code like map0[i0] instead of the usual map0[i0, i1]
-        # this is because we are passing the full map through to the function call
-
-        # similarly we also need to be careful to interrupt this function early
-        # we don't want to emit loops for things!
-
-        # I believe that this is probably the right place to be flattening the map
-        # expressions. We want to have already done any clever substitution for arity 1
-        # objects.
-
-        # rexpr = self._flatten(rexpr)
-        # cexpr = self._flatten(cexpr)
-
-        # for now assume that we pass exactly the right map through, do no composition
-        if not isinstance(rexpr, CalledMapVariable) or len(rexpr.parameters) != 2:
-            raise NotImplementedError
-        rinner_axis_label = rexpr.parameters[1].axis
-        # substitute a zero for the inner axis, we want to avoid this inner loop
-        new_rexpr = JnameSubstitutor(
-            self._labels_to_jnames | {rinner_axis_label: 0}, self._codegen_context
-        )(rexpr)
-
-        if not isinstance(cexpr, CalledMapVariable) or len(cexpr.parameters) != 2:
-            raise NotImplementedError
-        cinner_axis_label = cexpr.parameters[1].axis
-        # substitute a zero for the inner axis, we want to avoid this inner loop
-        new_cexpr = JnameSubstitutor(
-            self._labels_to_jnames | {cinner_axis_label: 0}, self._codegen_context
-        )(cexpr)
-
-        # now emit the right line of code, this should properly be a lp.ScalarCallable
-        # https://petsc.org/release/manualpages/Mat/MatGetValuesLocal/
-        # PetscErrorCode MatGetValuesLocal(Mat mat, PetscInt nrow, const PetscInt irow[], PetscInt ncol, const PetscInt icol[], PetscScalar y[])
-        nrow = rexpr.function.map_component.arity
-        irow = new_rexpr
-        ncol = cexpr.function.map_component.arity
-        icol = new_cexpr
-
-        y = ctx.unique_name("t")
-        ctx.add_temporary(y, mat.dtype, (nrow, ncol))
-        yvar = pym.var(y)
-
-        call_str = (
-            f"MatGetValuesLocal({mat.name}, {nrow}, {irow}, {ncol}, {icol}, &{y});"
-        )
-        self._codegen_context.add_cinstruction(call_str)
-
-        return yvar
 
     # def _flatten(self, expr):
     #     for
@@ -927,7 +977,7 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         ctx = self._codegen_context
 
         # should do elsewhere?
-        ctx.add_argument(indices.name, indices.dtype)
+        ctx.add_argument(indices)
 
         # for reference
         """
@@ -1052,7 +1102,7 @@ def _scalar_assignment(
     ctx,
 ):
     # Register data
-    ctx.add_argument(array.name, array.dtype)
+    ctx.add_argument(array)
 
     offset_expr = make_offset_expr(
         array.layout_axes.layouts[path],

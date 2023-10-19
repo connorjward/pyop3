@@ -87,6 +87,23 @@ def test_read_matrix_values():
     cdofs = op3.AxisTree(op3.Axis(4, "cdofs"))
     mat = op3.PetscMat(dofs, cdofs, indices)
 
+    # put some numbers in the matrix
+    sparsity = [
+        (0, 0),
+        (0, 1),
+        (1, 0),
+        (1, 1),
+        (1, 2),
+        (2, 1),
+        (2, 2),
+        (2, 3),
+        (3, 2),
+        (3, 3),
+    ]
+    for i, (row, col) in enumerate(sparsity):
+        mat.petscmat.setValue(row, col, i)
+    mat.petscmat.assemble()
+
     # construct the vector to store the accumulated values
     array = op3.MultiArray(cells, dtype=mat.dtype)
 
@@ -96,7 +113,7 @@ def test_read_matrix_values():
     cdofs_axis, cdofs_component = cdofs.leaf
     maxes = cells.add_subaxis(op3.Axis(2), cells_axis, cells_component)
     mdata = flatten(
-        [[0, 1], [1, 2], [2, 3], [3, 4]],
+        [[0, 1], [1, 2], [2, 3]],
     )
     marray = op3.MultiArray(
         maxes, name="mapdata", data=np.asarray(mdata, dtype=op3.IntType)
@@ -139,7 +156,13 @@ def test_read_matrix_values():
         inc(mat[map0(c), map1(c)], array[c]),
     )
 
-    raise NotImplementedError
+    expected = np.zeros_like(array.data_ro)
+    map_data = marray.data_ro.reshape((3, 2))
+    for i in range(3):
+        idxs = map_data[i : i + 1]
+        values = mat.petscmat.getValues(idxs, idxs)
+        expected[i] = np.sum(values)
+    assert np.allclose(array.data_ro, expected)
 
 
 def test_matrix_insertion():

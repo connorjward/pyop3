@@ -2,9 +2,6 @@ import numpy as np
 from mpi4py import MPI
 from petsc4py import PETSc
 
-__all__ = []
-
-
 ScalarType = PETSc.ScalarType
 IntType = PETSc.IntType
 PointerType = np.uintp

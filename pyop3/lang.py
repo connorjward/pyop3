@@ -22,7 +22,7 @@ from pyop3.axes.tree import (
     FrozenAxisTree,
     MultiArrayCollector,
 )
-from pyop3.distarray import DistributedArray, MultiArray
+from pyop3.distarray import DistributedArray, MultiArray, PetscMat
 from pyop3.distarray.multiarray import IndexExpressionReplacer, substitute_layouts
 from pyop3.dtypes import IntType
 from pyop3.indices.tree import (
@@ -420,6 +420,11 @@ def _as_pointer(array: DistributedArray) -> int:
 @_as_pointer.register
 def _(array: MultiArray):
     return array.data.ctypes.data
+
+
+@_as_pointer.register
+def _(array: PetscMat):
+    return array.petscmat.handle
 
 
 def fix_intents(tunit, accesses):

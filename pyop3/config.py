@@ -153,3 +153,25 @@ class Configuration(dict):
 
 
 config = Configuration()
+
+
+def get_petsc_dir():
+    try:
+        arch = "/" + os.environ.get("PETSC_ARCH", "")
+        dir = os.environ["PETSC_DIR"]
+        return (dir, dir + arch)
+    except KeyError:
+        try:
+            import petsc4py
+
+            config = petsc4py.get_config()
+            petsc_dir = config["PETSC_DIR"]
+            petsc_arch = config["PETSC_ARCH"]
+            return petsc_dir, petsc_dir + petsc_arch
+        except ImportError:
+            sys.exit(
+                """Error: Could not find PETSc library.
+
+Set the environment variable PETSC_DIR to your local PETSc base
+directory or install PETSc from PyPI: pip install petsc"""
+            )

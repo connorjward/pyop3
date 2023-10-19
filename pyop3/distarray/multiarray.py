@@ -504,6 +504,11 @@ class ContextSensitiveMultiArray(ContextSensitive):
             array_per_context[loop_context] = array.copy_record(axes=layout_axes)
         return ContextSensitiveMultiArray(array_per_context)
 
+    # don't like this name
+    @property
+    def orig_array(self):
+        return single_valued(array.orig_array for array in self.context_map.values())
+
     @property
     def dtype(self):
         return single_valued(array.dtype for array in self.context_map.values())
