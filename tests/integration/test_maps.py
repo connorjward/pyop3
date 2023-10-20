@@ -23,7 +23,7 @@ from pyop3 import (
     do_loop,
     loop,
 )
-from pyop3.codegen.ir import LOOPY_LANG_VERSION, LOOPY_TARGET
+from pyop3.codegen.ir import loopy_lang_version, loopy_target
 from pyop3.utils import flatten
 
 
@@ -37,8 +37,8 @@ def vector_inc_kernel():
             lp.GlobalArg("y", ScalarType, (1,), is_input=True, is_output=True),
         ],
         name="vector_inc",
-        target=LOOPY_TARGET,
-        lang_version=LOOPY_LANG_VERSION,
+        target=loopy_target(),
+        lang_version=loopy_lang_version(),
     )
     return Function(lpy_kernel, [READ, INC])
 
@@ -53,8 +53,8 @@ def vec2_inc_kernel():
             lp.GlobalArg("y", ScalarType, (2,), is_input=True, is_output=True),
         ],
         name="vec2_inc",
-        target=LOOPY_TARGET,
-        lang_version=LOOPY_LANG_VERSION,
+        target=loopy_target(),
+        lang_version=loopy_lang_version(),
     )
     return Function(lpy_kernel, [READ, INC])
 
@@ -69,8 +69,8 @@ def vec6_inc_kernel():
             lp.GlobalArg("y", ScalarType, (1,), is_input=True, is_output=True),
         ],
         name="vector_inc",
-        target=LOOPY_TARGET,
-        lang_version=LOOPY_LANG_VERSION,
+        target=loopy_target(),
+        lang_version=loopy_lang_version(),
     )
     return Function(code, [READ, INC])
 
@@ -85,8 +85,8 @@ def vec12_inc_kernel():
             lp.GlobalArg("y", ScalarType, (2,), is_input=True, is_output=True),
         ],
         name="vector_inc",
-        target=LOOPY_TARGET,
-        lang_version=LOOPY_LANG_VERSION,
+        target=loopy_target(),
+        lang_version=loopy_lang_version(),
     )
     return Function(code, [READ, INC])
 
@@ -414,7 +414,7 @@ def test_map_composition(vec2_inc_kernel):
 
     mapaxes0 = iterset.add_node(Axis(arity0), *iterset.leaf)
     mapdata0 = np.asarray([[2, 4, 0], [6, 7, 1]], dtype=int)
-    maparray0 = MultiArray(mapaxes0, name="map0", data=flatten(mapdata0))
+    maparray0 = MultiArray(mapaxes0, name="map0", data=mapdata0.flatten())
     map0 = Map(
         {
             pmap({iterset.root.label: "cpt0"}): [
@@ -543,8 +543,8 @@ def test_recursive_multi_component_maps():
             lp.GlobalArg("y", ScalarType, (1,), is_input=False, is_output=True),
         ],
         name="sum_kernel",
-        target=LOOPY_TARGET,
-        lang_version=LOOPY_LANG_VERSION,
+        target=loopy_target(),
+        lang_version=loopy_lang_version(),
     )
     sum_kernel = Function(lpy_kernel, [READ, WRITE])
 
@@ -620,8 +620,8 @@ def test_sum_with_consecutive_maps():
             lp.GlobalArg("y", ScalarType, (1,), is_input=False, is_output=True),
         ],
         name="sum",
-        target=LOOPY_TARGET,
-        lang_version=LOOPY_LANG_VERSION,
+        target=loopy_target(),
+        lang_version=loopy_lang_version(),
     )
     sum_kernel = Function(lpy_kernel, [READ, WRITE])
 

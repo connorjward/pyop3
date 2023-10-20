@@ -23,7 +23,7 @@ from pyop3 import (
     do_loop,
     loop,
 )
-from pyop3.codegen.ir import LOOPY_LANG_VERSION, LOOPY_TARGET
+from pyop3.codegen.ir import loopy_lang_version, loopy_target
 from pyop3.utils import flatten, just_one
 
 
@@ -38,9 +38,9 @@ def test_different_axis_orderings_do_not_change_packing_order():
             lp.GlobalArg("x", np.float64, (m1, m2), is_input=True, is_output=False),
             lp.GlobalArg("y", np.float64, (m1, m2), is_input=False, is_output=True),
         ],
-        target=LOOPY_TARGET,
         name="copy",
-        lang_version=(2018, 2),
+        target=loopy_target(),
+        lang_version=loopy_lang_version(),
     )
     copy_kernel = Function(lpy_kernel, [READ, WRITE])
 

@@ -4,7 +4,7 @@ import pytest
 from pyrsistent import pmap
 
 import pyop3 as op3
-from pyop3.codegen.ir import LOOPY_LANG_VERSION, LOOPY_TARGET
+from pyop3.codegen.ir import loopy_lang_version, loopy_target
 from pyop3.utils import flatten
 
 
@@ -147,8 +147,8 @@ def test_read_matrix_values():
             lp.GlobalArg("array", array.dtype, (1,), is_input=False, is_output=True),
         ],
         name="inc",
-        target=LOOPY_TARGET,
-        lang_version=LOOPY_LANG_VERSION,
+        target=loopy_target(),
+        lang_version=loopy_lang_version(),
     )
     inc = op3.Function(lpy_kernel, [op3.READ, op3.INC])
     op3.do_loop(

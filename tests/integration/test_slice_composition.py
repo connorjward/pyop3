@@ -23,7 +23,7 @@ from pyop3 import (
     do_loop,
     loop,
 )
-from pyop3.codegen.ir import LOOPY_LANG_VERSION, LOOPY_TARGET
+from pyop3.codegen.ir import loopy_lang_version, loopy_target
 from pyop3.utils import flatten
 
 
@@ -37,8 +37,8 @@ def vec2_copy_kernel():
             lp.GlobalArg("y", ScalarType, (2,), is_input=False, is_output=True),
         ],
         name="copy",
-        target=LOOPY_TARGET,
-        lang_version=LOOPY_LANG_VERSION,
+        target=loopy_target(),
+        lang_version=loopy_lang_version(),
     )
     return Function(lpy_kernel, [READ, WRITE])
 

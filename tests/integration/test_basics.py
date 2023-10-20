@@ -24,7 +24,7 @@ from pyop3 import (
     do_loop,
     loop,
 )
-from pyop3.codegen.ir import LOOPY_LANG_VERSION, LOOPY_TARGET
+from pyop3.codegen.ir import loopy_lang_version, loopy_target
 from pyop3.utils import flatten
 
 
@@ -37,9 +37,9 @@ def scalar_copy_kernel():
             lp.GlobalArg("x", ScalarType, (1,), is_input=True, is_output=False),
             lp.GlobalArg("y", ScalarType, (1,), is_input=False, is_output=True),
         ],
-        target=LOOPY_TARGET,
         name="scalar_copy",
-        lang_version=(2018, 2),
+        target=loopy_target(),
+        lang_version=loopy_lang_version(),
     )
     return Function(code, [READ, WRITE])
 
@@ -53,9 +53,9 @@ def vector_copy_kernel():
             lp.GlobalArg("x", ScalarType, (3,), is_input=True, is_output=False),
             lp.GlobalArg("y", ScalarType, (3,), is_input=False, is_output=True),
         ],
-        target=LOOPY_TARGET,
         name="vector_copy",
-        lang_version=(2018, 2),
+        target=loopy_target(),
+        lang_version=loopy_lang_version(),
     )
     return Function(code, [READ, WRITE])
 
@@ -203,9 +203,9 @@ def test_inc_with_shared_global_value():
         "{ [i]: 0 <= i < 3 }",
         "x[i]  = x[i] + 1",
         [lp.GlobalArg("x", ScalarType, (3,), is_input=True, is_output=True)],
-        target=LOOPY_TARGET,
         name="plus_one",
-        lang_version=(2018, 2),
+        target=loopy_target(),
+        lang_version=loopy_lang_version(),
     )
     plus_one = Function(knl, [INC])
 

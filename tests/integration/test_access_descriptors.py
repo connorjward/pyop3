@@ -16,7 +16,7 @@ from pyop3 import (
     ScalarType,
     do_loop,
 )
-from pyop3.codegen.ir import LOOPY_LANG_VERSION, LOOPY_TARGET
+from pyop3.codegen.ir import loopy_lang_version, loopy_target
 
 
 # NOTE: It is only meaningful to test min/max in parallel as otherwise they behave the
@@ -30,8 +30,8 @@ def min_rw_kernel():
             lp.GlobalArg("y", ScalarType, (1,), is_input=True, is_output=False),
         ],
         name="min_rw",
-        target=LOOPY_TARGET,
-        lang_version=LOOPY_LANG_VERSION,
+        target=loopy_target(),
+        lang_version=loopy_lang_version(),
     )
     return Function(code, [MIN_RW, READ])
 
@@ -46,8 +46,8 @@ def min_write_kernel():
             lp.GlobalArg("z", ScalarType, (1,), is_input=True, is_output=False),
         ],
         name="min_write",
-        target=LOOPY_TARGET,
-        lang_version=LOOPY_LANG_VERSION,
+        target=loopy_target(),
+        lang_version=loopy_lang_version(),
     )
     return Function(code, [MIN_WRITE, READ, READ])
 
@@ -61,8 +61,8 @@ def max_rw_kernel():
             lp.GlobalArg("y", ScalarType, (1,), is_input=True, is_output=False),
         ],
         name="max_rw",
-        target=LOOPY_TARGET,
-        lang_version=LOOPY_LANG_VERSION,
+        target=loopy_target(),
+        lang_version=loopy_lang_version(),
     )
     return Function(code, [MAX_RW, READ])
 
@@ -77,8 +77,8 @@ def max_write_kernel():
             lp.GlobalArg("z", ScalarType, (1,), is_input=True, is_output=False),
         ],
         name="max_write",
-        target=LOOPY_TARGET,
-        lang_version=LOOPY_LANG_VERSION,
+        target=loopy_target(),
+        lang_version=loopy_lang_version(),
     )
     return Function(code, [MAX_WRITE, READ, READ])
 
@@ -104,8 +104,8 @@ def test_pointwise_accesses_descriptors_fail_with_vector_shape(access):
         "",
         kernel_data,
         name="dummy",
-        target=LOOPY_TARGET,
-        lang_version=LOOPY_LANG_VERSION,
+        target=loopy_target(),
+        lang_version=loopy_lang_version(),
     )
 
     with pytest.raises(ValueError):

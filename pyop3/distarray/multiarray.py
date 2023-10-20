@@ -30,6 +30,7 @@ from pyop3.distarray.base import DistributedArray
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
 from pyop3.indices import IndexedAxisTree, IndexTree, as_index_forest, index_axes
 from pyop3.indices.tree import collect_loop_indices
+from pyop3.mirrored_array import MirroredArray
 from pyop3.utils import (
     PrettyTuple,
     UniqueNameGenerator,
@@ -109,24 +110,13 @@ class MultiArray(DistributedArray, ContextFree):
         #     # must be context-free
         #     raise TypeError()
 
-        if isinstance(data, np.ndarray):
-            if dtype:
-                data = np.asarray(data, dtype=dtype)
-            else:
-                dtype = data.dtype
-        elif isinstance(data, Sequence):
-            data = np.asarray(data, dtype=dtype)
-            dtype = data.dtype
-        elif data is None:
-            if not dtype:
-                raise ValueError("Must either specify a dtype or provide an array")
-            dtype = np.dtype(dtype)
-            data = np.zeros(axes.size, dtype=dtype)
+        if data is not None:
+            data = MirroredArray(data, dtype)
         else:
-            raise TypeError("data argument not recognised")
+            data = MirroredArray((axes.size,), dtype)
 
         self._data = data
-        self.dtype = dtype
+        self.dtype = data.dtype
 
         self.temporary_axes = as_axis_tree(axes).freeze()  # used for the temporary
         self.axes = layout_axes(axes)
@@ -250,17 +240,17 @@ class MultiArray(DistributedArray, ContextFree):
 
     @property
     def data_rw(self):
-        return self._data
+        return self._data.data_rw
 
     @property
     def data_ro(self):
         # TODO
-        return self._data
+        return self._data.data_ro
 
     @property
     def data_wo(self):
         # TODO
-        return self._data
+        return self._data.data_wo
 
     @functools.cached_property
     def datamap(self) -> dict[str:DistributedArray]:
