@@ -10,10 +10,10 @@ from pyop3 import (
     Axis,
     AxisComponent,
     AxisTree,
+    Function,
     Index,
     IndexTree,
     IntType,
-    LoopyKernel,
     Map,
     MultiArray,
     ScalarType,
@@ -40,7 +40,7 @@ def vector_inc_kernel():
         target=loopy_target(),
         lang_version=loopy_lang_version(),
     )
-    return LoopyKernel(lpy_kernel, [READ, INC])
+    return Function(lpy_kernel, [READ, INC])
 
 
 @pytest.fixture
@@ -56,7 +56,7 @@ def vec2_inc_kernel():
         target=loopy_target(),
         lang_version=loopy_lang_version(),
     )
-    return LoopyKernel(lpy_kernel, [READ, INC])
+    return Function(lpy_kernel, [READ, INC])
 
 
 @pytest.fixture
@@ -72,7 +72,7 @@ def vec6_inc_kernel():
         target=loopy_target(),
         lang_version=loopy_lang_version(),
     )
-    return LoopyKernel(code, [READ, INC])
+    return Function(code, [READ, INC])
 
 
 @pytest.fixture
@@ -88,10 +88,11 @@ def vec12_inc_kernel():
         target=loopy_target(),
         lang_version=loopy_lang_version(),
     )
-    return LoopyKernel(code, [READ, INC])
+    return Function(code, [READ, INC])
 
 
-def test_inc_from_tabulated_map(vector_inc_kernel):
+@pytest.mark.parametrize("nested", [True, False])
+def test_inc_from_tabulated_map(scalar_inc_kernel, vector_inc_kernel, nested):
     m, n = 4, 3
     mapdata = np.asarray([[1, 2, 0], [2, 0, 1], [3, 2, 3], [2, 0, 1]], dtype=IntType)
 
@@ -114,7 +115,14 @@ def test_inc_from_tabulated_map(vector_inc_kernel):
         "map0",
     )
 
-    do_loop(p := axes.index(), vector_inc_kernel(dat0[map0(p)], dat1[p]))
+    if nested:
+        l = loop(
+            p := axes.index(),
+            loop(q := map0(p).index(), scalar_inc_kernel(dat0[q], dat1[p])),
+        )
+        l()
+    else:
+        do_loop(p := axes.index(), vector_inc_kernel(dat0[map0(p)], dat1[p]))
 
     # Since dat0.data is simply arange, accessing index i of it will also just be i.
     # Therefore, accessing multiple entries and storing the sum of them is
@@ -538,7 +546,7 @@ def test_recursive_multi_component_maps():
         target=loopy_target(),
         lang_version=loopy_lang_version(),
     )
-    sum_kernel = LoopyKernel(lpy_kernel, [READ, WRITE])
+    sum_kernel = Function(lpy_kernel, [READ, WRITE])
 
     do_loop(p := dat1_axes.index(), sum_kernel(dat0[map1(map0(p))], dat1[p]))
 
@@ -615,7 +623,7 @@ def test_sum_with_consecutive_maps():
         target=loopy_target(),
         lang_version=loopy_lang_version(),
     )
-    sum_kernel = LoopyKernel(lpy_kernel, [READ, WRITE])
+    sum_kernel = Function(lpy_kernel, [READ, WRITE])
 
     do_loop(p := iterset.index(), sum_kernel(dat0[map0(p), map1(p)], dat1[p]))
 

@@ -14,9 +14,9 @@ from pyop3 import (
     Axis,
     AxisComponent,
     AxisTree,
+    Function,
     IndexTree,
     IntType,
-    LoopyKernel,
     MultiArray,
     ScalarType,
     Slice,
@@ -40,7 +40,7 @@ def vec2_copy_kernel():
         target=loopy_target(),
         lang_version=loopy_lang_version(),
     )
-    return LoopyKernel(lpy_kernel, [READ, WRITE])
+    return Function(lpy_kernel, [READ, WRITE])
 
 
 def test_1d_slice_composition(vec2_copy_kernel):

@@ -9,9 +9,9 @@ from pyop3 import (
     READ,
     Axis,
     AxisTree,
+    Function,
     Index,
     IndexTree,
-    LoopyKernel,
     MultiArray,
     ScalarType,
     do_loop,
@@ -33,7 +33,7 @@ def min_rw_kernel():
         target=loopy_target(),
         lang_version=loopy_lang_version(),
     )
-    return LoopyKernel(code, [MIN_RW, READ])
+    return Function(code, [MIN_RW, READ])
 
 
 @pytest.fixture
@@ -49,7 +49,7 @@ def min_write_kernel():
         target=loopy_target(),
         lang_version=loopy_lang_version(),
     )
-    return LoopyKernel(code, [MIN_WRITE, READ, READ])
+    return Function(code, [MIN_WRITE, READ, READ])
 
 
 @pytest.fixture
@@ -64,7 +64,7 @@ def max_rw_kernel():
         target=loopy_target(),
         lang_version=loopy_lang_version(),
     )
-    return LoopyKernel(code, [MAX_RW, READ])
+    return Function(code, [MAX_RW, READ])
 
 
 @pytest.fixture
@@ -80,7 +80,7 @@ def max_write_kernel():
         target=loopy_target(),
         lang_version=loopy_lang_version(),
     )
-    return LoopyKernel(code, [MAX_WRITE, READ, READ])
+    return Function(code, [MAX_WRITE, READ, READ])
 
 
 @pytest.mark.parametrize("access", [MIN_RW, MIN_WRITE, MAX_RW, MAX_WRITE])
@@ -109,4 +109,4 @@ def test_pointwise_accesses_descriptors_fail_with_vector_shape(access):
     )
 
     with pytest.raises(ValueError):
-        LoopyKernel(lpy_kernel, [access] + [READ] * (len(kernel_data) - 1))
+        Function(lpy_kernel, [access] + [READ] * (len(kernel_data) - 1))

@@ -3,7 +3,6 @@ from pyop3.indices.tree import (
     AffineSliceComponent,
     CalledMap,
     Index,
-    IndexedArray,
     IndexedAxisTree,
     IndexTree,
     LocalLoopIndex,

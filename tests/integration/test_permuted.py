@@ -13,8 +13,8 @@ from pyop3 import (
     Axis,
     AxisComponent,
     AxisTree,
+    Function,
     IntType,
-    LoopyKernel,
     MultiArray,
     ScalarType,
     do_loop,
@@ -37,7 +37,7 @@ def scalar_copy_kernel():
         name="scalar_copy",
         lang_version=loopy_lang_version(),
     )
-    return LoopyKernel(code, [READ, WRITE])
+    return Function(code, [READ, WRITE])
 
 
 @pytest.fixture
@@ -53,7 +53,7 @@ def vector_copy_kernel():
         name="vector_copy",
         lang_version=loopy_lang_version(),
     )
-    return LoopyKernel(code, [READ, WRITE])
+    return Function(code, [READ, WRITE])
 
 
 def test_vector_copy_with_permuted_axis(vector_copy_kernel):

@@ -46,19 +46,19 @@ class OrderedCollector(pym.mapper.CombineMapper):
     map_function_symbol = map_constant
 
     def map_multi_array(self, expr):
-        return (expr,)
+        return (expr.array,)
 
 
 _rename_mapper = RenameMapper()
 _ordered_collector = OrderedCollector()
 
 
-def as_str(expr):
-    return str(_rename_mapper(expr))
+def as_str(layout):
+    return str(_rename_mapper(layout))
 
 
-def collect_multi_arrays(expr):
-    return _ordered_collector(expr)
+def collect_multi_arrays(layout):
+    return _ordered_collector(layout)
 
 
 def check_offsets(axes, indices_and_offsets):
@@ -73,7 +73,7 @@ def check_invalid_indices(axes, indicess):
 
 
 def test_1d_affine_layout():
-    axes = AxisTree(Axis([AxisComponent(5, "pt0")], "ax0"))
+    axes = AxisTree(Axis([AxisComponent(5, "pt0")], "ax0")).freeze()
 
     layout0 = axes.layouts[pmap({"ax0": "pt0"})]
 
@@ -95,7 +95,7 @@ def test_2d_affine_layout():
     axes = AxisTree(
         Axis([AxisComponent(3, "pt0")], "ax0", id="root"),
         {"root": Axis([AxisComponent(2, "pt0")], "ax1")},
-    )
+    ).freeze()
 
     layout0 = axes.layouts[pmap({"ax0": "pt0", "ax1": "pt0"})]
 
@@ -115,7 +115,9 @@ def test_2d_affine_layout():
 
 
 def test_1d_multi_component_layout():
-    axes = AxisTree(Axis([AxisComponent(3, "pt0"), AxisComponent(2, "pt1")], "ax0"))
+    axes = AxisTree(
+        Axis([AxisComponent(3, "pt0"), AxisComponent(2, "pt1")], "ax0")
+    ).freeze()
 
     layout0 = axes.layouts[pmap({"ax0": "pt0"})]
     layout1 = axes.layouts[pmap({"ax0": "pt1"})]
@@ -146,12 +148,14 @@ def test_1d_multi_component_layout():
 
 
 def test_1d_permuted_layout():
-    axes = AxisTree(Axis([AxisComponent(3, "pt0")], "ax0", permutation=[1, 2, 0]))
+    axes = AxisTree(
+        Axis([AxisComponent(3, "pt0")], "ax0", permutation=[1, 2, 0])
+    ).freeze()
 
     layout0 = axes.layouts[pmap({"ax0": "pt0"})]
 
     assert as_str(layout0) == "array_0"
-    assert np.allclose(layout0.data_ro, [1, 2, 0])
+    assert np.allclose(layout0.array.data_ro, [1, 2, 0])
     check_offsets(
         axes,
         [
@@ -176,15 +180,15 @@ def test_1d_multi_component_permuted_layout():
             "ax0",
             permutation=[1, 4, 3, 2, 0],
         )
-    )
+    ).freeze()
 
     layout0 = axes.layouts[pmap({"ax0": "pt0"})]
     layout1 = axes.layouts[pmap({"ax0": "pt1"})]
 
     assert as_str(layout0) == "array_0"
     assert as_str(layout1) == "array_0"
-    assert np.allclose(layout0.data_ro, [1, 4, 3])
-    assert np.allclose(layout1.data_ro, [2, 0])
+    assert np.allclose(layout0.array.data_ro, [1, 4, 3])
+    assert np.allclose(layout1.array.data_ro, [2, 0])
     check_offsets(
         axes,
         [
@@ -207,7 +211,7 @@ def test_1d_multi_component_permuted_layout():
 
 
 def test_1d_zero_sized_layout():
-    axes = AxisTree(Axis([AxisComponent(0, "pt0")], "ax0"))
+    axes = AxisTree(Axis([AxisComponent(0, "pt0")], "ax0")).freeze()
 
     layout0 = axes.layouts[pmap({"ax0": "pt0"})]
 
@@ -225,7 +229,7 @@ def test_multi_component_layout_with_zero_sized_subaxis():
                 Axis([AxisComponent(3, "pt0")], "ax1"),
             ],
         },
-    )
+    ).freeze()
 
     assert axes.size == 3
 
@@ -271,7 +275,7 @@ def test_permuted_multi_component_layout_with_zero_sized_subaxis():
         {
             root.id: [Axis(0), Axis(3)],
         },
-    )
+    ).freeze()
 
     assert axes.size == 6
 
@@ -316,6 +320,7 @@ def test_ragged_layout():
     nnzaxes = AxisTree(Axis([AxisComponent(3, "pt0")], "ax0"))
     nnz = MultiArray(nnzaxes, data=np.asarray([2, 1, 2], dtype=IntType))
     axes = nnzaxes.add_subaxis(Axis([AxisComponent(nnz, "pt0")], "ax1"), *nnzaxes.leaf)
+    axes = axes.freeze()
 
     layout0 = axes.layouts[pmap({"ax0": "pt0", "ax1": "pt0"})]
     array0 = just_one(collect_multi_arrays(layout0))
@@ -365,6 +370,7 @@ def test_ragged_layout_with_two_outer_axes():
     nnz = MultiArray(nnzaxes, data=nnzdata.flatten())
 
     axes = nnzaxes.add_subaxis(Axis([AxisComponent(nnz, "pt0")], "ax2"), *nnzaxes.leaf)
+    axes = axes.freeze()
 
     layout0 = axes.layouts[pmap({"ax0": "pt0", "ax1": "pt0", "ax2": "pt0"})]
     array0 = just_one(collect_multi_arrays(layout0))

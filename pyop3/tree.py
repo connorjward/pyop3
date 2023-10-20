@@ -7,7 +7,7 @@ from typing import Any, Dict, FrozenSet, List, Mapping, Optional, Tuple, Union
 
 import pyrsistent
 import pytools
-from pyrsistent import pmap
+from pyrsistent import freeze, pmap
 
 from pyop3.utils import (
     Id,
@@ -28,6 +28,10 @@ from pyop3.utils import (
 
 
 class NodeNotFoundException(Exception):
+    pass
+
+
+class NodeData(pytools.ImmutableRecord):
     pass
 
 
@@ -56,12 +60,15 @@ class StrictLabelledNode(LabelledNode):
 Node = LabelledNode
 
 
+# TODO I don't think that this should be considered an immutable record. The fields
+# relate to one another and it encourages mutability (via copy) rather than using a
+# specific interface
 class LabelledTree(pytools.ImmutableRecord):
     fields = {"root", "parent_to_children"}
 
     def __init__(self, root, parent_to_children):
         self.root = root
-        self.parent_to_children = pmap(parent_to_children)
+        self.parent_to_children = freeze(parent_to_children)
 
     def __str__(self):
         return self._stringify()
@@ -99,6 +106,7 @@ class LabelledTree(pytools.ImmutableRecord):
             return nodestr
 
 
+# TODO is this a good inheritance choice? Messes with MutableLabelledTree/FrozenLabelledTree
 class StrictLabelledTree(LabelledTree):
     def __init__(
         self,

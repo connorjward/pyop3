@@ -49,7 +49,7 @@ from packaging.version import InvalidVersion, Version
 from petsc4py import PETSc
 
 from pyop3 import mpi
-from pyop3.config import config
+from pyop3.config import config, get_petsc_dir
 from pyop3.log import INFO, debug, progress, warning
 
 
@@ -76,7 +76,29 @@ def compile_loopy(kernel, *, stop_at_c=False, **kwargs):
         return code
     argtypes = [ctypes.c_voidp for _ in kernel.default_entrypoint.args]
     restype = None
-    return compile_c(code, kernel.default_entrypoint.name, argtypes, restype, **kwargs)
+
+    # ideally move this logic somewhere else
+    cppargs = (
+        tuple("-I%s/include" % d for d in get_petsc_dir())
+        # + tuple("-I%s" % d for d in self.local_kernel.include_dirs)
+        # + ("-I%s" % os.path.abspath(os.path.dirname(__file__)),)
+    )
+    ldargs = (
+        tuple("-L%s/lib" % d for d in get_petsc_dir())
+        + tuple("-Wl,-rpath,%s/lib" % d for d in get_petsc_dir())
+        + ("-lpetsc", "-lm")
+        # + tuple(self.local_kernel.ldargs)
+    )
+
+    return compile_c(
+        code,
+        kernel.default_entrypoint.name,
+        argtypes,
+        restype,
+        extra_compiler_flags=cppargs,
+        extra_linker_flags=ldargs,
+        **kwargs,
+    )
 
 
 def compile_c(code: str, name, argtypes, restype, **kwargs):
