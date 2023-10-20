@@ -3,7 +3,6 @@ from pyop3.axes.tree import (
     AxisComponent,
     AxisTree,
     AxisVariable,
-    CalledAxisTree,
     ContextFree,
     ContextSensitive,
     LoopIterable,

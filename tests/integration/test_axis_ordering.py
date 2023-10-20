@@ -14,9 +14,9 @@ from pyop3 import (
     Axis,
     AxisComponent,
     AxisTree,
+    Function,
     IndexTree,
     IntType,
-    LoopyKernel,
     MultiArray,
     ScalarType,
     Slice,
@@ -42,7 +42,7 @@ def test_different_axis_orderings_do_not_change_packing_order():
         name="copy",
         lang_version=(2018, 2),
     )
-    copy_kernel = LoopyKernel(lpy_kernel, [READ, WRITE])
+    copy_kernel = Function(lpy_kernel, [READ, WRITE])
 
     axis0 = Axis(m0, "ax0")
     axis1 = Axis(m1, "ax1")
@@ -65,7 +65,7 @@ def test_different_axis_orderings_do_not_change_packing_order():
     p = axis0.index()
     path = pmap({axis0.label: just_one(axis0.components).label})
 
-    loop_context = pmap({p: (path, path)})
+    loop_context = pmap({p: path})
     q = IndexTree(
         p,
         {

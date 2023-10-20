@@ -38,7 +38,11 @@ def test_loop_over_ragged_subset(scalar_copy_kernel):
     dat0 = MultiArray(axes, name="dat0", data=np.arange(axes.size, dtype=ScalarType))
     dat1 = MultiArray(axes, name="dat1", dtype=dat0.dtype)
 
-    do_loop(p := axes[:, subset].index(), scalar_copy_kernel(dat0[p], dat1[p]))
+    slice0 = Slice("ax0", [AffineSliceComponent("pt0", label="pt0")], label="ax0")
+
+    # this is ambiguous
+    # do_loop(p := axes[:, subset].index(), scalar_copy_kernel(dat0[p], dat1[p]))
+    do_loop(p := axes[slice0, subset].index(), scalar_copy_kernel(dat0[p], dat1[p]))
 
     expected = np.zeros_like(dat0.data)
     subset_offset = 0
@@ -93,3 +97,65 @@ def test_sparse_copy(scalar_copy_kernel):
     # to have [[0, 1], [3, 4, 5], [7, 8]]
     expected = np.asarray([0, 1, 3, 4, 5, 7, 8])
     assert np.allclose(dat1.data, expected)
+
+
+def test_sliced_array(scalar_copy_kernel):
+    n = 30
+    axes = Axis([AxisComponent(n, "pt0")], "ax0")
+
+    array0 = MultiArray(
+        axes, name="array0", data=np.arange(axes.size, dtype=ScalarType)
+    )
+    # array1 expects indices [2, 4, 6, ...]
+    array1 = MultiArray(axes[::2][1:], name="array1", dtype=array0.dtype)
+
+    # loop over [4, 8, 12, 16, ...]
+    do_loop(p := axes[::4][1:].index(), scalar_copy_kernel(array0[p], array1[p]))
+    assert np.allclose(array1.data_ro[::2], 0)
+    assert np.allclose(array1.data_ro[1::2], array0.data_ro[::4][1:])
+
+
+def test_sparse_matrix_insertion(scalar_copy_kernel):
+    # Insert a single value into a 3x3 sparse matrix with non-zero layout:
+    # [x x 0]
+    # [x x x]
+    # [0 x x]
+
+    nnz_axes = AxisTree(Axis([AxisComponent(3, "pt0")], "ax0"))
+    nnz_data = np.asarray([2, 3, 2], dtype=IntType)
+    nnz = MultiArray(nnz_axes, name="nnz", data=nnz_data)
+
+    subset_axes = nnz_axes.add_subaxis(
+        Axis([AxisComponent(nnz, "pt0")], "ax1"), *nnz_axes.leaf
+    )
+    subset_data = np.asarray(flatten([[0, 1], [0, 1, 2], [1, 2]]), dtype=IntType)
+    # TODO strongly type that this must be ordered and unique
+    # Probably want an OrderedSubset class. Similarly should also take care
+    # to allow non-unique indices - they do not form a subset
+    subset = MultiArray(
+        subset_axes,
+        name="subset",
+        data=subset_data,
+        # ordered=True,
+        # unique=True,
+    )
+
+    axes = nnz_axes.add_subaxis(Axis([AxisComponent(3, "pt0")], "ax1"), *nnz_axes.leaf)
+
+    slice0 = Slice("ax0", [AffineSliceComponent("pt0", label="pt0")], label="ax0")
+    slice1 = Slice(
+        "ax0", [AffineSliceComponent("pt0", label="pt0")], label="ax0_sliced"
+    )
+
+    scalar = MultiArray(
+        Axis(1), name="scalar", data=np.asarray([666], dtype=ScalarType)
+    )
+    matrix = MultiArray(axes[slice0, subset], name="matrix", dtype=scalar.dtype)
+
+    # insert a value into a column of the matrix
+    do_loop(
+        p := axes[slice1, 1].index(),
+        scalar_copy_kernel(scalar[:], matrix[p]),
+    )
+    expected = np.asarray([0, 666, 0, 666, 0, 666, 0])
+    assert np.allclose(matrix.data_ro, expected)

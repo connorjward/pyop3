@@ -11,10 +11,26 @@ from weakref import WeakValueDictionary
 
 import loopy as lp
 import numpy as np
+import pymbolic as pym
 import pytools
+from pyrsistent import freeze, pmap
 
-from pyop3.distarray import DistributedArray, MultiArray
-from pyop3.indices import IndexedArray
+from pyop3.axes import as_axis_tree
+from pyop3.axes.tree import (
+    ContextFree,
+    ContextSensitive,
+    FrozenAxisTree,
+    MultiArrayCollector,
+)
+from pyop3.distarray import DistributedArray, MultiArray, PetscMat
+from pyop3.distarray.multiarray import IndexExpressionReplacer, substitute_layouts
+from pyop3.dtypes import IntType
+from pyop3.indices.tree import (
+    IndexedAxisTree,
+    _compose_bits,
+    _index_axes,
+    as_index_forest,
+)
 from pyop3.utils import as_tuple, checked_zip, merge_dicts
 
 
@@ -166,7 +182,7 @@ class FunctionArgument:
         return self.tensor.indices
 
 
-class LoopyKernel:
+class Function:
     """A callable function."""
 
     def __init__(self, loopy_kernel, access_descrs):
@@ -193,7 +209,7 @@ class LoopyKernel:
             for spec, arg in checked_zip(self.argspec, args)
         ):
             raise ValueError("Arguments to the kernel have the wrong dtype")
-        return FunctionCall(self, args)
+        return CalledFunction(self, args)
 
     @property
     def argspec(self):
@@ -209,11 +225,7 @@ class LoopyKernel:
         return self.code.default_entrypoint.name
 
 
-class Terminal(LoopExpr):
-    pass
-
-
-class FunctionCall(Terminal):
+class CalledFunction(LoopExpr):
     def __init__(self, function, arguments):
         self.function = function
         self.arguments = arguments
@@ -259,6 +271,76 @@ class FunctionCall(Terminal):
     #             self.argspec,
     #         )
     #     )
+
+
+class Offset(LoopExpr, ContextSensitive):
+    """Terminal containing the offset of some axis tree given some multi-index."""
+
+    def __init__(self, per_context):
+        LoopExpr.__init__(self)
+        ContextSensitive.__init__(self, per_context)
+
+    # FIXME
+    @property
+    def name(self):
+        return "my_offset"
+
+    @property
+    def dtype(self):
+        return IntType
+
+    @functools.cached_property
+    def datamap(self):
+        return merge_dicts(axes.datamap for axes in self.context_map.values())
+
+
+def offset(axes, indices):
+    axes = as_axis_tree(axes).freeze()
+    axes_per_context = {}
+    for index_tree in as_index_forest(indices, axes=axes):
+        loop_context = index_tree.loop_context
+        (
+            indexed_axes,
+            target_path_per_indexed_cpt,
+            index_exprs_per_indexed_cpt,
+            layout_exprs_per_indexed_cpt,
+        ) = _index_axes(axes, index_tree, loop_context)
+
+        (
+            target_paths,
+            index_exprs,
+            layout_exprs,
+        ) = _compose_bits(
+            axes,
+            indexed_axes,
+            target_path_per_indexed_cpt,
+            index_exprs_per_indexed_cpt,
+            layout_exprs_per_indexed_cpt,
+        )
+
+        new_axes = IndexedAxisTree(
+            indexed_axes.root,
+            indexed_axes.parent_to_children,
+            target_paths,
+            index_exprs,
+            layout_exprs,
+        )
+
+        new_layouts = substitute_layouts(
+            axes,
+            new_axes,
+            target_path_per_indexed_cpt,
+            index_exprs_per_indexed_cpt,
+        )
+        layout_axes = FrozenAxisTree(
+            new_axes.root,
+            new_axes.parent_to_children,
+            target_paths,
+            index_exprs,
+            new_layouts,
+        )
+        axes_per_context[loop_context] = layout_axes
+    return Offset(axes_per_context)
 
 
 class Instruction(pytools.ImmutableRecord):
@@ -338,6 +420,11 @@ def _as_pointer(array: DistributedArray) -> int:
 @_as_pointer.register
 def _(array: MultiArray):
     return array.data.ctypes.data
+
+
+@_as_pointer.register
+def _(array: PetscMat):
+    return array.petscmat.handle
 
 
 def fix_intents(tunit, accesses):

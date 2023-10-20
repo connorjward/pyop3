@@ -1,7 +1,5 @@
-name: Testing
+name: Test
 
-# Trigger the workflow on push or pull request,
-# but only for the master branch
 on:
   push:
     branches:
@@ -15,7 +13,7 @@ jobs:
       # Don't immediately kill all if one Python version fails
       fail-fast: false
       matrix:
-        python-version: ['3.8', '3.9', '3.10', '3.11']
+        python-version: ['3.9', '3.10', '3.11']
     env:
       CC: mpicc
       PETSC_DIR: ${{ github.workspace }}/petsc

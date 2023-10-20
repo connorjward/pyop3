@@ -14,10 +14,10 @@ from pyop3 import (
     Axis,
     AxisComponent,
     AxisTree,
+    Function,
     Index,
     IndexTree,
     IntType,
-    LoopyKernel,
     MultiArray,
     ScalarType,
     Slice,
@@ -41,7 +41,7 @@ def scalar_copy_kernel():
         name="scalar_copy",
         lang_version=(2018, 2),
     )
-    return LoopyKernel(code, [READ, WRITE])
+    return Function(code, [READ, WRITE])
 
 
 @pytest.fixture
@@ -57,7 +57,7 @@ def vector_copy_kernel():
         name="vector_copy",
         lang_version=(2018, 2),
     )
-    return LoopyKernel(code, [READ, WRITE])
+    return Function(code, [READ, WRITE])
 
 
 def test_scalar_copy(scalar_copy_kernel):
@@ -176,7 +176,9 @@ def test_multi_component_scalar_copy_with_two_outer_loops(scalar_copy_kernel):
         Axis([(n, 1)], "ax0", id="root"),
         {"root": Axis([(b, 0)], "ax1")},
     )
-    do_loop(p := iterset.index(), scalar_copy_kernel(dat0[p], dat1[p]))
+    # do_loop(p := iterset.index(), scalar_copy_kernel(dat0[p], dat1[p]))
+    l = loop(p := iterset.index(), scalar_copy_kernel(dat0[p], dat1[p]))
+    l()
 
     assert all(dat1.data[: m * a] == 0)
     assert all(dat1.data[m * a :] == dat0.data[m * a :])
@@ -205,7 +207,7 @@ def test_inc_with_shared_global_value():
         name="plus_one",
         lang_version=(2018, 2),
     )
-    plus_one = LoopyKernel(knl, [INC])
+    plus_one = Function(knl, [INC])
 
     p = IndexTree(Index(Range("ax0", m0)))
 

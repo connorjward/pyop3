@@ -14,13 +14,22 @@ import pymbolic as pym
 import pytools
 from mpi4py import MPI
 from petsc4py import PETSc
-from pyrsistent import pmap
+from pyrsistent import freeze, pmap
 
 from pyop3 import utils
-from pyop3.axes import Axis, AxisComponent, AxisTree, as_axis_tree
+from pyop3.axes import (
+    Axis,
+    AxisComponent,
+    AxisTree,
+    ContextFree,
+    ContextSensitive,
+    as_axis_tree,
+)
+from pyop3.axes.tree import AxisVariable, FrozenAxisTree, MultiArrayCollector
 from pyop3.distarray.base import DistributedArray
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
-from pyop3.indices import IndexedArray, IndexTree, as_index_forest  # index_axes,
+from pyop3.indices import IndexedAxisTree, IndexTree, as_index_forest, index_axes
+from pyop3.indices.tree import collect_loop_indices
 from pyop3.utils import (
     PrettyTuple,
     UniqueNameGenerator,
@@ -33,6 +42,10 @@ from pyop3.utils import (
 )
 
 
+class IncompatibleShapeError(Exception):
+    """TODO, also bad name"""
+
+
 # should be elsewhere, this is copied from loopexpr2loopy VariableReplacer
 class IndexExpressionReplacer(pym.mapper.IdentityMapper):
     def __init__(self, replace_map):
@@ -41,8 +54,27 @@ class IndexExpressionReplacer(pym.mapper.IdentityMapper):
     def map_axis_variable(self, expr):
         return self._replace_map.get(expr.axis_label, expr)
 
+    def map_multi_array(self, expr):
+        indices = tuple(self.rec(index) for index in expr.index_tuple)
+        return MultiArrayVariable(expr.array, indices)
 
-class MultiArray(DistributedArray, pym.primitives.Variable):
+
+class MultiArrayVariable(pym.primitives.Subscript):
+    mapper_method = sys.intern("map_multi_array")
+
+    def __init__(self, array, indices):
+        super().__init__(pym.var(array.name), indices)
+        self.array = array
+
+        # alias
+        self.indices = indices
+
+    @property
+    def datamap(self):
+        return self.array.datamap | merge_dicts(idx.datamap for idx in self.indices)
+
+
+class MultiArray(DistributedArray, ContextFree):
     """Multi-dimensional, hierarchical array.
 
     Parameters
@@ -56,33 +88,26 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
     fields = DistributedArray.fields | {
         "axes",
         "dtype",
-        "name",
         "data",
         "max_value",
         "sf",
-        "indicess",
     }
-
-    mapper_method = sys.intern("map_multi_array")
-
-    prefix = "array"
-    name_generator = UniqueNameGenerator()
 
     def __init__(
         self,
-        axes,
+        axes: AxisTree,
         dtype=None,
         *,
-        name: str = None,
-        prefix: str = None,
         data=None,
         max_value=None,
         sf=None,
-        indicess=(),
+        **kwargs,
     ):
-        if name and prefix:
-            raise ValueError("Can only specify one of name and prefix")
-        axes = as_axis_tree(axes)
+        super().__init__(**kwargs)
+
+        # if not isinstance(axes, (AxisTree, IndexedAxisTree)):
+        #     # must be context-free
+        #     raise TypeError()
 
         if isinstance(data, np.ndarray):
             if dtype:
@@ -100,20 +125,12 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
         else:
             raise TypeError("data argument not recognised")
 
-        # add prefix as an existing name so it is a true prefix
-        if prefix:
-            self.name_generator.add_name(prefix, conflicting_ok=True)
-        name = name or self.name_generator(prefix or self.prefix)
-
-        DistributedArray.__init__(self, name)
-        pym.primitives.Variable.__init__(self, name)
-
         self._data = data
         self.dtype = dtype
 
-        self.indicess = indicess
-
-        self.axes = axes
+        self.temporary_axes = as_axis_tree(axes).freeze()  # used for the temporary
+        self.axes = layout_axes(axes)
+        self.layout_axes = self.axes  # cached property?
 
         self.max_value = max_value
         self.sf = sf
@@ -124,11 +141,105 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
 
         self._sync_thread = None
 
-    # don't like this, instead use something singledispatch in the right place
-    # split_axes is only used for a very specific use case
+    def __getitem__(self, indices) -> Union[MultiArray, ContextSensitiveMultiArray]:
+        from pyop3.indices.tree import (
+            _compose_bits,
+            _index_axes,
+            as_index_tree,
+            collect_loop_contexts,
+            index_axes,
+        )
+
+        loop_contexts = collect_loop_contexts(indices)
+        if not loop_contexts:
+            index_tree = just_one(as_index_forest(indices, axes=self.layout_axes))
+            (
+                indexed_axes,
+                target_path_per_indexed_cpt,
+                index_exprs_per_indexed_cpt,
+                layout_exprs_per_indexed_cpt,
+            ) = _index_axes(self.layout_axes, index_tree, pmap())
+            target_paths, index_exprs, layout_exprs = _compose_bits(
+                self.layout_axes,
+                indexed_axes,
+                target_path_per_indexed_cpt,
+                index_exprs_per_indexed_cpt,
+                layout_exprs_per_indexed_cpt,
+            )
+
+            new_axes = IndexedAxisTree(
+                indexed_axes.root,
+                indexed_axes.parent_to_children,
+                target_paths,
+                index_exprs,
+                layout_exprs,
+            )
+
+            new_layouts = substitute_layouts(
+                self.layout_axes,
+                new_axes,
+                target_path_per_indexed_cpt,
+                index_exprs_per_indexed_cpt,
+            )
+            layout_axes = FrozenAxisTree(
+                new_axes.root,
+                new_axes.parent_to_children,
+                target_paths=target_paths,
+                index_exprs=index_exprs,
+                layouts=new_layouts,
+            )
+            return self.copy_record(axes=layout_axes)
+
+        array_per_context = {}
+        for index_tree in as_index_forest(indices, axes=self.layout_axes):
+            loop_context = index_tree.loop_context
+            (
+                indexed_axes,
+                target_path_per_indexed_cpt,
+                index_exprs_per_indexed_cpt,
+                layout_exprs_per_indexed_cpt,
+            ) = _index_axes(self.layout_axes, index_tree, loop_context)
+
+            (
+                target_paths,
+                index_exprs,
+                layout_exprs,
+            ) = _compose_bits(
+                self.layout_axes,
+                indexed_axes,
+                target_path_per_indexed_cpt,
+                index_exprs_per_indexed_cpt,
+                layout_exprs_per_indexed_cpt,
+            )
+
+            new_axes = IndexedAxisTree(
+                indexed_axes.root,
+                indexed_axes.parent_to_children,
+                target_paths,
+                index_exprs,
+                layout_exprs,
+            )
+
+            new_layouts = substitute_layouts(
+                self.layout_axes,
+                new_axes,
+                target_path_per_indexed_cpt,
+                index_exprs_per_indexed_cpt,
+            )
+            layout_axes = FrozenAxisTree(
+                new_axes.root,
+                new_axes.parent_to_children,
+                target_paths=target_paths,
+                index_exprs=index_exprs,
+                layouts=new_layouts,
+            )
+            array_per_context[loop_context] = self.copy_record(axes=layout_axes)
+        return ContextSensitiveMultiArray(array_per_context)
+
+    # TODO remove this
     @property
-    def split_axes(self):
-        return pmap({pmap(): self.axes})
+    def layouts(self):
+        return self.axes.layouts
 
     @property
     def data(self):
@@ -153,16 +264,28 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
 
     @functools.cached_property
     def datamap(self) -> dict[str:DistributedArray]:
-        datamap = {self.name: self}
-        datamap.update(self.axes.datamap)
-        datamap.update(
-            merge_dicts([idx.datamap for idxs in self.indicess for idx in idxs])
+        datamap_ = {self.name: self}
+        datamap_.update(self.axes.datamap)
+        datamap_.update(self.layout_axes.datamap)
+        return freeze(datamap_)
+
+    def as_var(self):
+        # must not be branched...
+        indices = tuple(
+            AxisVariable(axis)
+            for axis, _ in self.axes.path(*self.axes.leaf, ordered=True)
         )
-        return datamap
+        return MultiArrayVariable(self, indices)
+
+    @property
+    def shape(self):
+        raise IncompatibleShapeError(
+            "Ragged and/or multi-component arrays do not have a well defined shape"
+        )
 
     @property
     def alloc_size(self):
-        return self.axes.alloc_size() if self.axes.root else 1
+        return self.axes.alloc_size() if not self.axes.is_empty else 1
 
     # ???
     # @property
@@ -306,10 +429,6 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
     def set_value(self, path, indices, value):
         self.data[self.axes.get_offset(path, indices)] = value
 
-    # maybe I could check types here and use instead of get_value?
-    def __getitem__(self, indices):
-        return self.copy(axes=self.axes[indices])
-
     def select_axes(self, indices):
         selected = []
         current_axis = self.axes
@@ -320,6 +439,162 @@ class MultiArray(DistributedArray, pym.primitives.Variable):
 
     def __str__(self):
         return self.name
+
+
+class ContextSensitiveMultiArray(ContextSensitive):
+    def __getitem__(self, indices) -> ContextSensitiveMultiArray:
+        from pyop3.indices.tree import (
+            _compose_bits,
+            _index_axes,
+            as_index_tree,
+            collect_loop_contexts,
+            index_axes,
+        )
+
+        loop_contexts = collect_loop_contexts(indices)
+        if not loop_contexts:
+            raise NotImplementedError("code path untested")
+
+        # FIXME for now assume that there is only one context
+        context, array = just_one(self.context_map.items())
+
+        array_per_context = {}
+        for index_tree in as_index_forest(indices, axes=array.layout_axes):
+            loop_context = index_tree.loop_context
+            (
+                indexed_axes,
+                target_path_per_indexed_cpt,
+                index_exprs_per_indexed_cpt,
+                layout_exprs_per_indexed_cpt,
+            ) = _index_axes(array.layout_axes, index_tree, loop_context)
+
+            (
+                target_paths,
+                index_exprs,
+                layout_exprs,
+            ) = _compose_bits(
+                array.layout_axes,
+                indexed_axes,
+                target_path_per_indexed_cpt,
+                index_exprs_per_indexed_cpt,
+                layout_exprs_per_indexed_cpt,
+            )
+
+            new_axes = IndexedAxisTree(
+                indexed_axes.root,
+                indexed_axes.parent_to_children,
+                target_paths,
+                index_exprs,
+                layout_exprs,
+            )
+
+            new_layouts = substitute_layouts(
+                array.layout_axes,
+                new_axes,
+                target_path_per_indexed_cpt,
+                index_exprs_per_indexed_cpt,
+            )
+            layout_axes = FrozenAxisTree(
+                new_axes.root,
+                new_axes.parent_to_children,
+                target_paths,
+                index_exprs,
+                layouts=new_layouts,
+            )
+            array_per_context[loop_context] = array.copy_record(axes=layout_axes)
+        return ContextSensitiveMultiArray(array_per_context)
+
+    # don't like this name
+    @property
+    def orig_array(self):
+        return single_valued(array.orig_array for array in self.context_map.values())
+
+    @property
+    def dtype(self):
+        return single_valued(array.dtype for array in self.context_map.values())
+
+    @property
+    def name(self):
+        return single_valued(array.name for array in self.context_map.values())
+
+    @functools.cached_property
+    def datamap(self):
+        return merge_dicts(array.datamap for array in self.context_map.values())
+
+
+def replace_layout(orig_layout, replace_map):
+    return IndexExpressionReplacer(replace_map)(orig_layout)
+
+
+@functools.singledispatch
+def layout_axes(axes) -> FrozenAxisTree:
+    if isinstance(axes, FrozenAxisTree):
+        return axes
+    else:
+        return as_axis_tree(axes).freeze()
+
+
+@layout_axes.register
+def _(axes: IndexedAxisTree) -> FrozenAxisTree:
+    from pyop3.distarray.multiarray import IndexExpressionReplacer
+
+    if axes.is_empty:
+        raise NotImplementedError
+        # return LayoutAxisTree(axes, freeze({pmap(): 0}))
+        breakpoint()
+        return LayoutAxisTree(axes, NotImplemented)
+
+    # relabel the axis tree, note that the strong statements (i.e. just_one(...), etc)
+    # are *required* rather than me being lazy. If these conditions do not hold then
+    # it is not valid to use this axis tree as a layout.
+    new_root_labels = set()
+    new_root_cpts = []
+    for orig_cpt in axes.root.components:
+        axlabel, clabel = just_one(
+            axes.target_paths[axes.root.id, orig_cpt.label].items()
+        )
+        new_root_labels.add(axlabel)
+        new_root_cpts.append(orig_cpt.copy(label=clabel))
+    new_root_label = just_one(new_root_labels)
+    new_root = axes.root.copy(label=new_root_label, components=new_root_cpts)
+
+    new_parent_to_children = {}
+    for axis_id, subaxes in axes.parent_to_children.items():
+        new_subaxes = []
+        for subaxis in subaxes:
+            if subaxis is None:
+                new_subaxes.append(None)
+                continue
+            axis_labels = set()
+            cpts = []
+            for orig_cpt in subaxis.components:
+                axlabel, clabel = just_one(
+                    axes.target_paths[subaxis.id, orig_cpt.label].items()
+                )
+                axis_labels.add(axlabel)
+                cpts.append(orig_cpt.copy(label=clabel))
+            axis_label = just_one(axis_labels)
+            new_subaxes.append(subaxis.copy(label=axis_label, components=cpts))
+        new_parent_to_children[axis_id] = new_subaxes
+
+    new_axes = FrozenAxisTree(root=new_root, parent_to_children=new_parent_to_children)
+
+    assert axes.layout_exprs
+    layouts_ = {}
+    for leaf in axes.leaves:
+        orig_path = axes.path(*leaf)
+        new_path = {}
+        replace_map = {}
+        for axis, cpt in axes.path_with_nodes(*leaf).items():
+            new_path.update(axes.target_paths[axis.id, cpt])
+            replace_map.update(axes.layout_exprs[axis.id, cpt])
+        new_path = freeze(new_path)
+
+        orig_layout = axes.restore().layouts[orig_path]
+        new_layout = IndexExpressionReplacer(replace_map)(orig_layout)
+        assert new_layout != orig_layout
+        layouts_[new_path] = new_layout
+    return FrozenAxisTree(new_axes.root, new_axes.parent_to_children, layouts=layouts_)
 
 
 def make_sparsity(
@@ -547,3 +822,34 @@ def overlap_axes(ax1, ax2, sparsity=None):
         new_parts.append(new_part)
 
     return MultiAxis(new_parts).set_up(with_sf=False)
+
+
+def substitute_layouts(orig_axes, new_axes, target_paths, index_exprs):
+    # replace layout bits that disappear with loop index
+    if new_axes.is_empty:
+        new_layouts = {}
+        orig_path = target_paths[None]
+        new_path = pmap()
+
+        orig_layout = orig_axes.layouts[orig_path]
+        new_layout = IndexExpressionReplacer(index_exprs[None])(orig_layout)
+        new_layouts[new_path] = new_layout
+        # don't silently do nothing
+        assert new_layout != orig_layout
+    else:
+        new_layouts = {}
+        for leaf_axis, leaf_cpt in new_axes.leaves:
+            orig_path = dict(target_paths.get(None, {}))
+            for myaxis, mycpt in new_axes.path_with_nodes(leaf_axis, leaf_cpt).items():
+                orig_path.update(target_paths.get((myaxis.id, mycpt), {}))
+
+            orig_layout = orig_axes.layouts[freeze(orig_path)]
+            new_layout = IndexExpressionReplacer(index_exprs.get(None, {}))(orig_layout)
+            new_layouts[new_axes.path(leaf_axis, leaf_cpt)] = new_layout
+            # TODO, this sometimes fails, is that valid?
+            # don't silently do nothing
+            # assert new_layout != orig_layout
+
+    # TODO not sure if target paths etc needed to pass through
+    return new_layouts
+    # return FrozenAxisTree(new_axes.root, new_axes.parent_to_children, layouts=new_layouts)
