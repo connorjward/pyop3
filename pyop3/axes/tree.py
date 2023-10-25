@@ -512,19 +512,11 @@ class AxisComponent(LabelledImmutableRecord):
 
         return isinstance(self.count, MultiArray)
 
-    # deprecated alias, permutation is a better name as it is easier to reason
-    # about sending points vs where they map to.
-    @property
-    def numbering(self):
-        return self.permutation
-
     # TODO this is just a traversal - clean up
     def alloc_size(self, axtree, axis):
         from pyop3.distarray import MultiArray
 
-        if axis.indexed:
-            npoints = 1
-        elif isinstance(self.count, MultiArray):
+        if isinstance(self.count, MultiArray):
             npoints = self.count.max_value
         else:
             assert isinstance(self.count, numbers.Integral)
@@ -568,7 +560,7 @@ class AxisComponent(LabelledImmutableRecord):
 class Axis(StrictLabelledNode, LoopIterable):
     fields = StrictLabelledNode.fields - {"component_labels"} | {
         "components",
-        "permutation",
+        "numbering",
     }
 
     def __init__(
@@ -576,27 +568,24 @@ class Axis(StrictLabelledNode, LoopIterable):
         components: Union[Sequence[AxisComponent], AxisComponent, int],
         label: Optional[Hashable] = None,
         *,
-        permutation: Optional[Sequence[int]] = None,
+        numbering: Optional[Sequence[int]] = None,
         **kwargs,
     ):
         components = tuple(_as_axis_component(cpt) for cpt in as_tuple(components))
 
-        if permutation is not None and not all(
+        if numbering is not None and not all(
             isinstance(cpt.count, numbers.Integral) for cpt in components
         ):
             raise NotImplementedError(
-                "Axis permutations are only supported for axes with fixed component sizes"
+                "Axis numberings are only supported for axes with fixed component sizes"
             )
         # TODO could also check sizes here
 
         super().__init__([c.label for c in components], label=label, **kwargs)
         self.components = components
 
-        # FIXME: permutation should be something hashable but not quite like this...
-        self.permutation = tuple(permutation) if permutation is not None else None
-
-        # dead code, remove
-        self.indexed = False
+        # needed to get hashable working, but should it be?
+        self.numbering = tuple(numbering) if numbering is not None else None
 
     def __getitem__(self, indices):
         return as_axis_tree(self)[indices]
@@ -1423,9 +1412,7 @@ def _compute_layouts(
     # 1. do we need to pass further up?
     if not all(has_fixed_size(axes, axis, cpt) for cpt in axis.components):
         # 0. We ignore things if they are indexed. They don't contribute
-        if axis.indexed:
-            ctree = None
-        elif all(has_constant_step(axes, axis, c) for c in axis.components):
+        if all(has_constant_step(axes, axis, c) for c in axis.components):
             # we must be at the bottom of a ragged patch - therefore don't
             # add to shape of things
             # in theory if we are ragged and permuted then we do want to include this level
@@ -1459,17 +1446,12 @@ def _compute_layouts(
     # 2. add layouts here
     else:
         # 1. do we need to tabulate anything?
-        if axis.permutation is not None or not all(
+        if axis.numbering is not None or not all(
             has_constant_step(axes, axis, c) for c in axis.components
         ):
-            # If this axis is indexed and there is no inner shape to index then do nothing
-            if axis.indexed and strictly_all(sub is None for sub in csubtrees):
-                return layouts | merge_dicts(sublayoutss), None, steps
-
             # super ick
             bits = []
             for cpt in axis.components:
-                # axlabel, clabel = just_one(axes.target_paths[((axis, cpt),)].items())
                 axlabel, clabel = axis.label, cpt.label
                 bits.append((cpt.count, axlabel, clabel))
             croot = CustomNode(bits)
@@ -1497,9 +1479,6 @@ def _compute_layouts(
 
         # must therefore be affine
         else:
-            # 0. We ignore things if they are indexed. They don't contribute
-            if axis.indexed:
-                return layouts | merge_dicts(sublayoutss), None, steps
             ctree = None
             layouts = {}
             steps = [step_size(axes, axis, c) for c in axis.components]
@@ -1508,7 +1487,6 @@ def _compute_layouts(
                 mycomponent = axis.components[cidx]
                 sublayouts = sublayoutss[cidx].copy()
 
-                # new_layout = AffineLayout(axis.label, mycomponent.label, step, start)
                 new_layout = AxisVariable(axis.label) * step + start
                 sublayouts[path | {axis.label: mycomponent.label}] = new_layout
                 start += _axis_component_size(axes, axis, mycomponent)
@@ -1572,59 +1550,48 @@ def _tabulate_count_array_tree(
     indices=pyrsistent.pmap(),
 ):
     npoints = sum(_as_int(c.count, path, indices) for c in axis.components)
-    permutation = (
-        axis.permutation
-        if axis.permutation is not None
-        else np.arange(npoints, dtype=IntType)
-    )
 
     point_to_component_id = np.empty(npoints, dtype=np.int8)
     point_to_component_num = np.empty(npoints, dtype=PointerType)
+    *strata_offsets, _ = [0] + list(
+        np.cumsum([_as_int(c.count, path, indices) for c in axis.components])
+    )
     pos = 0
+    point = 0
+    # TODO this is overkill, we can just inspect the ranges?
     for cidx, component in enumerate(axis.components):
         # can determine this once above
         csize = _as_int(component.count, path, indices)
         for i in range(csize):
-            point = permutation[pos + i]
             point_to_component_id[point] = cidx
+            # this is now just the identity with an offset?
             point_to_component_num[point] = i
+            point += 1
         pos += csize
 
-    for pt in range(npoints):
-        selected_component_id = point_to_component_id[pt]
-        selected_component_num = point_to_component_num[pt]
+    counters = np.zeros(len(axis.components), dtype=int)
+    for new_pt, old_pt in enumerate(axis.numbering or range(npoints)):
+        # equivalent to plex strata
+        selected_component_id = point_to_component_id[old_pt]
+        # selected_component_num = point_to_component_num[old_pt]
+        selected_component_num = old_pt - strata_offsets[selected_component_id]
         selected_component = axis.components[selected_component_id]
 
-        new_path = (
-            path
-            # | axes.target_path_per_leaf[pmap({axis.label: selected_component.label})]
-            | {axis.label: selected_component.label}
-        )
-        # new_other_path = other_path | {axis.label: selected_component.label}
-        new_indices = indices | {
-            # just_one(
-            #     axes.target_path_per_leaf[
-            #         pmap({axis.label: selected_component.label})
-            #     ].keys()
-            # ): selected_component_num
-            axis.label: selected_component_num
-        }
-        # new_indices = indices | {axis.label: selected_component_num}
+        new_strata_pt = counters[selected_component_id]
+        counters[selected_component_id] += 1
+
+        new_path = path | {axis.label: selected_component.label}
+        new_indices = indices | {axis.label: new_strata_pt}
         if new_path in count_arrays:
             count_arrays[new_path].set_value(new_path, new_indices, offset.value)
-            if not axis.indexed:
-                offset += step_size(
-                    axes,
-                    axis,
-                    selected_component,
-                    new_path,
-                    # new_other_path,
-                    new_indices,
-                )
+            offset += step_size(
+                axes,
+                axis,
+                selected_component,
+                new_path,
+                new_indices,
+            )
         else:
-            if axis.indexed:
-                saved_offset = offset.value
-
             subaxis = axes.child(axis, selected_component)
             assert subaxis
             _tabulate_count_array_tree(
@@ -1635,9 +1602,6 @@ def _tabulate_count_array_tree(
                 new_path,
                 new_indices,
             )
-
-            if axis.indexed:
-                offset.value = saved_offset
 
 
 # TODO this whole function sucks, should accumulate earlier

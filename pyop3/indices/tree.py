@@ -374,14 +374,7 @@ class LoopIndex(AbstractLoopIndex):
         return tuple(paths)
 
     def target_paths(self, context):
-        iterset = self.iterset.with_context(context)
-        target_paths_ = []
-        for leaf in iterset.leaves:
-            target_path = {}
-            for axis, cpt in iterset.path_with_nodes(*leaf).items():
-                target_path.update(iterset.target_paths.get((axis.id, cpt), {}))
-            target_paths_.append(pmap(target_path))
-        return tuple(target_paths_)
+        return (context[self],)
 
 
 class LocalLoopIndex(AbstractLoopIndex):
@@ -391,9 +384,8 @@ class LocalLoopIndex(AbstractLoopIndex):
         super().__init__(**kwargs)
         self.loop_index = loop_index
 
-    @property
-    def target_paths(self):
-        return self.loop_index.target_paths
+    def target_paths(self, context):
+        return (context[self],)
 
     @property
     def datamap(self):

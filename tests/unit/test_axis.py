@@ -149,19 +149,20 @@ def test_1d_multi_component_layout():
 
 def test_1d_permuted_layout():
     axes = AxisTree(
-        Axis([AxisComponent(3, "pt0")], "ax0", permutation=[1, 2, 0])
+        Axis([AxisComponent(3, "pt0")], "ax0", numbering=[2, 0, 1])
     ).freeze()
 
     layout0 = axes.layouts[pmap({"ax0": "pt0"})]
 
+    # FIXME, for single component arrays we do not need to tabulate anything
     assert as_str(layout0) == "array_0"
-    assert np.allclose(layout0.array.data_ro, [1, 2, 0])
+    assert np.allclose(layout0.array.data_ro, [0, 1, 2])
     check_offsets(
         axes,
         [
-            ([0], 1),
-            ([1], 2),
-            ([2], 0),
+            ([0], 0),
+            ([1], 1),
+            ([2], 2),
         ],
     )
     check_invalid_indices(
@@ -178,7 +179,7 @@ def test_1d_multi_component_permuted_layout():
         Axis(
             [AxisComponent(3, "pt0"), AxisComponent(2, "pt1")],
             "ax0",
-            permutation=[1, 4, 3, 2, 0],
+            numbering=[4, 0, 3, 2, 1],
         )
     ).freeze()
 
@@ -187,16 +188,16 @@ def test_1d_multi_component_permuted_layout():
 
     assert as_str(layout0) == "array_0"
     assert as_str(layout1) == "array_0"
-    assert np.allclose(layout0.array.data_ro, [1, 4, 3])
-    assert np.allclose(layout1.array.data_ro, [2, 0])
+    assert np.allclose(layout0.array.data_ro, [1, 3, 4])
+    assert np.allclose(layout1.array.data_ro, [0, 2])
     check_offsets(
         axes,
         [
             ([("pt0", 0)], 1),
-            ([("pt0", 1)], 4),
-            ([("pt0", 2)], 3),
-            ([("pt1", 0)], 2),
-            ([("pt1", 1)], 0),
+            ([("pt0", 1)], 3),
+            ([("pt0", 2)], 4),
+            ([("pt1", 0)], 0),
+            ([("pt1", 1)], 2),
         ],
     )
     check_invalid_indices(
