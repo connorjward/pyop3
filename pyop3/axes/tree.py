@@ -285,68 +285,6 @@ def step_size(
         return 1
 
 
-def attach_star_forest(axis, with_halo_points=True):
-    raise NotImplementedError("TODO")
-    comm = MPI.COMM_WORLD
-
-    # 1. construct the point-to-point SF per axis part
-    if len(axis.children(axis.root)) != 1:
-        raise NotImplementedError
-    for part in axis.children(axis.root):
-        part_sf = make_star_forest_per_axis_part(part, comm)
-
-    # for now, will want to concat or something
-    point_sf = part_sf
-
-    # 2. broadcast the root offset to all leaves
-    # TODO use a single buffer
-    part = just_one(axis.children(axis.root))
-    from_buffer = np.zeros(part.count, dtype=PointerType)
-    to_buffer = np.zeros(part.count, dtype=PointerType)
-
-    for pt, label in enumerate(part.overlap):
-        # only need to broadcast offsets for roots
-        if isinstance(label, Shared) and not label.root:
-            from_buffer[pt] = axis.get_offset((pt,))
-
-    # TODO: It's quite bad to allocate a massive buffer when not much of it gets
-    # moved. Perhaps good to use some sort of map and create a minimal SF.
-
-    cdim = axis.calc_size(part, 0) if axis.children(part) else 1
-    dtype, _ = get_mpi_dtype(np.dtype(PointerType), cdim)
-    bcast_args = dtype, from_buffer, to_buffer, MPI.REPLACE
-    point_sf.bcastBegin(*bcast_args)
-    point_sf.bcastEnd(*bcast_args)
-
-    # 3. construct a new SF with these offsets
-    nroots, _local, _remote = part_sf.getGraph()
-
-    local_offsets = []
-    remote_offsets = []
-    i = 0
-    for pt, label in enumerate(part.overlap):
-        # TODO not a nice check (is_leaf?)
-        cond1 = not is_owned_by_process(label)
-        if cond1:
-            if with_halo_points or (not with_halo_points and isinstance(label, Shared)):
-                local_offsets.append(axis.get_offset((pt,)))
-                remote_offsets.append((_remote[i, 0], to_buffer[pt]))
-            i += 1
-
-    local_offsets = np.array(local_offsets, dtype=IntType)
-    remote_offsets = np.array(remote_offsets, dtype=IntType)
-
-    sf = PETSc.SF().create(comm)
-    sf.setGraph(nroots, local_offsets, remote_offsets)
-
-    if with_halo_points:
-        axis.sf = sf
-    else:
-        axis.shared_sf = sf
-
-    return axis
-
-
 def make_star_forest_per_axis_part(part, comm):
     if part.is_distributed:
         # we have a root if a point is shared but doesn't point to another rank
