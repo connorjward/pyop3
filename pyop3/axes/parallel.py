@@ -1,25 +1,12 @@
+from __future__ import annotations
+
 import numpy as np
 from mpi4py import MPI
 from petsc4py import PETSc
 
-from pyop3.axes.tree import Axis, AxisTree, FrozenAxisTree, _axis_size
 from pyop3.dtypes import IntType, get_mpi_dtype
 from pyop3.extras.debug import print_with_rank
-
-
-class DistributedAxis(Axis):
-    """
-    sf is the point SF, ignores permutation/numbering
-
-    for now assume that we have a good numbering for core/owned/halo
-    """
-
-    # sf not hashable
-    # fields = Axis.fields | {"sf"}
-
-    def __init__(self, *args, sf, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.sf = sf
+from pyop3.utils import strict_int
 
 
 def mysize(axes, axis, component):
@@ -27,6 +14,29 @@ def mysize(axes, axis, component):
         return _axis_size(axes, subaxis)
     else:
         return 1
+
+
+def partition_ghost_points(axis, sf):
+    npoints = sum(strict_int(c.count) for c in axis.components)
+    nroots, ilocal, iremote = sf.getGraph()
+
+    is_owned = np.full(npoints, True, dtype=bool)
+    is_owned[ilocal] = False
+
+    numbering = np.empty(npoints, dtype=IntType)
+    owned_ptr = 0
+    ghost_ptr = npoints - len(ilocal)
+    for pt in axis.numbering or range(npoints):
+        if is_owned[pt]:
+            numbering[owned_ptr] = pt
+            owned_ptr += 1
+        else:
+            numbering[ghost_ptr] = pt
+            ghost_ptr += 1
+
+    assert owned_ptr == npoints - len(ilocal)
+    assert ghost_ptr == npoints
+    return numbering
 
 
 def grow_dof_sf(axes: FrozenAxisTree):

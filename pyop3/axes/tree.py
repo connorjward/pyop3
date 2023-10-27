@@ -561,6 +561,7 @@ class Axis(StrictLabelledNode, LoopIterable):
     fields = StrictLabelledNode.fields - {"component_labels"} | {
         "components",
         "numbering",
+        "sf",
     }
 
     def __init__(
@@ -569,6 +570,7 @@ class Axis(StrictLabelledNode, LoopIterable):
         label: Optional[Hashable] = None,
         *,
         numbering: Optional[Sequence[int]] = None,
+        sf=None,
         **kwargs,
     ):
         components = tuple(_as_axis_component(cpt) for cpt in as_tuple(components))
@@ -586,6 +588,7 @@ class Axis(StrictLabelledNode, LoopIterable):
 
         # needed to get hashable working, but should it be?
         self.numbering = tuple(numbering) if numbering is not None else None
+        self.sf = sf
 
     def __getitem__(self, indices):
         return as_axis_tree(self)[indices]
@@ -595,6 +598,18 @@ class Axis(StrictLabelledNode, LoopIterable):
 
     def __str__(self) -> str:
         return f"{self.__class__.__name__}([{', '.join(str(cpt) for cpt in self.components)}], label={self.label})"
+
+    @classmethod
+    def from_serial(cls, serial: Axis, sf):
+        # FIXME
+        from pyop3.axes.parallel import partition_ghost_points
+
+        if serial.sf is not None:
+            raise RuntimeError("serial axis is not serial")
+
+        # renumber the serial axis to store ghost entries at the end of the vector
+        numbering = partition_ghost_points(serial, sf)
+        return cls(serial.components, serial.label, numbering=numbering, sf=sf)
 
     @property
     def size(self):
