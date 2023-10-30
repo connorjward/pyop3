@@ -214,6 +214,18 @@ def as_multiaxis(axis):
 #     return True
 
 
+def has_halo(axes, axis):
+    if axis.sf is not None:
+        return True
+    else:
+        for component in axis.components:
+            subaxis = axes.child(axis, component)
+            if subaxis and has_halo(axes, subaxis):
+                return True
+        return False
+    return axis.sf is not None or has_halo(axes, subaxis)
+
+
 def has_independently_indexed_subaxis_parts(axes, axis, cpt):
     """
     subaxis parts are independently indexed if they don't depend on the index from
@@ -561,7 +573,7 @@ class Axis(StrictLabelledNode, LoopIterable):
     fields = StrictLabelledNode.fields - {"component_labels"} | {
         "components",
         "numbering",
-        "sf",
+        # "sf",  # FIXME, not hashable
     }
 
     def __init__(
@@ -589,6 +601,10 @@ class Axis(StrictLabelledNode, LoopIterable):
         # needed to get hashable working, but should it be?
         self.numbering = tuple(numbering) if numbering is not None else None
         self.sf = sf
+
+    # temporary hack
+    def get_copy_kwargs(self, **kwargs):
+        return super().get_copy_kwargs(**kwargs) | {"sf": self.sf}
 
     def __getitem__(self, indices):
         return as_axis_tree(self)[indices]
@@ -1424,10 +1440,25 @@ def _compute_layouts(
     a fixed size even for the non-ragged components.
     """
 
-    # 1. do we need to pass further up?
-    if not all(has_fixed_size(axes, axis, cpt) for cpt in axis.components):
-        # 0. We ignore things if they are indexed. They don't contribute
-        if all(has_constant_step(axes, axis, c) for c in axis.components):
+    # 1. do we need to pass further up? i.e. are we variable size?
+    # also if we have halo data then we need to pass to the top
+    if (not all(has_fixed_size(axes, axis, cpt) for cpt in axis.components)) or (
+        has_halo(axes, axis) and axis != axes.root
+    ):
+        if has_halo(axes, axis) or not all(
+            has_constant_step(axes, axis, c) for c in axis.components
+        ):
+            croot = CustomNode(
+                [(cpt.count, axis.label, cpt.label) for cpt in axis.components]
+            )
+            if strictly_all(sub is not None for sub in csubtrees):
+                cparent_to_children = pmap(
+                    {croot.id: [sub.root for sub in csubtrees]}
+                ) | merge_dicts(sub.parent_to_children for sub in csubtrees)
+            else:
+                cparent_to_children = {}
+            ctree = StrictLabelledTree(croot, cparent_to_children)
+        else:
             # we must be at the bottom of a ragged patch - therefore don't
             # add to shape of things
             # in theory if we are ragged and permuted then we do want to include this level
@@ -1442,18 +1473,6 @@ def _compute_layouts(
                     }
                 )
 
-        else:
-            croot = CustomNode(
-                [(cpt.count, axis.label, cpt.label) for cpt in axis.components]
-            )
-            if strictly_all(sub is not None for sub in csubtrees):
-                cparent_to_children = pmap(
-                    {croot.id: [sub.root for sub in csubtrees]}
-                ) | merge_dicts(sub.parent_to_children for sub in csubtrees)
-            else:
-                cparent_to_children = {}
-            ctree = StrictLabelledTree(croot, cparent_to_children)
-
         # layouts and steps are just propagated from below
         layouts.update(merge_dicts(sublayoutss))
         return layouts, ctree, steps
@@ -1461,8 +1480,11 @@ def _compute_layouts(
     # 2. add layouts here
     else:
         # 1. do we need to tabulate anything?
-        if axis.numbering is not None or not all(
-            has_constant_step(axes, axis, c) for c in axis.components
+        if (
+            axis.numbering is not None
+            or not all(has_constant_step(axes, axis, c) for c in axis.components)
+            or has_halo(axes, axis)
+            and axis == axes.root
         ):
             # super ick
             bits = []
@@ -1484,6 +1506,9 @@ def _compute_layouts(
             offset = IntRef(0)
             _tabulate_count_array_tree(axes, axis, fulltree, offset)
 
+            # apply ghost offset stuff
+            _tabulate_count_array_tree(axes, axis, fulltree, offset, setting_halo=True)
+
             for subpath, offset_data in fulltree.items():
                 layouts[path | subpath] = offset_data.as_var()
             ctree = None
@@ -1494,6 +1519,7 @@ def _compute_layouts(
 
         # must therefore be affine
         else:
+            assert all(sub is None for sub in csubtrees)
             ctree = None
             layouts = {}
             steps = [step_size(axes, axis, c) for c in axis.components]
@@ -1561,8 +1587,9 @@ def _tabulate_count_array_tree(
     count_arrays,
     offset,
     path=pmap(),
-    # other_path=pmap(),
     indices=pyrsistent.pmap(),
+    is_owned=True,
+    setting_halo=False,
 ):
     npoints = sum(_as_int(c.count, path, indices) for c in axis.components)
 
@@ -1586,6 +1613,11 @@ def _tabulate_count_array_tree(
 
     counters = np.zeros(len(axis.components), dtype=int)
     for new_pt, old_pt in enumerate(axis.numbering or range(npoints)):
+        if axis.sf is not None:
+            # more efficient outside of loop
+            _, ilocal, _ = axis.sf.getGraph()
+            is_owned = new_pt < npoints - len(ilocal)
+
         # equivalent to plex strata
         selected_component_id = point_to_component_id[old_pt]
         # selected_component_num = point_to_component_num[old_pt]
@@ -1598,14 +1630,15 @@ def _tabulate_count_array_tree(
         new_path = path | {axis.label: selected_component.label}
         new_indices = indices | {axis.label: new_strata_pt}
         if new_path in count_arrays:
-            count_arrays[new_path].set_value(new_path, new_indices, offset.value)
-            offset += step_size(
-                axes,
-                axis,
-                selected_component,
-                new_path,
-                new_indices,
-            )
+            if is_owned and not setting_halo or not is_owned and setting_halo:
+                count_arrays[new_path].set_value(new_path, new_indices, offset.value)
+                offset += step_size(
+                    axes,
+                    axis,
+                    selected_component,
+                    new_path,
+                    new_indices,
+                )
         else:
             subaxis = axes.child(axis, selected_component)
             assert subaxis
@@ -1616,6 +1649,8 @@ def _tabulate_count_array_tree(
                 offset,
                 new_path,
                 new_indices,
+                is_owned=is_owned,
+                setting_halo=setting_halo,
             )
 
 

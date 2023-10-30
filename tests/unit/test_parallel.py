@@ -2,6 +2,7 @@ import numpy as np
 import pytest
 from mpi4py import MPI
 from petsc4py import PETSc
+from pyrsistent import freeze
 
 import pyop3 as op3
 from pyop3.axes.parallel import grow_dof_sf
@@ -133,7 +134,7 @@ def test_multi_component_halo_data_stored_at_end(maxis):
 
 
 @pytest.mark.parallel(nprocs=2)
-def test_distributed_subaxes_partition_halo_data(comm):
+def test_distributed_subaxes_partition_halo_data(axis):
     # Check that
     #
     #        +--+--+
@@ -145,10 +146,48 @@ def test_distributed_subaxes_partition_halo_data(comm):
     #   +-----+   +-----+
     #
     # transforms to move all of the halo data to the end. Inspect the layouts.
-    pass
+    root = op3.Axis([1, 1])
+    subaxis0 = axis
+    subaxis1 = axis.copy(id=op3.Axis.unique_id())
+    axes = op3.AxisTree(root, {root.id: [subaxis0, subaxis1]}).freeze()
+
+    path0 = freeze(
+        {
+            root.label: root.components[0].label,
+            subaxis0.label: subaxis0.components[0].label,
+        }
+    )
+    path1 = freeze(
+        {
+            root.label: root.components[1].label,
+            subaxis1.label: subaxis1.components[0].label,
+        }
+    )
+
+    _, ilocal, _ = axis.sf.getGraph()
+    npoints = axis.components[0].count
+    nghost = len(ilocal)
+    nowned = npoints - nghost
+
+    layout0 = axes.layouts[path0].array
+    layout1 = axes.layouts[path1].array
+
+    # check that we have tabulated offsets like:
+    # ["owned pt0", "owned pt1", "halo pt0", "halo pt1"]
+    assert (
+        layout0.get_value([0, 0])
+        < layout0.get_value([0, nowned - 1])
+        < layout1.get_value([0, 0])
+        < layout1.get_value([0, nowned - 1])
+        < layout0.get_value([0, nowned])
+        < layout0.get_value([0, npoints - 1])
+        < layout1.get_value([0, nowned])
+        < layout1.get_value([0, npoints - 1])
+    )
 
 
-@pytest.mark.parallel(nprocs=2)
+@pytest.mark.skip(reason="TODO")
+# @pytest.mark.parallel(nprocs=2)
 def test_stuff(comm):
     raise NotImplementedError
     sf = create_sf(comm)
