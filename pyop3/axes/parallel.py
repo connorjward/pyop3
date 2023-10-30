@@ -73,7 +73,7 @@ def renumber_sf(sf, numbering):
 
 def collect_sf_graphs(axes, axis=None, path=pmap(), indices=pmap()):
     # NOTE: This function does not check for nested SFs (which should error)
-    from pyop3.axes.tree import _axis_component_size
+    from pyop3.axes.tree import _as_int, _axis_component_size
 
     axis = axis or axes.root
 
@@ -84,8 +84,7 @@ def collect_sf_graphs(axes, axis=None, path=pmap(), indices=pmap()):
         for component in axis.components:
             subaxis = axes.child(axis, component)
             if subaxis is not None:
-                # FIXME will fail if non-integer
-                for pt in range(component.count):
+                for pt in range(_as_int(component.count, path, indices)):
                     graphs.extend(
                         collect_sf_graphs(
                             axes,

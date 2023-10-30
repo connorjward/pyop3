@@ -1078,6 +1078,9 @@ class FrozenAxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable)
     def _sf(self):
         from pyop3.axes.parallel import collect_sf_graphs
 
+        if self.is_empty:
+            return None
+
         graphs = collect_sf_graphs(self)
         print_with_rank(graphs)
         if len(graphs) == 0:
