@@ -28,6 +28,7 @@ from pyop3.axes import (
 from pyop3.axes.tree import AxisVariable, FrozenAxisTree, MultiArrayCollector
 from pyop3.distarray.base import DistributedArray
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
+from pyop3.extras.debug import print_with_rank
 from pyop3.indices import IndexedAxisTree, IndexTree, as_index_forest, index_axes
 from pyop3.indices.tree import collect_loop_indices
 from pyop3.utils import (
@@ -342,7 +343,8 @@ class MultiArray(DistributedArray, ContextFree):
         sf.reduceBegin(*args)
         sf.reduceEnd(*args)
 
-    def broadcast_roots_to_leaves(self, sf):
+    def broadcast_roots_to_leaves(self):
+        sf = self.axes.sf
         mpi_dtype, _ = get_mpi_dtype(self.data.dtype)
         mpi_op = MPI.REPLACE
         args = (mpi_dtype, self.data, self.data, mpi_op)

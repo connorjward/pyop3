@@ -24,7 +24,7 @@ from pyrsistent import freeze, pmap
 
 from pyop3 import utils
 from pyop3.dtypes import IntType, PointerType, get_mpi_dtype
-from pyop3.extras.debug import deprecated
+from pyop3.extras.debug import deprecated, print_with_rank
 from pyop3.tree import (
     ComponentLabel,
     LabelledNode,
@@ -618,14 +618,17 @@ class Axis(StrictLabelledNode, LoopIterable):
     @classmethod
     def from_serial(cls, serial: Axis, sf):
         # FIXME
-        from pyop3.axes.parallel import partition_ghost_points
+        from pyop3.axes.parallel import partition_ghost_points, renumber_sf
 
         if serial.sf is not None:
             raise RuntimeError("serial axis is not serial")
 
         # renumber the serial axis to store ghost entries at the end of the vector
         numbering = partition_ghost_points(serial, sf)
-        return cls(serial.components, serial.label, numbering=numbering, sf=sf)
+
+        # but the sf now points to the wrong things!
+        new_sf = renumber_sf(sf, numbering)
+        return cls(serial.components, serial.label, numbering=numbering, sf=new_sf)
 
     @property
     def size(self):
@@ -793,6 +796,9 @@ class AxisTreeMixin(abc.ABC):
         if allow_unused:
             path = _trim_path(self, path)
 
+        # print_with_rank(path)
+        # print_with_rank(indices)
+
         offset = pym.evaluate(self.layouts[path], (path, indices), ExpressionEvaluator)
         return strict_int(offset)
 
@@ -803,22 +809,14 @@ class AxisTreeMixin(abc.ABC):
 # TODO Inherit from MutableLabelledTree or similar
 # class AxisTree(StrictLabelledTree, AxisTreeMixin, ContextFreeLoopIterable):
 class AxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable):
-    fields = StrictLabelledTree.fields | {"sf", "shared_sf", "comm"}
+    # fields = StrictLabelledTree.fields | {"sf", "shared_sf", "comm"}
 
     def __init__(
         self,
         root: Optional[MultiAxis] = None,
         parent_to_children: Optional[Dict] = None,
-        *,
-        sf=None,
-        shared_sf=None,
-        comm=None,
     ):
         super().__init__(root, parent_to_children)
-
-        self.sf = sf
-        self.shared_sf = shared_sf
-        self.comm = comm  # FIXME DTRT with internal comms
 
         self._layout_exprs = FrozenAxisTree._default_index_exprs(self)
 
@@ -999,6 +997,7 @@ class FrozenAxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable)
         target_paths=None,
         index_exprs=None,
         layouts=None,
+        sf=None,
     ):
         super().__init__(root, parent_to_children)
         self._target_paths = target_paths or self._default_target_paths()
@@ -1006,6 +1005,8 @@ class FrozenAxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable)
         # dont think I need this?
         self.layout_exprs = self._default_index_exprs()
         self.layouts = layouts or self._default_layouts()
+        # factory method?
+        self.sf = sf or self._sf()
 
     def __getitem__(self, indices) -> Union[IndexedAxisTree, ContextSensitiveAxisTree]:
         from pyop3.indices.tree import (
@@ -1073,6 +1074,31 @@ class FrozenAxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable)
 
     def freeze(self) -> FrozenAxisTree:
         return self
+
+    def _sf(self):
+        from pyop3.axes.parallel import collect_sf_graphs
+
+        graphs = collect_sf_graphs(self)
+        print_with_rank(graphs)
+        if len(graphs) == 0:
+            return None
+        else:
+            # merge the graphs
+            nroots = 0
+            ilocals = []
+            iremotes = []
+            for graph in graphs:
+                nr, ilocal, iremote = graph
+                nroots += nr
+                ilocals.append(ilocal)
+                iremotes.append(iremote)
+            ilocal = np.concatenate(ilocals)
+            iremote = np.concatenate(iremotes)
+            # fixme, get the right comm (and ensure consistency)
+            # sf = PETSc.SF().create(self.comm)
+            sf = PETSc.SF().create(PETSc.Sys.getDefaultComm())
+            sf.setGraph(nroots, ilocal, iremote)
+            return sf
 
     def _default_target_paths(self):
         if self.is_empty:
@@ -1504,9 +1530,9 @@ def _compute_layouts(
 
             # now populate fulltree
             offset = IntRef(0)
-            _tabulate_count_array_tree(axes, axis, fulltree, offset)
+            _tabulate_count_array_tree(axes, axis, fulltree, offset, setting_halo=False)
 
-            # apply ghost offset stuff
+            # apply ghost offset stuff, the offset from the previous pass is used
             _tabulate_count_array_tree(axes, axis, fulltree, offset, setting_halo=True)
 
             for subpath, offset_data in fulltree.items():
@@ -1587,7 +1613,7 @@ def _tabulate_count_array_tree(
     count_arrays,
     offset,
     path=pmap(),
-    indices=pyrsistent.pmap(),
+    indices=pmap(),
     is_owned=True,
     setting_halo=False,
 ):

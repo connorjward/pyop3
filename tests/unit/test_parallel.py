@@ -172,6 +172,9 @@ def test_distributed_subaxes_partition_halo_data(axis):
     layout0 = axes.layouts[path0].array
     layout1 = axes.layouts[path1].array
 
+    # print_with_rank(layout0.data)
+    # print_with_rank(layout0.data)
+
     # check that we have tabulated offsets like:
     # ["owned pt0", "owned pt1", "halo pt0", "halo pt1"]
     assert (
@@ -186,42 +189,37 @@ def test_distributed_subaxes_partition_halo_data(axis):
     )
 
 
-@pytest.mark.skip(reason="TODO")
-# @pytest.mark.parallel(nprocs=2)
-def test_stuff(comm):
-    raise NotImplementedError
-    sf = create_sf(comm)
+@pytest.mark.parallel(nprocs=2)
+def test_nested_parallel_axes_produce_correct_sf(axis):
+    # Check that
+    #
+    #        +--+--+
+    #        |  |  |
+    #        +--+--+
+    #       /       \
+    #   +-----+   +-----+
+    #   |   xx|   |   xx|
+    #   +-----+   +-----+
+    #
+    # builds the right star forest.
+    root = op3.Axis([1, 1])
+    subaxis0 = axis
+    subaxis1 = axis.copy(id=op3.Axis.unique_id())
+    axes = op3.AxisTree(root, {root.id: [subaxis0, subaxis1]}).freeze()
 
-    if comm.rank == 0:
-        axes = op3.AxisTree(
-            DistributedAxis(
-                [
-                    op3.AxisComponent(4, "a"),
-                    op3.AxisComponent(2, "b"),
-                ],
-                permutation=[0, 2, 3, 5, 1, 4],
-                sf=sf,
-            )
-        )
-    else:
-        assert comm.rank == 1
-        axes = op3.AxisTree(
-            DistributedAxis(
-                [
-                    op3.AxisComponent(3, "a"),
-                    op3.AxisComponent(3, "b"),
-                ],
-                permutation=[0, 1, 3, 2, 4, 5],
-                sf=sf,
-            )
-        )
+    rank = axis.sf.comm.rank
+    other_rank = (axis.sf.comm.rank + 1) % 2
 
-    dof_sf = grow_dof_sf(axes.freeze())
+    array = op3.MultiArray(axes, dtype=op3.ScalarType)
+    array.data[...] = axis.sf.comm.rank
+    array.broadcast_roots_to_leaves()
 
-    dof_sf.view()
+    print_with_rank(array.data)
+    array.axes.sf.view()
 
-    raise NotImplementedError
-
-
-if __name__ == "__main__":
-    test_stuff(MPI.COMM_WORLD)
+    _, ilocal, _ = axes.sf.getGraph()
+    nghost = len(ilocal)
+    assert nghost == 4
+    # TODO ultimately will be _with_halos
+    assert np.equal(array.data[:-nghost], rank).all()
+    assert np.equal(array.data[-nghost:], other_rank).all()
