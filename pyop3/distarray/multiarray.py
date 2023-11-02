@@ -59,6 +59,16 @@ class IndexExpressionReplacer(pym.mapper.IdentityMapper):
         indices = tuple(self.rec(index) for index in expr.index_tuple)
         return MultiArrayVariable(expr.array, indices)
 
+    def map_called_map(self, expr):
+        array = expr.function.map_component.array
+        return MultiArrayVariable(
+            array, tuple(self.rec(idx) for idx in expr.parameters)
+        )
+
+    def map_loop_index(self, expr):
+        # print_with_rank(self._replace_map)
+        return self._replace_map.get(expr, expr)
+
 
 class MultiArrayVariable(pym.primitives.Subscript):
     mapper_method = sys.intern("map_multi_array")

@@ -24,7 +24,7 @@ from pyrsistent import freeze, pmap
 
 from pyop3 import utils
 from pyop3.dtypes import IntType, PointerType, get_mpi_dtype
-from pyop3.extras.debug import deprecated, print_with_rank
+from pyop3.extras.debug import deprecated, print_if_rank, print_with_rank
 from pyop3.tree import (
     ComponentLabel,
     LabelledNode,
@@ -165,9 +165,17 @@ class ExpressionEvaluator(pym.mapper.evaluator.EvaluationMapper):
         # for keyval in self.context.items():
         #     context.append(keyval)
         return expr.array.get_value(path, self.context[1])
+        # return expr.array.get_value(path, [self.rec(idx) for idx in expr.indices])
 
     def map_loop_index(self, expr):
-        return self.context[1][expr.name, expr.axis]
+        return self.context[1][expr]
+
+    def map_called_map(self, expr):
+        print_with_rank(expr)
+        print_with_rank(self.context[1])
+        array = expr.function.map_component.array
+        path = array.axes.path(*array.axes.leaf)
+        return array.get_value(path, self.context[1])
 
 
 class IntRef:
@@ -799,8 +807,9 @@ class AxisTreeMixin(abc.ABC):
         if allow_unused:
             path = _trim_path(self, path)
 
-        # print_with_rank(path)
-        # print_with_rank(indices)
+        # print_if_rank(0, repr(self.layouts[path]))
+        # # print_with_rank(path)
+        # print_if_rank(0, indices)
 
         offset = pym.evaluate(self.layouts[path], (path, indices), ExpressionEvaluator)
         return strict_int(offset)

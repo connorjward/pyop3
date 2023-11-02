@@ -8,6 +8,7 @@ import pyop3 as op3
 from pyop3.axes.parallel import grow_dof_sf
 from pyop3.extras.debug import print_with_rank
 from pyop3.indices.tree import IterationType, partition_iterset
+from pyop3.utils import just_one
 
 
 @pytest.fixture
@@ -224,10 +225,6 @@ def test_nested_parallel_axes_produce_correct_sf(axis):
 
 @pytest.mark.parallel(nprocs=2)
 def test_partition_iterset_scalar(axis):
-    # debug
-    # def test_partition_iterset_scalar():
-    # axis = op3.Axis(3)
-
     array = op3.MultiArray(axis, dtype=op3.ScalarType)
 
     p = axis.index()
@@ -240,5 +237,39 @@ def test_partition_iterset_scalar(axis):
 
 @pytest.mark.parallel(nprocs=2)
 def test_partition_iterset_with_map(axis):
-    ...
-    raise NotImplementedError
+    # debug
+    # def test_partition_iterset_with_map():
+    # axis = op3.Axis(6)
+
+    axis_label = axis.label
+    component_label = just_one(axis.components).label
+
+    # connect nearest neighbours (and self at ends)
+    map_data = np.asarray(
+        [[0, 1], [0, 2], [1, 3], [2, 4], [3, 5], [4, 5]], dtype=op3.IntType
+    )
+    map_axes = op3.AxisTree(op3.Axis(6, id="root"), {"root": op3.Axis(2)})
+    map_array = op3.MultiArray(map_axes, data=map_data.flatten())
+    map0 = op3.Map(
+        {
+            freeze({axis_label: component_label}): [
+                op3.TabulatedMapComponent(
+                    axis_label, component_label, map_array, label=component_label
+                )
+            ]
+        },
+        "map0",
+        label=axis_label,
+    )
+
+    array = op3.MultiArray(axis, dtype=op3.ScalarType)
+    p = axis.index()
+    tmp = array[map0(p)]
+    # breakpoint()
+    core, noncore = partition_iterset(p, [tmp])
+
+    print_with_rank(core)
+    print_with_rank(noncore)
+
+    assert np.equal(core, [0, 1, 2]).all()
+    assert np.equal(noncore, [3]).all()
