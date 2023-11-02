@@ -155,7 +155,7 @@ class ContextSensitiveLoopIterable(LoopIterable, ContextSensitive, abc.ABC):
 
 class ExpressionEvaluator(pym.mapper.evaluator.EvaluationMapper):
     def map_axis_variable(self, expr):
-        return self.context[1][expr.axis_label]
+        return self.context[expr.axis_label]
 
     def map_multi_array(self, expr):
         # path = _trim_path(array.axes, self.context[0])
@@ -164,13 +164,16 @@ class ExpressionEvaluator(pym.mapper.evaluator.EvaluationMapper):
         # context = []
         # for keyval in self.context.items():
         #     context.append(keyval)
-        return expr.array.get_value(path, self.context[1])
-        # return expr.array.get_value(path, [self.rec(idx) for idx in expr.indices])
+        # return expr.array.get_value(path, self.context[1])
+        replace_map = {axis: self.rec(idx) for axis, idx in expr.indices.items()}
+        return expr.array.get_value(path, replace_map)
 
     def map_loop_index(self, expr):
+        raise NotImplementedError
         return self.context[1][expr]
 
     def map_called_map(self, expr):
+        raise NotImplementedError
         print_with_rank(expr)
         print_with_rank(self.context[1])
         array = expr.function.map_component.array
@@ -684,6 +687,11 @@ class Axis(StrictLabelledNode, LoopIterable):
 
 
 class MultiArrayCollector(pym.mapper.Collector):
+    def map_called_map(self, expr):
+        return self.rec(expr.function) | set.union(
+            *(self.rec(idx) for idx in expr.parameters.values())
+        )
+
     def map_map_variable(self, expr):
         return {expr.map_component.array}
 
@@ -811,7 +819,7 @@ class AxisTreeMixin(abc.ABC):
         # # print_with_rank(path)
         # print_if_rank(0, indices)
 
-        offset = pym.evaluate(self.layouts[path], (path, indices), ExpressionEvaluator)
+        offset = pym.evaluate(self.layouts[path], indices, ExpressionEvaluator)
         return strict_int(offset)
 
     # old alias

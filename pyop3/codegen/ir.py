@@ -911,14 +911,11 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
     # this is cleaner if I do it as a single line expression
     # rather than register assignments for things.
     def map_multi_array(self, expr):
-        path = expr.array.axes.path(*expr.array.axes.leaf, ordered=True)
-        replace_map = {
-            axis: self.rec(index)
-            for (axis, _), index in checked_zip(path, expr.index_tuple)
-        }
+        path = expr.array.axes.path(*expr.array.axes.leaf)
+        replace_map = {axis: self.rec(index) for axis, index in expr.indices.items()}
         varname = _scalar_assignment(
             expr.array,
-            pmap(path),
+            path,
             replace_map,
             self._codegen_context,
         )
@@ -928,7 +925,8 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         if not isinstance(expr.function.map_component.array, MultiArray):
             raise NotImplementedError("Affine map stuff not supported yet")
 
-        inner_expr = [self.rec(param) for param in expr.parameters]
+        # TODO I think I can clean the indexing up a lot here
+        inner_expr = {axis: self.rec(idx) for axis, idx in expr.parameters.items()}
         map_array = expr.function.map_component.array
 
         # handle [map0(p)][map1(p)] where map0 does not have an associated loop
@@ -945,11 +943,19 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         # j0 is now fixed but j1 can still be changed
         rootaxis = map_array.axes.root
         inner_axis, inner_cpt = map_array.axes.leaf
+
+        # the inner_expr tells us the right mapping for the temporary, however,
+        # for maps that are arrays the innermost axis label does not always match
+        # the label used by the temporary. Therefore we need to do a swap here.
+        # I don't like this.
+        replace_map = inner_expr.copy()
+        replace_map[inner_axis.label] = replace_map.pop(expr.function.full_map.name)
+
         jname_expr = _scalar_assignment(
             map_array,
             pmap({rootaxis.label: just_one(rootaxis.components).label})
             | pmap({inner_axis.label: inner_cpt.label}),
-            {rootaxis.label: inner_expr[0], inner_axis.label: inner_expr[1]},
+            replace_map,
             self._codegen_context,
         )
         return jname_expr

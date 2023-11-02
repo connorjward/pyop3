@@ -184,11 +184,21 @@ class MapVariable(pym.primitives.Variable):
         self.map_component = map_component
 
     def __call__(self, *args):
-        return CalledMapVariable(self, args)
+        return CalledMapVariable(self, *args)
+
+    @functools.cached_property
+    def datamap(self):
+        return self.map_component.datamap
 
 
 class CalledMapVariable(pym.primitives.Call):
     mapper_method = sys.intern("map_called_map")
+
+    @functools.cached_property
+    def datamap(self):
+        return self.function.datamap | merge_dicts(
+            idx.datamap for idx in self.parameters.values()
+        )
 
 
 class TabulatedMapComponent(MapComponent):
@@ -987,11 +997,8 @@ def _make_leaf_axis_from_called_map(called_map, prior_target_path, prior_index_e
         map_var = MapVariable(called_map, map_cpt)
         axisvar = AxisVariable(called_map.name)
 
-        # maps can only take one input?
-        from_indices = just_one(prior_index_exprs.values())
-
         index_exprs_per_cpt[axis_id, cpt.label] = {
-            map_cpt.target_axis: map_var(from_indices, axisvar)
+            map_cpt.target_axis: map_var(prior_index_exprs | {called_map.name: axisvar})
         }
 
         # don't think that this is possible for maps
@@ -1374,7 +1381,7 @@ def partition_iterset(index: LoopIndex, arrays):
                     # print_if_rank(0, pmap(replace_map) | array_replace_map)
                     myexpr = pym.evaluate(
                         expr,
-                        ("unused", pmap(replace_map) | array_replace_map),
+                        pmap(replace_map) | array_replace_map,
                         ExpressionEvaluator,
                     )
                     assert myexpr != expr

@@ -56,14 +56,13 @@ class IndexExpressionReplacer(pym.mapper.IdentityMapper):
         return self._replace_map.get(expr.axis_label, expr)
 
     def map_multi_array(self, expr):
-        indices = tuple(self.rec(index) for index in expr.index_tuple)
+        indices = {axis: self.rec(index) for axis, index in expr.indices.items()}
         return MultiArrayVariable(expr.array, indices)
 
     def map_called_map(self, expr):
         array = expr.function.map_component.array
-        return MultiArrayVariable(
-            array, tuple(self.rec(idx) for idx in expr.parameters)
-        )
+        indices = {axis: self.rec(idx) for axis, idx in expr.parameters.items()}
+        return MultiArrayVariable(array, indices)
 
     def map_loop_index(self, expr):
         # print_with_rank(self._replace_map)
@@ -74,15 +73,17 @@ class MultiArrayVariable(pym.primitives.Subscript):
     mapper_method = sys.intern("map_multi_array")
 
     def __init__(self, array, indices):
-        super().__init__(pym.var(array.name), indices)
+        super().__init__(pym.var(array.name), "not used, bad parent class choice")
         self.array = array
 
         # alias
-        self.indices = indices
+        self.indices = freeze(indices)
 
     @property
     def datamap(self):
-        return self.array.datamap | merge_dicts(idx.datamap for idx in self.indices)
+        return self.array.datamap | merge_dicts(
+            idx.datamap for idx in self.indices.values()
+        )
 
 
 class MultiArray(DistributedArray, ContextFree):
@@ -282,9 +283,11 @@ class MultiArray(DistributedArray, ContextFree):
 
     def as_var(self):
         # must not be branched...
-        indices = tuple(
-            AxisVariable(axis)
-            for axis, _ in self.axes.path(*self.axes.leaf, ordered=True)
+        indices = freeze(
+            {
+                axis: AxisVariable(axis)
+                for axis, _ in self.axes.path(*self.axes.leaf).items()
+            }
         )
         return MultiArrayVariable(self, indices)
 
