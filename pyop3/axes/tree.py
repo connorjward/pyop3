@@ -166,6 +166,9 @@ class ExpressionEvaluator(pym.mapper.evaluator.EvaluationMapper):
         #     context.append(keyval)
         return expr.array.get_value(path, self.context[1])
 
+    def map_loop_index(self, expr):
+        return self.context[1][expr.name, expr.axis]
+
 
 class IntRef:
     """Pass-by-reference integer."""
@@ -1082,7 +1085,6 @@ class FrozenAxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable)
             return None
 
         graphs = collect_sf_graphs(self)
-        print_with_rank(graphs)
         if len(graphs) == 0:
             return None
         else:

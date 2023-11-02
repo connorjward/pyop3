@@ -3,6 +3,7 @@ from __future__ import annotations
 import abc
 import collections
 import dataclasses
+import enum
 import functools
 import itertools
 import math
@@ -10,6 +11,7 @@ import numbers
 import sys
 from typing import Any, Collection, Hashable, Mapping, Sequence
 
+import numpy as np
 import pymbolic as pym
 import pyrsistent
 import pytools
@@ -32,6 +34,7 @@ from pyop3.axes.tree import (
     _as_int,
 )
 from pyop3.dtypes import IntType
+from pyop3.extras.debug import print_with_rank
 from pyop3.tree import LabelledNode, LabelledTree, postvisit
 from pyop3.utils import (
     LabelledImmutableRecord,
@@ -1266,6 +1269,10 @@ def _compose_bits(
 
 
 def iter_axis_tree(axes: AxisTree, axis=None, path=pmap(), indices=pmap()):
+    if axes.is_empty:
+        yield path, indices
+        return
+
     axis = axis or axes.root
 
     for component in axis.components:
@@ -1277,3 +1284,61 @@ def iter_axis_tree(axes: AxisTree, axis=None, path=pmap(), indices=pmap()):
                 yield from iter_axis_tree(axes, subaxis, path_, indices_)
             else:
                 yield path_, indices_
+
+
+class IterationType(enum.IntEnum):
+    CORE = enum.auto()
+    NONCORE = enum.auto()
+    GHOST = enum.auto()
+
+
+def partition_iterset(index: LoopIndex, arrays):
+    # take first
+    paraxis = [axis for axis in index.iterset.nodes if axis.sf is not None][0]
+
+    # hangs inside the loop, make a property!
+    nghosts = {}
+    for array in arrays:
+        sf = array.orig_array.axes.sf
+        _, ilocal, _ = sf.getGraph()
+        nghosts[array.name] = len(ilocal)
+
+    def is_ghost(array, offset):
+        nghost = nghosts[array.name]
+        size = array.orig_array.axes.size
+        return offset > size - nghost
+
+    npoints = sum(c.count for c in paraxis.components)
+    flags = np.full(npoints, IterationType.CORE, dtype=int)
+
+    # now mark ghost entities
+    nghosts_axis = len(paraxis.sf.getGraph()[1])
+    flags[-nghosts_axis:] = IterationType.GHOST
+
+    # now determine noncore
+    for path, indices in index.iter():
+        parindex = indices[paraxis.label]
+
+        # TODO clean this up
+        indices_ = indices | freeze(
+            {(index.id, axis): i for (axis, i) in indices.items()}
+        )
+
+        for array in arrays:
+            if flags[parindex] in {IterationType.NONCORE, IterationType.GHOST}:
+                continue
+
+            array = array.with_context({index: path})
+            for array_path, array_indices in array.axes.index().iter():
+                # don't like setting allow_unused, better to filter the path/indices somehow
+                offset = array.axes.offset(
+                    path | array_path, indices_ | array_indices, allow_unused=True
+                )
+
+                if is_ghost(array, offset):
+                    flags[parindex] = IterationType.NONCORE
+                    break
+
+    core = just_one(np.nonzero(flags == IterationType.CORE))
+    noncore = just_one(np.nonzero(flags == IterationType.NONCORE))
+    return core, noncore

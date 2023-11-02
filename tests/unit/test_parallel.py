@@ -7,6 +7,7 @@ from pyrsistent import freeze
 import pyop3 as op3
 from pyop3.axes.parallel import grow_dof_sf
 from pyop3.extras.debug import print_with_rank
+from pyop3.indices.tree import IterationType, partition_iterset
 
 
 @pytest.fixture
@@ -172,9 +173,6 @@ def test_distributed_subaxes_partition_halo_data(axis):
     layout0 = axes.layouts[path0].array
     layout1 = axes.layouts[path1].array
 
-    # print_with_rank(layout0.data)
-    # print_with_rank(layout0.data)
-
     # check that we have tabulated offsets like:
     # ["owned pt0", "owned pt1", "halo pt0", "halo pt1"]
     assert (
@@ -214,7 +212,6 @@ def test_nested_parallel_axes_produce_correct_sf(axis):
     array.data[...] = axis.sf.comm.rank
     array.broadcast_roots_to_leaves()
 
-    print_with_rank(array.data)
     array.axes.sf.view()
 
     _, ilocal, _ = axes.sf.getGraph()
@@ -223,3 +220,25 @@ def test_nested_parallel_axes_produce_correct_sf(axis):
     # TODO ultimately will be _with_halos
     assert np.equal(array.data[:-nghost], rank).all()
     assert np.equal(array.data[-nghost:], other_rank).all()
+
+
+@pytest.mark.parallel(nprocs=2)
+def test_partition_iterset_scalar(axis):
+    # debug
+    # def test_partition_iterset_scalar():
+    # axis = op3.Axis(3)
+
+    array = op3.MultiArray(axis, dtype=op3.ScalarType)
+
+    p = axis.index()
+    tmp = array[p]
+    core, noncore = partition_iterset(p, [tmp])
+
+    assert np.equal(core, [0, 1, 2, 3]).all()
+    assert np.equal(noncore, []).all()
+
+
+@pytest.mark.parallel(nprocs=2)
+def test_partition_iterset_with_map(axis):
+    ...
+    raise NotImplementedError
