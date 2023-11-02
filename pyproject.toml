@@ -20,7 +20,7 @@ dev = [
   "black",
   "isort",
 ]
-tests = [
+test = [
   "pytest",
   "pytest-mpi @ git+https://github.com/firedrakeproject/pytest-mpi",
 ]
