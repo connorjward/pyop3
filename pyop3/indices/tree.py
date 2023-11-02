@@ -29,6 +29,7 @@ from pyop3.axes.tree import (
     ContextSensitiveLoopIterable,
     FrozenAxisTree,
     IndexedAxisTree,
+    _as_int,
 )
 from pyop3.dtypes import IntType
 from pyop3.tree import LabelledNode, LabelledTree, postvisit
@@ -341,14 +342,10 @@ class LoopIndexVariable(pym.primitives.Variable):
         return self.index.datamap
 
 
-# TODO just call this LoopIndex (inherit from AbstractLoopIndex)
 class LoopIndex(AbstractLoopIndex):
     fields = AbstractLoopIndex.fields | {"iterset"}
 
     def __init__(self, iterset, **kwargs):
-        # FIXME I think that an IndexTree should not know its component labels
-        # we can do that in the dict. This is because it is context dependent.
-        # for now just use one label (assume single component)
         super().__init__(**kwargs)
         self.iterset = iterset
         self.local_index = LocalLoopIndex(self)
@@ -366,15 +363,13 @@ class LoopIndex(AbstractLoopIndex):
     def datamap(self):
         return self.iterset.datamap
 
-    def mypaths(self, context):
-        iterset = self.iterset.with_context(context)
-        paths = []
-        for leaf in iterset.leaves:
-            paths.append(iterset.path(*leaf))
-        return tuple(paths)
-
     def target_paths(self, context):
         return (context[self],)
+
+    def iter(self):
+        if not isinstance(self.iterset, FrozenAxisTree):
+            raise NotImplementedError
+        return iter_axis_tree(self.iterset)
 
 
 class LocalLoopIndex(AbstractLoopIndex):
@@ -1268,3 +1263,17 @@ def _compose_bits(
         freeze(dict(index_exprs)),
         freeze(dict(layout_exprs)),
     )
+
+
+def iter_axis_tree(axes: AxisTree, axis=None, path=pmap(), indices=pmap()):
+    axis = axis or axes.root
+
+    for component in axis.components:
+        path_ = path | {axis.label: component.label}
+        subaxis = axes.child(axis, component)
+        for pt in range(_as_int(component.count, path, indices)):
+            indices_ = indices | {axis.label: pt}
+            if subaxis:
+                yield from iter_axis_tree(axes, subaxis, path_, indices_)
+            else:
+                yield path_, indices_
