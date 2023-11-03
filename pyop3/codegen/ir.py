@@ -670,7 +670,9 @@ def parse_assignment_petscmat(array, temp, shape, op, loop_indices, codegen_cont
     # for now assume that we pass exactly the right map through, do no composition
     if not isinstance(rexpr, CalledMapVariable) or len(rexpr.parameters) != 2:
         raise NotImplementedError
-    rinner_axis_label = rexpr.parameters[1].axis
+
+    rinner_axis_label = rexpr.function.full_map.name
+
     # substitute a zero for the inner axis, we want to avoid this inner loop
     new_rexpr = JnameSubstitutor(
         iname_expr_replace_map | {rinner_axis_label: 0}, codegen_context
@@ -678,7 +680,7 @@ def parse_assignment_petscmat(array, temp, shape, op, loop_indices, codegen_cont
 
     if not isinstance(cexpr, CalledMapVariable) or len(cexpr.parameters) != 2:
         raise NotImplementedError
-    cinner_axis_label = cexpr.parameters[1].axis
+    cinner_axis_label = cexpr.function.full_map.name
     # substitute a zero for the inner axis, we want to avoid this inner loop
     new_cexpr = JnameSubstitutor(
         iname_expr_replace_map | {cinner_axis_label: 0}, codegen_context
