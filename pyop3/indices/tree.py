@@ -1142,9 +1142,12 @@ def _compose_bits(
 
     if indexed_axes.is_empty:
         return (
-            pmap(),
-            pmap(),
-            pmap(),
+            # pmap(),
+            # pmap(),
+            # pmap(),
+            freeze({None: itarget_paths.get(None, pmap())}),
+            freeze({None: iindex_exprs.get(None, pmap())}),
+            freeze({None: ilayout_exprs.get(None, pmap())}),
         )
 
     if iaxis is None:
@@ -1383,10 +1386,11 @@ def partition_iterset(index: LoopIndex, arrays):
                 # ) in array.axes.index().iter(indices):
             ) in array.axes.index().iter(replace_map):
                 allexprs = dict(array.axes.index_exprs.get(None, {}))
-                for myaxis, mycpt in array.axes.path_with_nodes(
-                    *array.axes._node_from_path(array_path)
-                ).items():
-                    allexprs.update(array.axes.index_exprs[myaxis.id, mycpt])
+                if not array.axes.is_empty:
+                    for myaxis, mycpt in array.axes.path_with_nodes(
+                        *array.axes._node_from_path(array_path)
+                    ).items():
+                        allexprs.update(array.axes.index_exprs[myaxis.id, mycpt])
 
                 the_expr_i_want = allexprs[paraxis.label]
 
@@ -1396,25 +1400,10 @@ def partition_iterset(index: LoopIndex, arrays):
                     ExpressionEvaluator,
                 )
                 assert isinstance(pt_index, numbers.Integral)
-                # offset = array.axes.offset(
-                #     array_path,
-                #     # newmap,
-                #     # indices_,
-                #     replace_map | array_indices,
-                # )
-                # print_if_rank(0, offset)
-                #
-                # print_if_rank(0, array_indices)
-                # print_if_rank(0, replace_map | array_replace_map)
-                print_if_rank(0, pt_index)
-                # print_with_rank(repr(parindex))
 
-                # if is_ghost(array, offset):
                 if flags[pt_index] == IterationType.GHOST:
                     flags[parindex] = IterationType.NONCORE
                     break
-                else:
-                    print_if_rank(0, pt_index, " is not ghost")
 
     core = just_one(np.nonzero(flags == IterationType.CORE))
     noncore = just_one(np.nonzero(flags == IterationType.NONCORE))
