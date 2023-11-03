@@ -28,9 +28,9 @@ from pyop3.axes import (
 from pyop3.axes.tree import AxisVariable, FrozenAxisTree, MultiArrayCollector
 from pyop3.distarray.base import DistributedArray
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
-from pyop3.extras.debug import print_with_rank
+from pyop3.extras.debug import print_if_rank, print_with_rank
 from pyop3.indices import IndexedAxisTree, IndexTree, as_index_forest, index_axes
-from pyop3.indices.tree import collect_loop_indices
+from pyop3.indices.tree import CalledMapVariable, collect_loop_indices
 from pyop3.utils import (
     PrettyTuple,
     UniqueNameGenerator,
@@ -53,31 +53,51 @@ class IndexExpressionReplacer(pym.mapper.IdentityMapper):
         self._replace_map = replace_map
 
     def map_axis_variable(self, expr):
+        # print_if_rank(0, "replace map ", self._replace_map)
+        # return self._replace_map[expr.axis_label]
         return self._replace_map.get(expr.axis_label, expr)
 
     def map_multi_array(self, expr):
+        # print_if_rank(0, self._replace_map)
+        # print_if_rank(0, expr.indices)
         indices = {axis: self.rec(index) for axis, index in expr.indices.items()}
         return MultiArrayVariable(expr.array, indices)
 
     def map_called_map(self, expr):
         array = expr.function.map_component.array
+
+        # should the following only exist at eval time?
+
+        # the inner_expr tells us the right mapping for the temporary, however,
+        # for maps that are arrays the innermost axis label does not always match
+        # the label used by the temporary. Therefore we need to do a swap here.
+        # I don't like this.
+        # inner_axis = array.axes.leaf_axis
+        # print_if_rank(0, self._replace_map)
+        # print_if_rank(0, expr.parameters)
         indices = {axis: self.rec(idx) for axis, idx in expr.parameters.items()}
-        return MultiArrayVariable(array, indices)
+        # indices[inner_axis.label] = indices.pop(expr.function.full_map.name)
+
+        return CalledMapVariable(expr.function, indices)
 
     def map_loop_index(self, expr):
-        # print_with_rank(self._replace_map)
-        return self._replace_map.get(expr, expr)
+        # this is hacky, if I make this raise a KeyError then we fail in indexing
+        return self._replace_map.get((expr.name, expr.axis), expr)
 
 
-class MultiArrayVariable(pym.primitives.Subscript):
+class MultiArrayVariable(pym.primitives.Variable):
     mapper_method = sys.intern("map_multi_array")
 
     def __init__(self, array, indices):
-        super().__init__(pym.var(array.name), "not used, bad parent class choice")
+        super().__init__(array.name)
         self.array = array
-
-        # alias
         self.indices = freeze(indices)
+
+    def __repr__(self) -> str:
+        return f"MultiArrayVariable({self.array!r}, {self.indices!r})"
+
+    def __getinitargs__(self):
+        return self.array, self.indices
 
     @property
     def datamap(self):
@@ -855,11 +875,13 @@ def substitute_layouts(orig_axes, new_axes, target_paths, index_exprs):
         new_layouts = {}
         for leaf_axis, leaf_cpt in new_axes.leaves:
             orig_path = dict(target_paths.get(None, {}))
+            replace_map = dict(index_exprs.get(None, {}))
             for myaxis, mycpt in new_axes.path_with_nodes(leaf_axis, leaf_cpt).items():
                 orig_path.update(target_paths.get((myaxis.id, mycpt), {}))
+                replace_map.update(index_exprs.get((myaxis.id, mycpt), {}))
 
             orig_layout = orig_axes.layouts[freeze(orig_path)]
-            new_layout = IndexExpressionReplacer(index_exprs.get(None, {}))(orig_layout)
+            new_layout = IndexExpressionReplacer(replace_map)(orig_layout)
             new_layouts[new_axes.path(leaf_axis, leaf_cpt)] = new_layout
             # TODO, this sometimes fails, is that valid?
             # don't silently do nothing

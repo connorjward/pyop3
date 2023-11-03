@@ -380,10 +380,10 @@ class LoopIndex(AbstractLoopIndex):
     def target_paths(self, context):
         return (context[self],)
 
-    def iter(self):
+    def iter(self, stuff=pmap()):
         if not isinstance(self.iterset, FrozenAxisTree):
             raise NotImplementedError
-        return iter_axis_tree(self.iterset)
+        return iter_axis_tree(self.iterset, stuff)
 
 
 class LocalLoopIndex(AbstractLoopIndex):
@@ -1149,6 +1149,8 @@ def _compose_bits(
 
     if iaxis is None:
         target_path |= itarget_paths.get(None, {})
+        partial_index_exprs |= iindex_exprs.get(None, {})
+        # partial_layout_exprs |= ilayout_exprs.get(None, {})
         visited_target_axes = visited_target_axes.union(target_path.keys())
         iaxis = indexed_axes.root
 
@@ -1203,6 +1205,7 @@ def _compose_bits(
                 # but drop some bits if indexed out... and final map is per component of the new axtree
                 orig_index_exprs = axes.index_exprs[target_axis.id, target_cpt.label]
                 for axis_label, index_expr in orig_index_exprs.items():
+                    # new_index_expr = IndexExpressionReplacer(new_partial_index_exprs)(
                     new_index_expr = IndexExpressionReplacer(new_partial_index_exprs)(
                         index_expr
                     )
@@ -1213,7 +1216,7 @@ def _compose_bits(
                     new_index_exprs_acc = new_index_exprs_acc | {
                         axis_label: new_index_expr
                     }
-            new_partial_index_exprs = pmap()
+            # new_partial_index_exprs = pmap()
 
             # now do the layout expressions, this is simpler since target path magic isnt needed
             # compose layout expressions, this does an *outside* substitution
@@ -1239,7 +1242,7 @@ def _compose_bits(
                 )
                 layout_exprs[ikey][iaxis.label] = new_layout_expr
 
-            new_partial_layout_exprs = pmap()
+            # new_partial_layout_exprs = pmap()
 
         if isubaxis := indexed_axes.child(iaxis, icpt):
             (
@@ -1265,8 +1268,10 @@ def _compose_bits(
             layout_exprs.update(sublayout_exprs)
 
         else:
-            assert not new_partial_index_exprs
-            assert not new_partial_layout_exprs
+            pass
+            # assert not skip  huh?
+            # assert not new_partial_index_exprs
+            # assert not new_partial_layout_exprs
 
     # breakpoint()
     return (
@@ -1277,7 +1282,13 @@ def _compose_bits(
 
 
 def iter_axis_tree(
-    axes: AxisTree, axis=None, path=pmap(), indices=pmap(), index_exprs=pmap()
+    axes: AxisTree,
+    outermap,
+    axis=None,
+    path=pmap(),
+    indices=pmap(),
+    target_path=pmap(),
+    index_exprs=pmap(),
 ):
     from pyop3.distarray.multiarray import IndexExpressionReplacer
 
@@ -1289,21 +1300,33 @@ def iter_axis_tree(
 
     for component in axis.components:
         path_ = path | {axis.label: component.label}
+        target_path_ = target_path | axes.target_paths.get(
+            (axis.id, component.label), {}
+        )
         myindex_exprs = axes.index_exprs[axis.id, component.label]
         subaxis = axes.child(axis, component)
         for pt in range(_as_int(component.count, path, indices)):
-            # new_exprs = {}
-            # for axlabel, index_expr in myindex_exprs.items():
-            #     new_index = IndexExpressionReplacer({axis.label: pt})(index_expr)
-            #     assert new_index != index_expr
-            #     new_exprs[axlabel] = new_index
-            # index_exprs_ = index_exprs | new_exprs
-            index_exprs_ = index_exprs | myindex_exprs
+            new_exprs = {}
+            for axlabel, index_expr in myindex_exprs.items():
+                # need to replace *not* evaluate because the axis tree could be indexed
+                # with a loop index whose value is not yet known (or pass in context info)
+                # new_index = IndexExpressionReplacer({axis.label: pt})(index_expr)
+                new_index = ExpressionEvaluator(outermap | indices | {axis.label: pt})(
+                    index_expr
+                )
+                assert new_index != index_expr
+                new_exprs[axlabel] = new_index
+            index_exprs_ = index_exprs | new_exprs
+            # index_exprs_ = index_exprs | myindex_exprs
             indices_ = indices | {axis.label: pt}
             if subaxis:
-                yield from iter_axis_tree(axes, subaxis, path_, indices_, index_exprs_)
+                yield from iter_axis_tree(
+                    axes, outermap, subaxis, path_, indices_, target_path_, index_exprs_
+                )
             else:
-                yield path_, index_exprs_, indices_
+                # yield path_, index_exprs_, indices_
+                # yield target_path_, index_exprs_
+                yield path_, indices_
 
 
 class IterationType(enum.IntEnum):
@@ -1325,10 +1348,13 @@ def partition_iterset(index: LoopIndex, arrays):
         _, ilocal, _ = sf.getGraph()
         nghosts[array.name] = len(ilocal)
 
-    def is_ghost(array, offset):
-        nghost = nghosts[array.name]
-        size = array.orig_array.axes.size
-        return offset > size - nghost
+    # print_if_rank(0, nghosts)
+
+    # I think I can do this by inspecting the number of the particular axis, much more efficient
+    # def is_ghost(array, offset):
+    #     nghost = nghosts[array.name]
+    #     size = array.orig_array.axes.size
+    #     return offset > size - nghost
 
     npoints = sum(c.count for c in paraxis.components)
     flags = np.full(npoints, IterationType.CORE, dtype=int)
@@ -1338,69 +1364,57 @@ def partition_iterset(index: LoopIndex, arrays):
     flags[-nghosts_axis:] = IterationType.GHOST
 
     # now determine noncore
-    for path, indices, mymap in index.iter():
-        parindex = mymap[paraxis.label]
+    for path, indices in index.iter():
+        parindex = indices[paraxis.label]
+        # not sure this is always the case...
+        assert isinstance(parindex, numbers.Integral)
 
-        replace_map = {LoopIndexVariable(index, axis): i for axis, i in indices.items()}
+        replace_map = freeze({(index.id, axis): i for axis, i in indices.items()})
 
         for array in arrays:
             if flags[parindex] in {IterationType.NONCORE, IterationType.GHOST}:
                 continue
 
+            # loop over stencil
             array = array.with_context({index: path})
             for (
                 array_path,
                 array_indices,
-                array_replace_map,
-            ) in array.axes.index().iter():
-                # indices_ = {}
-                # for axlabel, myexpr in array_indices.items():
-                #     if isinstance(myexpr, LoopIndexVariable):
-                #         indices_[axlabel] = {AxisVariable(myexpr.axis): replace_map[myexpr]}
-                #     else:
-                #         indices_[axlabel] = myexpr
-                #     new = IndexExpressionReplacer(replace_map)(myexpr)
-                # assert new != myexpr
-                # indices_[axlabel] = new
+                # ) in array.axes.index().iter(indices):
+            ) in array.axes.index().iter(replace_map):
+                allexprs = dict(array.axes.index_exprs.get(None, {}))
+                for myaxis, mycpt in array.axes.path_with_nodes(
+                    *array.axes._node_from_path(array_path)
+                ).items():
+                    allexprs.update(array.axes.index_exprs[myaxis.id, mycpt])
 
-                # exit()
+                the_expr_i_want = allexprs[paraxis.label]
 
-                # newindices = {}
-                # for axlabel, myexpr in array_indices.items():
-                #     print_with_rank(repr(myexpr))
-                #     evald = pym.evaluate(myexpr, ("unused", replace_map), ExpressionEvaluator)
-                #     newindices[axlabel] = evald
-
-                # print_with_rank(array_indices)
-                # print_with_rank(array_replace_map)
-                # print_with_rank(indices_)
-                # exit()
-                newmap = {}
-                for axlabel, expr in array_indices.items():
-                    # print_if_rank(0, expr)
-                    # print_if_rank(0, pmap(replace_map) | array_replace_map)
-                    myexpr = pym.evaluate(
-                        expr,
-                        pmap(replace_map) | array_replace_map,
-                        ExpressionEvaluator,
-                    )
-                    assert myexpr != expr
-                    newmap[axlabel] = myexpr
-
-                # print_if_rank(0, newmap)
-                offset = array.axes.offset(
-                    array_path,
-                    newmap,
+                pt_index = pym.evaluate(
+                    the_expr_i_want,
+                    replace_map | array_indices,
+                    ExpressionEvaluator,
                 )
+                assert isinstance(pt_index, numbers.Integral)
+                # offset = array.axes.offset(
+                #     array_path,
+                #     # newmap,
+                #     # indices_,
+                #     replace_map | array_indices,
+                # )
+                # print_if_rank(0, offset)
                 #
                 # print_if_rank(0, array_indices)
                 # print_if_rank(0, replace_map | array_replace_map)
-                # print_if_rank(0, repr(parindex))
+                print_if_rank(0, pt_index)
                 # print_with_rank(repr(parindex))
 
-                if is_ghost(array, offset):
+                # if is_ghost(array, offset):
+                if flags[pt_index] == IterationType.GHOST:
                     flags[parindex] = IterationType.NONCORE
                     break
+                else:
+                    print_if_rank(0, pt_index, " is not ghost")
 
     core = just_one(np.nonzero(flags == IterationType.CORE))
     noncore = just_one(np.nonzero(flags == IterationType.NONCORE))

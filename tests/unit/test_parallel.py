@@ -248,7 +248,7 @@ def test_partition_iterset_with_map(axis):
     map_data = np.asarray(
         [[0, 1], [0, 2], [1, 3], [2, 4], [3, 5], [4, 5]], dtype=op3.IntType
     )
-    map_axes = op3.AxisTree(op3.Axis(6, id="root"), {"root": op3.Axis(2)})
+    map_axes = op3.AxisTree(op3.Axis(6, axis.label, id="root"), {"root": op3.Axis(2)})
     map_array = op3.MultiArray(map_axes, data=map_data.flatten())
     map0 = op3.Map(
         {

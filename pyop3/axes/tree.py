@@ -169,16 +169,27 @@ class ExpressionEvaluator(pym.mapper.evaluator.EvaluationMapper):
         return expr.array.get_value(path, replace_map)
 
     def map_loop_index(self, expr):
-        raise NotImplementedError
-        return self.context[1][expr]
+        return self.context[expr.name, expr.axis]
 
     def map_called_map(self, expr):
-        raise NotImplementedError
-        print_with_rank(expr)
-        print_with_rank(self.context[1])
         array = expr.function.map_component.array
+        indices = {axis: self.rec(idx) for axis, idx in expr.parameters.items()}
+
         path = array.axes.path(*array.axes.leaf)
-        return array.get_value(path, self.context[1])
+
+        # the inner_expr tells us the right mapping for the temporary, however,
+        # for maps that are arrays the innermost axis label does not always match
+        # the label used by the temporary. Therefore we need to do a swap here.
+        # I don't like this.
+        # print_if_rank(0, repr(array.axes))
+        # print_if_rank(0, "before: ",indices)
+        inner_axis = array.axes.leaf_axis
+        indices[inner_axis.label] = indices.pop(expr.function.full_map.name)
+
+        # print_if_rank(0, "after:",indices)
+        # print_if_rank(0, repr(expr))
+        # print_if_rank(0, self.context)
+        return array.get_value(path, indices)
 
 
 class IntRef:
@@ -815,9 +826,10 @@ class AxisTreeMixin(abc.ABC):
         if allow_unused:
             path = _trim_path(self, path)
 
+        # print_if_rank(0, indices)
+        # print_if_rank(0, repr(self.layouts))
         # print_if_rank(0, repr(self.layouts[path]))
         # # print_with_rank(path)
-        # print_if_rank(0, indices)
 
         offset = pym.evaluate(self.layouts[path], indices, ExpressionEvaluator)
         return strict_int(offset)
