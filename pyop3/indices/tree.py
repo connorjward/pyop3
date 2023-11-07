@@ -888,14 +888,14 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
                 pmap({slice_.axis: newvar * subslice.step + subslice.start})
             )
             layout_exprs_per_subslice.append(
-                pmap({slice_.axis: (layout_var - subslice.start) // subslice.step})
+                pmap({slice_.label: (layout_var - subslice.start) // subslice.step})
             )
         else:
             index_exprs_per_subslice.append(
                 pmap({slice_.axis: subslice.array.as_var()})
             )
             layout_exprs_per_subslice.append(
-                pmap({slice_.axis: bsearch(subslice.array.as_var(), layout_var)})
+                pmap({slice_.label: bsearch(subslice.array.as_var(), layout_var)})
             )
 
     axes = FrozenAxisTree(Axis(components, label=axis_label))
