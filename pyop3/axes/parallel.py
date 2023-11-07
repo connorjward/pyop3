@@ -114,7 +114,7 @@ def grow_dof_sf(axes: FrozenAxisTree, axis, path, indices):
     # effectively build the section
     component_counts = tuple(c.count for c in axis.components)
     *component_offsets, npoints = [0] + list(np.cumsum(component_counts))
-    # TODO this is overkill since we only need to compute the owned/halo data
+    # TODO this is overkill since we only need to compute the leaf data
     offsets = np.full(npoints, -1, IntType)
     ndofs = np.copy(offsets)
     for i, component in enumerate(axis.components):
@@ -133,19 +133,8 @@ def grow_dof_sf(axes: FrozenAxisTree, axis, path, indices):
     # TODO use a single buffer
     to_offsets = np.zeros_like(offsets)
 
-    # TODO send offsets and dofs together, makes cdim 2?
-    cdim = 1
-    dtype, _ = get_mpi_dtype(np.dtype(IntType), cdim)
+    dtype, _ = get_mpi_dtype(np.dtype(IntType))
     bcast_args = dtype, offsets, to_offsets, MPI.REPLACE
-    point_sf.bcastBegin(*bcast_args)
-    point_sf.bcastEnd(*bcast_args)
-
-    # now send dofs
-    to_ndofs = np.zeros_like(ndofs)
-
-    cdim = 1
-    dtype, _ = get_mpi_dtype(np.dtype(IntType), cdim)
-    bcast_args = dtype, ndofs, to_ndofs, MPI.REPLACE
     point_sf.bcastBegin(*bcast_args)
     point_sf.bcastEnd(*bcast_args)
 
