@@ -7,7 +7,7 @@ from pyrsistent import pmap
 
 from pyop3.dtypes import IntType, get_mpi_dtype
 from pyop3.extras.debug import print_with_rank
-from pyop3.utils import strict_int
+from pyop3.utils import just_one, strict_int
 
 
 def mysize(axes, axis, component):
@@ -110,25 +110,60 @@ def collect_sf_graphs(axes, axis=None, path=pmap(), indices=pmap()):
         return tuple(graphs)
 
 
+# perhaps I can defer renumbering the SF to here?
 def grow_dof_sf(axes: FrozenAxisTree, axis, path, indices):
-    # effectively build the section
+    point_sf = axis.sf
+    nroots, ilocal, iremote = point_sf.getGraph()
+
     component_counts = tuple(c.count for c in axis.components)
     *component_offsets, npoints = [0] + list(np.cumsum(component_counts))
-    # TODO this is overkill since we only need to compute the leaf data
+
+    # should be a property really, get the root indices so we can compute the offset for them
+    buffer = np.full(npoints, False, dtype=bool)
+    buffer[-len(ilocal) :] = True
+    dtype, _ = get_mpi_dtype(buffer.dtype)
+    bcast_args = dtype, buffer, buffer, MPI.REPLACE
+    point_sf.reduceBegin(*bcast_args)
+    point_sf.reduceEnd(*bcast_args)
+    buffer[-len(ilocal) :] = False
+
+    iroot = just_one(np.nonzero(buffer))
+
+    print_with_rank("iroots: ", iroot)
+
+    # effectively build the section
+    # TODO this is overkill since we only need to broadcast the roots
     offsets = np.full(npoints, -1, IntType)
     ndofs = np.copy(offsets)
-    for i, component in enumerate(axis.components):
-        for j in range(component_counts[i]):
-            offset = axes.offset(
-                path | {axis.label: component.label}, indices | {axis.label: j}
-            )
-            ndof = mysize(axes, axis, component)
+    for pt in iroot:
+        component, component_num = axis.axis_number_to_component(pt)
+        offset = axes.offset(
+            path | {axis.label: component.label}, indices | {axis.label: component_num}
+        )
+        offsets[pt] = offset
 
-            offsets[component_offsets[i] + j] = offset
-            ndofs[component_offsets[i] + j] = ndof
+    for pt in ilocal:
+        component, component_num = axis.axis_number_to_component(pt)
+        ndofs[pt] = mysize(axes, axis, component)
+        offset = axes.offset(
+            path | {axis.label: component.label}, indices | {axis.label: component_num}
+        )
+        offsets[pt] = offset
+    # for i, component in enumerate(axis.components):
+    #     for j in range(component_counts[i]):
+    #         offset = axes.offset(
+    #             path | {axis.label: component.label}, indices | {axis.label: j}
+    #         )
+    #         ndof = mysize(axes, axis, component)
+    #
+    #         offsets[component_offsets[i] + j] = offset
+    #         ndofs[component_offsets[i] + j] = ndof
+    print_with_rank("offsets: ", offsets)
+    print_with_rank("ndofs: ", ndofs)
+    print_with_rank("ilocal: ", ilocal)
+    print_with_rank("iremote: ", iremote)
 
     # now communicate this
-    point_sf = axis.sf
 
     # TODO use a single buffer
     to_offsets = np.zeros_like(offsets)
@@ -138,17 +173,25 @@ def grow_dof_sf(axes: FrozenAxisTree, axis, path, indices):
     point_sf.bcastBegin(*bcast_args)
     point_sf.bcastEnd(*bcast_args)
 
-    # construct a new SF with these offsets
-    nroots, ilocal, iremote = point_sf.getGraph()
+    print_with_rank("to offsets: ", to_offsets)
 
+    # construct a new SF with these offsets
     local_offsets = []
     remote_offsets = []
     for i, (rank, _) in zip(ilocal, iremote):
+        # maybe inverse
+        # j = axis._inverse_numbering[i]
+        # j = axis.numbering[i]
+        # print_with_rank(i, j)
+        j = i
         for d in range(ndofs[i]):
-            local_offsets.append(offsets[i] + d)
-            remote_offsets.append((rank, to_offsets[i] + d))
+            local_offsets.append(offsets[j] + d)
+            remote_offsets.append((rank, to_offsets[j] + d))
 
     local_offsets = np.array(local_offsets, dtype=IntType)
     remote_offsets = np.array(remote_offsets, dtype=IntType)
+
+    print_with_rank("local offsets: ", local_offsets)
+    print_with_rank("remote offsets: ", remote_offsets)
 
     return (nroots, local_offsets, remote_offsets)

@@ -671,9 +671,6 @@ class Axis(StrictLabelledNode, LoopIterable):
     def index(self):
         return as_axis_tree(self).index()
 
-    def enumerate(self):
-        return as_axis_tree(self).enumerate()
-
     @property
     def target_path_per_component(self):
         return as_axis_tree(self).target_path_per_component
@@ -695,6 +692,50 @@ class Axis(StrictLabelledNode, LoopIterable):
     @property
     def index_exprs(self):
         return as_axis_tree(self).index_exprs
+
+    # Note: these functions assume that the numbering follows the plex convention
+    # of numbering each strata contiguously. I think (?) that I effectively also do this.
+    # actually this might well be wrong. we have a renumbering after all - this gives us
+    # the original numbering only
+    def component_number_to_axis_number(self, component, num):
+        component_index = self.components.index(component)
+        canonical = self._component_numbering_offsets[component_index] + num
+        return self._to_renumbered(canonical)
+
+    def axis_number_to_component(self, num):
+        # guess, is this the right map (from new numbering to original)?
+        # I don't think so because we have a funky point SF. can we get rid?
+        # num = self.numbering[num]
+        component_index = self._component_index_from_axis_number(num)
+        component_num = num - self._component_numbering_offsets[component_index]
+        # return self.components[component_index], component_num
+        return self.components[component_index], component_num
+
+    def _component_index_from_axis_number(self, num):
+        offsets = self._component_numbering_offsets
+        for i, (min_, max_) in enumerate(zip(offsets, offsets[1:])):
+            if min_ <= num < max_:
+                return i
+        raise ValueError(f"Axis number {num} not found.")
+
+    @functools.cached_property
+    def _component_numbering_offsets(self):
+        return (0,) + tuple(np.cumsum([c.count for c in self.components], dtype=int))
+
+    # FIXME bad name
+    def _to_renumbered(self, num):
+        """Convert a flat/canonical/unpermuted axis number to its renumbered equivalent."""
+        if self.numbering is None:
+            return num
+        else:
+            return self._inverse_numbering[num]
+
+    @functools.cached_property
+    def _inverse_numbering(self):
+        # put in utils.py
+        from pyop3.axes.parallel import invert
+
+        return invert(self.numbering)
 
 
 class MultiArrayCollector(pym.mapper.Collector):
