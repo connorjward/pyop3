@@ -15,6 +15,7 @@ import numpy as np
 import pymbolic as pym
 import pyrsistent
 import pytools
+from mpi4py import MPI
 from pyrsistent import freeze, pmap
 
 from pyop3.axes import (
@@ -34,7 +35,7 @@ from pyop3.axes.tree import (
     IndexedAxisTree,
     _as_int,
 )
-from pyop3.dtypes import IntType
+from pyop3.dtypes import IntType, get_mpi_dtype
 from pyop3.extras.debug import print_if_rank, print_with_rank
 from pyop3.tree import LabelledNode, LabelledTree, postvisit
 from pyop3.utils import (
@@ -1238,12 +1239,13 @@ def _compose_bits(
             for ikey, layout_expr in new_partial_layout_exprs.items():
                 # always 1:1 for layouts
                 mykey, myvalue = just_one(layout_expr.items())
+                # think this is wrong...
                 mytargetpath = just_one(itarget_paths[ikey].keys())
                 layout_expr_replace_map = {mytargetpath: full_replace_map[mytargetpath]}
                 new_layout_expr = IndexExpressionReplacer(layout_expr_replace_map)(
                     myvalue
                 )
-                layout_exprs[ikey][iaxis.label] = new_layout_expr
+                layout_exprs[ikey][mykey] = new_layout_expr
 
             # new_partial_layout_exprs = pmap()
 
@@ -1333,49 +1335,70 @@ def iter_axis_tree(
 
 
 class IterationType(enum.IntEnum):
-    CORE = enum.auto()
-    NONCORE = enum.auto()
-    GHOST = enum.auto()
+    CORE = 0
+    ROOT = 1
+    LEAF = 2
 
 
 def partition_iterset(index: LoopIndex, arrays):
+    """Split an iteration set into core, root and leaf index sets.
+
+    The distinction between these is as follows:
+
+    * CORE: May be iterated over without any communication at all.
+    * ROOT: Requires a leaf-to-root reduction (i.e. up-to-date SF roots).
+    * LEAF: Requires a root-to-leaf broadcast (i.e. up-to-date SF leaves) and also up-to-date roots.
+
+    The partitioning algorithm basically loops over the iteration set and marks entities
+    in turn. Any entries whose stencils touch an SF leaf are marked LEAF and any that do
+    not touch leaves but do roots are marked ROOT. Any remaining entities do not require
+    the SF and are marked CORE.
+
+    """
     from pyop3.distarray.multiarray import IndexExpressionReplacer
 
     # take first
     paraxis = [axis for axis in index.iterset.nodes if axis.sf is not None][0]
 
-    # hangs inside the loop, make a property!
-    nghosts = {}
+    # at a minimum this should be done per multi-axis instead of per array
+    array_labels = {}
     for array in arrays:
-        sf = array.orig_array.axes.sf
-        _, ilocal, _ = sf.getGraph()
-        nghosts[array.name] = len(ilocal)
+        # take first
+        array_paraxis = [
+            axis for axis in array.orig_array.axes.nodes if axis.sf is not None
+        ][0]
+        anpoints = sum(c.count for c in array_paraxis.components)
+        # mark everything as roots and then reduce to apply to the actual roots
+        labels = np.full(anpoints, IterationType.CORE, dtype=IntType)
+        print_with_rank("labels: ", labels)
+        sf = array_paraxis.sf
+        nroots, ilocal, iremote = sf.getGraph()
+        print_with_rank("bits: ", nroots, ilocal, iremote)
 
-    # print_if_rank(0, nghosts)
+        labels[-len(ilocal) :] = IterationType.ROOT
+        print_with_rank("labels: ", labels)
+        mpi_dtype, _ = get_mpi_dtype(labels.dtype)
+        mpi_op = MPI.REPLACE
+        args = (mpi_dtype, labels.copy(), labels, mpi_op)
+        sf.reduceBegin(*args)
+        sf.reduceEnd(*args)
 
-    # I think I can do this by inspecting the number of the particular axis, much more efficient
-    # def is_ghost(array, offset):
-    #     nghost = nghosts[array.name]
-    #     size = array.orig_array.axes.size
-    #     return offset > size - nghost
+        # now set the leaf labels to the right thing
+        labels[-len(ilocal) :] = IterationType.LEAF
+        print_with_rank("labels: ", labels)
+        array_labels[array.name] = labels
 
     npoints = sum(c.count for c in paraxis.components)
-    flags = np.full(npoints, IterationType.CORE, dtype=int)
+    flags = np.full(npoints, IterationType.CORE, dtype=IntType)
 
-    # now mark ghost entities
-    nghosts_axis = len(paraxis.sf.getGraph()[1])
-    flags[-nghosts_axis:] = IterationType.GHOST
-
-    # now determine noncore
     for path, indices in index.iter():
         parindex = indices[paraxis.label]
-        # not sure this is always the case...
         assert isinstance(parindex, numbers.Integral)
 
         replace_map = freeze({(index.id, axis): i for axis, i in indices.items()})
 
         for array in arrays:
-            if flags[parindex] in {IterationType.NONCORE, IterationType.GHOST}:
+            if flags[parindex] == IterationType.LEAF:
                 continue
 
             # loop over stencil
@@ -1383,7 +1406,6 @@ def partition_iterset(index: LoopIndex, arrays):
             for (
                 array_path,
                 array_indices,
-                # ) in array.axes.index().iter(indices):
             ) in array.axes.index().iter(replace_map):
                 allexprs = dict(array.axes.index_exprs.get(None, {}))
                 if not array.axes.is_empty:
@@ -1401,10 +1423,15 @@ def partition_iterset(index: LoopIndex, arrays):
                 )
                 assert isinstance(pt_index, numbers.Integral)
 
-                if flags[pt_index] == IterationType.GHOST:
-                    flags[parindex] = IterationType.NONCORE
+                if array_labels[array.name][pt_index] == IterationType.LEAF:
+                    flags[parindex] = IterationType.LEAF
+                    # no point doing more analysis
                     break
+                elif array_labels[array.name][pt_index] == IterationType.ROOT:
+                    flags[parindex] = IterationType.ROOT
+    print_with_rank("flags: ", flags)
 
     core = just_one(np.nonzero(flags == IterationType.CORE))
-    noncore = just_one(np.nonzero(flags == IterationType.NONCORE))
-    return core, noncore
+    root = just_one(np.nonzero(flags == IterationType.ROOT))
+    leaf = just_one(np.nonzero(flags == IterationType.LEAF))
+    return core, root, leaf

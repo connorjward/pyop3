@@ -576,7 +576,6 @@ def _(axes: IndexedAxisTree) -> FrozenAxisTree:
     if axes.is_empty:
         raise NotImplementedError
         # return LayoutAxisTree(axes, freeze({pmap(): 0}))
-        breakpoint()
         return LayoutAxisTree(axes, NotImplemented)
 
     # relabel the axis tree, note that the strong statements (i.e. just_one(...), etc)
@@ -624,6 +623,9 @@ def _(axes: IndexedAxisTree) -> FrozenAxisTree:
             new_path.update(axes.target_paths[axis.id, cpt])
             replace_map.update(axes.layout_exprs[axis.id, cpt])
         new_path = freeze(new_path)
+
+        print(axes.layout_exprs.values())
+        print(replace_map)
 
         orig_layout = axes.restore().layouts[orig_path]
         new_layout = IndexExpressionReplacer(replace_map)(orig_layout)

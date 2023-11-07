@@ -40,31 +40,69 @@ def partition_ghost_points(axis, sf):
     return numbering
 
 
+# stolen from stackoverflow
+# https://stackoverflow.com/questions/11649577/how-to-invert-a-permutation-array-in-numpy
+def invert(p):
+    """Return an array s with which np.array_equal(arr[p][s], arr) is True.
+    The array_like argument p must be some permutation of 0, 1, ..., len(p)-1.
+    """
+    p = np.asanyarray(p)  # in case p is a tuple, etc.
+    s = np.empty_like(p)
+    s[p] = np.arange(p.size)
+    return s
+
+
 def renumber_sf(sf, numbering):
-    # TODO use a single buffer
+    """Create a new point SF."""
+    # I think that this might be able to be much simpler, since we guarantee storing
+    # ghost entities at the end
+
     to_numbering = np.zeros_like(numbering)
+    inv = invert(numbering)
+    print_with_rank("numbering: ", numbering)
+    print_with_rank("inv: ", invert(numbering))
+    print_with_rank("graph: ", sf.getGraph())
 
     cdim = 1
     dtype, _ = get_mpi_dtype(np.dtype(IntType), cdim)
-    bcast_args = dtype, numbering, to_numbering, MPI.REPLACE
+    # bcast_args = dtype, numbering, to_numbering, MPI.REPLACE
+    bcast_args = dtype, inv, to_numbering, MPI.REPLACE
     sf.bcastBegin(*bcast_args)
     sf.bcastEnd(*bcast_args)
+
+    print_with_rank("tonumbering: ", to_numbering)
 
     # construct a new SF with these offsets
     nroots, ilocal, iremote = sf.getGraph()
 
     local_offsets = []
     remote_offsets = []
-    i = 0
-    for new_pt, old_pt in enumerate(numbering):
-        if old_pt in ilocal:
-            local_offsets.append(new_pt)
-            # first arg is rank
-            remote_offsets.append((iremote[i, 0], to_numbering[old_pt]))
-            i += 1
+
+    # i = 0
+    for i, (rank, _) in zip(ilocal, iremote):
+        local_offsets.append(inv[i])
+        remote_offsets.append((rank, to_numbering[i]))
+
+    # start = len(numbering) - len(ilocal)
+    # stop = len(numbering)
+    # for j,index in enumerate(range(start, stop)):
+    #     # simple, just at the end
+    #     local_offsets.append(index)
+    #     # first arg is rank
+    #     remote_offsets.append((iremote[j, 0], to_numbering[index]))
+
+    # for new_pt, old_pt in enumerate(numbering):
+    #     if old_pt in ilocal:
+    #         local_offsets.append(new_pt)
+    #         # first arg is rank
+    #         remote_offsets.append((iremote[i, 0], to_numbering[old_pt]))
+    #         i += 1
 
     local_offsets = np.array(local_offsets, dtype=IntType)
     remote_offsets = np.array(remote_offsets, dtype=IntType)
+
+    print_with_rank("local offsets: ", local_offsets)
+    print_with_rank("remote offsets: ", remote_offsets)
 
     new_sf = PETSc.SF().create(sf.comm)
     new_sf.setGraph(nroots, local_offsets, remote_offsets)
@@ -129,7 +167,6 @@ def grow_dof_sf(axes: FrozenAxisTree, axis, path, indices):
     # now send dofs
     to_ndofs = np.zeros_like(ndofs)
 
-    # TODO send offsets and dofs together, makes cdim 2?
     cdim = 1
     dtype, _ = get_mpi_dtype(np.dtype(IntType), cdim)
     bcast_args = dtype, ndofs, to_ndofs, MPI.REPLACE
@@ -139,18 +176,32 @@ def grow_dof_sf(axes: FrozenAxisTree, axis, path, indices):
     # construct a new SF with these offsets
     nroots, ilocal, iremote = point_sf.getGraph()
 
+    print_with_rank("ilocal: ", ilocal)
+    print_with_rank("iremote: ", iremote)
+    print_with_rank("offsets: ", offsets)
+    print_with_rank("to offsets: ", to_offsets)
+
     local_offsets = []
     remote_offsets = []
-    i = 0
-    for pt in range(npoints):
-        if pt in ilocal:
-            for d in range(ndofs[pt]):
-                local_offsets.append(offsets[pt] + d)
-                # first arg is rank
-                remote_offsets.append((iremote[i, 0], to_offsets[pt] + d))
-            i += 1
+    # i = 0
+    # for pt in range(npoints):
+    #     if pt in ilocal:
+    #         for d in range(ndofs[pt]):
+    #             # local_offsets.append(offsets[pt] + d)
+    #             local_offsets.append(offsets[i] + d)
+    #             # first arg is rank
+    #             remote_offsets.append((iremote[i, 0], to_offsets[i] + d))
+    #         i += 1
+
+    for i, (rank, _) in zip(ilocal, iremote):
+        for d in range(ndofs[i]):
+            local_offsets.append(offsets[i] + d)
+            remote_offsets.append((rank, to_offsets[i] + d))
 
     local_offsets = np.array(local_offsets, dtype=IntType)
     remote_offsets = np.array(remote_offsets, dtype=IntType)
+
+    print_with_rank("localoff: ", local_offsets)
+    print_with_rank("remoteoff: ", remote_offsets)
 
     return (nroots, local_offsets, remote_offsets)
