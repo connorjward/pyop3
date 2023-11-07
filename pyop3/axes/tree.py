@@ -826,11 +826,6 @@ class AxisTreeMixin(abc.ABC):
         if allow_unused:
             path = _trim_path(self, path)
 
-        # print_if_rank(0, indices)
-        # print_if_rank(0, repr(self.layouts))
-        # print_if_rank(0, repr(self.layouts[path]))
-        # # print_with_rank(path)
-
         offset = pym.evaluate(self.layouts[path], indices, ExpressionEvaluator)
         return strict_int(offset)
 

@@ -59,9 +59,6 @@ def renumber_sf(sf, numbering):
 
     to_numbering = np.zeros_like(numbering)
     inv = invert(numbering)
-    print_with_rank("numbering: ", numbering)
-    print_with_rank("inv: ", invert(numbering))
-    print_with_rank("graph: ", sf.getGraph())
 
     cdim = 1
     dtype, _ = get_mpi_dtype(np.dtype(IntType), cdim)
@@ -70,39 +67,18 @@ def renumber_sf(sf, numbering):
     sf.bcastBegin(*bcast_args)
     sf.bcastEnd(*bcast_args)
 
-    print_with_rank("tonumbering: ", to_numbering)
-
     # construct a new SF with these offsets
     nroots, ilocal, iremote = sf.getGraph()
 
     local_offsets = []
     remote_offsets = []
 
-    # i = 0
     for i, (rank, _) in zip(ilocal, iremote):
         local_offsets.append(inv[i])
         remote_offsets.append((rank, to_numbering[i]))
 
-    # start = len(numbering) - len(ilocal)
-    # stop = len(numbering)
-    # for j,index in enumerate(range(start, stop)):
-    #     # simple, just at the end
-    #     local_offsets.append(index)
-    #     # first arg is rank
-    #     remote_offsets.append((iremote[j, 0], to_numbering[index]))
-
-    # for new_pt, old_pt in enumerate(numbering):
-    #     if old_pt in ilocal:
-    #         local_offsets.append(new_pt)
-    #         # first arg is rank
-    #         remote_offsets.append((iremote[i, 0], to_numbering[old_pt]))
-    #         i += 1
-
     local_offsets = np.array(local_offsets, dtype=IntType)
     remote_offsets = np.array(remote_offsets, dtype=IntType)
-
-    print_with_rank("local offsets: ", local_offsets)
-    print_with_rank("remote offsets: ", remote_offsets)
 
     new_sf = PETSc.SF().create(sf.comm)
     new_sf.setGraph(nroots, local_offsets, remote_offsets)
@@ -176,23 +152,8 @@ def grow_dof_sf(axes: FrozenAxisTree, axis, path, indices):
     # construct a new SF with these offsets
     nroots, ilocal, iremote = point_sf.getGraph()
 
-    print_with_rank("ilocal: ", ilocal)
-    print_with_rank("iremote: ", iremote)
-    print_with_rank("offsets: ", offsets)
-    print_with_rank("to offsets: ", to_offsets)
-
     local_offsets = []
     remote_offsets = []
-    # i = 0
-    # for pt in range(npoints):
-    #     if pt in ilocal:
-    #         for d in range(ndofs[pt]):
-    #             # local_offsets.append(offsets[pt] + d)
-    #             local_offsets.append(offsets[i] + d)
-    #             # first arg is rank
-    #             remote_offsets.append((iremote[i, 0], to_offsets[i] + d))
-    #         i += 1
-
     for i, (rank, _) in zip(ilocal, iremote):
         for d in range(ndofs[i]):
             local_offsets.append(offsets[i] + d)
@@ -200,8 +161,5 @@ def grow_dof_sf(axes: FrozenAxisTree, axis, path, indices):
 
     local_offsets = np.array(local_offsets, dtype=IntType)
     remote_offsets = np.array(remote_offsets, dtype=IntType)
-
-    print_with_rank("localoff: ", local_offsets)
-    print_with_rank("remoteoff: ", remote_offsets)
 
     return (nroots, local_offsets, remote_offsets)

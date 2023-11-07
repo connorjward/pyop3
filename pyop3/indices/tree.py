@@ -1228,8 +1228,6 @@ def _compose_bits(
             # we start with src -> f(intermediate)
             # and intermediate -> g(final)
 
-            # this sometimes misses bits, something is poorly ordered...
-            # print(axes.layout_exprs)
             full_replace_map = merge_dicts(
                 [
                     axes.layout_exprs[tgt_ax.id, tgt_cpt.label]
@@ -1239,15 +1237,12 @@ def _compose_bits(
             for ikey, layout_expr in new_partial_layout_exprs.items():
                 # always 1:1 for layouts
                 mykey, myvalue = just_one(layout_expr.items())
-                # think this is wrong...
                 mytargetpath = just_one(itarget_paths[ikey].keys())
                 layout_expr_replace_map = {mytargetpath: full_replace_map[mytargetpath]}
                 new_layout_expr = IndexExpressionReplacer(layout_expr_replace_map)(
                     myvalue
                 )
                 layout_exprs[ikey][mykey] = new_layout_expr
-
-            # new_partial_layout_exprs = pmap()
 
         if isubaxis := indexed_axes.child(iaxis, icpt):
             (
@@ -1370,13 +1365,10 @@ def partition_iterset(index: LoopIndex, arrays):
         anpoints = sum(c.count for c in array_paraxis.components)
         # mark everything as roots and then reduce to apply to the actual roots
         labels = np.full(anpoints, IterationType.CORE, dtype=IntType)
-        print_with_rank("labels: ", labels)
         sf = array_paraxis.sf
         nroots, ilocal, iremote = sf.getGraph()
-        print_with_rank("bits: ", nroots, ilocal, iremote)
 
         labels[-len(ilocal) :] = IterationType.ROOT
-        print_with_rank("labels: ", labels)
         mpi_dtype, _ = get_mpi_dtype(labels.dtype)
         mpi_op = MPI.REPLACE
         args = (mpi_dtype, labels.copy(), labels, mpi_op)
@@ -1385,7 +1377,6 @@ def partition_iterset(index: LoopIndex, arrays):
 
         # now set the leaf labels to the right thing
         labels[-len(ilocal) :] = IterationType.LEAF
-        print_with_rank("labels: ", labels)
         array_labels[array.name] = labels
 
     npoints = sum(c.count for c in paraxis.components)
@@ -1429,7 +1420,6 @@ def partition_iterset(index: LoopIndex, arrays):
                     break
                 elif array_labels[array.name][pt_index] == IterationType.ROOT:
                     flags[parindex] = IterationType.ROOT
-    print_with_rank("flags: ", flags)
 
     core = just_one(np.nonzero(flags == IterationType.CORE))
     root = just_one(np.nonzero(flags == IterationType.ROOT))
