@@ -277,22 +277,36 @@ class MultiArray(DistributedArray, ContextFree):
     def data(self):
         import warnings
 
-        warnings.warn("deprecate this")
+        warnings.warn(".data is a deprecated alias for .data_rw", FutureWarning)
         return self.data_rw
 
     @property
     def data_rw(self):
-        return self._data
+        return self._data[: self.axes.owned_size]
 
     @property
     def data_ro(self):
         # TODO
-        return self._data
+        return self.data_rw
 
     @property
     def data_wo(self):
         # TODO
+        return self.data_rw
+
+    @property
+    def data_rw_with_ghosts(self):
         return self._data
+
+    @property
+    def data_ro_with_ghosts(self):
+        # TODO
+        return self.data_rw_with_ghosts
+
+    @property
+    def data_wo_with_ghosts(self):
+        # TODO
+        return self.data_rw_with_ghosts
 
     @functools.cached_property
     def datamap(self) -> dict[str:DistributedArray]:

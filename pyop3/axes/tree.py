@@ -12,6 +12,7 @@ import numbers
 import operator
 import sys
 import threading
+from functools import cached_property
 from typing import Any, FrozenSet, Hashable, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -84,7 +85,7 @@ class ContextSensitive(ContextAware, abc.ABC):
     def __init__(self, context_map: pmap[pmap[LoopIndex, pmap[str, str]], ContextFree]):
         self.context_map = pmap(context_map)
 
-    @functools.cached_property
+    @cached_property
     def keys(self):
         # loop is used just for unpacking
         for context in self.context_map.keys():
@@ -665,6 +666,35 @@ class Axis(StrictLabelledNode, LoopIterable):
             raise RuntimeError("non-int counts present, cannot sum")
         return sum(cpt.find_integer_count() for cpt in self.components)
 
+    # @parallel_only  # TODO
+    @cached_property
+    def owned_count(self):
+        nghost = len(self.sf.getGraph()[1])
+        return self.count - nghost
+
+    @cached_property
+    def count_per_component(self):
+        return tuple(c.count for c in self.components)
+
+    @cached_property
+    # @parallel_only
+    def owned_count_per_component(self):
+        return tuple(
+            full - ghost
+            for full, ghost in checked_zip(
+                self.count_per_component, self.ghost_count_per_component
+            )
+        )
+
+    @cached_property
+    # @parallel_only
+    def ghost_count_per_component(self):
+        counts = np.zeros_like(self.components, dtype=int)
+        _, ilocal, _ = self.sf.getGraph()
+        for leaf_index in ilocal:
+            counts[self._component_index_from_axis_number[leaf_index]] += 1
+        return tuple(counts)
+
     def index(self):
         return as_axis_tree(self).index()
 
@@ -715,7 +745,7 @@ class Axis(StrictLabelledNode, LoopIterable):
                 return i
         raise ValueError(f"Axis number {num} not found.")
 
-    @functools.cached_property
+    @cached_property
     def _component_numbering_offsets(self):
         return (0,) + tuple(np.cumsum([c.count for c in self.components], dtype=int))
 
@@ -727,7 +757,7 @@ class Axis(StrictLabelledNode, LoopIterable):
         else:
             return self._inverse_numbering[num]
 
-    @functools.cached_property
+    @cached_property
     def _inverse_numbering(self):
         # put in utils.py
         from pyop3.axes.parallel import invert
@@ -842,7 +872,7 @@ class AxisTreeMixin(abc.ABC):
         cpt_label = _as_axis_component_label(component)
         return super().child(parent, cpt_label)
 
-    @functools.cached_property
+    @cached_property
     def size(self):
         return axis_tree_size(self)
 
@@ -1109,7 +1139,7 @@ class FrozenAxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable)
     def index_exprs(self):
         return self._index_exprs
 
-    @functools.cached_property
+    @cached_property
     def datamap(self) -> dict[str:DistributedArray]:
         if self.is_empty:
             dmap = {}
@@ -1166,6 +1196,11 @@ class FrozenAxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable)
             sf = PETSc.SF().create(PETSc.Sys.getDefaultComm())
             sf.setGraph(nroots, ilocal, iremote)
             return sf
+
+    @cached_property
+    def owned_size(self):
+        nghost = len(self.sf.getGraph()[1]) if self.sf is not None else 0
+        return self.size - nghost
 
     def _default_target_paths(self):
         if self.is_empty:
@@ -1231,7 +1266,7 @@ class ContextSensitiveAxisTree(ContextSensitiveLoopIterable):
 
         return LoopIndex(self)
 
-    @functools.cached_property
+    @cached_property
     def datamap(self):
         return merge_dicts(axes.datamap for axes in self.context_map.values())
 
