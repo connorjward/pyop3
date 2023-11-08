@@ -1369,16 +1369,11 @@ def partition_iterset(index: LoopIndex, arrays):
         nroots, ilocal, iremote = sf._graph
 
         labels[ilocal] = IterationType.ROOT
-        # is the copy needed?
-        sf.reduce(labels.copy(), labels, MPI.REPLACE)
+        sf.reduce(labels, MPI.REPLACE)
 
         # now set the leaf labels to the right thing
         labels[ilocal] = IterationType.LEAF
 
-        # try permuting things to the new ordering
-        print_if_rank(0, "labels: ", labels)
-        # labels = labels[array_paraxis._inverse_numbering]
-        print_if_rank(0, "numbering", array_paraxis.numbering)
         # do this because we need to think of the indices here as a selector
         # rather than a map. We need to transform to the new numbering, hence we
         # need to apply the map default -> reordered, but the indexing semantics
@@ -1390,8 +1385,6 @@ def partition_iterset(index: LoopIndex, arrays):
         #     j = array_paraxis._inverse_numbering[i]
         #     new_labels[j] = l
         # labels = new_labels
-
-        print_if_rank(0, "labels: ", labels)
 
         array_labels[array.name] = labels
 
@@ -1430,16 +1423,11 @@ def partition_iterset(index: LoopIndex, arrays):
                 )
                 assert isinstance(pt_index, numbers.Integral)
 
-                # fixme, array_paraxis is in another loop, does this work?
-                # convert renumbered back to default
-                # origpt_index = array_paraxis.numbering[pt_index]
-                origpt_index = pt_index
-
-                if array_labels[array.name][origpt_index] == IterationType.LEAF:
+                if array_labels[array.name][pt_index] == IterationType.LEAF:
                     flags[parindex] = IterationType.LEAF
                     # no point doing more analysis
                     break
-                elif array_labels[array.name][origpt_index] == IterationType.ROOT:
+                elif array_labels[array.name][pt_index] == IterationType.ROOT:
                     flags[parindex] = IterationType.ROOT
 
     core = just_one(np.nonzero(flags == IterationType.CORE))
