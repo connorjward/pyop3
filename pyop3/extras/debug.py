@@ -12,7 +12,7 @@ warnings.warn(
 
 def print_with_rank(*args, comm: Optional[Union[PETSc.Comm, MPI.Comm]] = None) -> None:
     comm = comm or PETSc.Sys.getDefaultComm()
-    print(f"[rank {comm.rank}] : ", *args, sep="", flush=True)
+    print(f"[rank {comm.rank}] : ", *args, flush=True)
 
 
 def print_if_rank(

@@ -643,17 +643,14 @@ class Axis(StrictLabelledNode, LoopIterable):
     @classmethod
     def from_serial(cls, serial: Axis, sf):
         # FIXME
-        from pyop3.axes.parallel import partition_ghost_points, renumber_sf
+        from pyop3.axes.parallel import partition_ghost_points
 
         if serial.sf is not None:
             raise RuntimeError("serial axis is not serial")
 
         # renumber the serial axis to store ghost entries at the end of the vector
         numbering = partition_ghost_points(serial, sf)
-
-        # but the sf now points to the wrong things!
-        new_sf = renumber_sf(sf, numbering)
-        return cls(serial.components, serial.label, numbering=numbering, sf=new_sf)
+        return cls(serial.components, serial.label, numbering=numbering, sf=sf)
 
     @property
     def size(self):

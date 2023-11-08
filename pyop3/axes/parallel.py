@@ -52,39 +52,6 @@ def invert(p):
     return s
 
 
-def renumber_sf(sf, numbering):
-    """Create a new point SF."""
-    # I think that this might be able to be much simpler, since we guarantee storing
-    # ghost entities at the end
-
-    to_numbering = np.zeros_like(numbering)
-    inv = invert(numbering)
-
-    cdim = 1
-    dtype, _ = get_mpi_dtype(np.dtype(IntType), cdim)
-    # bcast_args = dtype, numbering, to_numbering, MPI.REPLACE
-    bcast_args = dtype, inv, to_numbering, MPI.REPLACE
-    sf.bcastBegin(*bcast_args)
-    sf.bcastEnd(*bcast_args)
-
-    # construct a new SF with these offsets
-    nroots, ilocal, iremote = sf.getGraph()
-
-    local_offsets = []
-    remote_offsets = []
-
-    for i, (rank, _) in zip(ilocal, iremote):
-        local_offsets.append(inv[i])
-        remote_offsets.append((rank, to_numbering[i]))
-
-    local_offsets = np.array(local_offsets, dtype=IntType)
-    remote_offsets = np.array(remote_offsets, dtype=IntType)
-
-    new_sf = PETSc.SF().create(sf.comm)
-    new_sf.setGraph(nroots, local_offsets, remote_offsets)
-    return new_sf
-
-
 def collect_sf_graphs(axes, axis=None, path=pmap(), indices=pmap()):
     # NOTE: This function does not check for nested SFs (which should error)
     from pyop3.axes.tree import _as_int, _axis_component_size
@@ -116,16 +83,18 @@ def grow_dof_sf(axes: FrozenAxisTree, axis, path, indices):
     nroots, ilocal, iremote = point_sf.getGraph()
 
     component_counts = tuple(c.count for c in axis.components)
-    *component_offsets, npoints = [0] + list(np.cumsum(component_counts))
+    component_offsets = [0] + list(np.cumsum(component_counts))
+    npoints = component_offsets[-1]
 
     # should be a property really, get the root indices so we can compute the offset for them
     buffer = np.full(npoints, False, dtype=bool)
-    buffer[-len(ilocal) :] = True
+    # buffer[-len(ilocal) :] = True
+    buffer[ilocal] = True
     dtype, _ = get_mpi_dtype(buffer.dtype)
     bcast_args = dtype, buffer, buffer, MPI.REPLACE
     point_sf.reduceBegin(*bcast_args)
     point_sf.reduceEnd(*bcast_args)
-    buffer[-len(ilocal) :] = False
+    buffer[ilocal] = False
 
     iroot = just_one(np.nonzero(buffer))
 
@@ -136,28 +105,48 @@ def grow_dof_sf(axes: FrozenAxisTree, axis, path, indices):
     offsets = np.full(npoints, -1, IntType)
     ndofs = np.copy(offsets)
     for pt in iroot:
-        component, component_num = axis.axis_number_to_component(pt)
+        # this isn't right
+        # rpt = axis.numbering[pt]
+        # this works because we are using the default numbering
+        # component, component_num = axis.axis_number_to_component(pt)
+
+        # inverse numbering maps from default -> renumbered
+        renumbered_pt = axis._inverse_numbering[pt]
+        selected_component = None
+        component_num = None
+        for i, (min_, max_) in enumerate(zip(component_offsets, component_offsets[1:])):
+            if min_ <= renumbered_pt < max_:
+                selected_component = axis.components[i]
+                component_num = renumbered_pt - component_offsets[i]
+                break
+        assert selected_component is not None
+        assert component_num is not None
+
         offset = axes.offset(
-            path | {axis.label: component.label}, indices | {axis.label: component_num}
+            path | {axis.label: selected_component.label},
+            indices | {axis.label: component_num},
         )
         offsets[pt] = offset
 
+    print_with_rank("int. offsets: ", offsets)
+
     for pt in ilocal:
-        component, component_num = axis.axis_number_to_component(pt)
+        renumbered_pt = axis._inverse_numbering[pt]
+        component = None
+        component_num = None
+        for i, (min_, max_) in enumerate(zip(component_offsets, component_offsets[1:])):
+            if min_ <= renumbered_pt < max_:
+                component = axis.components[i]
+                component_num = renumbered_pt - component_offsets[i]
+                break
+        assert component is not None
+        assert component_num is not None
         ndofs[pt] = mysize(axes, axis, component)
         offset = axes.offset(
             path | {axis.label: component.label}, indices | {axis.label: component_num}
         )
         offsets[pt] = offset
-    # for i, component in enumerate(axis.components):
-    #     for j in range(component_counts[i]):
-    #         offset = axes.offset(
-    #             path | {axis.label: component.label}, indices | {axis.label: j}
-    #         )
-    #         ndof = mysize(axes, axis, component)
-    #
-    #         offsets[component_offsets[i] + j] = offset
-    #         ndofs[component_offsets[i] + j] = ndof
+
     print_with_rank("offsets: ", offsets)
     print_with_rank("ndofs: ", ndofs)
     print_with_rank("ilocal: ", ilocal)

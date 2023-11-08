@@ -22,11 +22,11 @@ def sf(comm):
 
     The created star forest will be distributed as follows:
 
-                           g  g
-    rank 0: [0, 1, 2, 3, * 4, 5]
-                   |  |  * |  |
-    rank 1:       [0, 1, * 2, 3, 4, 5]
                    g  g
+    rank 0:       [0, 1, * 2, 3, 4, 5]
+                   |  |  * |  |
+    rank 1: [0, 1, 2, 3, * 4, 5]
+                           g  g
 
     "g" denotes ghost points and "*" is the location of the partition.
 
@@ -39,15 +39,15 @@ def sf(comm):
     if comm.size == 1:
         return
 
-    # the sf is created independently of the renumbering I think
+    # the sf is created independently of the renumbering
     if comm.rank == 0:
         nroots = 2
-        ilocal = (4, 5)
+        ilocal = (0, 1)
         iremote = tuple((1, i) for i in (2, 3))
     else:
         assert comm.rank == 1
         nroots = 2
-        ilocal = (0, 1)
+        ilocal = (4, 5)
         iremote = tuple((0, i) for i in (2, 3))
 
     sf = PETSc.SF().create(comm)
@@ -62,10 +62,10 @@ def axis(comm, sf):
         return
 
     if sf.comm.rank == 0:
-        numbering = [0, 4, 1, 2, 5, 3]
+        numbering = [0, 1, 3, 2, 4, 5]
     else:
         assert sf.comm.rank == 1
-        numbering = [0, 1, 3, 2, 4, 5]
+        numbering = [0, 4, 1, 2, 5, 3]
     serial = op3.Axis(6, numbering=numbering)
     return op3.Axis.from_serial(serial, sf)
 
@@ -118,11 +118,11 @@ def maxis(comm, msf):
 @pytest.mark.parallel(nprocs=2)
 def test_halo_data_stored_at_end_of_array(comm, axis):
     if comm.rank == 0:
-        # unchanged as halo data already at the end
-        reordered = [0, 1, 2, 3, 4, 5]
+        reordered = [3, 2, 4, 5, 0, 1]
     else:
         assert comm.rank == 1
-        reordered = [3, 2, 4, 5, 0, 1]
+        # unchanged as halo data already at the end
+        reordered = [0, 1, 2, 3, 4, 5]
     assert np.equal(axis.numbering, reordered).all()
 
 
@@ -233,20 +233,22 @@ def test_partition_iterset_scalar(comm, axis):
     tmp = array[p]
     core, root, leaf = partition_iterset(p, [tmp])
 
+    print_with_rank(core, root, leaf)
+
     if comm.rank == 0:
-        # numbering = [0, 4, 1, 2, 5, 3]
-        assert np.equal(core, [0, 1]).all()
-        assert np.equal(root, [2, 3]).all()
-        assert np.equal(leaf, [4, 5]).all()
-    else:
         # from [0, 1, 3, 2, 4, 5] and knowing that ...
         # this is so confusing
         # basically for this case the numbering is such that the root entities
         # come before the core ones. Ghost will always be the final entries because that
         # is how we do the numbering in the first place.
-        assert comm.rank == 1
         assert np.equal(core, [2, 3]).all()
         assert np.equal(root, [0, 1]).all()
+        assert np.equal(leaf, [4, 5]).all()
+    else:
+        assert comm.rank == 1
+        # numbering = [0, 4, 1, 2, 5, 3]
+        assert np.equal(core, [0, 1]).all()
+        assert np.equal(root, [2, 3]).all()
         assert np.equal(leaf, [4, 5]).all()
 
 
@@ -258,14 +260,14 @@ def test_partition_iterset_with_map(comm, axis):
     # connect nearest neighbours (and self at ends)
     # note that this is with the renumbered axis numbering
     if comm.rank == 0:
-        map_data = np.asarray(
-            [[0, 1], [0, 2], [1, 3], [2, 4], [3, 5], [4, 5]], dtype=op3.IntType
-        )
-    else:
         # slightly different because the "end" point is actually 3 and the start is 4
-        assert comm.rank == 1
         map_data = np.asarray(
             [[5, 1], [0, 2], [1, 3], [2, 3], [4, 5], [4, 0]], dtype=op3.IntType
+        )
+    else:
+        assert comm.rank == 1
+        map_data = np.asarray(
+            [[0, 1], [0, 2], [1, 3], [2, 4], [3, 5], [4, 5]], dtype=op3.IntType
         )
     map_axes = op3.AxisTree(op3.Axis(6, axis.label, id="root"), {"root": op3.Axis(2)})
     map_array = op3.MultiArray(map_axes, data=map_data.flatten())
@@ -287,11 +289,11 @@ def test_partition_iterset_with_map(comm, axis):
     core, root, leaf = partition_iterset(p, [tmp])
 
     if comm.rank == 0:
-        assert np.equal(core, [0]).all()
-        assert np.equal(root, [1, 2]).all()
-        assert np.equal(leaf, [3, 4, 5]).all()
-    else:
-        assert comm.rank == 1
         assert np.equal(core, [3]).all()
         assert np.equal(root, [1, 2]).all()
         assert np.equal(leaf, [0, 4, 5]).all()
+    else:
+        assert comm.rank == 1
+        assert np.equal(core, [0]).all()
+        assert np.equal(root, [1, 2]).all()
+        assert np.equal(leaf, [3, 4, 5]).all()

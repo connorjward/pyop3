@@ -1368,7 +1368,7 @@ def partition_iterset(index: LoopIndex, arrays):
         sf = array_paraxis.sf
         nroots, ilocal, iremote = sf.getGraph()
 
-        labels[-len(ilocal) :] = IterationType.ROOT
+        labels[ilocal] = IterationType.ROOT
         mpi_dtype, _ = get_mpi_dtype(labels.dtype)
         mpi_op = MPI.REPLACE
         args = (mpi_dtype, labels.copy(), labels, mpi_op)
@@ -1376,7 +1376,26 @@ def partition_iterset(index: LoopIndex, arrays):
         sf.reduceEnd(*args)
 
         # now set the leaf labels to the right thing
-        labels[-len(ilocal) :] = IterationType.LEAF
+        labels[ilocal] = IterationType.LEAF
+
+        # try permuting things to the new ordering
+        print_if_rank(0, "labels: ", labels)
+        # labels = labels[array_paraxis._inverse_numbering]
+        print_if_rank(0, "numbering", array_paraxis.numbering)
+        # do this because we need to think of the indices here as a selector
+        # rather than a map. We need to transform to the new numbering, hence we
+        # need to apply the map default -> reordered, but the indexing semantics
+        # are the opposite of this
+        labels = labels[list(array_paraxis.numbering)]
+        # this is equivalent to:
+        # new_labels = np.empty_like(labels)
+        # for i, l in enumerate(labels):
+        #     j = array_paraxis._inverse_numbering[i]
+        #     new_labels[j] = l
+        # labels = new_labels
+
+        print_if_rank(0, "labels: ", labels)
+
         array_labels[array.name] = labels
 
     npoints = sum(c.count for c in paraxis.components)
@@ -1414,11 +1433,16 @@ def partition_iterset(index: LoopIndex, arrays):
                 )
                 assert isinstance(pt_index, numbers.Integral)
 
-                if array_labels[array.name][pt_index] == IterationType.LEAF:
+                # fixme, array_paraxis is in another loop, does this work?
+                # convert renumbered back to default
+                # origpt_index = array_paraxis.numbering[pt_index]
+                origpt_index = pt_index
+
+                if array_labels[array.name][origpt_index] == IterationType.LEAF:
                     flags[parindex] = IterationType.LEAF
                     # no point doing more analysis
                     break
-                elif array_labels[array.name][pt_index] == IterationType.ROOT:
+                elif array_labels[array.name][origpt_index] == IterationType.ROOT:
                     flags[parindex] = IterationType.ROOT
 
     core = just_one(np.nonzero(flags == IterationType.CORE))
