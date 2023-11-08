@@ -72,8 +72,12 @@ def check_invalid_indices(axes, indicess):
             axes.get_offset(indices)
 
 
-def test_1d_affine_layout():
-    axes = AxisTree(Axis([AxisComponent(5, "pt0")], "ax0")).freeze()
+@pytest.mark.parametrize("numbering", [None, (2, 0, 1)])
+def test_1d_affine_layout(numbering):
+    # the numbering should not change the final layout
+    axes = AxisTree(
+        Axis([AxisComponent(5, "pt0")], "ax0", numbering=numbering)
+    ).freeze()
 
     layout0 = axes.layouts[pmap({"ax0": "pt0"})]
 
@@ -143,33 +147,6 @@ def test_1d_multi_component_layout():
             [("pt1", -1)],
             [("pt1", 2)],
             [("pt0", 0), 0],
-        ],
-    )
-
-
-def test_1d_permuted_layout():
-    axes = AxisTree(
-        Axis([AxisComponent(3, "pt0")], "ax0", numbering=[2, 0, 1])
-    ).freeze()
-
-    layout0 = axes.layouts[pmap({"ax0": "pt0"})]
-
-    # FIXME, for single component arrays we do not need to tabulate anything
-    assert as_str(layout0) == "array_0"
-    assert np.allclose(layout0.array.data_ro, [0, 1, 2])
-    check_offsets(
-        axes,
-        [
-            ([0], 0),
-            ([1], 1),
-            ([2], 2),
-        ],
-    )
-    check_invalid_indices(
-        axes,
-        [
-            [-1],
-            [3],
         ],
     )
 

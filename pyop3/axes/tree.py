@@ -1205,27 +1205,7 @@ class FrozenAxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable)
 
         layouts, _, _ = _compute_layouts(self, self.root)
         layoutsnew = _collect_at_leaves(self, layouts)
-        # self.apply_layouts(layouts)
         return pyrsistent.freeze(dict(layoutsnew))
-        # assert is_set_up(self)
-
-        # FIXME reinsert this code
-        # set the .sf and .owned_sf properties of new_axis
-        # if with_sf and is_distributed(self):
-        #     attach_star_forest(self)
-        #     attach_star_forest(self, with_halo_points=False)
-        #
-        #     # attach a local to global map
-        #     if len(self.children(self.root)) > 1:
-        #         raise NotImplementedError(
-        #             "Currently only compute lgmaps for a single part, shouldn't "
-        #             "be hard to fix"
-        #         )
-        #     lgmap = create_lgmap(self)
-        #     new_part = just_one(self.children(self.root))
-        #     self.replace_node(new_part.copy(lgmap=lgmap))
-        # self.copy(parts=[new_axis.part.copy(lgmap=lgmap)])
-        # new_axis = attach_owned_star_forest(new_axis)
 
     def _check_labels(self):
         def check(node, prev_labels):
@@ -1576,8 +1556,9 @@ def _compute_layouts(
     # 2. add layouts here
     else:
         # 1. do we need to tabulate anything?
+        interleaved = len(axis.components) > 1 and axis.numbering is not None
         if (
-            axis.numbering is not None
+            interleaved
             or not all(has_constant_step(axes, axis, c) for c in axis.components)
             or has_halo(axes, axis)
             and axis == axes.root
