@@ -286,7 +286,8 @@ class MultiArray(DistributedArray, ContextFree):
 
     @property
     def data_rw(self):
-        self.reduce_leaves_to_roots()
+        if not self._roots_valid:
+            self.reduce_leaves_to_roots()
         return self._data[: self.axes.owned_size]
 
     @property
@@ -388,7 +389,7 @@ class MultiArray(DistributedArray, ContextFree):
 
     @cached_property
     def reduction_ops(self):
-        from pyop3.loopexprs import INC
+        from pyop3.lang import INC
 
         return {
             INC: MPI.SUM,
@@ -405,19 +406,16 @@ class MultiArray(DistributedArray, ContextFree):
         pending_write_op = self._last_write_op
         sf = self.axes.sf
 
-        mpi_dtype, _ = get_mpi_dtype(self.data.dtype)
         mpi_op = self.reduction_ops[pending_write_op]
-        args = (mpi_dtype, self.data, self.data, mpi_op)
-        sf.reduceBegin(*args)
-        sf.reduceEnd(*args)
+        sf.reduce(self._data, mpi_op)
+
+        self._roots_valid = True
+        self._leaves_valid = False
 
     def broadcast_roots_to_leaves(self):
         sf = self.axes.sf
-        mpi_dtype, _ = get_mpi_dtype(self.data.dtype)
         mpi_op = MPI.REPLACE
-        args = (mpi_dtype, self.data, self.data, mpi_op)
-        sf.bcastBegin(*args)
-        sf.bcastEnd(*args)
+        sf.broadcast(self._data, MPI.REPLACE)
 
     def sync_begin(self, need_halo_values=False):
         """Begin synchronizing shared data."""

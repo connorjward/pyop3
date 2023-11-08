@@ -12,15 +12,13 @@ from pyop3.utils import just_one, strict_int
 
 
 def partition_ghost_points(axis, sf):
-    npoints = sum(strict_int(c.count) for c in axis.components)
-    nroots, ilocal, iremote = sf.getGraph()
-
+    npoints = sf.size
     is_owned = np.full(npoints, True, dtype=bool)
-    is_owned[ilocal] = False
+    is_owned[sf.ileaf] = False
 
     numbering = np.empty(npoints, dtype=IntType)
     owned_ptr = 0
-    ghost_ptr = npoints - len(ilocal)
+    ghost_ptr = npoints - sf.nleaves
     for pt in axis.numbering or range(npoints):
         if is_owned[pt]:
             numbering[owned_ptr] = pt
@@ -29,7 +27,7 @@ def partition_ghost_points(axis, sf):
             numbering[ghost_ptr] = pt
             ghost_ptr += 1
 
-    assert owned_ptr == npoints - len(ilocal)
+    assert owned_ptr == npoints - sf.nleaves
     assert ghost_ptr == npoints
     return numbering
 
@@ -74,7 +72,8 @@ def collect_sf_graphs(axes, axis=None, path=pmap(), indices=pmap()):
 # perhaps I can defer renumbering the SF to here?
 def grow_dof_sf(axes: FrozenAxisTree, axis, path, indices):
     point_sf = axis.sf
-    nroots, ilocal, iremote = point_sf.getGraph()
+    # TODO, use convenience methods
+    nroots, ilocal, iremote = point_sf._graph
 
     component_counts = tuple(c.count for c in axis.components)
     component_offsets = [0] + list(np.cumsum(component_counts))
@@ -84,10 +83,7 @@ def grow_dof_sf(axes: FrozenAxisTree, axis, path, indices):
     buffer = np.full(npoints, False, dtype=bool)
     # buffer[-len(ilocal) :] = True
     buffer[ilocal] = True
-    dtype, _ = get_mpi_dtype(buffer.dtype)
-    bcast_args = dtype, buffer, buffer, MPI.REPLACE
-    point_sf.reduceBegin(*bcast_args)
-    point_sf.reduceEnd(*bcast_args)
+    point_sf.reduce(buffer, MPI.REPLACE)
     buffer[ilocal] = False
 
     iroot = just_one(np.nonzero(buffer))
@@ -154,10 +150,7 @@ def grow_dof_sf(axes: FrozenAxisTree, axis, path, indices):
     # TODO use a single buffer
     to_offsets = np.zeros_like(offsets)
 
-    dtype, _ = get_mpi_dtype(np.dtype(IntType))
-    bcast_args = dtype, offsets, to_offsets, MPI.REPLACE
-    point_sf.bcastBegin(*bcast_args)
-    point_sf.bcastEnd(*bcast_args)
+    point_sf.broadcast(offsets, to_offsets, MPI.REPLACE)
 
     print_with_rank("to offsets: ", to_offsets)
 

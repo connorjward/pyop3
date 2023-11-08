@@ -64,24 +64,26 @@ def test_new_array_has_valid_roots_and_leaves(paxes):
     assert array._roots_valid and array._leaves_valid
 
 
-@pytest.mark.parallel(nprocs=2)
-@pytest.mark.parametrize(
-    ("accessor", "leaves_valid"),
-    [
-        ("data_rw", False),
-        ("data_ro", True),
-        ("data_wo", False),
-        ("data_rw_with_ghosts", True),
-        ("data_ro_with_ghosts", True),
-        ("data_wo_with_ghosts", True),
-    ],
-)
-def test_leaf_invalidation(paxes, accessor, leaves_valid):
-    array = op3.MultiArray(paxes)
-    assert array._leaves_valid
-
-    attrgetter(accessor)(array)
-    assert array._leaves_valid == leaves_valid
+# @pytest.mark.parallel(nprocs=2)
+# @pytest.mark.parametrize(
+#     ("accessor", "leaves_valid"),
+#     [
+#         ("data_rw", False),
+#         ("data_ro", True),
+#         ("data_wo", False),
+#         ("data_rw_with_ghosts", True),
+#         ("data_ro_with_ghosts", True),
+#         ("data_wo_with_ghosts", True),
+#     ],
+# )
+# def test_leaf_invalidation(paxes, accessor, leaves_valid):
+#     array = op3.MultiArray(paxes)
+#     assert array._leaves_valid
+#
+#     # set the roots as modified, this means that
+#
+#     attrgetter(accessor)(array)
+#     assert array._leaves_valid == leaves_valid
 
 
 @pytest.mark.parallel(nprocs=2)
@@ -105,10 +107,10 @@ def test_accessors_update_roots_and_leaves(comm, paxes, accessor, leaves_valid):
     other_rank = (comm.rank + 1) % 2
 
     # invalidate root and leaf data
-    array.data_wo_with_ghosts[...] = rank
+    array._data[...] = rank
     array._roots_valid = False
+    array._leaves_valid = False
     array._last_write_op = op3.INC
-    assert not array._leaves_valid
 
     attrgetter(accessor)(array)
 

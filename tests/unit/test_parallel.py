@@ -169,10 +169,8 @@ def test_distributed_subaxes_partition_halo_data(axis):
         }
     )
 
-    _, ilocal, _ = axis.sf.getGraph()
-    npoints = axis.components[0].count
-    nghost = len(ilocal)
-    nowned = npoints - nghost
+    npoints = axis.sf.size
+    nowned = npoints - axis.sf.nleaves
 
     layout0 = axes.layouts[path0].array
     layout1 = axes.layouts[path1].array
@@ -216,10 +214,7 @@ def test_nested_parallel_axes_produce_correct_sf(comm, axis):
     array.data[...] = rank
     array.broadcast_roots_to_leaves()
 
-    array.axes.sf.view()
-
-    _, ilocal, _ = axes.sf.getGraph()
-    nghost = len(ilocal)
+    nghost = axes.sf.nleaves
     assert nghost == 4
     assert np.equal(array.data_ro_with_ghosts[:-nghost], rank).all()
     assert np.equal(array.data_ro_with_ghosts[-nghost:], other_rank).all()

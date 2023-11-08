@@ -1366,14 +1366,11 @@ def partition_iterset(index: LoopIndex, arrays):
         # mark everything as roots and then reduce to apply to the actual roots
         labels = np.full(anpoints, IterationType.CORE, dtype=IntType)
         sf = array_paraxis.sf
-        nroots, ilocal, iremote = sf.getGraph()
+        nroots, ilocal, iremote = sf._graph
 
         labels[ilocal] = IterationType.ROOT
-        mpi_dtype, _ = get_mpi_dtype(labels.dtype)
-        mpi_op = MPI.REPLACE
-        args = (mpi_dtype, labels.copy(), labels, mpi_op)
-        sf.reduceBegin(*args)
-        sf.reduceEnd(*args)
+        # is the copy needed?
+        sf.reduce(labels.copy(), labels, MPI.REPLACE)
 
         # now set the leaf labels to the right thing
         labels[ilocal] = IterationType.LEAF

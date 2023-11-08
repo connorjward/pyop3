@@ -26,6 +26,7 @@ from pyrsistent import freeze, pmap
 from pyop3 import utils
 from pyop3.dtypes import IntType, PointerType, get_mpi_dtype
 from pyop3.extras.debug import deprecated, print_if_rank, print_with_rank
+from pyop3.sf import StarForest
 from pyop3.tree import (
     ComponentLabel,
     LabelledNode,
@@ -649,6 +650,9 @@ class Axis(StrictLabelledNode, LoopIterable):
         if serial.sf is not None:
             raise RuntimeError("serial axis is not serial")
 
+        if isinstance(sf, PETSc.SF):
+            sf = StarForest(sf, serial.size)
+
         # renumber the serial axis to store ghost entries at the end of the vector
         numbering = partition_ghost_points(serial, sf)
         return cls(serial.components, serial.label, numbering=numbering, sf=sf)
@@ -662,15 +666,13 @@ class Axis(StrictLabelledNode, LoopIterable):
         """Return the total number of entries in the axis across all axis parts.
         Will fail if axis parts do not have integer counts.
         """
-        if not all(cpt.has_integer_count for cpt in self.components):
-            raise RuntimeError("non-int counts present, cannot sum")
-        return sum(cpt.find_integer_count() for cpt in self.components)
+        # hacky but right (no inner shape)
+        return self.size
 
     # @parallel_only  # TODO
     @cached_property
     def owned_count(self):
-        nghost = len(self.sf.getGraph()[1])
-        return self.count - nghost
+        return self.count - self.sf.nleaves
 
     @cached_property
     def count_per_component(self):
@@ -690,8 +692,7 @@ class Axis(StrictLabelledNode, LoopIterable):
     # @parallel_only
     def ghost_count_per_component(self):
         counts = np.zeros_like(self.components, dtype=int)
-        _, ilocal, _ = self.sf.getGraph()
-        for leaf_index in ilocal:
+        for leaf_index in self.sf.ileaf:
             counts[self._component_index_from_axis_number[leaf_index]] += 1
         return tuple(counts)
 
@@ -1209,14 +1210,11 @@ class FrozenAxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable)
             ilocal = np.concatenate(ilocals)
             iremote = np.concatenate(iremotes)
             # fixme, get the right comm (and ensure consistency)
-            # sf = PETSc.SF().create(self.comm)
-            sf = PETSc.SF().create(PETSc.Sys.getDefaultComm())
-            sf.setGraph(nroots, ilocal, iremote)
-            return sf
+            return StarForest.from_graph(self.size, nroots, ilocal, iremote)
 
     @cached_property
     def owned_size(self):
-        nghost = len(self.sf.getGraph()[1]) if self.sf is not None else 0
+        nghost = self.sf.nleaves if self.sf is not None else 0
         return self.size - nghost
 
     def _default_target_paths(self):
@@ -1741,7 +1739,7 @@ def _tabulate_count_array_tree(
     for new_pt, old_pt in enumerate(axis.numbering or range(npoints)):
         if axis.sf is not None:
             # more efficient outside of loop
-            _, ilocal, _ = axis.sf.getGraph()
+            _, ilocal, _ = axis.sf._graph
             is_owned = new_pt < npoints - len(ilocal)
 
         # equivalent to plex strata
