@@ -883,7 +883,7 @@ class AxisTreeMixin(abc.ABC):
     def find_part(self, label):
         return self._parts_by_label[label]
 
-    def offset(self, *args, allow_unused=False):
+    def offset(self, *args, allow_unused=False, insert_zeros=False):
         nargs = len(args)
         if nargs == 2:
             path, indices = args[0], args[1]
@@ -893,6 +893,23 @@ class AxisTreeMixin(abc.ABC):
 
         if allow_unused:
             path = _trim_path(self, path)
+
+        if insert_zeros:
+            # extend the path by choosing the zero offset option every time
+            # this is needed if we don't have all the internal bits available
+            while path not in self.layouts:
+                axis, clabel = self._node_from_path(path)
+                subaxis = self.child(axis, clabel)
+                # choose the component that is first in the renumbering
+                if subaxis.numbering:
+                    cidx = subaxis._component_index_from_axis_number(
+                        subaxis.numbering[0]
+                    )
+                else:
+                    cidx = 0
+                subcpt = subaxis.components[cidx]
+                path |= {subaxis.label: subcpt.label}
+                indices |= {subaxis.label: 0}
 
         offset = pym.evaluate(self.layouts[path], indices, ExpressionEvaluator)
         return strict_int(offset)

@@ -1,3 +1,4 @@
+# TODO move these tests into something matching an appropriate module
 import numpy as np
 import pytest
 from mpi4py import MPI
@@ -220,7 +221,6 @@ def test_nested_parallel_axes_produce_correct_sf(comm, axis):
     _, ilocal, _ = axes.sf.getGraph()
     nghost = len(ilocal)
     assert nghost == 4
-    # TODO ultimately will be _with_halos
     assert np.equal(array.data_ro_with_ghosts[:-nghost], rank).all()
     assert np.equal(array.data_ro_with_ghosts[-nghost:], other_rank).all()
 

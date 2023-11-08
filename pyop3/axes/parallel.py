@@ -5,16 +5,10 @@ from mpi4py import MPI
 from petsc4py import PETSc
 from pyrsistent import pmap
 
+from pyop3.axes.tree import step_size
 from pyop3.dtypes import IntType, get_mpi_dtype
 from pyop3.extras.debug import print_with_rank
 from pyop3.utils import just_one, strict_int
-
-
-def mysize(axes, axis, component):
-    if subaxis := axes.child(axis, component):
-        return _axis_size(axes, subaxis)
-    else:
-        return 1
 
 
 def partition_ghost_points(axis, sf):
@@ -125,6 +119,7 @@ def grow_dof_sf(axes: FrozenAxisTree, axis, path, indices):
         offset = axes.offset(
             path | {axis.label: selected_component.label},
             indices | {axis.label: component_num},
+            insert_zeros=True,
         )
         offsets[pt] = offset
 
@@ -141,9 +136,11 @@ def grow_dof_sf(axes: FrozenAxisTree, axis, path, indices):
                 break
         assert component is not None
         assert component_num is not None
-        ndofs[pt] = mysize(axes, axis, component)
+        ndofs[pt] = step_size(axes, axis, component)
         offset = axes.offset(
-            path | {axis.label: component.label}, indices | {axis.label: component_num}
+            path | {axis.label: component.label},
+            indices | {axis.label: component_num},
+            insert_zeros=True,
         )
         offsets[pt] = offset
 

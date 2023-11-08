@@ -224,3 +224,10 @@ def map_when(func, when_func, iterable):
             yield func(item)
         else:
             yield item
+
+
+def readonly(array):
+    """Return a readonly view of a numpy array."""
+    view = array.view()
+    view.setflags(write=False)
+    return view

@@ -7,6 +7,7 @@ import numbers
 import operator
 import sys
 import threading
+from functools import cached_property
 from typing import Any, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -37,6 +38,7 @@ from pyop3.utils import (
     as_tuple,
     just_one,
     merge_dicts,
+    readonly,
     single_valued,
     strict_int,
     strictly_all,
@@ -140,6 +142,8 @@ class MultiArray(DistributedArray, ContextFree):
         # if not isinstance(axes, (AxisTree, IndexedAxisTree)):
         #     # must be context-free
         #     raise TypeError()
+        if data is None and dtype is None:
+            dtype = ScalarType
 
         if isinstance(data, np.ndarray):
             if dtype:
@@ -167,9 +171,9 @@ class MultiArray(DistributedArray, ContextFree):
         self.max_value = max_value
         self.sf = sf
 
-        self._pending_write_op = None
-        self._halo_modified = False
-        self._halo_valid = True
+        self._roots_valid = True
+        self._leaves_valid = True
+        self._last_write_op = None
 
         self._sync_thread = None
 
@@ -282,16 +286,17 @@ class MultiArray(DistributedArray, ContextFree):
 
     @property
     def data_rw(self):
+        self.reduce_leaves_to_roots()
         return self._data[: self.axes.owned_size]
 
     @property
     def data_ro(self):
-        # TODO
-        return self.data_rw
+        return readonly(self.data_rw)
 
     @property
     def data_wo(self):
-        # TODO
+        # Even for write-only access we must ensure that roots are updated, otherwise
+        # writing to a subset of values would leave the array in a poorly defined state.
         return self.data_rw
 
     @property
@@ -305,7 +310,13 @@ class MultiArray(DistributedArray, ContextFree):
 
     @property
     def data_wo_with_ghosts(self):
-        # TODO
+        """
+
+        This method sets the leaves as being valid but this is dangerous since
+        the set values must match those on other processors. In practice this
+        should only be used for setting constant values.
+
+        """
         return self.data_rw_with_ghosts
 
     @functools.cached_property
@@ -375,7 +386,7 @@ class MultiArray(DistributedArray, ContextFree):
                 count.append(y)
             return flattened, count
 
-    @property
+    @cached_property
     def reduction_ops(self):
         from pyop3.loopexprs import INC
 
@@ -383,7 +394,17 @@ class MultiArray(DistributedArray, ContextFree):
             INC: MPI.SUM,
         }
 
-    def reduce_leaves_to_roots(self, sf, pending_write_op):
+    # TODO should have begin and end methods
+    def reduce_leaves_to_roots(self):
+        if self._roots_valid:
+            assert self._last_write_op is None
+            return
+        else:
+            assert self._last_write_op is not None
+
+        pending_write_op = self._last_write_op
+        sf = self.axes.sf
+
         mpi_dtype, _ = get_mpi_dtype(self.data.dtype)
         mpi_op = self.reduction_ops[pending_write_op]
         args = (mpi_dtype, self.data, self.data, mpi_op)
