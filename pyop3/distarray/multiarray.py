@@ -281,44 +281,42 @@ class MultiArray(DistributedArray, ContextFree):
     def data(self):
         import warnings
 
-        warnings.warn(".data is a deprecated alias for .data_rw", FutureWarning)
+        warnings.warn(
+            ".data is a deprecated alias for .data_rw and will be removed in future",
+            FutureWarning,
+        )
         return self.data_rw
 
     @property
     def data_rw(self):
         if not self._roots_valid:
             self.reduce_leaves_to_roots()
+
+        # modifying owned values invalidates ghosts
+        self._leaves_valid = False
         return self._data[: self.axes.owned_size]
 
     @property
     def data_ro(self):
-        return readonly(self.data_rw)
+        if not self._roots_valid:
+            self.reduce_leaves_to_roots()
+        return readonly(self._data[: self.axes.owned_size])
 
     @property
     def data_wo(self):
-        # Even for write-only access we must ensure that roots are updated, otherwise
-        # writing to a subset of values would leave the array in a poorly defined state.
-        return self.data_rw
-
-    @property
-    def data_rw_with_ghosts(self):
-        return self._data
-
-    @property
-    def data_ro_with_ghosts(self):
-        # TODO
-        return self.data_rw_with_ghosts
-
-    @property
-    def data_wo_with_ghosts(self):
         """
+        Have to be careful. If not setting all values (i.e. subsets) should call
+        `reduce_leaves_to_roots` first.
 
-        This method sets the leaves as being valid but this is dangerous since
-        the set values must match those on other processors. In practice this
-        should only be used for setting constant values.
-
+        When this is called we set roots_valid, claiming that any (lazy) 'in-flight' writes
+        can be dropped.
         """
-        return self.data_rw_with_ghosts
+        # pending writes can be dropped (care needed if only doing subsets)
+        self._roots_valid = True
+        self._last_write_op = None
+        # modifying owned values invalidates ghosts
+        self._leaves_valid = False
+        return self._data[: self.axes.owned_size]
 
     @functools.cached_property
     def datamap(self) -> dict[str:DistributedArray]:
@@ -411,6 +409,7 @@ class MultiArray(DistributedArray, ContextFree):
 
         self._roots_valid = True
         self._leaves_valid = False
+        self._last_write_op = None
 
     def broadcast_roots_to_leaves(self):
         sf = self.axes.sf

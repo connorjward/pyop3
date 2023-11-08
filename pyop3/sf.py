@@ -1,8 +1,11 @@
 from functools import cached_property
 
+import numpy as np
+from mpi4py import MPI
 from petsc4py import PETSc
 
 from pyop3.dtypes import get_mpi_dtype
+from pyop3.utils import just_one
 
 
 class StarForest:
@@ -22,17 +25,25 @@ class StarForest:
     def iroot(self):
         """Return the indices of roots on the current process."""
         # mark leaves and reduce
-        buffer = np.full(self.size, False, dtype=bool)
-        buffer[ilocal] = True
-        self.reduce(buffer, MPI.REPLACE)
+        mask = np.full(self.size, False, dtype=bool)
+        mask[self.ileaf] = True
+        self.reduce(mask, MPI.REPLACE)
 
         # now clear the leaf indices, the remaining marked indices are roots
-        buffer[ilocal] = False
-        return just_one(np.nonzero(buffer))
+        mask[self.ileaf] = False
+        return just_one(np.nonzero(mask))
 
     @property
     def ileaf(self):
         return self.ilocal
+
+    @cached_property
+    def icore(self):
+        """Return the indices of points that are not roots or leaves."""
+        mask = np.full(self.size, True, dtype=bool)
+        mask[self.iroot] = False
+        mask[self.ileaf] = False
+        return just_one(np.nonzero(mask))
 
     @property
     def nroots(self):
@@ -78,14 +89,16 @@ class StarForest:
     def _graph(self):
         return self.sf.getGraph()
 
-    @staticmethod
-    def _prepare_args(*args):
+    def _prepare_args(self, *args):
         if len(args) == 3:
             from_buffer, to_buffer, op = args
         elif len(args) == 2:
             from_buffer, op = args
             to_buffer = from_buffer
         else:
+            raise ValueError
+
+        if any(len(buf) != self.size for buf in [from_buffer, to_buffer]):
             raise ValueError
 
         # what about cdim?

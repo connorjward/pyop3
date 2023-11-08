@@ -216,8 +216,8 @@ def test_nested_parallel_axes_produce_correct_sf(comm, axis):
 
     nghost = axes.sf.nleaves
     assert nghost == 4
-    assert np.equal(array.data_ro_with_ghosts[:-nghost], rank).all()
-    assert np.equal(array.data_ro_with_ghosts[-nghost:], other_rank).all()
+    assert np.equal(array._data[:-nghost], rank).all()
+    assert np.equal(array._data[-nghost:], other_rank).all()
 
 
 @pytest.mark.parallel(nprocs=2)
