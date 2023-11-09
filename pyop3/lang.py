@@ -6,6 +6,7 @@ import dataclasses
 import enum
 import functools
 import operator
+from functools import cached_property, partial
 from typing import Iterable, Sequence, Tuple
 from weakref import WeakValueDictionary
 
@@ -24,19 +25,24 @@ from pyop3.axes.tree import (
 )
 from pyop3.distarray import DistributedArray, MultiArray, PetscMat
 from pyop3.distarray.multiarray import IndexExpressionReplacer, substitute_layouts
-from pyop3.dtypes import IntType
+from pyop3.dtypes import IntType, dtype_limits
 from pyop3.indices.tree import (
     IndexedAxisTree,
     _compose_bits,
     _index_axes,
     as_index_forest,
+    partition_iterset,
 )
 from pyop3.utils import as_tuple, checked_zip, merge_dicts
 
 
-# TODO I don't think that this belongs in this file, it belongs to the kernel?
-# create a kernel.py file?
+# TODO I don't think that this belongs in this file, it belongs to the function?
+# create a function.py file?
+# class Intent?
 class Access(enum.Enum):
+    # developer note, MIN_RW and MIN_WRITE are distinct (unlike PyOP2) to avoid
+    # passing "requires_zeroed_output_arguments" around, yuck
+
     READ = "read"
     WRITE = "write"
     RW = "rw"
@@ -49,12 +55,16 @@ class Access(enum.Enum):
 
 READ = Access.READ
 WRITE = Access.WRITE
-INC = Access.INC
 RW = Access.RW
+INC = Access.INC
 MIN_RW = Access.MIN_RW
 MIN_WRITE = Access.MIN_WRITE
 MAX_RW = Access.MAX_RW
 MAX_WRITE = Access.MAX_WRITE
+
+
+class IntentMismatchError(Exception):
+    pass
 
 
 class LoopExpr(pytools.ImmutableRecord, abc.ABC):
@@ -111,7 +121,7 @@ class Loop(LoopExpr):
     def indices(self):
         return self.index.indices
 
-    @functools.cached_property
+    @cached_property
     def datamap(self):
         return self.index.datamap | merge_dicts(
             stmt.datamap for stmt in self.statements
@@ -121,15 +131,141 @@ class Loop(LoopExpr):
         return f"for {self.index} ∊ {self.index.point_set}"
 
     def __call__(self, **kwargs):
+        if self.is_parallel:
+            # interleave computation and communication
+            # FIXME self.datamap.values is probably many more arrays than we care about
+            icore, inoncore = partition_iterset(self.index, self.datamap.values)
+
+            finalizers = self.prepare_arrays_begin()
+
+            # core
+            # replace the parallel axis subset with one for the specific indices here
+            core_kwargs = merge_dicts(
+                [kwargs, {"iparallel": icore, "psize": len(icore)}]
+            )
+            self._call(**core_kwargs)
+
+            self.prepare_arrays_end(finalizers)
+
+            # noncore
+            noncore_kwargs = merge_dicts(
+                [kwargs, {"iparallel": inoncore, "psize": len(icore)}]
+            )
+            self._call(**noncore_kwargs)
+
+            # need to set last write op
+            # also may need to eagerly assemble Mats, or be clever?
+        else:
+            self._call(**kwargs)
+
+    def _call(self, **kwargs):
+        """kwargs overwrite arrays stored in datamaps."""
         args = [
-            _as_pointer(self.datamap[arg.name])
+            _as_pointer(kwargs.get(arg.name, self.datamap[arg.name]))
             for arg in self.loopy_code.default_entrypoint.args
         ]
-
-        # TODO parse kwargs
-        # breakpoint()
-
         self.executable(*args)
+
+    @cached_property
+    def is_parallel(self):
+        return len(self._distarray_args) > 0
+
+    def prepare_arrays_begin(self):
+        # NOTE: It is safe to include reductions in the finalizers because
+        # core entities (in the iterset) are defined as being those that do
+        # not overlap with any points in the star forest.
+        finalizers = []
+        for array, intent in self._distarray_args:
+            touches_ghost_points = _has_nontrivial_stencil(array)
+
+            if intent in {READ, RW}:
+                if touches_ghost_points:
+                    if not array._roots_valid:
+                        array.reduce_then_broadcast_begin()
+                        finalizers.append(array.reduce_then_broadcast_end)
+                    else:
+                        array.broadcast_roots_to_leaves_begin()
+                        finalizers.append(array.broadcast_roots_to_leaves_end)
+                    assert array._roots_valid and array._leaves_valid
+                else:
+                    if not array._roots_valid:
+                        array.reduce_leaves_to_roots_begin()
+                        finalizers.append(array.reduce_leaves_to_roots_end)
+                    assert array._roots_valid
+
+            elif intent == WRITE:
+                # Assumes that all points are written to (i.e. not a subset). If
+                # this is not the case then a manual reduction is needed.
+                array._roots_valid = True
+                array._leaves_valid = False
+                array._last_write_op = None
+
+            elif intent in {INC, MIN_WRITE, MIN_RW, MAX_WRITE, MAX_RW}:  # reductions
+                # We don't need to update roots if performing the same reduction
+                # again. For example we can increment into an array as many times
+                # as we want. The reduction only needs to be done when the
+                # data is read.
+                if array._roots_valid or intent == array._last_write_op:
+                    pass
+                else:
+                    # We assume that all points are visited, and therefore that
+                    # WRITE accesses do not need to update roots. If only a subset
+                    # of entities are written to then a manual reduction is required.
+                    # This is the same assumption that we make for data_wo and is
+                    # explained in the documentation.
+                    # TODO Add this to the documentation
+                    if intent in {INC, MIN_RW, MAX_RW}:
+                        assert array._last_write_op is not None
+                        array.reduce_leaves_to_roots_begin()
+                        finalizers.append(array.reduce_leaves_to_roots_end)
+
+                # If ghost points are not modified then no future reduction is required
+                if not touches_ghost_points:
+                    array._roots_valid = True
+                    array._leaves_valid = False
+                    array._last_write_op = None
+                else:
+                    array._roots_valid = False
+                    array._leaves_valid = False
+                    array._last_write_op = intent
+
+                    # set leaves to appropriate nil value
+                    if intent == INC:
+                        array._data[array.axes.sf.ileaf] = 0
+                    elif intent in {MIN_WRITE, MIN_RW}:
+                        array._data[array.axes.sf.ileaf] = dtype_limits(array.dtype).max
+                    elif intent in {MAX_WRITE, MAX_RW}:
+                        array._data[array.axes.sf.ileaf] = dtype_limits(array.dtype).min
+                    else:
+                        raise AssertionError
+
+            else:
+                raise AssertionError
+
+        return tuple(finalizers)
+
+    def prepare_arrays_end(self, finalizers):
+        for f in finalizers:
+            f()
+
+    @cached_property
+    def all_function_arguments(self):
+        func_args = {}
+        for stmt in self.statements:
+            for arg, intent in stmt.all_function_arguments:
+                if arg in func_args:
+                    if func_args[arg] != intent:
+                        # I think that it does not make sense to access arrays with
+                        # different intents in the same kernel but it is always OK
+                        # if the same intent is used
+                        raise IntentMismatchError
+                else:
+                    func_args[arg] = intent
+        # now sort
+        return tuple(
+            (arg, func_args[arg])
+            for arg in sorted(func_args.keys(), key=lambda a: a.name)
+        )
 
     @functools.cached_property
     def loopy_code(self):
@@ -148,6 +284,26 @@ class Loop(LoopExpr):
         from pyop3.codegen.exe import compile_loopy
 
         return compile_loopy(self.loopy_code)
+
+    @cached_property
+    def _distarray_args(self):
+        return tuple(
+            (arg, intent)
+            for arg, intent in self.all_function_arguments
+            if isinstance(arg, MultiArray) and arg.is_distributed
+        )
+
+
+def _has_nontrivial_stencil(array):
+    """
+
+    This is a proxy for 'this array touches halo points'.
+
+    """
+    # FIXME This is WRONG, there are cases (e.g. support(extfacet)) where
+    # the halo might be touched but the size (i.e. map arity) is 1. I need
+    # to look at index_exprs probably.
+    return array.axes.size > 1
 
 
 @dataclasses.dataclass(frozen=True)
@@ -234,10 +390,6 @@ class CalledFunction(LoopExpr):
     def datamap(self) -> dict[str, DistributedArray]:
         return merge_dicts([arg.datamap for arg in self.arguments])
 
-    # @property
-    # def operands(self):
-    #     ...
-
     @property
     def name(self):
         return self.function.name
@@ -246,31 +398,19 @@ class CalledFunction(LoopExpr):
     def argspec(self):
         return self.function.argspec
 
-    # @property
-    # def inputs(self):
-    #     return tuple(
-    #         arg
-    #         for arg, spec in zip(self.arguments, self.argspec)
-    #         if spec.access == READ
-    #     )
-    #
-    # @property
-    # def outputs(self):
-    #     return tuple(
-    #         arg
-    #         for arg, spec in zip(self.arguments, self.argspec)
-    #         if spec.access in {AccessDescriptor.WRITE, AccessDescriptor.INC}
-    #     )
-
-    # @property
-    # def output_specs(self):
-    #     return tuple(
-    #         filter(
-    #             lambda spec: spec.access
-    #             in {AccessDescriptor.WRITE, AccessDescriptor.INC},
-    #             self.argspec,
-    #         )
-    #     )
+    @property
+    def all_function_arguments(self):
+        return tuple(
+            sorted(
+                [
+                    (arg, intent)
+                    for arg, intent in checked_zip(
+                        self.arguments, self.function._access_descrs
+                    )
+                ],
+                key=lambda a: a.name,
+            )
+        )
 
 
 class Offset(LoopExpr, ContextSensitive):
@@ -415,6 +555,17 @@ def do_loop(*args, **kwargs):
 @functools.singledispatch
 def _as_pointer(array: DistributedArray) -> int:
     raise NotImplementedError
+
+
+# bad name now, "as_kernel_arg"?
+@_as_pointer.register
+def _(array: int):
+    return array
+
+
+@_as_pointer.register
+def _(array: np.ndarray):
+    return array.ctypes.data
 
 
 @_as_pointer.register

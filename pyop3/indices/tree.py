@@ -1329,12 +1329,6 @@ def iter_axis_tree(
                 yield path_, indices_
 
 
-class IterationType(enum.IntEnum):
-    CORE = 0
-    ROOT = 1
-    LEAF = 2
-
-
 def partition_iterset(index: LoopIndex, arrays):
     """Split an iteration set into core, root and leaf index sets.
 
@@ -1349,6 +1343,12 @@ def partition_iterset(index: LoopIndex, arrays):
     not touch leaves but do roots are marked ROOT. Any remaining entities do not require
     the SF and are marked CORE.
 
+    !!! NOTE !!!
+
+    I am changing this behaviour. I think the distinction between ROOT and LEAF is not
+    meaningful. These can be lumped together into NONCORE (i.e. 'requires communication
+    to be complete before computation can happen').
+
     """
     from pyop3.distarray.multiarray import IndexExpressionReplacer
 
@@ -1356,29 +1356,24 @@ def partition_iterset(index: LoopIndex, arrays):
     paraxis = [axis for axis in index.iterset.nodes if axis.sf is not None][0]
 
     # at a minimum this should be done per multi-axis instead of per array
-    array_labels = {}
+    is_root_or_leaf_per_array = {}
     for array in arrays:
         # take first
         array_paraxis = [
             axis for axis in array.orig_array.axes.nodes if axis.sf is not None
         ][0]
-        anpoints = sum(c.count for c in array_paraxis.components)
-        # mark everything as roots and then reduce to apply to the actual roots
-        labels = np.full(anpoints, IterationType.CORE, dtype=IntType)
         sf = array_paraxis.sf
-        nroots, ilocal, iremote = sf._graph
 
-        labels[ilocal] = IterationType.ROOT
-        sf.reduce(labels, MPI.REPLACE)
-
-        # now set the leaf labels to the right thing
-        labels[ilocal] = IterationType.LEAF
+        # mark leaves and roots
+        is_root_or_leaf = np.full(sf.size, False, dtype=bool)
+        is_root_or_leaf[sf.iroot] = True
+        is_root_or_leaf[sf.ileaf] = True
 
         # do this because we need to think of the indices here as a selector
         # rather than a map. We need to transform to the new numbering, hence we
         # need to apply the map default -> reordered, but the indexing semantics
         # are the opposite of this
-        labels = labels[list(array_paraxis.numbering)]
+        is_root_or_leaf = is_root_or_leaf[list(array_paraxis.numbering)]
         # this is equivalent to:
         # new_labels = np.empty_like(labels)
         # for i, l in enumerate(labels):
@@ -1386,11 +1381,9 @@ def partition_iterset(index: LoopIndex, arrays):
         #     new_labels[j] = l
         # labels = new_labels
 
-        array_labels[array.name] = labels
+        is_root_or_leaf_per_array[array.name] = is_root_or_leaf
 
-    npoints = sum(c.count for c in paraxis.components)
-    flags = np.full(npoints, IterationType.CORE, dtype=IntType)
-
+    is_core = np.full(paraxis.size, True, dtype=bool)
     for path, indices in index.iter():
         parindex = indices[paraxis.label]
         assert isinstance(parindex, numbers.Integral)
@@ -1398,7 +1391,7 @@ def partition_iterset(index: LoopIndex, arrays):
         replace_map = freeze({(index.id, axis): i for axis, i in indices.items()})
 
         for array in arrays:
-            if flags[parindex] == IterationType.LEAF:
+            if not is_core[parindex]:
                 continue
 
             # loop over stencil
@@ -1423,14 +1416,11 @@ def partition_iterset(index: LoopIndex, arrays):
                 )
                 assert isinstance(pt_index, numbers.Integral)
 
-                if array_labels[array.name][pt_index] == IterationType.LEAF:
-                    flags[parindex] = IterationType.LEAF
+                if is_root_or_leaf_per_array[array.name][pt_index]:
+                    is_core[parindex] = False
                     # no point doing more analysis
                     break
-                elif array_labels[array.name][pt_index] == IterationType.ROOT:
-                    flags[parindex] = IterationType.ROOT
 
-    core = just_one(np.nonzero(flags == IterationType.CORE))
-    root = just_one(np.nonzero(flags == IterationType.ROOT))
-    leaf = just_one(np.nonzero(flags == IterationType.LEAF))
-    return core, root, leaf
+    core = just_one(np.nonzero(is_core))
+    noncore = just_one(np.nonzero(not is_core))
+    return core, noncore

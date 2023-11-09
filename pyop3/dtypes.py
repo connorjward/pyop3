@@ -1,3 +1,5 @@
+import collections
+
 import numpy as np
 from mpi4py import MPI
 from petsc4py import PETSc
@@ -5,6 +7,8 @@ from petsc4py import PETSc
 ScalarType = PETSc.ScalarType
 IntType = PETSc.IntType
 PointerType = np.uintp
+
+DTypeLimit = collections.namedtuple("DTypeLimit", ["min", "max"])
 
 
 _MPI_types = {}
@@ -67,3 +71,23 @@ def as_numpy_dtype(mpi_dtype):
         except KeyError:
             raise RuntimeError("Unhandled base datatype %r", base)
         return _numpy_types.setdefault(mpi_dtype.py2f(), base)
+
+
+def dtype_limits(dtype):
+    """Attempt to determine the min and max values of a datatype.
+
+    :arg dtype: A numpy datatype.
+    :returns: a 2-tuple of min, max
+    :raises ValueError: If numeric limits could not be determined.
+    """
+    try:
+        info = numpy.finfo(dtype)
+    except ValueError:
+        # maybe an int?
+        try:
+            info = numpy.iinfo(dtype)
+        except ValueError as e:
+            raise ValueError(
+                "Unable to determine numeric limits from %s" % dtype
+            ) from e
+    return DTypeLimit(info.min, info.max)

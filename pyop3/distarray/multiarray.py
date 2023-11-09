@@ -412,9 +412,11 @@ class MultiArray(DistributedArray, ContextFree):
         self._last_write_op = None
 
     def broadcast_roots_to_leaves(self):
-        sf = self.axes.sf
-        mpi_op = MPI.REPLACE
-        sf.broadcast(self._data, MPI.REPLACE)
+        if not self._roots_valid:
+            raise RuntimeError
+        assert self._last_write_op is None
+        self.axes.sf.broadcast(self._data, MPI.REPLACE)
+        self._leaves_valid = True
 
     def sync_begin(self, need_halo_values=False):
         """Begin synchronizing shared data."""
