@@ -1422,5 +1422,5 @@ def partition_iterset(index: LoopIndex, arrays):
                     break
 
     core = just_one(np.nonzero(is_core))
-    noncore = just_one(np.nonzero(not is_core))
+    noncore = just_one(np.nonzero(np.logical_not(is_core)))
     return core, noncore

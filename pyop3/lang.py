@@ -23,7 +23,7 @@ from pyop3.axes.tree import (
     FrozenAxisTree,
     MultiArrayCollector,
 )
-from pyop3.distarray import DistributedArray, MultiArray, PetscMat
+from pyop3.distarray import Dat, MultiArray, PetscMat
 from pyop3.distarray.multiarray import IndexExpressionReplacer, substitute_layouts
 from pyop3.dtypes import IntType, dtype_limits
 from pyop3.indices.tree import (
@@ -72,7 +72,7 @@ class LoopExpr(pytools.ImmutableRecord, abc.ABC):
 
     @property
     @abc.abstractmethod
-    def datamap(self) -> WeakValueDictionary[str, DistributedArray]:
+    def datamap(self):
         """Map from names to arrays.
 
         weakref since we don't want to hold a reference to these things?
@@ -196,16 +196,15 @@ class Loop(LoopExpr):
             elif intent == WRITE:
                 # Assumes that all points are written to (i.e. not a subset). If
                 # this is not the case then a manual reduction is needed.
-                array._roots_valid = True
                 array._leaves_valid = False
-                array._last_write_op = None
+                array._pending_reduction = None
 
             elif intent in {INC, MIN_WRITE, MIN_RW, MAX_WRITE, MAX_RW}:  # reductions
                 # We don't need to update roots if performing the same reduction
                 # again. For example we can increment into an array as many times
                 # as we want. The reduction only needs to be done when the
                 # data is read.
-                if array._roots_valid or intent == array._last_write_op:
+                if array._roots_valid or intent == array._pending_reduction:
                     pass
                 else:
                     # We assume that all points are visited, and therefore that
@@ -215,19 +214,17 @@ class Loop(LoopExpr):
                     # explained in the documentation.
                     # TODO Add this to the documentation
                     if intent in {INC, MIN_RW, MAX_RW}:
-                        assert array._last_write_op is not None
+                        assert array._pending_reduction is not None
                         array.reduce_leaves_to_roots_begin()
                         finalizers.append(array.reduce_leaves_to_roots_end)
 
                 # If ghost points are not modified then no future reduction is required
                 if not touches_ghost_points:
-                    array._roots_valid = True
                     array._leaves_valid = False
-                    array._last_write_op = None
+                    array._pending_reduction = None
                 else:
-                    array._roots_valid = False
                     array._leaves_valid = False
-                    array._last_write_op = intent
+                    array._pending_reduction = intent
 
                     # set leaves to appropriate nil value
                     if intent == INC:
@@ -288,9 +285,9 @@ class Loop(LoopExpr):
     @cached_property
     def _distarray_args(self):
         return tuple(
-            (arg, intent)
+            (arg.array, intent)
             for arg, intent in self.all_function_arguments
-            if isinstance(arg, MultiArray) and arg.is_distributed
+            if isinstance(arg, Dat) and arg.array.is_distributed
         )
 
 
@@ -387,7 +384,7 @@ class CalledFunction(LoopExpr):
         self.arguments = arguments
 
     @functools.cached_property
-    def datamap(self) -> dict[str, DistributedArray]:
+    def datamap(self):
         return merge_dicts([arg.datamap for arg in self.arguments])
 
     @property
@@ -408,7 +405,7 @@ class CalledFunction(LoopExpr):
                         self.arguments, self.function._access_descrs
                     )
                 ],
-                key=lambda a: a.name,
+                key=lambda a: a[0].name,
             )
         )
 
@@ -553,7 +550,7 @@ def do_loop(*args, **kwargs):
 
 
 @functools.singledispatch
-def _as_pointer(array: DistributedArray) -> int:
+def _as_pointer(array) -> int:
     raise NotImplementedError
 
 

@@ -10,6 +10,7 @@ del pytools
 import pyop3.transforms
 from pyop3.axes import Axis, AxisComponent, AxisTree  # noqa: F401
 from pyop3.distarray import MultiArray, PetscMat  # noqa: F401
+from pyop3.distarray2 import DistributedArray  # noqa: F401
 from pyop3.dtypes import IntType, ScalarType  # noqa: F401
 from pyop3.indices import (  # noqa: F401
     AffineSliceComponent,
@@ -36,5 +37,4 @@ from pyop3.lang import (  # noqa: F401
     loop,
     offset,
 )
-from pyop3.meshdata import Const, Dat, Mat  # noqa: F401
 from pyop3.space import ConstrainedAxis, Space  # noqa: F401

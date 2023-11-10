@@ -22,7 +22,7 @@ from pyrsistent import freeze, pmap
 from pyop3 import utils
 from pyop3.axes import Axis, AxisComponent, AxisTree, AxisVariable
 from pyop3.axes.tree import ContextSensitiveAxisTree
-from pyop3.distarray import DistributedArray, MultiArray
+from pyop3.distarray import MultiArray
 from pyop3.distarray.multiarray import ContextSensitiveMultiArray
 from pyop3.distarray.petsc import IndexedPetscMat, PetscMat, PetscObject
 from pyop3.dtypes import IntType, PointerType

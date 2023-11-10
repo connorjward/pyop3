@@ -12,7 +12,7 @@ from pyrsistent import freeze
 
 from pyop3.axes import AxisTree
 from pyop3.axes.tree import ContextFree, ContextSensitive, FrozenAxisTree
-from pyop3.distarray.base import DistributedArray
+from pyop3.distarray.base import Tensor
 from pyop3.distarray.multiarray import ContextSensitiveMultiArray, MultiArray
 from pyop3.dtypes import ScalarType
 from pyop3.indices import IndexTree
@@ -27,14 +27,14 @@ class PetscVariable(pym.primitives.Variable):
         self.obj = obj
 
 
-class PetscObject(DistributedArray, abc.ABC):
+class PetscObject(abc.ABC):
     dtype = ScalarType
 
     def as_var(self):
         return PetscVariable(self)
 
 
-class PetscVec(PetscObject):
+class PetscVec(Tensor, PetscObject):
     def __new__(cls, *args, **kwargs):
         # dispatch to different vec types based on -vec_type
         raise NotImplementedError
@@ -48,7 +48,7 @@ class PetscVecNest(PetscVec):
     ...
 
 
-class PetscMat(PetscObject):
+class PetscMat(Tensor, PetscObject):
     prefix = "mat"
 
     def __new__(cls, *args, **kwargs):

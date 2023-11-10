@@ -25,7 +25,7 @@ from pyrsistent import freeze, pmap
 
 from pyop3 import utils
 from pyop3.dtypes import IntType, PointerType, get_mpi_dtype
-from pyop3.extras.debug import deprecated, print_if_rank, print_with_rank
+from pyop3.extras.debug import print_if_rank, print_with_rank
 from pyop3.sf import StarForest
 from pyop3.tree import (
     ComponentLabel,
@@ -43,6 +43,7 @@ from pyop3.utils import (
     UniquelyIdentifiedImmutableRecord,
     as_tuple,
     checked_zip,
+    deprecated,
     flatten,
     has_unique_entries,
     is_single_valued,
@@ -977,7 +978,7 @@ class AxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable):
         return order_axes(layout)
 
     # TODO this is just a regular tree search
-    @deprecated  # I think?
+    @deprecated(internal=True)  # I think?
     def get_part_from_path(self, path, axis=None):
         axis = axis or self.root
 
@@ -995,7 +996,7 @@ class AxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable):
         else:
             return axis, component
 
-    @deprecated
+    @deprecated(internal=True)
     def drop_last(self):
         """Remove the last subaxis"""
         if not self.part.subaxis:
@@ -1006,7 +1007,7 @@ class AxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable):
             )
 
     @property
-    @deprecated
+    @deprecated(internal=True)
     def is_linear(self):
         """Return ``True`` if the multi-axis contains no branches at any level."""
         if self.nparts == 1:
@@ -1014,7 +1015,7 @@ class AxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable):
         else:
             return False
 
-    @deprecated
+    @deprecated()
     def add_subaxis(self, subaxis, *loc):
         return self.add_node(subaxis, *loc)
 
@@ -1158,7 +1159,7 @@ class FrozenAxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable)
         return self._index_exprs
 
     @cached_property
-    def datamap(self) -> dict[str:DistributedArray]:
+    def datamap(self):
         if self.is_empty:
             dmap = {}
         else:

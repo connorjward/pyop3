@@ -27,7 +27,8 @@ from pyop3.axes import (
     as_axis_tree,
 )
 from pyop3.axes.tree import AxisVariable, FrozenAxisTree, MultiArrayCollector
-from pyop3.distarray.base import DistributedArray
+from pyop3.distarray2 import DistributedArray
+from pyop3.distarray.base import Tensor
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
 from pyop3.extras.debug import print_if_rank, print_with_rank
 from pyop3.indices import IndexedAxisTree, IndexTree, as_index_forest, index_axes
@@ -36,6 +37,7 @@ from pyop3.utils import (
     PrettyTuple,
     UniqueNameGenerator,
     as_tuple,
+    deprecated,
     just_one,
     merge_dicts,
     readonly,
@@ -108,7 +110,7 @@ class MultiArrayVariable(pym.primitives.Variable):
         )
 
 
-class MultiArray(DistributedArray, ContextFree):
+class Dat(Tensor, ContextFree):
     """Multi-dimensional, hierarchical array.
 
     Parameters
@@ -119,14 +121,6 @@ class MultiArray(DistributedArray, ContextFree):
 
     """
 
-    fields = DistributedArray.fields | {
-        "axes",
-        "dtype",
-        "data",
-        "max_value",
-        "sf",
-    }
-
     def __init__(
         self,
         axes: AxisTree,
@@ -134,48 +128,40 @@ class MultiArray(DistributedArray, ContextFree):
         *,
         data=None,
         max_value=None,
-        sf=None,
         **kwargs,
     ):
         super().__init__(**kwargs)
 
-        # if not isinstance(axes, (AxisTree, IndexedAxisTree)):
-        #     # must be context-free
-        #     raise TypeError()
+        # TODO This is ugly
+        temporary_axes = as_axis_tree(axes).freeze()  # used for the temporary
+        axes = layout_axes(axes)
+
         if data is None and dtype is None:
             dtype = ScalarType
 
-        if isinstance(data, np.ndarray):
-            if dtype:
-                data = np.asarray(data, dtype=dtype)
-            else:
-                dtype = data.dtype
-        elif isinstance(data, Sequence):
-            data = np.asarray(data, dtype=dtype)
-            dtype = data.dtype
-        elif data is None:
-            if not dtype:
-                raise ValueError("Must either specify a dtype or provide an array")
-            dtype = np.dtype(dtype)
-            data = np.zeros(axes.size, dtype=dtype)
+        if isinstance(data, DistributedArray):
+            # disable for now, temporaries hit this in an annoying way
+            # if data.sf is not axes.sf:
+            #     raise ValueError("Star forests do not match")
+            if dtype is not None:
+                raise ValueError(
+                    "If data is a DistributedArray, dtype should not be provided"
+                )
+            pass
+        elif isinstance(data, np.ndarray):
+            data = DistributedArray(data, dtype, name=self.name, sf=axes.sf)
         else:
-            raise TypeError("data argument not recognised")
+            data = DistributedArray(axes.size, dtype, name=self.name, sf=axes.sf)
+        self.array = data
 
-        self._data = data
-        self.dtype = dtype
-
-        self.temporary_axes = as_axis_tree(axes).freeze()  # used for the temporary
-        self.axes = layout_axes(axes)
-        self.layout_axes = self.axes  # cached property?
+        self.temporary_axes = temporary_axes
+        self.axes = axes
+        self.layout_axes = axes  # used? likely don't need all these
 
         self.max_value = max_value
-        self.sf = sf
 
-        self._roots_valid = True
-        self._leaves_valid = True
-        self._last_write_op = None
-
-        self._sync_thread = None
+    def __str__(self):
+        return self.name
 
     def __getitem__(self, indices) -> Union[MultiArray, ContextSensitiveMultiArray]:
         from pyop3.indices.tree import (
@@ -224,7 +210,7 @@ class MultiArray(DistributedArray, ContextFree):
                 index_exprs=index_exprs,
                 layouts=new_layouts,
             )
-            return self.copy_record(axes=layout_axes)
+            return self._with_axes(layout_axes)
 
         array_per_context = {}
         for index_tree in as_index_forest(indices, axes=self.layout_axes):
@@ -269,7 +255,7 @@ class MultiArray(DistributedArray, ContextFree):
                 index_exprs=index_exprs,
                 layouts=new_layouts,
             )
-            array_per_context[loop_context] = self.copy_record(axes=layout_axes)
+            array_per_context[loop_context] = self._with_axes(layout_axes)
         return ContextSensitiveMultiArray(array_per_context)
 
     # TODO remove this
@@ -278,29 +264,25 @@ class MultiArray(DistributedArray, ContextFree):
         return self.axes.layouts
 
     @property
-    def data(self):
-        import warnings
+    def dtype(self):
+        return self.array.dtype
 
-        warnings.warn(
-            ".data is a deprecated alias for .data_rw and will be removed in future",
-            FutureWarning,
-        )
+    @property
+    def sf(self) -> StarForest:
+        return self.array.sf
+
+    @property
+    @deprecated(".data_rw")
+    def data(self):
         return self.data_rw
 
     @property
     def data_rw(self):
-        if not self._roots_valid:
-            self.reduce_leaves_to_roots()
-
-        # modifying owned values invalidates ghosts
-        self._leaves_valid = False
-        return self._data[: self.axes.owned_size]
+        return self.array.data_rw
 
     @property
     def data_ro(self):
-        if not self._roots_valid:
-            self.reduce_leaves_to_roots()
-        return readonly(self._data[: self.axes.owned_size])
+        return self.array.data_ro
 
     @property
     def data_wo(self):
@@ -311,19 +293,39 @@ class MultiArray(DistributedArray, ContextFree):
         When this is called we set roots_valid, claiming that any (lazy) 'in-flight' writes
         can be dropped.
         """
-        # pending writes can be dropped (care needed if only doing subsets)
-        self._roots_valid = True
-        self._last_write_op = None
-        # modifying owned values invalidates ghosts
-        self._leaves_valid = False
-        return self._data[: self.axes.owned_size]
+        return self.array.data_wo
 
-    @functools.cached_property
-    def datamap(self) -> dict[str:DistributedArray]:
+    @property
+    def sf(self):
+        return self.array.sf
+
+    @cached_property
+    def datamap(self):
         datamap_ = {self.name: self}
         datamap_.update(self.axes.datamap)
         datamap_.update(self.layout_axes.datamap)
         return freeze(datamap_)
+
+    def assemble(self):
+        """Ensure that stored values are up-to-date.
+
+        This function is typically only required when accessing the `Dat` in a
+        write-only mode (`Access.WRITE`, `Access.MIN_WRITE` or `Access.MAX_WRITE`)
+        and only setting a subset of the values. Without `Dat.assemble` the non-subset
+        entries in the array would hold undefined values.
+
+        """
+        self.array._reduce_then_broadcast()
+
+    def _with_axes(self, axes):
+        """Return a new `Dat` with new axes pointing to the same data."""
+        return type(self)(
+            axes,
+            data=self.array,
+            max_value=self.max_value,
+            name=self.name,
+            orig_array=self.orig_array,
+        )
 
     def as_var(self):
         # must not be branched...
@@ -336,19 +338,8 @@ class MultiArray(DistributedArray, ContextFree):
         return MultiArrayVariable(self, indices)
 
     @property
-    def shape(self):
-        raise IncompatibleShapeError(
-            "Ragged and/or multi-component arrays do not have a well defined shape"
-        )
-
-    @property
     def alloc_size(self):
         return self.axes.alloc_size() if not self.axes.is_empty else 1
-
-    # ???
-    # @property
-    # def pym_var(self) -> pym.primitives.Variable:
-    #     return MultiArray
 
     @classmethod
     def from_list(cls, data, axis_labels, name=None, dtype=ScalarType, inc=0):
@@ -385,113 +376,6 @@ class MultiArray(DistributedArray, ContextFree):
                 count.append(y)
             return flattened, count
 
-    @cached_property
-    def reduction_ops(self):
-        from pyop3.lang import INC
-
-        return {
-            INC: MPI.SUM,
-        }
-
-    # TODO should have begin and end methods
-    def reduce_leaves_to_roots(self):
-        if self._roots_valid:
-            assert self._last_write_op is None
-            return
-        else:
-            assert self._last_write_op is not None
-
-        pending_write_op = self._last_write_op
-        sf = self.axes.sf
-
-        mpi_op = self.reduction_ops[pending_write_op]
-        sf.reduce(self._data, mpi_op)
-
-        self._roots_valid = True
-        self._leaves_valid = False
-        self._last_write_op = None
-
-    def broadcast_roots_to_leaves(self):
-        if not self._roots_valid:
-            raise RuntimeError
-        assert self._last_write_op is None
-        self.axes.sf.broadcast(self._data, MPI.REPLACE)
-        self._leaves_valid = True
-
-    def sync_begin(self, need_halo_values=False):
-        """Begin synchronizing shared data."""
-        self._sync_thread = threading.Thread(
-            target=self.__class__.sync,
-            args=(self,),
-            kwargs={"need_halo_values": need_halo_values},
-        )
-        self._sync_thread.start()
-
-    def sync_end(self):
-        """Finish synchronizing shared data."""
-        if not self._sync_thread:
-            raise RuntimeError(
-                "Cannot call sync_end without a prior call to sync_begin"
-            )
-        self._sync_thread.join()
-        self._sync_thread = None
-
-    # TODO create Synchronizer object for encapsulation?
-    def sync(self, need_halo_values=False):
-        """Perform halo exchanges to ensure that all ranks store up-to-date values.
-
-        Parameters
-        ----------
-        need_halo_values : bool
-            Whether or not halo values also need to be synchronized.
-
-        Notes
-        -----
-        This is a blocking operation. F.labelor the non-blocking alternative use
-        :meth:`sync_begin` and :meth:`sync_end` (FIXME)
-
-        Note that this method should only be called when one needs to read from
-        the array.
-        """
-        # 1. Reduce leaf values to roots if they have been written to.
-        # (this is basically local-to-global)
-        if self._pending_write_op:
-            assert (
-                not self._halo_valid
-            ), "If a write is pending the halo cannot be valid"
-            # If halo entries have also been written to then we need to use the
-            # full SF containing both shared and halo points. If the halo has not
-            # been modified then we only need to reduce with shared points.
-            if self._halo_modified:
-                self.reduce_leaves_to_roots(self.root.sf, self._pending_write_op)
-            else:
-                # only reduce with values from owned points
-                self.reduce_leaves_to_roots(self.root.shared_sf, self._pending_write_op)
-
-        # implicit barrier? can only broadcast reduced values
-
-        # 3. at this point only one of the owned points knows the correct result which
-        # now needs to be scattered back to some (but not necessarily all) of the other ranks.
-        # (this is basically global-to-local)
-
-        # only send to halos if we want to read them and they are out-of-date
-        if need_halo_values and not self._halo_valid:
-            # send the root value back to all the points
-            self.broadcast_roots_to_leaves(self.root.sf)
-            self._halo_valid = True  # all the halo points are now up-to-date
-        else:
-            # only need to update owned points if we did a reduction earlier
-            if self._pending_write_op:
-                # send the root value back to just the owned points
-                self.broadcast_roots_to_leaves(self.root.shared_sf)
-                # (the halo is still dirty)
-
-        # set self.last_op to None here? what if halo is still off?
-        # what if we read owned values and then owned+halo values?
-        # just perform second step
-        self._pending_write_op = None
-        self._halo_modified = False
-
     def get_value(self, *args, **kwargs):
         return self.data[self.axes.get_offset(*args, **kwargs)]
 
@@ -506,10 +390,16 @@ class MultiArray(DistributedArray, ContextFree):
             current_axis = current_axis.get_part(idx.npart).subaxis
         return tuple(selected)
 
-    def __str__(self):
-        return self.name
+
+# Needs to be subclass for isinstance checks to work
+# TODO Delete
+class MultiArray(Dat):
+    @deprecated("Dat")
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
 
+# Now ContextSensitiveDat
 class ContextSensitiveMultiArray(ContextSensitive):
     def __getitem__(self, indices) -> ContextSensitiveMultiArray:
         from pyop3.indices.tree import (
@@ -570,13 +460,19 @@ class ContextSensitiveMultiArray(ContextSensitive):
                 index_exprs,
                 layouts=new_layouts,
             )
-            array_per_context[loop_context] = array.copy_record(axes=layout_axes)
+            array_per_context[loop_context] = array._with_axes(layout_axes)
         return ContextSensitiveMultiArray(array_per_context)
 
     # don't like this name
+    # FIXME This function returns dats, the "array" function returns a DistributedArray,
+    # this is confusing and should be cleaned up
     @property
     def orig_array(self):
-        return single_valued(array.orig_array for array in self.context_map.values())
+        return single_valued(dat.orig_array for dat in self.context_map.values())
+
+    @property
+    def array(self):
+        return single_valued(dat.array for dat in self.context_map.values())
 
     @property
     def dtype(self):

@@ -8,7 +8,7 @@ from pyrsistent import freeze
 import pyop3 as op3
 from pyop3.axes.parallel import grow_dof_sf
 from pyop3.extras.debug import print_with_rank
-from pyop3.indices.tree import IterationType, partition_iterset
+from pyop3.indices.tree import partition_iterset
 from pyop3.utils import just_one
 
 
@@ -210,11 +210,13 @@ def test_nested_parallel_axes_produce_correct_sf(comm, axis):
     rank = comm.rank
     other_rank = (rank + 1) % 2
 
-    array = op3.MultiArray(axes, dtype=op3.ScalarType)
-    array.data[...] = rank
-    array.broadcast_roots_to_leaves()
+    array = op3.DistributedArray(axes.size, sf=axes.sf)
+    array._data[...] = rank
 
-    nghost = axes.sf.nleaves
+    # update ghost points
+    array._broadcast_roots_to_leaves()
+
+    nghost = array.sf.nleaves
     assert nghost == 4
     assert np.equal(array._data[:-nghost], rank).all()
     assert np.equal(array._data[-nghost:], other_rank).all()
@@ -226,9 +228,7 @@ def test_partition_iterset_scalar(comm, axis):
 
     p = axis.index()
     tmp = array[p]
-    core, root, leaf = partition_iterset(p, [tmp])
-
-    print_with_rank(core, root, leaf)
+    core, noncore = partition_iterset(p, [tmp])
 
     if comm.rank == 0:
         # from [0, 1, 3, 2, 4, 5] and knowing that ...
@@ -237,14 +237,12 @@ def test_partition_iterset_scalar(comm, axis):
         # come before the core ones. Ghost will always be the final entries because that
         # is how we do the numbering in the first place.
         assert np.equal(core, [2, 3]).all()
-        assert np.equal(root, [0, 1]).all()
-        assert np.equal(leaf, [4, 5]).all()
+        assert np.equal(noncore, [0, 1, 4, 5]).all()
     else:
         assert comm.rank == 1
         # numbering = [0, 4, 1, 2, 5, 3]
         assert np.equal(core, [0, 1]).all()
-        assert np.equal(root, [2, 3]).all()
-        assert np.equal(leaf, [4, 5]).all()
+        assert np.equal(noncore, [2, 3, 4, 5]).all()
 
 
 @pytest.mark.parallel(nprocs=2)
@@ -281,14 +279,12 @@ def test_partition_iterset_with_map(comm, axis):
     array = op3.MultiArray(axis, dtype=op3.ScalarType)
     p = axis.index()
     tmp = array[map0(p)]
-    core, root, leaf = partition_iterset(p, [tmp])
+    core, noncore = partition_iterset(p, [tmp])
 
     if comm.rank == 0:
         assert np.equal(core, [3]).all()
-        assert np.equal(root, [1, 2]).all()
-        assert np.equal(leaf, [0, 4, 5]).all()
+        assert np.equal(noncore, [0, 1, 2, 4, 5]).all()
     else:
         assert comm.rank == 1
         assert np.equal(core, [0]).all()
-        assert np.equal(root, [1, 2]).all()
-        assert np.equal(leaf, [3, 4, 5]).all()
+        assert np.equal(noncore, [1, 2, 3, 4, 5]).all()

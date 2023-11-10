@@ -21,8 +21,3 @@ def print_if_rank(
     comm = comm or PETSc.Sys.getDefaultComm()
     if rank == comm.rank:
         print(*args, flush=True)
-
-
-def deprecated(fn):
-    warnings.warn(f"{fn.__name__} is deprecated", DeprecationWarning)
-    return fn
