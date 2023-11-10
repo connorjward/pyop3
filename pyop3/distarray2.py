@@ -16,6 +16,28 @@ class IncompatibleStarForestException(Exception):
     pass
 
 
+class DataTransferInFlightException(Exception):
+    pass
+
+
+class BadOrderingException(Exception):
+    pass
+
+
+def not_in_flight(fn):
+    """Ensure that a method cannot be called when a transfer is in progress."""
+
+    def wrapper(self, *args, **kwargs):
+        if self._transfer_in_flight:
+            raise DataTransferInFlightException(
+                f"Not valid to call {fn.__name__} with messages in-flight, "
+                f"please call {self._finalizer.__name__} first"
+            )
+        return fn(self, *args, **kwargs)
+
+    return wrapper
+
+
 class DistributedArray:
     """An array distributed across multiple processors with ghost values."""
 
@@ -65,18 +87,21 @@ class DistributedArray:
         self.state = 0
 
         # flags for tracking parallel correctness
-        self._pending_reduction = None
         self._leaves_valid = True
+        self._pending_reduction = None
+        self._finalizer = None
 
         # TODO
         # self._sync_thread = None
 
     @property
+    @not_in_flight
     @deprecated(".data_rw")
     def data(self):
         return self.data_rw
 
     @property
+    @not_in_flight
     def data_rw(self):
         self.state += 1
 
@@ -88,12 +113,14 @@ class DistributedArray:
         return self._owned_data
 
     @property
+    @not_in_flight
     def data_ro(self):
         if not self._roots_valid:
             self._reduce_leaves_to_roots()
         return readonly(self._owned_data)
 
     @property
+    @not_in_flight
     def data_wo(self):
         """
         Have to be careful. If not setting all values (i.e. subsets) should call
@@ -114,12 +141,14 @@ class DistributedArray:
         return self.sf is not None
 
     @property
+    @not_in_flight
     def _data(self):
         if self._lazy_data is None:
             self._lazy_data = np.zeros(self.shape, dtype=self.dtype)
         return self._lazy_data
 
     @property
+    @not_in_flight
     def _owned_data(self):
         if self.is_distributed:
             return self._data[: -self.sf.nleaves]
@@ -127,8 +156,13 @@ class DistributedArray:
             return self._data
 
     @property
+    @not_in_flight
     def _roots_valid(self) -> bool:
         return self._pending_reduction is None
+
+    @property
+    def _transfer_in_flight(self) -> bool:
+        return self._finalizer is not None
 
     @cached_property
     def _reduction_ops(self):
@@ -139,100 +173,63 @@ class DistributedArray:
             INC: MPI.SUM,
         }
 
-    # TODO should have begin and end methods
+    @not_in_flight
     def _reduce_leaves_to_roots(self):
-        if self._roots_valid:
-            return
+        self._reduce_leaves_to_roots_begin()
+        self._reduce_leaves_to_roots_end()
 
-        pending_write_op = self._pending_reduction
-
-        mpi_op = self._reduction_ops[pending_write_op]
-        self.sf.reduce(self._data, mpi_op)
-
-        self._leaves_valid = False
-        self._pending_reduction = None
-
-    def _broadcast_roots_to_leaves(self):
+    @not_in_flight
+    def _reduce_leaves_to_roots_begin(self):
         if not self._roots_valid:
-            # or do the reduction?
-            raise RuntimeError
-        self.sf.broadcast(self._data, MPI.REPLACE)
-        self._leaves_valid = True
+            self.sf.reduce_begin(
+                self._data, self._reduction_ops[self._pending_reduction]
+            )
+            self._leaves_valid = False
+        self._finalizer = self._reduce_leaves_to_roots_end
 
+    def _reduce_leaves_to_roots_end(self):
+        if self._finalizer is None:
+            raise BadOrderingException(
+                "Should not call _reduce_leaves_to_roots_end without first calling "
+                "_reduce_leaves_to_roots_begin"
+            )
+        if self._finalizer is not self._reduce_leaves_to_roots_end:
+            raise DataTransferInFlightException("Wrong finalizer called")
+
+        if not self._roots_valid:
+            self.sf.reduce_end(self._data, self._reduction_ops[self._pending_reduction])
+        self._pending_reduction = None
+        self._finalizer = None
+
+    @not_in_flight
+    def _broadcast_roots_to_leaves(self):
+        self._broadcast_roots_to_leaves_begin()
+        self._broadcast_roots_to_leaves_end()
+
+    @not_in_flight
+    def _broadcast_roots_to_leaves_begin(self):
+        if not self._roots_valid:
+            raise RuntimeError("Cannot broadcast invalid roots")
+
+        if not self._leaves_valid:
+            self.sf.broadcast_begin(self._data, MPI.REPLACE)
+        self._finalizer = self._broadcast_roots_to_leaves_end
+
+    def _broadcast_roots_to_leaves_end(self):
+        if self._finalizer is None:
+            raise BadOrderingException(
+                "Should not call _broadcast_roots_to_leaves_end without first "
+                "calling _broadcast_roots_to_leaves_begin"
+            )
+        if self._finalizer is not self._broadcast_roots_to_leaves_end:
+            raise DataTransferInFlightException("Wrong finalizer called")
+
+        if not self._leaves_valid:
+            self.sf.broadcast_end(self._data, MPI.REPLACE)
+        self._leaves_valid = True
+        self._finalizer = None
+
+    @not_in_flight
     def _reduce_then_broadcast(self):
         self._reduce_leaves_to_roots()
         self._broadcast_roots_to_leaves()
-
-    # def sync_begin(self, need_halo_values=False):
-    #     """Begin synchronizing shared data."""
-    #     self._sync_thread = threading.Thread(
-    #         target=self.__class__.sync,
-    #         args=(self,),
-    #         kwargs={"need_halo_values": need_halo_values},
-    #     )
-    #     self._sync_thread.start()
-    #
-    # def sync_end(self):
-    #     """Finish synchronizing shared data."""
-    #     if not self._sync_thread:
-    #         raise RuntimeError(
-    #             "Cannot call sync_end without a prior call to sync_begin"
-    #         )
-    #     self._sync_thread.join()
-    #     self._sync_thread = None
-    #
-    # # TODO create Synchronizer object for encapsulation?
-    # def sync(self, need_halo_values=False):
-    #     """Perform halo exchanges to ensure that all ranks store up-to-date values.
-    #
-    #     Parameters
-    #     ----------
-    #     need_halo_values : bool
-    #         Whether or not halo values also need to be synchronized.
-    #
-    #     Notes
-    #     -----
-    #     This is a blocking operation. F.labelor the non-blocking alternative use
-    #     :meth:`sync_begin` and :meth:`sync_end` (FIXME)
-    #
-    #     Note that this method should only be called when one needs to read from
-    #     the array.
-    #     """
-    #     # 1. Reduce leaf values to roots if they have been written to.
-    #     # (this is basically local-to-global)
-    #     if self._pending_write_op:
-    #         assert (
-    #             not self._halo_valid
-    #         ), "If a write is pending the halo cannot be valid"
-    #         # If halo entries have also been written to then we need to use the
-    #         # full SF containing both shared and halo points. If the halo has not
-    #         # been modified then we only need to reduce with shared points.
-    #         if self._halo_modified:
-    #             self.reduce_leaves_to_roots(self.root.sf, self._pending_write_op)
-    #         else:
-    #             # only reduce with values from owned points
-    #             self.reduce_leaves_to_roots(self.root.shared_sf, self._pending_write_op)
-    #
-    #     # implicit barrier? can only broadcast reduced values
-    #
-    #     # 3. at this point only one of the owned points knows the correct result which
-    #     # now needs to be scattered back to some (but not necessarily all) of the other ranks.
-    #     # (this is basically global-to-local)
-    #
-    #     # only send to halos if we want to read them and they are out-of-date
-    #     if need_halo_values and not self._halo_valid:
-    #         # send the root value back to all the points
-    #         self.broadcast_roots_to_leaves(self.root.sf)
-    #         self._halo_valid = True  # all the halo points are now up-to-date
-    #     else:
-    #         # only need to update owned points if we did a reduction earlier
-    #         if self._pending_write_op:
-    #             # send the root value back to just the owned points
-    #             self.broadcast_roots_to_leaves(self.root.shared_sf)
-    #             # (the halo is still dirty)
-    #
-    #     # set self.last_op to None here? what if halo is still off?
-    #     # what if we read owned values and then owned+halo values?
-    #     # just perform second step
-    #     self._pending_write_op = None
-    #     self._halo_modified = False
