@@ -1,4 +1,4 @@
-from pyop3.axes.tree import (
+from .tree import (
     Axis,
     AxisComponent,
     AxisTree,

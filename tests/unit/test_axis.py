@@ -3,7 +3,7 @@ import pymbolic as pym
 import pytest
 from pyrsistent import pmap
 
-from pyop3.axes import Axis, AxisComponent, AxisTree
+from pyop3.axtree import Axis, AxisComponent, AxisTree
 from pyop3.distarray import MultiArray
 from pyop3.dtypes import IntType
 from pyop3.utils import UniqueNameGenerator, flatten, just_one

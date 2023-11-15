@@ -646,7 +646,7 @@ class Axis(StrictLabelledNode, LoopIterable):
     @classmethod
     def from_serial(cls, serial: Axis, sf):
         # FIXME
-        from pyop3.axes.parallel import partition_ghost_points
+        from pyop3.axtree.parallel import partition_ghost_points
 
         if serial.sf is not None:
             raise RuntimeError("serial axis is not serial")
@@ -762,7 +762,7 @@ class Axis(StrictLabelledNode, LoopIterable):
     @cached_property
     def _inverse_numbering(self):
         # put in utils.py
-        from pyop3.axes.parallel import invert
+        from pyop3.axtree.parallel import invert
 
         return invert(self.numbering)
 
@@ -1043,7 +1043,7 @@ class IndexedAxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable
         self.layout_exprs = layout_exprs
 
     def __getitem__(self, indices):
-        from pyop3.indices.tree import (
+        from pyop3.itree.tree import (
             as_index_forest,
             collect_loop_contexts,
             index_axes,
@@ -1067,7 +1067,7 @@ class IndexedAxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable
         return FrozenAxisTree(self.root, self.parent_to_children)
 
     def index(self) -> LoopIndex:
-        from pyop3.indices import LoopIndex
+        from pyop3.itree import LoopIndex
 
         return LoopIndex(self)
 
@@ -1123,11 +1123,7 @@ class FrozenAxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable)
         self.sf = sf or self._sf()
 
     def __getitem__(self, indices) -> Union[IndexedAxisTree, ContextSensitiveAxisTree]:
-        from pyop3.indices.tree import (
-            as_index_forest,
-            collect_loop_contexts,
-            index_axes,
-        )
+        from pyop3.itree.tree import as_index_forest, collect_loop_contexts, index_axes
 
         if indices is Ellipsis:
             indices = index_tree_from_ellipsis(self)
@@ -1146,7 +1142,7 @@ class FrozenAxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable)
         return FrozenAxisTree(self.root, self.parent_to_children)
 
     def index(self):
-        from pyop3.indices import LoopIndex
+        from pyop3.itree import LoopIndex
 
         return LoopIndex(self)
 
@@ -1190,7 +1186,7 @@ class FrozenAxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable)
         return self
 
     def _sf(self):
-        from pyop3.axes.parallel import collect_sf_graphs
+        from pyop3.axtree.parallel import collect_sf_graphs
 
         if self.is_empty:
             return None
@@ -1278,7 +1274,7 @@ class ContextSensitiveAxisTree(ContextSensitiveLoopIterable):
         # return ContextSensitiveAxisTree(new_context_map)
 
     def index(self) -> LoopIndex:
-        from pyop3.indices import LoopIndex
+        from pyop3.itree import LoopIndex
 
         return LoopIndex(self)
 
@@ -1441,7 +1437,7 @@ def create_lgmap(axes):
 
 @functools.singledispatch
 def as_axis_tree(arg: Any):
-    from pyop3.indices import IndexedAxisTree
+    from pyop3.itree import IndexedAxisTree
 
     if isinstance(arg, IndexedAxisTree):
         return arg

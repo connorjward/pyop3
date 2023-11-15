@@ -20,13 +20,13 @@ import pytools
 from pyrsistent import freeze, pmap
 
 from pyop3 import utils
-from pyop3.axes import Axis, AxisComponent, AxisTree, AxisVariable
-from pyop3.axes.tree import ContextSensitiveAxisTree
+from pyop3.axtree import Axis, AxisComponent, AxisTree, AxisVariable
+from pyop3.axtree.tree import ContextSensitiveAxisTree
 from pyop3.distarray import MultiArray
 from pyop3.distarray.multiarray import ContextSensitiveMultiArray
 from pyop3.distarray.petsc import IndexedPetscMat, PetscMat, PetscObject
 from pyop3.dtypes import IntType, PointerType
-from pyop3.indices import (
+from pyop3.itree import (
     AffineMapComponent,
     AffineSliceComponent,
     CalledMap,
@@ -41,7 +41,7 @@ from pyop3.indices import (
     Subset,
     TabulatedMapComponent,
 )
-from pyop3.indices.tree import CalledMapVariable, LoopIndexVariable
+from pyop3.itree.tree import CalledMapVariable, LoopIndexVariable
 from pyop3.lang import (
     INC,
     MAX_RW,

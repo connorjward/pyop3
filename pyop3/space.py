@@ -1,3 +1,5 @@
+"""This is an old file that isn't used any more."""
+
 import functools
 import numbers
 from typing import Any, Dict, FrozenSet, Hashable, Optional

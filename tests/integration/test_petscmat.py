@@ -4,7 +4,7 @@ import pytest
 from pyrsistent import pmap
 
 import pyop3 as op3
-from pyop3.codegen.ir import LOOPY_LANG_VERSION, LOOPY_TARGET
+from pyop3.ir import LOOPY_LANG_VERSION, LOOPY_TARGET
 from pyop3.utils import flatten
 
 

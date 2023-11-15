@@ -18,7 +18,7 @@ import pytools
 from mpi4py import MPI
 from pyrsistent import freeze, pmap
 
-from pyop3.axes import (
+from pyop3.axtree import (
     Axis,
     AxisComponent,
     AxisTree,
@@ -27,7 +27,7 @@ from pyop3.axes import (
     ContextSensitive,
     LoopIterable,
 )
-from pyop3.axes.tree import (
+from pyop3.axtree.tree import (
     ContextSensitiveAxisTree,
     ContextSensitiveLoopIterable,
     ExpressionEvaluator,

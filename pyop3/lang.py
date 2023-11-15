@@ -17,8 +17,8 @@ import pymbolic as pym
 import pytools
 from pyrsistent import freeze, pmap
 
-from pyop3.axes import as_axis_tree
-from pyop3.axes.tree import (
+from pyop3.axtree import as_axis_tree
+from pyop3.axtree.tree import (
     ContextFree,
     ContextSensitive,
     FrozenAxisTree,
@@ -32,7 +32,7 @@ from pyop3.distarray.multiarray import (
     substitute_layouts,
 )
 from pyop3.dtypes import IntType, dtype_limits
-from pyop3.indices.tree import (
+from pyop3.itree.tree import (
     IndexedAxisTree,
     _compose_bits,
     _index_axes,
@@ -188,19 +188,19 @@ class Loop(LoopExpr):
 
     @functools.cached_property
     def loopy_code(self):
-        from pyop3.codegen.ir import compile
+        from pyop3.ir.lower import compile
 
         return compile(self)
 
     @functools.cached_property
     def c_code(self):
-        from pyop3.codegen.exe import compile_loopy
+        from pyop3.target import compile_loopy
 
         return compile_loopy(self.loopy_code, stop_at_c=True)
 
     @functools.cached_property
     def executable(self):
-        from pyop3.codegen.exe import compile_loopy
+        from pyop3.target import compile_loopy
 
         return compile_loopy(self.loopy_code)
 
@@ -239,6 +239,8 @@ class Loop(LoopExpr):
         # core entities (in the iterset) are defined as being those that do
         # not overlap with any points in the star forest.
 
+        # TODO update this comment to account for different threading models
+
         # Since we sometimes have to do a reduce and then a broadcast the messages
         # are organised into generations with each generation being executed in
         # turn.
@@ -247,29 +249,36 @@ class Loop(LoopExpr):
         # the following collection of messages (the final generation is always -1):
         #
         #   [generation  0] : [array1.reduce_begin, array2.reduce_begin]
-        #   [generation  1] : [array1.reduce_end]
-        #   [generation  2] : [array1.broadcast_begin]
+        #   [generation  1] : [array1.reduce_end, array1.broadcast_begin]
         #   [generation -1] : [array1.broadcast_end, array2.reduce_end]
         #
         # To avoid blocking the operations are executed on a separate thread. Once
         # the thread terminates, all messages will have been sent and execution
         # may continue.
-        messages = defaultdict(list)  # maps generation to messages
+
+        # maps array to messages split by generation
+        messages = defaultdict(defaultdict(list))
         for array, intent, touches_ghost_points in self._distarray_args:
             if intent in {READ, RW}:
                 if touches_ghost_points:
                     if not array._roots_valid:
-                        messages[0].append(array._reduce_leaves_to_roots_begin)
-                        messages[1].append(array._reduce_leaves_to_roots_end)
-                        messages[2].append(array._broadcast_roots_to_leaves_begin)
-                        messages[-1].append(array._broadcast_roots_to_leaves_end)
+                        messages[array][0].append(array._reduce_leaves_to_roots_begin)
+                        messages[array][1].extend(
+                            [
+                                array._reduce_leaves_to_roots_end,
+                                array._broadcast_roots_to_leaves_begin,
+                            ]
+                        )
+                        messages[array][-1].append(array._broadcast_roots_to_leaves_end)
                     else:
-                        messages[0].append(array._broadcast_roots_to_leaves_begin)
-                        messages[-1].append(array._broadcast_roots_to_leaves_end)
+                        messages[array][0].append(
+                            array._broadcast_roots_to_leaves_begin
+                        )
+                        messages[array][-1].append(array._broadcast_roots_to_leaves_end)
                 else:
                     if not array._roots_valid:
-                        messages[0].append(array.reduce_leaves_to_roots_begin)
-                        messages[-1].append(array.reduce_leaves_to_roots_end)
+                        messages[array][0].append(array.reduce_leaves_to_roots_begin)
+                        messages[array][-1].append(array.reduce_leaves_to_roots_end)
 
             elif intent == WRITE:
                 # Assumes that all points are written to (i.e. not a subset). If
@@ -290,11 +299,10 @@ class Loop(LoopExpr):
                     # of entities are written to then a manual reduction is required.
                     # This is the same assumption that we make for data_wo and is
                     # explained in the documentation.
-                    # TODO Add this to the documentation
                     if intent in {INC, MIN_RW, MAX_RW}:
                         assert array._pending_reduction is not None
-                        messages[0].append(array.reduce_leaves_to_roots_begin)
-                        messages[-1].append(array.reduce_leaves_to_roots_end)
+                        messages[array][0].append(array.reduce_leaves_to_roots_begin)
+                        messages[array][-1].append(array.reduce_leaves_to_roots_end)
 
                 # We are modifying owned values so the leaves must now be wrong
                 array._leaves_valid = False
@@ -325,14 +333,47 @@ class Loop(LoopExpr):
         """Context manager for interleaving computation and communication."""
         sendrecvs = self._array_updates()
 
-        # begin sending messages on a separate thread
-        thread = threading.Thread(target=self.__class__._sendrecv, args=(sendrecvs,))
-        thread.start()
+        if config["thread_model"] in {"SINGLE", "SERIALIZED"}:
+            # cannot do a thread per-array, compress the sendrecvs
+            new_sendrecvs = defaultdict(list)
+            for sendrecvs_per_array in sendrecvs.values():
+                for generation, messages in sendrecvs_per_array.items():
+                    new_sendrecvs[generation].extend(messages)
+            sendrecvs = new_sendrecvs
+
+        # TODO make an enum
+        if config["thread_model"] == "SINGLE":
+            # multithreading is not supported, do all of the sendrecvs apart
+            # from the final generation eagerly
+            ngenerations = len(sendrecvs) - 1
+            for gen in range(ngenerations):
+                for sendrecv in sendrecvs[gen]:
+                    sendrecv()
+            finalizers = messages[-1]
+        elif config["thread_model"] == "SERIALIZED":
+            # ghost exchanges can only be done on a single thread
+            thread = threading.Thread(
+                target=self.__class__._sendrecv, args=(sendrecvs,)
+            )
+            thread.start()
+            finalizers = [thread.join]
+        elif config["thread_model"] == "MULTIPLE":
+            # different thread per array
+            finalizers = []
+            for sendrecvs_per_array in sendrecvs.values():
+                thread = threading.Thread(
+                    target=self.__class__._sendrecv, args=(sendrecvs_per_array,)
+                )
+                thread.start()
+                finalizers.append(thread.join)
+        else:
+            raise AssertionError
 
         yield
 
-        # wait for the thread to terminate
-        thread.join()
+        # wait for everything
+        for f in finalizers:
+            f()
 
     @staticmethod
     def _sendrecv(messages):

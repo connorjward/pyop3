@@ -5,7 +5,7 @@ from mpi4py import MPI
 from petsc4py import PETSc
 from pyrsistent import pmap
 
-from pyop3.axes.tree import step_size
+from pyop3.axtree.tree import _as_int, _axis_component_size, step_size
 from pyop3.dtypes import IntType, get_mpi_dtype
 from pyop3.extras.debug import print_with_rank
 from pyop3.utils import just_one, strict_int
@@ -46,8 +46,6 @@ def invert(p):
 
 def collect_sf_graphs(axes, axis=None, path=pmap(), indices=pmap()):
     # NOTE: This function does not check for nested SFs (which should error)
-    from pyop3.axes.tree import _as_int, _axis_component_size
-
     axis = axis or axes.root
 
     if axis.sf is not None:

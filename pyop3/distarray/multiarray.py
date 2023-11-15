@@ -17,8 +17,7 @@ from mpi4py import MPI
 from petsc4py import PETSc
 from pyrsistent import freeze, pmap
 
-from pyop3 import utils
-from pyop3.axes import (
+from pyop3.axtree import (
     Axis,
     AxisComponent,
     AxisTree,
@@ -26,18 +25,19 @@ from pyop3.axes import (
     ContextSensitive,
     as_axis_tree,
 )
-from pyop3.axes.tree import AxisVariable, FrozenAxisTree, MultiArrayCollector
+from pyop3.axtree.tree import AxisVariable, FrozenAxisTree, MultiArrayCollector
 from pyop3.distarray2 import DistributedArray
 from pyop3.distarray.base import Tensor
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
 from pyop3.extras.debug import print_if_rank, print_with_rank
-from pyop3.indices import IndexedAxisTree, IndexTree, as_index_forest, index_axes
-from pyop3.indices.tree import CalledMapVariable, collect_loop_indices
+from pyop3.itree import IndexedAxisTree, IndexTree, as_index_forest, index_axes
+from pyop3.itree.tree import CalledMapVariable, collect_loop_indices
 from pyop3.utils import (
     PrettyTuple,
     UniqueNameGenerator,
     as_tuple,
     deprecated,
+    is_single_valued,
     just_one,
     merge_dicts,
     readonly,
@@ -164,7 +164,7 @@ class Dat(Tensor, ContextFree):
         return self.name
 
     def __getitem__(self, indices) -> Union[MultiArray, ContextSensitiveMultiArray]:
-        from pyop3.indices.tree import (
+        from pyop3.itree.tree import (
             _compose_bits,
             _index_axes,
             as_index_tree,
@@ -402,7 +402,7 @@ class MultiArray(Dat):
 # Now ContextSensitiveDat
 class ContextSensitiveMultiArray(ContextSensitive):
     def __getitem__(self, indices) -> ContextSensitiveMultiArray:
-        from pyop3.indices.tree import (
+        from pyop3.itree.tree import (
             _compose_bits,
             _index_axes,
             as_index_tree,
@@ -585,7 +585,7 @@ def make_sparsity(
                 "Need to think about whether maps are reasonable here"
             )
 
-        if not utils.is_single_valued(idx.id for idx in [iterindex, lmap, rmap]):
+        if not is_single_valued(idx.id for idx in [iterindex, lmap, rmap]):
             raise ValueError("Indices must share common roots")
 
         sparsity = collections.defaultdict(set)

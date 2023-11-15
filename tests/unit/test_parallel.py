@@ -6,9 +6,9 @@ from petsc4py import PETSc
 from pyrsistent import freeze
 
 import pyop3 as op3
-from pyop3.axes.parallel import grow_dof_sf
+from pyop3.axtree.parallel import grow_dof_sf
 from pyop3.extras.debug import print_with_rank
-from pyop3.indices.tree import partition_iterset
+from pyop3.itree.tree import partition_iterset
 from pyop3.utils import just_one
 
 

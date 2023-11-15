@@ -1,38 +1,3 @@
-# This file is part of PyOP2
-#
-# PyOP2 is Copyright (c) 2012, Imperial College London and
-# others. Please see the AUTHORS file in the main source directory for
-# a full list of copyright holders.  All rights reserved.
-#
-# Redistribution and use in source and binary forms, with or without
-# modification, are permitted provided that the following conditions
-# are met:
-#
-#     * Redistributions of source code must retain the above copyright
-#       notice, this list of conditions and the following disclaimer.
-#     * Redistributions in binary form must reproduce the above copyright
-#       notice, this list of conditions and the following disclaimer in the
-#       documentation and/or other materials provided with the distribution.
-#     * The name of Imperial College London or that of other
-#       contributors may not be used to endorse or promote products
-#       derived from this software without specific prior written
-#       permission.
-#
-# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTERS
-# ''AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
-# LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
-# FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
-# COPYRIGHT HOLDERS OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT,
-# INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
-# (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
-# HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
-# STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
-# ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
-# OF THE POSSIBILITY OF SUCH DAMAGE.
-
-"""PyOP2 global configuration."""
-
 import os
 from tempfile import gettempdir
 
@@ -41,8 +6,9 @@ class ConfigurationError(RuntimeError):
     pass
 
 
+# TODO I prefer this as a namedtuple or dataclass
 class Configuration(dict):
-    r"""PyOP2 configuration parameters
+    r"""pyop3 configuration parameters
 
     :param cc: C compiler (executable name eg: `gcc`
         or path eg: `/opt/gcc/bin/gcc`).
@@ -75,6 +41,17 @@ class Configuration(dict):
         cdim > 1 be built as block sparsities, or dof sparsities.  The
         former saves memory but changes which preconditioners are
         available for the resulting matrices.  (Default yes)
+    :param thread_model: Thread support provided by the underlying OS. This
+        is used for the interleaving of computation and communication in parallel
+        loops. Possible values are:
+
+        * "SINGLE": Only a single thread is supported.
+        * "SERIALIZED": Multiple threads are allowed but only one may make MPI calls.
+        * "MULTIPLE": Multiple threads are allowed and they can all make MPI calls.
+                      This is the default.
+
+        Note that these names have been drawn from MPI_Init_thread terminology.
+
     """
     # name, env variable, type, default, write once
     cache_dir = os.path.join(gettempdir(), "pyop2-cache-uid%s" % os.getuid())
@@ -97,6 +74,7 @@ class Configuration(dict):
         "print_cache_size": ("PYOP3_PRINT_CACHE_SIZE", bool, False),
         "matnest": ("PYOP3_MATNEST", bool, True),
         "block_sparsity": ("PYOP3_BLOCK_SPARSITY", bool, True),
+        "thread_model": ("PYOP3_THREAD_MODEL", str, "MULTIPLE"),
     }
     """Default values for PyOP2 configuration parameters"""
 
