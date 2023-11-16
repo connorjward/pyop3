@@ -85,10 +85,14 @@ class StarForest:
     def reduce_begin(self, *args):
         reduce_args = self._prepare_args(*args)
         self.sf.reduceBegin(*reduce_args)
+        print_with_rank(reduce_args)
+        print_with_rank("reduce begin")
 
     def reduce_end(self, *args):
         reduce_args = self._prepare_args(*args)
         self.sf.reduceEnd(*reduce_args)
+        print_with_rank(reduce_args)
+        print_with_rank("reduce end")
 
     @cached_property
     def _graph(self):
@@ -102,9 +106,6 @@ class StarForest:
             to_buffer = from_buffer
         else:
             raise ValueError
-
-        print_with_rank("size", self.size)
-        print_with_rank("buf", from_buffer)
 
         if any(len(buf) != self.size for buf in [from_buffer, to_buffer]):
             raise BufferSizeMismatchException

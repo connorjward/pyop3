@@ -37,14 +37,7 @@ def mesh_axis(comm):
                             *
     [rank 1]             x  * -----x-----x-----x-----x
                          4      0  5  1  6  2  7  3  8
-
-
-
-
-    [rank 1]             x  * -----x-----x-----x
-                         3  *   0  4  1  5  2  6
                          g      r  r
-
 
     Ghost points (leaves) are marked with "g" and roots with "r".
 
@@ -77,7 +70,6 @@ def mesh_axis(comm):
         ncells = 4
         nverts = 5
         numbering = [3, 4, 7, 0, 2, 1, 6, 8, 5]
-        # numbering = [3, 4, 0, 2, 1, 6, 5]
     serial = op3.Axis(
         [op3.AxisComponent(ncells, "cells"), op3.AxisComponent(nverts, "verts")],
         "mesh",
@@ -105,7 +97,6 @@ def cone_map(comm, mesh_axis):
         mdata = np.asarray([[4, 3], [5, 4], [6, 5]])
     else:
         assert comm.rank == 1
-        # mdata = np.asarray([[3, 4], [4, 5], [5, 6]])
         mdata = np.asarray([[4, 5], [5, 6], [6, 7], [7, 8]])
 
     # NOTES
@@ -166,10 +157,6 @@ def cone_map(comm, mesh_axis):
             old_vert = old_pt - min_vert
             mdata_renum[new_cell, i] = vert_renumbering[old_vert]
 
-    # print_with_rank("vertnum", vert_renumbering)
-    print_with_rank("mdata", mdata)
-    print_with_rank("mdata new", mdata_renum)
-
     mdat = op3.Dat(maxes, name="cone", data=mdata_renum.flatten())
     return op3.Map(
         {
@@ -187,12 +174,15 @@ def cone_map(comm, mesh_axis):
 def test_parallel_loop(comm, paxis, intent, fill_value):
     assert comm.size == 2
 
+    rank_dat = op3.Dat(
+        op3.Axis(1), name="rank", data=np.asarray([comm.rank + 1]), dtype=int
+    )
     dat = op3.Dat(paxis, data=np.full(paxis.size, fill_value, dtype=int))
-    knl = rank_plus_one_kernel(comm, intent)
+    knl = set_kernel(1, intent)
 
     op3.do_loop(
         p := paxis.index(),
-        knl(dat[p]),
+        knl(rank_dat, dat[p]),
     )
 
     assert np.equal(dat.array._data[: paxis.owned_count], comm.rank + 1).all()
@@ -212,29 +202,55 @@ def test_parallel_loop_with_map(comm, mesh_axis, cone_map, scalar_copy_kernel):
     # could parametrise these
     intent = op3.INC
     fill_value = 0
+    write_value = rank + 1
+    other_write_value = other_rank + 1
 
     rank_dat = op3.Dat(
-        op3.Axis(1), name="rank", data=np.asarray([comm.rank + 1]), dtype=int
+        op3.Axis(1), name="rank", data=np.asarray([write_value]), dtype=int
     )
     dat = op3.Dat(mesh_axis, data=np.full(mesh_axis.size, fill_value), dtype=int)
 
     knl = set_kernel(2, intent)
 
-    # op3.do_loop(
-    loop = op3.loop(
+    op3.do_loop(
         c := mesh_axis["cells"].index(),
         knl(rank_dat, dat[cone_map(c)]),
     )
 
-    print_with_rank(loop.loopy_code.ir)
+    # for the cone of an interval mesh (and before reductions) we expect interior
+    # vertices to be touched twice and exterior vertices to be touched once
+    nverts = mesh_axis.components[1].count
+    assert np.count_nonzero(dat.array._data == write_value * 2) == nverts - 2
+    assert np.count_nonzero(dat.array._data == write_value) == 2
 
-    loop()
+    # there should be a pending reduction
+    assert dat.array._pending_reduction == intent
+    assert not dat.array._roots_valid
+    assert not dat.array._leaves_valid
 
-    print_with_rank(dat.layouts[freeze({"mesh": "verts"})].array.data)
+    # now do the reduction
+    # dat.data_ro
+    print_with_rank("before", dat.array._data)
+    dat.array._reduce_leaves_to_roots()
 
-    print_with_rank(dat.array._data)
-    print_with_rank(dat.array._pending_reduction)
-    print_with_rank(dat.array._leaves_valid)
+    print_with_rank("after", dat.array._data)
+
+    assert dat.array._pending_reduction is None
+    assert dat.array._roots_valid
+    # leaves are still not up-to-date, requires a broadcast
+    assert not dat.array._leaves_valid
+
+    # NOTE: This demonstrates an issue with my current implementation. We really
+    # want an SF for each loop that we do because if we only modify a subset of values
+    # (here just the vertices) then we still do a reduction on the cells even if they
+    # weren't changed.
+
+    # Both ranks have a single exterior ghost vertex that touches an interior vertex
+    # on the other rank. Therefore we expect one owned value to have a value of
+    # interior_value_on_current_rank + exterior_value_on_other_rank.
+    assert np.count_nonzero(dat.array._data == write_value * 2 + other_write_value) == 1
+    assert np.count_nonzero(dat.array._data == write_value) == 2
+    assert np.count_nonzero(dat.array._data == write_value * 2) == nverts - 3
 
 
 @pytest.mark.parallel(nprocs=2)

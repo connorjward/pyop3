@@ -8,7 +8,7 @@ from pyrsistent import pmap
 from pyop3.axtree.tree import _as_int, _axis_component_size, step_size
 from pyop3.dtypes import IntType, get_mpi_dtype
 from pyop3.extras.debug import print_with_rank
-from pyop3.utils import just_one, strict_int
+from pyop3.utils import checked_zip, just_one, strict_int
 
 
 def partition_ghost_points(axis, sf):
@@ -78,24 +78,31 @@ def grow_dof_sf(axes: FrozenAxisTree, axis, path, indices):
     component_offsets = [0] + list(np.cumsum(component_counts))
     npoints = component_offsets[-1]
 
-    # effectively build the section
-    # TODO this is overkill since we only need to broadcast the roots
-    offsets = np.full(npoints, -1, IntType)
-    ndofs = np.copy(offsets)
-    for pt in point_sf.iroot:
-        # this isn't right
-        # rpt = axis.numbering[pt]
-        # this works because we are using the default numbering
-        # component, component_num = axis.axis_number_to_component(pt)
+    # renumbering per component, can skip if no renumbering present
+    renumbering = [np.empty(c.count, dtype=int) for c in axis.components]
+    counters = [0] * len(axis.components)
+    for new_pt, old_pt in enumerate(axis.numbering):
+        for cidx, (min_, max_) in enumerate(
+            zip(component_offsets, component_offsets[1:])
+        ):
+            if min_ <= old_pt < max_:
+                renumbering[cidx][old_pt - min_] = counters[cidx]
+                counters[cidx] += 1
+                break
+    assert all(count == c.count for count, c in checked_zip(counters, axis.components))
 
-        # inverse numbering maps from default -> renumbered
-        renumbered_pt = axis._inverse_numbering[pt]
+    # effectively build the section
+    root_offsets = np.full(npoints, -1, IntType)
+    for pt in point_sf.iroot:
+        # convert to a component-wise numbering
         selected_component = None
         component_num = None
-        for i, (min_, max_) in enumerate(zip(component_offsets, component_offsets[1:])):
-            if min_ <= renumbered_pt < max_:
-                selected_component = axis.components[i]
-                component_num = renumbered_pt - component_offsets[i]
+        for cidx, (min_, max_) in enumerate(
+            zip(component_offsets, component_offsets[1:])
+        ):
+            if min_ <= pt < max_:
+                selected_component = axis.components[cidx]
+                component_num = renumbering[cidx][pt - component_offsets[cidx]]
                 break
         assert selected_component is not None
         assert component_num is not None
@@ -105,60 +112,55 @@ def grow_dof_sf(axes: FrozenAxisTree, axis, path, indices):
             indices | {axis.label: component_num},
             insert_zeros=True,
         )
-        offsets[pt] = offset
+        root_offsets[pt] = offset
 
-    print_with_rank("int. offsets: ", offsets)
+    print_with_rank("root offsets before", root_offsets)
 
-    for pt in ilocal:
-        renumbered_pt = axis._inverse_numbering[pt]
-        component = None
+    point_sf.broadcast(root_offsets, MPI.REPLACE)
+
+    # for sanity reasons remove the original root values from the buffer
+    root_offsets[point_sf.iroot] = -1
+
+    local_leaf_offsets = np.empty(point_sf.nleaves, dtype=IntType)
+    leaf_ndofs = local_leaf_offsets.copy()
+    for myindex, pt in enumerate(ilocal):
+        # convert to a component-wise numbering
+        selected_component = None
         component_num = None
-        for i, (min_, max_) in enumerate(zip(component_offsets, component_offsets[1:])):
-            if min_ <= renumbered_pt < max_:
-                component = axis.components[i]
-                component_num = renumbered_pt - component_offsets[i]
+        for cidx, (min_, max_) in enumerate(
+            zip(component_offsets, component_offsets[1:])
+        ):
+            if min_ <= pt < max_:
+                selected_component = axis.components[cidx]
+                component_num = renumbering[cidx][pt - component_offsets[cidx]]
                 break
-        assert component is not None
+        assert selected_component is not None
         assert component_num is not None
-        ndofs[pt] = step_size(axes, axis, component)
+
         offset = axes.offset(
-            path | {axis.label: component.label},
+            path | {axis.label: selected_component.label},
             indices | {axis.label: component_num},
             insert_zeros=True,
         )
-        offsets[pt] = offset
-
-    print_with_rank("offsets: ", offsets)
-    print_with_rank("ndofs: ", ndofs)
-    print_with_rank("ilocal: ", ilocal)
-    print_with_rank("iremote: ", iremote)
-
-    # now communicate this
-
-    # TODO use a single buffer
-    to_offsets = np.zeros_like(offsets)
-
-    point_sf.broadcast(offsets, to_offsets, MPI.REPLACE)
-
-    print_with_rank("to offsets: ", to_offsets)
+        local_leaf_offsets[myindex] = offset
+        leaf_ndofs[myindex] = step_size(axes, axis, selected_component)
 
     # construct a new SF with these offsets
-    local_offsets = []
-    remote_offsets = []
-    for i, (rank, _) in zip(ilocal, iremote):
-        # maybe inverse
-        # j = axis._inverse_numbering[i]
-        # j = axis.numbering[i]
-        # print_with_rank(i, j)
-        j = i
-        for d in range(ndofs[i]):
-            local_offsets.append(offsets[j] + d)
-            remote_offsets.append((rank, to_offsets[j] + d))
+    ndofs = sum(leaf_ndofs)
+    local_leaf_dof_offsets = np.empty(ndofs, dtype=IntType)
+    remote_leaf_dof_offsets = np.empty((ndofs, 2), dtype=IntType)
+    counter = 0
+    for leaf, pos in enumerate(point_sf.ilocal):
+        for d in range(leaf_ndofs[leaf]):
+            local_leaf_dof_offsets[counter] = local_leaf_offsets[leaf] + d
 
-    local_offsets = np.array(local_offsets, dtype=IntType)
-    remote_offsets = np.array(remote_offsets, dtype=IntType)
+            rank = point_sf.iremote[leaf][0]
+            remote_leaf_dof_offsets[counter] = [rank, root_offsets[pos] + d]
+            counter += 1
 
-    print_with_rank("local offsets: ", local_offsets)
-    print_with_rank("remote offsets: ", remote_offsets)
+    print_with_rank("root offsets: ", root_offsets)
+    print_with_rank("local leaf offsets", local_leaf_offsets)
+    print_with_rank("local dof offsets: ", local_leaf_dof_offsets)
+    print_with_rank("remote offsets: ", remote_leaf_dof_offsets)
 
-    return (nroots, local_offsets, remote_offsets)
+    return (nroots, local_leaf_dof_offsets, remote_leaf_dof_offsets)
