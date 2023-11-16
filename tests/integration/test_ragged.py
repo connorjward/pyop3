@@ -20,7 +20,7 @@ from pyop3 import (
     do_loop,
     loop,
 )
-from pyop3.codegen.ir import LOOPY_LANG_VERSION, LOOPY_TARGET
+from pyop3.ir import LOOPY_LANG_VERSION, LOOPY_TARGET
 from pyop3.utils import flatten
 
 
@@ -270,10 +270,7 @@ def test_scalar_copy_of_permuted_axis_with_ragged_inner_axis(scalar_copy_kernel)
     m = 3
     nnzdata = np.asarray([2, 0, 4], dtype=IntType)
     npoints = sum(nnzdata)
-    perm = np.asarray([2, 1, 0], dtype=IntType)
-
-    fullperm = [4, 5] + [] + [0, 1, 2, 3]
-    assert len(fullperm) == npoints
+    numbering = np.asarray([2, 1, 0], dtype=IntType)
 
     nnzaxis = Axis(m, "ax0")
     nnz = MultiArray(
@@ -284,24 +281,21 @@ def test_scalar_copy_of_permuted_axis_with_ragged_inner_axis(scalar_copy_kernel)
     )
 
     axes = AxisTree(nnzaxis, {nnzaxis.id: Axis(nnz, "ax1")})
-    paxes = axes.with_modified_node(axes.root, permutation=perm)
+    paxes = axes.with_modified_node(axes.root, numbering=numbering)
 
     dat0 = MultiArray(axes, name="dat0", data=np.arange(axes.size, dtype=ScalarType))
     dat1 = MultiArray(paxes, name="dat1", dtype=dat0.dtype)
 
     do_loop(p := axes.index(), scalar_copy_kernel(dat0[p], dat1[p]))
-    assert np.allclose(dat1.data[fullperm], dat0.data)
+    assert np.allclose(dat1.data, dat0.data)
 
 
 def test_scalar_copy_of_permuted_then_ragged_then_permuted_axes(scalar_copy_kernel):
     m, n = 3, 2
     nnzdata = np.asarray([2, 1, 3], dtype=IntType)
-    perm0 = np.asarray([2, 1, 0], dtype=IntType)
-    perm1 = np.asarray([1, 0], dtype=IntType)
+    num0 = np.asarray([2, 1, 0], dtype=IntType)
+    num1 = np.asarray([1, 0], dtype=IntType)
     npoints = sum(nnzdata) * n
-
-    fullperm = [9, 8, 11, 10] + [7, 6] + [1, 0, 3, 2, 5, 4]
-    assert len(fullperm) == npoints
 
     nnzaxis = Axis(m)
     nnz = MultiArray(
@@ -312,12 +306,12 @@ def test_scalar_copy_of_permuted_then_ragged_then_permuted_axes(scalar_copy_kern
     )
 
     axes = AxisTree(nnzaxis, {nnzaxis.id: Axis(nnz, id="ax0"), "ax0": Axis(n)})
-    paxes = axes.with_modified_node(axes.root, permutation=perm0).with_modified_node(
-        axes.leaf[0], permutation=perm1
+    paxes = axes.with_modified_node(axes.root, numbering=num0).with_modified_node(
+        axes.leaf[0], numbering=num1
     )
 
     dat0 = MultiArray(axes, name="dat0", data=np.arange(npoints, dtype=ScalarType))
     dat1 = MultiArray(paxes, name="dat1", data=np.zeros(npoints, dtype=ScalarType))
 
     do_loop(p := axes.index(), scalar_copy_kernel(dat0[p], dat1[p]))
-    assert np.allclose(dat1.data[fullperm], dat0.data)
+    assert np.allclose(dat1.data_ro, dat0.data_ro)

@@ -23,7 +23,7 @@ from pyop3 import (
     do_loop,
     loop,
 )
-from pyop3.codegen.ir import LOOPY_LANG_VERSION, LOOPY_TARGET
+from pyop3.ir import LOOPY_LANG_VERSION, LOOPY_TARGET
 from pyop3.utils import flatten
 
 
@@ -412,7 +412,7 @@ def test_map_composition(vec2_inc_kernel):
     daxes0 = AxisTree(Axis([(10, "cpt0")]))
     daxes1 = AxisTree(Axis([AxisComponent(arity1, "cpt0")], "ax0"))
 
-    mapaxes0 = iterset.add_node(Axis(arity0), *iterset.leaf)
+    mapaxes0 = iterset.add_node(Axis(arity0, "map0"), *iterset.leaf)
     mapdata0 = np.asarray([[2, 4, 0], [6, 7, 1]], dtype=int)
     maparray0 = MultiArray(mapaxes0, name="map0", data=flatten(mapdata0))
     map0 = Map(
@@ -425,7 +425,7 @@ def test_map_composition(vec2_inc_kernel):
     )
 
     # this map targets the entries in mapdata0 so it can only contain 0s, 1s and 2s
-    mapaxes1 = iterset.add_node(Axis(arity1), *iterset.leaf)
+    mapaxes1 = iterset.add_node(Axis(arity1, "map1"), *iterset.leaf)
     mapdata1 = np.asarray([[0, 2], [2, 1]], dtype=int)
     maparray1 = MultiArray(mapaxes1, name="map1", data=mapdata1.flatten())
     map1 = Map(

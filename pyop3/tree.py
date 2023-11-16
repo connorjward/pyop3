@@ -259,6 +259,8 @@ class StrictLabelledTree(LabelledTree):
 
     @functools.cached_property
     def nodes(self) -> Frozenset[Node]:
+        if self.is_empty:
+            return frozenset()
         return frozenset({self.root}) | {
             node
             for node in filter(None, flatten(list(self.parent_to_children.values())))

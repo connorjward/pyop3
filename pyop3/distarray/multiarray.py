@@ -7,6 +7,7 @@ import numbers
 import operator
 import sys
 import threading
+from functools import cached_property
 from typing import Any, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -16,8 +17,7 @@ from mpi4py import MPI
 from petsc4py import PETSc
 from pyrsistent import freeze, pmap
 
-from pyop3 import utils
-from pyop3.axes import (
+from pyop3.axtree import (
     Axis,
     AxisComponent,
     AxisTree,
@@ -25,17 +25,22 @@ from pyop3.axes import (
     ContextSensitive,
     as_axis_tree,
 )
-from pyop3.axes.tree import AxisVariable, FrozenAxisTree, MultiArrayCollector
-from pyop3.distarray.base import DistributedArray
+from pyop3.axtree.tree import AxisVariable, FrozenAxisTree, MultiArrayCollector
+from pyop3.distarray2 import DistributedArray
+from pyop3.distarray.base import Tensor
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
-from pyop3.indices import IndexedAxisTree, IndexTree, as_index_forest, index_axes
-from pyop3.indices.tree import collect_loop_indices
+from pyop3.extras.debug import print_if_rank, print_with_rank
+from pyop3.itree import IndexedAxisTree, IndexTree, as_index_forest, index_axes
+from pyop3.itree.tree import CalledMapVariable, collect_loop_indices
 from pyop3.utils import (
     PrettyTuple,
     UniqueNameGenerator,
     as_tuple,
+    deprecated,
+    is_single_valued,
     just_one,
     merge_dicts,
+    readonly,
     single_valued,
     strict_int,
     strictly_all,
@@ -52,29 +57,60 @@ class IndexExpressionReplacer(pym.mapper.IdentityMapper):
         self._replace_map = replace_map
 
     def map_axis_variable(self, expr):
+        # print_if_rank(0, "replace map ", self._replace_map)
+        # return self._replace_map[expr.axis_label]
         return self._replace_map.get(expr.axis_label, expr)
 
     def map_multi_array(self, expr):
-        indices = tuple(self.rec(index) for index in expr.index_tuple)
+        # print_if_rank(0, self._replace_map)
+        # print_if_rank(0, expr.indices)
+        indices = {axis: self.rec(index) for axis, index in expr.indices.items()}
         return MultiArrayVariable(expr.array, indices)
 
+    def map_called_map(self, expr):
+        array = expr.function.map_component.array
 
-class MultiArrayVariable(pym.primitives.Subscript):
+        # should the following only exist at eval time?
+
+        # the inner_expr tells us the right mapping for the temporary, however,
+        # for maps that are arrays the innermost axis label does not always match
+        # the label used by the temporary. Therefore we need to do a swap here.
+        # I don't like this.
+        # inner_axis = array.axes.leaf_axis
+        # print_if_rank(0, self._replace_map)
+        # print_if_rank(0, expr.parameters)
+        indices = {axis: self.rec(idx) for axis, idx in expr.parameters.items()}
+        # indices[inner_axis.label] = indices.pop(expr.function.full_map.name)
+
+        return CalledMapVariable(expr.function, indices)
+
+    def map_loop_index(self, expr):
+        # this is hacky, if I make this raise a KeyError then we fail in indexing
+        return self._replace_map.get((expr.name, expr.axis), expr)
+
+
+class MultiArrayVariable(pym.primitives.Variable):
     mapper_method = sys.intern("map_multi_array")
 
     def __init__(self, array, indices):
-        super().__init__(pym.var(array.name), indices)
+        super().__init__(array.name)
         self.array = array
+        self.indices = freeze(indices)
 
-        # alias
-        self.indices = indices
+    def __repr__(self) -> str:
+        return f"MultiArrayVariable({self.array!r}, {self.indices!r})"
+
+    def __getinitargs__(self):
+        return self.array, self.indices
 
     @property
     def datamap(self):
-        return self.array.datamap | merge_dicts(idx.datamap for idx in self.indices)
+        return self.array.datamap | merge_dicts(
+            idx.datamap for idx in self.indices.values()
+        )
 
 
-class MultiArray(DistributedArray, ContextFree):
+class Dat(Tensor, ContextFree):
     """Multi-dimensional, hierarchical array.
 
     Parameters
@@ -85,13 +121,7 @@ class MultiArray(DistributedArray, ContextFree):
 
     """
 
-    fields = DistributedArray.fields | {
-        "axes",
-        "dtype",
-        "data",
-        "max_value",
-        "sf",
-    }
+    DEFAULT_DTYPE = DistributedArray.DEFAULT_DTYPE
 
     def __init__(
         self,
@@ -100,49 +130,43 @@ class MultiArray(DistributedArray, ContextFree):
         *,
         data=None,
         max_value=None,
-        sf=None,
         **kwargs,
     ):
         super().__init__(**kwargs)
 
-        # if not isinstance(axes, (AxisTree, IndexedAxisTree)):
-        #     # must be context-free
-        #     raise TypeError()
+        # TODO This is ugly
+        temporary_axes = as_axis_tree(axes).freeze()  # used for the temporary
+        axes = layout_axes(axes)
 
-        if isinstance(data, np.ndarray):
-            if dtype:
-                data = np.asarray(data, dtype=dtype)
-            else:
-                dtype = data.dtype
-        elif isinstance(data, Sequence):
-            data = np.asarray(data, dtype=dtype)
-            dtype = data.dtype
-        elif data is None:
-            if not dtype:
-                raise ValueError("Must either specify a dtype or provide an array")
-            dtype = np.dtype(dtype)
-            data = np.zeros(axes.size, dtype=dtype)
+        if data is None and dtype is None:
+            dtype = ScalarType
+
+        if isinstance(data, DistributedArray):
+            # disable for now, temporaries hit this in an annoying way
+            # if data.sf is not axes.sf:
+            #     raise ValueError("Star forests do not match")
+            if dtype is not None:
+                raise ValueError(
+                    "If data is a DistributedArray, dtype should not be provided"
+                )
+            pass
+        elif isinstance(data, np.ndarray):
+            data = DistributedArray(data, dtype, name=self.name, sf=axes.sf)
         else:
-            raise TypeError("data argument not recognised")
+            data = DistributedArray(axes.size, dtype, name=self.name, sf=axes.sf)
+        self.array = data
 
-        self._data = data
-        self.dtype = dtype
-
-        self.temporary_axes = as_axis_tree(axes).freeze()  # used for the temporary
-        self.axes = layout_axes(axes)
-        self.layout_axes = self.axes  # cached property?
+        self.temporary_axes = temporary_axes
+        self.axes = axes
+        self.layout_axes = axes  # used? likely don't need all these
 
         self.max_value = max_value
-        self.sf = sf
 
-        self._pending_write_op = None
-        self._halo_modified = False
-        self._halo_valid = True
-
-        self._sync_thread = None
+    def __str__(self):
+        return self.name
 
     def __getitem__(self, indices) -> Union[MultiArray, ContextSensitiveMultiArray]:
-        from pyop3.indices.tree import (
+        from pyop3.itree.tree import (
             _compose_bits,
             _index_axes,
             as_index_tree,
@@ -188,7 +212,7 @@ class MultiArray(DistributedArray, ContextFree):
                 index_exprs=index_exprs,
                 layouts=new_layouts,
             )
-            return self.copy_record(axes=layout_axes)
+            return self._with_axes(layout_axes)
 
         array_per_context = {}
         for index_tree in as_index_forest(indices, axes=self.layout_axes):
@@ -233,7 +257,7 @@ class MultiArray(DistributedArray, ContextFree):
                 index_exprs=index_exprs,
                 layouts=new_layouts,
             )
-            array_per_context[loop_context] = self.copy_record(axes=layout_axes)
+            array_per_context[loop_context] = self._with_axes(layout_axes)
         return ContextSensitiveMultiArray(array_per_context)
 
     # TODO remove this
@@ -242,55 +266,82 @@ class MultiArray(DistributedArray, ContextFree):
         return self.axes.layouts
 
     @property
-    def data(self):
-        import warnings
+    def dtype(self):
+        return self.array.dtype
 
-        warnings.warn("deprecate this")
+    @property
+    def sf(self) -> StarForest:
+        return self.array.sf
+
+    @property
+    @deprecated(".data_rw")
+    def data(self):
         return self.data_rw
 
     @property
     def data_rw(self):
-        return self._data
+        return self.array.data_rw
 
     @property
     def data_ro(self):
-        # TODO
-        return self._data
+        return self.array.data_ro
 
     @property
     def data_wo(self):
-        # TODO
-        return self._data
+        """
+        Have to be careful. If not setting all values (i.e. subsets) should call
+        `reduce_leaves_to_roots` first.
 
-    @functools.cached_property
-    def datamap(self) -> dict[str:DistributedArray]:
+        When this is called we set roots_valid, claiming that any (lazy) 'in-flight' writes
+        can be dropped.
+        """
+        return self.array.data_wo
+
+    @property
+    def sf(self):
+        return self.array.sf
+
+    @cached_property
+    def datamap(self):
         datamap_ = {self.name: self}
         datamap_.update(self.axes.datamap)
         datamap_.update(self.layout_axes.datamap)
         return freeze(datamap_)
 
+    def assemble(self):
+        """Ensure that stored values are up-to-date.
+
+        This function is typically only required when accessing the `Dat` in a
+        write-only mode (`Access.WRITE`, `Access.MIN_WRITE` or `Access.MAX_WRITE`)
+        and only setting a subset of the values. Without `Dat.assemble` the non-subset
+        entries in the array would hold undefined values.
+
+        """
+        self.array._reduce_then_broadcast()
+
+    def _with_axes(self, axes):
+        """Return a new `Dat` with new axes pointing to the same data."""
+        return type(self)(
+            axes,
+            data=self.array,
+            max_value=self.max_value,
+            name=self.name,
+            orig_array=self.orig_array,
+        )
+
     def as_var(self):
         # must not be branched...
-        indices = tuple(
-            AxisVariable(axis)
-            for axis, _ in self.axes.path(*self.axes.leaf, ordered=True)
+        indices = freeze(
+            {
+                axis: AxisVariable(axis)
+                for axis, _ in self.axes.path(*self.axes.leaf).items()
+            }
         )
         return MultiArrayVariable(self, indices)
 
     @property
-    def shape(self):
-        raise IncompatibleShapeError(
-            "Ragged and/or multi-component arrays do not have a well defined shape"
-        )
-
-    @property
     def alloc_size(self):
         return self.axes.alloc_size() if not self.axes.is_empty else 1
-
-    # ???
-    # @property
-    # def pym_var(self) -> pym.primitives.Variable:
-    #     return MultiArray
 
     @classmethod
     def from_list(cls, data, axis_labels, name=None, dtype=ScalarType, inc=0):
@@ -327,102 +378,6 @@ class MultiArray(DistributedArray, ContextFree):
                 count.append(y)
             return flattened, count
 
-    @property
-    def reduction_ops(self):
-        from pyop3.loopexprs import INC
-
-        return {
-            INC: MPI.SUM,
-        }
-
-    def reduce_leaves_to_roots(self, sf, pending_write_op):
-        mpi_dtype, _ = get_mpi_dtype(self.data.dtype)
-        mpi_op = self.reduction_ops[pending_write_op]
-        args = (mpi_dtype, self.data, self.data, mpi_op)
-        sf.reduceBegin(*args)
-        sf.reduceEnd(*args)
-
-    def broadcast_roots_to_leaves(self, sf):
-        mpi_dtype, _ = get_mpi_dtype(self.data.dtype)
-        mpi_op = MPI.REPLACE
-        args = (mpi_dtype, self.data, self.data, mpi_op)
-        sf.bcastBegin(*args)
-        sf.bcastEnd(*args)
-
-    def sync_begin(self, need_halo_values=False):
-        """Begin synchronizing shared data."""
-        self._sync_thread = threading.Thread(
-            target=self.__class__.sync,
-            args=(self,),
-            kwargs={"need_halo_values": need_halo_values},
-        )
-        self._sync_thread.start()
-
-    def sync_end(self):
-        """Finish synchronizing shared data."""
-        if not self._sync_thread:
-            raise RuntimeError(
-                "Cannot call sync_end without a prior call to sync_begin"
-            )
-        self._sync_thread.join()
-        self._sync_thread = None
-
-    # TODO create Synchronizer object for encapsulation?
-    def sync(self, need_halo_values=False):
-        """Perform halo exchanges to ensure that all ranks store up-to-date values.
-
-        Parameters
-        ----------
-        need_halo_values : bool
-            Whether or not halo values also need to be synchronized.
-
-        Notes
-        -----
-        This is a blocking operation. F.labelor the non-blocking alternative use
-        :meth:`sync_begin` and :meth:`sync_end` (FIXME)
-
-        Note that this method should only be called when one needs to read from
-        the array.
-        """
-        # 1. Reduce leaf values to roots if they have been written to.
-        # (this is basically local-to-global)
-        if self._pending_write_op:
-            assert (
-                not self._halo_valid
-            ), "If a write is pending the halo cannot be valid"
-            # If halo entries have also been written to then we need to use the
-            # full SF containing both shared and halo points. If the halo has not
-            # been modified then we only need to reduce with shared points.
-            if self._halo_modified:
-                self.reduce_leaves_to_roots(self.root.sf, self._pending_write_op)
-            else:
-                # only reduce with values from owned points
-                self.reduce_leaves_to_roots(self.root.shared_sf, self._pending_write_op)
-
-        # implicit barrier? can only broadcast reduced values
-
-        # 3. at this point only one of the owned points knows the correct result which
-        # now needs to be scattered back to some (but not necessarily all) of the other ranks.
-        # (this is basically global-to-local)
-
-        # only send to halos if we want to read them and they are out-of-date
-        if need_halo_values and not self._halo_valid:
-            # send the root value back to all the points
-            self.broadcast_roots_to_leaves(self.root.sf)
-            self._halo_valid = True  # all the halo points are now up-to-date
-        else:
-            # only need to update owned points if we did a reduction earlier
-            if self._pending_write_op:
-                # send the root value back to just the owned points
-                self.broadcast_roots_to_leaves(self.root.shared_sf)
-                # (the halo is still dirty)
-
-        # set self.last_op to None here? what if halo is still off?
-        # what if we read owned values and then owned+halo values?
-        # just perform second step
-        self._pending_write_op = None
-        self._halo_modified = False
-
     def get_value(self, *args, **kwargs):
         return self.data[self.axes.get_offset(*args, **kwargs)]
 
@@ -437,13 +392,19 @@ class MultiArray(DistributedArray, ContextFree):
             current_axis = current_axis.get_part(idx.npart).subaxis
         return tuple(selected)
 
-    def __str__(self):
-        return self.name
+
+# Needs to be subclass for isinstance checks to work
+# TODO Delete
+class MultiArray(Dat):
+    @deprecated("Dat")
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
 
+# Now ContextSensitiveDat
 class ContextSensitiveMultiArray(ContextSensitive):
     def __getitem__(self, indices) -> ContextSensitiveMultiArray:
-        from pyop3.indices.tree import (
+        from pyop3.itree.tree import (
             _compose_bits,
             _index_axes,
             as_index_tree,
@@ -501,13 +462,19 @@ class ContextSensitiveMultiArray(ContextSensitive):
                 index_exprs,
                 layouts=new_layouts,
             )
-            array_per_context[loop_context] = array.copy_record(axes=layout_axes)
+            array_per_context[loop_context] = array._with_axes(layout_axes)
         return ContextSensitiveMultiArray(array_per_context)
 
     # don't like this name
+    # FIXME This function returns dats, the "array" function returns a DistributedArray,
+    # this is confusing and should be cleaned up
     @property
     def orig_array(self):
-        return single_valued(array.orig_array for array in self.context_map.values())
+        return single_valued(dat.orig_array for dat in self.context_map.values())
+
+    @property
+    def array(self):
+        return single_valued(dat.array for dat in self.context_map.values())
 
     @property
     def dtype(self):
@@ -541,7 +508,6 @@ def _(axes: IndexedAxisTree) -> FrozenAxisTree:
     if axes.is_empty:
         raise NotImplementedError
         # return LayoutAxisTree(axes, freeze({pmap(): 0}))
-        breakpoint()
         return LayoutAxisTree(axes, NotImplemented)
 
     # relabel the axis tree, note that the strong statements (i.e. just_one(...), etc)
@@ -590,6 +556,9 @@ def _(axes: IndexedAxisTree) -> FrozenAxisTree:
             replace_map.update(axes.layout_exprs[axis.id, cpt])
         new_path = freeze(new_path)
 
+        print(axes.layout_exprs.values())
+        print(replace_map)
+
         orig_layout = axes.restore().layouts[orig_path]
         new_layout = IndexExpressionReplacer(replace_map)(orig_layout)
         assert new_layout != orig_layout
@@ -618,7 +587,7 @@ def make_sparsity(
                 "Need to think about whether maps are reasonable here"
             )
 
-        if not utils.is_single_valued(idx.id for idx in [iterindex, lmap, rmap]):
+        if not is_single_valued(idx.id for idx in [iterindex, lmap, rmap]):
             raise ValueError("Indices must share common roots")
 
         sparsity = collections.defaultdict(set)
@@ -775,55 +744,6 @@ def distribute_sparsity(sparsity, ax1, ax2, owner="row"):
     return new_sparsity
 
 
-def overlap_axes(ax1, ax2, sparsity=None):
-    """Combine two multiaxes, possibly sparsely."""
-    if ax1.depth != 1 or ax2.depth != 1:
-        raise NotImplementedError(
-            "Need to think about composition rules for nested axes"
-        )
-
-    new_parts = []
-    for pt1 in ax1.parts:
-        new_subparts = []
-        for pt2 in ax2.parts:
-            # some initial checks
-            if any(not isinstance(pt.count, numbers.Integral) for pt in [pt1, pt2]):
-                raise NotImplementedError(
-                    "Need to think about non-integral sized axis parts"
-                )
-
-            # now do the real work
-            count = []
-            indices = []
-            for i1 in range(pt1.count):
-                indices_per_row = []
-                for i2 in range(pt2.count):
-                    # if ((i1,), (i2,)) in sparsity[(pt1.label,), (pt2.label,)]:
-                    if (i1, i2) in sparsity[(pt1.label, pt2.label)]:
-                        indices_per_row.append(i2)
-                count.append(len(indices_per_row))
-                indices.append(indices_per_row)
-
-            count = MultiArray.from_list(
-                count, labels=[pt1.label], name="count", dtype=IntType
-            )
-            indices = MultiArray.from_list(
-                indices, labels=[pt1.label, "any"], name="indices", dtype=IntType
-            )
-
-            # FIXME: I think that the inner axis count should be "full", not
-            # the number of indices. This means that we need to use the
-            # number of indices when computing layouts.
-            new_subpart = pt2.copy(count=count, indices=indices)
-            new_subparts.append(new_subpart)
-
-        subaxis = MultiAxis(new_subparts)
-        new_part = pt1.copy(subaxis=subaxis)
-        new_parts.append(new_part)
-
-    return MultiAxis(new_parts).set_up(with_sf=False)
-
-
 def substitute_layouts(orig_axes, new_axes, target_paths, index_exprs):
     # replace layout bits that disappear with loop index
     if new_axes.is_empty:
@@ -840,11 +760,13 @@ def substitute_layouts(orig_axes, new_axes, target_paths, index_exprs):
         new_layouts = {}
         for leaf_axis, leaf_cpt in new_axes.leaves:
             orig_path = dict(target_paths.get(None, {}))
+            replace_map = dict(index_exprs.get(None, {}))
             for myaxis, mycpt in new_axes.path_with_nodes(leaf_axis, leaf_cpt).items():
                 orig_path.update(target_paths.get((myaxis.id, mycpt), {}))
+                replace_map.update(index_exprs.get((myaxis.id, mycpt), {}))
 
             orig_layout = orig_axes.layouts[freeze(orig_path)]
-            new_layout = IndexExpressionReplacer(index_exprs.get(None, {}))(orig_layout)
+            new_layout = IndexExpressionReplacer(replace_map)(orig_layout)
             new_layouts[new_axes.path(leaf_axis, leaf_cpt)] = new_layout
             # TODO, this sometimes fails, is that valid?
             # don't silently do nothing

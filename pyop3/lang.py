@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import abc
 import collections
+import contextlib
 import dataclasses
 import enum
 import functools
 import operator
+from collections import defaultdict
+from functools import cached_property, partial
 from typing import Iterable, Sequence, Tuple
 from weakref import WeakValueDictionary
 
@@ -15,28 +18,40 @@ import pymbolic as pym
 import pytools
 from pyrsistent import freeze, pmap
 
-from pyop3.axes import as_axis_tree
-from pyop3.axes.tree import (
+from pyop3.axtree import as_axis_tree
+from pyop3.axtree.tree import (
     ContextFree,
     ContextSensitive,
     FrozenAxisTree,
     MultiArrayCollector,
 )
-from pyop3.distarray import DistributedArray, MultiArray, PetscMat
-from pyop3.distarray.multiarray import IndexExpressionReplacer, substitute_layouts
-from pyop3.dtypes import IntType
-from pyop3.indices.tree import (
+from pyop3.config import config
+from pyop3.distarray import Dat, MultiArray, PetscMat
+from pyop3.distarray2 import DistributedArray
+from pyop3.distarray.multiarray import (
+    ContextSensitiveMultiArray,
+    IndexExpressionReplacer,
+    substitute_layouts,
+)
+from pyop3.dtypes import IntType, dtype_limits
+from pyop3.extras.debug import print_with_rank
+from pyop3.itree.tree import (
     IndexedAxisTree,
     _compose_bits,
     _index_axes,
     as_index_forest,
+    partition_iterset,
 )
-from pyop3.utils import as_tuple, checked_zip, merge_dicts
+from pyop3.utils import as_tuple, checked_zip, just_one, merge_dicts, unique
 
 
-# TODO I don't think that this belongs in this file, it belongs to the kernel?
-# create a kernel.py file?
+# TODO I don't think that this belongs in this file, it belongs to the function?
+# create a function.py file?
+# class Intent?
 class Access(enum.Enum):
+    # developer note, MIN_RW and MIN_WRITE are distinct (unlike PyOP2) to avoid
+    # passing "requires_zeroed_output_arguments" around, yuck
+
     READ = "read"
     WRITE = "write"
     RW = "rw"
@@ -49,12 +64,16 @@ class Access(enum.Enum):
 
 READ = Access.READ
 WRITE = Access.WRITE
-INC = Access.INC
 RW = Access.RW
+INC = Access.INC
 MIN_RW = Access.MIN_RW
 MIN_WRITE = Access.MIN_WRITE
 MAX_RW = Access.MAX_RW
 MAX_WRITE = Access.MAX_WRITE
+
+
+class IntentMismatchError(Exception):
+    pass
 
 
 class LoopExpr(pytools.ImmutableRecord, abc.ABC):
@@ -62,7 +81,7 @@ class LoopExpr(pytools.ImmutableRecord, abc.ABC):
 
     @property
     @abc.abstractmethod
-    def datamap(self) -> WeakValueDictionary[str, DistributedArray]:
+    def datamap(self):
         """Map from names to arrays.
 
         weakref since we don't want to hold a reference to these things?
@@ -111,43 +130,267 @@ class Loop(LoopExpr):
     def indices(self):
         return self.index.indices
 
-    @functools.cached_property
+    @cached_property
     def datamap(self):
         return self.index.datamap | merge_dicts(
             stmt.datamap for stmt in self.statements
         )
 
-    def __str__(self):
-        return f"for {self.index} ∊ {self.index.point_set}"
-
     def __call__(self, **kwargs):
-        args = [
-            _as_pointer(self.datamap[arg.name])
-            for arg in self.loopy_code.default_entrypoint.args
-        ]
+        from pyop3.ir.lower import compile
 
-        # TODO parse kwargs
-        # breakpoint()
+        if self.is_parallel:
+            # interleave computation and communication
+            new_index, (icore, inoncore) = partition_iterset(
+                self.index, [a for a, _ in self.all_function_arguments]
+            )
 
-        self.executable(*args)
+            assert self.index.id == new_index.id
 
-    @functools.cached_property
+            # substitute subsets into loopexpr, should maybe be done in partition_iterset
+            parallel_loop = self.copy(index=new_index)
+            code = compile(parallel_loop)
+
+            # interleave communication and computation
+            with self._updates_in_flight():
+                # replace the parallel axis subset with one for the specific indices here
+                extent = just_one(icore.axes.root.components).count
+                core_kwargs = merge_dicts(
+                    [kwargs, {icore.name: icore, extent.name: extent}]
+                )
+                code(**core_kwargs)
+
+            # noncore
+            noncore_extent = just_one(inoncore.axes.root.components).count
+            noncore_kwargs = merge_dicts(
+                [kwargs, {icore.name: inoncore, extent.name: noncore_extent}]
+            )
+            code(**noncore_kwargs)
+
+            # also may need to eagerly assemble Mats, or be clever?
+        else:
+            compile(self)(**kwargs)
+
+    @cached_property
     def loopy_code(self):
-        from pyop3.codegen.ir import compile
+        from pyop3.ir.lower import compile
 
         return compile(self)
 
-    @functools.cached_property
-    def c_code(self):
-        from pyop3.codegen.exe import compile_loopy
+    @cached_property
+    def is_parallel(self):
+        return len(self._distarray_args) > 0
 
-        return compile_loopy(self.loopy_code, stop_at_c=True)
+    @cached_property
+    def all_function_arguments(self):
+        # TODO overly verbose
+        func_args = {}
+        for stmt in self.statements:
+            for arg, intent in stmt.all_function_arguments:
+                if arg not in func_args:
+                    func_args[arg] = intent
+        # now sort
+        return tuple(
+            (arg, func_args[arg])
+            for arg in sorted(func_args.keys(), key=lambda a: a.name)
+        )
 
-    @functools.cached_property
-    def executable(self):
-        from pyop3.codegen.exe import compile_loopy
+    @cached_property
+    def _distarray_args(self):
+        arrays = {}
+        for arg, intent in self.all_function_arguments:
+            # catch exceptions in a horrible way
+            if isinstance(arg, Offset):  # should probably remove this type
+                continue
+            if (
+                not isinstance(arg.array, DistributedArray)
+                or not arg.array.is_distributed
+            ):
+                continue
+            if arg.array not in arrays:
+                arrays[arg.array] = (intent, _has_nontrivial_stencil(arg))
+            else:
+                if arrays[arg.array][0] != intent:
+                    # I think that it does not make sense to access arrays with
+                    # different intents in the same kernel but that it is
+                    # always OK if the same intent is used.
+                    raise IntentMismatchError
 
-        return compile_loopy(self.loopy_code)
+                # We need to know if *any* uses of a particular array touch ghost points
+                if not arrays[arg.array][1] and _has_nontrivial_stencil(arg):
+                    arrays[arg.array] = (intent, True)
+
+        # now sort
+        return tuple(
+            (arr, *arrays[arr]) for arr in sorted(arrays.keys(), key=lambda a: a.name)
+        )
+
+    def _array_updates(self):
+        # NOTE: It is safe to include reductions in the finalizers because
+        # core entities (in the iterset) are defined as being those that do
+        # not overlap with any points in the star forest.
+
+        # TODO update this comment to account for different threading models
+
+        # Since we sometimes have to do a reduce and then a broadcast the messages
+        # are organised into generations with each generation being executed in
+        # turn.
+        # As an example consider needing to update 2 arrays, one with a
+        # reduce-then-broadcast and the other with a reduction. This will produce
+        # the following collection of messages (the final generation is always -1):
+        #
+        #   [generation  0] : [array1.reduce_begin, array2.reduce_begin]
+        #   [generation  1] : [array1.reduce_end, array1.broadcast_begin]
+        #   [generation -1] : [array1.broadcast_end, array2.reduce_end]
+        #
+        # To avoid blocking the operations are executed on a separate thread. Once
+        # the thread terminates, all messages will have been sent and execution
+        # may continue.
+
+        # maps array to messages split by generation
+        messages = defaultdict(partial(defaultdict, list))
+        for array, intent, touches_ghost_points in self._distarray_args:
+            if intent in {READ, RW}:
+                if touches_ghost_points:
+                    if not array._roots_valid:
+                        messages[array][0].append(array._reduce_leaves_to_roots_begin)
+                        messages[array][1].extend(
+                            [
+                                array._reduce_leaves_to_roots_end,
+                                array._broadcast_roots_to_leaves_begin,
+                            ]
+                        )
+                        messages[array][-1].append(array._broadcast_roots_to_leaves_end)
+                    else:
+                        messages[array][0].append(
+                            array._broadcast_roots_to_leaves_begin
+                        )
+                        messages[array][-1].append(array._broadcast_roots_to_leaves_end)
+                else:
+                    if not array._roots_valid:
+                        messages[array][0].append(array.reduce_leaves_to_roots_begin)
+                        messages[array][-1].append(array.reduce_leaves_to_roots_end)
+
+            elif intent == WRITE:
+                # Assumes that all points are written to (i.e. not a subset). If
+                # this is not the case then a manual reduction is needed.
+                array._leaves_valid = False
+                array._pending_reduction = None
+
+            elif intent in {INC, MIN_WRITE, MIN_RW, MAX_WRITE, MAX_RW}:  # reductions
+                # We don't need to update roots if performing the same reduction
+                # again. For example we can increment into an array as many times
+                # as we want. The reduction only needs to be done when the
+                # data is read.
+                if array._roots_valid or intent == array._pending_reduction:
+                    pass
+                else:
+                    # We assume that all points are visited, and therefore that
+                    # WRITE accesses do not need to update roots. If only a subset
+                    # of entities are written to then a manual reduction is required.
+                    # This is the same assumption that we make for data_wo and is
+                    # explained in the documentation.
+                    if intent in {INC, MIN_RW, MAX_RW}:
+                        assert array._pending_reduction is not None
+                        messages[array][0].append(array.reduce_leaves_to_roots_begin)
+                        messages[array][-1].append(array.reduce_leaves_to_roots_end)
+
+                # We are modifying owned values so the leaves must now be wrong
+                array._leaves_valid = False
+
+                # If ghost points are not modified then no future reduction is required
+                if not touches_ghost_points:
+                    array._pending_reduction = None
+                else:
+                    array._pending_reduction = intent
+
+                    # set leaves to appropriate nil value
+                    if intent == INC:
+                        array._data[array.sf.ileaf] = 0
+                    elif intent in {MIN_WRITE, MIN_RW}:
+                        array._data[array.sf.ileaf] = dtype_limits(array.dtype).max
+                    elif intent in {MAX_WRITE, MAX_RW}:
+                        array._data[array.sf.ileaf] = dtype_limits(array.dtype).min
+                    else:
+                        raise AssertionError
+
+            else:
+                raise AssertionError
+
+        return messages
+
+    @contextlib.contextmanager
+    def _updates_in_flight(self):
+        """Context manager for interleaving computation and communication."""
+        sendrecvs = self._array_updates()
+
+        if config["thread_model"] in {"SINGLE", "SERIALIZED"}:
+            # cannot do a thread per-array, compress the sendrecvs
+            new_sendrecvs = defaultdict(list)
+            for sendrecvs_per_array in sendrecvs.values():
+                for generation, messages in sendrecvs_per_array.items():
+                    new_sendrecvs[generation].extend(messages)
+            sendrecvs = new_sendrecvs
+
+        # TODO make an enum
+        if config["thread_model"] == "SINGLE":
+            # multithreading is not supported, do all of the sendrecvs apart
+            # from the final generation eagerly
+            ngenerations = len(sendrecvs) - 1
+            for gen in range(ngenerations):
+                for sendrecv in sendrecvs[gen]:
+                    sendrecv()
+            finalizers = messages[-1]
+        elif config["thread_model"] == "SERIALIZED":
+            # ghost exchanges can only be done on a single thread
+            thread = threading.Thread(
+                target=self.__class__._sendrecv, args=(sendrecvs,)
+            )
+            thread.start()
+            finalizers = [thread.join]
+        elif config["thread_model"] == "MULTIPLE":
+            # different thread per array
+            finalizers = []
+            for sendrecvs_per_array in sendrecvs.values():
+                thread = threading.Thread(
+                    target=self.__class__._sendrecv, args=(sendrecvs_per_array,)
+                )
+                thread.start()
+                finalizers.append(thread.join)
+        else:
+            raise AssertionError
+
+        yield
+
+        # wait for everything
+        for f in finalizers:
+            f()
+
+    @staticmethod
+    def _sendrecv(messages):
+        # loop over generations starting from 0 and ending with -1
+        ngenerations = len(messages) - 1
+        for gen in [*range(ngenerations), -1]:
+            for msg in messages[gen]:
+                msg()
+
+
+# TODO singledispatch
+def _has_nontrivial_stencil(array):
+    """
+
+    This is a proxy for 'this array touches halo points'.
+
+    """
+    # FIXME This is WRONG, there are cases (e.g. support(extfacet)) where
+    # the halo might be touched but the size (i.e. map arity) is 1. I need
+    # to look at index_exprs probably.
+    if isinstance(array, Dat):
+        return array.axes.size > 1
+    elif isinstance(array, ContextSensitiveMultiArray):
+        return any(_has_nontrivial_stencil(d) for d in array.context_map.values())
+    else:
+        raise TypeError
 
 
 @dataclasses.dataclass(frozen=True)
@@ -231,12 +474,8 @@ class CalledFunction(LoopExpr):
         self.arguments = arguments
 
     @functools.cached_property
-    def datamap(self) -> dict[str, DistributedArray]:
+    def datamap(self):
         return merge_dicts([arg.datamap for arg in self.arguments])
-
-    # @property
-    # def operands(self):
-    #     ...
 
     @property
     def name(self):
@@ -246,31 +485,20 @@ class CalledFunction(LoopExpr):
     def argspec(self):
         return self.function.argspec
 
-    # @property
-    # def inputs(self):
-    #     return tuple(
-    #         arg
-    #         for arg, spec in zip(self.arguments, self.argspec)
-    #         if spec.access == READ
-    #     )
-    #
-    # @property
-    # def outputs(self):
-    #     return tuple(
-    #         arg
-    #         for arg, spec in zip(self.arguments, self.argspec)
-    #         if spec.access in {AccessDescriptor.WRITE, AccessDescriptor.INC}
-    #     )
-
-    # @property
-    # def output_specs(self):
-    #     return tuple(
-    #         filter(
-    #             lambda spec: spec.access
-    #             in {AccessDescriptor.WRITE, AccessDescriptor.INC},
-    #             self.argspec,
-    #         )
-    #     )
+    # FIXME NEXT: Expand ContextSensitive things here
+    @property
+    def all_function_arguments(self):
+        return tuple(
+            sorted(
+                [
+                    (arg, intent)
+                    for arg, intent in checked_zip(
+                        self.arguments, self.function._access_descrs
+                    )
+                ],
+                key=lambda a: a[0].name,
+            )
+        )
 
 
 class Offset(LoopExpr, ContextSensitive):
@@ -410,21 +638,6 @@ def loop(*args, **kwargs):
 
 def do_loop(*args, **kwargs):
     loop(*args, **kwargs)()
-
-
-@functools.singledispatch
-def _as_pointer(array: DistributedArray) -> int:
-    raise NotImplementedError
-
-
-@_as_pointer.register
-def _(array: MultiArray):
-    return array.data.ctypes.data
-
-
-@_as_pointer.register
-def _(array: PetscMat):
-    return array.petscmat.handle
 
 
 def fix_intents(tunit, accesses):

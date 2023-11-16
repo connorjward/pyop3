@@ -55,7 +55,7 @@ jobs:
         working-directory: ${{ env.PETSC_DIR }}/src/binding/petsc4py
         run: |
           pip install --upgrade pip
-          pip install --upgrade wheel 'cython<3' numpy
+          pip install --upgrade wheel cython numpy
           pip install --no-deps .
 
       - name: Checkout pyop3
@@ -67,8 +67,8 @@ jobs:
         shell: bash
         working-directory: pyop3
         run: |
-          pip install pytest pytest-cov pytest-timeout pytest-xdist pytest-timeout
-          pip install .
+          pip install ".[test]"
+          pip install pytest-cov pytest-timeout pytest-xdist
 
       - name: Run tests
         shell: bash

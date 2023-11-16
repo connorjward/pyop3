@@ -2,8 +2,10 @@ import collections
 import functools
 import itertools
 import operator
+import warnings
 from typing import Any, Collection, Hashable, Optional
 
+import numpy as np
 import pytools
 from pyrsistent import pmap
 
@@ -123,6 +125,8 @@ def is_sequence(item):
 
 def flatten(iterable):
     """Recursively flatten a nested iterable."""
+    if isinstance(iterable, np.ndarray):
+        return iterable.flatten()
     if not isinstance(iterable, (list, tuple)):
         return (iterable,)
     return tuple(item_ for item in iterable for item_ in flatten(item))
@@ -224,3 +228,25 @@ def map_when(func, when_func, iterable):
             yield func(item)
         else:
             yield item
+
+
+def readonly(array):
+    """Return a readonly view of a numpy array."""
+    view = array.view()
+    view.setflags(write=False)
+    return view
+
+
+def deprecated(prefer=None, internal=False):
+    def decorator(fn):
+        def wrapper(*args, **kwargs):
+            msg = f"{fn.__qualname__} is deprecated and will be removed"
+            if prefer:
+                msg += f", please use {prefer} instead"
+            warning_type = DeprecationWarning if internal else FutureWarning
+            warnings.warn(msg, warning_type)
+            return fn(*args, **kwargs)
+
+        return wrapper
+
+    return decorator

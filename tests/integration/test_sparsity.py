@@ -150,12 +150,18 @@ def test_sparse_matrix_insertion(scalar_copy_kernel):
     scalar = MultiArray(
         Axis(1), name="scalar", data=np.asarray([666], dtype=ScalarType)
     )
-    matrix = MultiArray(axes[slice0, subset], name="matrix", dtype=scalar.dtype)
+    sparseaxes = axes[slice0, subset]
+    # matrix = MultiArray(axes[slice0, subset], name="matrix", dtype=scalar.dtype)
+    matrix = MultiArray(sparseaxes, name="matrix", dtype=scalar.dtype)
+    # breakpoint()
 
     # insert a value into a column of the matrix
-    do_loop(
+    # do_loop(
+    l = loop(
         p := axes[slice1, 1].index(),
         scalar_copy_kernel(scalar[:], matrix[p]),
     )
+    l()
     expected = np.asarray([0, 666, 0, 666, 0, 666, 0])
+    # breakpoint()
     assert np.allclose(matrix.data_ro, expected)

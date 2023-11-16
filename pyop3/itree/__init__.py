@@ -1,4 +1,4 @@
-from pyop3.indices.tree import (
+from .tree import (
     AffineMapComponent,
     AffineSliceComponent,
     CalledMap,

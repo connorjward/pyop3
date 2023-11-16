@@ -10,13 +10,13 @@ import pymbolic as pym
 from petsc4py import PETSc
 from pyrsistent import freeze
 
-from pyop3.axes import AxisTree
-from pyop3.axes.tree import ContextFree, ContextSensitive, FrozenAxisTree
-from pyop3.distarray.base import DistributedArray
+from pyop3.axtree import AxisTree
+from pyop3.axtree.tree import ContextFree, ContextSensitive, FrozenAxisTree
+from pyop3.distarray.base import Tensor
 from pyop3.distarray.multiarray import ContextSensitiveMultiArray, MultiArray
 from pyop3.dtypes import ScalarType
-from pyop3.indices import IndexTree
-from pyop3.indices.tree import IndexedAxisTree
+from pyop3.itree import IndexTree
+from pyop3.itree.tree import IndexedAxisTree
 from pyop3.utils import just_one, merge_dicts, single_valued, strictly_all
 
 
@@ -27,14 +27,14 @@ class PetscVariable(pym.primitives.Variable):
         self.obj = obj
 
 
-class PetscObject(DistributedArray, abc.ABC):
+class PetscObject(abc.ABC):
     dtype = ScalarType
 
     def as_var(self):
         return PetscVariable(self)
 
 
-class PetscVec(PetscObject):
+class PetscVec(Tensor, PetscObject):
     def __new__(cls, *args, **kwargs):
         # dispatch to different vec types based on -vec_type
         raise NotImplementedError
@@ -48,7 +48,7 @@ class PetscVecNest(PetscVec):
     ...
 
 
-class PetscMat(PetscObject):
+class PetscMat(Tensor, PetscObject):
     prefix = "mat"
 
     def __new__(cls, *args, **kwargs):
@@ -74,6 +74,10 @@ class IndexedPetscMat(ContextFree):
     # alias, bad?
     @property
     def orig_array(self):
+        return self.orig_mat
+
+    @property
+    def array(self):
         return self.orig_mat
 
     @property
@@ -207,7 +211,7 @@ class PetscMatAIJ(PetscMat):
         # self.petscmat = petscmat
 
     def __getitem__(self, indices):
-        from pyop3.indices.tree import (
+        from pyop3.itree.tree import (
             _compose_bits,
             _index_axes,
             as_index_forest,
