@@ -5,7 +5,12 @@ from mpi4py import MPI
 from petsc4py import PETSc
 
 from pyop3.dtypes import get_mpi_dtype
+from pyop3.extras.debug import print_with_rank
 from pyop3.utils import just_one
+
+
+class BufferSizeMismatchException(Exception):
+    pass
 
 
 class StarForest:
@@ -98,8 +103,11 @@ class StarForest:
         else:
             raise ValueError
 
+        print_with_rank("size", self.size)
+        print_with_rank("buf", from_buffer)
+
         if any(len(buf) != self.size for buf in [from_buffer, to_buffer]):
-            raise ValueError
+            raise BufferSizeMismatchException
 
         # what about cdim?
         dtype, _ = get_mpi_dtype(from_buffer.dtype)

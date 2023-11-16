@@ -10,6 +10,7 @@ import functools
 import itertools
 import numbers
 import operator
+import textwrap
 from typing import Any, Dict, FrozenSet, Optional, Sequence, Tuple, Union
 
 import loopy as lp
@@ -22,10 +23,11 @@ from pyrsistent import freeze, pmap
 from pyop3 import utils
 from pyop3.axtree import Axis, AxisComponent, AxisTree, AxisVariable
 from pyop3.axtree.tree import ContextSensitiveAxisTree
-from pyop3.distarray import MultiArray
+from pyop3.distarray import Dat, MultiArray
 from pyop3.distarray.multiarray import ContextSensitiveMultiArray
 from pyop3.distarray.petsc import IndexedPetscMat, PetscMat, PetscObject
 from pyop3.dtypes import IntType, PointerType
+from pyop3.extras.debug import print_with_rank
 from pyop3.itree import (
     AffineMapComponent,
     AffineSliceComponent,
@@ -77,15 +79,15 @@ class OpaqueType(lp.types.OpaqueType):
         return f"OpaqueType('{self.name}')"
 
 
-class CodegenContext(abc.ABC):
-    pass
-
-
 class AssignmentType(enum.Enum):
     READ = enum.auto()
     WRITE = enum.auto()
     INC = enum.auto()
     ZERO = enum.auto()
+
+
+class CodegenContext(abc.ABC):
+    pass
 
 
 class LoopyCodegenContext(CodegenContext):
@@ -221,7 +223,7 @@ class LoopyCodegenContext(CodegenContext):
         return self._dtype(array.orig_array)
 
     @_dtype.register
-    def _(self, array: MultiArray):
+    def _(self, array: Dat):
         return array.dtype
 
     @_dtype.register
@@ -231,6 +233,25 @@ class LoopyCodegenContext(CodegenContext):
     def _add_instruction(self, insn):
         self._insns.append(insn)
         self._last_insn_id = insn.id
+
+
+class CodegenResult:
+    # TODO also accept a map from input arrays to the renumbered ones, helpful for replacement
+    def __init__(self, expr, ir):
+        self.expr = expr
+        self.ir = ir
+
+    def __call__(self, **kwargs):
+        from pyop3.target import compile_loopy
+
+        args = [
+            _as_pointer(kwargs.get(arg.name, self.expr.datamap[arg.name]))
+            for arg in self.ir.default_entrypoint.args
+        ]
+        compile_loopy(self.ir)(*args)
+
+    def target_code(self, target):
+        raise NotImplementedError("TODO")
 
 
 class BinarySearchCallable(lp.ScalarCallable):
@@ -282,6 +303,7 @@ class BinarySearchCallable(lp.ScalarCallable):
         return
 
 
+# prefer generate_code?
 def compile(expr: LoopExpr, name="mykernel"):
     ctx = LoopyCodegenContext()
     _compile(expr, pmap(), ctx)
@@ -303,15 +325,16 @@ def compile(expr: LoopExpr, name="mykernel"):
         ("30_petsc", "#include <petsc.h>"),  # perhaps only if petsc callable used?
         (
             "30_bsearch",
+            textwrap.dedent(
+                """
+                #include <stdlib.h>
+                
+                
+                int32_t cmpfunc(const void * a, const void * b) {
+                   return ( *(int32_t*)a - *(int32_t*)b );
+                }
             """
-#include <stdlib.h>
-
-
-int32_t cmpfunc(const void * a, const void * b) {
-   return ( *(int32_t*)a - *(int32_t*)b );
-}
-
-            """,
+            ),
         ),
     ]
 
@@ -330,8 +353,10 @@ int32_t cmpfunc(const void * a, const void * b) {
     # add callables
     tu = lp.register_callable(tu, "bsearch", BinarySearchCallable())
 
+    tu = tu.with_entrypoints("mykernel")
+
     # breakpoint()
-    return tu.with_entrypoints("mykernel")
+    return CodegenResult(expr, tu)
 
 
 @functools.singledispatch
@@ -375,6 +400,8 @@ def parse_loop_properly_this_time(
 ):
     from pyop3.distarray.multiarray import IndexExpressionReplacer
 
+    print_with_rank(axes)
+
     outer_replace_map = {}
     for _, replace_map in loop_indices.values():
         outer_replace_map.update(replace_map)
@@ -405,6 +432,12 @@ def parse_loop_properly_this_time(
 
         # these aren't jnames!
         my_index_exprs = axes.index_exprs.get((axis.id, component.label), {})
+
+        print_with_rank("myindexexprs", my_index_exprs)
+        print_with_rank("new_iname_rplacemap", new_iname_replace_map)
+        print_with_rank("jname_replace_map", jname_replace_map)
+        print_with_rank("outerreplac", outer_replace_map)
+
         jname_extras = {}
         for axis_label, index_expr in my_index_exprs.items():
             jname_expr = JnameSubstitutor(
@@ -1140,5 +1173,33 @@ def find_axis(axes, path, target, current_axis=None):
 def context_from_indices(loop_indices):
     loop_context = {}
     for loop_index, (path, _) in loop_indices.items():
-        loop_context[loop_index] = path
+        loop_context[loop_index.id] = path
     return freeze(loop_context)
+
+
+# lives here??
+@functools.singledispatch
+def _as_pointer(array) -> int:
+    raise NotImplementedError
+
+
+# bad name now, "as_kernel_arg"?
+@_as_pointer.register
+def _(array: int):
+    return array
+
+
+@_as_pointer.register
+def _(array: np.ndarray):
+    return array.ctypes.data
+
+
+@_as_pointer.register
+def _(array: Dat):
+    # TODO if we use the right accessor here we modify the state appropriately
+    return array.array._data.ctypes.data
+
+
+@_as_pointer.register
+def _(array: PetscMat):
+    return array.petscmat.handle

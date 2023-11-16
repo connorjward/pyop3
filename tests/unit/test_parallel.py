@@ -13,65 +13,6 @@ from pyop3.utils import just_one
 
 
 @pytest.fixture
-def comm():
-    return MPI.COMM_WORLD
-
-
-@pytest.fixture
-def sf(comm):
-    """Create a star forest for a distributed array.
-
-    The created star forest will be distributed as follows:
-
-                   g  g
-    rank 0:       [0, 1, * 2, 3, 4, 5]
-                   |  |  * |  |
-    rank 1: [0, 1, 2, 3, * 4, 5]
-                           g  g
-
-    "g" denotes ghost points and "*" is the location of the partition.
-
-    Note that we use a "naive" point numbering here because this needs to be
-    composed with a serial numbering provided by the distributed axis. The tests
-    get very hard to parse if we also have a tricky numbering here.
-
-    """
-    # abort in serial
-    if comm.size == 1:
-        return
-
-    # the sf is created independently of the renumbering
-    if comm.rank == 0:
-        nroots = 2
-        ilocal = (0, 1)
-        iremote = tuple((1, i) for i in (2, 3))
-    else:
-        assert comm.rank == 1
-        nroots = 2
-        ilocal = (4, 5)
-        iremote = tuple((0, i) for i in (2, 3))
-
-    sf = PETSc.SF().create(comm)
-    sf.setGraph(nroots, ilocal, iremote)
-    return sf
-
-
-@pytest.fixture
-def axis(comm, sf):
-    # abort in serial
-    if comm.size == 1:
-        return
-
-    if sf.comm.rank == 0:
-        numbering = [0, 1, 3, 2, 4, 5]
-    else:
-        assert sf.comm.rank == 1
-        numbering = [0, 4, 1, 2, 5, 3]
-    serial = op3.Axis(6, numbering=numbering)
-    return op3.Axis.from_serial(serial, sf)
-
-
-@pytest.fixture
 def msf(comm):
     # abort in serial
     if comm.size == 1:
@@ -117,14 +58,14 @@ def maxis(comm, msf):
 
 
 @pytest.mark.parallel(nprocs=2)
-def test_halo_data_stored_at_end_of_array(comm, axis):
+def test_halo_data_stored_at_end_of_array(comm, paxis):
     if comm.rank == 0:
         reordered = [3, 2, 4, 5, 0, 1]
     else:
         assert comm.rank == 1
         # unchanged as halo data already at the end
         reordered = [0, 1, 2, 3, 4, 5]
-    assert np.equal(axis.numbering, reordered).all()
+    assert np.equal(paxis.numbering, reordered).all()
 
 
 @pytest.mark.parallel(nprocs=2)
@@ -139,7 +80,7 @@ def test_multi_component_halo_data_stored_at_end(comm, maxis):
 
 
 @pytest.mark.parallel(nprocs=2)
-def test_distributed_subaxes_partition_halo_data(axis):
+def test_distributed_subaxes_partition_halo_data(paxis):
     # Check that
     #
     #        +--+--+
@@ -152,8 +93,8 @@ def test_distributed_subaxes_partition_halo_data(axis):
     #
     # transforms to move all of the halo data to the end. Inspect the layouts.
     root = op3.Axis([1, 1])
-    subaxis0 = axis
-    subaxis1 = axis.copy(id=op3.Axis.unique_id())
+    subaxis0 = paxis
+    subaxis1 = paxis.copy(id=op3.Axis.unique_id())
     axes = op3.AxisTree(root, {root.id: [subaxis0, subaxis1]}).freeze()
 
     path0 = freeze(
@@ -169,8 +110,8 @@ def test_distributed_subaxes_partition_halo_data(axis):
         }
     )
 
-    npoints = axis.sf.size
-    nowned = npoints - axis.sf.nleaves
+    npoints = paxis.sf.size
+    nowned = npoints - paxis.sf.nleaves
 
     layout0 = axes.layouts[path0].array
     layout1 = axes.layouts[path1].array
@@ -190,7 +131,7 @@ def test_distributed_subaxes_partition_halo_data(axis):
 
 
 @pytest.mark.parallel(nprocs=2)
-def test_nested_parallel_axes_produce_correct_sf(comm, axis):
+def test_nested_parallel_axes_produce_correct_sf(comm, paxis):
     # Check that
     #
     #        +--+--+
@@ -203,8 +144,8 @@ def test_nested_parallel_axes_produce_correct_sf(comm, axis):
     #
     # builds the right star forest.
     root = op3.Axis([1, 1])
-    subaxis0 = axis
-    subaxis1 = axis.copy(id=op3.Axis.unique_id())
+    subaxis0 = paxis
+    subaxis1 = paxis.copy(id=op3.Axis.unique_id())
     axes = op3.AxisTree(root, {root.id: [subaxis0, subaxis1]}).freeze()
 
     rank = comm.rank
@@ -223,10 +164,10 @@ def test_nested_parallel_axes_produce_correct_sf(comm, axis):
 
 
 @pytest.mark.parallel(nprocs=2)
-def test_partition_iterset_scalar(comm, axis):
-    array = op3.MultiArray(axis, dtype=op3.ScalarType)
+def test_partition_iterset_scalar(comm, paxis):
+    array = op3.MultiArray(paxis, dtype=op3.ScalarType)
 
-    p = axis.index()
+    p = paxis.index()
     tmp = array[p]
     core, noncore = partition_iterset(p, [tmp])
 
@@ -246,9 +187,9 @@ def test_partition_iterset_scalar(comm, axis):
 
 
 @pytest.mark.parallel(nprocs=2)
-def test_partition_iterset_with_map(comm, axis):
-    axis_label = axis.label
-    component_label = just_one(axis.components).label
+def test_partition_iterset_with_map(comm, paxis):
+    axis_label = paxis.label
+    component_label = just_one(paxis.components).label
 
     # connect nearest neighbours (and self at ends)
     # note that this is with the renumbered axis numbering
@@ -262,7 +203,7 @@ def test_partition_iterset_with_map(comm, axis):
         map_data = np.asarray(
             [[0, 1], [0, 2], [1, 3], [2, 4], [3, 5], [4, 5]], dtype=op3.IntType
         )
-    map_axes = op3.AxisTree(op3.Axis(6, axis.label, id="root"), {"root": op3.Axis(2)})
+    map_axes = op3.AxisTree(op3.Axis(6, paxis.label, id="root"), {"root": op3.Axis(2)})
     map_array = op3.MultiArray(map_axes, data=map_data.flatten())
     map0 = op3.Map(
         {
@@ -276,8 +217,8 @@ def test_partition_iterset_with_map(comm, axis):
         label=axis_label,
     )
 
-    array = op3.MultiArray(axis, dtype=op3.ScalarType)
-    p = axis.index()
+    array = op3.MultiArray(paxis, dtype=op3.ScalarType)
+    p = paxis.index()
     tmp = array[map0(p)]
     core, noncore = partition_iterset(p, [tmp])
 

@@ -77,22 +77,11 @@ def grow_dof_sf(axes: FrozenAxisTree, axis, path, indices):
     component_offsets = [0] + list(np.cumsum(component_counts))
     npoints = component_offsets[-1]
 
-    # should be a property really, get the root indices so we can compute the offset for them
-    buffer = np.full(npoints, False, dtype=bool)
-    # buffer[-len(ilocal) :] = True
-    buffer[ilocal] = True
-    point_sf.reduce(buffer, MPI.REPLACE)
-    buffer[ilocal] = False
-
-    iroot = just_one(np.nonzero(buffer))
-
-    print_with_rank("iroots: ", iroot)
-
     # effectively build the section
     # TODO this is overkill since we only need to broadcast the roots
     offsets = np.full(npoints, -1, IntType)
     ndofs = np.copy(offsets)
-    for pt in iroot:
+    for pt in point_sf.iroot:
         # this isn't right
         # rpt = axis.numbering[pt]
         # this works because we are using the default numbering

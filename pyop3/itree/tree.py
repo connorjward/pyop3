@@ -379,10 +379,10 @@ class LoopIndex(AbstractLoopIndex):
         return self.iterset.datamap
 
     def target_paths(self, context):
-        return (context[self],)
+        return (context[self.id],)
 
     def iter(self, stuff=pmap()):
-        if not isinstance(self.iterset, FrozenAxisTree):
+        if not isinstance(self.iterset, (IndexedAxisTree, FrozenAxisTree)):
             raise NotImplementedError
         return iter_axis_tree(self.iterset, stuff)
 
@@ -548,7 +548,7 @@ def loop_contexts_from_iterable(indices):
         if loop_index in contexts[0].keys():
             raise AssertionError
         for ctx in contexts:
-            ctx[loop_index] = paths
+            ctx[loop_index.id] = paths
     return contexts
 
 
@@ -598,10 +598,10 @@ def _(arg: LoopIndex, local=False):
                 extracontext.update(target_path)
             if local:
                 contexts.append(
-                    loop_context | {arg.local_index: pmap(extra_source_context)}
+                    loop_context | {arg.local_index.id: pmap(extra_source_context)}
                 )
             else:
-                contexts.append(loop_context | {arg: pmap(extracontext)})
+                contexts.append(loop_context | {arg.id: pmap(extracontext)})
         return tuple(contexts)
     else:
         assert isinstance(arg.iterset, (FrozenAxisTree, IndexedAxisTree))
@@ -618,9 +618,9 @@ def _(arg: LoopIndex, local=False):
                     # iterset.paths[axis.id, cpt.label]
                 )
             if local:
-                contexts.append(pmap({arg.local_index: source_path}))
+                contexts.append(pmap({arg.local_index.id: source_path}))
             else:
-                contexts.append(pmap({arg: pmap(target_path)}))
+                contexts.append(pmap({arg.id: pmap(target_path)}))
         return tuple(contexts)
 
 
@@ -804,14 +804,14 @@ def _(loop_index: LoopIndex, *, loop_indices, **kwargs):
 
     iterset = loop_index.iterset
 
-    target_path_per_component = pmap({None: loop_indices[loop_index]})
+    target_path_per_component = pmap({None: loop_indices[loop_index.id]})
     # fairly sure that here I want the *output* path of the loop indices
     index_exprs_per_component = pmap(
         {
             None: pmap(
                 {
                     axis: LoopIndexVariable(loop_index, axis)
-                    for axis in loop_indices[loop_index].keys()
+                    for axis in loop_indices[loop_index.id].keys()
                 }
                 # {axis: LoopIndexVariable(loop_index, axis) for axis in path.keys()}
             )
@@ -828,7 +828,7 @@ def _(loop_index: LoopIndex, *, loop_indices, **kwargs):
 
 @collect_shape_index_callback.register
 def _(local_index: LocalLoopIndex, *args, loop_indices, **kwargs):
-    path = loop_indices[local_index]
+    path = loop_indices[local_index.id]
 
     loop_index = local_index.loop_index
     iterset = loop_index.iterset
@@ -1293,7 +1293,7 @@ def iter_axis_tree(
     from pyop3.distarray.multiarray import IndexExpressionReplacer
 
     if axes.is_empty:
-        yield pmap(), pmap()
+        yield pmap(), pmap(), pmap(), pmap()
         return
 
     axis = axis or axes.root
@@ -1325,10 +1325,11 @@ def iter_axis_tree(
                 )
             else:
                 # yield path_, index_exprs_, indices_
-                # yield target_path_, index_exprs_
-                yield path_, indices_
+                yield path_, target_path_, indices_, index_exprs_
+                # yield path_, indices_
 
 
+# TODO This should work for multiple loop indices. One should really pass a loop expression.
 def partition_iterset(index: LoopIndex, arrays):
     """Split an iteration set into core, root and leaf index sets.
 
@@ -1350,10 +1351,17 @@ def partition_iterset(index: LoopIndex, arrays):
     to be complete before computation can happen').
 
     """
-    from pyop3.distarray.multiarray import IndexExpressionReplacer
+    from pyop3.distarray.multiarray import Dat, IndexExpressionReplacer
 
     # take first
-    paraxis = [axis for axis in index.iterset.nodes if axis.sf is not None][0]
+    # paraxis = [axis for axis in index.iterset.nodes if axis.sf is not None][0]
+    if index.iterset.depth > 1:
+        raise NotImplementedError("Need a good way to sniff the parallel axis")
+    paraxis = index.iterset.root
+
+    # FIXME, need indices per component
+    if len(paraxis.components) > 1:
+        raise NotImplementedError
 
     # at a minimum this should be done per multi-axis instead of per array
     is_root_or_leaf_per_array = {}
@@ -1384,21 +1392,26 @@ def partition_iterset(index: LoopIndex, arrays):
         is_root_or_leaf_per_array[array.name] = is_root_or_leaf
 
     is_core = np.full(paraxis.size, True, dtype=bool)
-    for path, indices in index.iter():
+    for path, target_path, indices, target_indices in index.iter():
         parindex = indices[paraxis.label]
         assert isinstance(parindex, numbers.Integral)
 
-        replace_map = freeze({(index.id, axis): i for axis, i in indices.items()})
+        # replace_map = freeze({(index.id, axis): i for axis, i in indices.items()})
+        replace_map = freeze(
+            {(index.id, axis): i for axis, i in target_indices.items()}
+        )
 
         for array in arrays:
             if not is_core[parindex]:
                 continue
 
             # loop over stencil
-            array = array.with_context({index: path})
+            array = array.with_context({index.id: target_path})
             for (
                 array_path,
+                array_target_path,
                 array_indices,
+                array_target_indices,
             ) in array.axes.index().iter(replace_map):
                 allexprs = dict(array.axes.index_exprs.get(None, {}))
                 if not array.axes.is_empty:
@@ -1407,11 +1420,28 @@ def partition_iterset(index: LoopIndex, arrays):
                     ).items():
                         allexprs.update(array.axes.index_exprs[myaxis.id, mycpt])
 
-                the_expr_i_want = allexprs[paraxis.label]
+                # allexprs is indexed with the "source" labels but we want a particular
+                # "target" label, need to go backwards... or something
+                if len(target_path) != 1:
+                    raise NotImplementedError
+                target_parallel_axis_label = just_one(target_path.keys())
+                # myloc = just_one([loc for loc, tpath in array.axes.target_paths.items()
+                #                   if just_one(tpath.keys()) == target_parallel_axis_label])
+                #
+                # print_if_rank(0, "allexprs", allexprs)
+                #
+                # # myloc is a 2-tuple of axis ID and component label
+                # if myloc is not None:
+                #     mylabel = array.axes.id_to_node[myloc[0]].label
+                #     the_expr_i_want = allexprs[mylabel]
+                # else:
+                #     the_expr_i_want = allexprs[None]
+                the_expr_i_want = allexprs[target_parallel_axis_label]
 
                 pt_index = pym.evaluate(
                     the_expr_i_want,
-                    replace_map | array_indices,
+                    # replace_map | array_indices,
+                    replace_map | array_target_indices,
                     ExpressionEvaluator,
                 )
                 assert isinstance(pt_index, numbers.Integral)
@@ -1421,6 +1451,27 @@ def partition_iterset(index: LoopIndex, arrays):
                     # no point doing more analysis
                     break
 
+    parcpt = just_one(paraxis.components)  # for now
+
     core = just_one(np.nonzero(is_core))
     noncore = just_one(np.nonzero(np.logical_not(is_core)))
-    return core, noncore
+    subsets = tuple(
+        Dat(Axis([AxisComponent(len(data), parcpt.label)], paraxis.label), data=data)
+        for data in [core, noncore]
+    )
+
+    # make a new iteration set over just these indices
+    # index with just core (arbitrary)
+
+    # need to use the existing labels here
+    new_iterset = index.iterset[
+        Slice(
+            paraxis.label,
+            [Subset(parcpt.label, subsets[0], label=parcpt.label)],
+            label=paraxis.label,
+        )
+    ]
+
+    print_with_rank("old", index.iterset)
+    print_with_rank("new", new_iterset)
+    return index.copy(iterset=new_iterset), subsets

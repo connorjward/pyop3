@@ -7,6 +7,7 @@ import dataclasses
 import enum
 import functools
 import operator
+from collections import defaultdict
 from functools import cached_property, partial
 from typing import Iterable, Sequence, Tuple
 from weakref import WeakValueDictionary
@@ -24,6 +25,7 @@ from pyop3.axtree.tree import (
     FrozenAxisTree,
     MultiArrayCollector,
 )
+from pyop3.config import config
 from pyop3.distarray import Dat, MultiArray, PetscMat
 from pyop3.distarray2 import DistributedArray
 from pyop3.distarray.multiarray import (
@@ -32,6 +34,7 @@ from pyop3.distarray.multiarray import (
     substitute_layouts,
 )
 from pyop3.dtypes import IntType, dtype_limits
+from pyop3.extras.debug import print_with_rank
 from pyop3.itree.tree import (
     IndexedAxisTree,
     _compose_bits,
@@ -133,40 +136,42 @@ class Loop(LoopExpr):
             stmt.datamap for stmt in self.statements
         )
 
-    def __str__(self):
-        return f"for {self.index} ∊ {self.index.point_set}"
-
     def __call__(self, **kwargs):
+        from pyop3.ir.lower import compile
+
         if self.is_parallel:
             # interleave computation and communication
-            icore, inoncore = partition_iterset(self.index, self.all_function_arguments)
+            print_with_rank("args", self.all_function_arguments)
+            new_index, (icore, inoncore) = partition_iterset(
+                self.index, [a for a, _ in self.all_function_arguments]
+            )
+
+            assert self.index.id == new_index.id
+
+            # substitute subsets into loopexpr, should maybe be done in partition_iterset
+            parallel_loop = self.copy(index=new_index)
+            code = compile(parallel_loop)
 
             # interleave communication and computation
             with self._updates_in_flight():
                 # replace the parallel axis subset with one for the specific indices here
-                core_kwargs = merge_dicts(
-                    [kwargs, {"iparallel": icore, "psize": len(icore)}]
-                )
-                self._call(**core_kwargs)
+                core_kwargs = merge_dicts([kwargs, {icore.name: icore}])
+                code(**core_kwargs)
 
             # noncore
-            noncore_kwargs = merge_dicts(
-                [kwargs, {"iparallel": inoncore, "psize": len(icore)}]
-            )
-            self._call(**noncore_kwargs)
+            noncore_kwargs = merge_dicts([kwargs, {icore.name: inoncore}])
+            code(**noncore_kwargs)
 
             # need to set last write op
             # also may need to eagerly assemble Mats, or be clever?
         else:
-            self._call(**kwargs)
+            compile(self)(**kwargs)
 
-    def _call(self, **kwargs):
-        """kwargs overwrite arrays stored in datamaps."""
-        args = [
-            _as_pointer(kwargs.get(arg.name, self.datamap[arg.name]))
-            for arg in self.loopy_code.default_entrypoint.args
-        ]
-        self.executable(*args)
+    @cached_property
+    def loopy_code(self):
+        from pyop3.ir.lower import compile
+
+        return compile(self)
 
     @cached_property
     def is_parallel(self):
@@ -185,24 +190,6 @@ class Loop(LoopExpr):
             (arg, func_args[arg])
             for arg in sorted(func_args.keys(), key=lambda a: a.name)
         )
-
-    @functools.cached_property
-    def loopy_code(self):
-        from pyop3.ir.lower import compile
-
-        return compile(self)
-
-    @functools.cached_property
-    def c_code(self):
-        from pyop3.target import compile_loopy
-
-        return compile_loopy(self.loopy_code, stop_at_c=True)
-
-    @functools.cached_property
-    def executable(self):
-        from pyop3.target import compile_loopy
-
-        return compile_loopy(self.loopy_code)
 
     @cached_property
     def _distarray_args(self):
@@ -257,7 +244,7 @@ class Loop(LoopExpr):
         # may continue.
 
         # maps array to messages split by generation
-        messages = defaultdict(defaultdict(list))
+        messages = defaultdict(partial(defaultdict, list))
         for array, intent, touches_ghost_points in self._distarray_args:
             if intent in {READ, RW}:
                 if touches_ghost_points:
@@ -647,33 +634,6 @@ def loop(*args, **kwargs):
 
 def do_loop(*args, **kwargs):
     loop(*args, **kwargs)()
-
-
-@functools.singledispatch
-def _as_pointer(array) -> int:
-    raise NotImplementedError
-
-
-# bad name now, "as_kernel_arg"?
-@_as_pointer.register
-def _(array: int):
-    return array
-
-
-@_as_pointer.register
-def _(array: np.ndarray):
-    return array.ctypes.data
-
-
-@_as_pointer.register
-def _(array: Dat):
-    # TODO if we use the right accessor here we modify the state appropriately
-    return array.array._data.ctypes.data
-
-
-@_as_pointer.register
-def _(array: PetscMat):
-    return array.petscmat.handle
 
 
 def fix_intents(tunit, accesses):

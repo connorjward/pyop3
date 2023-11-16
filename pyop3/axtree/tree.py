@@ -677,16 +677,16 @@ class Axis(StrictLabelledNode, LoopIterable):
 
     @cached_property
     def count_per_component(self):
-        return tuple(c.count for c in self.components)
+        return freeze({c: c.count for c in self.components})
 
     @cached_property
     # @parallel_only
     def owned_count_per_component(self):
-        return tuple(
-            full - ghost
-            for full, ghost in checked_zip(
-                self.count_per_component, self.ghost_count_per_component
-            )
+        return freeze(
+            {
+                cpt: count - self.ghost_count_per_component[cpt]
+                for cpt, count in self.count_per_component.items()
+            }
         )
 
     @cached_property
@@ -694,8 +694,10 @@ class Axis(StrictLabelledNode, LoopIterable):
     def ghost_count_per_component(self):
         counts = np.zeros_like(self.components, dtype=int)
         for leaf_index in self.sf.ileaf:
-            counts[self._component_index_from_axis_number[leaf_index]] += 1
-        return tuple(counts)
+            counts[self._component_index_from_axis_number(leaf_index)] += 1
+        return freeze(
+            {cpt: count for cpt, count in checked_zip(self.components, counts)}
+        )
 
     def index(self):
         return as_axis_tree(self).index()
@@ -764,7 +766,10 @@ class Axis(StrictLabelledNode, LoopIterable):
         # put in utils.py
         from pyop3.axtree.parallel import invert
 
-        return invert(self.numbering)
+        if self.numbering is None:
+            return np.arange(self.count, dtype=IntType)
+        else:
+            return invert(self.numbering)
 
 
 class MultiArrayCollector(pym.mapper.Collector):
@@ -1144,7 +1149,7 @@ class FrozenAxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable)
     def index(self):
         from pyop3.itree import LoopIndex
 
-        return LoopIndex(self)
+        return LoopIndex(self.owned)
 
     @property
     def target_paths(self):
@@ -1181,6 +1186,27 @@ class FrozenAxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable)
             for array in MultiArrayCollector()(layout_expr):
                 dmap.update(array.datamap)
         return pmap(dmap)
+
+    @cached_property
+    def owned(self):
+        """Return the owned portion of the axis tree."""
+        from pyop3.itree import AffineSliceComponent, Slice
+
+        paraxes = [axis for axis in self.nodes if axis.sf is not None]
+        if len(paraxes) == 0:
+            return self
+
+        # assumes that there is at most one parallel axis (can appear multiple times
+        # if mixed)
+        paraxis = paraxes[0]
+        slices = [
+            AffineSliceComponent(
+                c.label, stop=paraxis.owned_count_per_component[c], label=c.label
+            )
+            for c in paraxis.components
+        ]
+        slice_ = Slice(paraxis.label, slices, label=paraxis.label)
+        return self[slice_]
 
     def freeze(self) -> FrozenAxisTree:
         return self
@@ -1249,7 +1275,7 @@ class FrozenAxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable)
 
         layouts, _, _ = _compute_layouts(self, self.root)
         layoutsnew = _collect_at_leaves(self, layouts)
-        return pyrsistent.freeze(dict(layoutsnew))
+        return freeze(dict(layoutsnew))
 
     def _check_labels(self):
         def check(node, prev_labels):

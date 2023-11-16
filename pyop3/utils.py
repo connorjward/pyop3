@@ -238,12 +238,15 @@ def readonly(array):
 
 
 def deprecated(prefer=None, internal=False):
-    def wrapper(fn):
-        msg = f"{fn.__qualname__} is deprecated and will be removed"
-        if prefer:
-            msg += f", please use {prefer} instead"
-        warning_type = DeprecationWarning if internal else FutureWarning
-        warnings.warn(msg, warning_type)
-        return fn
+    def decorator(fn):
+        def wrapper(*args, **kwargs):
+            msg = f"{fn.__qualname__} is deprecated and will be removed"
+            if prefer:
+                msg += f", please use {prefer} instead"
+            warning_type = DeprecationWarning if internal else FutureWarning
+            warnings.warn(msg, warning_type)
+            return fn(*args, **kwargs)
 
-    return wrapper
+        return wrapper
+
+    return decorator

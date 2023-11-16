@@ -121,6 +121,8 @@ class Dat(Tensor, ContextFree):
 
     """
 
+    DEFAULT_DTYPE = DistributedArray.DEFAULT_DTYPE
+
     def __init__(
         self,
         axes: AxisTree,
@@ -740,55 +742,6 @@ def distribute_sparsity(sparsity, ax1, ax2, owner="row"):
 
     # import pdb; pdb.set_trace()
     return new_sparsity
-
-
-def overlap_axes(ax1, ax2, sparsity=None):
-    """Combine two multiaxes, possibly sparsely."""
-    if ax1.depth != 1 or ax2.depth != 1:
-        raise NotImplementedError(
-            "Need to think about composition rules for nested axes"
-        )
-
-    new_parts = []
-    for pt1 in ax1.parts:
-        new_subparts = []
-        for pt2 in ax2.parts:
-            # some initial checks
-            if any(not isinstance(pt.count, numbers.Integral) for pt in [pt1, pt2]):
-                raise NotImplementedError(
-                    "Need to think about non-integral sized axis parts"
-                )
-
-            # now do the real work
-            count = []
-            indices = []
-            for i1 in range(pt1.count):
-                indices_per_row = []
-                for i2 in range(pt2.count):
-                    # if ((i1,), (i2,)) in sparsity[(pt1.label,), (pt2.label,)]:
-                    if (i1, i2) in sparsity[(pt1.label, pt2.label)]:
-                        indices_per_row.append(i2)
-                count.append(len(indices_per_row))
-                indices.append(indices_per_row)
-
-            count = MultiArray.from_list(
-                count, labels=[pt1.label], name="count", dtype=IntType
-            )
-            indices = MultiArray.from_list(
-                indices, labels=[pt1.label, "any"], name="indices", dtype=IntType
-            )
-
-            # FIXME: I think that the inner axis count should be "full", not
-            # the number of indices. This means that we need to use the
-            # number of indices when computing layouts.
-            new_subpart = pt2.copy(count=count, indices=indices)
-            new_subparts.append(new_subpart)
-
-        subaxis = MultiAxis(new_subparts)
-        new_part = pt1.copy(subaxis=subaxis)
-        new_parts.append(new_part)
-
-    return MultiAxis(new_parts).set_up(with_sf=False)
 
 
 def substitute_layouts(orig_axes, new_axes, target_paths, index_exprs):
