@@ -141,14 +141,12 @@ class DistributedArray:
         return self.sf is not None
 
     @property
-    @not_in_flight
     def _data(self):
         if self._lazy_data is None:
             self._lazy_data = np.zeros(self.shape, dtype=self.dtype)
         return self._lazy_data
 
     @property
-    @not_in_flight
     def _owned_data(self):
         if self.is_distributed:
             return self._data[: -self.sf.nleaves]
@@ -156,7 +154,6 @@ class DistributedArray:
             return self._data
 
     @property
-    @not_in_flight
     def _roots_valid(self) -> bool:
         return self._pending_reduction is None
 
@@ -193,7 +190,7 @@ class DistributedArray:
                 "Should not call _reduce_leaves_to_roots_end without first calling "
                 "_reduce_leaves_to_roots_begin"
             )
-        if self._finalizer is not self._reduce_leaves_to_roots_end:
+        if self._finalizer != self._reduce_leaves_to_roots_end:
             raise DataTransferInFlightException("Wrong finalizer called")
 
         if not self._roots_valid:
@@ -221,7 +218,7 @@ class DistributedArray:
                 "Should not call _broadcast_roots_to_leaves_end without first "
                 "calling _broadcast_roots_to_leaves_begin"
             )
-        if self._finalizer is not self._broadcast_roots_to_leaves_end:
+        if self._finalizer != self._broadcast_roots_to_leaves_end:
             raise DataTransferInFlightException("Wrong finalizer called")
 
         if not self._leaves_valid:

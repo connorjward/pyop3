@@ -395,7 +395,7 @@ class LocalLoopIndex(AbstractLoopIndex):
         self.loop_index = loop_index
 
     def target_paths(self, context):
-        return (context[self],)
+        return (context[self.id],)
 
     @property
     def datamap(self):
@@ -1425,23 +1425,11 @@ def partition_iterset(index: LoopIndex, arrays):
                 if len(target_path) != 1:
                     raise NotImplementedError
                 target_parallel_axis_label = just_one(target_path.keys())
-                # myloc = just_one([loc for loc, tpath in array.axes.target_paths.items()
-                #                   if just_one(tpath.keys()) == target_parallel_axis_label])
-                #
-                # print_if_rank(0, "allexprs", allexprs)
-                #
-                # # myloc is a 2-tuple of axis ID and component label
-                # if myloc is not None:
-                #     mylabel = array.axes.id_to_node[myloc[0]].label
-                #     the_expr_i_want = allexprs[mylabel]
-                # else:
-                #     the_expr_i_want = allexprs[None]
                 the_expr_i_want = allexprs[target_parallel_axis_label]
 
                 pt_index = pym.evaluate(
                     the_expr_i_want,
-                    # replace_map | array_indices,
-                    replace_map | array_target_indices,
+                    replace_map | array_indices,
                     ExpressionEvaluator,
                 )
                 assert isinstance(pt_index, numbers.Integral)
@@ -1472,6 +1460,4 @@ def partition_iterset(index: LoopIndex, arrays):
         )
     ]
 
-    print_with_rank("old", index.iterset)
-    print_with_rank("new", new_iterset)
     return index.copy(iterset=new_iterset), subsets

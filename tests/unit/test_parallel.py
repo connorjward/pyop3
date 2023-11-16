@@ -153,6 +153,7 @@ def test_nested_parallel_axes_produce_correct_sf(comm, paxis):
 
     array = op3.DistributedArray(axes.size, sf=axes.sf)
     array._data[...] = rank
+    array._leaves_valid = False
 
     # update ghost points
     array._broadcast_roots_to_leaves()
@@ -164,12 +165,17 @@ def test_nested_parallel_axes_produce_correct_sf(comm, paxis):
 
 
 @pytest.mark.parallel(nprocs=2)
-def test_partition_iterset_scalar(comm, paxis):
+@pytest.mark.parametrize("with_ghosts", [False, True])
+def test_partition_iterset_scalar(comm, paxis, with_ghosts):
     array = op3.MultiArray(paxis, dtype=op3.ScalarType)
 
-    p = paxis.index()
+    if with_ghosts:
+        p = op3.LoopIndex(paxis.axes.freeze())
+    else:
+        p = paxis.index()
+
     tmp = array[p]
-    core, noncore = partition_iterset(p, [tmp])
+    _, (icore, inoncore) = partition_iterset(p, [tmp])
 
     if comm.rank == 0:
         # from [0, 1, 3, 2, 4, 5] and knowing that ...
@@ -177,17 +183,24 @@ def test_partition_iterset_scalar(comm, paxis):
         # basically for this case the numbering is such that the root entities
         # come before the core ones. Ghost will always be the final entries because that
         # is how we do the numbering in the first place.
-        assert np.equal(core, [2, 3]).all()
-        assert np.equal(noncore, [0, 1, 4, 5]).all()
+        expected_icore = [2, 3]
+        expected_inoncore = [0, 1]
+        if with_ghosts:
+            expected_inoncore += [4, 5]
     else:
         assert comm.rank == 1
         # numbering = [0, 4, 1, 2, 5, 3]
-        assert np.equal(core, [0, 1]).all()
-        assert np.equal(noncore, [2, 3, 4, 5]).all()
+        expected_icore = [0, 1]
+        expected_inoncore = [2, 3]
+        if with_ghosts:
+            expected_inoncore += [4, 5]
+    assert np.equal(icore.data_ro, expected_icore).all()
+    assert np.equal(inoncore.data_ro, expected_inoncore).all()
 
 
 @pytest.mark.parallel(nprocs=2)
-def test_partition_iterset_with_map(comm, paxis):
+@pytest.mark.parametrize("with_ghosts", [False, True])
+def test_partition_iterset_with_map(comm, paxis, with_ghosts):
     axis_label = paxis.label
     component_label = just_one(paxis.components).label
 
@@ -218,14 +231,24 @@ def test_partition_iterset_with_map(comm, paxis):
     )
 
     array = op3.MultiArray(paxis, dtype=op3.ScalarType)
-    p = paxis.index()
+
+    if with_ghosts:
+        p = op3.LoopIndex(paxis.axes.freeze())
+    else:
+        p = paxis.index()
     tmp = array[map0(p)]
-    core, noncore = partition_iterset(p, [tmp])
+    _, (icore, inoncore) = partition_iterset(p, [tmp])
 
     if comm.rank == 0:
-        assert np.equal(core, [3]).all()
-        assert np.equal(noncore, [0, 1, 2, 4, 5]).all()
+        expected_icore = [3]
+        expected_inoncore = [0, 1, 2]
+        if with_ghosts:
+            expected_inoncore += [4, 5]
     else:
         assert comm.rank == 1
-        assert np.equal(core, [0]).all()
-        assert np.equal(noncore, [1, 2, 3, 4, 5]).all()
+        expected_icore = [0]
+        expected_inoncore = [1, 2, 3]
+        if with_ghosts:
+            expected_inoncore += [4, 5]
+    assert np.equal(icore.data_ro, expected_icore).all()
+    assert np.equal(inoncore.data_ro, expected_inoncore).all()

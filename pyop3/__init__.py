@@ -16,6 +16,7 @@ from pyop3.itree import (  # noqa: F401
     AffineSliceComponent,
     Index,
     IndexTree,
+    LoopIndex,
     Map,
     Slice,
     SliceComponent,

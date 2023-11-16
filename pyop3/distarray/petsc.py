@@ -77,6 +77,10 @@ class IndexedPetscMat(ContextFree):
         return self.orig_mat
 
     @property
+    def array(self):
+        return self.orig_mat
+
+    @property
     def name(self):
         return self.getvalues.parameters[0].name
 

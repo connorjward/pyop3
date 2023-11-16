@@ -7,7 +7,9 @@ import pyop3 as op3
 
 def test_loop_index_iter_flat():
     iterset = op3.AxisTree(op3.Axis([op3.AxisComponent(5, "pt0")], "ax0"))
-    expected = [(freeze({"ax0": "pt0"}), freeze({"ax0": i})) for i in range(5)]
+    expected = [
+        (freeze({"ax0": "pt0"}),) * 2 + (freeze({"ax0": i}),) * 2 for i in range(5)
+    ]
     assert list(iterset.index().iter()) == expected
 
 
@@ -21,7 +23,9 @@ def test_loop_index_iter_nested():
 
     path = freeze({"ax0": "pt0", "ax1": "pt0"})
     expected = [
-        (path, freeze({"ax0": i, "ax1": j})) for i in range(5) for j in range(3)
+        (path,) * 2 + (freeze({"ax0": i, "ax1": j}),) * 2
+        for i in range(5)
+        for j in range(3)
     ]
     assert list(iterset.index().iter()) == expected
 
@@ -33,7 +37,7 @@ def test_loop_index_iter_multi_component():
 
     path0 = freeze({"ax0": "pt0"})
     path1 = freeze({"ax0": "pt1"})
-    expected = [(path0, freeze({"ax0": i})) for i in range(3)] + [
-        (path1, freeze({"ax0": i})) for i in range(3)
+    expected = [(path0,) * 2 + (freeze({"ax0": i}),) * 2 for i in range(3)] + [
+        (path1,) * 2 + (freeze({"ax0": i}),) * 2 for i in range(3)
     ]
     assert list(iterset.index().iter()) == expected
