@@ -491,7 +491,7 @@ def collect_loop_indices(arg):
     # cyclic import
     from pyop3.distarray import MultiArray
 
-    if isinstance(arg, (MultiArray, Slice, slice)):
+    if isinstance(arg, (MultiArray, Slice, slice, str)):
         return ()
     elif isinstance(arg, collections.abc.Iterable):
         return sum(map(collect_loop_indices, arg), ())
@@ -790,6 +790,16 @@ def _(index: Index, **kwargs):
 def _(slice_: slice, **kwargs):
     slice_ = apply_loop_context(slice_, loop_context=pmap(), path=pmap(), **kwargs)
     return (IndexTree(slice_),)
+
+
+@as_index_forest.register
+def _(label: str, *, axes, **kwargs):
+    # if we use a string then we assume we are taking a full slice of the
+    # top level axis
+    axis = axes.root
+    component = just_one(c for c in axis.components if c.label == label)
+    slice_ = Slice(axis.label, [AffineSliceComponent(component.label)])
+    return as_index_forest(slice_, axes=axes, **kwargs)
 
 
 @functools.singledispatch
@@ -1366,10 +1376,16 @@ def partition_iterset(index: LoopIndex, arrays):
     # at a minimum this should be done per multi-axis instead of per array
     is_root_or_leaf_per_array = {}
     for array in arrays:
+        # skip purely local arrays
+        if not array.orig_array.array.is_distributed:
+            continue
+
         # take first
-        array_paraxis = [
+        array_paraxes = [
             axis for axis in array.orig_array.axes.nodes if axis.sf is not None
-        ][0]
+        ]
+
+        array_paraxis = array_paraxes[0]
         sf = array_paraxis.sf
 
         # mark leaves and roots
@@ -1402,6 +1418,9 @@ def partition_iterset(index: LoopIndex, arrays):
         )
 
         for array in arrays:
+            # skip purely local arrays
+            if not array.orig_array.array.is_distributed:
+                continue
             if not is_core[parindex]:
                 continue
 
@@ -1443,10 +1462,16 @@ def partition_iterset(index: LoopIndex, arrays):
 
     core = just_one(np.nonzero(is_core))
     noncore = just_one(np.nonzero(np.logical_not(is_core)))
-    subsets = tuple(
-        Dat(Axis([AxisComponent(len(data), parcpt.label)], paraxis.label), data=data)
-        for data in [core, noncore]
-    )
+
+    subsets = []
+    for data in [core, noncore]:
+        # Constant?
+        size = Dat(AxisTree(), data=np.asarray([len(data)]), dtype=IntType)
+        subset = Dat(
+            Axis([AxisComponent(size, parcpt.label)], paraxis.label), data=data
+        )
+        subsets.append(subset)
+    subsets = tuple(subsets)
 
     # make a new iteration set over just these indices
     # index with just core (arbitrary)

@@ -522,12 +522,12 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
 
         loop_context = context_from_indices(loop_indices)
 
-        if isinstance(arg, (MultiArray, ContextSensitiveMultiArray)):
+        if isinstance(arg, (Dat, ContextSensitiveMultiArray)):
             axes = arg.with_context(loop_context).temporary_axes.restore()
         else:
             assert isinstance(arg, Offset)
             axes = AxisTree()
-        temporary = MultiArray(
+        temporary = Dat(
             axes,
             name=ctx.unique_name("t"),
             dtype=arg.dtype,
@@ -857,7 +857,7 @@ def add_leaf_assignment(
 ):
     context = context_from_indices(loop_indices)
 
-    if isinstance(array, (MultiArray, ContextSensitiveMultiArray)):
+    if isinstance(array, (Dat, ContextSensitiveMultiArray)):
         array_expr = functools.partial(
             make_array_expr,
             array,
@@ -957,7 +957,7 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         return varname
 
     def map_called_map(self, expr):
-        if not isinstance(expr.function.map_component.array, MultiArray):
+        if not isinstance(expr.function.map_component.array, Dat):
             raise NotImplementedError("Affine map stuff not supported yet")
 
         # TODO I think I can clean the indexing up a lot here
@@ -1100,10 +1100,13 @@ def register_extent(extent, jnames, ctx):
         return extent
 
     # actually a pymbolic expression
-    if not isinstance(extent, MultiArray):
+    if not isinstance(extent, Dat):
         raise NotImplementedError("need to tidy up assignment logic")
 
-    path = extent.axes.path(*extent.axes.leaf)
+    if not extent.axes.is_empty:
+        path = extent.axes.path(*extent.axes.leaf)
+    else:
+        path = pmap()
     expr = _scalar_assignment(extent, path, jnames, ctx)
 
     varname = ctx.unique_name("p")

@@ -19,7 +19,8 @@ def partition_ghost_points(axis, sf):
     numbering = np.empty(npoints, dtype=IntType)
     owned_ptr = 0
     ghost_ptr = npoints - sf.nleaves
-    for pt in axis.numbering or range(npoints):
+    points = axis.numbering if axis.numbering is not None else range(npoints)
+    for pt in points:
         if is_owned[pt]:
             numbering[owned_ptr] = pt
             owned_ptr += 1

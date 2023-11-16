@@ -42,7 +42,7 @@ from pyop3.itree.tree import (
     as_index_forest,
     partition_iterset,
 )
-from pyop3.utils import as_tuple, checked_zip, merge_dicts, unique
+from pyop3.utils import as_tuple, checked_zip, just_one, merge_dicts, unique
 
 
 # TODO I don't think that this belongs in this file, it belongs to the function?
@@ -141,7 +141,6 @@ class Loop(LoopExpr):
 
         if self.is_parallel:
             # interleave computation and communication
-            print_with_rank("args", self.all_function_arguments)
             new_index, (icore, inoncore) = partition_iterset(
                 self.index, [a for a, _ in self.all_function_arguments]
             )
@@ -155,14 +154,19 @@ class Loop(LoopExpr):
             # interleave communication and computation
             with self._updates_in_flight():
                 # replace the parallel axis subset with one for the specific indices here
-                core_kwargs = merge_dicts([kwargs, {icore.name: icore}])
+                extent = just_one(icore.axes.root.components).count
+                core_kwargs = merge_dicts(
+                    [kwargs, {icore.name: icore, extent.name: extent}]
+                )
                 code(**core_kwargs)
 
             # noncore
-            noncore_kwargs = merge_dicts([kwargs, {icore.name: inoncore}])
+            noncore_extent = just_one(inoncore.axes.root.components).count
+            noncore_kwargs = merge_dicts(
+                [kwargs, {icore.name: inoncore, extent.name: noncore_extent}]
+            )
             code(**noncore_kwargs)
 
-            # need to set last write op
             # also may need to eagerly assemble Mats, or be clever?
         else:
             compile(self)(**kwargs)

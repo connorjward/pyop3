@@ -455,11 +455,11 @@ class Sparsity:
 
 
 def _collect_datamap(axis, *subdatamaps, axes):
-    from pyop3.distarray import MultiArray
+    from pyop3.distarray import Dat
 
     datamap = {}
     for cidx, component in enumerate(axis.components):
-        if isinstance(count := component.count, MultiArray):
+        if isinstance(count := component.count, Dat):
             datamap.update(count.datamap)
 
     datamap.update(merge_dicts(subdatamaps))
@@ -600,7 +600,7 @@ class AxisComponent(LabelledImmutableRecord):
 class Axis(StrictLabelledNode, LoopIterable):
     fields = StrictLabelledNode.fields - {"component_labels"} | {
         "components",
-        "numbering",
+        # "numbering",
         # "sf",  # FIXME, not hashable
     }
 
@@ -626,13 +626,17 @@ class Axis(StrictLabelledNode, LoopIterable):
         super().__init__([c.label for c in components], label=label, **kwargs)
         self.components = components
 
-        # needed to get hashable working, but should it be?
-        self.numbering = tuple(numbering) if numbering is not None else None
+        if numbering is not None:
+            numbering = np.asarray(numbering, dtype=IntType)
+        self.numbering = numbering
         self.sf = sf
 
     # temporary hack
     def get_copy_kwargs(self, **kwargs):
-        return super().get_copy_kwargs(**kwargs) | {"sf": self.sf}
+        return super().get_copy_kwargs(**kwargs) | {
+            "sf": self.sf,
+            "numbering": self.numbering,
+        }
 
     def __getitem__(self, indices):
         return as_axis_tree(self)[indices]
@@ -1759,7 +1763,8 @@ def _tabulate_count_array_tree(
         pos += csize
 
     counters = np.zeros(len(axis.components), dtype=int)
-    for new_pt, old_pt in enumerate(axis.numbering or range(npoints)):
+    points = axis.numbering if axis.numbering is not None else range(npoints)
+    for new_pt, old_pt in enumerate(points):
         if axis.sf is not None:
             # more efficient outside of loop
             _, ilocal, _ = axis.sf._graph
@@ -1874,10 +1879,10 @@ def _axis_component_size(
 
 @functools.singledispatch
 def _as_int(arg: Any, path: Mapping, indices: Mapping):
-    from pyop3.distarray import MultiArray
+    from pyop3.distarray import Dat
 
     # cyclic import
-    if isinstance(arg, MultiArray):
+    if isinstance(arg, Dat):
         # TODO this might break if we have something like [:, subset]
         # I will need to map the "source" axis (e.g. slice_label0) back
         # to the "target" axis
