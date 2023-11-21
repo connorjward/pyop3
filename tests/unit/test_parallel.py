@@ -175,27 +175,20 @@ def test_partition_iterset_scalar(comm, paxis, with_ghosts):
         p = paxis.index()
 
     tmp = array[p]
-    _, (icore, inoncore) = partition_iterset(p, [tmp])
+    _, (icore, iroot, ileaf) = partition_iterset(p, [tmp])
 
     if comm.rank == 0:
-        # from [0, 1, 3, 2, 4, 5] and knowing that ...
-        # this is so confusing
-        # basically for this case the numbering is such that the root entities
-        # come before the core ones. Ghost will always be the final entries because that
-        # is how we do the numbering in the first place.
         expected_icore = [2, 3]
-        expected_inoncore = [0, 1]
-        if with_ghosts:
-            expected_inoncore += [4, 5]
+        expected_iroot = [0, 1]
+        expected_ileaf = [4, 5] if with_ghosts else []
     else:
         assert comm.rank == 1
-        # numbering = [0, 4, 1, 2, 5, 3]
         expected_icore = [0, 1]
-        expected_inoncore = [2, 3]
-        if with_ghosts:
-            expected_inoncore += [4, 5]
+        expected_iroot = [2, 3]
+        expected_ileaf = [4, 5] if with_ghosts else []
     assert np.equal(icore.data_ro, expected_icore).all()
-    assert np.equal(inoncore.data_ro, expected_inoncore).all()
+    assert np.equal(iroot.data_ro, expected_iroot).all()
+    assert np.equal(ileaf.data_ro, expected_ileaf).all()
 
 
 @pytest.mark.parallel(nprocs=2)
@@ -237,18 +230,17 @@ def test_partition_iterset_with_map(comm, paxis, with_ghosts):
     else:
         p = paxis.index()
     tmp = array[map0(p)]
-    _, (icore, inoncore) = partition_iterset(p, [tmp])
+    _, (icore, iroot, ileaf) = partition_iterset(p, [tmp])
 
     if comm.rank == 0:
         expected_icore = [3]
-        expected_inoncore = [0, 1, 2]
-        if with_ghosts:
-            expected_inoncore += [4, 5]
+        expected_iroot = [1, 2]
+        expected_ileaf = [0, 4, 5] if with_ghosts else [0]
     else:
         assert comm.rank == 1
         expected_icore = [0]
-        expected_inoncore = [1, 2, 3]
-        if with_ghosts:
-            expected_inoncore += [4, 5]
+        expected_iroot = [1, 2]
+        expected_ileaf = [3, 4, 5] if with_ghosts else [3]
     assert np.equal(icore.data_ro, expected_icore).all()
-    assert np.equal(inoncore.data_ro, expected_inoncore).all()
+    assert np.equal(iroot.data_ro, expected_iroot).all()
+    assert np.equal(ileaf.data_ro, expected_ileaf).all()

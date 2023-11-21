@@ -141,9 +141,13 @@ class Loop(LoopExpr):
 
         if self.is_parallel:
             # interleave computation and communication
-            new_index, (icore, inoncore) = partition_iterset(
+            new_index, (icore, iroot, ileaf) = partition_iterset(
                 self.index, [a for a, _ in self.all_function_arguments]
             )
+
+            print_with_rank("icore", icore.data)
+            print_with_rank("iroot", iroot.data)
+            print_with_rank("ileaf", ileaf.data)
 
             assert self.index.id == new_index.id
 
@@ -152,7 +156,7 @@ class Loop(LoopExpr):
             code = compile(parallel_loop)
 
             # interleave communication and computation
-            with self._updates_in_flight():
+            with self._updates_in_flight(0):
                 # replace the parallel axis subset with one for the specific indices here
                 extent = just_one(icore.axes.root.components).count
                 core_kwargs = merge_dicts(
@@ -160,12 +164,21 @@ class Loop(LoopExpr):
                 )
                 code(**core_kwargs)
 
-            # noncore
-            noncore_extent = just_one(inoncore.axes.root.components).count
-            noncore_kwargs = merge_dicts(
-                [kwargs, {icore.name: inoncore, extent.name: noncore_extent}]
+            # roots
+            with self._updates_in_flight(1):
+                # replace the parallel axis subset with one for the specific indices here
+                root_extent = just_one(iroot.axes.root.components).count
+                root_kwargs = merge_dicts(
+                    [kwargs, {icore.name: iroot, extent.name: root_extent}]
+                )
+                code(**root_kwargs)
+
+            # leaves
+            leaf_extent = just_one(ileaf.axes.root.components).count
+            leaf_kwargs = merge_dicts(
+                [kwargs, {icore.name: ileaf, extent.name: leaf_extent}]
             )
-            code(**noncore_kwargs)
+            code(**leaf_kwargs)
 
             # also may need to eagerly assemble Mats, or be clever?
         else:
@@ -230,6 +243,9 @@ class Loop(LoopExpr):
         # core entities (in the iterset) are defined as being those that do
         # not overlap with any points in the star forest.
 
+        # NOTE: The following is now slightly out-of-date. We now distinguish
+        # *per array* and also split each generation into starts and finalizers.
+
         # TODO update this comment to account for different threading models
 
         # Since we sometimes have to do a reduce and then a broadcast the messages
@@ -253,23 +269,33 @@ class Loop(LoopExpr):
             if intent in {READ, RW}:
                 if touches_ghost_points:
                     if not array._roots_valid:
-                        messages[array][0].append(array._reduce_leaves_to_roots_begin)
-                        messages[array][1].extend(
+                        # 2-tuple of inits (bad name) and finalizers
+                        messages[array][0] = (
+                            # init
+                            [array._reduce_leaves_to_roots_begin],
+                            # finalizer
                             [
                                 array._reduce_leaves_to_roots_end,
                                 array._broadcast_roots_to_leaves_begin,
-                            ]
+                            ],
                         )
-                        messages[array][-1].append(array._broadcast_roots_to_leaves_end)
+                        messages[array][1] = (
+                            [],
+                            [array._broadcast_roots_to_leaves_end],
+                        )
                     else:
-                        messages[array][0].append(
-                            array._broadcast_roots_to_leaves_begin
+                        messages[array][0] = (
+                            [array._broadcast_roots_to_leaves_begin],
+                            [],
                         )
-                        messages[array][-1].append(array._broadcast_roots_to_leaves_end)
+                        messages[array][1] = (
+                            [],
+                            [array._broadcast_roots_to_leaves_end],
+                        )
                 else:
                     if not array._roots_valid:
-                        messages[array][0].append(array.reduce_leaves_to_roots_begin)
-                        messages[array][-1].append(array.reduce_leaves_to_roots_end)
+                        messages[array][0] = ([array.reduce_leaves_to_roots_begin], [])
+                        messages[array][1] = ([], [array.reduce_leaves_to_roots_end])
 
             elif intent == WRITE:
                 # Assumes that all points are written to (i.e. not a subset). If
@@ -292,8 +318,8 @@ class Loop(LoopExpr):
                     # explained in the documentation.
                     if intent in {INC, MIN_RW, MAX_RW}:
                         assert array._pending_reduction is not None
-                        messages[array][0].append(array.reduce_leaves_to_roots_begin)
-                        messages[array][-1].append(array.reduce_leaves_to_roots_end)
+                        messages[array][0] = ([array.reduce_leaves_to_roots_begin], [])
+                        messages[array][1] = ([], [array.reduce_leaves_to_roots_end])
 
                 # We are modifying owned values so the leaves must now be wrong
                 array._leaves_valid = False
@@ -320,11 +346,13 @@ class Loop(LoopExpr):
         return messages
 
     @contextlib.contextmanager
-    def _updates_in_flight(self):
+    def _updates_in_flight(self, generation):
         """Context manager for interleaving computation and communication."""
         sendrecvs = self._array_updates()
 
         if config["thread_model"] in {"SINGLE", "SERIALIZED"}:
+            raise NotImplementedError("Untested")
+            # now out-of-date
             # cannot do a thread per-array, compress the sendrecvs
             new_sendrecvs = defaultdict(list)
             for sendrecvs_per_array in sendrecvs.values():
@@ -334,6 +362,7 @@ class Loop(LoopExpr):
 
         # TODO make an enum
         if config["thread_model"] == "SINGLE":
+            raise NotImplementedError("Untested")
             # multithreading is not supported, do all of the sendrecvs apart
             # from the final generation eagerly
             ngenerations = len(sendrecvs) - 1
@@ -342,6 +371,7 @@ class Loop(LoopExpr):
                     sendrecv()
             finalizers = messages[-1]
         elif config["thread_model"] == "SERIALIZED":
+            raise NotImplementedError("Untested")
             # ghost exchanges can only be done on a single thread
             thread = threading.Thread(
                 target=self.__class__._sendrecv, args=(sendrecvs,)
@@ -352,8 +382,9 @@ class Loop(LoopExpr):
             # different thread per array
             finalizers = []
             for sendrecvs_per_array in sendrecvs.values():
+                inits, finalizers_ = sendrecvs_per_array[generation]
                 thread = threading.Thread(
-                    target=self.__class__._sendrecv, args=(sendrecvs_per_array,)
+                    target=self.__class__._sendrecv, args=(inits, finalizers_)
                 )
                 thread.start()
                 finalizers.append(thread.join)
@@ -367,12 +398,11 @@ class Loop(LoopExpr):
             f()
 
     @staticmethod
-    def _sendrecv(messages):
-        # loop over generations starting from 0 and ending with -1
-        ngenerations = len(messages) - 1
-        for gen in [*range(ngenerations), -1]:
-            for msg in messages[gen]:
-                msg()
+    def _sendrecv(inits, finalizers):
+        for msg in inits:
+            msg()
+        for fin in finalizers:
+            fin()
 
 
 # TODO singledispatch

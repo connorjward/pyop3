@@ -7,6 +7,7 @@ from pyrsistent import freeze
 import pyop3 as op3
 from pyop3.extras.debug import print_with_rank
 from pyop3.ir import LOOPY_LANG_VERSION, LOOPY_TARGET
+from pyop3.utils import just_one
 
 
 def set_kernel(size, intent):
@@ -212,16 +213,29 @@ def test_parallel_loop_with_map(comm, mesh_axis, cone_map, scalar_copy_kernel):
 
     knl = set_kernel(2, intent)
 
+    # since we don't unpick "owned" for indexed axes yet
+    loop_index = mesh_axis.axes.freeze().owned["cells"].index()
+
     op3.do_loop(
-        c := mesh_axis["cells"].index(),
+        # c := mesh_axis["cells"].index(),
+        c := loop_index,
         knl(rank_dat, dat[cone_map(c)]),
     )
 
-    # for the cone of an interval mesh (and before reductions) we expect interior
-    # vertices to be touched twice and exterior vertices to be touched once
-    nverts = mesh_axis.components[1].count
-    assert np.count_nonzero(dat.array._data == write_value * 2) == nverts - 2
-    assert np.count_nonzero(dat.array._data == write_value) == 2
+    # we now expect the (renumbered) values to look like
+    #             1  0  2  0  1  *   0  0
+    #    [rank 0] x-----x-----x  * -----x
+    #                            *
+    #    [rank 1]             x  * -----x-----x-----x-----x
+    #                         2  *   0  4  0  4  0  4  0  2
+    if comm.rank == 0:
+        assert np.count_nonzero(dat.array._data == 0) == 4
+        assert np.count_nonzero(dat.array._data == 1) == 2
+        assert np.count_nonzero(dat.array._data == 2) == 1
+    else:
+        assert np.count_nonzero(dat.array._data == 0) == 4
+        assert np.count_nonzero(dat.array._data == 2) == 2
+        assert np.count_nonzero(dat.array._data == 4) == 3
 
     # there should be a pending reduction
     assert dat.array._pending_reduction == intent
@@ -229,28 +243,49 @@ def test_parallel_loop_with_map(comm, mesh_axis, cone_map, scalar_copy_kernel):
     assert not dat.array._leaves_valid
 
     # now do the reduction
-    # dat.data_ro
-    print_with_rank("before", dat.array._data)
     dat.array._reduce_leaves_to_roots()
-
-    print_with_rank("after", dat.array._data)
-
     assert dat.array._pending_reduction is None
     assert dat.array._roots_valid
     # leaves are still not up-to-date, requires a broadcast
     assert not dat.array._leaves_valid
 
-    # NOTE: This demonstrates an issue with my current implementation. We really
-    # want an SF for each loop that we do because if we only modify a subset of values
-    # (here just the vertices) then we still do a reduction on the cells even if they
-    # weren't changed.
+    # we now expect the (renumbered) values to look like
+    #             1  0  2  0  3  *   0  0
+    #    [rank 0] x-----x-----x  * -----x
+    #                            *
+    #    [rank 1]             x  * -----x-----x-----x-----x
+    #                         2  *   0  4  0  4  0  4  0  2
+    if comm.rank == 0:
+        assert np.count_nonzero(dat.array._data == 0) == 4
+        assert np.count_nonzero(dat.array._data == 1) == 1
+        assert np.count_nonzero(dat.array._data == 2) == 1
+        assert np.count_nonzero(dat.array._data == 3) == 1
+    else:
+        assert np.count_nonzero(dat.array._data == 0) == 4
+        assert np.count_nonzero(dat.array._data == 2) == 2
+        assert np.count_nonzero(dat.array._data == 4) == 3
 
-    # Both ranks have a single exterior ghost vertex that touches an interior vertex
-    # on the other rank. Therefore we expect one owned value to have a value of
-    # interior_value_on_current_rank + exterior_value_on_other_rank.
-    assert np.count_nonzero(dat.array._data == write_value * 2 + other_write_value) == 1
-    assert np.count_nonzero(dat.array._data == write_value) == 2
-    assert np.count_nonzero(dat.array._data == write_value * 2) == nverts - 3
+    # now broadcast to leaves
+    dat.array._broadcast_roots_to_leaves()
+    assert dat.array._leaves_valid
+
+    # we now expect the (renumbered) values to look like
+    #             1  0  2  0  3  *   0  4
+    #    [rank 0] x-----x-----x  * -----x
+    #                            *
+    #    [rank 1]             x  * -----x-----x-----x-----x
+    #                         3  *   0  4  0  4  0  4  0  2
+    if comm.rank == 0:
+        assert np.count_nonzero(dat.array._data == 0) == 3
+        assert np.count_nonzero(dat.array._data == 1) == 1
+        assert np.count_nonzero(dat.array._data == 2) == 1
+        assert np.count_nonzero(dat.array._data == 3) == 1
+        assert np.count_nonzero(dat.array._data == 4) == 1
+    else:
+        assert np.count_nonzero(dat.array._data == 0) == 4
+        assert np.count_nonzero(dat.array._data == 2) == 1
+        assert np.count_nonzero(dat.array._data == 3) == 1
+        assert np.count_nonzero(dat.array._data == 4) == 3
 
 
 @pytest.mark.parallel(nprocs=2)

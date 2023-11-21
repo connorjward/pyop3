@@ -1339,6 +1339,18 @@ def iter_axis_tree(
                 # yield path_, indices_
 
 
+class ArrayPointLabel(enum.IntEnum):
+    CORE = 0
+    ROOT = 1
+    LEAF = 2
+
+
+class IterationPointType(enum.IntEnum):
+    CORE = 0
+    ROOT = 1
+    LEAF = 2
+
+
 # TODO This should work for multiple loop indices. One should really pass a loop expression.
 def partition_iterset(index: LoopIndex, arrays):
     """Split an iteration set into core, root and leaf index sets.
@@ -1381,23 +1393,24 @@ def partition_iterset(index: LoopIndex, arrays):
             continue
 
         # take first
-        array_paraxes = [
-            axis for axis in array.orig_array.axes.nodes if axis.sf is not None
-        ]
-
-        array_paraxis = array_paraxes[0]
-        sf = array_paraxis.sf
+        # array_paraxes = [
+        #     axis for axis in array.orig_array.axes.nodes if axis.sf is not None
+        # ]
+        #
+        # array_paraxis = array_paraxes[0]
+        # sf = array_paraxis.sf
+        sf = array.orig_array.axes.sf  # the dof sf
 
         # mark leaves and roots
-        is_root_or_leaf = np.full(sf.size, False, dtype=bool)
-        is_root_or_leaf[sf.iroot] = True
-        is_root_or_leaf[sf.ileaf] = True
+        is_root_or_leaf = np.full(sf.size, ArrayPointLabel.CORE, dtype=np.uint8)
+        is_root_or_leaf[sf.iroot] = ArrayPointLabel.ROOT
+        is_root_or_leaf[sf.ileaf] = ArrayPointLabel.LEAF
 
         # do this because we need to think of the indices here as a selector
         # rather than a map. We need to transform to the new numbering, hence we
         # need to apply the map default -> reordered, but the indexing semantics
         # are the opposite of this
-        is_root_or_leaf = is_root_or_leaf[list(array_paraxis.numbering)]
+        # is_root_or_leaf = is_root_or_leaf[array_paraxis.numbering]
         # this is equivalent to:
         # new_labels = np.empty_like(labels)
         # for i, l in enumerate(labels):
@@ -1407,12 +1420,11 @@ def partition_iterset(index: LoopIndex, arrays):
 
         is_root_or_leaf_per_array[array.name] = is_root_or_leaf
 
-    is_core = np.full(paraxis.size, True, dtype=bool)
+    labels = np.full(paraxis.size, IterationPointType.CORE, dtype=np.uint8)
     for path, target_path, indices, target_indices in index.iter():
         parindex = indices[paraxis.label]
         assert isinstance(parindex, numbers.Integral)
 
-        # replace_map = freeze({(index.id, axis): i for axis, i in indices.items()})
         replace_map = freeze(
             {(index.id, axis): i for axis, i in target_indices.items()}
         )
@@ -1421,7 +1433,7 @@ def partition_iterset(index: LoopIndex, arrays):
             # skip purely local arrays
             if not array.orig_array.array.is_distributed:
                 continue
-            if not is_core[parindex]:
+            if labels[parindex] == IterationPointType.LEAF:
                 continue
 
             # loop over stencil
@@ -1432,39 +1444,56 @@ def partition_iterset(index: LoopIndex, arrays):
                 array_indices,
                 array_target_indices,
             ) in array.axes.index().iter(replace_map):
-                allexprs = dict(array.axes.index_exprs.get(None, {}))
-                if not array.axes.is_empty:
-                    for myaxis, mycpt in array.axes.path_with_nodes(
-                        *array.axes._node_from_path(array_path)
-                    ).items():
-                        allexprs.update(array.axes.index_exprs[myaxis.id, mycpt])
+                # allexprs = dict(array.axes.index_exprs.get(None, {}))
+                # if not array.axes.is_empty:
+                #     for myaxis, mycpt in array.axes.path_with_nodes(
+                #         *array.axes._node_from_path(array_path)
+                #     ).items():
+                #         allexprs.update(array.axes.index_exprs[myaxis.id, mycpt])
+                #
+                offset = array.axes.offset(array_path, array_indices | replace_map)
 
                 # allexprs is indexed with the "source" labels but we want a particular
                 # "target" label, need to go backwards... or something
-                if len(target_path) != 1:
-                    raise NotImplementedError
-                target_parallel_axis_label = just_one(target_path.keys())
-                the_expr_i_want = allexprs[target_parallel_axis_label]
+                # if len(target_path) != 1:
+                #     raise NotImplementedError
+                # target_parallel_axis_label = just_one(target_path.keys())
+                # the_expr_i_want = allexprs[target_parallel_axis_label]
+                #
+                # # but this is for a particular component!! need to map component index to
+                # # "full" one, how? or just do offset?
+                # pt_index = pym.evaluate(
+                #     the_expr_i_want,
+                #     replace_map | array_indices,
+                #     ExpressionEvaluator,
+                # )
+                # print_if_rank(1, "ptindex", pt_index)
+                # assert isinstance(pt_index, numbers.Integral)
 
-                pt_index = pym.evaluate(
-                    the_expr_i_want,
-                    replace_map | array_indices,
-                    ExpressionEvaluator,
-                )
-                assert isinstance(pt_index, numbers.Integral)
-
-                if is_root_or_leaf_per_array[array.name][pt_index]:
-                    is_core[parindex] = False
-                    # no point doing more analysis
-                    break
+                # point_label = is_root_or_leaf_per_array[array.name][pt_index]
+                point_label = is_root_or_leaf_per_array[array.name][offset]
+                print_if_rank(1, "ptlabel", point_label)
+                if point_label == ArrayPointLabel.LEAF:
+                    labels[parindex] = IterationPointType.LEAF
+                    break  # no point doing more analysis
+                elif point_label == ArrayPointLabel.ROOT:
+                    assert labels[parindex] != IterationPointType.LEAF
+                    labels[parindex] = IterationPointType.ROOT
+                else:
+                    assert point_label == ArrayPointLabel.CORE
+                    pass
 
     parcpt = just_one(paraxis.components)  # for now
 
-    core = just_one(np.nonzero(is_core))
-    noncore = just_one(np.nonzero(np.logical_not(is_core)))
+    print_with_rank("arrayper", is_root_or_leaf_per_array)
+    print_with_rank("labels", labels)
+
+    core = just_one(np.nonzero(labels == IterationPointType.CORE))
+    root = just_one(np.nonzero(labels == IterationPointType.ROOT))
+    leaf = just_one(np.nonzero(labels == IterationPointType.LEAF))
 
     subsets = []
-    for data in [core, noncore]:
+    for data in [core, root, leaf]:
         # Constant?
         size = Dat(AxisTree(), data=np.asarray([len(data)]), dtype=IntType)
         subset = Dat(

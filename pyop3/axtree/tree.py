@@ -1078,6 +1078,8 @@ class IndexedAxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable
     def index(self) -> LoopIndex:
         from pyop3.itree import LoopIndex
 
+        # TODO
+        # return LoopIndex(self.owned)
         return LoopIndex(self)
 
     @property
@@ -1306,6 +1308,8 @@ class ContextSensitiveAxisTree(ContextSensitiveLoopIterable):
     def index(self) -> LoopIndex:
         from pyop3.itree import LoopIndex
 
+        # TODO
+        # return LoopIndex(self.owned)
         return LoopIndex(self)
 
     @cached_property
