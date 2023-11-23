@@ -41,16 +41,6 @@ class Configuration(dict):
         cdim > 1 be built as block sparsities, or dof sparsities.  The
         former saves memory but changes which preconditioners are
         available for the resulting matrices.  (Default yes)
-    :param thread_model: Thread support provided by the underlying OS. This
-        is used for the interleaving of computation and communication in parallel
-        loops. Possible values are:
-
-        * "SINGLE": Only a single thread is supported.
-        * "SERIALIZED": Multiple threads are allowed but only one may make MPI calls.
-        * "MULTIPLE": Multiple threads are allowed and they can all make MPI calls.
-                      This is the default.
-
-        Note that these names have been drawn from MPI_Init_thread terminology.
 
     """
     # name, env variable, type, default, write once
@@ -74,7 +64,6 @@ class Configuration(dict):
         "print_cache_size": ("PYOP3_PRINT_CACHE_SIZE", bool, False),
         "matnest": ("PYOP3_MATNEST", bool, True),
         "block_sparsity": ("PYOP3_BLOCK_SPARSITY", bool, True),
-        "thread_model": ("PYOP3_THREAD_MODEL", str, "MULTIPLE"),
     }
     """Default values for PyOP2 configuration parameters"""
 
