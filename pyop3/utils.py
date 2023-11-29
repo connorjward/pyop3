@@ -1,3 +1,4 @@
+import abc
 import collections
 import functools
 import itertools
@@ -32,26 +33,22 @@ Id = Hashable
 Label = Hashable
 
 
-class UniquelyIdentifiedImmutableRecord(pytools.ImmutableRecord):
-    fields = {"id"}
-
-    def __init__(self, id: Optional[Id] = None):
-        pytools.ImmutableRecord.__init__(self)
+class Identified(abc.ABC):
+    def __init__(self, id):
         self.id = id if id is not None else self.unique_id()
 
     @classmethod
-    def unique_id(cls):
-        return unique_name(f"_{cls.__name__}_id")
+    def unique_id(cls) -> str:
+        return unique_name(f"_id_{cls.__name__}")
 
 
-class LabelledImmutableRecord(UniquelyIdentifiedImmutableRecord):
-    fields = {"label"} | UniquelyIdentifiedImmutableRecord.fields
+class Labelled(abc.ABC):
+    def __init__(self, label):
+        self.label = label if label is not None else self.unique_label()
 
-    def __init__(self, label: Optional[Label] = None, **kwargs):
-        super().__init__(**kwargs)
-        self.label = (
-            label if label is not None else unique_name(f"_{type(self).__name__}_label")
-        )
+    @classmethod
+    def unique_label(cls) -> str:
+        return unique_name(f"_label_{cls.__name__}")
 
 
 def as_tuple(item):

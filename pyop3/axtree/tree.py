@@ -29,18 +29,16 @@ from pyop3.extras.debug import print_if_rank, print_with_rank
 from pyop3.sf import StarForest
 from pyop3.tree import (
     ComponentLabel,
-    LabelledNode,
+    LabelledNodeComponent,
     LabelledTree,
+    MultiComponentLabelledNode,
     NodeId,
-    StrictLabelledNode,
     StrictLabelledTree,
     postvisit,
     previsit,
 )
 from pyop3.utils import (
-    LabelledImmutableRecord,
     PrettyTuple,
-    UniquelyIdentifiedImmutableRecord,
     as_tuple,
     checked_zip,
     deprecated,
@@ -466,7 +464,7 @@ def _collect_datamap(axis, *subdatamaps, axes):
     return datamap
 
 
-class AxisComponent(LabelledImmutableRecord):
+class AxisComponent(LabelledNodeComponent):
     """
     Parameters
     ----------
@@ -492,26 +490,25 @@ class AxisComponent(LabelledImmutableRecord):
 
     """
 
-    fields = {
+    fields = LabelledNodeComponent.fields | {
         "count",
         "overlap",
         "indexed",
         "indices",
         "lgmap",
-    } | LabelledImmutableRecord.fields
+    }
 
     def __init__(
         self,
         count,
-        label: Optional[Hashable] = None,
+        label=None,
         *,
         indices=None,
         overlap=None,
         indexed=False,
         lgmap=None,
-        **kwargs,
     ):
-        super().__init__(label=label, **kwargs)
+        super().__init__(label=label)
         self.count = count
         self.indices = indices
         self.overlap = overlap
@@ -597,8 +594,8 @@ class AxisComponent(LabelledImmutableRecord):
         return self.num_owned
 
 
-class Axis(StrictLabelledNode, LoopIterable):
-    fields = StrictLabelledNode.fields - {"component_labels"} | {
+class Axis(MultiComponentLabelledNode, LoopIterable):
+    fields = MultiComponentLabelledNode.fields | {
         "components",
         # "numbering",
         # "sf",  # FIXME, not hashable
@@ -1534,8 +1531,8 @@ def _(component: AxisComponent):
 
 # use this to build a tree of sizes that we use to construct
 # the right count arrays
-class CustomNode(StrictLabelledNode):
-    fields = LabelledNode.fields - {"component_labels"} | {"counts"}
+class CustomNode(MultiComponentLabelledNode):
+    fields = MultiComponentLabelledNode.fields | {"counts"}
 
     def __init__(self, counts, **kwargs):
         super().__init__(counts, **kwargs)

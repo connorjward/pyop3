@@ -1,5 +1,4 @@
 from .tree import (
-    AffineMapComponent,
     AffineSliceComponent,
     CalledMap,
     Index,

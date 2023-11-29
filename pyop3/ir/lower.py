@@ -29,7 +29,6 @@ from pyop3.distarray.petsc import IndexedPetscMat, PetscMat, PetscObject
 from pyop3.dtypes import IntType, PointerType
 from pyop3.extras.debug import print_with_rank
 from pyop3.itree import (
-    AffineMapComponent,
     AffineSliceComponent,
     CalledMap,
     Index,

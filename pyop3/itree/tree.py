@@ -37,10 +37,10 @@ from pyop3.axtree.tree import (
 )
 from pyop3.dtypes import IntType, get_mpi_dtype
 from pyop3.extras.debug import print_if_rank, print_with_rank
-from pyop3.tree import LabelledNode, LabelledTree, postvisit
+from pyop3.tree import LabelledNodeComponent, LabelledTree, Node, postvisit
 from pyop3.utils import (
-    LabelledImmutableRecord,
-    UniquelyIdentifiedImmutableRecord,
+    Identified,
+    Labelled,
     as_tuple,
     checked_zip,
     is_single_valued,
@@ -125,19 +125,24 @@ def collect_datamap_from_expression(expr: pym.primitives.Expr) -> dict:
     return _datamap_collector(expr)
 
 
-class SliceComponent(LabelledImmutableRecord, abc.ABC):
-    fields = LabelledImmutableRecord.fields | {"component"}
+class IndexComponent(LabelledNodeComponent):
+    pass
 
-    def __init__(self, component, **kwargs):
-        super().__init__(**kwargs)
+
+class SliceComponent(IndexComponent, abc.ABC):
+    # I *believe* that "label" should be the same as "component"
+    fields = IndexComponent.fields | {"component"}
+
+    def __init__(self, component, *, label):
+        super().__init__(label)
         self.component = component
 
 
 class AffineSliceComponent(SliceComponent):
     fields = SliceComponent.fields | {"start", "stop", "step"}
 
-    def __init__(self, component, start=None, stop=None, step=None, **kwargs):
-        super().__init__(component, **kwargs)
+    def __init__(self, component, start=None, stop=None, step=None, *, label=None):
+        super().__init__(component, label=label)
         # use None for the default args here since that agrees with Python slices
         self.start = start if start is not None else 0
         self.stop = stop
@@ -151,8 +156,8 @@ class AffineSliceComponent(SliceComponent):
 class Subset(SliceComponent):
     fields = SliceComponent.fields | {"array"}
 
-    def __init__(self, component, array: MultiArray, **kwargs):
-        super().__init__(component, **kwargs)
+    def __init__(self, component, array: MultiArray, *, label=None):
+        super().__init__(component, label=label)
         self.array = array
 
     @property
@@ -160,57 +165,35 @@ class Subset(SliceComponent):
         return self.array.datamap
 
 
-class MapComponent(LabelledImmutableRecord):
-    fields = {
+# TODO, target_component vs component???
+class MapComponent(IndexComponent):
+    fields = IndexComponent.fields | {
         "target_axis",
         "target_component",
-        "arity",
-    } | LabelledImmutableRecord.fields
+    }
 
-    def __init__(self, target_axis, target_component, arity, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, target_axis, target_component, *, label=None):
+        super().__init__(label)
         self.target_axis = target_axis
         self.target_component = target_component
-        self.arity = arity
+
+    @property
+    @abc.abstractmethod
+    def arity(self):
+        pass
 
 
-class MapVariable(pym.primitives.Variable):
-    """Pymbolic variable representing the action of a map."""
-
-    mapper_method = sys.intern("map_map_variable")
-
-    def __init__(self, full_map, map_component):
-        super().__init__(map_component.array.name)
-        self.full_map = full_map
-        self.map_component = map_component
-
-    def __call__(self, *args):
-        return CalledMapVariable(self, *args)
-
-    @functools.cached_property
-    def datamap(self):
-        return self.map_component.datamap
-
-
-class CalledMapVariable(pym.primitives.Call):
-    mapper_method = sys.intern("map_called_map")
-
-    @functools.cached_property
-    def datamap(self):
-        return self.function.datamap | merge_dicts(
-            idx.datamap for idx in self.parameters.values()
-        )
-
-
+# TODO: Implement AffineMapComponent
 class TabulatedMapComponent(MapComponent):
-    fields = MapComponent.fields - {"arity"} | {"array"}
+    fields = MapComponent.fields | {"array"}
 
-    def __init__(self, target_axis, target_component, array, **kwargs):
-        arity = array.axes.leaf_component.count
-        super().__init__(target_axis, target_component, arity, **kwargs)
+    def __init__(self, target_axis, target_component, array, *, label=None):
+        super().__init__(target_axis, target_component, label=label)
         self.array = array
 
-        # self.index_expr = MapVariable(self)
+    @property
+    def arity(self):
+        return self.array.axes.leaf_component.count
 
     # old alias
     @property
@@ -222,63 +205,98 @@ class TabulatedMapComponent(MapComponent):
         return self.array.datamap
 
 
-class AffineMapComponent(MapComponent):
-    fields = MapComponent.fields | {"expr"}
-
-    def __init__(self, from_labels, to_labels, arity, expr, **kwargs):
-        """
-        Parameters
-        ----------
-        expr:
-            A 2-tuple of pymbolic variables and an expression. We need to split them
-            like this because we need to know the order in which the variables
-            correspond to the axis parts.
-        """
-        if len(expr[0]) != len(from_labels) + 1:
-            raise ValueError("Wrong number of variables in expression")
-
-        self.expr = expr
-        super().__init__(from_labels, to_labels, arity, **kwargs)
-
-
-class Map(pytools.ImmutableRecord):
-    """
-
-    Notes
-    -----
-    This class *cannot* be used as an index. Instead, one must use a
-    `CalledMap` which can be formed from a `Map` using call syntax.
-    """
-
-    fields = {"connectivity", "name"}
-
-    def __init__(self, connectivity, name, **kwargs) -> None:
-        super().__init__(**kwargs)
-        self.connectivity = connectivity
-        self.name = name
-
-    def __call__(self, index) -> Union[CalledMap, ContextSensitiveCalledMap]:
-        return CalledMap(self, index)
-
-    @functools.cached_property
-    def datamap(self):
-        data = {}
-        for bit in self.connectivity.values():
-            for map_cpt in bit:
-                data.update(map_cpt.datamap)
-        return pmap(data)
-
-
-class Index(LabelledNode):
+class Index(Node):
     @abc.abstractmethod
     def target_paths(self, context):
         pass
 
 
-# ImmutableRecord?
+class AbstractLoopIndex(Index, abc.ABC):
+    pass
+
+
+class LoopIndex(AbstractLoopIndex):
+    fields = AbstractLoopIndex.fields | {"iterset"}
+
+    # does the label ever matter here?
+    def __init__(self, iterset, *, id=None):
+        super().__init__(id)
+        self.iterset = iterset
+        self.local_index = LocalLoopIndex(self)
+
+    @property
+    def i(self):
+        return self.local_index
+
+    @property
+    def j(self):
+        # is this evil?
+        return self
+
+    @property
+    def datamap(self):
+        return self.iterset.datamap
+
+    def target_paths(self, context):
+        return (context[self.id],)
+
+    def iter(self, stuff=pmap()):
+        if not isinstance(self.iterset, (IndexedAxisTree, FrozenAxisTree)):
+            raise NotImplementedError
+        return iter_axis_tree(self.iterset, stuff)
+
+
+class LocalLoopIndex(AbstractLoopIndex):
+    """Class representing a 'local' index."""
+
+    fields = AbstractLoopIndex.fields | {"loop_index"}
+
+    def __init__(self, loop_index: LoopIndex, *, id=None):
+        super().__init__(id)
+        self.loop_index = loop_index
+
+    def target_paths(self, context):
+        return (context[self.id],)
+
+    @property
+    def datamap(self):
+        return self.loop_index.datamap
+
+
+# TODO I want a Slice to have "bits" like a Map/CalledMap does
+class Slice(Index, Labelled):
+    """
+
+    A slice can be thought of as a map from a smaller space to the target space.
+
+    Like maps it can also target multiple outputs. This is useful for multi-component
+    axes.
+
+    """
+
+    # TODO remove "label"
+    # fields = Index.fields | {"axis", "slices"}
+    fields = Index.fields | {"axis", "slices", "label"}
+
+    def __init__(self, axis, slices, *, id=None, label=None):
+        # super().__init__(id)
+        Index.__init__(self, id)
+        Labelled.__init__(self, label)  # remove
+        self.axis = axis
+        self.slices = as_tuple(slices)
+
+    def target_paths(self, context):
+        return tuple(pmap({self.axis: subslice.component}) for subslice in self.slices)
+
+    @property
+    def datamap(self):
+        return merge_dicts([s.datamap for s in self.slices])
+
+
 class CalledMap(Index, LoopIterable):
     # This function cannot be part of an index tree because it has not specialised
     # to a particular loop index path.
+    # FIXME, is this true?
     def __init__(self, map, from_index, **kwargs):
         self.map = map
         self.from_index = from_index
@@ -324,13 +342,32 @@ class CalledMap(Index, LoopIterable):
         return tuple(targets)
 
 
-class ContextSensitiveCalledMap(ContextSensitiveLoopIterable):
-    pass
+class Map(pytools.ImmutableRecord):
+    """
 
+    Notes
+    -----
+    This class *cannot* be used as an index. Instead, one must use a
+    `CalledMap` which can be formed from a `Map` using call syntax.
+    """
 
-# no clue if this should be context free, only really makes sense for iterables
-class AbstractLoopIndex(Index, abc.ABC):
-    pass
+    fields = {"connectivity", "name"}
+
+    def __init__(self, connectivity, name, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.connectivity = connectivity
+        self.name = name
+
+    def __call__(self, index) -> Union[CalledMap, ContextSensitiveCalledMap]:
+        return CalledMap(self, index)
+
+    @functools.cached_property
+    def datamap(self):
+        data = {}
+        for bit in self.connectivity.values():
+            for map_cpt in bit:
+                data.update(map_cpt.datamap)
+        return pmap(data)
 
 
 class LoopIndexVariable(pym.primitives.Variable):
@@ -357,75 +394,36 @@ class LoopIndexVariable(pym.primitives.Variable):
         return self.index.datamap
 
 
-class LoopIndex(AbstractLoopIndex):
-    fields = AbstractLoopIndex.fields | {"iterset"}
+class MapVariable(pym.primitives.Variable):
+    """Pymbolic variable representing the action of a map."""
 
-    def __init__(self, iterset, **kwargs):
-        super().__init__(**kwargs)
-        self.iterset = iterset
-        self.local_index = LocalLoopIndex(self)
+    mapper_method = sys.intern("map_map_variable")
 
-    @property
-    def i(self):
-        return self.local_index
+    def __init__(self, full_map, map_component):
+        super().__init__(map_component.array.name)
+        self.full_map = full_map
+        self.map_component = map_component
 
-    @property
-    def j(self):
-        # is this evil?
-        return self
+    def __call__(self, *args):
+        return CalledMapVariable(self, *args)
 
-    @property
+    @functools.cached_property
     def datamap(self):
-        return self.iterset.datamap
-
-    def target_paths(self, context):
-        return (context[self.id],)
-
-    def iter(self, stuff=pmap()):
-        if not isinstance(self.iterset, (IndexedAxisTree, FrozenAxisTree)):
-            raise NotImplementedError
-        return iter_axis_tree(self.iterset, stuff)
+        return self.map_component.datamap
 
 
-class LocalLoopIndex(AbstractLoopIndex):
-    """Class representing a 'local' index."""
+class CalledMapVariable(pym.primitives.Call):
+    mapper_method = sys.intern("map_called_map")
 
-    def __init__(self, loop_index: LoopIndex, **kwargs):
-        super().__init__(**kwargs)
-        self.loop_index = loop_index
-
-    def target_paths(self, context):
-        return (context[self.id],)
-
-    @property
+    @functools.cached_property
     def datamap(self):
-        return self.loop_index.datamap
+        return self.function.datamap | merge_dicts(
+            idx.datamap for idx in self.parameters.values()
+        )
 
 
-# TODO I want a Slice to have "bits" like a Map/CalledMap does
-class Slice(Index):
-    """
-
-    A slice can be thought of as a map from a smaller space to the target space.
-
-    Like maps it can also target multiple outputs. This is useful for multi-component
-    axes.
-
-    """
-
-    fields = Index.fields | {"axis", "slices"}
-
-    def __init__(self, axis, slices: Collection[SliceComponent], **kwargs):
-        super().__init__(**kwargs)
-        self.axis = axis
-        self.slices = as_tuple(slices)
-
-    def target_paths(self, context):
-        return tuple(pmap({self.axis: subslice.component}) for subslice in self.slices)
-
-    @property
-    def datamap(self):
-        return merge_dicts([s.datamap for s in self.slices])
+class ContextSensitiveCalledMap(ContextSensitiveLoopIterable):
+    pass
 
 
 @functools.singledispatch

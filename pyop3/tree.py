@@ -11,9 +11,9 @@ from pyrsistent import freeze, pmap
 
 from pyop3.utils import (
     Id,
+    Identified,
     Label,
-    LabelledImmutableRecord,
-    UniquelyIdentifiedImmutableRecord,
+    Labelled,
     apply_at,
     as_tuple,
     checked_zip,
@@ -31,33 +31,48 @@ class NodeNotFoundException(Exception):
     pass
 
 
+# old
 class NodeData(pytools.ImmutableRecord):
     pass
 
 
-# type aliases
+# type aliases, bit old
 NodeId = Id
 ComponentLabel = Label
 
 
-class LabelledNode(LabelledImmutableRecord):
-    pass
+class Node(pytools.ImmutableRecord, Identified):
+    fields = {"id"}
+
+    def __init__(self, id=None):
+        pytools.ImmutableRecord.__init__(self)
+        Identified.__init__(self, id)
 
 
-class StrictLabelledNode(LabelledNode):
-    fields = LabelledNode.fields | {"component_labels"}
+class LabelledNodeComponent(pytools.ImmutableRecord, Labelled):
+    fields = {"label"}
 
-    def __init__(self, component_labels, **kwargs):
-        super().__init__(**kwargs)
-        self.component_labels = as_tuple(component_labels)
+    def __init__(self, label=None):
+        pytools.ImmutableRecord.__init__(self)
+        Labelled.__init__(self, label)
+
+
+class MultiComponentLabelledNode(Node, Labelled):
+    fields = Node.fields | {"components", "label"}
+
+    def __init__(self, components, label=None, *, id=None):
+        Node.__init__(self, id)
+        Labelled.__init__(self, label)
+
+        self.components = as_tuple(components)
 
     @property
     def degree(self) -> int:
-        return len(self.component_labels)
+        return len(self.components)
 
-
-# old alias
-Node = LabelledNode
+    @property
+    def component_labels(self):
+        return tuple(c.label for c in self.components)
 
 
 # TODO I don't think that this should be considered an immutable record. The fields
