@@ -30,7 +30,6 @@ def test_copy_with_local_indices(scalar_copy_kernel):
 
 def test_copy_slice(scalar_copy_kernel):
     big_axes = Axis([AxisComponent(10, "pt0")], "ax0")
-    # small_axes = Axis([AxisComponent(5, "pt0")], "ax1")
     small_axes = Axis([AxisComponent(5, "pt0")], "ax0")
 
     array0 = MultiArray(
@@ -38,14 +37,8 @@ def test_copy_slice(scalar_copy_kernel):
     )
     array1 = MultiArray(small_axes, name="array1", dtype=array0.dtype)
 
-    slice0 = Slice(
-        # "ax0", [AffineSliceComponent("pt0", step=2, label="pt0")], label="ax1"
-        "ax0",
-        [AffineSliceComponent("pt0", step=2, label="pt0")],
-    )
-
     do_loop(
-        p := big_axes[slice0].index(),
+        p := big_axes[::2].index(),
         scalar_copy_kernel(array0[p], array1[p.i]),
     )
     assert np.allclose(array1.data, array0.data[::2])

@@ -40,11 +40,7 @@ def test_loop_over_ragged_subset(scalar_copy_kernel):
     dat0 = MultiArray(axes, name="dat0", data=np.arange(axes.size, dtype=ScalarType))
     dat1 = MultiArray(axes, name="dat1", dtype=dat0.dtype)
 
-    slice0 = Slice("ax0", [AffineSliceComponent("pt0", label="pt0")])
-
-    # this is ambiguous
-    # do_loop(p := axes[:, subset].index(), scalar_copy_kernel(dat0[p], dat1[p]))
-    do_loop(p := axes[slice0, subset].index(), scalar_copy_kernel(dat0[p], dat1[p]))
+    do_loop(p := axes[:, subset].index(), scalar_copy_kernel(dat0[p], dat1[p]))
 
     expected = np.zeros_like(dat0.data)
     subset_offset = 0
@@ -75,24 +71,19 @@ def test_sparse_copy(scalar_copy_kernel):
     dat0 = MultiArray(axes0, name="dat0", data=np.arange(axes0.size, dtype=ScalarType))
     dat1 = MultiArray(axes1, name="dat1", dtype=dat0.dtype)
 
-    slice0 = Slice("ax0", [AffineSliceComponent("pt0", label="pt0")])
-
     subset_data = np.asarray(flatten([[0, 1], [0, 1, 2], [1, 2]]), dtype=IntType)
     subset = MultiArray(
         axes1,
         name="subset",
         data=subset_data,
     )
-    slice1 = Slice("ax1", [Subset("pt0", subset, label="pt0")])
 
     # The following is equivalent to
     # for (i, j), (p, q) in axes[:, subset]:
     #   dat1[i, j] = dat0[p, q]
 
-    # TODO ideally the following would work
-    # do_loop(p := axes0[:, subset].enumerate(), scalar_copy_kernel(dat0[p.value], dat1[p.index]))
     do_loop(
-        p := axes0[slice0, slice1].index(),
+        p := axes0[:, subset].index(),
         scalar_copy_kernel(dat0[p], dat1[p.i]),
     )
 
@@ -146,26 +137,15 @@ def test_sparse_matrix_insertion(scalar_copy_kernel):
 
     axes = nnz_axes.add_subaxis(Axis([AxisComponent(3, "pt0")], "ax1"), *nnz_axes.leaf)
 
-    slice0 = Slice("ax0", [AffineSliceComponent("pt0", label="pt0")], label="ax0")
-    slice1 = Slice(
-        "ax0", [AffineSliceComponent("pt0", label="pt0")], label="ax0_sliced"
-    )
-
     scalar = MultiArray(
         Axis(1), name="scalar", data=np.asarray([666], dtype=ScalarType)
     )
-    sparseaxes = axes[slice0, subset]
-    # matrix = MultiArray(axes[slice0, subset], name="matrix", dtype=scalar.dtype)
-    matrix = MultiArray(sparseaxes, name="matrix", dtype=scalar.dtype)
-    # breakpoint()
+    matrix = MultiArray(axes[:, subset], name="matrix", dtype=scalar.dtype)
 
     # insert a value into a column of the matrix
-    # do_loop(
-    l = loop(
-        p := axes[slice1, 1].index(),
-        scalar_copy_kernel(scalar[:], matrix[p]),
+    do_loop(
+        p := axes[:, 1].index(),
+        scalar_copy_kernel(scalar, matrix[p]),
     )
-    l()
     expected = np.asarray([0, 666, 0, 666, 0, 666, 0])
-    # breakpoint()
     assert np.allclose(matrix.data_ro, expected)

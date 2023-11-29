@@ -1204,11 +1204,12 @@ class FrozenAxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable)
         paraxis = paraxes[0]
         slices = [
             AffineSliceComponent(
-                c.label, stop=paraxis.owned_count_per_component[c], label=c.label
+                c.label,
+                stop=paraxis.owned_count_per_component[c],
             )
             for c in paraxis.components
         ]
-        slice_ = Slice(paraxis.label, slices, label=paraxis.label)
+        slice_ = Slice(paraxis.label, slices)
         return self[slice_]
 
     def freeze(self) -> FrozenAxisTree:

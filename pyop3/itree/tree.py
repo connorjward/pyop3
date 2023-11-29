@@ -125,24 +125,19 @@ def collect_datamap_from_expression(expr: pym.primitives.Expr) -> dict:
     return _datamap_collector(expr)
 
 
-class IndexComponent(LabelledNodeComponent):
-    pass
+class SliceComponent(pytools.ImmutableRecord, abc.ABC):
+    fields = {"component"}
 
-
-class SliceComponent(IndexComponent, abc.ABC):
-    # I *believe* that "label" should be the same as "component"
-    fields = IndexComponent.fields | {"component"}
-
-    def __init__(self, component, *, label):
-        super().__init__(label)
+    def __init__(self, component):
+        super().__init__()
         self.component = component
 
 
 class AffineSliceComponent(SliceComponent):
     fields = SliceComponent.fields | {"start", "stop", "step"}
 
-    def __init__(self, component, start=None, stop=None, step=None, *, label=None):
-        super().__init__(component, label=label)
+    def __init__(self, component, start=None, stop=None, step=None):
+        super().__init__(component)
         # use None for the default args here since that agrees with Python slices
         self.start = start if start is not None else 0
         self.stop = stop
@@ -156,8 +151,8 @@ class AffineSliceComponent(SliceComponent):
 class Subset(SliceComponent):
     fields = SliceComponent.fields | {"array"}
 
-    def __init__(self, component, array: MultiArray, *, label=None):
-        super().__init__(component, label=label)
+    def __init__(self, component, array: MultiArray):
+        super().__init__(component)
         self.array = array
 
     @property
@@ -165,12 +160,8 @@ class Subset(SliceComponent):
         return self.array.datamap
 
 
-# TODO, target_component vs component???
-class MapComponent(IndexComponent):
-    fields = IndexComponent.fields | {
-        "target_axis",
-        "target_component",
-    }
+class MapComponent(LabelledNodeComponent):
+    fields = LabelledNodeComponent.fields | {"target_axis", "target_component"}
 
     def __init__(self, target_axis, target_component, *, label=None):
         super().__init__(label)
@@ -449,9 +440,9 @@ def apply_loop_context(arg, loop_context, *, axes, path):
         # subsets
         array_axis, array_component = arg.axes.leaf
         for cpt in target_axis.components:
-            slice_cpt = Subset(cpt.label, arg, label=array_component.label)
+            slice_cpt = Subset(cpt.label, arg)
             slice_cpts.append(slice_cpt)
-        return Slice(target_axis.label, slice_cpts, label=array_axis.label)
+        return Slice(target_axis.label, slice_cpts)
     elif isinstance(arg, numbers.Integral):
         return apply_loop_context(
             slice(arg, arg + 1), loop_context, axes=axes, path=path
@@ -876,7 +867,6 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
     for subslice in slice_.slices:
         # we are assuming that axes with the same label *must* be identical. They are
         # only allowed to differ in that they have different IDs.
-        cpt_label = subslice.label
         target_axis, target_cpt = prev_axes.find_component(
             slice_.axis, subslice.component, also_node=True
         )
@@ -889,7 +879,7 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
         else:
             assert isinstance(subslice, Subset)
             size = subslice.array.axes.leaf_component.count
-        cpt = AxisComponent(size, label=cpt_label)
+        cpt = AxisComponent(size, label=subslice.component)
         components.append(cpt)
 
         target_path_per_subslice.append(pmap({slice_.axis: subslice.component}))
@@ -1512,7 +1502,7 @@ def partition_iterset(index: LoopIndex, arrays):
     new_iterset = index.iterset[
         Slice(
             paraxis.label,
-            [Subset(parcpt.label, subsets[0], label=parcpt.label)],
+            [Subset(parcpt.label, subsets[0])],
             label=paraxis.label,
         )
     ]
