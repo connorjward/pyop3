@@ -1,11 +1,10 @@
-import ctypes
-
 import loopy as lp
 import numpy as np
 import pymbolic as pym
 import pytest
 from pyrsistent import pmap
 
+import pyop3 as op3
 from pyop3 import (
     INC,
     READ,
@@ -17,14 +16,12 @@ from pyop3 import (
     Function,
     IndexTree,
     IntType,
-    MultiArray,
     ScalarType,
     Slice,
     do_loop,
     loop,
 )
 from pyop3.ir import LOOPY_LANG_VERSION, LOOPY_TARGET
-from pyop3.utils import flatten
 
 
 @pytest.fixture
@@ -45,14 +42,14 @@ def vec2_copy_kernel():
 
 def test_1d_slice_composition(vec2_copy_kernel):
     m, n = 10, 2
-    dat0 = MultiArray(
+    dat0 = op3.Dat(
         AxisTree(Axis([(m, "cpt0")], "ax0")),
         name="dat0",
         data=np.arange(m, dtype=ScalarType),
     )
-    dat1 = MultiArray(Axis([(n, "cpt0")], "ax0"), name="dat1", dtype=dat0.dtype)
+    dat1 = op3.Dat(Axis([(n, "cpt0")], "ax0"), name="dat1", dtype=dat0.dtype)
 
-    do_loop(Axis(1).index(), vec2_copy_kernel(dat0[::2][1:3], dat1[:]))
+    do_loop(Axis(1).index(), vec2_copy_kernel(dat0[::2][1:3], dat1))
     assert np.allclose(dat1.data, dat0.data[::2][1:3])
 
 
@@ -65,8 +62,8 @@ def test_2d_slice_composition(vec2_copy_kernel):
     )
     axes1 = AxisTree(Axis([(n, "cpt0")], "ax0"))
 
-    dat0 = MultiArray(axes0, name="dat0", data=np.arange(axes0.size, dtype=ScalarType))
-    dat1 = MultiArray(axes1, name="dat1", dtype=dat0.dtype)
+    dat0 = op3.Dat(axes0, name="dat0", data=np.arange(axes0.size, dtype=ScalarType))
+    dat1 = op3.Dat(axes1, name="dat1", dtype=dat0.dtype)
 
     do_loop(
         Axis(1).index(),

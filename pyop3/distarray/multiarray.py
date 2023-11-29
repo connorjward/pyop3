@@ -205,11 +205,13 @@ class Dat(Tensor, ContextFree):
                 target_path_per_indexed_cpt,
                 index_exprs_per_indexed_cpt,
             )
+            # test it out
+            # new_layouts = new_axes.layouts
             layout_axes = FrozenAxisTree(
                 new_axes.root,
                 new_axes.parent_to_children,
                 target_paths=target_paths,
-                index_exprs=index_exprs,
+                # index_exprs=index_exprs,  try not passing this
                 layouts=new_layouts,
             )
             return self._with_axes(layout_axes)

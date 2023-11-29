@@ -264,7 +264,8 @@ class LocalLoopIndex(AbstractLoopIndex):
 
 
 # TODO I want a Slice to have "bits" like a Map/CalledMap does
-class Slice(Index, Labelled):
+# class Slice(Index, Labelled):
+class Slice(Index):
     """
 
     A slice can be thought of as a map from a smaller space to the target space.
@@ -275,13 +276,13 @@ class Slice(Index, Labelled):
     """
 
     # TODO remove "label"
-    # fields = Index.fields | {"axis", "slices"}
-    fields = Index.fields | {"axis", "slices", "label"}
+    fields = Index.fields | {"axis", "slices"}
+    # fields = Index.fields | {"axis", "slices", "label"}
 
     def __init__(self, axis, slices, *, id=None, label=None):
-        # super().__init__(id)
-        Index.__init__(self, id)
-        Labelled.__init__(self, label)  # remove
+        super().__init__(id)
+        # Index.__init__(self, id)
+        # Labelled.__init__(self, label)  # remove
         self.axis = axis
         self.slices = as_tuple(slices)
 
@@ -291,6 +292,10 @@ class Slice(Index, Labelled):
     @property
     def datamap(self):
         return merge_dicts([s.datamap for s in self.slices])
+
+    @property
+    def label(self):
+        return self.axis
 
 
 class CalledMap(Index, LoopIterable):
