@@ -67,13 +67,13 @@ def test_sparse_copy(scalar_copy_kernel):
     axes0 = nnz_axes.add_subaxis(Axis([AxisComponent(3, "pt0")], "ax1"), *nnz_axes.leaf)
     # sparse
     axes1 = nnz_axes.add_subaxis(
-        Axis([AxisComponent(nnz, "pt0")], "ax2"), *nnz_axes.leaf
+        Axis([AxisComponent(nnz, "pt0")], "ax1"), *nnz_axes.leaf
     )
 
     dat0 = MultiArray(axes0, name="dat0", data=np.arange(axes0.size, dtype=ScalarType))
     dat1 = MultiArray(axes1, name="dat1", dtype=dat0.dtype)
 
-    slice0 = Slice("ax0", [AffineSliceComponent("pt0", label="pt0")], label="ax0")
+    slice0 = Slice("ax0", [AffineSliceComponent("pt0", label="pt0")])
 
     subset_data = np.asarray(flatten([[0, 1], [0, 1, 2], [1, 2]]), dtype=IntType)
     subset = MultiArray(
@@ -81,11 +81,13 @@ def test_sparse_copy(scalar_copy_kernel):
         name="subset",
         data=subset_data,
     )
-    slice1 = Slice("ax1", [Subset("pt0", subset, label="pt0")], label="ax2")
+    slice1 = Slice("ax1", [Subset("pt0", subset, label="pt0")])
 
     # The following is equivalent to
     # for (i, j), (p, q) in axes[:, subset]:
     #   dat1[i, j] = dat0[p, q]
+
+    # TODO ideally the following would work
     # do_loop(p := axes0[:, subset].enumerate(), scalar_copy_kernel(dat0[p.value], dat1[p.index]))
     do_loop(
         p := axes0[slice0, slice1].index(),
