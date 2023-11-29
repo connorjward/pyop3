@@ -597,43 +597,34 @@ class AxisComponent(LabelledNodeComponent):
 class Axis(MultiComponentLabelledNode, LoopIterable):
     fields = MultiComponentLabelledNode.fields | {
         "components",
-        # "numbering",
-        # "sf",  # FIXME, not hashable
+        "numbering",
+        "sf",
     }
 
     def __init__(
         self,
-        components: Union[Sequence[AxisComponent], AxisComponent, int],
-        label: Optional[Hashable] = None,
+        components,
+        label=None,
         *,
-        numbering: Optional[Sequence[int]] = None,
+        numbering=None,
         sf=None,
-        **kwargs,
+        id=None,
     ):
-        components = tuple(_as_axis_component(cpt) for cpt in as_tuple(components))
-
-        if numbering is not None and not all(
-            isinstance(cpt.count, numbers.Integral) for cpt in components
-        ):
-            raise NotImplementedError(
-                "Axis numberings are only supported for axes with fixed component sizes"
-            )
-        # TODO could also check sizes here
-
-        super().__init__([c.label for c in components], label=label, **kwargs)
-        self.components = components
+        components = self._parse_components(components)
+        numbering = self._parse_numbering(numbering)
 
         if numbering is not None:
-            numbering = np.asarray(numbering, dtype=IntType)
+            if not all(isinstance(c.count, numbers.Integral) for c in components):
+                raise NotImplementedError(
+                    "Axis numberings are only supported for axes with fixed component sizes"
+                )
+            if sum(c.count for c in components) != numbering.size:
+                raise ValueError
+
+        super().__init__(components, label=label, id=id)
+
         self.numbering = numbering
         self.sf = sf
-
-    # temporary hack
-    def get_copy_kwargs(self, **kwargs):
-        return super().get_copy_kwargs(**kwargs) | {
-            "sf": self.sf,
-            "numbering": self.numbering,
-        }
 
     def __getitem__(self, indices):
         return as_axis_tree(self)[indices]
@@ -770,7 +761,33 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
         if self.numbering is None:
             return np.arange(self.count, dtype=IntType)
         else:
-            return invert(self.numbering)
+            return invert(self.numbering.data_ro)
+
+    @staticmethod
+    def _parse_components(components):
+        if isinstance(components, collections.abc.Mapping):
+            return tuple(
+                AxisComponent(count, clabel) for clabel, count in components.items()
+            )
+        elif isinstance(components, collections.abc.Iterable):
+            return tuple(_as_axis_component(c) for c in components)
+        else:
+            return (_as_axis_component(components),)
+
+    @staticmethod
+    def _parse_numbering(numbering):
+        from pyop3.distarray import Dat
+
+        if numbering is None:
+            return None
+        elif isinstance(numbering, Dat):
+            return numbering
+        elif isinstance(numbering, collections.abc.Collection):
+            return Dat(len(numbering), data=numbering, dtype=IntType)
+        else:
+            raise TypeError(
+                f"{type(numbering).__name__} is not a supported type for numbering"
+            )
 
 
 class MultiArrayCollector(pym.mapper.Collector):
@@ -911,7 +928,7 @@ class AxisTreeMixin(abc.ABC):
                 # choose the component that is first in the renumbering
                 if subaxis.numbering:
                     cidx = subaxis._component_index_from_axis_number(
-                        subaxis.numbering[0]
+                        subaxis.numbering.data_ro[0]
                     )
                 else:
                     cidx = 0
@@ -942,6 +959,45 @@ class AxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable):
 
     def __getitem__(self, indices) -> IndexedAxisTree:
         return self.freeze()[indices]
+
+    @classmethod
+    def from_nested(cls, nest) -> AxisTree:
+        root, parent_to_children = cls._from_nested(nest)
+        return cls(root, parent_to_children)
+
+    # TODO move further down method list
+    @classmethod
+    def _from_nested(cls, nest):
+        # TODO add appropriate exception classes
+        if isinstance(nest, collections.abc.Mapping):
+            assert len(nest) == 1
+            axis, subaxes = just_one(nest.items())
+            axis = _as_axis(axis)
+            if isinstance(subaxes, collections.abc.Mapping):
+                # mapping of component labels to subaxes
+                cidxs = [
+                    axis.component_labels.index(clabel) for clabel in subaxes.keys()
+                ]
+                subaxes = subaxes.values()
+            elif isinstance(subaxes, collections.abc.Sequence):
+                cidxs = range(axis.degree)
+            else:
+                # just an axis
+                assert axis.degree == 1
+                cidxs = [0]
+                subaxes = [subaxes]
+
+            children = [None] * axis.degree
+            parent_to_children = {}
+            for cidx, subaxis in checked_zip(cidxs, subaxes):
+                subaxis_, sub_p2c = cls._from_nested(subaxis)
+                children[cidx] = subaxis_
+                parent_to_children.update(sub_p2c)
+            parent_to_children[axis.id] = children
+            return axis, parent_to_children
+        else:
+            axis = _as_axis(nest)
+            return axis, {axis.id: [None] * axis.degree}
 
     def index(self) -> LoopIndex:
         return self.freeze().index()
@@ -1469,10 +1525,13 @@ def create_lgmap(axes):
 
 @functools.singledispatch
 def as_axis_tree(arg: Any):
+    from pyop3.distarray import Dat  # cyclic import
     from pyop3.itree import IndexedAxisTree
 
     if isinstance(arg, IndexedAxisTree):
         return arg
+    if isinstance(arg, Dat):
+        return as_axis_tree(AxisComponent(arg))
     raise TypeError
 
 
@@ -1489,6 +1548,26 @@ def _(arg: Axis):
 @as_axis_tree.register
 def _(arg: AxisComponent):
     return AxisTree(Axis([arg]))
+
+
+@as_axis_tree.register(numbers.Integral)
+def _(arg: numbers.Integral):
+    return as_axis_tree(AxisComponent(arg))
+
+
+@functools.singledispatch
+def _as_axis(arg) -> Axis:
+    return Axis(_as_axis_component(arg))
+
+
+@_as_axis.register
+def _(arg: Axis):
+    return arg
+
+
+@_as_axis.register
+def _(arg: AxisComponent):
+    return Axis(arg)
 
 
 @functools.singledispatch
@@ -1765,7 +1844,7 @@ def _tabulate_count_array_tree(
         pos += csize
 
     counters = np.zeros(len(axis.components), dtype=int)
-    points = axis.numbering if axis.numbering is not None else range(npoints)
+    points = axis.numbering.data_ro if axis.numbering is not None else range(npoints)
     for new_pt, old_pt in enumerate(points):
         if axis.sf is not None:
             # more efficient outside of loop

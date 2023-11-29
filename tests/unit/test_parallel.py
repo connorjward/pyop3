@@ -65,7 +65,7 @@ def test_halo_data_stored_at_end_of_array(comm, paxis):
         assert comm.rank == 1
         # unchanged as halo data already at the end
         reordered = [0, 1, 2, 3, 4, 5]
-    assert np.equal(paxis.numbering, reordered).all()
+    assert np.equal(paxis.numbering.data_ro, reordered).all()
 
 
 @pytest.mark.parallel(nprocs=2)
@@ -76,7 +76,7 @@ def test_multi_component_halo_data_stored_at_end(comm, maxis):
     else:
         assert comm.rank == 1
         reordered = [4, 2, 1, 5, 3, 0, 6]
-    assert np.equal(maxis.numbering, reordered).all()
+    assert np.equal(maxis.numbering.data_ro, reordered).all()
 
 
 @pytest.mark.parallel(nprocs=2)

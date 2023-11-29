@@ -115,9 +115,6 @@ class Dat(Tensor, ContextFree):
 
     Parameters
     ----------
-    sf : ???
-        PETSc star forest connecting values (offsets) in the local array with
-        remote equivalents.
 
     """
 
@@ -125,7 +122,7 @@ class Dat(Tensor, ContextFree):
 
     def __init__(
         self,
-        axes: AxisTree,
+        axes,
         dtype=None,
         *,
         data=None,
@@ -262,6 +259,11 @@ class Dat(Tensor, ContextFree):
             array_per_context[loop_context] = self._with_axes(layout_axes)
         return ContextSensitiveMultiArray(array_per_context)
 
+    def __iter__(self):
+        # This is needed to avoid accidentally iterating over a Dat which is
+        # implicitly considered an iterator since it implements __getitem__.
+        raise TypeError(f"{type(self).__name__} is not iterable")
+
     # TODO remove this
     @property
     def layouts(self):
@@ -344,6 +346,10 @@ class Dat(Tensor, ContextFree):
     @property
     def alloc_size(self):
         return self.axes.alloc_size() if not self.axes.is_empty else 1
+
+    @property
+    def size(self):
+        return self.axes.size
 
     @classmethod
     def from_list(cls, data, axis_labels, name=None, dtype=ScalarType, inc=0):

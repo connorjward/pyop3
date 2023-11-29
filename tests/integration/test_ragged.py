@@ -6,6 +6,7 @@ import pymbolic as pym
 import pytest
 from pyrsistent import pmap
 
+import pyop3 as op3
 from pyop3 import (
     INC,
     READ,
@@ -229,41 +230,40 @@ def test_nested_ragged_copy_with_dependent_subaxes(nested_dependent_ragged_copy_
 def test_scalar_copy_of_ragged_component_in_multi_component_axis(scalar_copy_kernel):
     m0, m1, m2 = 4, 5, 6
     n0, n1 = 1, 2
-    nnzdata = np.asarray([3, 2, 1, 2, 1], dtype=IntType)
+    nnz_data = np.asarray([3, 2, 1, 2, 1], dtype=IntType)
 
-    nnzaxes = AxisTree(Axis([(m1, "cpt0")], "ax0"))
-    nnz = MultiArray(
-        nnzaxes,
+    nnz_axis = op3.Axis({"pt1": m1}, "ax0")
+    nnz = op3.Dat(
+        nnz_axis,
         name="nnz",
-        data=nnzdata,
-        max_value=max(nnzdata),
+        data=nnz_data,
+        max_value=max(nnz_data),
     )
 
-    axes = AxisTree(
-        Axis(
-            [
-                m0,
-                (m1, "cpt0"),
-                m2,
-            ],
-            "ax0",
-            id="root",
-        ),
+    axes = op3.AxisTree.from_nested(
         {
-            "root": [Axis(n0), Axis([(nnz, "cpt0")], "ax1"), Axis(n1)],
-        },
+            op3.Axis({"pt0": m0, "pt1": m1, "pt2": m2}, "ax0"): [
+                op3.Axis(n0),
+                op3.Axis({"pt0": nnz}, "ax1"),
+                op3.Axis(n1),
+            ]
+        }
     )
 
-    dat0 = MultiArray(axes, name="dat0", data=np.arange(axes.size, dtype=ScalarType))
-    dat1 = MultiArray(axes, name="dat1", dtype=ScalarType)
+    dat0 = op3.Dat(axes, name="dat0", data=np.arange(axes.size, dtype=ScalarType))
+    dat1 = op3.Dat(axes, name="dat1", dtype=dat0.dtype)
 
-    iterset = nnzaxes.add_node(Axis([(nnz, "cpt0")], "ax1"), *nnzaxes.leaf)
+    iterset = op3.AxisTree.from_nested(
+        {
+            nnz_axis: op3.Axis({"pt0": nnz}, "ax1"),
+        }
+    )
     do_loop(p := iterset.index(), scalar_copy_kernel(dat0[p], dat1[p]))
 
-    off = np.cumsum([m0 * n0, sum(nnzdata), m2 * n1])
-    assert np.allclose(dat1.data[: off[0]], 0)
-    assert np.allclose(dat1.data[off[0] : off[1]], dat0.data[off[0] : off[1]])
-    assert np.allclose(dat1.data[off[1] :], 0)
+    off = np.cumsum([m0 * n0, sum(nnz_data), m2 * n1])
+    assert np.allclose(dat1.data_ro[: off[0]], 0)
+    assert np.allclose(dat1.data_ro[off[0] : off[1]], dat0.data_ro[off[0] : off[1]])
+    assert np.allclose(dat1.data_ro[off[1] :], 0)
 
 
 def test_scalar_copy_of_permuted_axis_with_ragged_inner_axis(scalar_copy_kernel):
@@ -305,13 +305,22 @@ def test_scalar_copy_of_permuted_then_ragged_then_permuted_axes(scalar_copy_kern
         max_value=max(nnzdata),
     )
 
-    axes = AxisTree(nnzaxis, {nnzaxis.id: Axis(nnz, id="ax0"), "ax0": Axis(n)})
+    axes = op3.AxisTree(
+        nnzaxis, {nnzaxis.id: op3.Axis(nnz, id="ax0"), "ax0": op3.Axis(n)}
+    )
+
+    # axes = op3.AxisTree.from_nested(
+    #     {
+    #         nnzaxis:
+    #     }
+    # )
+
     paxes = axes.with_modified_node(axes.root, numbering=num0).with_modified_node(
         axes.leaf[0], numbering=num1
     )
 
-    dat0 = MultiArray(axes, name="dat0", data=np.arange(npoints, dtype=ScalarType))
-    dat1 = MultiArray(paxes, name="dat1", data=np.zeros(npoints, dtype=ScalarType))
+    dat0 = op3.Dat(axes, name="dat0", data=np.arange(npoints, dtype=ScalarType))
+    dat1 = op3.Dat(paxes, name="dat1", data=np.zeros(npoints, dtype=ScalarType))
 
     do_loop(p := axes.index(), scalar_copy_kernel(dat0[p], dat1[p]))
     assert np.allclose(dat1.data_ro, dat0.data_ro)

@@ -72,7 +72,7 @@ def check_invalid_indices(axes, indicess):
             axes.get_offset(indices)
 
 
-@pytest.mark.parametrize("numbering", [None, (2, 0, 1)])
+@pytest.mark.parametrize("numbering", [None, [2, 3, 0, 4, 1]])
 def test_1d_affine_layout(numbering):
     # the numbering should not change the final layout
     axes = AxisTree(
