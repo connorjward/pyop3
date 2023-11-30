@@ -135,9 +135,6 @@ class Dat(Tensor, ContextFree):
         temporary_axes = as_axis_tree(axes).freeze()  # used for the temporary
         axes = layout_axes(axes)
 
-        if data is None and dtype is None:
-            dtype = ScalarType
-
         if isinstance(data, DistributedArray):
             # disable for now, temporaries hit this in an annoying way
             # if data.sf is not axes.sf:
@@ -147,10 +144,19 @@ class Dat(Tensor, ContextFree):
                     "If data is a DistributedArray, dtype should not be provided"
                 )
             pass
-        elif isinstance(data, np.ndarray):
-            data = DistributedArray(data, dtype, name=self.name, sf=axes.sf)
         else:
-            data = DistributedArray(axes.size, dtype, name=self.name, sf=axes.sf)
+            if isinstance(data, np.ndarray):
+                dtype = dtype or data.dtype
+            else:
+                dtype = dtype or self.DEFAULT_DTYPE
+
+            if data is not None:
+                data = np.asarray(data, dtype=dtype)
+                shape = data.shape
+            else:
+                shape = axes.size
+            data = DistributedArray(shape, dtype, name=self.name, data=data, sf=axes.sf)
+
         self.array = data
 
         self.temporary_axes = temporary_axes
@@ -253,16 +259,15 @@ class Dat(Tensor, ContextFree):
                 new_axes.root,
                 new_axes.parent_to_children,
                 target_paths=target_paths,
-                index_exprs=index_exprs,
+                # index_exprs=index_exprs,
                 layouts=new_layouts,
             )
             array_per_context[loop_context] = self._with_axes(layout_axes)
         return ContextSensitiveMultiArray(array_per_context)
 
-    def __iter__(self):
-        # This is needed to avoid accidentally iterating over a Dat which is
-        # implicitly considered an iterator since it implements __getitem__.
-        raise TypeError(f"{type(self).__name__} is not iterable")
+    # Since __getitem__ is implemented, this class is implicitly considered
+    # to be iterable (which it's not). This avoids some confusing behaviour.
+    __iter__ = None
 
     # TODO remove this
     @property

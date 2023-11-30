@@ -9,7 +9,7 @@ import numpy as np
 from mpi4py import MPI
 
 from pyop3.dtypes import ScalarType
-from pyop3.utils import UniqueNameGenerator, deprecated, readonly
+from pyop3.utils import UniqueNameGenerator, as_tuple, deprecated, readonly
 
 
 class IncompatibleStarForestException(Exception):
@@ -44,34 +44,29 @@ class DistributedArray:
     # NOTE: When GPU support is added, the host-device awareness and
     # copies should live in this class.
 
+    # NOTE: It is probably easiest to treat the data as being "moved into" the
+    # DistributedArray. But copies should ideally be avoided?
+
     DEFAULT_DTYPE = ScalarType
 
     _prefix = "array"
     _name_generator = UniqueNameGenerator()
 
-    def __init__(self, data_or_shape, dtype=None, *, name=None, prefix=None, sf=None):
+    def __init__(
+        self, shape, dtype=None, *, name=None, prefix=None, data=None, sf=None
+    ):
+        shape = as_tuple(shape)
+        if dtype is None:
+            dtype = self.DEFAULT_DTYPE
+
         if name and prefix:
             raise ValueError("Can only specify one of name and prefix")
 
-        # option 1: passed shape
-        if isinstance(data_or_shape, (numbers.Integral, tuple)):
-            data = None
-            shape = (
-                data_or_shape if isinstance(data_or_shape, tuple) else (data_or_shape,)
-            )
-            if not dtype:
-                dtype = self.DEFAULT_DTYPE
-        # option 2: passed a numpy array
-        elif isinstance(data_or_shape, np.ndarray):
-            data = data_or_shape
-            shape = data.shape
-            if len(shape) > 1:
-                raise NotImplementedError
-            if not dtype:
-                dtype = data.dtype
-            data = np.asarray(data, dtype)
-        else:
-            raise TypeError(f"Unexpected type passed to data_or_shape")
+        if data is not None:
+            if data.shape != shape:
+                raise ValueError
+            if data.dtype != dtype:
+                raise ValueError
 
         if sf and shape[0] != sf.size:
             raise IncompatibleStarForestException
@@ -91,8 +86,9 @@ class DistributedArray:
         self._pending_reduction = None
         self._finalizer = None
 
-        # TODO
-        # self._sync_thread = None
+    # @classmethod
+    # def from_array(cls, array: np.ndarray, **kwargs):
+    #     return cls(array.shape, array.dtype, data=array, **kwargs)
 
     @property
     @not_in_flight

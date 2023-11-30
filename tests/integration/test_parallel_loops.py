@@ -130,7 +130,7 @@ def cone_map(comm, mesh_axis):
     cell_renumbering = np.empty(ncells, dtype=int)
     min_cell, max_cell = mesh_axis._component_numbering_offsets[:2]
     counter = 0
-    for new_pt, old_pt in enumerate(mesh_axis.numbering):
+    for new_pt, old_pt in enumerate(mesh_axis.numbering.data_ro):
         # is it a cell?
         if min_cell <= old_pt < max_cell:
             old_cell = old_pt - min_cell
@@ -142,7 +142,7 @@ def cone_map(comm, mesh_axis):
     vert_renumbering = np.empty(nverts, dtype=int)
     min_vert, max_vert = mesh_axis._component_numbering_offsets[1:]
     counter = 0
-    for new_pt, old_pt in enumerate(mesh_axis.numbering):
+    for new_pt, old_pt in enumerate(mesh_axis.numbering.data_ro):
         # is it a vertex?
         if min_vert <= old_pt < max_vert:
             old_vert = old_pt - min_vert

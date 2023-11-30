@@ -81,7 +81,7 @@ def grow_dof_sf(axes: FrozenAxisTree, axis, path, indices):
     # renumbering per component, can skip if no renumbering present
     renumbering = [np.empty(c.count, dtype=int) for c in axis.components]
     counters = [0] * len(axis.components)
-    for new_pt, old_pt in enumerate(axis.numbering):
+    for new_pt, old_pt in enumerate(axis.numbering.data_ro):
         for cidx, (min_, max_) in enumerate(
             zip(component_offsets, component_offsets[1:])
         ):

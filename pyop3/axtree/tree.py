@@ -961,13 +961,13 @@ class AxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable):
         return self.freeze()[indices]
 
     @classmethod
-    def from_nested(cls, nest) -> AxisTree:
-        root, parent_to_children = cls._from_nested(nest)
+    def from_nest(cls, nest) -> AxisTree:
+        root, parent_to_children = cls._from_nest(nest)
         return cls(root, parent_to_children)
 
     # TODO move further down method list
     @classmethod
-    def _from_nested(cls, nest):
+    def _from_nest(cls, nest):
         # TODO add appropriate exception classes
         if isinstance(nest, collections.abc.Mapping):
             assert len(nest) == 1
@@ -990,7 +990,7 @@ class AxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable):
             children = [None] * axis.degree
             parent_to_children = {}
             for cidx, subaxis in checked_zip(cidxs, subaxes):
-                subaxis_, sub_p2c = cls._from_nested(subaxis)
+                subaxis_, sub_p2c = cls._from_nest(subaxis)
                 children[cidx] = subaxis_
                 parent_to_children.update(sub_p2c)
             parent_to_children[axis.id] = children

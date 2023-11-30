@@ -240,7 +240,7 @@ def test_scalar_copy_of_ragged_component_in_multi_component_axis(scalar_copy_ker
         max_value=max(nnz_data),
     )
 
-    axes = op3.AxisTree.from_nested(
+    axes = op3.AxisTree.from_nest(
         {
             op3.Axis({"pt0": m0, "pt1": m1, "pt2": m2}, "ax0"): [
                 op3.Axis(n0),
@@ -253,7 +253,7 @@ def test_scalar_copy_of_ragged_component_in_multi_component_axis(scalar_copy_ker
     dat0 = op3.Dat(axes, name="dat0", data=np.arange(axes.size, dtype=ScalarType))
     dat1 = op3.Dat(axes, name="dat1", dtype=dat0.dtype)
 
-    iterset = op3.AxisTree.from_nested(
+    iterset = op3.AxisTree.from_nest(
         {
             nnz_axis: op3.Axis({"pt0": nnz}, "ax1"),
         }
