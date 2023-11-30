@@ -202,6 +202,7 @@ class Dat(Tensor, ContextFree):
                 layout_exprs,
             )
 
+            # not sure I need to do this now slices maintain the same labels
             new_layouts = substitute_layouts(
                 self.layout_axes,
                 new_axes,
@@ -242,7 +243,6 @@ class Dat(Tensor, ContextFree):
             )
 
             new_axes = IndexedAxisTree(
-                indexed_axes.root,
                 indexed_axes.parent_to_children,
                 target_paths,
                 index_exprs,
@@ -256,7 +256,6 @@ class Dat(Tensor, ContextFree):
                 index_exprs_per_indexed_cpt,
             )
             layout_axes = FrozenAxisTree(
-                new_axes.root,
                 new_axes.parent_to_children,
                 target_paths=target_paths,
                 # index_exprs=index_exprs,

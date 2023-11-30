@@ -35,6 +35,10 @@ class NodeNotFoundException(Exception):
     pass
 
 
+class EmptyTreeException(Exception):
+    pass
+
+
 class Node(pytools.ImmutableRecord, Identified):
     fields = {"id"}
 
@@ -44,14 +48,10 @@ class Node(pytools.ImmutableRecord, Identified):
 
 
 class AbstractTree(pytools.ImmutableRecord, abc.ABC):
-    fields = {"root", "parent_to_children"}
+    fields = {"parent_to_children"}
 
-    def __init__(self, root, parent_to_children):
-        root, parent_to_children = self._parse_parent_to_children(
-            root, parent_to_children
-        )
-        self.root = root
-        self.parent_to_children = parent_to_children
+    def __init__(self, parent_to_children=None):
+        self.parent_to_children = self._parse_parent_to_children(parent_to_children)
 
     def __str__(self):
         return self._stringify()
@@ -62,11 +62,18 @@ class AbstractTree(pytools.ImmutableRecord, abc.ABC):
     @classmethod
     def from_nest(cls, nest) -> AxisTree:
         root, parent_to_children = cls._from_nest(nest)
-        return cls(root, parent_to_children)
+        return cls({None: [root]} | parent_to_children)
+
+    @property
+    def root(self):
+        if not self.is_empty:
+            return just_one(self.parent_to_children[None])
+        else:
+            return None
 
     @property
     def is_empty(self) -> bool:
-        return not self.root
+        return not self.parent_to_children
 
     @property
     def depth(self) -> int:
@@ -96,11 +103,13 @@ class AbstractTree(pytools.ImmutableRecord, abc.ABC):
     def nodes(self):
         if self.is_empty:
             return frozenset()
-        return frozenset({self.root}) | {
-            node
-            for node in chain.from_iterable(self.parent_to_children.values())
-            if node is not None
-        }
+        return frozenset(
+            {
+                node
+                for node in chain.from_iterable(self.parent_to_children.values())
+                if node is not None
+            }
+        )
 
     @property
     @abc.abstractmethod
@@ -117,10 +126,7 @@ class AbstractTree(pytools.ImmutableRecord, abc.ABC):
 
     def parent(self, node):
         node = self._as_node(node)
-        if node == self.root:
-            return None
-        else:
-            return self.child_to_parent[node]
+        return self.child_to_parent[node]
 
     def children(self, node):
         node_id = self._as_node_id(node)
@@ -129,12 +135,8 @@ class AbstractTree(pytools.ImmutableRecord, abc.ABC):
     def replace_node(self, old_node, new_node):
         parent_to_children = {k: list(v) for k, v in self.parent_to_children.items()}
         parent_to_children[new_node.id] = parent_to_children.pop(old_node.id)
-        if old_node == self.root:
-            root = new_node
-        else:
-            root = self.root
-            parent, pidx = self.parent(old_node)
-            parent_to_children[parent.id][pidx] = new_node
+        parent, pidx = self.parent(old_node)
+        parent_to_children[parent.id][pidx] = new_node
         return self.copy(root=root, parent_to_children=parent_to_children)
 
     def with_modified_node(self, node, **kwargs):
@@ -233,32 +235,34 @@ class AbstractTree(pytools.ImmutableRecord, abc.ABC):
             return node, parent_to_children
         else:
             node = cls._parse_node(nest)
-            return node, {node.id: [None] * node.degree}
+            return node, {}
 
-    # TODO, could be improved, especially if root and parent_to_children are combined.
+    # TODO, could be improved
     @staticmethod
-    def _parse_parent_to_children(root, parent_to_children):
-        if root:
-            if parent_to_children:
-                parent_to_children = {
-                    parent_id: as_tuple(children)
-                    for parent_id, children in parent_to_children.items()
-                }
-
-                node_ids = [
-                    node.id
-                    for node in filter(None, flatten(list(parent_to_children.values())))
-                ] + [root.id]
-                if not has_unique_entries(node_ids):
-                    raise ValueError("Nodes with duplicate IDs found")
-                if any(parent_id not in node_ids for parent_id in parent_to_children):
-                    raise ValueError("Parent ID not found")
-            # else:
-            #     parent_to_children = {root.id: [None] * root.degree}
+    def _parse_parent_to_children(parent_to_children):
+        if not parent_to_children:
+            return pmap()
+        elif isinstance(parent_to_children, Node):
+            # just passing root
+            return freeze({None: (parent_to_children,)})
+        elif None not in parent_to_children:
+            raise ValueError("Root missing from tree")
+        elif len(parent_to_children[None]) != 1:
+            raise ValueError("Multiple roots provided, this is not allowed")
         else:
-            if parent_to_children:
-                raise ValueError("Tree cannot have children without a root")
-        return root, freeze(parent_to_children or {})
+            node_ids = [
+                node.id
+                for node in chain.from_iterable(parent_to_children.values())
+                if node is not None
+            ]
+            if not has_unique_entries(node_ids):
+                raise ValueError("Nodes with duplicate IDs found")
+            if any(
+                parent_id not in node_ids
+                for parent_id in parent_to_children.keys() - {None}
+            ):
+                raise ValueError("Tree is disconnected")
+            return freeze(parent_to_children)
 
     @staticmethod
     def _parse_node(node):
@@ -452,6 +456,7 @@ class LabelledTree(AbstractTree):
                 "Either both or neither of parent and component must be defined"
             )
 
+        # should fail if not a valid place to insert?
         if not parent:
             return subtree
         else:
@@ -461,8 +466,12 @@ class LabelledTree(AbstractTree):
             new_parent_to_children = {
                 p: list(ch) for p, ch in self.parent_to_children.items()
             }
-            new_parent_to_children[parent.id][cpt_index] = subtree.root
-            new_parent_to_children.update(subtree.parent_to_children)
+
+            sub_p2c = dict(subtree.parent_to_children)
+            subroot = just_one(sub_p2c.pop(None))
+
+            new_parent_to_children[parent.id][cpt_index] = subroot
+            new_parent_to_children.update(sub_p2c)
             return self.copy(parent_to_children=new_parent_to_children)
 
     @cached_property
@@ -617,38 +626,37 @@ class LabelledTree(AbstractTree):
             node = cls._parse_node(nest)
             return node, {node.id: [None] * node.degree}
 
-    # TODO, could be improved, especially if root and parent_to_children are combined.
+    # TODO, could be improved, same as other Tree apart from [None, None, ...] bit
     @staticmethod
-    def _parse_parent_to_children(root, parent_to_children):
-        if root:
-            if parent_to_children:
-                parent_to_children = {
-                    parent_id: as_tuple(children)
-                    for parent_id, children in parent_to_children.items()
-                }
+    def _parse_parent_to_children(parent_to_children):
+        if not parent_to_children:
+            return pmap()
+        if isinstance(parent_to_children, Node):
+            # just passing root
+            parent_to_children = {None: (parent_to_children,)}
 
-                nodes = [root] + [
-                    node
-                    for node in chain.from_iterable(parent_to_children.values())
-                    if node is not None
-                ]
+        if None not in parent_to_children:
+            raise ValueError("Root missing from tree")
+        if len(parent_to_children[None]) != 1:
+            raise ValueError("Multiple roots provided, this is not allowed")
 
-                # add missing leaves
-                for leaf in nodes:
-                    if leaf.id not in parent_to_children.keys():
-                        parent_to_children[leaf.id] = (None,) * leaf.degree
-
-                node_ids = [n.id for n in nodes]
-                if not has_unique_entries(node_ids):
-                    raise ValueError("Nodes with duplicate IDs found")
-                if any(parent_id not in node_ids for parent_id in parent_to_children):
-                    raise ValueError("Parent ID not found")
-            else:
-                parent_to_children = {root.id: [None] * root.degree}
-        else:
-            if parent_to_children:
-                raise ValueError("Tree cannot have children without a root")
-        return root, freeze(parent_to_children or {})
+        nodes = [
+            node
+            for node in chain.from_iterable(parent_to_children.values())
+            if node is not None
+        ]
+        node_ids = [n.id for n in nodes]
+        if not has_unique_entries(node_ids):
+            raise ValueError("Nodes with duplicate IDs found")
+        if any(
+            parent_id not in node_ids
+            for parent_id in parent_to_children.keys() - {None}
+        ):
+            raise ValueError("Tree is disconnected")
+        for node in nodes:
+            if node.id not in parent_to_children.keys():
+                parent_to_children[node.id] = [None] * node.degree
+        return freeze(parent_to_children)
 
     @staticmethod
     def _parse_node(node):

@@ -532,9 +532,6 @@ class AxisComponent(LabelledNodeComponent):
         tree to produce the layout. This is why we need this ``indexed`` flag.
         """
 
-    def __str__(self) -> str:
-        return f"{{count={self.count}}}"
-
     @property
     def is_distributed(self):
         return self.overlap is not None
@@ -633,7 +630,10 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
         return as_axis_tree(self)(*args)
 
     def __str__(self) -> str:
-        return f"{self.__class__.__name__}([{', '.join(str(cpt) for cpt in self.components)}], label={self.label})"
+        return (
+            self.__class__.__name__
+            + f"({{{', '.join(f'{c.label}: {c.count}' for c in self.components)}}}, {self.label})"
+        )
 
     @classmethod
     def from_serial(cls, serial: Axis, sf):
@@ -890,11 +890,11 @@ class AxisTree(AxisTreeMixin, LabelledTree, ContextFreeLoopIterable):
 
     def __init__(
         self,
-        root: Optional[MultiAxis] = None,
-        parent_to_children: Optional[Dict] = None,
+        parent_to_children=None,
     ):
-        super().__init__(root, parent_to_children)
+        super().__init__(parent_to_children)
 
+        # makea  cached property, then delete this method
         self._layout_exprs = FrozenAxisTree._default_index_exprs(self)
 
     def __getitem__(self, indices) -> IndexedAxisTree:
@@ -913,7 +913,7 @@ class AxisTree(AxisTreeMixin, LabelledTree, ContextFreeLoopIterable):
         raise RuntimeError("Should already be frozen")
 
     def freeze(self) -> FrozenAxisTree:
-        return FrozenAxisTree(self.root, self.parent_to_children)
+        return FrozenAxisTree(self.parent_to_children)
 
     def add_node(
         self,
@@ -996,13 +996,12 @@ class IndexedAxisTree(AxisTreeMixin, LabelledTree, ContextFreeLoopIterable):
 
     def __init__(
         self,
-        root,
         parent_to_children,
         target_paths,
         index_exprs,
         layout_exprs,
     ):
-        super().__init__(root, parent_to_children)
+        super().__init__(parent_to_children)
         self._target_paths = target_paths
         self._index_exprs = index_exprs
         self.layout_exprs = layout_exprs
@@ -1029,7 +1028,7 @@ class IndexedAxisTree(AxisTreeMixin, LabelledTree, ContextFreeLoopIterable):
 
     # hacky
     def restore(self):
-        return FrozenAxisTree(self.root, self.parent_to_children)
+        return FrozenAxisTree(self.parent_to_children)
 
     def index(self) -> LoopIndex:
         from pyop3.itree import LoopIndex
@@ -1073,14 +1072,13 @@ class IndexedAxisTree(AxisTreeMixin, LabelledTree, ContextFreeLoopIterable):
 class FrozenAxisTree(AxisTreeMixin, LabelledTree, ContextFreeLoopIterable):
     def __init__(
         self,
-        root=None,
-        parent_to_children=pmap(),
+        parent_to_children=None,
         target_paths=None,
         index_exprs=None,
         layouts=None,
         sf=None,
     ):
-        super().__init__(root, parent_to_children)
+        super().__init__(parent_to_children)
         self._target_paths = target_paths or self._default_target_paths()
         self._index_exprs = index_exprs or self._default_index_exprs()
         # dont think I need this?
@@ -1106,7 +1104,7 @@ class FrozenAxisTree(AxisTreeMixin, LabelledTree, ContextFreeLoopIterable):
 
     # hacky
     def restore(self):
-        return FrozenAxisTree(self.root, self.parent_to_children)
+        return FrozenAxisTree(self.parent_to_children)
 
     def index(self):
         from pyop3.itree import LoopIndex
@@ -1232,8 +1230,7 @@ class FrozenAxisTree(AxisTreeMixin, LabelledTree, ContextFreeLoopIterable):
         # TODO: put somewhere better
         # self._check_labels()
 
-        # catch empyt axis tree
-        if self.root is None:
+        if self.is_empty:
             return pmap({pmap(): 0})
 
         layouts, _, _ = _compute_layouts(self, self.root)
@@ -1823,7 +1820,7 @@ def axis_tree_size(axes: AxisTree) -> int:
     example, an array with shape ``(10, 3)`` will have a size of 30.
 
     """
-    if not axes.root:
+    if axes.is_empty:
         return 1
     return _axis_size(axes, axes.root, pmap(), pmap())
 

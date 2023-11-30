@@ -64,39 +64,35 @@ bsearch = pym.var("mybsearch")
 # need something like a SplitCalledMap. Instead we will just admit any
 # parent_to_children map and do error checking when we convert it to shape.
 class IndexTree(Tree):
-    def __init__(self, root, parent_to_children=pmap(), *, loop_context=pmap()):
-        root, parent_to_children, loop_context = parse_index_tree(
-            root, parent_to_children, loop_context
+    def __init__(self, parent_to_children=pmap(), *, loop_context=pmap()):
+        super().__init__(parent_to_children)
+        # FIXME, don't need to modify parent_to_children in this function
+        parent_to_children, loop_context = parse_index_tree(
+            self.parent_to_children, loop_context
         )
-        super().__init__(root, parent_to_children)
         self.loop_context = loop_context
 
 
-def parse_index_tree(root, parent_to_children, loop_context):
-    root = apply_loop_context(root, loop_context)
-    new_parent_to_children = parse_parent_to_children(
-        parent_to_children, root, loop_context
-    )
+def parse_index_tree(parent_to_children, loop_context):
+    new_parent_to_children = parse_parent_to_children(parent_to_children, loop_context)
 
-    return root, pmap(new_parent_to_children), loop_context
+    return pmap(new_parent_to_children), loop_context
 
 
-def parse_parent_to_children(parent_to_children, parent, loop_context):
-    if parent.id in parent_to_children:
+def parse_parent_to_children(parent_to_children, loop_context, parent=None):
+    if parent in parent_to_children:
         new_children = []
         subparents_to_children = []
-        for child in parent_to_children[parent.id]:
+        for child in parent_to_children[parent]:
             if child is None:
                 continue
             child = apply_loop_context(child, loop_context)
             new_children.append(child)
             subparents_to_children.append(
-                parse_parent_to_children(parent_to_children, child, loop_context)
+                parse_parent_to_children(parent_to_children, loop_context, child.id)
             )
 
-        return pmap({parent.id: tuple(new_children)}) | merge_dicts(
-            subparents_to_children
-        )
+        return pmap({parent: tuple(new_children)}) | merge_dicts(subparents_to_children)
     else:
         return pmap()
 
@@ -444,6 +440,10 @@ def apply_loop_context(arg, loop_context, *, axes, path):
             slice_cpt = Subset(cpt.label, arg)
             slice_cpts.append(slice_cpt)
         return Slice(target_axis.label, slice_cpts)
+    elif isinstance(arg, str):
+        # component label
+        # FIXME this is not right, only works at top level
+        return Slice(axes.root.label, AffineSliceComponent(arg))
     elif isinstance(arg, numbers.Integral):
         return apply_loop_context(
             slice(arg, arg + 1), loop_context, axes=axes, path=path
@@ -725,16 +725,16 @@ def index_tree_from_iterable(
             children.append(child)
             subtrees.append(subtree)
 
-        root = index
         parent_to_children = pmap({index.id: children}) | merge_dicts(subtrees)
     else:
-        root = index
-        parent_to_children = pmap()
+        parent_to_children = {}
 
     if first_call:
-        return IndexTree(root, parent_to_children, loop_context=loop_context)
+        assert None not in parent_to_children
+        parent_to_children |= {None: [index]}
+        return IndexTree(parent_to_children, loop_context=loop_context)
     else:
-        return root, parent_to_children
+        return index, parent_to_children
 
 
 @functools.singledispatch
@@ -757,7 +757,7 @@ def as_index_forest(arg: Any, **kwargs):
     if isinstance(arg, MultiArray):
         slice_ = apply_loop_context(arg, loop_context=pmap(), path=pmap(), **kwargs)
         return (IndexTree(slice_),)
-    elif isinstance(arg, collections.abc.Iterable):
+    elif isinstance(arg, collections.abc.Sequence):
         loop_contexts = collect_loop_contexts(arg) or [pmap()]
         forest = []
         for context in loop_contexts:
@@ -1119,7 +1119,6 @@ def index_axes(axes, index_tree):
         layout_exprs_per_indexed_cpt,
     )
     return IndexedAxisTree(
-        indexed_axes.root,
         indexed_axes.parent_to_children,
         target_paths,
         index_exprs,
