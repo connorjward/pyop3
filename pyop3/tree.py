@@ -60,9 +60,11 @@ class AbstractTree(pytools.ImmutableRecord, abc.ABC):
         return self._as_node(node) in self.nodes
 
     @classmethod
-    def from_nest(cls, nest) -> AxisTree:
+    def from_nest(cls, nest, **kwargs) -> AxisTree:
         root, parent_to_children = cls._from_nest(nest)
-        return cls({None: [root]} | parent_to_children)
+        breakpoint()
+        parent_to_children.update({None: [root]})
+        return cls(parent_to_children, **kwargs)
 
     @property
     def root(self):
@@ -214,29 +216,6 @@ class AbstractTree(pytools.ImmutableRecord, abc.ABC):
 
         return subtree
 
-    @classmethod
-    def _from_nest(cls, nest):
-        # TODO add appropriate exception classes
-        if isinstance(nest, collections.abc.Mapping):
-            assert len(nest) == 1
-            node, subnodes = just_one(nest.items())
-            node = cls._parse_node(node)
-
-            if not isinstance(subnodes, collections.abc.Sequence):
-                subnodes = [subnodes]
-
-            children = []
-            parent_to_children = {}
-            for subnode in checked_zip(subnode_idxs, subnodes):
-                subnode_, sub_p2c = cls._from_nest(subnode)
-                children.append(subnode_)
-                parent_to_children.update(sub_p2c)
-            parent_to_children[node.id] = children
-            return node, parent_to_children
-        else:
-            node = cls._parse_node(nest)
-            return node, {}
-
     # TODO, could be improved
     @staticmethod
     def _parse_parent_to_children(parent_to_children):
@@ -267,7 +246,7 @@ class AbstractTree(pytools.ImmutableRecord, abc.ABC):
     @staticmethod
     def _parse_node(node):
         if isinstance(node, Node):
-            return Node
+            return node
         else:
             raise TypeError(f"No handler defined for {type(node).__name__}")
 
@@ -338,6 +317,35 @@ class Tree(AbstractTree):
             parent_to_children[parent.id].append(node)
             return type(self)(self.root, parent_to_children)
 
+    @classmethod
+    def _from_nest(cls, nest):
+        # TODO add appropriate exception classes
+        if isinstance(nest, collections.abc.Mapping):
+            assert len(nest) == 1
+            node, subnodes = just_one(nest.items())
+            node = cls._parse_node(node)
+
+            if isinstance(subnodes, collections.abc.Mapping):
+                if len(subnodes) == 1 and isinstance(just_one(subnodes.keys()), Node):
+                    # just one subnode
+                    subnodes = [subnodes]
+                else:
+                    raise ValueError
+            elif not isinstance(subnodes, collections.abc.Sequence):
+                subnodes = [subnodes]
+
+            children = []
+            parent_to_children = {}
+            for subnode in subnodes:
+                subnode_, sub_p2c = cls._from_nest(subnode)
+                children.append(subnode_)
+                parent_to_children.update(sub_p2c)
+            parent_to_children[node.id] = children
+            return node, parent_to_children
+        else:
+            node = cls._parse_node(nest)
+            return node, {}
+
 
 class LabelledNodeComponent(pytools.ImmutableRecord, Labelled):
     fields = {"label"}
@@ -362,6 +370,10 @@ class MultiComponentLabelledNode(Node, Labelled):
     @property
     def component_labels(self):
         return tuple(c.label for c in self.components)
+
+    @property
+    def component(self):
+        return just_one(self.components)
 
 
 class LabelledTree(AbstractTree):
@@ -601,11 +613,19 @@ class LabelledTree(AbstractTree):
             node = cls._parse_node(node)
 
             if isinstance(subnodes, collections.abc.Mapping):
-                # mapping of component labels to subnodes
-                cidxs = [
-                    node.component_labels.index(clabel) for clabel in subnodes.keys()
-                ]
-                subnodes = subnodes.values()
+                if len(subnodes) == 1 and isinstance(
+                    just_one(subnodes.keys()), MultiComponentLabelledNode
+                ):
+                    # just one subnode
+                    cidxs = [0]
+                    subnodes = [subnodes]
+                else:
+                    # mapping of component labels to subnodes
+                    cidxs = [
+                        node.component_labels.index(clabel)
+                        for clabel in subnodes.keys()
+                    ]
+                    subnodes = subnodes.values()
             elif isinstance(subnodes, collections.abc.Sequence):
                 cidxs = range(node.degree)
             else:

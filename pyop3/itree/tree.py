@@ -72,6 +72,17 @@ class IndexTree(Tree):
         )
         self.loop_context = loop_context
 
+    @staticmethod
+    def _parse_node(node):
+        if isinstance(node, Index):
+            return node
+        elif isinstance(node, Axis):
+            return Slice(
+                node.label, [AffineSliceComponent(c.label) for c in node.components]
+            )
+        else:
+            raise TypeError(f"No handler defined for {type(node).__name__}")
+
 
 def parse_index_tree(parent_to_children, loop_context):
     new_parent_to_children = parse_parent_to_children(parent_to_children, loop_context)
@@ -455,6 +466,11 @@ def apply_loop_context(arg, loop_context, *, axes, path):
 @apply_loop_context.register
 def _(index: Index, loop_context, **kwargs):
     return index
+
+
+@apply_loop_context.register
+def _(index: Axis, *args, **kwargs):
+    return Slice(index.label, [AffineSliceComponent(c.label) for c in index.components])
 
 
 @apply_loop_context.register

@@ -1,10 +1,6 @@
-import ctypes
-
 import loopy as lp
 import numpy as np
-import pymbolic as pym
 import pytest
-from pyrsistent import pmap
 
 import pyop3 as op3
 from pyop3.ir import LOOPY_LANG_VERSION, LOOPY_TARGET
@@ -44,8 +40,8 @@ def vector_copy_kernel():
 
 def test_scalar_copy(scalar_copy_kernel):
     m = 10
-    axis = op3.Axis({"pt0": m}, "ax0")
-    dat0 = op3.Dat(axis, name="dat0", data=np.arange(m), dtype=op3.ScalarType)
+    axis = op3.Axis(m)
+    dat0 = op3.Dat(axis, name="dat0", data=np.arange(axis.size), dtype=op3.ScalarType)
     dat1 = op3.Dat(
         axis,
         name="dat1",
@@ -60,7 +56,7 @@ def test_vector_copy(vector_copy_kernel):
     m, n = 10, 3
 
     axes = op3.AxisTree.from_nest({op3.Axis(m): op3.Axis(n)})
-    dat0 = op3.Dat(axes, name="dat0", data=np.arange(m * n), dtype=op3.ScalarType)
+    dat0 = op3.Dat(axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType)
     dat1 = op3.Dat(
         axes,
         name="dat1",
@@ -127,13 +123,6 @@ def test_multi_component_scalar_copy_with_two_outer_loops(scalar_copy_kernel):
     )
     dat1 = op3.Dat(axes, name="dat1", dtype=dat0.dtype)
 
-    # iterset = AxisTree(
-    #     Axis([(n, 1)], "ax0", id="root"),
-    #     {"root": Axis([(b, 0)], "ax1")},
-    # )
     op3.do_loop(p := axes["pt1", :].index(), scalar_copy_kernel(dat0[p], dat1[p]))
-    # l = loop(p := iterset.index(), scalar_copy_kernel(dat0[p], dat1[p]))
-    # l()
-
     assert all(dat1.data[: m * a] == 0)
     assert all(dat1.data[m * a :] == dat0.data[m * a :])
