@@ -182,8 +182,8 @@ def test_nested_ragged_copy_with_independent_subaxes(nested_ragged_copy_kernel):
 
     p = IndexTree(Index(Range("ax0", m)))
     q = p.copy()
-    q = q.put_node(Index(Range("ax1", nnz0[p])), q.leaf)
-    q = q.put_node(Index(Range("ax2", nnz1[p])), q.leaf)
+    q = q.add_node(Index(Range("ax1", nnz0[p])), q.leaf)
+    q = q.add_node(Index(Range("ax2", nnz1[p])), q.leaf)
 
     do_loop(p, nested_ragged_copy_kernel(dat0[q], dat1[q]))
 
@@ -219,8 +219,8 @@ def test_nested_ragged_copy_with_dependent_subaxes(nested_dependent_ragged_copy_
 
     p = IndexTree(Index(Range("ax0", m)))
     q = p.copy()
-    q = q.put_node(Index(Range("ax1", nnz0[q])), q.leaf)
-    q = q.put_node(Index(Range("ax2", nnz1[q])), q.leaf)
+    q = q.add_node(Index(Range("ax1", nnz0[q])), q.leaf)
+    q = q.add_node(Index(Range("ax2", nnz1[q])), q.leaf)
 
     do_loop(p, nested_dependent_ragged_copy_kernel(dat0[q], dat1[q]))
 

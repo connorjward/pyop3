@@ -28,12 +28,9 @@ from pyop3.dtypes import IntType, PointerType, get_mpi_dtype
 from pyop3.extras.debug import print_if_rank, print_with_rank
 from pyop3.sf import StarForest
 from pyop3.tree import (
-    ComponentLabel,
     LabelledNodeComponent,
     LabelledTree,
     MultiComponentLabelledNode,
-    NodeId,
-    StrictLabelledTree,
     postvisit,
     previsit,
 )
@@ -132,6 +129,9 @@ class LoopIterable(abc.ABC):
     @abc.abstractmethod
     def __getitem__(self, indices) -> Union[LoopIterable, ContextSensitiveLoopIterable]:
         raise NotImplementedError
+
+    # not iterable in the Python sense
+    __iter__ = None
 
     @abc.abstractmethod
     def index(self) -> LoopIndex:
@@ -245,7 +245,7 @@ def has_halo(axes, axis):
         return True
     else:
         for component in axis.components:
-            subaxis = axes.child(axis, component)
+            subaxis = axes.component_child(axis, component)
             if subaxis and has_halo(axes, subaxis):
                 return True
         return False
@@ -262,7 +262,7 @@ def has_independently_indexed_subaxis_parts(axes, axis, cpt):
 
     Note that we need to consider both ragged sizes and permutations here
     """
-    if subaxis := axes.child(axis, cpt):
+    if subaxis := axes.component_child(axis, cpt):
         return not any(
             requires_external_index(axes, subaxis, c) for c in subaxis.components
         )
@@ -317,7 +317,7 @@ def step_size(
     """
     if not has_constant_step(axes, axis, component) and not indices:
         raise ValueError
-    if subaxis := axes.child(axis, component):
+    if subaxis := axes.component_child(axis, component):
         return _axis_size(axes, subaxis, path, indices)
     else:
         return 1
@@ -561,7 +561,7 @@ class AxisComponent(LabelledNodeComponent):
 
         assert npoints is not None
 
-        if subaxis := axtree.child(axis, self):
+        if subaxis := axtree.component_child(axis, self):
             return npoints * axtree.alloc_size(subaxis)
         else:
             return npoints
@@ -833,56 +833,6 @@ class AxisVariable(pym.primitives.Variable):
 
 
 class AxisTreeMixin(abc.ABC):
-    def path(self, axis: Axis, component: AxisComponent, **kwargs):
-        cpt_label = _as_axis_component_label(component)
-        return super().path(axis, cpt_label, **kwargs)
-
-    def path_with_nodes(self, axis: Axis, component: AxisComponent, **kwargs):
-        cpt_label = _as_axis_component_label(component)
-        return super().path_with_nodes(axis, cpt_label, **kwargs)
-
-    # bad name
-    def detailed_path(self, path):
-        node = self._node_from_path(path)
-        if node is None:
-            return pmap()
-        else:
-            return self.path_with_nodes(*node, and_components=True)
-
-    def is_valid_path(self, path):
-        try:
-            self._node_from_path(path)
-            return True
-        except:
-            return False
-
-    def find_component(self, node_label, cpt_label, also_node=False):
-        """Return the first component in the tree matching the given labels.
-
-        Notes
-        -----
-        This will return the first component matching the labels. Multiple may exist
-        but we assume that they are identical.
-
-        """
-        for node in self.nodes:
-            if node.label == node_label:
-                for cpt in node.components:
-                    if cpt.label == cpt_label:
-                        if also_node:
-                            return node, cpt
-                        else:
-                            return cpt
-        raise ValueError("Matching component not found")
-
-    @property
-    def leaf(self):
-        leaf_axis, leaf_cpt_label = super().leaf
-        leaf_cpt = leaf_axis.components[
-            leaf_axis.component_labels.index(leaf_cpt_label)
-        ]
-        return leaf_axis, leaf_cpt
-
     @property
     def leaf_axis(self):
         return self.leaf[0]
@@ -891,12 +841,6 @@ class AxisTreeMixin(abc.ABC):
     def leaf_component(self):
         return self.leaf[1]
 
-    def child(
-        self, parent: Axis, component: Union[AxisComponent, ComponentLabel]
-    ) -> Optional[Axis]:
-        cpt_label = _as_axis_component_label(component)
-        return super().child(parent, cpt_label)
-
     @cached_property
     def size(self):
         return axis_tree_size(self)
@@ -904,9 +848,6 @@ class AxisTreeMixin(abc.ABC):
     def alloc_size(self, axis=None):
         axis = axis or self.root
         return sum(cpt.alloc_size(self, axis) for cpt in axis.components)
-
-    def find_part(self, label):
-        return self._parts_by_label[label]
 
     def offset(self, *args, allow_unused=False, insert_zeros=False):
         nargs = len(args)
@@ -924,7 +865,7 @@ class AxisTreeMixin(abc.ABC):
             # this is needed if we don't have all the internal bits available
             while path not in self.layouts:
                 axis, clabel = self._node_from_path(path)
-                subaxis = self.child(axis, clabel)
+                subaxis = self.component_child(axis, clabel)
                 # choose the component that is first in the renumbering
                 if subaxis.numbering:
                     cidx = subaxis._component_index_from_axis_number(
@@ -939,13 +880,12 @@ class AxisTreeMixin(abc.ABC):
         offset = pym.evaluate(self.layouts[path], indices, ExpressionEvaluator)
         return strict_int(offset)
 
-    # old alias
-    get_offset = offset
+    @deprecated("offset")
+    def get_offset(self, *args, **kwargs):
+        return self.offset(*args, **kwargs)
 
 
-# TODO Inherit from MutableLabelledTree or similar
-# class AxisTree(StrictLabelledTree, AxisTreeMixin, ContextFreeLoopIterable):
-class AxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable):
+class AxisTree(AxisTreeMixin, LabelledTree, ContextFreeLoopIterable):
     # fields = StrictLabelledTree.fields | {"sf", "shared_sf", "comm"}
 
     def __init__(
@@ -959,45 +899,6 @@ class AxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable):
 
     def __getitem__(self, indices) -> IndexedAxisTree:
         return self.freeze()[indices]
-
-    @classmethod
-    def from_nest(cls, nest) -> AxisTree:
-        root, parent_to_children = cls._from_nest(nest)
-        return cls(root, parent_to_children)
-
-    # TODO move further down method list
-    @classmethod
-    def _from_nest(cls, nest):
-        # TODO add appropriate exception classes
-        if isinstance(nest, collections.abc.Mapping):
-            assert len(nest) == 1
-            axis, subaxes = just_one(nest.items())
-            axis = _as_axis(axis)
-            if isinstance(subaxes, collections.abc.Mapping):
-                # mapping of component labels to subaxes
-                cidxs = [
-                    axis.component_labels.index(clabel) for clabel in subaxes.keys()
-                ]
-                subaxes = subaxes.values()
-            elif isinstance(subaxes, collections.abc.Sequence):
-                cidxs = range(axis.degree)
-            else:
-                # just an axis
-                assert axis.degree == 1
-                cidxs = [0]
-                subaxes = [subaxes]
-
-            children = [None] * axis.degree
-            parent_to_children = {}
-            for cidx, subaxis in checked_zip(cidxs, subaxes):
-                subaxis_, sub_p2c = cls._from_nest(subaxis)
-                children[cidx] = subaxis_
-                parent_to_children.update(sub_p2c)
-            parent_to_children[axis.id] = children
-            return axis, parent_to_children
-        else:
-            axis = _as_axis(nest)
-            return axis, {axis.id: [None] * axis.degree}
 
     def index(self) -> LoopIndex:
         return self.freeze().index()
@@ -1054,7 +955,9 @@ class AxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable):
             ]
         )
         if sublabels:
-            return self.get_part_from_path(sublabels, self.child(axis, component))
+            return self.get_part_from_path(
+                sublabels, self.component_child(axis, component)
+            )
         else:
             return axis, component
 
@@ -1084,8 +987,8 @@ class AxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable):
 
 # TODO: Inherit things from AxisTree, StaticAxisTree?
 # class IndexedAxisTree(StrictLabelledTree, AxisTreeMixin, ContextFreeLoopIterable):
-class IndexedAxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable):
-    fields = StrictLabelledTree.fields | {
+class IndexedAxisTree(AxisTreeMixin, LabelledTree, ContextFreeLoopIterable):
+    fields = LabelledTree.fields | {
         "target_paths",
         "index_exprs",
         "layout_exprs",
@@ -1167,7 +1070,7 @@ class IndexedAxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable
 # TODO Inherit from FrozenLabelledTree
 # TODO The order of inheritance is annoying here, mixin class currently needs to come first
 # class FrozenAxisTree(StrictLabelledTree, AxisTreeMixin, ContextFreeLoopIterable):
-class FrozenAxisTree(AxisTreeMixin, StrictLabelledTree, ContextFreeLoopIterable):
+class FrozenAxisTree(AxisTreeMixin, LabelledTree, ContextFreeLoopIterable):
     def __init__(
         self,
         root=None,
@@ -1410,7 +1313,7 @@ def size_requires_external_index(axes, axis, component, depth=0):
     if not component.has_integer_count and count.axes.depth > depth:
         return True
     else:
-        if subaxis := axes.child(axis, component):
+        if subaxis := axes.component_child(axis, component):
             for c in subaxis.components:
                 if size_requires_external_index(axes, subaxis, c, depth + 1):
                     return True
@@ -1420,7 +1323,7 @@ def size_requires_external_index(axes, axis, component, depth=0):
 def has_constant_step(axes: AxisTree, axis, cpt, depth=0):
     # we have a constant step if none of the internal dimensions need to index themselves
     # with the current index (numbering doesn't matter here)
-    if subaxis := axes.child(axis, cpt):
+    if subaxis := axes.component_child(axis, cpt):
         return all(
             not size_requires_external_index(axes, subaxis, c, depth)
             for c in subaxis.components
@@ -1633,7 +1536,7 @@ def _compute_layouts(
     csubtrees = []
     sublayoutss = []
     for cpt in axis.components:
-        if subaxis := axes.child(axis, cpt):
+        if subaxis := axes.component_child(axis, cpt):
             sublayouts, csubtree, substeps = _compute_layouts(
                 axes, subaxis, path | {axis.label: cpt.label}
             )
@@ -1688,7 +1591,7 @@ def _compute_layouts(
                 ) | merge_dicts(sub.parent_to_children for sub in csubtrees)
             else:
                 cparent_to_children = {}
-            ctree = StrictLabelledTree(croot, cparent_to_children)
+            ctree = LabelledTree(croot, cparent_to_children)
         else:
             # we must be at the bottom of a ragged patch - therefore don't
             # add to shape of things
@@ -1730,7 +1633,7 @@ def _compute_layouts(
                 ) | merge_dicts(sub.parent_to_children for sub in csubtrees)
             else:
                 cparent_to_children = {}
-            ctree = StrictLabelledTree(croot, cparent_to_children)
+            ctree = LabelledTree(croot, cparent_to_children)
 
             fulltree = _create_count_array_tree(ctree)
 
@@ -1873,7 +1776,7 @@ def _tabulate_count_array_tree(
                     new_indices,
                 )
         else:
-            subaxis = axes.child(axis, selected_component)
+            subaxis = axes.component_child(axis, selected_component)
             assert subaxis
             _tabulate_count_array_tree(
                 axes,
@@ -1905,7 +1808,7 @@ def _collect_at_leaves(
             prior_ = prior + values[new_path]
         else:
             prior_ = prior
-        if subaxis := axes.child(axis, cpt):
+        if subaxis := axes.component_child(axis, cpt):
             acc.update(_collect_at_leaves(axes, values, subaxis, new_path, prior_))
         else:
             acc[new_path] = prior_
@@ -1944,7 +1847,7 @@ def _axis_component_size(
     indices: Mapping = pyrsistent.pmap(),
 ):
     count = _as_int(component.count, path, indices)
-    if subaxis := axes.child(axis, component):
+    if subaxis := axes.component_child(axis, component):
         return sum(
             _axis_size(
                 axes,
@@ -2007,7 +1910,7 @@ def _path_and_indices_from_index_tuple(
 
         indices |= {axis.label: index}
         path |= {axis.label: cpt_label}
-        axis = axes.child(axis, cpt_label)
+        axis = axes.component_child(axis, cpt_label)
 
     if axis is not None:
         raise IndexError("Insufficient number of indices given")
@@ -2022,7 +1925,7 @@ def _trim_path(axes: AxisTree, path: Mapping) -> pyrsistent.pmap:
     while axis:
         cpt_label = path[axis.label]
         new_path[axis.label] = cpt_label
-        axis = axes.child(axis, cpt_label)
+        axis = axes.component_child(axis, cpt_label)
     return pyrsistent.pmap(new_path)
 
 
@@ -2035,7 +1938,7 @@ def _collect_sizes_rec(axes, axis) -> pmap:
     for cpt in axis.components:
         sizes[axis.label, cpt.label] = cpt.count
 
-        if subaxis := axes.child(axis, cpt):
+        if subaxis := axes.component_child(axis, cpt):
             subsizes = _collect_sizes_rec(axes, subaxis)
             for loc, size in subsizes.items():
                 # make sure that sizes always match for duplicates

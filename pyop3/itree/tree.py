@@ -37,7 +37,7 @@ from pyop3.axtree.tree import (
 )
 from pyop3.dtypes import IntType, get_mpi_dtype
 from pyop3.extras.debug import print_if_rank, print_with_rank
-from pyop3.tree import LabelledNodeComponent, LabelledTree, Node, postvisit
+from pyop3.tree import Node, Tree, postvisit
 from pyop3.utils import (
     Identified,
     Labelled,
@@ -63,7 +63,7 @@ bsearch = pym.var("mybsearch")
 # the loop context. This is awful for a user to have to build since we
 # need something like a SplitCalledMap. Instead we will just admit any
 # parent_to_children map and do error checking when we convert it to shape.
-class IndexTree(LabelledTree):
+class IndexTree(Tree):
     def __init__(self, root, parent_to_children=pmap(), *, loop_context=pmap()):
         root, parent_to_children, loop_context = parse_index_tree(
             root, parent_to_children, loop_context
@@ -602,11 +602,11 @@ def _(arg: LoopIndex, local=False):
         assert isinstance(arg.iterset, (FrozenAxisTree, IndexedAxisTree))
         iterset = arg.iterset
         contexts = []
-        for leaf in iterset.leaves:
-            source_path = iterset.path(*leaf)
+        for leaf_axis, leaf_cpt in iterset.leaves:
+            source_path = iterset.path(leaf_axis, leaf_cpt)
             target_path = {}
             for axis, cpt in iterset.path_with_nodes(
-                *leaf, and_components=True
+                leaf_axis, leaf_cpt, and_components=True
             ).items():
                 target_path.update(
                     iterset.target_paths[axis.id, cpt.label]
