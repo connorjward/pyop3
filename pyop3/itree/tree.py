@@ -160,11 +160,12 @@ class Subset(SliceComponent):
         return self.array.datamap
 
 
-class MapComponent(LabelledNodeComponent):
-    fields = LabelledNodeComponent.fields | {"target_axis", "target_component"}
+class MapComponent(pytools.ImmutableRecord, Labelled, abc.ABC):
+    fields = {"target_axis", "target_component", "label"}
 
     def __init__(self, target_axis, target_component, *, label=None):
-        super().__init__(label)
+        pytools.ImmutableRecord.__init__(self)
+        Labelled.__init__(self, label)
         self.target_axis = target_axis
         self.target_component = target_component
 
