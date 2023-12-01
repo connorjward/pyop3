@@ -89,9 +89,8 @@ def cone_map(comm, mesh_axis):
     ncells = mesh_axis.components[0].count
     nverts = mesh_axis.components[1].count
     arity = 2
-    maxes = op3.AxisTree(
-        op3.Axis([op3.AxisComponent(ncells, "cells")], "mesh", id="root"),
-        {"root": op3.Axis(arity)},
+    maxes = op3.AxisTree.from_nest(
+        {op3.Axis({"cells": ncells}, "mesh"): op3.Axis(arity)},
     )
 
     if comm.rank == 0:

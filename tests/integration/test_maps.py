@@ -118,7 +118,7 @@ def test_inc_from_multi_component_temporary(vector_inc_kernel):
     map_data = np.asarray([[1, 2], [0, 1], [3, 2]])
 
     axis0 = op3.Axis({"pt0": m, "pt1": n}, "ax0")
-    axis1 = axis0["pt0"]
+    axis1 = axis0["pt0"].root
 
     dat0 = op3.MultiArray(
         axis0, name="dat0", data=np.arange(axis0.size), dtype=op3.ScalarType
@@ -425,9 +425,11 @@ def test_recursive_multi_component_maps():
         {"pt0": m, "pt1": n},
         "ax0",
     )
+    axis0 = axis["pt0"].root
+    axis1 = axis["pt1"].root
 
     # maps from pt0 so the array has size (m, arity0_0)
-    map_axes0_0 = op3.AxisTree.from_nest({axis["pt0"]: op3.Axis(arity0_0)})
+    map_axes0_0 = op3.AxisTree.from_nest({axis0: op3.Axis(arity0_0)})
     # maps to pt0 so the maximum possible index is m - 1
     map_data0_0 = np.asarray(
         [[2, 4, 0], [2, 3, 1], [0, 2, 3], [1, 3, 4], [3, 1, 0]],
@@ -438,7 +440,7 @@ def test_recursive_multi_component_maps():
     )
 
     # maps from pt0 so the array has size (m, arity0_1)
-    map_axes0_1 = op3.AxisTree.from_nest({axis["pt0"]: op3.Axis(arity0_1)})
+    map_axes0_1 = op3.AxisTree.from_nest({axis0: op3.Axis(arity0_1)})
     # maps to pt1 so the maximum possible index is n - 1
     map_data0_1 = np.asarray([[4, 5], [2, 1], [0, 3], [5, 0], [3, 2]])
     assert np.prod(map_data0_1.shape) == map_axes0_1.size
@@ -447,7 +449,7 @@ def test_recursive_multi_component_maps():
     )
 
     # maps from pt1 so the array has size (n, arity1)
-    map_axes1 = op3.AxisTree.from_nest({axis["pt1"]: op3.Axis(arity1)})
+    map_axes1 = op3.AxisTree.from_nest({axis1: op3.Axis(arity1)})
     # maps to pt1 so the maximum possible index is n - 1
     map_data1 = np.asarray([[4], [5], [2], [3], [0], [1]])
     assert np.prod(map_data1.shape) == map_axes1.size

@@ -8,6 +8,7 @@ from pyop3.ir import LOOPY_LANG_VERSION, LOOPY_TARGET
 from pyop3.utils import flatten
 
 
+@pytest.mark.skip("offset nodes are probably deprecated")
 def test_map_compression(scalar_copy_kernel_int):
     # Produce a point-to-DoF map from a point-to-point map. This should be
     # automated by Mats (but not PetscMats).

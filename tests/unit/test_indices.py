@@ -14,10 +14,9 @@ def test_loop_index_iter_flat():
 
 
 def test_loop_index_iter_nested():
-    iterset = op3.AxisTree(
-        op3.Axis([op3.AxisComponent(5, "pt0")], "ax0", id="root"),
+    iterset = op3.AxisTree.from_nest(
         {
-            "root": op3.Axis([op3.AxisComponent(3, "pt0")], "ax1"),
+            op3.Axis({"pt0": 5}, "ax0"): op3.Axis({"pt0": 3}, "ax1"),
         },
     )
 
@@ -32,7 +31,7 @@ def test_loop_index_iter_nested():
 
 def test_loop_index_iter_multi_component():
     iterset = op3.AxisTree(
-        op3.Axis([op3.AxisComponent(3, "pt0"), op3.AxisComponent(3, "pt1")], "ax0"),
+        op3.Axis({"pt0": 3, "pt1": 3}, "ax0"),
     )
 
     path0 = freeze({"ax0": "pt0"})

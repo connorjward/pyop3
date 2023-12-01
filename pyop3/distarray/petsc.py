@@ -145,7 +145,7 @@ class PetscMatAIJ(PetscMat):
         self.sparsity = sparsity
 
         # bit unpleasant
-        self.layout_axes = AxisTree(self.raxis, {self.raxis.id: self.caxis}).freeze()
+        self.layout_axes = AxisTree.from_nest({self.raxis: self.caxis}).freeze()
 
         # copy only needed if we reuse the zero matrix
         self.petscmat = mat.copy()
@@ -245,7 +245,6 @@ class PetscMatAIJ(PetscMat):
             )
 
             new_axes = IndexedAxisTree(
-                indexed_axes.root,
                 indexed_axes.parent_to_children,
                 target_paths,
                 index_exprs,
@@ -273,7 +272,6 @@ class PetscMatAIJ(PetscMat):
 
             # not sure that this is quite correct
             layout_axes = FrozenAxisTree(
-                new_axes.root,
                 new_axes.parent_to_children,
                 target_paths=target_paths,
                 index_exprs=None,

@@ -95,7 +95,7 @@ def test_distributed_subaxes_partition_halo_data(paxis):
     root = op3.Axis([1, 1])
     subaxis0 = paxis
     subaxis1 = paxis.copy(id=op3.Axis.unique_id())
-    axes = op3.AxisTree(root, {root.id: [subaxis0, subaxis1]}).freeze()
+    axes = op3.AxisTree.from_nest({root: [subaxis0, subaxis1]}).freeze()
 
     path0 = freeze(
         {
@@ -146,7 +146,7 @@ def test_nested_parallel_axes_produce_correct_sf(comm, paxis):
     root = op3.Axis([1, 1])
     subaxis0 = paxis
     subaxis1 = paxis.copy(id=op3.Axis.unique_id())
-    axes = op3.AxisTree(root, {root.id: [subaxis0, subaxis1]}).freeze()
+    axes = op3.AxisTree.from_nest({root: [subaxis0, subaxis1]}).freeze()
 
     rank = comm.rank
     other_rank = (rank + 1) % 2
@@ -167,7 +167,7 @@ def test_nested_parallel_axes_produce_correct_sf(comm, paxis):
 @pytest.mark.parallel(nprocs=2)
 @pytest.mark.parametrize("with_ghosts", [False, True])
 def test_partition_iterset_scalar(comm, paxis, with_ghosts):
-    array = op3.MultiArray(paxis, dtype=op3.ScalarType)
+    array = op3.Dat(paxis, dtype=op3.ScalarType)
 
     if with_ghosts:
         p = op3.LoopIndex(paxis.axes.freeze())
@@ -209,8 +209,8 @@ def test_partition_iterset_with_map(comm, paxis, with_ghosts):
         map_data = np.asarray(
             [[0, 1], [0, 2], [1, 3], [2, 4], [3, 5], [4, 5]], dtype=op3.IntType
         )
-    map_axes = op3.AxisTree(op3.Axis(6, paxis.label, id="root"), {"root": op3.Axis(2)})
-    map_array = op3.MultiArray(map_axes, data=map_data.flatten())
+    map_axes = op3.AxisTree.from_nest({op3.Axis(6, paxis.label): op3.Axis(2)})
+    map_array = op3.Dat(map_axes, data=map_data.flatten())
     map0 = op3.Map(
         {
             freeze({axis_label: component_label}): [
@@ -223,7 +223,7 @@ def test_partition_iterset_with_map(comm, paxis, with_ghosts):
         label=axis_label,
     )
 
-    array = op3.MultiArray(paxis, dtype=op3.ScalarType)
+    array = op3.Dat(paxis, dtype=op3.ScalarType)
 
     if with_ghosts:
         p = op3.LoopIndex(paxis.axes.freeze())
