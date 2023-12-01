@@ -624,7 +624,11 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
         self.sf = sf
 
     def __getitem__(self, indices):
-        return as_axis_tree(self)[indices]
+        # if indices are a map I am not sure we should be returning root
+        indexed = as_axis_tree(self)[indices]
+        assert indexed.depth == 1
+        # return another Axis, more intuitive
+        return indexed.root
 
     def __call__(self, *args):
         return as_axis_tree(self)(*args)

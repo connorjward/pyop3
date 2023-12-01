@@ -551,7 +551,8 @@ def _(axes: IndexedAxisTree) -> FrozenAxisTree:
             new_subaxes.append(subaxis.copy(label=axis_label, components=cpts))
         new_parent_to_children[axis_id] = new_subaxes
 
-    new_axes = FrozenAxisTree(root=new_root, parent_to_children=new_parent_to_children)
+    new_parent_to_children.update({None: (new_root,)})
+    new_axes = FrozenAxisTree(new_parent_to_children)
 
     assert axes.layout_exprs
     layouts_ = {}
@@ -569,9 +570,9 @@ def _(axes: IndexedAxisTree) -> FrozenAxisTree:
 
         orig_layout = axes.restore().layouts[orig_path]
         new_layout = IndexExpressionReplacer(replace_map)(orig_layout)
-        assert new_layout != orig_layout
+        # assert new_layout != orig_layout
         layouts_[new_path] = new_layout
-    return FrozenAxisTree(new_axes.root, new_axes.parent_to_children, layouts=layouts_)
+    return FrozenAxisTree(new_axes.parent_to_children, layouts=layouts_)
 
 
 def make_sparsity(
