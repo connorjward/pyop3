@@ -1029,6 +1029,11 @@ class IndexedAxisTree(AxisTreeMixin, LabelledTree, ContextFreeLoopIterable):
             axis_trees[index_tree.loop_context] = index_axes(self, index_tree)
         return ContextSensitiveAxisTree(axis_trees)
 
+    @property
+    def sf(self):
+        # FIXME
+        return None
+
     # hacky
     def restore(self):
         return FrozenAxisTree(self.parent_to_children)

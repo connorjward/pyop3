@@ -511,49 +511,7 @@ def layout_axes(axes) -> FrozenAxisTree:
 
 @layout_axes.register
 def _(axes: IndexedAxisTree) -> FrozenAxisTree:
-    from pyop3.distarray.multiarray import IndexExpressionReplacer
-
-    if axes.is_empty:
-        raise NotImplementedError
-        # return LayoutAxisTree(axes, freeze({pmap(): 0}))
-        return LayoutAxisTree(axes, NotImplemented)
-
-    # relabel the axis tree, note that the strong statements (i.e. just_one(...), etc)
-    # are *required* rather than me being lazy. If these conditions do not hold then
-    # it is not valid to use this axis tree as a layout.
-    new_root_labels = set()
-    new_root_cpts = []
-    for orig_cpt in axes.root.components:
-        axlabel, clabel = just_one(
-            axes.target_paths[axes.root.id, orig_cpt.label].items()
-        )
-        new_root_labels.add(axlabel)
-        new_root_cpts.append(orig_cpt.copy(label=clabel))
-    new_root_label = just_one(new_root_labels)
-    new_root = axes.root.copy(label=new_root_label, components=new_root_cpts)
-
-    new_parent_to_children = {}
-    for axis_id, subaxes in axes.parent_to_children.items():
-        new_subaxes = []
-        for subaxis in subaxes:
-            if subaxis is None:
-                new_subaxes.append(None)
-                continue
-            axis_labels = set()
-            cpts = []
-            for orig_cpt in subaxis.components:
-                axlabel, clabel = just_one(
-                    axes.target_paths[subaxis.id, orig_cpt.label].items()
-                )
-                axis_labels.add(axlabel)
-                cpts.append(orig_cpt.copy(label=clabel))
-            axis_label = just_one(axis_labels)
-            new_subaxes.append(subaxis.copy(label=axis_label, components=cpts))
-        new_parent_to_children[axis_id] = new_subaxes
-
-    new_parent_to_children.update({None: (new_root,)})
-    new_axes = FrozenAxisTree(new_parent_to_children)
-
+    # this can definitely be a cached_property???
     assert axes.layout_exprs
     layouts_ = {}
     for leaf in axes.leaves:
@@ -565,14 +523,11 @@ def _(axes: IndexedAxisTree) -> FrozenAxisTree:
             replace_map.update(axes.layout_exprs[axis.id, cpt])
         new_path = freeze(new_path)
 
-        print(axes.layout_exprs.values())
-        print(replace_map)
-
         orig_layout = axes.restore().layouts[orig_path]
         new_layout = IndexExpressionReplacer(replace_map)(orig_layout)
         # assert new_layout != orig_layout
         layouts_[new_path] = new_layout
-    return FrozenAxisTree(new_axes.parent_to_children, layouts=layouts_)
+    return FrozenAxisTree(axes.parent_to_children, layouts=layouts_)
 
 
 def make_sparsity(

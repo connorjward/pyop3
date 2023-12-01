@@ -513,7 +513,7 @@ def offset(axes, indices):
             new_axes.parent_to_children,
             target_paths,
             # index_exprs,
-            new_layouts,
+            layouts=new_layouts,
         )
         axes_per_context[loop_context] = layout_axes
     return Offset(axes_per_context)
