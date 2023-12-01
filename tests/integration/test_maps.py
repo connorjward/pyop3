@@ -204,7 +204,7 @@ def test_inc_with_multiple_maps(vector_inc_kernel):
         for j0 in range(arity0):
             expected[i] += dat0.data_ro[map_data0[i, j0]]
         for j1 in range(arity1):
-            expected[i] += dat0.data_ro[map_data0[i, j1]]
+            expected[i] += dat0.data_ro[map_data1[i, j1]]
     assert np.allclose(dat1.data, expected)
 
 
@@ -428,42 +428,42 @@ def test_recursive_multi_component_maps():
 
     # maps from pt0 so the array has size (m, arity0_0)
     map_axes0_0 = op3.AxisTree.from_nest({axis["pt0"]: op3.Axis(arity0_0)})
-    # maps to ax0_cpt0 so the maximum possible index is m - 1
+    # maps to pt0 so the maximum possible index is m - 1
     map_data0_0 = np.asarray(
         [[2, 4, 0], [2, 3, 1], [0, 2, 3], [1, 3, 4], [3, 1, 0]],
     )
     assert np.prod(map_data0_0.shape) == map_axes0_0.size
-    map_array0_0 = op3.Dat(
+    map_dat0_0 = op3.Dat(
         map_axes0_0, name="map0_0", data=map_data0_0.flatten(), dtype=op3.IntType
     )
 
-    # maps from ax0_cpt0 so the array has size (m, arity0_1)
+    # maps from pt0 so the array has size (m, arity0_1)
     map_axes0_1 = op3.AxisTree.from_nest({axis["pt0"]: op3.Axis(arity0_1)})
-    # maps to ax0_cpt1 so the maximum possible index is n - 1
+    # maps to pt1 so the maximum possible index is n - 1
     map_data0_1 = np.asarray([[4, 5], [2, 1], [0, 3], [5, 0], [3, 2]])
     assert np.prod(map_data0_1.shape) == map_axes0_1.size
-    map_array0_1 = op3.Dat(
+    map_dat0_1 = op3.Dat(
         map_axes0_1, name="map0_1", data=map_data0_1.flatten(), dtype=op3.IntType
     )
 
-    # maps from ax0_cpt1 so the array has size (n, arity1)
+    # maps from pt1 so the array has size (n, arity1)
     map_axes1 = op3.AxisTree.from_nest({axis["pt1"]: op3.Axis(arity1)})
-    # maps to ax0_cpt1 so the maximum possible index is n - 1
+    # maps to pt1 so the maximum possible index is n - 1
     map_data1 = np.asarray([[4], [5], [2], [3], [0], [1]])
     assert np.prod(map_data1.shape) == map_axes1.size
-    map_array1 = op3.Dat(
+    map_dat1 = op3.Dat(
         map_axes1, name="map1", data=map_data1.flatten(), dtype=op3.IntType
     )
 
-    # map from cpt0 -> {cpt0, cpt1} and from cpt1 -> {cpt1}
+    # map from pt0 -> {pt0, pt1} and from pt1 -> {pt1}
     map0 = op3.Map(
         {
             pmap({"ax0": "pt0"}): [
-                op3.TabulatedMapComponent("ax0", "pt0", map_array0_0),
-                op3.TabulatedMapComponent("ax0", "pt1", map_array0_1),
+                op3.TabulatedMapComponent("ax0", "pt0", map_dat0_0),
+                op3.TabulatedMapComponent("ax0", "pt1", map_dat0_1),
             ],
             pmap({"ax0": "pt1"}): [
-                op3.TabulatedMapComponent("ax0", "pt1", map_array1),
+                op3.TabulatedMapComponent("ax0", "pt1", map_dat1),
             ],
         },
         "map0",
@@ -511,71 +511,73 @@ def test_recursive_multi_component_maps():
 
 
 def test_sum_with_consecutive_maps():
-    iterset_size = 5
-    dat_sizes = 10, 4
+    size = 5
+    m, n = 10, 4
     arity0 = 3
     arity1 = 2
 
-    iterset = AxisTree(Axis([AxisComponent(iterset_size, "iter_ax0_cpt0")], "iter_ax0"))
-    dat_axes0 = AxisTree(
-        Axis([AxisComponent(dat_sizes[0], "dat0_ax0_cpt0")], "dat0_ax0", id="root"),
-        {"root": Axis([AxisComponent(dat_sizes[1], "dat0_ax1_cpt0")], "dat0_ax1")},
+    iterset = op3.Axis({"pt0": size}, "ax0")
+    dat_axes0 = op3.AxisTree.from_nest(
+        {op3.Axis({"pt0": m}, "ax1"): op3.Axis({"pt0": n}, "ax2")},
     )
 
-    dat0 = MultiArray(
-        dat_axes0, name="dat0", data=np.arange(dat_axes0.size, dtype=ScalarType)
+    dat0 = op3.Dat(
+        dat_axes0, name="dat0", data=np.arange(dat_axes0.size), dtype=op3.ScalarType
     )
-    dat1 = MultiArray(iterset, name="dat1", dtype=dat0.dtype)
+    dat1 = op3.Dat(iterset, name="dat1", dtype=dat0.dtype)
 
-    # map0 maps from the iterset to dat0_ax0
-    map_axes0 = iterset.add_node(Axis(arity0), *iterset.leaf)
+    # map0 maps from the iterset to ax1
+    map_axes0 = op3.AxisTree.from_nest({iterset: op3.Axis(arity0)})
     map_data0 = np.asarray(
-        [[2, 9, 0], [6, 7, 1], [5, 3, 8], [9, 3, 2], [2, 4, 6]], dtype=IntType
+        [[2, 9, 0], [6, 7, 1], [5, 3, 8], [9, 3, 2], [2, 4, 6]],
     )
-    map_array0 = MultiArray(map_axes0, name="map0", data=map_data0.flatten())
-    map0 = Map(
+    map_dat0 = op3.Dat(
+        map_axes0, name="map0", data=map_data0.flatten(), dtype=op3.IntType
+    )
+    map0 = op3.Map(
         {
-            pmap({"iter_ax0": "iter_ax0_cpt0"}): [
-                TabulatedMapComponent("dat0_ax0", "dat0_ax0_cpt0", map_array0),
+            pmap({"ax0": "pt0"}): [
+                op3.TabulatedMapComponent("ax1", "pt0", map_dat0),
             ],
         },
         "map0",
     )
 
-    # map1 maps from the iterset to dat0_ax1
-    map_axes1 = iterset.add_node(Axis(arity1), *iterset.leaf)
-    map_data1 = np.asarray([[0, 2], [2, 1], [3, 1], [0, 0], [1, 2]], dtype=IntType)
-    map_array1 = MultiArray(map_axes1, name="map1", data=map_data1.flatten())
-    map1 = Map(
+    # map1 maps from the iterset to ax2
+    map_axes1 = op3.AxisTree.from_nest({iterset: op3.Axis(arity1)})
+    map_data1 = np.asarray([[0, 2], [2, 1], [3, 1], [0, 0], [1, 2]])
+    map_dat1 = op3.Dat(
+        map_axes1, name="map1", data=map_data1.flatten(), dtype=op3.IntType
+    )
+    map1 = op3.Map(
         {
-            pmap({"iter_ax0": "iter_ax0_cpt0"}): [
-                TabulatedMapComponent("dat0_ax1", "dat0_ax1_cpt0", map_array1),
+            pmap({"ax0": "pt0"}): [
+                op3.TabulatedMapComponent("ax2", "pt0", map_dat1),
             ],
         },
         "map1",
     )
 
-    # create the local kernel
     lpy_kernel = lp.make_kernel(
-        f"{{ [i]: 0 <= i < {arity0*arity1} }}",
-        "y[0] = y[0] + x[i]",
+        [f"{{ [i]: 0 <= i < {arity0} }}", f"{{ [j]: 0 <= j < {arity1} }}"],
+        "y[0] = y[0] + x[i, j]",
         [
             lp.GlobalArg(
-                "x", ScalarType, (arity0 * arity1,), is_input=True, is_output=False
+                "x", op3.ScalarType, (arity0, arity1), is_input=True, is_output=False
             ),
-            lp.GlobalArg("y", ScalarType, (1,), is_input=False, is_output=True),
+            lp.GlobalArg("y", op3.ScalarType, (1,), is_input=False, is_output=True),
         ],
         name="sum",
         target=LOOPY_TARGET,
         lang_version=LOOPY_LANG_VERSION,
     )
-    sum_kernel = Function(lpy_kernel, [READ, WRITE])
+    sum_kernel = op3.Function(lpy_kernel, [op3.READ, op3.WRITE])
 
-    do_loop(p := iterset.index(), sum_kernel(dat0[map0(p), map1(p)], dat1[p]))
+    op3.do_loop(p := iterset.index(), sum_kernel(dat0[map0(p), map1(p)], dat1[p]))
 
-    expected = np.zeros_like(dat1.data)
+    expected = np.zeros_like(dat1.data_ro)
     for i in range(iterset.size):
-        expected[i] = np.sum(
-            dat0.data.reshape(dat_sizes)[map_data0[i]][:, map_data1[i]]
-        )
-    assert np.allclose(dat1.data, expected)
+        for j in range(arity0):
+            for k in range(arity1):
+                expected[i] += dat0.data_ro[map_data0[i, j] * n + map_data1[i, k]]
+    assert np.allclose(dat1.data_ro, expected)
