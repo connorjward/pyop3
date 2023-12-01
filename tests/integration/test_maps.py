@@ -421,28 +421,13 @@ def test_recursive_multi_component_maps():
     m, n = 5, 6
     arity0_0, arity0_1, arity1 = 3, 2, 1
 
-    dat_axis0 = op3.AxisTree(
-        op3.Axis(
-            [
-                op3.AxisComponent(m, "dat0_ax0_cpt0"),
-                op3.AxisComponent(n, "dat0_ax0_cpt1"),
-            ],
-            "dat0_ax0",
-        )
-    )
-    dat_axis1 = op3.AxisTree(
-        op3.Axis([op3.AxisComponent(m, "dat0_ax0_cpt0")], "dat0_ax0")
+    axis = op3.Axis(
+        {"pt0": m, "pt1": n},
+        "ax0",
     )
 
-    # maps from ax0_cpt0 so the array has size (m, arity0_0)
-    map_axes0_0 = op3.AxisTree(
-        {
-            None: [
-                op3.Axis([op3.AxisComponent(m, "dat0_ax0_cpt0")], "dat0_ax0", id="root")
-            ],
-            "root": [op3.Axis(arity0_0)],
-        },
-    )
+    # maps from pt0 so the array has size (m, arity0_0)
+    map_axes0_0 = op3.AxisTree.from_nest({axis["pt0"]: op3.Axis(arity0_0)})
     # maps to ax0_cpt0 so the maximum possible index is m - 1
     map_data0_0 = np.asarray(
         [[2, 4, 0], [2, 3, 1], [0, 2, 3], [1, 3, 4], [3, 1, 0]],
@@ -453,14 +438,7 @@ def test_recursive_multi_component_maps():
     )
 
     # maps from ax0_cpt0 so the array has size (m, arity0_1)
-    map_axes0_1 = op3.AxisTree(
-        {
-            None: [
-                op3.Axis([op3.AxisComponent(m, "dat0_ax0_cpt0")], "dat0_ax0", id="root")
-            ],
-            "root": [op3.Axis(arity0_1)],
-        },
-    )
+    map_axes0_1 = op3.AxisTree.from_nest({axis["pt0"]: op3.Axis(arity0_1)})
     # maps to ax0_cpt1 so the maximum possible index is n - 1
     map_data0_1 = np.asarray([[4, 5], [2, 1], [0, 3], [5, 0], [3, 2]])
     assert np.prod(map_data0_1.shape) == map_axes0_1.size
@@ -469,14 +447,7 @@ def test_recursive_multi_component_maps():
     )
 
     # maps from ax0_cpt1 so the array has size (n, arity1)
-    map_axes1 = op3.AxisTree(
-        {
-            None: [
-                op3.Axis([op3.AxisComponent(n, "dat0_ax0_cpt1")], "dat0_ax0", id="root")
-            ],
-            "root": [op3.Axis(arity1)],
-        },
-    )
+    map_axes1 = op3.AxisTree.from_nest({axis["pt1"]: op3.Axis(arity1)})
     # maps to ax0_cpt1 so the maximum possible index is n - 1
     map_data1 = np.asarray([[4], [5], [2], [3], [0], [1]])
     assert np.prod(map_data1.shape) == map_axes1.size
@@ -487,30 +458,27 @@ def test_recursive_multi_component_maps():
     # map from cpt0 -> {cpt0, cpt1} and from cpt1 -> {cpt1}
     map0 = op3.Map(
         {
-            pmap({"dat0_ax0": "dat0_ax0_cpt0"}): [
-                op3.TabulatedMapComponent("dat0_ax0", "dat0_ax0_cpt0", map_array0_0),
-                op3.TabulatedMapComponent("dat0_ax0", "dat0_ax0_cpt1", map_array0_1),
+            pmap({"ax0": "pt0"}): [
+                op3.TabulatedMapComponent("ax0", "pt0", map_array0_0),
+                op3.TabulatedMapComponent("ax0", "pt1", map_array0_1),
             ],
-            pmap({"dat0_ax0": "dat0_ax0_cpt1"}): [
-                op3.TabulatedMapComponent("dat0_ax0", "dat0_ax0_cpt1", map_array1),
+            pmap({"ax0": "pt1"}): [
+                op3.TabulatedMapComponent("ax0", "pt1", map_array1),
             ],
         },
         "map0",
     )
     map1 = map0.copy(name="map1")
 
-    dat0 = op3.Dat(
-        dat_axis0, name="dat0", data=np.arange(dat_axis0.size), dtype=op3.ScalarType
-    )
-    dat1 = op3.Dat(dat_axis1, name="dat1", dtype=dat0.dtype)
+    dat0 = op3.Dat(axis, name="dat0", data=np.arange(axis.size), dtype=op3.ScalarType)
+    dat1 = op3.Dat(axis["pt0"], name="dat1", dtype=dat0.dtype)
 
-    # create the local kernel
     # the temporary from the maps will look like:
-    # Axis([{count=3}, {count=2}], label=map0)
-    # ├──➤ Axis([{count=3}, {count=2}], label=map1)
+    # Axis([3, 2], label=map0)
+    # ├──➤ Axis([3, 2], label=map1)
     # │    ├──➤ None
     # │    └──➤ None
-    # └──➤ Axis([{count=1}], label=map1)
+    # └──➤ Axis(1, label=map1)
     #      └──➤ None
     # which has 17 entries
     lpy_kernel = lp.make_kernel(
@@ -526,7 +494,7 @@ def test_recursive_multi_component_maps():
     )
     sum_kernel = op3.Function(lpy_kernel, [op3.READ, op3.WRITE])
 
-    op3.do_loop(p := dat_axis1.index(), sum_kernel(dat0[map1(map0(p))], dat1[p]))
+    op3.do_loop(p := axis["pt0"].index(), sum_kernel(dat0[map1(map0(p))], dat1[p]))
 
     expected = np.zeros_like(dat1.data_ro)
     for i in range(m):
