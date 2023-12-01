@@ -624,11 +624,10 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
         self.sf = sf
 
     def __getitem__(self, indices):
-        # if indices are a map I am not sure we should be returning root
-        indexed = as_axis_tree(self)[indices]
-        assert indexed.depth == 1
-        # return another Axis, more intuitive
-        return indexed.root
+        # NOTE: This *must* return an axis tree because that is where we attach
+        # index expression information. Just returning as_axis_tree(self).root
+        # here will break things.
+        return as_axis_tree(self)[indices]
 
     def __call__(self, *args):
         return as_axis_tree(self)(*args)
@@ -1237,7 +1236,7 @@ class FrozenAxisTree(AxisTreeMixin, LabelledTree, ContextFreeLoopIterable):
         if self.is_empty:
             return pmap({pmap(): 0})
 
-        layouts, _, _ = _compute_layouts(self, self.root)
+        layouts, _, _, _ = _compute_layouts(self, self.root)
         layoutsnew = _collect_at_leaves(self, layouts)
         return freeze(dict(layoutsnew))
 
@@ -1476,10 +1475,9 @@ def _(arg: AxisComponent):
 
 @functools.singledispatch
 def _as_axis_component(arg: Any) -> AxisComponent:
-    from pyop3.distarray import MultiArray
+    from pyop3.distarray import Dat  # cyclic import
 
-    # Needed to avoid cyclic import
-    if isinstance(arg, MultiArray):
+    if isinstance(arg, Dat):
         return AxisComponent(arg)
     else:
         raise TypeError
@@ -1534,17 +1532,20 @@ def _compute_layouts(
 
     # Post-order traversal
     # make sure to catch children that are None
+    csubroots = []
     csubtrees = []
     sublayoutss = []
     for cpt in axis.components:
         if subaxis := axes.component_child(axis, cpt):
-            sublayouts, csubtree, substeps = _compute_layouts(
+            sublayouts, csubroot, csubtree, substeps = _compute_layouts(
                 axes, subaxis, path | {axis.label: cpt.label}
             )
             sublayoutss.append(sublayouts)
+            csubroots.append(csubroot)
             csubtrees.append(csubtree)
             steps.update(substeps)
         else:
+            csubroots.append(None)
             csubtrees.append(None)
             sublayoutss.append(collections.defaultdict(list))
 
@@ -1588,15 +1589,16 @@ def _compute_layouts(
             )
             if strictly_all(sub is not None for sub in csubtrees):
                 cparent_to_children = pmap(
-                    {croot.id: [sub.root for sub in csubtrees]}
-                ) | merge_dicts(sub.parent_to_children for sub in csubtrees)
+                    {croot.id: [sub for sub in csubroots]}
+                ) | merge_dicts(sub for sub in csubtrees)
             else:
                 cparent_to_children = {}
-            ctree = LabelledTree(croot, cparent_to_children)
+            ctree = cparent_to_children
         else:
             # we must be at the bottom of a ragged patch - therefore don't
             # add to shape of things
             # in theory if we are ragged and permuted then we do want to include this level
+            croot = None
             ctree = None
             for c in axis.components:
                 step = step_size(axes, axis, c)
@@ -1610,7 +1612,7 @@ def _compute_layouts(
 
         # layouts and steps are just propagated from below
         layouts.update(merge_dicts(sublayoutss))
-        return layouts, ctree, steps
+        return layouts, croot, ctree, steps
 
     # 2. add layouts here
     else:
@@ -1630,11 +1632,13 @@ def _compute_layouts(
             croot = CustomNode(bits)
             if strictly_all(sub is not None for sub in csubtrees):
                 cparent_to_children = pmap(
-                    {croot.id: [sub.root for sub in csubtrees]}
-                ) | merge_dicts(sub.parent_to_children for sub in csubtrees)
+                    {croot.id: [sub for sub in csubroots]}
+                ) | merge_dicts(sub for sub in csubtrees)
             else:
                 cparent_to_children = {}
-            ctree = LabelledTree(croot, cparent_to_children)
+
+            cparent_to_children |= {None: (croot,)}
+            ctree = LabelledTree(cparent_to_children)
 
             fulltree = _create_count_array_tree(ctree)
 
@@ -1651,7 +1655,7 @@ def _compute_layouts(
             steps = {path: _axis_size(axes, axis)}
 
             layouts.update(merge_dicts(sublayoutss))
-            return layouts, ctree, steps
+            return layouts, None, ctree, steps
 
         # must therefore be affine
         else:
@@ -1670,7 +1674,7 @@ def _compute_layouts(
 
                 layouts.update(sublayouts)
             steps = {path: _axis_size(axes, axis)}
-            return layouts, None, steps
+            return layouts, None, None, steps
 
 
 # I don't think that this actually needs to be a tree, just return a dict
@@ -1695,10 +1699,10 @@ def _create_count_array_tree(
                 for (ct, axlabel, clabel) in counts | current_node.counts[cidx]
             ]
             root = axes[0]
-            parent_to_children = {}
+            parent_to_children = {None: (root,)}
             for parent, child in zip(axes, axes[1:]):
-                parent_to_children[parent.id] = child
-            axtree = AxisTree(root, parent_to_children)
+                parent_to_children[parent.id] = (child,)
+            axtree = AxisTree(parent_to_children)
             countarray = MultiArray(
                 axtree,
                 data=np.full(axis_tree_size(axtree), -1, dtype=IntType),

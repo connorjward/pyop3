@@ -497,7 +497,6 @@ def offset(axes, indices):
         )
 
         new_axes = IndexedAxisTree(
-            indexed_axes.root,
             indexed_axes.parent_to_children,
             target_paths,
             index_exprs,
@@ -511,10 +510,9 @@ def offset(axes, indices):
             index_exprs_per_indexed_cpt,
         )
         layout_axes = FrozenAxisTree(
-            new_axes.root,
             new_axes.parent_to_children,
             target_paths,
-            index_exprs,
+            # index_exprs,
             new_layouts,
         )
         axes_per_context[loop_context] = layout_axes

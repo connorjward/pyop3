@@ -137,8 +137,9 @@ class AbstractTree(pytools.ImmutableRecord, abc.ABC):
         parent_to_children = {k: list(v) for k, v in self.parent_to_children.items()}
         parent_to_children[new_node.id] = parent_to_children.pop(old_node.id)
         parent, pidx = self.parent(old_node)
-        parent_to_children[parent.id][pidx] = new_node
-        return self.copy(root=root, parent_to_children=parent_to_children)
+        parent_id = parent.id if parent is not None else None
+        parent_to_children[parent_id][pidx] = new_node
+        return self.copy(parent_to_children=parent_to_children)
 
     def with_modified_node(self, node, **kwargs):
         node = self._as_node(node)
@@ -223,23 +224,25 @@ class AbstractTree(pytools.ImmutableRecord, abc.ABC):
         elif isinstance(parent_to_children, Node):
             # just passing root
             return freeze({None: (parent_to_children,)})
-        elif None not in parent_to_children:
-            raise ValueError("Root missing from tree")
-        elif len(parent_to_children[None]) != 1:
-            raise ValueError("Multiple roots provided, this is not allowed")
         else:
-            node_ids = [
-                node.id
-                for node in chain.from_iterable(parent_to_children.values())
-                if node is not None
-            ]
-            if not has_unique_entries(node_ids):
-                raise ValueError("Nodes with duplicate IDs found")
-            if any(
-                parent_id not in node_ids
-                for parent_id in parent_to_children.keys() - {None}
-            ):
-                raise ValueError("Tree is disconnected")
+            parent_to_children = dict(parent_to_children)
+            if None not in parent_to_children:
+                raise ValueError("Root missing from tree")
+            elif len(parent_to_children[None]) != 1:
+                raise ValueError("Multiple roots provided, this is not allowed")
+            else:
+                node_ids = [
+                    node.id
+                    for node in chain.from_iterable(parent_to_children.values())
+                    if node is not None
+                ]
+                if not has_unique_entries(node_ids):
+                    raise ValueError("Nodes with duplicate IDs found")
+                if any(
+                    parent_id not in node_ids
+                    for parent_id in parent_to_children.keys() - {None}
+                ):
+                    raise ValueError("Tree is disconnected")
             return freeze(parent_to_children)
 
     @staticmethod
@@ -277,7 +280,10 @@ class AbstractTree(pytools.ImmutableRecord, abc.ABC):
             return nodestr
 
     def _as_node(self, node):
-        return node if isinstance(node, Node) else self.id_to_node[node]
+        if node is None:
+            return None
+        else:
+            return node if isinstance(node, Node) else self.id_to_node[node]
 
     def _as_node_id(self, node):
         return node.id if isinstance(node, Node) else node
@@ -650,9 +656,12 @@ class LabelledTree(AbstractTree):
     def _parse_parent_to_children(parent_to_children):
         if not parent_to_children:
             return pmap()
+
         if isinstance(parent_to_children, Node):
             # just passing root
             parent_to_children = {None: (parent_to_children,)}
+        else:
+            parent_to_children = dict(parent_to_children)
 
         if None not in parent_to_children:
             raise ValueError("Root missing from tree")
