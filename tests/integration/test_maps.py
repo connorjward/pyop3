@@ -3,26 +3,7 @@ import numpy as np
 import pytest
 from pyrsistent import pmap
 
-from pyop3 import (
-    INC,
-    READ,
-    WRITE,
-    Axis,
-    AxisComponent,
-    AxisTree,
-    Function,
-    Index,
-    IndexTree,
-    IntType,
-    Map,
-    MultiArray,
-    ScalarType,
-    Slice,
-    SliceComponent,
-    TabulatedMapComponent,
-    do_loop,
-    loop,
-)
+import pyop3 as op3
 from pyop3.ir import LOOPY_LANG_VERSION, LOOPY_TARGET
 from pyop3.utils import flatten
 
@@ -33,14 +14,14 @@ def vector_inc_kernel():
         "{ [i]: 0 <= i < 3 }",
         "y[0] = y[0] + x[i]",
         [
-            lp.GlobalArg("x", ScalarType, (3,), is_input=True, is_output=False),
-            lp.GlobalArg("y", ScalarType, (1,), is_input=True, is_output=True),
+            lp.GlobalArg("x", op3.ScalarType, (3,), is_input=True, is_output=False),
+            lp.GlobalArg("y", op3.ScalarType, (1,), is_input=True, is_output=True),
         ],
         name="vector_inc",
         target=LOOPY_TARGET,
         lang_version=LOOPY_LANG_VERSION,
     )
-    return Function(lpy_kernel, [READ, INC])
+    return op3.Function(lpy_kernel, [op3.READ, op3.INC])
 
 
 @pytest.fixture
@@ -49,14 +30,14 @@ def vec2_inc_kernel():
         "{ [i]: 0 <= i < 2 }",
         "y[i] = y[i] + x[i]",
         [
-            lp.GlobalArg("x", ScalarType, (2,), is_input=True, is_output=False),
-            lp.GlobalArg("y", ScalarType, (2,), is_input=True, is_output=True),
+            lp.GlobalArg("x", op3.ScalarType, (2,), is_input=True, is_output=False),
+            lp.GlobalArg("y", op3.ScalarType, (2,), is_input=True, is_output=True),
         ],
         name="vec2_inc",
         target=LOOPY_TARGET,
         lang_version=LOOPY_LANG_VERSION,
     )
-    return Function(lpy_kernel, [READ, INC])
+    return op3.Function(lpy_kernel, [op3.READ, op3.INC])
 
 
 @pytest.fixture
@@ -65,14 +46,14 @@ def vec6_inc_kernel():
         "{ [i]: 0 <= i < 6 }",
         "y[0] = y[0] + x[i]",
         [
-            lp.GlobalArg("x", ScalarType, (6,), is_input=True, is_output=False),
-            lp.GlobalArg("y", ScalarType, (1,), is_input=True, is_output=True),
+            lp.GlobalArg("x", op3.ScalarType, (6,), is_input=True, is_output=False),
+            lp.GlobalArg("y", op3.ScalarType, (1,), is_input=True, is_output=True),
         ],
         name="vector_inc",
         target=LOOPY_TARGET,
         lang_version=LOOPY_LANG_VERSION,
     )
-    return Function(code, [READ, INC])
+    return op3.Function(code, [op3.READ, op3.INC])
 
 
 @pytest.fixture
@@ -81,249 +62,274 @@ def vec12_inc_kernel():
         ["{ [i]: 0 <= i < 6 }", "{ [j]: 0 <= j < 2 }"],
         "y[j] = y[j] + x[i, j]",
         [
-            lp.GlobalArg("x", ScalarType, (6, 2), is_input=True, is_output=False),
-            lp.GlobalArg("y", ScalarType, (2,), is_input=True, is_output=True),
+            lp.GlobalArg("x", op3.ScalarType, (6, 2), is_input=True, is_output=False),
+            lp.GlobalArg("y", op3.ScalarType, (2,), is_input=True, is_output=True),
         ],
         name="vector_inc",
         target=LOOPY_TARGET,
         lang_version=LOOPY_LANG_VERSION,
     )
-    return Function(code, [READ, INC])
+    return op3.Function(code, [op3.READ, op3.INC])
 
 
 @pytest.mark.parametrize("nested", [True, False])
 def test_inc_from_tabulated_map(scalar_inc_kernel, vector_inc_kernel, nested):
     m, n = 4, 3
-    mapdata = np.asarray([[1, 2, 0], [2, 0, 1], [3, 2, 3], [2, 0, 1]], dtype=IntType)
+    map_data = np.asarray([[1, 2, 0], [2, 0, 1], [3, 2, 3], [2, 0, 1]])
 
-    axes = AxisTree(Axis([AxisComponent(m, "cpt0")], "ax0"))
-    dat0 = MultiArray(axes, name="dat0", data=np.arange(axes.size, dtype=ScalarType))
-    dat1 = MultiArray(axes, name="dat1", dtype=dat0.dtype)
+    axis = op3.Axis({"pt0": m}, "ax0")
+    dat0 = op3.Dat(axis, name="dat0", data=np.arange(axis.size), dtype=op3.ScalarType)
+    dat1 = op3.Dat(axis, name="dat1", dtype=dat0.dtype)
 
-    maxes = axes.add_node(Axis(n), *axes.leaf)
-    maparray = MultiArray(
-        maxes,
+    map_axes = op3.AxisTree.from_nest({axis: op3.Axis(n)})
+    map_dat = op3.Dat(
+        map_axes,
         name="map0",
-        data=mapdata.flatten(),
+        data=map_data.flatten(),
+        dtype=op3.IntType,
     )
-    map0 = Map(
+    map0 = op3.Map(
         {
-            pmap({"ax0": "cpt0"}): [
-                TabulatedMapComponent("ax0", "cpt0", maparray),
+            pmap({"ax0": "pt0"}): [
+                op3.TabulatedMapComponent("ax0", "pt0", map_dat),
             ],
         },
         "map0",
     )
 
     if nested:
-        l = loop(
-            p := axes.index(),
-            loop(q := map0(p).index(), scalar_inc_kernel(dat0[q], dat1[p])),
+        op3.do_loop(
+            p := axis.index(),
+            op3.loop(q := map0(p).index(), scalar_inc_kernel(dat0[q], dat1[p])),
         )
-        l()
     else:
-        do_loop(p := axes.index(), vector_inc_kernel(dat0[map0(p)], dat1[p]))
+        op3.do_loop(p := axis.index(), vector_inc_kernel(dat0[map0(p)], dat1[p]))
 
-    # Since dat0.data is simply arange, accessing index i of it will also just be i.
-    # Therefore, accessing multiple entries and storing the sum of them is
-    # equivalent to summing the indices from the map.
-    assert np.allclose(dat1.data, np.sum(mapdata, axis=1))
+    expected = np.zeros_like(dat1.data_ro)
+    for i in range(m):
+        for j in range(n):
+            expected[i] += dat0.data_ro[map_data[i, j]]
+    assert np.allclose(dat1.data_ro, expected)
 
 
 def test_inc_from_multi_component_temporary(vector_inc_kernel):
     m, n = 3, 4
     arity = 2
-    mapdata = np.asarray([[1, 2], [0, 1], [3, 2]], dtype=IntType)
+    map_data = np.asarray([[1, 2], [0, 1], [3, 2]])
 
-    axes0 = AxisTree(Axis([AxisComponent(m, "cpt0"), AxisComponent(n, "cpt1")], "ax0"))
-    axes1 = AxisTree(Axis([AxisComponent(m, "cpt0")], "ax0"))
+    axis0 = op3.Axis({"pt0": m, "pt1": n}, "ax0")
+    axis1 = op3.Axis({"pt0": m}, "ax0")
 
-    dat0 = MultiArray(axes0, name="dat0", data=np.arange(m + n, dtype=ScalarType))
-    dat1 = MultiArray(axes1, name="dat1", data=np.zeros(m, dtype=ScalarType))
+    dat0 = op3.MultiArray(
+        axis0, name="dat0", data=np.arange(axis0.size), dtype=op3.ScalarType
+    )
+    dat1 = op3.MultiArray(axis1, name="dat1", dtype=dat0.dtype)
 
-    # this is an identity map
-    maxes0 = axes1.add_subaxis(Axis(1), *axes1.leaf)
-    maparray0 = MultiArray(
-        maxes0, name="map0", data=np.arange(maxes0.size, dtype=IntType)
+    # poor man's identity map
+    map_axes0 = op3.AxisTree.from_nest({axis1: op3.Axis(1)})
+    map_dat0 = op3.Dat(
+        map_axes0,
+        name="map0",
+        data=np.arange(map_axes0.size),
+        dtype=op3.IntType,
     )
 
-    maxes1 = axes1.add_subaxis(Axis(arity), *axes1.leaf)
-    maparray1 = MultiArray(maxes1, name="map1", data=mapdata.flatten())
+    map_axes1 = op3.AxisTree.from_nest({axis1: op3.Axis(arity)})
+    map_dat1 = op3.Dat(
+        map_axes1, name="map1", data=map_data.flatten(), dtype=op3.IntType
+    )
 
-    map0 = Map(
+    map0 = op3.Map(
         {
-            pmap({"ax0": "cpt0"}): [
-                TabulatedMapComponent("ax0", "cpt0", maparray0),
-                TabulatedMapComponent("ax0", "cpt1", maparray1),
+            pmap({"ax0": "pt0"}): [
+                op3.TabulatedMapComponent("ax0", "pt0", map_dat0),
+                op3.TabulatedMapComponent("ax0", "pt1", map_dat1),
             ],
         },
         "map0",
     )
 
-    do_loop(p := axes1.index(), vector_inc_kernel(dat0[map0(p)], dat1[p]))
+    op3.do_loop(p := axis1.index(), vector_inc_kernel(dat0[map0(p)], dat1[p]))
 
-    # The expected value is the current index (from the identity map), plus the values
-    # from the map. Since the indices in the map are offset in the actual array we
-    # also need to add this.
-    assert np.allclose(dat1.data, np.arange(m) + np.sum(mapdata + m, axis=1))
-
-
-@pytest.mark.skip(reason="Affine maps not yet supported")
-def test_inc_from_index_function(vector_inc_kernel):
-    m, n = 3, 4
-
-    axes0 = AxisTree(Axis([m, n], "ax0"))
-    axes1 = AxisTree(Axis(m, "ax0"))
-
-    dat0 = MultiArray(axes0, name="dat0", data=np.arange(m + n, dtype=ScalarType))
-    dat1 = MultiArray(axes1, name="dat1", data=np.zeros(m, dtype=ScalarType))
-
-    j0 = pym.var("j0")
-    j1 = pym.var("j1")
-    vars = (j0, j1)
-    mapexpr = (vars, j0 + j1)
-
-    p = IndexTree(Index(Range("ax0", m)))
-    q = p.put_node(
-        Index(
-            [
-                IdentityMap([("ax0", 0)], [("ax0", 0)], arity=1),
-                AffineMap([("ax0", 0)], [("ax0", 1)], arity=2, expr=mapexpr),
-            ]
-        ),
-        p.leaf,
-    )
-
-    do_loop(p, vector_inc_kernel(dat0[q], dat1[p]))
-
-    bit0 = np.arange(m)  # from the identity map
-    bit1 = np.arange(m, m + n - 1) + np.arange(m + 1, m + n)  # from the affine map
-    assert np.allclose(dat1.data, bit0 + bit1)
+    expected = np.zeros_like(dat1.data_ro)
+    for i in range(m):
+        expected[i] += dat0.data_ro[i]  # identity
+        for j in range(arity):
+            # add offset of m to reads since we are indexing the second
+            # component (stored contiguously)
+            expected[i] += dat0.data_ro[map_data[i, j] + m]
+    assert np.allclose(dat1.data, expected)
 
 
 def test_inc_with_multiple_maps(vector_inc_kernel):
     m = 5
     arity0, arity1 = 2, 1
-    mapdata0 = np.asarray([[1, 2], [0, 2], [0, 1], [3, 4], [2, 1]], dtype=IntType)
-    mapdata1 = np.asarray([[1], [1], [3], [0], [2]], dtype=IntType)
+    map_data0 = np.asarray([[1, 2], [0, 2], [0, 1], [3, 4], [2, 1]])
+    map_data1 = np.asarray([[1], [1], [3], [0], [2]])
 
-    axes = AxisTree(Axis([AxisComponent(m, "pt0")], "ax0"))
-    dat0 = MultiArray(axes, name="dat0", data=np.arange(axes.size, dtype=ScalarType))
-    dat1 = MultiArray(axes, name="dat1", dtype=dat0.dtype)
+    axis = op3.Axis({"pt0": m}, "ax0")
+    dat0 = op3.Dat(axis, name="dat0", data=np.arange(axis.size), dtype=op3.ScalarType)
+    dat1 = op3.Dat(axis, name="dat1", dtype=dat0.dtype)
 
-    maxes0 = axes.add_subaxis(Axis(arity0), *axes.leaf)
-    maxes1 = axes.add_subaxis(Axis(arity1), *axes.leaf)
+    map_axes0 = op3.AxisTree.from_nest({axis: op3.Axis(arity0)})
+    map_axes1 = op3.AxisTree.from_nest({axis: op3.Axis(arity1)})
 
-    maparray0 = MultiArray(
-        maxes0,
+    map_dat0 = op3.Dat(
+        map_axes0,
         name="map0",
-        data=mapdata0.flatten(),
+        data=map_data0.flatten(),
+        dtype=op3.IntType,
     )
-    maparray1 = MultiArray(
-        maxes1,
+    map_dat1 = op3.Dat(
+        map_axes1,
         name="map1",
-        data=mapdata1.flatten(),
+        data=map_data1.flatten(),
+        dtype=op3.IntType,
     )
 
-    map0 = Map(
+    map0 = op3.Map(
         {
             pmap({"ax0": "pt0"}): [
-                TabulatedMapComponent("ax0", "pt0", maparray0),
-                TabulatedMapComponent("ax0", "pt0", maparray1),
+                op3.TabulatedMapComponent("ax0", "pt0", map_dat0),
+                op3.TabulatedMapComponent("ax0", "pt0", map_dat1),
             ],
         },
         "map0",
     )
 
-    do_loop(p := axes.index(), vector_inc_kernel(dat0[map0(p)], dat1[p]))
-    assert np.allclose(dat1.data, np.sum(mapdata0, axis=1) + np.sum(mapdata1, axis=1))
+    op3.do_loop(p := axis.index(), vector_inc_kernel(dat0[map0(p)], dat1[p]))
 
-
-def test_inc_with_map_composition(vec6_inc_kernel):
-    m = 5
-    arity0, arity1 = 2, 3
-    mapdata0 = np.asarray([[2, 1], [0, 3], [1, 4], [0, 0], [3, 2]], dtype=IntType)
-    mapdata1 = np.asarray(
-        [[0, 4, 1], [2, 1, 3], [4, 2, 4], [0, 1, 2], [4, 2, 3]], dtype=IntType
-    )
-
-    axes = AxisTree(Axis([AxisComponent(m, "cpt0")], "ax0"))
-    dat0 = MultiArray(axes, name="dat0", data=np.arange(m, dtype=ScalarType))
-    dat1 = MultiArray(axes, name="dat1", dtype=dat0.dtype)
-
-    maxes0 = axes.add_subaxis(Axis(arity0), axes.root)
-    maxes1 = axes.add_subaxis(Axis(arity1), axes.root)
-
-    maparray0 = MultiArray(maxes0, name="map0", data=mapdata0.flatten())
-    maparray1 = MultiArray(maxes1, name="map1", data=mapdata1.flatten())
-
-    map0 = Map(
-        {
-            pmap({"ax0": "cpt0"}): [
-                TabulatedMapComponent("ax0", "cpt0", maparray0),
-            ],
-        },
-        "map0",
-    )
-    map1 = Map(
-        {
-            pmap({"ax0": "cpt0"}): [
-                TabulatedMapComponent("ax0", "cpt0", maparray1),
-            ],
-        },
-        "map1",
-    )
-
-    do_loop(p := axes.index(), vec6_inc_kernel(dat0[map1(map0(p))], dat1[p]))
-
-    expected = np.sum(np.sum(np.arange(m)[mapdata1], axis=1)[mapdata0], axis=1)
+    expected = np.zeros_like(dat1.data_ro)
+    for i in range(m):
+        for j0 in range(arity0):
+            expected[i] += dat0.data_ro[map_data0[i, j0]]
+        for j1 in range(arity1):
+            expected[i] += dat0.data_ro[map_data0[i, j1]]
     assert np.allclose(dat1.data, expected)
 
 
-def test_vector_inc_with_map_composition(vec12_inc_kernel):
-    m, n = 5, 2
+@pytest.mark.parametrize("nested", [True, False])
+def test_inc_with_map_composition(scalar_inc_kernel, vec6_inc_kernel, nested):
+    m = 5
     arity0, arity1 = 2, 3
-    mapdata0 = np.asarray([[2, 1], [0, 3], [1, 4], [0, 0], [3, 2]], dtype=IntType)
-    mapdata1 = np.asarray(
-        [[0, 4, 1], [2, 1, 3], [4, 2, 4], [0, 1, 2], [4, 2, 3]], dtype=IntType
+    map_data0 = np.asarray([[2, 1], [0, 3], [1, 4], [0, 0], [3, 2]])
+    map_data1 = np.asarray(
+        [[0, 4, 1], [2, 1, 3], [4, 2, 4], [0, 1, 2], [4, 2, 3]],
     )
 
-    axes = AxisTree(Axis([AxisComponent(m, "cpt0")], "ax0"))
+    axis = op3.Axis({"pt0": m}, "ax0")
+    dat0 = op3.Dat(axis, name="dat0", data=np.arange(m), dtype=op3.ScalarType)
+    dat1 = op3.Dat(axis, name="dat1", dtype=dat0.dtype)
 
-    daxes = axes.add_subaxis(Axis([AxisComponent(n, "cpt0")], "ax1"), axes.root)
-    dat0 = MultiArray(daxes, name="dat0", data=np.arange(daxes.size, dtype=ScalarType))
-    dat1 = MultiArray(daxes, name="dat1", dtype=dat0.dtype)
+    map_axes0 = op3.AxisTree.from_nest({axis: op3.Axis(arity0)})
+    map_axes1 = op3.AxisTree.from_nest({axis: op3.Axis(arity1)})
 
-    maxes0 = axes.add_subaxis(Axis(arity0), axes.root)
-    maxes1 = axes.add_subaxis(Axis(arity1), axes.root)
+    map_dat0 = op3.Dat(
+        map_axes0, name="map0", data=map_data0.flatten(), dtype=op3.IntType
+    )
+    map_dat1 = op3.Dat(
+        map_axes1, name="map1", data=map_data1.flatten(), dtype=op3.IntType
+    )
 
-    maparray0 = MultiArray(maxes0, name="map0", data=mapdata0.flatten())
-    maparray1 = MultiArray(maxes1, name="map1", data=mapdata1.flatten())
-
-    map0 = Map(
+    map0 = op3.Map(
         {
-            pmap({"ax0": "cpt0"}): [
-                TabulatedMapComponent("ax0", "cpt0", maparray0),
+            pmap({"ax0": "pt0"}): [
+                op3.TabulatedMapComponent("ax0", "pt0", map_dat0),
             ],
         },
         "map0",
     )
-    map1 = Map(
+    map1 = op3.Map(
         {
-            pmap({"ax0": "cpt0"}): [
-                TabulatedMapComponent("ax0", "cpt0", maparray1),
+            pmap({"ax0": "pt0"}): [
+                op3.TabulatedMapComponent("ax0", "pt0", map_dat1),
             ],
         },
         "map1",
     )
 
-    do_loop(p := axes.index(), vec12_inc_kernel(dat0[map1(map0(p)), :], dat1[p, :]))
+    if nested:
+        op3.do_loop(
+            p := axis.index(),
+            op3.loop(
+                q := map0(p).index(),
+                op3.loop(r := map1(q).index(), scalar_inc_kernel(dat0[r], dat1[p])),
+            ),
+        )
+    else:
+        op3.do_loop(p := axis.index(), vec6_inc_kernel(dat0[map1(map0(p))], dat1[p]))
 
-    expected = np.sum(
-        np.sum(np.arange(m * n).reshape((m, n))[mapdata1, :], axis=1)[mapdata0, :],
-        axis=1,
+    expected = np.zeros_like(dat1.data_ro)
+    for i in range(m):
+        for j in range(arity0):
+            for k in range(arity1):
+                expected[i] += dat0.data_ro[map_data1[map_data0[i, j], k]]
+    assert np.allclose(dat1.data_ro, expected)
+
+
+@pytest.mark.parametrize("nested", [True, False])
+def test_vector_inc_with_map_composition(vec2_inc_kernel, vec12_inc_kernel, nested):
+    m, n = 5, 2
+    arity0, arity1 = 2, 3
+    map_data0 = np.asarray([[2, 1], [0, 3], [1, 4], [0, 0], [3, 2]])
+    map_data1 = np.asarray([[0, 4, 1], [2, 1, 3], [4, 2, 4], [0, 1, 2], [4, 2, 3]])
+
+    axis = op3.Axis({"pt0": m}, "ax0")
+
+    dat_axes = op3.AxisTree.from_nest({axis: op3.Axis({"pt0": n}, "ax1")})
+    dat0 = op3.Dat(
+        dat_axes, name="dat0", data=np.arange(dat_axes.size), dtype=op3.ScalarType
     )
-    assert np.allclose(dat1.data.reshape((m, n)), expected)
+    dat1 = op3.Dat(dat_axes, name="dat1", dtype=dat0.dtype)
+
+    map_axes0 = op3.AxisTree.from_nest({axis: op3.Axis(arity0)})
+    map_axes1 = op3.AxisTree.from_nest({axis: op3.Axis(arity1)})
+
+    map_dat0 = op3.Dat(
+        map_axes0, name="map0", data=map_data0.flatten(), dtype=op3.IntType
+    )
+    map_dat1 = op3.Dat(
+        map_axes1, name="map1", data=map_data1.flatten(), dtype=op3.IntType
+    )
+
+    map0 = op3.Map(
+        {
+            pmap({"ax0": "pt0"}): [
+                op3.TabulatedMapComponent("ax0", "pt0", map_dat0),
+            ],
+        },
+        "map0",
+    )
+    map1 = op3.Map(
+        {
+            pmap({"ax0": "pt0"}): [
+                op3.TabulatedMapComponent("ax0", "pt0", map_dat1),
+            ],
+        },
+        "map1",
+    )
+
+    if nested:
+        op3.do_loop(
+            p := axis.index(),
+            op3.loop(
+                q := map0(p).index(),
+                op3.loop(r := map1(q).index(), vec2_inc_kernel(dat0[r, :], dat1[p, :])),
+            ),
+        )
+    else:
+        op3.do_loop(
+            p := axis.index(), vec12_inc_kernel(dat0[map1(map0(p)), :], dat1[p, :])
+        )
+
+    expected = np.zeros_like(dat1.data_ro)
+    for i in range(m):
+        for j in range(arity0):
+            for k in range(arity1):
+                idx = map_data1[map_data0[i, j], k]
+                for d in range(n):
+                    expected[i * n + d] += dat0.data_ro[idx * n + d]
+    assert np.allclose(dat1.data_ro, expected)
 
 
 @pytest.mark.skip(

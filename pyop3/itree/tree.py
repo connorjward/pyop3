@@ -318,7 +318,6 @@ class CalledMap(Index, LoopIterable):
         )
 
         axes = IndexedAxisTree(
-            axes.root,
             axes.parent_to_children,
             target_paths,
             index_exprs,

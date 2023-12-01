@@ -195,7 +195,6 @@ class Dat(Tensor, ContextFree):
             )
 
             new_axes = IndexedAxisTree(
-                indexed_axes.root,
                 indexed_axes.parent_to_children,
                 target_paths,
                 index_exprs,
@@ -212,7 +211,6 @@ class Dat(Tensor, ContextFree):
             # test it out
             # new_layouts = new_axes.layouts
             layout_axes = FrozenAxisTree(
-                new_axes.root,
                 new_axes.parent_to_children,
                 target_paths=target_paths,
                 # index_exprs=index_exprs,  try not passing this
@@ -454,7 +452,6 @@ class ContextSensitiveMultiArray(ContextSensitive):
             )
 
             new_axes = IndexedAxisTree(
-                indexed_axes.root,
                 indexed_axes.parent_to_children,
                 target_paths,
                 index_exprs,
@@ -468,7 +465,6 @@ class ContextSensitiveMultiArray(ContextSensitive):
                 index_exprs_per_indexed_cpt,
             )
             layout_axes = FrozenAxisTree(
-                new_axes.root,
                 new_axes.parent_to_children,
                 target_paths,
                 index_exprs,

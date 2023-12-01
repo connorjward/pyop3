@@ -62,7 +62,6 @@ class AbstractTree(pytools.ImmutableRecord, abc.ABC):
     @classmethod
     def from_nest(cls, nest, **kwargs) -> AxisTree:
         root, parent_to_children = cls._from_nest(nest)
-        breakpoint()
         parent_to_children.update({None: [root]})
         return cls(parent_to_children, **kwargs)
 
