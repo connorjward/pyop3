@@ -6,12 +6,14 @@ import sys
 from collections import defaultdict
 from typing import Optional
 
+import numpy as np
 import pymbolic as pym
 from pyrsistent import freeze, pmap
 
 from pyop3.axtree.tree import Axis, AxisComponent, AxisTree
-from pyop3.tree import MultiComponentLabelledNode
-from pyop3.utils import PrettyTuple, strict_int
+from pyop3.dtypes import IntType, PointerType
+from pyop3.tree import LabelledTree, MultiComponentLabelledNode
+from pyop3.utils import PrettyTuple, merge_dicts, strict_int, strictly_all
 
 
 # hacky class for index_exprs to work, needs cleaning up
@@ -38,6 +40,17 @@ class AxisVariable(pym.primitives.Variable):
     @property
     def datamap(self):
         return pmap()
+
+
+class IntRef:
+    """Pass-by-reference integer."""
+
+    def __init__(self, value):
+        self.value = value
+
+    def __iadd__(self, other):
+        self.value += other
+        return self
 
 
 def has_independently_indexed_subaxis_parts(axes, axis, cpt):
@@ -371,7 +384,7 @@ def _create_count_array_tree(
             parent_to_children = {None: (root,)}
             for parent, child in zip(axes, axes[1:]):
                 parent_to_children[parent.id] = (child,)
-            axtree = AxisTree(parent_to_children)
+            axtree = AxisTree.from_node_map(parent_to_children)
             countarray = MultiArray(
                 axtree,
                 data=np.full(axis_tree_size(axtree), -1, dtype=IntType),
@@ -552,53 +565,6 @@ def _as_int(arg: Any, path, indices):
 @_as_int.register
 def _(arg: numbers.Real, path, indices):
     return strict_int(arg)
-
-
-def _path_and_indices_from_index_tuple(axes, index_tuple):
-    path = pmap()
-    indices = pmap()
-    axis = axes.root
-    for index in index_tuple:
-        if axis is None:
-            raise IndexError("Too many indices provided")
-        if isinstance(index, numbers.Integral):
-            if axis.degree > 1:
-                raise IndexError(
-                    "Cannot index multi-component array with integers, a "
-                    "2-tuple of (component index, index value) is needed"
-                )
-            cpt_label = axis.components[0].label
-        else:
-            cpt_label, index = index
-
-        cpt_index = axis.component_labels.index(cpt_label)
-
-        if index < 0:
-            # In theory we could still get this to work...
-            raise IndexError("Cannot use negative indices")
-        # TODO need to pass indices here for ragged things
-        if index >= _as_int(axis.components[cpt_index].count, path, indices):
-            raise IndexError("Index is too large")
-
-        indices |= {axis.label: index}
-        path |= {axis.label: cpt_label}
-        axis = axes.component_child(axis, cpt_label)
-
-    if axis is not None:
-        raise IndexError("Insufficient number of indices given")
-
-    return path, indices
-
-
-def _trim_path(axes: AxisTree, path) -> pmap:
-    """Drop unused axes from the axis path."""
-    new_path = {}
-    axis = axes.root
-    while axis:
-        cpt_label = path[axis.label]
-        new_path[axis.label] = cpt_label
-        axis = axes.component_child(axis, cpt_label)
-    return pmap(new_path)
 
 
 def collect_sizes(axes: AxisTree) -> pmap:  # TODO value-type of returned pmap?
