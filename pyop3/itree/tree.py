@@ -37,7 +37,7 @@ from pyop3.axtree.tree import (
 )
 from pyop3.dtypes import IntType, get_mpi_dtype
 from pyop3.extras.debug import print_if_rank, print_with_rank
-from pyop3.tree import Node, Tree, postvisit
+from pyop3.tree import LabelledTree, Node, Tree, postvisit
 from pyop3.utils import (
     Identified,
     Labelled,
@@ -819,9 +819,6 @@ def collect_shape_index_callback(index, *args, **kwargs):
 
 @collect_shape_index_callback.register
 def _(loop_index: LoopIndex, *, loop_indices, **kwargs):
-    # breakpoint()
-    # path = loop_indices[loop_index]
-
     iterset = loop_index.iterset
 
     target_path_per_component = pmap({None: loop_indices[loop_index.id]})
@@ -833,13 +830,12 @@ def _(loop_index: LoopIndex, *, loop_indices, **kwargs):
                     axis: LoopIndexVariable(loop_index, axis)
                     for axis in loop_indices[loop_index.id].keys()
                 }
-                # {axis: LoopIndexVariable(loop_index, axis) for axis in path.keys()}
             )
         }
     )
     layout_exprs_per_component = pmap({None: 0})
     return (
-        AxisTree(),
+        LabelledTree(),
         target_path_per_component,
         index_exprs_per_component,
         layout_exprs_per_component,
@@ -864,7 +860,7 @@ def _(local_index: LocalLoopIndex, *args, loop_indices, **kwargs):
 
     layout_exprs_per_cpt = pmap({None: 0})
     return (
-        AxisTree(),
+        LabelledTree(),
         target_path_per_cpt,
         index_exprs_per_cpt,
         layout_exprs_per_cpt,
@@ -917,7 +913,8 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
                 pmap({slice_.label: bsearch(subslice.array.as_var(), layout_var)})
             )
 
-    axes = FrozenAxisTree(Axis(components, label=axis_label))
+    axis = Axis(components, label=axis_label)
+    axes = LabelledTree(axis)
     target_path_per_component = {}
     index_exprs_per_component = {}
     layout_exprs_per_component = {}
@@ -927,9 +924,9 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
         index_exprs_per_subslice,
         layout_exprs_per_subslice,
     ):
-        target_path_per_component[axes.root.id, cpt.label] = target_path
-        index_exprs_per_component[axes.root.id, cpt.label] = index_exprs
-        layout_exprs_per_component[axes.root.id, cpt.label] = layout_exprs
+        target_path_per_component[axis.id, cpt.label] = target_path
+        index_exprs_per_component[axis.id, cpt.label] = index_exprs
+        layout_exprs_per_component[axis.id, cpt.label] = layout_exprs
     return (
         axes,
         target_path_per_component,
@@ -947,7 +944,7 @@ def _(called_map: CalledMap, **kwargs):
         _,
     ) = collect_shape_index_callback(called_map.from_index, **kwargs)
 
-    if prior_axes.is_empty:
+    if not prior_axes:
         prior_target_path = prior_target_path_per_cpt[None]
         prior_index_exprs = prior_index_exprs_per_cpt[None]
         (
@@ -958,7 +955,7 @@ def _(called_map: CalledMap, **kwargs):
         ) = _make_leaf_axis_from_called_map(
             called_map, prior_target_path, prior_index_exprs
         )
-        axes = AxisTree(axis)
+        axes = LabelledTree(axis)
     else:
         axes = prior_axes
         target_path_per_cpt = {}
@@ -986,7 +983,10 @@ def _(called_map: CalledMap, **kwargs):
             ) = _make_leaf_axis_from_called_map(
                 called_map, prior_target_path, prior_index_exprs
             )
-            axes = axes.add_subaxis(subaxis, prior_leaf_axis, prior_leaf_cpt)
+            # axes = axes.add_node(subaxis, prior_leaf_axis, prior_leaf_cpt)
+            axes = axes.add_subtree(
+                LabelledTree(subaxis), prior_leaf_axis, prior_leaf_cpt
+            )
             target_path_per_cpt.update(subtarget_paths)
             index_exprs_per_cpt.update(subindex_exprs)
             layout_exprs_per_cpt.update(sublayout_exprs)
@@ -1045,10 +1045,10 @@ def _index_axes(axes, indices: IndexTree, loop_context):
     )
 
     if indexed_axes is None:
-        indexed_axes = AxisTree()
+        indexed_axes = {}
 
     # return the new axes plus the new index expressions per leaf
-    return indexed_axes.freeze(), tpaths, index_expr_per_target, layout_expr_per_target
+    return indexed_axes, tpaths, index_expr_per_target, layout_expr_per_target
 
 
 def _index_axes_rec(
@@ -1066,8 +1066,8 @@ def _index_axes_rec(
         layout_exprs_per_cpt_per_index,
     ) = tuple(map(dict, rest))
 
-    if not axes_per_index.is_empty:
-        leafkeys = [(ax.id, cpt) for ax, cpt in axes_per_index.leaves]
+    if axes_per_index:
+        leafkeys = axes_per_index.leaves
     else:
         leafkeys = [None]
 
@@ -1105,7 +1105,7 @@ def _index_axes_rec(
     axes = axes_per_index
     for k, subax in subaxes.items():
         if subax is not None:
-            if axes.root:
+            if axes:
                 axes = axes.add_subtree(subax, *k)
             else:
                 axes = subax
@@ -1159,7 +1159,7 @@ def _compose_bits(
 ):
     from pyop3.distarray.multiarray import IndexExpressionReplacer
 
-    if indexed_axes.is_empty:
+    if not indexed_axes:
         return (
             # pmap(),
             # pmap(),
@@ -1180,7 +1180,7 @@ def _compose_bits(
     index_exprs = collections.defaultdict(dict)
     layout_exprs = collections.defaultdict(dict)
 
-    for icpt in iaxis.components:
+    for cidx, icpt in enumerate(iaxis.components):
         new_target_path_acc = target_path_acc
         new_index_exprs_acc = index_exprs_acc
 
@@ -1262,7 +1262,8 @@ def _compose_bits(
                 )
                 layout_exprs[ikey][mykey] = new_layout_expr
 
-        if isubaxis := indexed_axes.child(iaxis, icpt):
+        isubaxis = indexed_axes.child(iaxis, icpt)
+        if isubaxis:
             (
                 subtarget_path,
                 subindex_exprs,

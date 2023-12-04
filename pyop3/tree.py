@@ -47,9 +47,7 @@ class Node(pytools.ImmutableRecord, Identified):
         Identified.__init__(self, id)
 
 
-class AbstractTree(pytools.ImmutableRecord, abc.ABC):
-    fields = {"parent_to_children"}
-
+class AbstractTree(abc.ABC):
     def __init__(self, parent_to_children=None):
         self.parent_to_children = self._parse_parent_to_children(parent_to_children)
 
@@ -58,6 +56,10 @@ class AbstractTree(pytools.ImmutableRecord, abc.ABC):
 
     def __contains__(self, node) -> bool:
         return self._as_node(node) in self.nodes
+
+    def __bool__(self) -> bool:
+        """Return `True` if the tree is non-empty."""
+        return not self.is_empty
 
     @classmethod
     def from_nest(cls, nest, **kwargs) -> AxisTree:
@@ -133,89 +135,6 @@ class AbstractTree(pytools.ImmutableRecord, abc.ABC):
         node_id = self._as_node_id(node)
         return self.parent_to_children.get(node_id, ())
 
-    def replace_node(self, old_node, new_node):
-        parent_to_children = {k: list(v) for k, v in self.parent_to_children.items()}
-        parent_to_children[new_node.id] = parent_to_children.pop(old_node.id)
-        parent, pidx = self.parent(old_node)
-        parent_id = parent.id if parent is not None else None
-        parent_to_children[parent_id][pidx] = new_node
-        return self.copy(parent_to_children=parent_to_children)
-
-    def with_modified_node(self, node, **kwargs):
-        node = self._as_node(node)
-        return self.replace_node(node, node.copy(**kwargs))
-
-    def pop_subtree(self, subroot: Union[Node, str]) -> Tree:
-        raise NotImplementedError
-        subroot = self._as_node(subroot)
-        self._check_exists(subroot)
-
-        if self._is_root(subroot):
-            subtree = self.copy()
-            self.reset()
-            return subtree
-
-        subtree = Tree(subroot)
-
-        nodes_and_parents = []
-
-        def collect_node_and_parent(node, _):
-            nodes_and_parents.append((node, self.parent(node)))
-
-        previsit(self, collect_node_and_parent, subroot)
-
-        for node, parent in nodes_and_parents:
-            if node != subroot:
-                subtree.add_node(node, parent)
-            del self._ids_to_nodes[node.id]
-            del self._child_to_parent[node.id]
-            self.parent_to_children[parent.id] = tuple(
-                child
-                for child in self.parent_to_children[parent.id]
-                if child != node.id
-            )
-
-        return subtree
-
-    # FIXME does not work
-    def pop_subtree(self, subroot):
-        subroot = self._as_node(subroot)
-        self._check_exists(subroot)
-
-        if self._is_root(subroot):
-            subtree = self.copy()
-            self.reset()
-            return subtree
-
-        subtree = type(self)(subroot)
-
-        nodes_and_parents = []
-
-        def collect_node_and_parent(node, _):
-            nodes_and_parents.append((node, self._child_to_parent_and_label[node.id]))
-
-        previsit(self, collect_node_and_parent, subroot)
-
-        for node, parent in nodes_and_parents:
-            parent_id, component_label = parent
-            if node != subroot:
-                subtree.add_node(node, parent)
-            del self._ids_to_nodes[node.id]
-            del self._child_to_parent[node.id]
-            self.parent_to_children[parent_id] = tuple(
-                child
-                for child in self.parent_to_children[parent_id]
-                if child != node.id
-            )
-
-            del self._parent_and_label_to_child[(parent_id, component_label)]
-            del self._child_to_parent_and_label[node.id]
-            del self._node_to_path[node.id]
-            for component in node.components:
-                del self._parent_and_label_to_child[(node.id, component.label)]
-
-        return subtree
-
     # TODO, could be improved
     @staticmethod
     def _parse_parent_to_children(parent_to_children):
@@ -285,7 +204,8 @@ class AbstractTree(pytools.ImmutableRecord, abc.ABC):
         else:
             return node if isinstance(node, Node) else self.id_to_node[node]
 
-    def _as_node_id(self, node):
+    @staticmethod
+    def _as_node_id(node):
         return node.id if isinstance(node, Node) else node
 
 
@@ -403,11 +323,6 @@ class LabelledTree(AbstractTree):
             if self.parent_to_children.get(node.id, [None] * node.degree)[cidx] is None
         )
 
-    def with_modified_component(self, node, component, **kwargs):
-        return self.replace_node(
-            node, node.with_modified_component(component, **kwargs)
-        )
-
     def add_node(
         self,
         node,
@@ -446,8 +361,26 @@ class LabelledTree(AbstractTree):
                 k: list(v) for k, v in self.parent_to_children.items()
             }
             new_parent_to_children[parent.id][cpt_index] = node
-            return self.copy(parent_to_children=new_parent_to_children)
+            return type(self)(new_parent_to_children)
 
+    def replace_node(self, old_node, new_node):
+        parent_to_children = {k: list(v) for k, v in self.parent_to_children.items()}
+        parent_to_children[new_node.id] = parent_to_children.pop(old_node.id)
+        parent, pidx = self.parent(old_node)
+        parent_id = parent.id if parent is not None else None
+        parent_to_children[parent_id][pidx] = new_node
+        return type(self)(parent_to_children)
+
+    def with_modified_node(self, node, **kwargs):
+        node = self._as_node(node)
+        return self.replace_node(node, node.copy(**kwargs))
+
+    def with_modified_component(self, node, component, **kwargs):
+        return self.replace_node(
+            node, node.with_modified_component(component, **kwargs)
+        )
+
+    # invalid for frozen trees
     def add_subtree(
         self,
         subtree,
@@ -464,6 +397,13 @@ class LabelledTree(AbstractTree):
             If ``False``, duplicate ``ids`` between the tree and subtree
             will raise an exception. If ``True``, the ``ids`` will be changed
             to avoid the clash.
+
+        Notes
+        -----
+        This function returns a parent-to-children mapping instead of a new tree
+        because it is non-trivial to unpick the impact of adding new nodes to the
+        tree. For example a new star forest may need to be computed. It, for now,
+        is preferable to make trees as "immutable as possible".
         """
         if uniquify:
             raise NotImplementedError("TODO")
@@ -473,23 +413,18 @@ class LabelledTree(AbstractTree):
                 "Either both or neither of parent and component must be defined"
             )
 
-        # should fail if not a valid place to insert?
         if not parent:
-            return subtree
-        else:
-            parent = self._as_node(parent)
-            clabel = self._as_component_label(component)
-            cpt_index = parent.component_labels.index(clabel)
-            new_parent_to_children = {
-                p: list(ch) for p, ch in self.parent_to_children.items()
-            }
+            raise NotImplementedError("TODO")
 
-            sub_p2c = dict(subtree.parent_to_children)
-            subroot = just_one(sub_p2c.pop(None))
+        assert isinstance(parent, MultiComponentLabelledNode)
+        cidx = parent.component_labels.index(component.label)
+        parent_to_children = {p: list(ch) for p, ch in self.parent_to_children.items()}
 
-            new_parent_to_children[parent.id][cpt_index] = subroot
-            new_parent_to_children.update(sub_p2c)
-            return self.copy(parent_to_children=new_parent_to_children)
+        sub_p2c = dict(subtree.parent_to_children)
+        subroot = just_one(sub_p2c.pop(None))
+        parent_to_children[parent.id][cidx] = subroot
+        parent_to_children.update(sub_p2c)
+        return type(self)(parent_to_children)
 
     @cached_property
     def _paths(self):

@@ -33,8 +33,9 @@ def test_scalar_copy_with_permuted_inner_axis(scalar_copy_kernel):
 
     axis0 = op3.Axis(m)
     axis1 = op3.Axis(n)
+    paxis1 = axis1.copy(numbering=numbering)
     axes = op3.AxisTree.from_nest({axis0: axis1})
-    paxes = axes.with_modified_node(axis1, numbering=numbering)
+    paxes = op3.AxisTree.from_nest({axis0: paxis1})
 
     dat0 = op3.Dat(axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType)
     dat1 = op3.Dat(paxes, name="dat1", dtype=dat0.dtype)
@@ -109,8 +110,9 @@ def test_vector_copy_with_permuted_multi_component_axes(vector_copy_kernel):
     numbering = [4, 2, 0, 3, 1]
 
     root = op3.Axis({"a": m, "b": n})
+    proot = root.copy(numbering=numbering)
     axes = op3.AxisTree.from_nest({root: [op3.Axis(a), op3.Axis(b)]})
-    paxes = axes.with_modified_node(root, numbering=numbering)
+    paxes = op3.AxisTree.from_nest({proot: [op3.Axis(a), op3.Axis(b)]})
 
     dat0 = op3.Dat(axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType)
     dat1 = op3.Dat(paxes, name="dat1", dtype=dat0.dtype)

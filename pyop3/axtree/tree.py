@@ -889,8 +889,6 @@ class AxisTreeMixin(abc.ABC):
 
 
 class AxisTree(AxisTreeMixin, LabelledTree, ContextFreeLoopIterable):
-    # fields = StrictLabelledTree.fields | {"sf", "shared_sf", "comm"}
-
     def __init__(
         self,
         parent_to_children=None,
@@ -991,12 +989,6 @@ class AxisTree(AxisTreeMixin, LabelledTree, ContextFreeLoopIterable):
 # TODO: Inherit things from AxisTree, StaticAxisTree?
 # class IndexedAxisTree(StrictLabelledTree, AxisTreeMixin, ContextFreeLoopIterable):
 class IndexedAxisTree(AxisTreeMixin, LabelledTree, ContextFreeLoopIterable):
-    fields = LabelledTree.fields | {
-        "target_paths",
-        "index_exprs",
-        "layout_exprs",
-    }
-
     def __init__(
         self,
         parent_to_children,
