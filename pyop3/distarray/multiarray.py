@@ -462,20 +462,22 @@ class ContextSensitiveMultiArray(ContextSensitive):
                 target_paths,
                 index_exprs,
                 layout_exprs,
+                array.layout_axes._layouts,
             )
 
-            new_layouts = substitute_layouts(
-                array.layout_axes,
-                new_axes,
-                target_path_per_indexed_cpt,
-                index_exprs_per_indexed_cpt,
-            )
-            layout_axes = FrozenAxisTree(
-                new_axes.parent_to_children,
-                target_paths,
-                index_exprs,
-                layouts=new_layouts,
-            )
+            # new_layouts = substitute_layouts(
+            #     array.layout_axes,
+            #     new_axes,
+            #     target_path_per_indexed_cpt,
+            #     index_exprs_per_indexed_cpt,
+            # )
+            # layout_axes = FrozenAxisTree(
+            #     new_axes.parent_to_children,
+            #     target_paths,
+            #     index_exprs,
+            #     layouts=new_layouts,
+            # )
+            layout_axes = new_axes
             array_per_context[loop_context] = array._with_axes(layout_axes)
         return ContextSensitiveMultiArray(array_per_context)
 

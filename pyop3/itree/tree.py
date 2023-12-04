@@ -317,11 +317,14 @@ class CalledMap(Index, LoopIterable):
             self, loop_indices=context
         )
 
+        axes = AxisTree.from_node_map(axes.parent_to_children)
+
         axes = IndexedAxisTree(
             axes.parent_to_children,
             target_paths,
             index_exprs,
             layout_exprs,
+            axes.layouts,
         )
 
         context_sensitive_axes = ContextSensitiveAxisTree({context: axes})

@@ -949,7 +949,7 @@ class IndexedAxisTree(PartialAxisTree, ContextFreeLoopIterable):
         self._target_paths = target_paths
         self._index_exprs = index_exprs
         self.layout_exprs = layout_exprs
-        self._layouts = layouts
+        self.layouts = layouts
 
     def __getitem__(self, indices):
         from pyop3.itree.tree import (
@@ -975,6 +975,11 @@ class IndexedAxisTree(PartialAxisTree, ContextFreeLoopIterable):
     def sf(self):
         # FIXME
         return None
+
+    @property
+    @deprecated("layouts")
+    def _layouts(self):
+        return self.layouts
 
     @cached_property
     def full_layouts(self):
@@ -1097,7 +1102,12 @@ class AxisTree(PartialAxisTree, ContextFreeLoopIterable):
 
     @deprecated()
     def restore(self):
-        return FrozenAxisTree(self.parent_to_children)
+        return self
+
+    # awful function, just use "layouts" across the board
+    @property
+    def full_layouts(self):
+        return self.layouts
 
     def index(self):
         from pyop3.itree import LoopIndex
