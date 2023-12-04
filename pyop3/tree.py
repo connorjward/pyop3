@@ -223,7 +223,7 @@ class Tree(AbstractTree):
         if parent is None:
             if not self.is_empty:
                 raise ValueError("Cannot add multiple roots")
-            return type(self)(node)
+            return self.copy(parent_to_children={None: (node,)})
         else:
             parent = self._as_node(parent)
             if node in self:
@@ -236,7 +236,9 @@ class Tree(AbstractTree):
                 k: list(v) for k, v in self.parent_to_children.items()
             }
             parent_to_children[parent.id].append(node)
-            return type(self)(self.root, parent_to_children)
+            # missing root, not used I think
+            raise NotImplementedError
+            return self.copy(parent_to_children=parent_to_children)
 
     @classmethod
     def _from_nest(cls, nest):
@@ -329,7 +331,7 @@ class LabelledTree(AbstractTree):
         if parent is None:
             if not self.is_empty:
                 raise ValueError("Cannot add multiple roots")
-            return type(self)(root)
+            return self.copy(parent_to_children={None: (node,)})
         else:
             parent = self._as_node(parent)
             if parent_component is None:
@@ -357,7 +359,7 @@ class LabelledTree(AbstractTree):
                 k: list(v) for k, v in self.parent_to_children.items()
             }
             new_parent_to_children[parent.id][cpt_index] = node
-            return type(self)(new_parent_to_children)
+            return self.copy(parent_to_children=new_parent_to_children)
 
     def replace_node(self, old_node, new_node):
         parent_to_children = {k: list(v) for k, v in self.parent_to_children.items()}
@@ -365,7 +367,7 @@ class LabelledTree(AbstractTree):
         parent, pidx = self.parent(old_node)
         parent_id = parent.id if parent is not None else None
         parent_to_children[parent_id][pidx] = new_node
-        return type(self)(parent_to_children)
+        return self.copy(parent_to_children=parent_to_children)
 
     def with_modified_node(self, node, **kwargs):
         node = self._as_node(node)
@@ -420,7 +422,7 @@ class LabelledTree(AbstractTree):
         subroot = just_one(sub_p2c.pop(None))
         parent_to_children[parent.id][cidx] = subroot
         parent_to_children.update(sub_p2c)
-        return type(self)(parent_to_children)
+        return self.copy(parent_to_children=parent_to_children)
 
     @cached_property
     def _paths(self):

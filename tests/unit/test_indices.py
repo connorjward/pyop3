@@ -6,7 +6,7 @@ import pyop3 as op3
 
 
 def test_loop_index_iter_flat():
-    iterset = op3.AxisTree(op3.Axis([op3.AxisComponent(5, "pt0")], "ax0"))
+    iterset = op3.AxisTree.from_nest(op3.Axis({"pt0": 5}, "ax0"))
     expected = [
         (freeze({"ax0": "pt0"}),) * 2 + (freeze({"ax0": i}),) * 2 for i in range(5)
     ]
@@ -30,7 +30,7 @@ def test_loop_index_iter_nested():
 
 
 def test_loop_index_iter_multi_component():
-    iterset = op3.AxisTree(
+    iterset = op3.AxisTree.from_nest(
         op3.Axis({"pt0": 3, "pt1": 3}, "ax0"),
     )
 

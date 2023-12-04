@@ -73,7 +73,7 @@ def check_invalid_indices(axes, indicess):
 @pytest.mark.parametrize("numbering", [None, [2, 3, 0, 4, 1]])
 def test_1d_affine_layout(numbering):
     # the numbering should not change the final layout
-    axes = op3.AxisTree(op3.Axis({"pt0": 5}, "ax0", numbering=numbering)).freeze()
+    axes = op3.AxisTree.from_nest(op3.Axis({"pt0": 5}, "ax0", numbering=numbering))
 
     layout0 = axes.layouts[pmap({"ax0": "pt0"})]
 
@@ -94,7 +94,7 @@ def test_1d_affine_layout(numbering):
 def test_2d_affine_layout():
     axes = op3.AxisTree.from_nest(
         {op3.Axis({"pt0": 3}, "ax0"): op3.Axis({"pt0": 2}, "ax1")},
-    ).freeze()
+    )
 
     layout0 = axes.layouts[pmap({"ax0": "pt0", "ax1": "pt0"})]
 
@@ -114,7 +114,7 @@ def test_2d_affine_layout():
 
 
 def test_1d_multi_component_layout():
-    axes = op3.AxisTree(op3.Axis({"pt0": 3, "pt1": 2}, "ax0")).freeze()
+    axes = op3.AxisTree.from_nest(op3.Axis({"pt0": 3, "pt1": 2}, "ax0"))
 
     layout0 = axes.layouts[pmap({"ax0": "pt0"})]
     layout1 = axes.layouts[pmap({"ax0": "pt1"})]
@@ -145,13 +145,13 @@ def test_1d_multi_component_layout():
 
 
 def test_1d_multi_component_permuted_layout():
-    axes = op3.AxisTree(
+    axes = op3.AxisTree.from_nest(
         op3.Axis(
             {"pt0": 3, "pt1": 2},
             "ax0",
             numbering=[4, 0, 3, 2, 1],
         )
-    ).freeze()
+    )
 
     layout0 = axes.layouts[pmap({"ax0": "pt0"})]
     layout1 = axes.layouts[pmap({"ax0": "pt1"})]
@@ -182,7 +182,7 @@ def test_1d_multi_component_permuted_layout():
 
 
 def test_1d_zero_sized_layout():
-    axes = op3.AxisTree(op3.Axis({"pt0": 0}, "ax0")).freeze()
+    axes = op3.AxisTree.from_nest(op3.Axis({"pt0": 0}, "ax0"))
 
     layout0 = axes.layouts[pmap({"ax0": "pt0"})]
 
@@ -333,13 +333,17 @@ def test_ragged_layout_with_zeros():
 
 
 def test_ragged_layout_with_two_outer_axes():
+    axis0 = op3.Axis({"pt0": 2}, "ax0")
+    axis1 = op3.Axis({"pt0": 2}, "ax1")
     nnz_axes = op3.AxisTree.from_nest(
-        {op3.Axis({"pt0": 2}, "ax0"): op3.Axis({"pt0": 2}, "ax1")},
+        {axis0: axis1},
     )
     nnz_data = np.asarray([[2, 1], [1, 2]])
     nnz = op3.Dat(nnz_axes, data=nnz_data.flatten(), dtype=op3.IntType)
 
-    axes = nnz_axes.add_subaxis(op3.Axis({"pt0": nnz}, "ax2"), *nnz_axes.leaf).freeze()
+    axes = op3.AxisTree.from_nest(
+        {axis0: {axis1: op3.Axis({"pt0": nnz}, "ax2")}},
+    )
 
     layout0 = axes.layouts[pmap({"ax0": "pt0", "ax1": "pt0", "ax2": "pt0"})]
     array0 = just_one(collect_multi_arrays(layout0))
