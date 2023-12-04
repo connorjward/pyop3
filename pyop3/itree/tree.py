@@ -27,13 +27,13 @@ from pyop3.axtree import (
     ContextSensitive,
     LoopIterable,
 )
+from pyop3.axtree.layout import _as_int
 from pyop3.axtree.tree import (
     ContextSensitiveAxisTree,
     ContextSensitiveLoopIterable,
     ExpressionEvaluator,
     FrozenAxisTree,
     IndexedAxisTree,
-    _as_int,
 )
 from pyop3.dtypes import IntType, get_mpi_dtype
 from pyop3.extras.debug import print_if_rank, print_with_rank
@@ -1138,6 +1138,7 @@ def index_axes(axes, index_tree):
         target_paths,
         index_exprs,
         layout_exprs,
+        axes.layouts,
     )
 
 
@@ -1173,7 +1174,9 @@ def _compose_bits(
         target_path |= itarget_paths.get(None, {})
         partial_index_exprs |= iindex_exprs.get(None, {})
         # partial_layout_exprs |= ilayout_exprs.get(None, {})
-        visited_target_axes = visited_target_axes.union(target_path.keys())
+
+        # no idea why I put this line here
+        # visited_target_axes = visited_target_axes.union(target_path.keys())
         iaxis = indexed_axes.root
 
     target_path_per_cpt = collections.defaultdict(dict)

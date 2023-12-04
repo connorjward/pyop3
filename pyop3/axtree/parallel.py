@@ -5,7 +5,7 @@ from mpi4py import MPI
 from petsc4py import PETSc
 from pyrsistent import pmap
 
-from pyop3.axtree.tree import _as_int, _axis_component_size, step_size
+from pyop3.axtree.layout import _as_int, _axis_component_size, step_size
 from pyop3.dtypes import IntType, get_mpi_dtype
 from pyop3.extras.debug import print_with_rank
 from pyop3.utils import checked_zip, just_one, strict_int

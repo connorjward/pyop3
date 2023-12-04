@@ -133,7 +133,7 @@ class Dat(Tensor, ContextFree):
 
         # TODO This is ugly
         temporary_axes = as_axis_tree(axes).freeze()  # used for the temporary
-        axes = layout_axes(axes)
+        axes = as_axis_tree(axes)
 
         if isinstance(data, DistributedArray):
             # disable for now, temporaries hit this in an annoying way
@@ -202,20 +202,24 @@ class Dat(Tensor, ContextFree):
             )
 
             # not sure I need to do this now slices maintain the same labels
-            new_layouts = substitute_layouts(
-                self.layout_axes,
-                new_axes,
-                target_path_per_indexed_cpt,
-                index_exprs_per_indexed_cpt,
-            )
+            # new_layouts = substitute_layouts(
+            #     self.layout_axes,
+            #     new_axes,
+            #     target_path_per_indexed_cpt,
+            #     index_exprs_per_indexed_cpt,
+            # )
             # test it out
             # new_layouts = new_axes.layouts
-            layout_axes = FrozenAxisTree(
-                new_axes.parent_to_children,
-                target_paths=target_paths,
-                # index_exprs=index_exprs,  try not passing this
-                layouts=new_layouts,
-            )
+            # layout_axes = FrozenAxisTree(
+            #     new_axes.parent_to_children,
+            #     target_paths=target_paths,
+            #     # index_exprs=index_exprs,  try not passing this
+            #     layouts=new_layouts,
+            # )
+
+            # I *believe* that I can determine the right layouts using index_exprs
+            # later on...
+            layout_axes = new_axes
             return self._with_axes(layout_axes)
 
         array_per_context = {}
@@ -245,20 +249,22 @@ class Dat(Tensor, ContextFree):
                 target_paths,
                 index_exprs,
                 layout_exprs,
+                self.layout_axes.layouts,
             )
 
-            new_layouts = substitute_layouts(
-                self.layout_axes,
-                new_axes,
-                target_path_per_indexed_cpt,
-                index_exprs_per_indexed_cpt,
-            )
-            layout_axes = FrozenAxisTree(
-                new_axes.parent_to_children,
-                target_paths=target_paths,
-                # index_exprs=index_exprs,
-                layouts=new_layouts,
-            )
+            # new_layouts = substitute_layouts(
+            #     self.layout_axes,
+            #     new_axes,
+            #     target_path_per_indexed_cpt,
+            #     index_exprs_per_indexed_cpt,
+            # )
+            # layout_axes = FrozenAxisTree(
+            #     new_axes.parent_to_children,
+            #     target_paths=target_paths,
+            #     # index_exprs=index_exprs,
+            #     layouts=new_layouts,
+            # )
+            layout_axes = new_axes
             array_per_context[loop_context] = self._with_axes(layout_axes)
         return ContextSensitiveMultiArray(array_per_context)
 
@@ -269,7 +275,7 @@ class Dat(Tensor, ContextFree):
     # TODO remove this
     @property
     def layouts(self):
-        return self.axes.layouts
+        return self.axes.full_layouts
 
     @property
     def dtype(self):
@@ -708,30 +714,30 @@ def distribute_sparsity(sparsity, ax1, ax2, owner="row"):
     return new_sparsity
 
 
-def substitute_layouts(orig_axes, new_axes, target_paths, index_exprs):
+def substitute_layouts(axes, target_paths, index_exprs):
     # replace layout bits that disappear with loop index
-    if new_axes.is_empty:
+    if axes.is_empty:
         new_layouts = {}
         orig_path = target_paths[None]
         new_path = pmap()
 
-        orig_layout = orig_axes.layouts[orig_path]
+        orig_layout = axes._layouts[orig_path]
         new_layout = IndexExpressionReplacer(index_exprs[None])(orig_layout)
         new_layouts[new_path] = new_layout
         # don't silently do nothing
         assert new_layout != orig_layout
     else:
         new_layouts = {}
-        for leaf_axis, leaf_cpt in new_axes.leaves:
+        for leaf_axis, leaf_cpt in axes.leaves:
             orig_path = dict(target_paths.get(None, {}))
             replace_map = dict(index_exprs.get(None, {}))
-            for myaxis, mycpt in new_axes.path_with_nodes(leaf_axis, leaf_cpt).items():
+            for myaxis, mycpt in axes.path_with_nodes(leaf_axis, leaf_cpt).items():
                 orig_path.update(target_paths.get((myaxis.id, mycpt), {}))
                 replace_map.update(index_exprs.get((myaxis.id, mycpt), {}))
 
-            orig_layout = orig_axes.layouts[freeze(orig_path)]
+            orig_layout = axes._layouts[freeze(orig_path)]
             new_layout = IndexExpressionReplacer(replace_map)(orig_layout)
-            new_layouts[new_axes.path(leaf_axis, leaf_cpt)] = new_layout
+            new_layouts[axes.path(leaf_axis, leaf_cpt)] = new_layout
             # TODO, this sometimes fails, is that valid?
             # don't silently do nothing
             # assert new_layout != orig_layout

@@ -47,7 +47,9 @@ class Node(pytools.ImmutableRecord, Identified):
         Identified.__init__(self, id)
 
 
-class AbstractTree(abc.ABC):
+class AbstractTree(pytools.ImmutableRecord, abc.ABC):
+    fields = {"parent_to_children"}
+
     def __init__(self, parent_to_children=None):
         self.parent_to_children = self._parse_parent_to_children(parent_to_children)
 
@@ -60,12 +62,6 @@ class AbstractTree(abc.ABC):
     def __bool__(self) -> bool:
         """Return `True` if the tree is non-empty."""
         return not self.is_empty
-
-    @classmethod
-    def from_nest(cls, nest, **kwargs) -> AxisTree:
-        root, parent_to_children = cls._from_nest(nest)
-        parent_to_children.update({None: [root]})
-        return cls(parent_to_children, **kwargs)
 
     @property
     def root(self):
