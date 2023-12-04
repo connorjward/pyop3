@@ -1,8 +1,8 @@
+from .layout import AxisVariable
 from .tree import (
     Axis,
     AxisComponent,
     AxisTree,
-    AxisVariable,
     ContextFree,
     ContextSensitive,
     LoopIterable,

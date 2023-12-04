@@ -27,13 +27,13 @@ from pyop3.axtree import (
     ContextSensitive,
     LoopIterable,
 )
+from pyop3.axtree.layout import _as_int
 from pyop3.axtree.tree import (
     ContextSensitiveAxisTree,
     ContextSensitiveLoopIterable,
     ExpressionEvaluator,
     FrozenAxisTree,
     IndexedAxisTree,
-    _as_int,
 )
 from pyop3.dtypes import IntType, get_mpi_dtype
 from pyop3.extras.debug import print_if_rank, print_with_rank

@@ -25,7 +25,8 @@ from pyop3.axtree import (
     ContextSensitive,
     as_axis_tree,
 )
-from pyop3.axtree.tree import AxisVariable, FrozenAxisTree, MultiArrayCollector
+from pyop3.axtree.layout import AxisVariable
+from pyop3.axtree.tree import FrozenAxisTree, MultiArrayCollector
 from pyop3.distarray2 import DistributedArray
 from pyop3.distarray.base import Tensor
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
@@ -253,12 +254,19 @@ class Dat(Tensor, ContextFree):
                 target_path_per_indexed_cpt,
                 index_exprs_per_indexed_cpt,
             )
-            layout_axes = FrozenAxisTree(
-                new_axes.parent_to_children,
-                target_paths=target_paths,
-                # index_exprs=index_exprs,
-                layouts=new_layouts,
-            )
+
+            if new_axes.is_empty:
+                layout_axes = AxisTree(
+                    new_axes.parent_to_children,
+                    target_path=target_paths[None],
+                    index_expr=index_exprs[None],
+                    layout_expr=layout_exprs[None],
+                    layout=new_layouts[pmap()],
+                )
+            else:
+                layout_axes = AxisTree(
+                    new_axes.parent_to_children,
+                )
             array_per_context[loop_context] = self._with_axes(layout_axes)
         return ContextSensitiveMultiArray(array_per_context)
 
@@ -715,7 +723,7 @@ def substitute_layouts(orig_axes, new_axes, target_paths, index_exprs):
         orig_path = target_paths[None]
         new_path = pmap()
 
-        orig_layout = orig_axes.layouts[orig_path]
+        orig_layout = orig_axes._node_from_path(orig_path)[1].layout
         new_layout = IndexExpressionReplacer(index_exprs[None])(orig_layout)
         new_layouts[new_path] = new_layout
         # don't silently do nothing
@@ -729,10 +737,10 @@ def substitute_layouts(orig_axes, new_axes, target_paths, index_exprs):
                 orig_path.update(target_paths.get((myaxis.id, mycpt), {}))
                 replace_map.update(index_exprs.get((myaxis.id, mycpt), {}))
 
-            orig_layout = orig_axes.layouts[freeze(orig_path)]
+            orig_layout = orig_axes._node_from_path(orig_path)[1].layout
             new_layout = IndexExpressionReplacer(replace_map)(orig_layout)
-            new_layouts[new_axes.path(leaf_axis, leaf_cpt)] = new_layout
-            # TODO, this sometimes fails, is that valid?
+            new_layouts[leaf_axis.id, leaf_cpt.label] = new_layout
+            # TODO, this sometimes fails, is that valid? think so if just a very basic slice
             # don't silently do nothing
             # assert new_layout != orig_layout
 

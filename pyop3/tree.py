@@ -61,12 +61,6 @@ class AbstractTree(abc.ABC):
         """Return `True` if the tree is non-empty."""
         return not self.is_empty
 
-    @classmethod
-    def from_nest(cls, nest, **kwargs) -> AxisTree:
-        root, parent_to_children = cls._from_nest(nest)
-        parent_to_children.update({None: [root]})
-        return cls(parent_to_children, **kwargs)
-
     @property
     def root(self):
         if not self.is_empty:
@@ -302,6 +296,18 @@ class MultiComponentLabelledNode(Node, Labelled):
 
 
 class LabelledTree(AbstractTree):
+    def __init__(self, parent_to_children=pmap()):
+        super().__init__(parent_to_children)
+
+        for axis in self.nodes:
+            for cpt in axis.components:
+                if (axis, cpt) in self.leaves:
+                    if not self._is_valid_leaf(cpt):
+                        raise ValueError
+                else:
+                    if not self._is_valid_branch(cpt):
+                        raise ValueError
+
     @deprecated("child")
     def component_child(self, parent, component):
         return self.child(parent, component)
@@ -581,10 +587,10 @@ class LabelledTree(AbstractTree):
                 children[cidx] = subnode_
                 parent_to_children.update(sub_p2c)
             parent_to_children[node.id] = children
-            return node, parent_to_children
+            return node, freeze(parent_to_children)
         else:
             node = cls._parse_node(nest)
-            return node, {node.id: [None] * node.degree}
+            return node, freeze({node.id: [None] * node.degree})
 
     # TODO, could be improved, same as other Tree apart from [None, None, ...] bit
     @staticmethod
@@ -620,6 +626,14 @@ class LabelledTree(AbstractTree):
             if node.id not in parent_to_children.keys():
                 parent_to_children[node.id] = [None] * node.degree
         return freeze(parent_to_children)
+
+    @staticmethod
+    def _is_valid_branch(node: LabelledNodeComponent) -> bool:
+        return True
+
+    @staticmethod
+    def _is_valid_leaf(node: LabelledNodeComponent) -> bool:
+        return True
 
     @staticmethod
     def _parse_node(node):
