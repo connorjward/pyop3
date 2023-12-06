@@ -34,10 +34,7 @@ def test_1d_slice_composition(vec2_copy_kernel):
     )
     dat1 = op3.Dat(op3.Axis(n), name="dat1", dtype=dat0.dtype)
 
-    # op3.do_loop(op3.Axis(1).index(), vec2_copy_kernel(dat0[::2][1:3], dat1))
-    loop = op3.loop(op3.Axis(1).index(), vec2_copy_kernel(dat0[::2][1:3], dat1))
-    loop()
-    breakpoint()
+    op3.do_loop(op3.Axis(1).index(), vec2_copy_kernel(dat0[::2][1:3], dat1))
     assert np.allclose(dat1.data_ro, dat0.data_ro[::2][1:3])
 
 

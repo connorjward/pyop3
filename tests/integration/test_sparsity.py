@@ -108,35 +108,28 @@ def test_sparse_matrix_insertion(scalar_copy_kernel):
     # [x x 0]
     # [x x x]
     # [0 x x]
+    axis0 = op3.Axis(3)
+    nnz_data = np.asarray([2, 3, 2])
+    nnz = op3.Dat(axis0, name="nnz", data=nnz_data, dtype=op3.IntType)
 
-    nnz_axes = AxisTree(Axis([AxisComponent(3, "pt0")], "ax0"))
-    nnz_data = np.asarray([2, 3, 2], dtype=IntType)
-    nnz = MultiArray(nnz_axes, name="nnz", data=nnz_data)
-
-    subset_axes = nnz_axes.add_subaxis(
-        Axis([AxisComponent(nnz, "pt0")], "ax1"), *nnz_axes.leaf
-    )
-    subset_data = np.asarray(flatten([[0, 1], [0, 1, 2], [1, 2]]), dtype=IntType)
+    subset_axes = op3.AxisTree.from_nest({axis0: op3.Axis({"pt0": nnz}, "ax1")})
+    subset_data = flatten([[0, 1], [0, 1, 2], [1, 2]])
     # TODO strongly type that this must be ordered and unique
-    # Probably want an OrderedSubset class. Similarly should also take care
-    # to allow non-unique indices - they do not form a subset
-    subset = MultiArray(
+    subset = op3.Dat(
         subset_axes,
         name="subset",
-        data=subset_data,
-        # ordered=True,
-        # unique=True,
+        data=np.asarray(subset_data),
+        dtype=op3.IntType,
     )
 
-    axes = nnz_axes.add_subaxis(Axis([AxisComponent(3, "pt0")], "ax1"), *nnz_axes.leaf)
-
-    scalar = MultiArray(
-        Axis(1), name="scalar", data=np.asarray([666], dtype=ScalarType)
+    axes = op3.AxisTree.from_nest({axis0: op3.Axis({"pt0": 3}, "ax1")})
+    matrix = op3.Dat(axes[:, subset], name="matrix", dtype=op3.ScalarType)
+    scalar = op3.Dat(
+        op3.Axis(1), name="scalar", data=np.asarray([666]), dtype=matrix.dtype
     )
-    matrix = MultiArray(axes[:, subset], name="matrix", dtype=scalar.dtype)
 
     # insert a value into a column of the matrix
-    do_loop(
+    op3.do_loop(
         p := axes[:, 1].index(),
         scalar_copy_kernel(scalar, matrix[p]),
     )

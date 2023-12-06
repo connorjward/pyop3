@@ -1132,6 +1132,7 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
     def freeze(self) -> FrozenAxisTree:
         return self
 
+    # needed here? or just for the Dat? perhaps a free function?
     def offset(self, *args, allow_unused=False, insert_zeros=False):
         nargs = len(args)
         if nargs == 2:

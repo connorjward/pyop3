@@ -1414,7 +1414,7 @@ def partition_iterset(index: LoopIndex, arrays):
     is_root_or_leaf_per_array = {}
     for array in arrays:
         # skip purely local arrays
-        if not array.orig_array.array.is_distributed:
+        if not array.array.is_distributed:
             continue
 
         # take first
@@ -1424,7 +1424,7 @@ def partition_iterset(index: LoopIndex, arrays):
         #
         # array_paraxis = array_paraxes[0]
         # sf = array_paraxis.sf
-        sf = array.orig_array.axes.sf  # the dof sf
+        sf = array.array.sf  # the dof sf
 
         # mark leaves and roots
         is_root_or_leaf = np.full(sf.size, ArrayPointLabel.CORE, dtype=np.uint8)
@@ -1456,7 +1456,7 @@ def partition_iterset(index: LoopIndex, arrays):
 
         for array in arrays:
             # skip purely local arrays
-            if not array.orig_array.array.is_distributed:
+            if not array.array.is_distributed:
                 continue
             if labels[parindex] == IterationPointType.LEAF:
                 continue
@@ -1476,7 +1476,10 @@ def partition_iterset(index: LoopIndex, arrays):
                 #     ).items():
                 #         allexprs.update(array.axes.index_exprs[myaxis.id, mycpt])
                 #
-                offset = array.axes.offset(array_path, array_indices | replace_map)
+                # offset = array.axes.offset(array_path, array_indices | replace_map)
+                offset = array.offset(
+                    array_target_path, array_target_indices | replace_map
+                )
 
                 # allexprs is indexed with the "source" labels but we want a particular
                 # "target" label, need to go backwards... or something

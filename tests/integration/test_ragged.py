@@ -241,17 +241,19 @@ def test_scalar_copy_of_permuted_axis_with_ragged_inner_axis(scalar_copy_kernel)
     nnz_data = np.asarray([2, 0, 4])
     numbering = [2, 1, 0]
 
-    nnz_axis = op3.Axis(m)
+    axis0 = op3.Axis(m)
+    paxis0 = axis0.copy(numbering=numbering)
     nnz = op3.Dat(
-        nnz_axis,
+        axis0,
         name="nnz",
         data=nnz_data,
         max_value=max(nnz_data),
         dtype=op3.IntType,
     )
 
-    axes = op3.AxisTree.from_nest({nnz_axis: op3.Axis(nnz)})
-    paxes = axes.with_modified_node(axes.root, numbering=numbering)
+    axis1 = op3.Axis(nnz)
+    axes = op3.AxisTree.from_nest({axis0: axis1})
+    paxes = op3.AxisTree.from_nest({paxis0: axis1})
 
     dat0 = op3.Dat(axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType)
     dat1 = op3.Dat(paxes, name="dat1", dtype=dat0.dtype)

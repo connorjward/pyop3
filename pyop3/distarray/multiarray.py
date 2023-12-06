@@ -215,34 +215,15 @@ class Dat(Tensor, Indexed, ContextFree):
                 layout_exprs_per_indexed_cpt,
             )
 
-            new_axes = IndexedAxisTree(
-                indexed_axes.parent_to_children,
-                target_paths,
-                index_exprs,
-                layout_exprs,
-                self.layout_axes.layouts,
+            return Dat(
+                indexed_axes,
+                data=self.array,
+                max_value=self.max_value,
+                target_paths=target_paths,
+                index_exprs=index_exprs,
+                layouts=self.layouts,
+                name=self.name,
             )
-
-            # not sure I need to do this now slices maintain the same labels
-            # new_layouts = substitute_layouts(
-            #     self.layout_axes,
-            #     new_axes,
-            #     target_path_per_indexed_cpt,
-            #     index_exprs_per_indexed_cpt,
-            # )
-            # test it out
-            # new_layouts = new_axes.layouts
-            # layout_axes = FrozenAxisTree(
-            #     new_axes.parent_to_children,
-            #     target_paths=target_paths,
-            #     # index_exprs=index_exprs,  try not passing this
-            #     layouts=new_layouts,
-            # )
-
-            # I *believe* that I can determine the right layouts using index_exprs
-            # later on...
-            layout_axes = new_axes
-            return self._with_axes(layout_axes)
 
         array_per_context = {}
         for index_tree in as_index_forest(indices, axes=self.axes):
@@ -378,6 +359,41 @@ class Dat(Tensor, Indexed, ContextFree):
         # "unindexed" axis tree
         axes = AxisTree(self.axes.parent_to_children)
         return type(self)(axes, dtype=self.dtype)
+
+    def offset(self, *args, allow_unused=False, insert_zeros=False):
+        nargs = len(args)
+        if nargs == 2:
+            path, indices = args[0], args[1]
+        else:
+            assert nargs == 1
+            path, indices = _path_and_indices_from_index_tuple(self.axes, args[0])
+
+        if allow_unused:
+            path = _trim_path(self.axes, path)
+
+        if insert_zeros:
+            # extend the path by choosing the zero offset option every time
+            # this is needed if we don't have all the internal bits available
+            while path not in self.layouts:
+                axis, clabel = self.axes._node_from_path(path)
+                subaxis = self.axes.child(axis, clabel)
+                # choose the component that is first in the renumbering
+                if subaxis.numbering:
+                    cidx = subaxis._component_index_from_axis_number(
+                        subaxis.numbering.data_ro[0]
+                    )
+                else:
+                    cidx = 0
+                subcpt = subaxis.components[cidx]
+                path |= {subaxis.label: subcpt.label}
+                indices |= {subaxis.label: 0}
+
+        offset = pym.evaluate(self.layouts[path], indices, ExpressionEvaluator)
+        return strict_int(offset)
+
+    @deprecated("offset")
+    def get_offset(self, *args, **kwargs):
+        return self.offset(*args, **kwargs)
 
     def _with_axes(self, axes):
         """Return a new `Dat` with new axes pointing to the same data."""
