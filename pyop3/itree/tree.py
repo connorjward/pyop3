@@ -1132,22 +1132,27 @@ def index_axes(axes, index_tree):
 
     target_paths, index_exprs, layout_exprs = _compose_bits(
         axes,
+        axes.target_paths,
+        axes.index_exprs,
+        axes.layout_exprs,
         indexed_axes,
         target_path_per_indexed_cpt,
         index_exprs_per_indexed_cpt,
         layout_exprs_per_indexed_cpt,
     )
-    return IndexedAxisTree(
+    return AxisTree(
         indexed_axes.parent_to_children,
         target_paths,
         index_exprs,
         layout_exprs,
-        axes.layouts,
     )
 
 
 def _compose_bits(
     axes,
+    prev_target_paths,
+    prev_index_exprs,
+    prev_layout_exprs,
     indexed_axes,
     itarget_paths,
     iindex_exprs,
@@ -1166,9 +1171,6 @@ def _compose_bits(
 
     if not indexed_axes:
         return (
-            # pmap(),
-            # pmap(),
-            # pmap(),
             freeze({None: itarget_paths.get(None, pmap())}),
             freeze({None: iindex_exprs.get(None, pmap())}),
             freeze({None: ilayout_exprs.get(None, pmap())}),
@@ -1215,12 +1217,12 @@ def _compose_bits(
                 skip = target_axis.label in new_visited_target_axes
                 new_visited_target_axes |= {target_axis.label}
 
-                new_target_path_acc = new_target_path_acc | axes.target_paths.get(
+                new_target_path_acc = new_target_path_acc | prev_target_paths.get(
                     (target_axis.id, target_cpt.label), {}
                 )
 
                 if not skip:
-                    for myaxlabel, mycptlabel in axes.target_paths.get(
+                    for myaxlabel, mycptlabel in prev_target_paths.get(
                         (target_axis.id, target_cpt.label), {}
                     ).items():
                         target_path_per_cpt[iaxis.id, icpt.label][
@@ -1232,7 +1234,7 @@ def _compose_bits(
                 # so the final replace map is target -> f(src)
                 # loop over the original replace map and substitute each value
                 # but drop some bits if indexed out... and final map is per component of the new axtree
-                orig_index_exprs = axes.index_exprs[target_axis.id, target_cpt.label]
+                orig_index_exprs = prev_index_exprs[target_axis.id, target_cpt.label]
                 for axis_label, index_expr in orig_index_exprs.items():
                     # new_index_expr = IndexExpressionReplacer(new_partial_index_exprs)(
                     new_index_expr = IndexExpressionReplacer(new_partial_index_exprs)(
@@ -1253,21 +1255,25 @@ def _compose_bits(
             # we start with src -> f(intermediate)
             # and intermediate -> g(final)
 
-            full_replace_map = merge_dicts(
-                [
-                    axes.layout_exprs[tgt_ax.id, tgt_cpt.label]
-                    for tgt_ax, tgt_cpt in detailed_path.items()
-                ]
-            )
-            for ikey, layout_expr in new_partial_layout_exprs.items():
-                # always 1:1 for layouts
-                mykey, myvalue = just_one(layout_expr.items())
-                mytargetpath = just_one(itarget_paths[ikey].keys())
-                layout_expr_replace_map = {mytargetpath: full_replace_map[mytargetpath]}
-                new_layout_expr = IndexExpressionReplacer(layout_expr_replace_map)(
-                    myvalue
+            # only do this if we are indexing an axis tree, not an array
+            if prev_layout_exprs is not None:
+                full_replace_map = merge_dicts(
+                    [
+                        prev_layout_exprs[tgt_ax.id, tgt_cpt.label]
+                        for tgt_ax, tgt_cpt in detailed_path.items()
+                    ]
                 )
-                layout_exprs[ikey][mykey] = new_layout_expr
+                for ikey, layout_expr in new_partial_layout_exprs.items():
+                    # always 1:1 for layouts
+                    mykey, myvalue = just_one(layout_expr.items())
+                    mytargetpath = just_one(itarget_paths[ikey].keys())
+                    layout_expr_replace_map = {
+                        mytargetpath: full_replace_map[mytargetpath]
+                    }
+                    new_layout_expr = IndexExpressionReplacer(layout_expr_replace_map)(
+                        myvalue
+                    )
+                    layout_exprs[ikey][mykey] = new_layout_expr
 
         isubaxis = indexed_axes.child(iaxis, icpt)
         if isubaxis:
@@ -1277,6 +1283,9 @@ def _compose_bits(
                 sublayout_exprs,
             ) = _compose_bits(
                 axes,
+                prev_target_paths,
+                prev_index_exprs,
+                prev_layout_exprs,
                 indexed_axes,
                 itarget_paths,
                 iindex_exprs,

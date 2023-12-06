@@ -203,9 +203,12 @@ class Dat(Tensor, Indexed, ContextFree):
                 target_path_per_indexed_cpt,
                 index_exprs_per_indexed_cpt,
                 layout_exprs_per_indexed_cpt,
-            ) = _index_axes(self.layout_axes, index_tree, pmap())
+            ) = _index_axes(self.axes, index_tree, pmap())
             target_paths, index_exprs, layout_exprs = _compose_bits(
-                self.layout_axes,
+                self.axes,
+                self.target_paths,
+                self.index_exprs,
+                None,
                 indexed_axes,
                 target_path_per_indexed_cpt,
                 index_exprs_per_indexed_cpt,
@@ -242,7 +245,7 @@ class Dat(Tensor, Indexed, ContextFree):
             return self._with_axes(layout_axes)
 
         array_per_context = {}
-        for index_tree in as_index_forest(indices, axes=self.layout_axes):
+        for index_tree in as_index_forest(indices, axes=self.axes):
             loop_context = index_tree.loop_context
             (
                 indexed_axes,
@@ -256,7 +259,10 @@ class Dat(Tensor, Indexed, ContextFree):
                 index_exprs,
                 layout_exprs,
             ) = _compose_bits(
-                self.layout_axes,
+                self.axes,
+                self.target_paths,
+                self.index_exprs,
+                None,
                 indexed_axes,
                 target_path_per_indexed_cpt,
                 index_exprs_per_indexed_cpt,
@@ -343,7 +349,13 @@ class Dat(Tensor, Indexed, ContextFree):
     def datamap(self):
         datamap_ = {self.name: self}
         datamap_.update(self.axes.datamap)
-        datamap_.update(self.layout_axes.datamap)
+        for index_exprs in self.index_exprs.values():
+            for expr in index_exprs.values():
+                for array in MultiArrayCollector()(expr):
+                    datamap_.update(array.datamap)
+        for layout_expr in self.layouts.values():
+            for array in MultiArrayCollector()(layout_expr):
+                datamap_.update(array.datamap)
         return freeze(datamap_)
 
     # TODO update docstring
@@ -472,73 +484,89 @@ class ContextSensitiveMultiArray(ContextSensitive):
         context, array = just_one(self.context_map.items())
 
         array_per_context = {}
-        for index_tree in as_index_forest(indices, axes=array.layout_axes):
+        for index_tree in as_index_forest(indices, axes=array.axes):
             loop_context = index_tree.loop_context
             (
                 indexed_axes,
                 target_path_per_indexed_cpt,
                 index_exprs_per_indexed_cpt,
                 layout_exprs_per_indexed_cpt,
-            ) = _index_axes(array.layout_axes, index_tree, loop_context)
+            ) = _index_axes(array.axes, index_tree, loop_context)
 
             (
                 target_paths,
                 index_exprs,
                 layout_exprs,
             ) = _compose_bits(
-                array.layout_axes,
+                array.axes,
+                array.target_paths,
+                array.index_exprs,
+                None,
                 indexed_axes,
                 target_path_per_indexed_cpt,
                 index_exprs_per_indexed_cpt,
                 layout_exprs_per_indexed_cpt,
             )
-
-            new_axes = IndexedAxisTree(
-                indexed_axes.parent_to_children,
-                target_paths,
-                index_exprs,
-                layout_exprs,
-                array.layout_axes._layouts,
+            array_per_context[loop_context] = Dat(
+                indexed_axes,
+                data=self.array,
+                max_value=self.max_value,
+                target_paths=target_paths,
+                index_exprs=index_exprs,
+                layouts=self.layouts,
+                name=self.name,
             )
 
-            # new_layouts = substitute_layouts(
-            #     array.layout_axes,
-            #     new_axes,
-            #     target_path_per_indexed_cpt,
-            #     index_exprs_per_indexed_cpt,
-            # )
-            # layout_axes = FrozenAxisTree(
-            #     new_axes.parent_to_children,
+            # new_axes = IndexedAxisTree(
+            #     indexed_axes.parent_to_children,
             #     target_paths,
             #     index_exprs,
-            #     layouts=new_layouts,
+            #     layout_exprs,
+            #     array.layouts,
             # )
-            layout_axes = new_axes
-            array_per_context[loop_context] = array._with_axes(layout_axes)
+            #
+            # # new_layouts = substitute_layouts(
+            # #     array.layout_axes,
+            # #     new_axes,
+            # #     target_path_per_indexed_cpt,
+            # #     index_exprs_per_indexed_cpt,
+            # # )
+            # # layout_axes = FrozenAxisTree(
+            # #     new_axes.parent_to_children,
+            # #     target_paths,
+            # #     index_exprs,
+            # #     layouts=new_layouts,
+            # # )
+            # layout_axes = new_axes
+            # array_per_context[loop_context] = array._with_axes(layout_axes)
         return ContextSensitiveMultiArray(array_per_context)
-
-    # don't like this name
-    # FIXME This function returns dats, the "array" function returns a DistributedArray,
-    # this is confusing and should be cleaned up
-    @property
-    def orig_array(self):
-        return single_valued(dat.orig_array for dat in self.context_map.values())
 
     @property
     def array(self):
-        return single_valued(dat.array for dat in self.context_map.values())
+        return self._shared_attr("array")
 
     @property
     def dtype(self):
-        return single_valued(array.dtype for array in self.context_map.values())
+        return self._shared_attr("dtype")
+
+    @property
+    def max_value(self):
+        return self._shared_attr("max_value")
 
     @property
     def name(self):
-        return single_valued(array.name for array in self.context_map.values())
+        return self._shared_attr("name")
+
+    @property
+    def layouts(self):
+        return self._shared_attr("layouts")
 
     @functools.cached_property
     def datamap(self):
         return merge_dicts(array.datamap for array in self.context_map.values())
+
+    def _shared_attr(self, attr: str):
+        return single_valued(getattr(a, attr) for a in self.context_map.values())
 
 
 def replace_layout(orig_layout, replace_map):
