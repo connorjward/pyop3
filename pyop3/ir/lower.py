@@ -18,12 +18,14 @@ import loopy.symbolic
 import numpy as np
 import pymbolic as pym
 import pytools
+from petsc4py import PETSc
 from pyrsistent import freeze, pmap
 
 from pyop3 import utils
 from pyop3.axtree import Axis, AxisComponent, AxisTree, AxisVariable
 from pyop3.axtree.tree import ContextSensitiveAxisTree
 from pyop3.distarray import Dat, MultiArray
+from pyop3.distarray2 import DistributedArray
 from pyop3.distarray.multiarray import ContextSensitiveMultiArray
 from pyop3.distarray.petsc import IndexedPetscMat, PetscMat, PetscObject
 from pyop3.dtypes import IntType, PointerType
@@ -171,9 +173,10 @@ class LoopyCodegenContext(CodegenContext):
             )
             return
 
-        if isinstance(array.orig_array, PetscMat):
+        if isinstance(array.array, PETSc.Mat):
             arg = lp.ValueArg(array.name, dtype=self._dtype(array))
         else:
+            assert isinstance(array.array, DistributedArray)
             arg = lp.GlobalArg(array.name, dtype=self._dtype(array), shape=None)
         self._args.append(arg)
 
@@ -219,7 +222,7 @@ class LoopyCodegenContext(CodegenContext):
 
     @_dtype.register
     def _(self, array: ContextSensitiveMultiArray):
-        return self._dtype(array.orig_array)
+        return single_valued(self._dtype(a) for a in array.context_map.values())
 
     @_dtype.register
     def _(self, array: Dat):
@@ -522,15 +525,11 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
         loop_context = context_from_indices(loop_indices)
 
         if isinstance(arg, (Dat, ContextSensitiveMultiArray)):
-            axes = arg.with_context(loop_context).temporary_axes.restore()
+            temporary = arg.with_context(loop_context).materialize()
         else:
             assert isinstance(arg, Offset)
+            raise NotImplementedError
             axes = AxisTree()
-        temporary = Dat(
-            axes,
-            name=ctx.unique_name("t"),
-            dtype=arg.dtype,
-        )
         indexed_temp = temporary
 
         if loopy_arg.shape is None:
@@ -737,6 +736,7 @@ def parse_assignment_petscmat(array, temp, shape, op, loop_indices, codegen_cont
     # codegen_context.add_cinstruction("PetscAttachDebugger();")
 
 
+# TODO now I attach a lot of info to the context-free array, do I need to pass axes around?
 def parse_assignment_properly_this_time(
     array,
     temp,
@@ -754,9 +754,13 @@ def parse_assignment_properly_this_time(
 ):
     from pyop3.distarray.multiarray import IndexExpressionReplacer
 
+    context = context_from_indices(loop_indices)
+    ctx_free_array = array.with_context(context)
+
     if axis is None:
         axis = axes.root
-        my_index_exprs = axes.index_exprs.get(None, pmap())
+        target_path = target_path | ctx_free_array.target_paths.get(None, pmap())
+        my_index_exprs = ctx_free_array.index_exprs.get(None, pmap())
         jname_extras = {}
         for axis_label, index_expr in my_index_exprs.items():
             jname_expr = JnameSubstitutor(
@@ -789,7 +793,7 @@ def parse_assignment_properly_this_time(
         codegen_context.add_domain(iname, extent_var)
 
         new_source_path = source_path | {axis.label: component.label}  # not used
-        new_target_path = target_path | axes.target_paths.get(
+        new_target_path = target_path | ctx_free_array.target_paths.get(
             (axis.id, component.label), {}
         )
 
@@ -798,7 +802,7 @@ def parse_assignment_properly_this_time(
         # I don't like that I need to do this here and also when I emit the layout
         # instructions.
         # Do I need the jnames on the way down? Think so for things like ragged...
-        my_index_exprs = axes.index_exprs.get((axis.id, component.label), {})
+        my_index_exprs = ctx_free_array.index_exprs.get((axis.id, component.label), {})
         jname_extras = {}
         for axis_label, index_expr in my_index_exprs.items():
             jname_expr = JnameSubstitutor(
@@ -857,19 +861,26 @@ def add_leaf_assignment(
     context = context_from_indices(loop_indices)
 
     if isinstance(array, (Dat, ContextSensitiveMultiArray)):
-        array_expr = functools.partial(
-            make_array_expr,
-            array,
-            array.with_context(context).layouts[source_path],
-            target_path,
-            iname_replace_map | jname_replace_map,
-            codegen_context,
-        )
+
+        def array_expr():
+            array_ = array.with_context(context)
+            return make_array_expr(
+                array,
+                # I think...
+                # not calling substitute layouts from above so loop indices not
+                # present in the layout...
+                # subst_layout(axes, source_path, target_path),
+                array_.layouts[target_path],
+                target_path,
+                iname_replace_map | jname_replace_map,
+                codegen_context,
+            )
+
     else:
         assert isinstance(array, Offset)
         array_expr = functools.partial(
             make_offset_expr,
-            array.with_context(context).layouts[source_path],
+            array.with_context(context).layouts[target_path],
             iname_replace_map | jname_replace_map,
             codegen_context,
         )
@@ -932,6 +943,19 @@ def make_temp_expr(temporary, shape, path, jnames, ctx):
     ctx.add_assignment(temp_offset_var, temp_offset)
     temp_offset_var = pym.var(temp_offset_var)
     return pym.subscript(pym.var(temporary.name), extra_indices + (temp_offset_var,))
+
+
+def subst_layout(axes, source_path, target_path):
+    # TODO move import
+    from pyop3.distarray.multiarray import IndexExpressionReplacer
+
+    replace_map = {}
+    for axis, cpt in axes.detailed_path(source_path).items():
+        replace_map.update(axes.layout_exprs[axis.id, cpt])
+
+    retval = IndexExpressionReplacer(replace_map)(axes.layouts[target_path])
+    # breakpoint()
+    return retval
 
 
 class JnameSubstitutor(pym.mapper.IdentityMapper):

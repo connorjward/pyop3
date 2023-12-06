@@ -34,6 +34,7 @@ from pyop3.axtree.tree import (
     ExpressionEvaluator,
     FrozenAxisTree,
     IndexedAxisTree,
+    PartialAxisTree,
 )
 from pyop3.dtypes import IntType, get_mpi_dtype
 from pyop3.extras.debug import print_if_rank, print_with_rank
@@ -434,9 +435,9 @@ class ContextSensitiveCalledMap(ContextSensitiveLoopIterable):
 
 @functools.singledispatch
 def apply_loop_context(arg, loop_context, *, axes, path):
-    from pyop3.distarray import MultiArray
+    from pyop3.distarray import Dat
 
-    if isinstance(arg, MultiArray):
+    if isinstance(arg, Dat):
         parent = axes._node_from_path(path)
         if parent is not None:
             parent_axis, parent_cpt = parent
@@ -502,9 +503,9 @@ def combine_contexts(contexts):
 @functools.singledispatch
 def collect_loop_indices(arg):
     # cyclic import
-    from pyop3.distarray import MultiArray
+    from pyop3.distarray import Dat
 
-    if isinstance(arg, (MultiArray, Slice, slice, str)):
+    if isinstance(arg, (Dat, Slice, slice, str)):
         return ()
     elif isinstance(arg, collections.abc.Iterable):
         return sum(map(collect_loop_indices, arg), ())
@@ -838,7 +839,7 @@ def _(loop_index: LoopIndex, *, loop_indices, **kwargs):
     )
     layout_exprs_per_component = pmap({None: 0})
     return (
-        LabelledTree(),
+        PartialAxisTree(),
         target_path_per_component,
         index_exprs_per_component,
         layout_exprs_per_component,
@@ -863,7 +864,7 @@ def _(local_index: LocalLoopIndex, *args, loop_indices, **kwargs):
 
     layout_exprs_per_cpt = pmap({None: 0})
     return (
-        LabelledTree(),
+        PartialAxisTree(),
         target_path_per_cpt,
         index_exprs_per_cpt,
         layout_exprs_per_cpt,
@@ -917,7 +918,7 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
             )
 
     axis = Axis(components, label=axis_label)
-    axes = LabelledTree(axis)
+    axes = PartialAxisTree(axis)
     target_path_per_component = {}
     index_exprs_per_component = {}
     layout_exprs_per_component = {}
@@ -958,7 +959,7 @@ def _(called_map: CalledMap, **kwargs):
         ) = _make_leaf_axis_from_called_map(
             called_map, prior_target_path, prior_index_exprs
         )
-        axes = LabelledTree(axis)
+        axes = PartialAxisTree(axis)
     else:
         axes = prior_axes
         target_path_per_cpt = {}
@@ -988,7 +989,7 @@ def _(called_map: CalledMap, **kwargs):
             )
             # axes = axes.add_node(subaxis, prior_leaf_axis, prior_leaf_cpt)
             axes = axes.add_subtree(
-                LabelledTree(subaxis), prior_leaf_axis, prior_leaf_cpt
+                PartialAxisTree(subaxis), prior_leaf_axis, prior_leaf_cpt
             )
             target_path_per_cpt.update(subtarget_paths)
             index_exprs_per_cpt.update(subindex_exprs)

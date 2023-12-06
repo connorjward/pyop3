@@ -13,6 +13,7 @@ import operator
 import sys
 import threading
 from functools import cached_property
+from itertools import chain
 from typing import Any, FrozenSet, Hashable, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
@@ -51,6 +52,18 @@ from pyop3.utils import (
     strictly_all,
     unique,
 )
+
+
+class Indexed(abc.ABC):
+    @property
+    @abc.abstractmethod
+    def target_paths(self):
+        pass
+
+    @property
+    @abc.abstractmethod
+    def index_exprs(self):
+        pass
 
 
 class ContextAware(abc.ABC):
@@ -140,15 +153,7 @@ class LoopIterable(abc.ABC):
 
 
 class ContextFreeLoopIterable(LoopIterable, ContextFree, abc.ABC):
-    @property
-    @abc.abstractmethod
-    def target_paths(self):
-        pass
-
-    @property
-    @abc.abstractmethod
-    def index_exprs(self):
-        pass
+    pass
 
 
 class ContextSensitiveLoopIterable(LoopIterable, ContextSensitive, abc.ABC):
@@ -848,6 +853,14 @@ class PartialAxisTree(LabelledTree):
     def freeze(self) -> FrozenAxisTree:
         return self.set_up()
 
+    @cached_property
+    def datamap(self):
+        if self.is_empty:
+            dmap = {}
+        else:
+            dmap = postvisit(self, _collect_datamap, axes=self)
+        return freeze(dmap)
+
     def add_node(
         self,
         axis,
@@ -936,104 +949,8 @@ class PartialAxisTree(LabelledTree):
         return sum(cpt.alloc_size(self, axis) for cpt in axis.components)
 
 
-class IndexedAxisTree(PartialAxisTree, ContextFreeLoopIterable):
-    def __init__(
-        self,
-        parent_to_children,
-        target_paths,
-        index_exprs,
-        layout_exprs,
-        layouts,
-    ):
-        super().__init__(parent_to_children)
-        self._target_paths = target_paths
-        self._index_exprs = index_exprs
-        self.layout_exprs = layout_exprs
-        self.layouts = layouts
-
-    def __getitem__(self, indices):
-        from pyop3.itree.tree import (
-            as_index_forest,
-            collect_loop_contexts,
-            index_axes,
-            index_tree_from_ellipsis,
-        )
-
-        if indices is Ellipsis:
-            indices = index_tree_from_ellipsis(self)
-
-        if not collect_loop_contexts(indices):
-            index_tree = just_one(as_index_forest(indices, axes=self))
-            return index_axes(self, index_tree)
-
-        axis_trees = {}
-        for index_tree in as_index_forest(indices, axes=self):
-            axis_trees[index_tree.loop_context] = index_axes(self, index_tree)
-        return ContextSensitiveAxisTree(axis_trees)
-
-    @property
-    def sf(self):
-        # FIXME
-        return None
-
-    @property
-    @deprecated("layouts")
-    def _layouts(self):
-        return self.layouts
-
-    @cached_property
-    def full_layouts(self):
-        # TODO move
-        from pyop3.distarray.multiarray import substitute_layouts
-
-        return substitute_layouts(self, self.target_paths, self.index_exprs)
-
-    # hacky
-    def restore(self):
-        return AxisTree.from_node_map(self.parent_to_children)
-
-    def index(self) -> LoopIndex:
-        from pyop3.itree import LoopIndex
-
-        # TODO
-        # return LoopIndex(self.owned)
-        return LoopIndex(self)
-
-    @property
-    def target_paths(self):
-        return self._target_paths
-
-    @property
-    def index_exprs(self):
-        return self._index_exprs
-
-    # TODO refactor
-    @property
-    def datamap(self):
-        if self.is_empty:
-            datamap_ = {}
-        else:
-            datamap_ = postvisit(self, _collect_datamap, axes=self)
-        for index_exprs in self.index_exprs.values():
-            for index_expr in index_exprs.values():
-                for array in MultiArrayCollector()(index_expr):
-                    datamap_.update(array.datamap)
-        # FIXME Need to collect!!!
-        # for layout_exprs in self.layout_exprs.values():
-        #     for layout_expr in layout_exprs.values():
-        #         for array in MultiArrayCollector()(layout_expr):
-        #             datamap_.update(array.datamap)
-        for layout in self._layouts.values():
-            for array in MultiArrayCollector()(layout):
-                datamap_.update(array.datamap)
-        return freeze(datamap_)
-
-    def freeze(self):
-        return self
-
-
 @frozen_record
-class AxisTree(PartialAxisTree, ContextFreeLoopIterable):
+class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
     fields = PartialAxisTree.fields | {
         "target_paths",
         "index_exprs",
@@ -1045,18 +962,21 @@ class AxisTree(PartialAxisTree, ContextFreeLoopIterable):
     def __init__(
         self,
         parent_to_children,
-        target_paths,
-        index_exprs,
-        layout_exprs,
-        layouts,
+        target_paths=None,
+        index_exprs=None,
+        layout_exprs=None,
         sf=None,
     ):
+        if some_but_not_all(
+            arg is None for arg in [target_paths, index_exprs, layout_exprs]
+        ):
+            raise ValueError
+
         super().__init__(parent_to_children)
-        self._target_paths = target_paths
-        self._index_exprs = index_exprs
-        self.layout_exprs = layout_exprs  # dont think I need this?
-        self.layouts = layouts
-        self.sf = sf
+        self._target_paths = target_paths or self._default_target_paths()
+        self._index_exprs = index_exprs or self._default_index_exprs()
+        self.layout_exprs = layout_exprs or self._default_layout_exprs()
+        self.sf = sf or self._default_sf()
 
     def __getitem__(self, indices) -> Union[IndexedAxisTree, ContextSensitiveAxisTree]:
         from pyop3.itree.tree import as_index_forest, collect_loop_contexts, index_axes
@@ -1089,25 +1009,14 @@ class AxisTree(PartialAxisTree, ContextFreeLoopIterable):
         target_paths = cls._default_target_paths(tree)
         index_exprs = cls._default_index_exprs(tree)
         layout_exprs = index_exprs
-        layouts = cls._default_layouts(tree)
         sf = cls._default_sf(tree)
         return cls(
             tree.parent_to_children,
             target_paths,
             index_exprs,
             layout_exprs,
-            layouts,
             sf,
         )
-
-    @deprecated()
-    def restore(self):
-        return self
-
-    # awful function, just use "layouts" across the board
-    @property
-    def full_layouts(self):
-        return self.layouts
 
     def index(self):
         from pyop3.itree import LoopIndex
@@ -1121,6 +1030,35 @@ class AxisTree(PartialAxisTree, ContextFreeLoopIterable):
     @property
     def index_exprs(self):
         return self._index_exprs
+
+    @cached_property
+    def layouts(self):
+        """Initialise the multi-axis by computing the layout functions."""
+        from pyop3.axtree.layout import _collect_at_leaves, _compute_layouts
+        from pyop3.distarray.multiarray import IndexExpressionReplacer
+
+        if self.is_empty:
+            return pmap({pmap(): 0})
+
+        layouts, _, _, _ = _compute_layouts(self, self.root)
+        layoutsnew = _collect_at_leaves(self, layouts)
+        layouts = freeze(dict(layoutsnew))
+
+        layouts_ = {}
+        for leaf in self.leaves:
+            orig_path = self.path(*leaf)
+            new_path = {}
+            replace_map = {}
+            for axis, cpt in self.path_with_nodes(*leaf).items():
+                new_path.update(self.target_paths[axis.id, cpt])
+                replace_map.update(self.layout_exprs[axis.id, cpt])
+            new_path = freeze(new_path)
+
+            orig_layout = layouts[orig_path]
+            new_layout = IndexExpressionReplacer(replace_map)(orig_layout)
+            # assert new_layout != orig_layout
+            layouts_[new_path] = new_layout
+        return freeze(layouts_)
 
     @cached_property
     def datamap(self):
@@ -1225,53 +1163,40 @@ class AxisTree(PartialAxisTree, ContextFreeLoopIterable):
 
         previsit(self, check, self.root, frozenset())
 
-    # TODO don't really like that these are static methods, at least need a better name
-    @staticmethod
-    def _default_target_paths(tree):
-        if tree.is_empty:
+    def _default_target_paths(self):
+        if self.is_empty:
             return pmap()
 
         return pmap(
             {
                 (axis.id, cpt.label): pmap({axis.label: cpt.label})
-                for axis in tree.nodes
+                for axis in self.nodes
                 for cpt in axis.components
             }
         )
 
-    @staticmethod
-    def _default_index_exprs(tree):
-        if tree.is_empty:
+    def _default_index_exprs(self):
+        if self.is_empty:
             return pmap()
 
         return pmap(
             {
                 (axis.id, cpt.label): pmap({axis.label: AxisVariable(axis.label)})
-                for axis in tree.nodes
+                for axis in self.nodes
                 for cpt in axis.components
             }
         )
 
-    @staticmethod
-    def _default_layouts(tree):
-        """Initialise the multi-axis by computing the layout functions."""
-        from pyop3.axtree.layout import _collect_at_leaves, _compute_layouts
+    def _default_layout_exprs(self):
+        return self._default_index_exprs()
 
-        if tree.is_empty:
-            return pmap({pmap(): 0})
-
-        layouts, _, _, _ = _compute_layouts(tree, tree.root)
-        layoutsnew = _collect_at_leaves(tree, layouts)
-        return freeze(dict(layoutsnew))
-
-    @staticmethod
-    def _default_sf(tree):
+    def _default_sf(self):
         from pyop3.axtree.parallel import collect_sf_graphs
 
-        if tree.is_empty:
+        if self.is_empty:
             return None
 
-        graphs = collect_sf_graphs(tree)
+        graphs = collect_sf_graphs(self)
         if len(graphs) == 0:
             return None
         else:
@@ -1287,7 +1212,89 @@ class AxisTree(PartialAxisTree, ContextFreeLoopIterable):
             ilocal = np.concatenate(ilocals)
             iremote = np.concatenate(iremotes)
             # fixme, get the right comm (and ensure consistency)
-            return StarForest.from_graph(tree.size, nroots, ilocal, iremote)
+            return StarForest.from_graph(self.size, nroots, ilocal, iremote)
+
+
+# old alias
+IndexedAxisTree = AxisTree
+# class IndexedAxisTree(AxisTree):
+#     def __init__(
+#         self,
+#         parent_to_children,
+#         target_paths,
+#         index_exprs,
+#         layout_exprs,
+#         layouts,
+#     ):
+#         super().__init__(parent_to_children, target_paths, index_exprs, layout_exprs, layouts)
+#
+#     def __getitem__(self, indices):
+#         from pyop3.itree.tree import (
+#             as_index_forest,
+#             collect_loop_contexts,
+#             index_axes,
+#             index_tree_from_ellipsis,
+#         )
+#
+#         if indices is Ellipsis:
+#             indices = index_tree_from_ellipsis(self)
+#
+#         if not collect_loop_contexts(indices):
+#             index_tree = just_one(as_index_forest(indices, axes=self))
+#             return index_axes(self, index_tree)
+#
+#         axis_trees = {}
+#         for index_tree in as_index_forest(indices, axes=self):
+#             axis_trees[index_tree.loop_context] = index_axes(self, index_tree)
+#         return ContextSensitiveAxisTree(axis_trees)
+#
+#     @property
+#     @deprecated("layouts")
+#     def _layouts(self):
+#         return self.layouts
+#
+#     # @cached_property
+#     # def full_layouts(self):
+#     #     # TODO move
+#     #     # from pyop3.distarray.multiarray import substitute_layouts
+#     #     #
+#     #     # return substitute_layouts(self, self.target_paths, self.index_exprs)
+#     #     return self.layouts
+#
+#     # hacky
+#     def restore(self):
+#         return AxisTree.from_node_map(self.parent_to_children)
+#
+#     def index(self) -> LoopIndex:
+#         from pyop3.itree import LoopIndex
+#
+#         # TODO
+#         # return LoopIndex(self.owned)
+#         return LoopIndex(self)
+#
+#     # TODO refactor
+#     @property
+#     def datamap(self):
+#         if self.is_empty:
+#             datamap_ = {}
+#         else:
+#             datamap_ = postvisit(self, _collect_datamap, axes=self)
+#         for index_exprs in self.index_exprs.values():
+#             for index_expr in index_exprs.values():
+#                 for array in MultiArrayCollector()(index_expr):
+#                     datamap_.update(array.datamap)
+#         # FIXME Need to collect!!!
+#         # for layout_exprs in self.layout_exprs.values():
+#         #     for layout_expr in layout_exprs.values():
+#         #         for array in MultiArrayCollector()(layout_expr):
+#         #             datamap_.update(array.datamap)
+#         for layout in self._layouts.values():
+#             for array in MultiArrayCollector()(layout):
+#                 datamap_.update(array.datamap)
+#         return freeze(datamap_)
+#
+#     def freeze(self):
+#         return self
 
 
 # old alias
@@ -1347,6 +1354,11 @@ def as_axis_tree(arg: Any):
     if isinstance(arg, Dat):
         return as_axis_tree(AxisComponent(arg))
     raise TypeError
+
+
+@as_axis_tree.register
+def _(arg: PartialAxisTree):
+    return arg
 
 
 @as_axis_tree.register

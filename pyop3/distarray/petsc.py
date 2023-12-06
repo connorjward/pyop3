@@ -282,6 +282,11 @@ class PetscMatAIJ(PetscMat):
             )
         return ContextSensitiveMultiArray(array_per_context)
 
+    # like Dat, bad name? handle?
+    @property
+    def array(self):
+        return self.petscmat
+
 
 class PetscMatBAIJ(PetscMat):
     ...

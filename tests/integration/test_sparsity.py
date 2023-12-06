@@ -1,19 +1,7 @@
 import numpy as np
 import pytest
 
-from pyop3 import (
-    AffineSliceComponent,
-    Axis,
-    AxisComponent,
-    AxisTree,
-    IntType,
-    MultiArray,
-    ScalarType,
-    Slice,
-    Subset,
-    do_loop,
-    loop,
-)
+import pyop3 as op3
 from pyop3.utils import flatten
 
 
@@ -22,34 +10,35 @@ def test_loop_over_ragged_subset(scalar_copy_kernel):
     # [x x 0]
     # [x x x]
     # [0 x x]
-    nnz_axes = AxisTree(Axis([AxisComponent(3, "pt0")], "ax0"))
-    nnz_data = np.asarray([2, 3, 2], dtype=IntType)
-    nnz = MultiArray(nnz_axes, name="nnz", data=nnz_data)
+    axis0 = op3.Axis(3)
+    nnz_data = np.asarray([2, 3, 2])
+    nnz = op3.Dat(axis0, name="nnz", data=nnz_data, dtype=op3.IntType)
 
-    subset_axes = nnz_axes.add_subaxis(
-        Axis([AxisComponent(nnz, "pt0")], "ax1"), *nnz_axes.leaf
-    )
-    subset_data = np.asarray(flatten([[0, 1], [0, 1, 2], [1, 2]]), dtype=IntType)
-    subset = MultiArray(
+    axis1 = op3.Axis(nnz, "ax1")
+    subset_axes = op3.AxisTree.from_nest({axis0: axis1})
+    subset_data = np.asarray(flatten([[0, 1], [0, 1, 2], [1, 2]]))
+    subset = op3.Dat(
         subset_axes,
         name="subset",
         data=subset_data,
+        dtype=op3.IntType,
     )
 
-    axes = nnz_axes.add_subaxis(Axis([AxisComponent(3, "pt0")], "ax1"), *nnz_axes.leaf)
-    dat0 = MultiArray(axes, name="dat0", data=np.arange(axes.size, dtype=ScalarType))
-    dat1 = MultiArray(axes, name="dat1", dtype=dat0.dtype)
+    axis2 = op3.Axis(3, "ax1")
+    axes = op3.AxisTree.from_nest({axis0: axis2})
+    dat0 = op3.Dat(axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType)
+    dat1 = op3.Dat(axes, name="dat1", dtype=dat0.dtype)
 
-    do_loop(p := axes[:, subset].index(), scalar_copy_kernel(dat0[p], dat1[p]))
+    op3.do_loop(p := axes[:, subset].index(), scalar_copy_kernel(dat0[p], dat1[p]))
 
-    expected = np.zeros_like(dat0.data)
+    expected = np.zeros_like(dat0.data_ro)
     subset_offset = 0
     for i in range(3):
         for j in range(nnz_data[i]):
             offset = i * 3 + subset_data[subset_offset]
-            expected[offset] = dat0.data[offset]
+            expected[offset] = dat0.data_ro[offset]
             subset_offset += 1
-    assert np.allclose(dat1.data, expected)
+    assert np.allclose(dat1.data_ro, expected)
 
 
 def test_sparse_copy(scalar_copy_kernel):
@@ -57,57 +46,61 @@ def test_sparse_copy(scalar_copy_kernel):
     # [x x 0]
     # [x x x]
     # [0 x x]
-    nnz_axes = AxisTree(Axis([AxisComponent(3, "pt0")], "ax0"))
-    nnz_data = np.asarray([2, 3, 2], dtype=IntType)
-    nnz = MultiArray(nnz_axes, name="nnz", data=nnz_data)
+    axis0 = op3.Axis(3)
+    nnz_data = np.asarray([2, 3, 2])
+    nnz = op3.Dat(axis0, name="nnz", data=nnz_data, dtype=op3.IntType)
 
-    # dense
-    axes0 = nnz_axes.add_subaxis(Axis([AxisComponent(3, "pt0")], "ax1"), *nnz_axes.leaf)
-    # sparse
-    axes1 = nnz_axes.add_subaxis(
-        Axis([AxisComponent(nnz, "pt0")], "ax1"), *nnz_axes.leaf
+    dense_axes = op3.AxisTree.from_nest({axis0: op3.Axis({"pt0": 3}, "ax1")})
+    sparse_axes = op3.AxisTree.from_nest({axis0: op3.Axis({"pt0": nnz}, "ax1")})
+
+    dat0 = op3.Dat(
+        dense_axes, name="dat0", data=np.arange(dense_axes.size), dtype=op3.ScalarType
     )
+    dat1 = op3.Dat(sparse_axes, name="dat1", dtype=dat0.dtype)
 
-    dat0 = MultiArray(axes0, name="dat0", data=np.arange(axes0.size, dtype=ScalarType))
-    dat1 = MultiArray(axes1, name="dat1", dtype=dat0.dtype)
-
-    subset_data = np.asarray(flatten([[0, 1], [0, 1, 2], [1, 2]]), dtype=IntType)
-    subset = MultiArray(
-        axes1,
+    subset_list = [[0, 1], [0, 1, 2], [1, 2]]
+    subset_data = np.asarray(flatten(subset_list))
+    subset = op3.Dat(
+        sparse_axes,
         name="subset",
         data=subset_data,
+        dtype=op3.IntType,
     )
 
     # The following is equivalent to
-    # for (i, j), (p, q) in axes[:, subset]:
+    # for (i, j), (p, q) in dense_axes[:, subset]:
     #   dat1[i, j] = dat0[p, q]
-
-    do_loop(
-        p := axes0[:, subset].index(),
+    op3.do_loop(
+        p := dense_axes[:, subset].index(),
         scalar_copy_kernel(dat0[p], dat1[p.i]),
     )
 
-    # Since we are looping over the matrix [[0, 1, 2], [3, 4, 5], [6, 7, 8]] and
-    # accessing [[0, 1], [0, 1, 2], [1, 2]] we expect
-    # to have [[0, 1], [3, 4, 5], [7, 8]]
-    expected = np.asarray([0, 1, 3, 4, 5, 7, 8])
-    assert np.allclose(dat1.data, expected)
+    expected = np.zeros_like(dat1.data_ro)
+    offset = 0
+    for i in range(3):
+        for j in subset_list[i]:
+            expected[offset] = dat0.data_ro[i * 3 + j]
+            offset += 1
+    assert offset == len(expected)
+    assert np.allclose(dat1.data_ro, expected)
 
 
 def test_sliced_array(scalar_copy_kernel):
     n = 30
-    axes = Axis([AxisComponent(n, "pt0")], "ax0")
+    axes = op3.Axis({"pt0": n}, "ax0")
 
-    array0 = MultiArray(
-        axes, name="array0", data=np.arange(axes.size, dtype=ScalarType)
-    )
-    # array1 expects indices [2, 4, 6, ...]
-    array1 = MultiArray(axes[::2][1:], name="array1", dtype=array0.dtype)
+    dat0 = op3.Dat(axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType)
+    # dat1 expects indices [2, 4, 6, ...]
+    # FIXME need to update the layout here...
+    dat1 = op3.Dat(axes[::2][1:], name="dat1", dtype=dat0.dtype)
 
     # loop over [4, 8, 12, 16, ...]
-    do_loop(p := axes[::4][1:].index(), scalar_copy_kernel(array0[p], array1[p]))
-    assert np.allclose(array1.data_ro[::2], 0)
-    assert np.allclose(array1.data_ro[1::2], array0.data_ro[::4][1:])
+    # op3.do_loop(p := axes[::4][1:].index(), scalar_copy_kernel(dat0[p], dat1[p]))
+    loop = op3.loop(p := axes[::4][1:].index(), scalar_copy_kernel(dat0[p], dat1[p]))
+    loop()
+    breakpoint()
+    assert np.allclose(dat1.data_ro[::2], 0)
+    assert np.allclose(dat1.data_ro[1::2], dat0.data_ro[::4][1:])
 
 
 def test_sparse_matrix_insertion(scalar_copy_kernel):

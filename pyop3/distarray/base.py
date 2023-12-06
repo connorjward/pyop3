@@ -13,12 +13,11 @@ class Tensor(abc.ABC):
     _prefix = "array"
     _name_generator = UniqueNameGenerator()
 
-    def __init__(self, name=None, prefix=None, orig_array=None) -> None:
+    def __init__(self, name=None, *, prefix=None) -> None:
         if name and prefix:
             raise ValueError("Can only specify one of name and prefix")
 
         self.name = name or self._name_generator(prefix or self._prefix)
-        self.orig_array = orig_array or self
 
     # hack for now, just dont make a pytool.Record
     def __repr__(self):

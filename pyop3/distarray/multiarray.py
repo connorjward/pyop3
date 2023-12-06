@@ -25,7 +25,7 @@ from pyop3.axtree import (
     ContextSensitive,
     as_axis_tree,
 )
-from pyop3.axtree.tree import AxisVariable, FrozenAxisTree, MultiArrayCollector
+from pyop3.axtree.tree import AxisVariable, FrozenAxisTree, Indexed, MultiArrayCollector
 from pyop3.distarray2 import DistributedArray
 from pyop3.distarray.base import Tensor
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
@@ -42,6 +42,7 @@ from pyop3.utils import (
     merge_dicts,
     readonly,
     single_valued,
+    some_but_not_all,
     strict_int,
     strictly_all,
 )
@@ -110,7 +111,7 @@ class MultiArrayVariable(pym.primitives.Variable):
         )
 
 
-class Dat(Tensor, ContextFree):
+class Dat(Tensor, Indexed, ContextFree):
     """Multi-dimensional, hierarchical array.
 
     Parameters
@@ -127,13 +128,21 @@ class Dat(Tensor, ContextFree):
         *,
         data=None,
         max_value=None,
-        **kwargs,
+        target_paths=None,
+        index_exprs=None,
+        layouts=None,
+        name=None,
+        prefix=None,
     ):
-        super().__init__(**kwargs)
+        super().__init__(name=name, prefix=prefix)
 
         # TODO This is ugly
-        temporary_axes = as_axis_tree(axes).freeze()  # used for the temporary
+        # temporary_axes = as_axis_tree(axes).freeze()  # used for the temporary
+        # previously layout_axes
+        # drop index_exprs...
         axes = as_axis_tree(axes)
+
+        # axes = as_layout_axes(axes)
 
         if isinstance(data, DistributedArray):
             # disable for now, temporaries hit this in an annoying way
@@ -159,11 +168,20 @@ class Dat(Tensor, ContextFree):
 
         self.array = data
 
-        self.temporary_axes = temporary_axes
+        # instead implement "materialize"
+        # self.temporary_axes = temporary_axes
         self.axes = axes
         self.layout_axes = axes  # used? likely don't need all these
 
         self.max_value = max_value
+
+        if some_but_not_all(x is None for x in [target_paths, index_exprs]):
+            raise ValueError
+
+        self._target_paths = target_paths or axes._default_target_paths()
+        self._index_exprs = index_exprs or axes._default_index_exprs()
+
+        self.layouts = layouts or axes.layouts
 
     def __str__(self):
         return self.name
@@ -199,6 +217,7 @@ class Dat(Tensor, ContextFree):
                 target_paths,
                 index_exprs,
                 layout_exprs,
+                self.layout_axes.layouts,
             )
 
             # not sure I need to do this now slices maintain the same labels
@@ -230,7 +249,7 @@ class Dat(Tensor, ContextFree):
                 target_path_per_indexed_cpt,
                 index_exprs_per_indexed_cpt,
                 layout_exprs_per_indexed_cpt,
-            ) = _index_axes(self.layout_axes, index_tree, loop_context)
+            ) = _index_axes(self.axes, index_tree, loop_context)
 
             (
                 target_paths,
@@ -244,13 +263,13 @@ class Dat(Tensor, ContextFree):
                 layout_exprs_per_indexed_cpt,
             )
 
-            new_axes = IndexedAxisTree(
-                indexed_axes.parent_to_children,
-                target_paths,
-                index_exprs,
-                layout_exprs,
-                self.layout_axes.layouts,
-            )
+            # new_axes = IndexedAxisTree(
+            #     indexed_axes.parent_to_children,
+            #     target_paths,
+            #     index_exprs,
+            #     layout_exprs,
+            #     self.layout_axes.layouts,
+            # )
 
             # new_layouts = substitute_layouts(
             #     self.layout_axes,
@@ -264,26 +283,25 @@ class Dat(Tensor, ContextFree):
             #     # index_exprs=index_exprs,
             #     layouts=new_layouts,
             # )
-            layout_axes = new_axes
-            array_per_context[loop_context] = self._with_axes(layout_axes)
+            # layout_axes = new_axes
+            array_per_context[loop_context] = type(self)(
+                indexed_axes,
+                data=self.array,
+                max_value=self.max_value,
+                target_paths=target_paths,
+                index_exprs=index_exprs,
+                layouts=self.layouts,
+                name=self.name,
+            )
         return ContextSensitiveMultiArray(array_per_context)
 
     # Since __getitem__ is implemented, this class is implicitly considered
     # to be iterable (which it's not). This avoids some confusing behaviour.
     __iter__ = None
 
-    # TODO remove this
-    @property
-    def layouts(self):
-        return self.axes.full_layouts
-
     @property
     def dtype(self):
         return self.array.dtype
-
-    @property
-    def sf(self) -> StarForest:
-        return self.array.sf
 
     @property
     @deprecated(".data_rw")
@@ -310,6 +328,14 @@ class Dat(Tensor, ContextFree):
         return self.array.data_wo
 
     @property
+    def target_paths(self):
+        return self._target_paths
+
+    @property
+    def index_exprs(self):
+        return self._index_exprs
+
+    @property
     def sf(self):
         return self.array.sf
 
@@ -320,7 +346,8 @@ class Dat(Tensor, ContextFree):
         datamap_.update(self.layout_axes.datamap)
         return freeze(datamap_)
 
-    def assemble(self):
+    # TODO update docstring
+    def assemble(self, update_leaves=False):
         """Ensure that stored values are up-to-date.
 
         This function is typically only required when accessing the `Dat` in a
@@ -329,16 +356,25 @@ class Dat(Tensor, ContextFree):
         entries in the array would hold undefined values.
 
         """
-        self.array._reduce_then_broadcast()
+        if update_leaves:
+            self.array._reduce_then_broadcast()
+        else:
+            self.array._reduce_leaves_to_roots()
+
+    def materialize(self) -> Dat:
+        """Return a new "unindexed" array with the same shape."""
+        # "unindexed" axis tree
+        axes = AxisTree(self.axes.parent_to_children)
+        return type(self)(axes, dtype=self.dtype)
 
     def _with_axes(self, axes):
         """Return a new `Dat` with new axes pointing to the same data."""
+        assert False, "do not use, it's wrong"
         return type(self)(
             axes,
             data=self.array,
             max_value=self.max_value,
             name=self.name,
-            orig_array=self.orig_array,
         )
 
     def as_var(self):
@@ -509,33 +545,16 @@ def replace_layout(orig_layout, replace_map):
     return IndexExpressionReplacer(replace_map)(orig_layout)
 
 
-@functools.singledispatch
-def layout_axes(axes) -> FrozenAxisTree:
-    if isinstance(axes, FrozenAxisTree):
-        return axes
-    else:
-        return as_axis_tree(axes).freeze()
-
-
-@layout_axes.register
-def _(axes: IndexedAxisTree) -> FrozenAxisTree:
-    # this can definitely be a cached_property???
-    assert axes.layout_exprs
-    layouts_ = {}
-    for leaf in axes.leaves:
-        orig_path = axes.path(*leaf)
-        new_path = {}
-        replace_map = {}
-        for axis, cpt in axes.path_with_nodes(*leaf).items():
-            new_path.update(axes.target_paths[axis.id, cpt])
-            replace_map.update(axes.layout_exprs[axis.id, cpt])
-        new_path = freeze(new_path)
-
-        orig_layout = axes.restore().layouts[orig_path]
-        new_layout = IndexExpressionReplacer(replace_map)(orig_layout)
-        # assert new_layout != orig_layout
-        layouts_[new_path] = new_layout
-    return FrozenAxisTree(axes.parent_to_children, layouts=layouts_)
+def as_layout_axes(axes: AxisTree) -> AxisTree:
+    # drop index exprs, everything else drops out
+    return AxisTree(
+        axes.parent_to_children,
+        axes.target_paths,
+        axes._default_index_exprs(),
+        axes.layout_exprs,
+        axes.layouts,
+        sf=axes.sf,
+    )
 
 
 def make_sparsity(
