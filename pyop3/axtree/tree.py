@@ -690,29 +690,44 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
         )
 
     def index(self):
-        return as_axis_tree(self).index()
+        return self._tree.index()
 
     @property
     def target_path_per_component(self):
-        return as_axis_tree(self).target_path_per_component
+        return self._tree.target_path_per_component
 
     @property
     def index_exprs_per_component(self):
-        return as_axis_tree(self).index_exprs_per_component
+        return self._tree.index_exprs_per_component
 
     @property
     def layout_exprs_per_component(self):
-        return as_axis_tree(self).layout_exprs_per_component
+        return self._tree.layout_exprs_per_component
 
-    # cached?
+    @deprecated("as_tree")
     @property
     def axes(self):
-        return as_axis_tree(self)
+        return self.as_tree()
 
-    # cached?
     @property
     def index_exprs(self):
-        return as_axis_tree(self).index_exprs
+        return self._tree.index_exprs
+
+    def as_tree(self) -> AxisTree:
+        """Convert the axis to a tree that contains it.
+
+        Returns
+        -------
+        Axis Tree
+            TODO
+
+        Notes
+        -----
+        The result of this function is cached because `AxisTree`s are immutable
+        and we want to cache expensive computations on them.
+
+        """
+        return self._tree
 
     # Note: these functions assume that the numbering follows the plex convention
     # of numbering each strata contiguously. I think (?) that I effectively also do this.
@@ -760,6 +775,10 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
             return np.arange(self.count, dtype=IntType)
         else:
             return invert(self.numbering.data_ro)
+
+    @cached_property
+    def _tree(self):
+        return AxisTree(self)
 
     @staticmethod
     def _parse_components(components):
@@ -961,7 +980,7 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
 
     def __init__(
         self,
-        parent_to_children,
+        parent_to_children=pmap(),
         target_paths=None,
         index_exprs=None,
         layout_exprs=None,
@@ -1368,7 +1387,7 @@ def _(arg: AxisTree):
 
 @as_axis_tree.register
 def _(arg: Axis):
-    return AxisTree.from_nest(arg)
+    return arg.as_tree()
 
 
 @as_axis_tree.register

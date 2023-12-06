@@ -228,6 +228,12 @@ class LoopyCodegenContext(CodegenContext):
     def _(self, array: Dat):
         return array.dtype
 
+    # TODO I think this subclasses Dat
+    @_dtype.register
+    def _(self, array: IndexedPetscMat):
+        return OpaqueType("Mat")
+        # return array.dtype
+
     @_dtype.register
     def _(self, array: PetscMat):
         return OpaqueType("Mat")

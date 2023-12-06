@@ -290,7 +290,7 @@ class Dat(Tensor, Indexed, ContextFree):
             #     layouts=new_layouts,
             # )
             # layout_axes = new_axes
-            array_per_context[loop_context] = type(self)(
+            array_per_context[loop_context] = Dat(
                 indexed_axes,
                 data=self.array,
                 max_value=self.max_value,

@@ -11,9 +11,14 @@ from petsc4py import PETSc
 from pyrsistent import freeze
 
 from pyop3.axtree import AxisTree
-from pyop3.axtree.tree import ContextFree, ContextSensitive, FrozenAxisTree
+from pyop3.axtree.tree import (
+    ContextFree,
+    ContextSensitive,
+    FrozenAxisTree,
+    as_axis_tree,
+)
 from pyop3.distarray.base import Tensor
-from pyop3.distarray.multiarray import ContextSensitiveMultiArray, MultiArray
+from pyop3.distarray.multiarray import ContextSensitiveMultiArray, Dat, MultiArray
 from pyop3.dtypes import ScalarType
 from pyop3.itree import IndexTree
 from pyop3.itree.tree import IndexedAxisTree
@@ -68,17 +73,12 @@ class ContextSensitiveIndexedPetscMat(ContextSensitive):
 class IndexedPetscMat(ContextFree):
     def __init__(self, getvalues, axes, orig_mat):
         self.getvalues = getvalues
-        self.temporary_axes = axes
+        self.axes = axes
         self.orig_mat = orig_mat
-
-    # alias, bad?
-    @property
-    def orig_array(self):
-        return self.orig_mat
 
     @property
     def array(self):
-        return self.orig_mat
+        return self.orig_mat.petscmat
 
     @property
     def name(self):
@@ -95,6 +95,10 @@ class IndexedPetscMat(ContextFree):
             self.getvalues.parameters[i].function.map_component.datamap for i in (1, 2)
         )
 
+    def materialize(self):
+        axes = AxisTree(self.axes.parent_to_children)
+        return Dat(axes, dtype=self.dtype)
+
 
 class PetscMatDense(PetscMat):
     ...
@@ -102,6 +106,9 @@ class PetscMatDense(PetscMat):
 
 class PetscMatAIJ(PetscMat):
     def __init__(self, raxes, caxes, sparsity, *, comm=None, name: str = None):
+        raxes = as_axis_tree(raxes)
+        caxes = as_axis_tree(caxes)
+
         super().__init__(name)
         if any(axes.depth > 1 for axes in [raxes, caxes]):
             # TODO, good exceptions
@@ -144,8 +151,7 @@ class PetscMatAIJ(PetscMat):
         self.caxis = caxes.root
         self.sparsity = sparsity
 
-        # bit unpleasant
-        self.layout_axes = AxisTree.from_nest({self.raxis: self.caxis}).freeze()
+        self.axes = AxisTree.from_nest({self.raxis: self.caxis})
 
         # copy only needed if we reuse the zero matrix
         self.petscmat = mat.copy()
@@ -222,7 +228,7 @@ class PetscMatAIJ(PetscMat):
 
         # TODO also support context-free (see MultiArray.__getitem__)
         array_per_context = {}
-        for index_tree in as_index_forest(indices, axes=self.layout_axes):
+        for index_tree in as_index_forest(indices, axes=self.axes):
             # make a temporary of the right shape
             loop_context = index_tree.loop_context
             (
@@ -230,21 +236,29 @@ class PetscMatAIJ(PetscMat):
                 target_path_per_indexed_cpt,
                 index_exprs_per_indexed_cpt,
                 layout_exprs_per_indexed_cpt,
-            ) = _index_axes(self.layout_axes, index_tree, loop_context)
+            ) = _index_axes(self.axes, index_tree, loop_context)
 
             (
                 target_paths,
                 index_exprs,
                 layout_exprs,
             ) = _compose_bits(
-                self.layout_axes,
+                self.axes,
+                # use the defaults because Mats can only be indexed once
+                # (then they turn into Dats)
+                self.axes._default_target_paths(),
+                self.axes._default_index_exprs(),
+                None,
                 indexed_axes,
                 target_path_per_indexed_cpt,
                 index_exprs_per_indexed_cpt,
                 layout_exprs_per_indexed_cpt,
             )
 
-            new_axes = IndexedAxisTree(
+            # TODO is IndexedPetscMat required? How is it different from
+            # a Dat? The layout functions are somehow not the same.
+
+            new_axes = AxisTree(
                 indexed_axes.parent_to_children,
                 target_paths,
                 index_exprs,
@@ -271,11 +285,10 @@ class PetscMatAIJ(PetscMat):
             )
 
             # not sure that this is quite correct
-            layout_axes = FrozenAxisTree(
+            layout_axes = AxisTree(
                 new_axes.parent_to_children,
-                target_paths=target_paths,
-                index_exprs=None,
-                layouts=None,
+                # target_paths=target_paths,
+                # index_exprs=None,
             )
             array_per_context[loop_context] = IndexedPetscMat(
                 getvalues, layout_axes, self
