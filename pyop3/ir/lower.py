@@ -1063,7 +1063,7 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         key_varname = ctx.unique_name("key")
         ctx.add_temporary(key_varname)
         key_var = pym.var(key_varname)
-        key_expr = self._labels_to_jnames[(axis_var.index.id, axis_var.axis)]
+        key_expr = self.rec(axis_var)
         ctx.add_assignment(key_var, key_expr)
 
         # base

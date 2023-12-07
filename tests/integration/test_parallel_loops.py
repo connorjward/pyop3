@@ -212,12 +212,8 @@ def test_parallel_loop_with_map(comm, mesh_axis, cone_map, scalar_copy_kernel):
 
     knl = set_kernel(2, intent)
 
-    # since we don't unpick "owned" for indexed axes yet
-    loop_index = mesh_axis.as_tree().owned["cells"].index()
-
     op3.do_loop(
-        # c := mesh_axis["cells"].index(),
-        c := loop_index,
+        c := mesh_axis.as_tree().owned["cells"].index(),
         knl(rank_dat, dat[cone_map(c)]),
     )
 
