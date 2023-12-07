@@ -167,26 +167,35 @@ def requires_external_index(axtree, axis, component_index):
     )  # or numbering_requires_external_index(axtree, axis, component_index)
 
 
-def size_requires_external_index(axes, axis, component, depth=0):
-    from pyop3.distarray import MultiArray
-
+def size_requires_external_index(axes, axis, component, path=pmap()):
     count = component.count
-    if not component.has_integer_count and count.axes.depth > depth:
-        return True
+    if not component.has_integer_count:
+        # is the path sufficient? i.e. do we have enough externally provided indices
+        # to correctly index the axis?
+        if count.axes.is_empty:
+            return False
+        for axlabel, clabel in count.axes.path(*count.axes.leaf).items():
+            if axlabel in path:
+                assert path[axlabel] == clabel
+            else:
+                return True
     else:
         if subaxis := axes.component_child(axis, component):
             for c in subaxis.components:
-                if size_requires_external_index(axes, subaxis, c, depth + 1):
+                # path_ = path | {subaxis.label: c.label}
+                path_ = path | {axis.label: component.label}
+                if size_requires_external_index(axes, subaxis, c, path_):
                     return True
     return False
 
 
-def has_constant_step(axes: AxisTree, axis, cpt, depth=0):
+def has_constant_step(axes: AxisTree, axis, cpt):
     # we have a constant step if none of the internal dimensions need to index themselves
     # with the current index (numbering doesn't matter here)
-    if subaxis := axes.component_child(axis, cpt):
+    if subaxis := axes.child(axis, cpt):
         return all(
-            not size_requires_external_index(axes, subaxis, c, depth)
+            # not size_requires_external_index(axes, subaxis, c, freeze({subaxis.label: c.label}))
+            not size_requires_external_index(axes, subaxis, c)
             for c in subaxis.components
         )
     else:
@@ -557,7 +566,7 @@ def _as_int(arg: Any, path, indices):
         # TODO this might break if we have something like [:, subset]
         # I will need to map the "source" axis (e.g. slice_label0) back
         # to the "target" axis
-        return arg.get_value(path, indices)
+        return arg.get_value(path, indices, allow_unused=True)
     else:
         raise TypeError
 

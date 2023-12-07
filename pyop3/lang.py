@@ -19,24 +19,17 @@ import pytools
 from pyrsistent import freeze, pmap
 
 from pyop3.axtree import as_axis_tree
-from pyop3.axtree.tree import (
-    ContextFree,
-    ContextSensitive,
-    FrozenAxisTree,
-    MultiArrayCollector,
-)
+from pyop3.axtree.tree import ContextFree, ContextSensitive, MultiArrayCollector
 from pyop3.config import config
 from pyop3.distarray import Dat, MultiArray, PetscMat
 from pyop3.distarray2 import DistributedArray
 from pyop3.distarray.multiarray import (
     ContextSensitiveMultiArray,
     IndexExpressionReplacer,
-    substitute_layouts,
 )
 from pyop3.dtypes import IntType, dtype_limits
 from pyop3.extras.debug import print_with_rank
 from pyop3.itree.tree import (
-    IndexedAxisTree,
     _compose_bits,
     _index_axes,
     as_index_forest,
@@ -219,9 +212,6 @@ class Loop(LoopExpr):
     def _distarray_args(self):
         arrays = {}
         for arg, intent in self.all_function_arguments:
-            # catch exceptions in a horrible way
-            if isinstance(arg, Offset):  # should probably remove this type
-                continue
             if (
                 not isinstance(arg.array, DistributedArray)
                 or not arg.array.is_distributed
@@ -449,74 +439,6 @@ class CalledFunction(LoopExpr):
                 key=lambda a: a[0].name,
             )
         )
-
-
-class Offset(LoopExpr, ContextSensitive):
-    """Terminal containing the offset of some axis tree given some multi-index."""
-
-    def __init__(self, per_context):
-        LoopExpr.__init__(self)
-        ContextSensitive.__init__(self, per_context)
-
-    # FIXME
-    @property
-    def name(self):
-        return "my_offset"
-
-    @property
-    def dtype(self):
-        return IntType
-
-    @functools.cached_property
-    def datamap(self):
-        return merge_dicts(axes.datamap for axes in self.context_map.values())
-
-
-def offset(axes, indices):
-    axes = as_axis_tree(axes).freeze()
-    axes_per_context = {}
-    for index_tree in as_index_forest(indices, axes=axes):
-        loop_context = index_tree.loop_context
-        (
-            indexed_axes,
-            target_path_per_indexed_cpt,
-            index_exprs_per_indexed_cpt,
-            layout_exprs_per_indexed_cpt,
-        ) = _index_axes(axes, index_tree, loop_context)
-
-        (
-            target_paths,
-            index_exprs,
-            layout_exprs,
-        ) = _compose_bits(
-            axes,
-            indexed_axes,
-            target_path_per_indexed_cpt,
-            index_exprs_per_indexed_cpt,
-            layout_exprs_per_indexed_cpt,
-        )
-
-        new_axes = IndexedAxisTree(
-            indexed_axes.parent_to_children,
-            target_paths,
-            index_exprs,
-            layout_exprs,
-        )
-
-        new_layouts = substitute_layouts(
-            axes,
-            new_axes,
-            target_path_per_indexed_cpt,
-            index_exprs_per_indexed_cpt,
-        )
-        layout_axes = FrozenAxisTree(
-            new_axes.parent_to_children,
-            target_paths,
-            # index_exprs,
-            layouts=new_layouts,
-        )
-        axes_per_context[loop_context] = layout_axes
-    return Offset(axes_per_context)
 
 
 class Instruction(pytools.ImmutableRecord):

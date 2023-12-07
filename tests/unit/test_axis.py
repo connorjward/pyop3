@@ -1,7 +1,7 @@
 import numpy as np
 import pymbolic as pym
 import pytest
-from pyrsistent import pmap
+from pyrsistent import freeze, pmap
 
 import pyop3 as op3
 from pyop3.utils import UniqueNameGenerator, just_one
@@ -200,7 +200,7 @@ def test_multi_component_layout_with_zero_sized_subaxis():
                 Axis([AxisComponent(3, "pt0")], "ax1"),
             ],
         },
-    ).freeze()
+    )
 
     assert axes.size == 3
 
@@ -239,50 +239,44 @@ def test_multi_component_layout_with_zero_sized_subaxis():
     )
 
 
-@pytest.mark.skip(reason="Need to tidy get_offset API")
 def test_permuted_multi_component_layout_with_zero_sized_subaxis():
-    axes = AxisTree(
-        root := Axis([3, 2], label="ax0", permutation=[3, 1, 4, 2, 0]),
-        {
-            root.id: [Axis(0), Axis(3)],
-        },
-    ).freeze()
+    axis0 = op3.Axis({"pt0": 3, "pt1": 2}, "ax0", numbering=[3, 1, 4, 2, 0])
+    axis1 = op3.Axis({"pt0": 0}, "ax1")
+    axis2 = op3.Axis({"pt0": 3}, "ax1")
+    axes = op3.AxisTree.from_nest({axis0: {"pt0": axis1, "pt1": axis2}})
 
     assert axes.size == 6
 
-    layout00, layout01 = axes.layouts[(0, 0)]
-    assert isinstance(layout00, TabulatedLayout)
-    assert (layout00.data.data == [6, 3, 6]).all()
-    assert isinstance(layout01, AffineLayout)
-    assert layout01.start == 0
-    assert layout01.step == 1
+    layout0 = axes.layouts[freeze({"ax0": "pt0", "ax1": "pt0"})]
+    layout1 = axes.layouts[freeze({"ax0": "pt1", "ax1": "pt0"})]
 
-    layout10, layout11 = axes.layouts[(1, 0)]
-    assert isinstance(layout10, TabulatedLayout)
-    assert (layout10.data.data == [3, 0]).all()
-    assert isinstance(layout11, AffineLayout)
-    assert layout11.start == 0
-    assert layout11.step == 1
+    assert as_str(layout0) == "array_0 + var_0"
+    assert as_str(layout1) == "array_0 + var_0"
+
+    array0 = just_one(collect_multi_arrays(layout0))
+    array1 = just_one(collect_multi_arrays(layout1))
+    assert (array0.data_ro == [3, 6, 6]).all()
+    assert (array1.data_ro == [0, 3]).all()
 
     check_offsets(
         axes,
         [
-            ([(1, 0), 0], 3),
-            ([(1, 0), 1], 4),
-            ([(1, 0), 2], 5),
-            ([(1, 1), 0], 0),
-            ([(1, 1), 1], 1),
-            ([(1, 1), 2], 2),
+            ([("pt1", 0), 0], 0),
+            ([("pt1", 0), 1], 1),
+            ([("pt1", 0), 2], 2),
+            ([("pt1", 1), 0], 3),
+            ([("pt1", 1), 1], 4),
+            ([("pt1", 1), 2], 5),
         ],
     )
     check_invalid_indices(
         axes,
         [
-            [(0, 0), 0],
-            [(1, 0)],
-            [(1, 2), 0],
-            [(1, 0), 3],
-            [(1, 0), 0, 0],
+            [("pt0", 0), 0],
+            [("pt1", 0)],
+            [("pt1", 2), 0],
+            [("pt1", 0), 3],
+            [("pt1", 0), 0, 0],
         ],
     )
 
@@ -321,15 +315,6 @@ def test_ragged_layout():
             [3, 0],
         ],
     )
-
-
-@pytest.mark.skip("TODO")
-def test_ragged_layout_with_zeros():
-    m = 3
-    nnz = MultiArray(
-        AxisTree(Axis(m, "ax0")), data=np.asarray([2, 0, 1], dtype=IntType)
-    )
-    axes = AxisTree(root := Axis(m, "ax0"), {root.id: Axis(nnz)})
 
 
 def test_ragged_layout_with_two_outer_axes():
@@ -374,36 +359,46 @@ def test_ragged_layout_with_two_outer_axes():
     )
 
 
-@pytest.mark.skip(reason="This doesn't quite yet work, needs tracking down")
 def test_independent_ragged_axes():
-    nnzaxis0 = Axis([AxisComponent(2, "pt0")], "ax0")
-    nnzdata0 = np.asarray([2, 1], dtype=IntType)
-    nnz0 = MultiArray(nnzaxis0, data=nnzdata0)
+    axis0 = op3.Axis({"pt0": 2}, "ax0")
+    nnz_data0 = np.asarray([2, 1])
+    nnz0 = op3.Dat(axis0, name="nnz0", data=nnz_data0, dtype=op3.IntType)
 
-    nnzaxis1 = Axis([AxisComponent(2, "pt0")], "ax1")
-    nnzdata1 = np.asarray([1, 2], dtype=IntType)
-    nnz1 = MultiArray(nnzaxis1, data=nnzdata1)
+    axis1 = op3.Axis({"pt0": 2}, "ax1")
+    nnz_data1 = np.asarray([1, 2])
+    nnz1 = op3.Dat(axis1, name="nnz1", data=nnz_data1, dtype=op3.IntType)
 
-    axes = AxisTree(
-        nnzaxis0,
-        {
-            nnzaxis0.id: nnzaxis1,
-            nnzaxis1.id: Axis(
-                [
-                    AxisComponent(nnz0, "pt0"),
-                    AxisComponent(nnz1, "pt1"),
-                    AxisComponent(3, "pt2"),
-                ],
-                "ax2",
-            ),
-        },
-    )
+    axis2 = op3.Axis({"pt0": nnz0, "pt1": nnz1, "pt2": 3}, "ax2")
+    axes = op3.AxisTree.from_nest({axis0: {axis1: axis2}})
 
-    axes.layouts
+    layout0 = axes.layouts[freeze({"ax0": "pt0", "ax1": "pt0", "ax2": "pt0"})]
+    layout1 = axes.layouts[freeze({"ax0": "pt0", "ax1": "pt0", "ax2": "pt1"})]
+    layout2 = axes.layouts[freeze({"ax0": "pt0", "ax1": "pt0", "ax2": "pt2"})]
 
     breakpoint()
-    # layout0, layout0 = axes.layouts[pmap()]
-    layout1 = axes.layouts["ax1", 0]
-    layout2_0 = axes.layouts["ax2", 0]
-    layout2_1 = axes.layouts["ax2", 1]
-    layout2_2 = axes.layouts["ax2", 2]
+    array0 = just_one(collect_multi_arrays(layout0))
+
+    assert as_str(layout0) == "array_0 + var_0"
+    assert np.allclose(array0.data_ro, np.asarray([[0, 2], [3, 4]]).flatten())
+    check_offsets(
+        axes,
+        [
+            ([0, 0, 0], 0),
+            ([0, 0, 1], 1),
+            ([0, 1, 0], 2),
+            ([1, 0, 0], 3),
+            ([1, 1, 0], 4),
+            ([1, 1, 1], 5),
+        ],
+    )
+    check_invalid_indices(
+        axes,
+        [
+            [0, 0, 2],
+            [0, 1, 1],
+            [1, 0, 1],
+            [1, 1, 2],
+            [1, 2, 0],
+            [2, 0, 0],
+        ],
+    )

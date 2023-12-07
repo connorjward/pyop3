@@ -69,7 +69,7 @@ def collect_sf_graphs(axes, axis=None, path=pmap(), indices=pmap()):
 
 
 # perhaps I can defer renumbering the SF to here?
-def grow_dof_sf(axes: FrozenAxisTree, axis, path, indices):
+def grow_dof_sf(axes, axis, path, indices):
     point_sf = axis.sf
     # TODO, use convenience methods
     nroots, ilocal, iremote = point_sf._graph

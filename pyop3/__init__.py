@@ -36,5 +36,4 @@ from pyop3.lang import (  # noqa: F401
     Loop,
     do_loop,
     loop,
-    offset,
 )

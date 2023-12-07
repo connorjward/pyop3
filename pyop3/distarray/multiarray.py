@@ -28,16 +28,16 @@ from pyop3.axtree import (
 from pyop3.axtree.tree import (
     AxisVariable,
     ExpressionEvaluator,
-    FrozenAxisTree,
     Indexed,
     MultiArrayCollector,
     _path_and_indices_from_index_tuple,
+    _trim_path,
 )
 from pyop3.distarray2 import DistributedArray
 from pyop3.distarray.base import Tensor
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
 from pyop3.extras.debug import print_if_rank, print_with_rank
-from pyop3.itree import IndexedAxisTree, IndexTree, as_index_forest, index_axes
+from pyop3.itree import IndexTree, as_index_forest, index_axes
 from pyop3.itree.tree import CalledMapVariable, collect_loop_indices, iter_axis_tree
 from pyop3.utils import (
     PrettyTuple,
@@ -257,27 +257,6 @@ class Dat(Tensor, Indexed, ContextFree):
                 layout_exprs_per_indexed_cpt,
             )
 
-            # new_axes = IndexedAxisTree(
-            #     indexed_axes.parent_to_children,
-            #     target_paths,
-            #     index_exprs,
-            #     layout_exprs,
-            #     self.layout_axes.layouts,
-            # )
-
-            # new_layouts = substitute_layouts(
-            #     self.layout_axes,
-            #     new_axes,
-            #     target_path_per_indexed_cpt,
-            #     index_exprs_per_indexed_cpt,
-            # )
-            # layout_axes = FrozenAxisTree(
-            #     new_axes.parent_to_children,
-            #     target_paths=target_paths,
-            #     # index_exprs=index_exprs,
-            #     layouts=new_layouts,
-            # )
-            # layout_axes = new_axes
             array_per_context[loop_context] = Dat(
                 indexed_axes,
                 data=self.array,
@@ -547,28 +526,6 @@ class ContextSensitiveMultiArray(ContextSensitive):
                 name=self.name,
             )
 
-            # new_axes = IndexedAxisTree(
-            #     indexed_axes.parent_to_children,
-            #     target_paths,
-            #     index_exprs,
-            #     layout_exprs,
-            #     array.layouts,
-            # )
-            #
-            # # new_layouts = substitute_layouts(
-            # #     array.layout_axes,
-            # #     new_axes,
-            # #     target_path_per_indexed_cpt,
-            # #     index_exprs_per_indexed_cpt,
-            # # )
-            # # layout_axes = FrozenAxisTree(
-            # #     new_axes.parent_to_children,
-            # #     target_paths,
-            # #     index_exprs,
-            # #     layouts=new_layouts,
-            # # )
-            # layout_axes = new_axes
-            # array_per_context[loop_context] = array._with_axes(layout_axes)
         return ContextSensitiveMultiArray(array_per_context)
 
     @property
@@ -791,36 +748,3 @@ def distribute_sparsity(sparsity, ax1, ax2, owner="row"):
 
     # import pdb; pdb.set_trace()
     return new_sparsity
-
-
-def substitute_layouts(axes, target_paths, index_exprs):
-    # replace layout bits that disappear with loop index
-    if axes.is_empty:
-        new_layouts = {}
-        orig_path = target_paths[None]
-        new_path = pmap()
-
-        orig_layout = axes._layouts[orig_path]
-        new_layout = IndexExpressionReplacer(index_exprs[None])(orig_layout)
-        new_layouts[new_path] = new_layout
-        # don't silently do nothing
-        assert new_layout != orig_layout
-    else:
-        new_layouts = {}
-        for leaf_axis, leaf_cpt in axes.leaves:
-            orig_path = dict(target_paths.get(None, {}))
-            replace_map = dict(index_exprs.get(None, {}))
-            for myaxis, mycpt in axes.path_with_nodes(leaf_axis, leaf_cpt).items():
-                orig_path.update(target_paths.get((myaxis.id, mycpt), {}))
-                replace_map.update(index_exprs.get((myaxis.id, mycpt), {}))
-
-            orig_layout = axes._layouts[freeze(orig_path)]
-            new_layout = IndexExpressionReplacer(replace_map)(orig_layout)
-            new_layouts[axes.path(leaf_axis, leaf_cpt)] = new_layout
-            # TODO, this sometimes fails, is that valid?
-            # don't silently do nothing
-            # assert new_layout != orig_layout
-
-    # TODO not sure if target paths etc needed to pass through
-    return new_layouts
-    # return FrozenAxisTree(new_axes.root, new_axes.parent_to_children, layouts=new_layouts)

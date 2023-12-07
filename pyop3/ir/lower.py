@@ -34,7 +34,6 @@ from pyop3.itree import (
     AffineSliceComponent,
     CalledMap,
     Index,
-    IndexedAxisTree,
     IndexTree,
     LocalLoopIndex,
     LoopIndex,
@@ -57,7 +56,6 @@ from pyop3.lang import (
     Assignment,
     CalledFunction,
     Loop,
-    Offset,
 )
 from pyop3.log import logger
 from pyop3.utils import (
@@ -530,12 +528,8 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
 
         loop_context = context_from_indices(loop_indices)
 
-        if isinstance(arg, (Dat, ContextSensitiveMultiArray)):
-            temporary = arg.with_context(loop_context).materialize()
-        else:
-            assert isinstance(arg, Offset)
-            raise NotImplementedError
-            axes = AxisTree()
+        assert isinstance(arg, (Dat, ContextSensitiveMultiArray))
+        temporary = arg.with_context(loop_context).materialize()
         indexed_temp = temporary
 
         if loopy_arg.shape is None:
@@ -548,9 +542,7 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
         temporaries.append((arg, indexed_temp, spec.access, shape))
 
         # Register data
-        # TODO more generic check
-        if not isinstance(arg, Offset):
-            ctx.add_argument(arg)
+        ctx.add_argument(arg)
 
         ctx.add_temporary(temporary.name, temporary.dtype, shape)
 
@@ -645,13 +637,8 @@ def parse_assignment(
 
     # get the right index tree given the loop context
 
-    # TODO cleanup
-    if isinstance(array, Offset):
-        axes = array.with_context(loop_context)
-        minimal_context = array.filter_context(loop_context)
-    else:
-        axes = array.with_context(loop_context).axes
-        minimal_context = array.filter_context(loop_context)
+    axes = array.with_context(loop_context).axes
+    minimal_context = array.filter_context(loop_context)
 
     target_path = {}
     # for _, jnames in new_indices.values():
@@ -866,30 +853,22 @@ def add_leaf_assignment(
 ):
     context = context_from_indices(loop_indices)
 
-    if isinstance(array, (Dat, ContextSensitiveMultiArray)):
+    assert isinstance(array, (Dat, ContextSensitiveMultiArray))
 
-        def array_expr():
-            array_ = array.with_context(context)
-            return make_array_expr(
-                array,
-                # I think...
-                # not calling substitute layouts from above so loop indices not
-                # present in the layout...
-                # subst_layout(axes, source_path, target_path),
-                array_.layouts[target_path],
-                target_path,
-                iname_replace_map | jname_replace_map,
-                codegen_context,
-            )
-
-    else:
-        assert isinstance(array, Offset)
-        array_expr = functools.partial(
-            make_offset_expr,
-            array.with_context(context).layouts[target_path],
+    def array_expr():
+        array_ = array.with_context(context)
+        return make_array_expr(
+            array,
+            # I think...
+            # not calling substitute layouts from above so loop indices not
+            # present in the layout...
+            # subst_layout(axes, source_path, target_path),
+            array_.layouts[target_path],
+            target_path,
             iname_replace_map | jname_replace_map,
             codegen_context,
         )
+
     temp_expr = functools.partial(
         make_temp_expr,
         temporary,

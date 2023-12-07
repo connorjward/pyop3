@@ -32,8 +32,6 @@ from pyop3.axtree.tree import (
     ContextSensitiveAxisTree,
     ContextSensitiveLoopIterable,
     ExpressionEvaluator,
-    FrozenAxisTree,
-    IndexedAxisTree,
     PartialAxisTree,
 )
 from pyop3.dtypes import IntType, get_mpi_dtype
@@ -241,7 +239,7 @@ class LoopIndex(AbstractLoopIndex):
         return (context[self.id],)
 
     def iter(self, stuff=pmap()):
-        if not isinstance(self.iterset, (IndexedAxisTree, FrozenAxisTree)):
+        if not isinstance(self.iterset, AxisTree):
             raise NotImplementedError
         return iter_axis_tree(
             self.iterset, self.iterset.target_paths, self.iterset.index_exprs, stuff
@@ -322,7 +320,7 @@ class CalledMap(Index, LoopIterable):
 
         axes = AxisTree.from_node_map(axes.parent_to_children)
 
-        axes = IndexedAxisTree(
+        axes = AxisTree(
             axes.parent_to_children,
             target_paths,
             index_exprs,
@@ -623,7 +621,7 @@ def _(arg: LoopIndex, local=False):
                 contexts.append(loop_context | {arg.id: pmap(extracontext)})
         return tuple(contexts)
     else:
-        assert isinstance(arg.iterset, (FrozenAxisTree, IndexedAxisTree))
+        assert isinstance(arg.iterset, AxisTree)
         iterset = arg.iterset
         contexts = []
         for leaf_axis, leaf_cpt in iterset.leaves:
