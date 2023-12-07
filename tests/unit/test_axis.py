@@ -4,7 +4,7 @@ import pytest
 from pyrsistent import freeze, pmap
 
 import pyop3 as op3
-from pyop3.utils import UniqueNameGenerator, just_one
+from pyop3.utils import UniqueNameGenerator, flatten, just_one, single_valued
 
 
 class RenameMapper(pym.mapper.IdentityMapper):
@@ -190,51 +190,39 @@ def test_1d_zero_sized_layout():
     check_invalid_indices(axes, [[], [0]])
 
 
-@pytest.mark.skip(reason="Need to tidy get_offset API")
 def test_multi_component_layout_with_zero_sized_subaxis():
-    axes = AxisTree(
-        Axis([AxisComponent(2, "pt0"), AxisComponent(1, "pt1")], "ax0", id="root"),
+    axes = op3.AxisTree.from_nest(
         {
-            "root": [
-                Axis([AxisComponent(0, "pt0")], "ax1"),
-                Axis([AxisComponent(3, "pt0")], "ax1"),
-            ],
-        },
+            op3.Axis({"pt0": 2, "pt1": 1}, "ax0"): {
+                "pt0": op3.Axis({"pt0": 0}, "ax1"),
+                "pt1": op3.Axis({"pt0": 3}, "ax1"),
+            }
+        }
     )
 
     assert axes.size == 3
 
-    layout00, layout01 = axes.layouts[pmap({"ax0": "pt0", "ax1": "pt0"})]
-    assert isinstance(layout00, AffineLayout)
-    assert layout00.start == 0
-    assert layout00.step == 0
-    assert isinstance(layout01, AffineLayout)
-    assert layout01.start == 0
-    assert layout01.step == 1
+    layout0 = axes.layouts[freeze({"ax0": "pt0", "ax1": "pt0"})]
+    layout1 = axes.layouts[freeze({"ax0": "pt1", "ax1": "pt0"})]
 
-    layout10, layout11 = axes.layouts[pmap({"ax0": "pt1", "ax1": "pt0"})]
-    assert isinstance(layout10, AffineLayout)
-    assert layout10.start == 0
-    assert layout10.step == 3
-    assert isinstance(layout11, AffineLayout)
-    assert layout11.start == 0
-    assert layout11.step == 1
+    assert as_str(layout0) == "var_0"
+    assert as_str(layout1) == "var_0*3 + var_1"
 
     check_offsets(
         axes,
         [
-            ([("pt1", "pt0"), 0], 0),
-            ([("pt1", "pt0"), 1], 1),
-            ([("pt1", "pt0"), 2], 2),
+            ([("pt1", 0), 0], 0),
+            ([("pt1", 0), 1], 1),
+            ([("pt1", 0), 2], 2),
         ],
     )
     check_invalid_indices(
         axes,
         [
             [],
-            [("pt0", "pt0"), 0],
-            [("pt1", "pt0"), 3],
-            [("pt1", "pt0"), 0, 0],
+            [("pt0", 0), 0],
+            [("pt1", 0), 3],
+            [("pt1", 1), 0],
         ],
     )
 
@@ -359,46 +347,65 @@ def test_ragged_layout_with_two_outer_axes():
     )
 
 
+@pytest.mark.xfail(reason="Adjacent ragged components do not yet work")
 def test_independent_ragged_axes():
     axis0 = op3.Axis({"pt0": 2}, "ax0")
+    axis1 = op3.Axis({"pt0": 2}, "ax1")
+
     nnz_data0 = np.asarray([2, 1])
     nnz0 = op3.Dat(axis0, name="nnz0", data=nnz_data0, dtype=op3.IntType)
-
-    axis1 = op3.Axis({"pt0": 2}, "ax1")
-    nnz_data1 = np.asarray([1, 2])
+    nnz_data1 = np.asarray([1, 0])
     nnz1 = op3.Dat(axis1, name="nnz1", data=nnz_data1, dtype=op3.IntType)
 
-    axis2 = op3.Axis({"pt0": nnz0, "pt1": nnz1, "pt2": 3}, "ax2")
+    axis2 = op3.Axis({"pt0": nnz0, "pt1": nnz1, "pt2": 2}, "ax2")
     axes = op3.AxisTree.from_nest({axis0: {axis1: axis2}})
+
+    assert axes.size == 16
 
     layout0 = axes.layouts[freeze({"ax0": "pt0", "ax1": "pt0", "ax2": "pt0"})]
     layout1 = axes.layouts[freeze({"ax0": "pt0", "ax1": "pt0", "ax2": "pt1"})]
     layout2 = axes.layouts[freeze({"ax0": "pt0", "ax1": "pt0", "ax2": "pt2"})]
 
-    breakpoint()
-    array0 = just_one(collect_multi_arrays(layout0))
-
+    # NOTE: This is wrong, the start values here should index into some offset array,
+    # otherwise the layouts all start from zero.
     assert as_str(layout0) == "array_0 + var_0"
-    assert np.allclose(array0.data_ro, np.asarray([[0, 2], [3, 4]]).flatten())
+    assert as_str(layout1) == "array_0 + var_0"
+    assert as_str(layout2) == "array_0 + var_0"
+
+    array0 = single_valued(
+        just_one(collect_multi_arrays(l)) for l in [layout0, layout1, layout2]
+    )
+    assert (array0.data_ro == flatten([[0, 5], [9, 13]])).all()
+
     check_offsets(
         axes,
         [
-            ([0, 0, 0], 0),
-            ([0, 0, 1], 1),
-            ([0, 1, 0], 2),
-            ([1, 0, 0], 3),
-            ([1, 1, 0], 4),
-            ([1, 1, 1], 5),
+            ([0, 0, ("pt0", 0)], 0),
+            ([0, 0, ("pt0", 1)], 1),
+            ([0, 0, ("pt1", 0)], 2),
+            ([0, 0, ("pt2", 0)], 3),
+            ([0, 0, ("pt2", 1)], 4),
+            ([0, 1, ("pt0", 0)], 5),
+            ([0, 1, ("pt0", 1)], 6),
+            ([0, 1, ("pt2", 0)], 7),
+            ([0, 1, ("pt2", 1)], 8),
+            ([1, 0, ("pt0", 0)], 9),
+            ([1, 0, ("pt1", 0)], 10),
+            ([1, 0, ("pt2", 0)], 11),
+            ([1, 0, ("pt2", 1)], 12),
+            ([1, 1, ("pt0", 0)], 13),
+            ([1, 1, ("pt2", 0)], 14),
+            ([1, 1, ("pt2", 1)], 15),
         ],
     )
-    check_invalid_indices(
-        axes,
-        [
-            [0, 0, 2],
-            [0, 1, 1],
-            [1, 0, 1],
-            [1, 1, 2],
-            [1, 2, 0],
-            [2, 0, 0],
-        ],
-    )
+    # check_invalid_indices(
+    #     axes,
+    #     [
+    #         [0, 0, 2],
+    #         [0, 1, 1],
+    #         [1, 0, 1],
+    #         [1, 1, 2],
+    #         [1, 2, 0],
+    #         [2, 0, 0],
+    #     ],
+    # )

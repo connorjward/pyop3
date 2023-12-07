@@ -113,7 +113,7 @@ class Space:
                     for idx, pt in enumerate(range(*self.mesh.plex.getDepthStratum(d))):
                         # get the offset for the zeroth sub axis element
                         indices = [(d, idx)] + [0] * (self.axes.depth - 1)
-                        offset = self.axes.get_offset(indices)
+                        offset = self.axes.offset(indices)
                         section.setOffset(pt, offset)
                         section.setDof(pt, ndofs)
                 else:

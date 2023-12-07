@@ -129,9 +129,9 @@ class PetscMatAIJ(PetscMat):
         assert nnz.max_value is not None
         zeros = np.zeros(nnz.max_value, dtype=self.dtype)
         for row_idx in range(rcpt.count):
-            cstart = sparsity.axes.get_offset([row_idx, 0])
+            cstart = sparsity.axes.offset([row_idx, 0])
             try:
-                cstop = sparsity.axes.get_offset([row_idx + 1, 0])
+                cstop = sparsity.axes.offset([row_idx + 1, 0])
             except IndexError:
                 # catch the last one
                 cstop = len(sparsity.data_ro)

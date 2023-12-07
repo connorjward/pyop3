@@ -1158,15 +1158,7 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
                 indices |= {subaxis.label: 0}
 
         offset = pym.evaluate(self.layouts[path], indices, ExpressionEvaluator)
-        print_with_rank("self.layouts", self.layouts)
-        print_with_rank("path", path)
-        print_with_rank("indices", indices)
-        print_with_rank("offset", offset)
         return strict_int(offset)
-
-    @deprecated("offset")
-    def get_offset(self, *args, **kwargs):
-        return self.offset(*args, **kwargs)
 
     @cached_property
     def owned_size(self):
