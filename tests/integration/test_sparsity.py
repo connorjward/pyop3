@@ -95,10 +95,7 @@ def test_sliced_array(scalar_copy_kernel):
     dat1 = op3.Dat(axes[::2][1:], name="dat1", dtype=dat0.dtype)
 
     # loop over [4, 8, 12, 16, ...]
-    # op3.do_loop(p := axes[::4][1:].index(), scalar_copy_kernel(dat0[p], dat1[p]))
-    loop = op3.loop(p := axes[::4][1:].index(), scalar_copy_kernel(dat0[p], dat1[p]))
-    loop()
-    breakpoint()
+    op3.do_loop(p := axes[::4][1:].index(), scalar_copy_kernel(dat0[p], dat1[p]))
     assert np.allclose(dat1.data_ro[::2], 0)
     assert np.allclose(dat1.data_ro[1::2], dat0.data_ro[::4][1:])
 
