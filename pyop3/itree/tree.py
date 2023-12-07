@@ -243,7 +243,9 @@ class LoopIndex(AbstractLoopIndex):
     def iter(self, stuff=pmap()):
         if not isinstance(self.iterset, (IndexedAxisTree, FrozenAxisTree)):
             raise NotImplementedError
-        return iter_axis_tree(self.iterset, stuff)
+        return iter_axis_tree(
+            self.iterset, self.iterset.target_paths, self.iterset.index_exprs, stuff
+        )
 
 
 class LocalLoopIndex(AbstractLoopIndex):
@@ -420,6 +422,9 @@ class MapVariable(pym.primitives.Variable):
 
 
 class CalledMapVariable(pym.primitives.Call):
+    def __str__(self) -> str:
+        return f"{self.function.name}({self.parameters})"
+
     mapper_method = sys.intern("map_called_map")
 
     @functools.cached_property
@@ -1318,45 +1323,72 @@ def _compose_bits(
 
 def iter_axis_tree(
     axes: AxisTree,
+    target_paths,
+    index_exprs,
     outermap,
     axis=None,
     path=pmap(),
     indices=pmap(),
-    target_path=pmap(),
-    index_exprs=pmap(),
+    target_path=None,
+    index_exprs_acc=None,
 ):
     from pyop3.distarray.multiarray import IndexExpressionReplacer
 
+    # print_if_rank(0, "index_exprs", index_exprs)
+
+    if target_path is None:
+        assert index_exprs_acc is None
+        target_path = target_paths.get(None, pmap())
+
+        myindex_exprs = index_exprs.get(None, pmap())
+        new_exprs = {}
+        for axlabel, index_expr in myindex_exprs.items():
+            new_index = ExpressionEvaluator(outermap)(index_expr)
+            print_with_rank("initialrepr", repr(index_expr))
+            print_with_rank("replacedrepr", repr(new_index))
+            print_with_rank("initial", index_expr)
+            print_with_rank("replaced", new_index)
+            assert new_index != index_expr
+            new_exprs[axlabel] = new_index
+        index_exprs_acc = freeze(new_exprs)
+
     if axes.is_empty:
-        yield pmap(), pmap(), pmap(), pmap()
+        yield pmap(), target_path, pmap(), index_exprs_acc
         return
 
     axis = axis or axes.root
 
     for component in axis.components:
         path_ = path | {axis.label: component.label}
-        target_path_ = target_path | axes.target_paths.get(
-            (axis.id, component.label), {}
-        )
-        myindex_exprs = axes.index_exprs[axis.id, component.label]
+        target_path_ = target_path | target_paths.get((axis.id, component.label), {})
+        myindex_exprs = index_exprs[axis.id, component.label]
         subaxis = axes.child(axis, component)
         for pt in range(_as_int(component.count, path, indices)):
             new_exprs = {}
             for axlabel, index_expr in myindex_exprs.items():
-                # need to replace *not* evaluate because the axis tree could be indexed
-                # with a loop index whose value is not yet known (or pass in context info)
-                # new_index = IndexExpressionReplacer({axis.label: pt})(index_expr)
                 new_index = ExpressionEvaluator(outermap | indices | {axis.label: pt})(
                     index_expr
                 )
+                print_with_rank("initialrepr", repr(index_expr))
+                print_with_rank("replacedrepr", repr(new_index))
+                print_with_rank("initial", index_expr)
+                print_with_rank("replaced", new_index)
                 assert new_index != index_expr
                 new_exprs[axlabel] = new_index
-            index_exprs_ = index_exprs | new_exprs
+            index_exprs_ = index_exprs_acc | new_exprs
             # index_exprs_ = index_exprs | myindex_exprs
             indices_ = indices | {axis.label: pt}
             if subaxis:
                 yield from iter_axis_tree(
-                    axes, outermap, subaxis, path_, indices_, target_path_, index_exprs_
+                    axes,
+                    target_paths,
+                    index_exprs,
+                    outermap,
+                    subaxis,
+                    path_,
+                    indices_,
+                    target_path_,
+                    index_exprs_,
                 )
             else:
                 # yield path_, index_exprs_, indices_
@@ -1463,12 +1495,16 @@ def partition_iterset(index: LoopIndex, arrays):
 
             # loop over stencil
             array = array.with_context({index.id: target_path})
+
+            print_with_rank("array axes", array.axes)
+            print_with_rank("array targetpaths", array.target_paths)
+            print_with_rank("array idxsexprs", array.index_exprs)
             for (
                 array_path,
                 array_target_path,
                 array_indices,
                 array_target_indices,
-            ) in array.axes.index().iter(replace_map):
+            ) in array.iter_indices(replace_map):
                 # allexprs = dict(array.axes.index_exprs.get(None, {}))
                 # if not array.axes.is_empty:
                 #     for myaxis, mycpt in array.axes.path_with_nodes(
@@ -1477,9 +1513,21 @@ def partition_iterset(index: LoopIndex, arrays):
                 #         allexprs.update(array.axes.index_exprs[myaxis.id, mycpt])
                 #
                 # offset = array.axes.offset(array_path, array_indices | replace_map)
-                offset = array.offset(
-                    array_target_path, array_target_indices | replace_map
-                )
+                # offset = array.offset(
+                #     array_target_path, array_target_indices | replace_map
+                # )
+                # offset = array.simple_offset(array_path, array_indices | replace_map)
+                print_with_rank("array path", array_path)
+                print_with_rank("array idxs", array_indices)
+                print_with_rank("array target path", array_target_path)
+                print_with_rank("array target idxs", array_target_indices)
+                # offset = array.simple_offset(array_target_path, array_target_indices | replace_map)
+
+                print_with_rank("myindices", array_indices | replace_map)
+                # offset = array.simple_offset(array_target_path, array_indices | replace_map)
+                # offset = array.simple_offset(array_target_path, array_target_indices | replace_map)
+
+                offset = array.simple_offset(array_target_path, array_target_indices)
 
                 # allexprs is indexed with the "source" labels but we want a particular
                 # "target" label, need to go backwards... or something

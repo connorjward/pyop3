@@ -25,13 +25,20 @@ from pyop3.axtree import (
     ContextSensitive,
     as_axis_tree,
 )
-from pyop3.axtree.tree import AxisVariable, FrozenAxisTree, Indexed, MultiArrayCollector
+from pyop3.axtree.tree import (
+    AxisVariable,
+    ExpressionEvaluator,
+    FrozenAxisTree,
+    Indexed,
+    MultiArrayCollector,
+    _path_and_indices_from_index_tuple,
+)
 from pyop3.distarray2 import DistributedArray
 from pyop3.distarray.base import Tensor
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
 from pyop3.extras.debug import print_if_rank, print_with_rank
 from pyop3.itree import IndexedAxisTree, IndexTree, as_index_forest, index_axes
-from pyop3.itree.tree import CalledMapVariable, collect_loop_indices
+from pyop3.itree.tree import CalledMapVariable, collect_loop_indices, iter_axis_tree
 from pyop3.utils import (
     PrettyTuple,
     UniqueNameGenerator,
@@ -391,9 +398,16 @@ class Dat(Tensor, Indexed, ContextFree):
         offset = pym.evaluate(self.layouts[path], indices, ExpressionEvaluator)
         return strict_int(offset)
 
-    @deprecated("offset")
-    def get_offset(self, *args, **kwargs):
-        return self.offset(*args, **kwargs)
+    def simple_offset(self, path, indices):
+        print_if_rank(0, "self.layouts", self.layouts)
+        print_if_rank(0, "path", path)
+        print_if_rank(0, "indices", indices)
+        offset = pym.evaluate(self.layouts[path], indices, ExpressionEvaluator)
+        return strict_int(offset)
+
+    def iter_indices(self, outer_map):
+        print_with_rank(0, "myiexpr!!!!!!!!!!!!!!!!!!", self.index_exprs)
+        return iter_axis_tree(self.axes, self.target_paths, self.index_exprs, outer_map)
 
     def _with_axes(self, axes):
         """Return a new `Dat` with new axes pointing to the same data."""
@@ -459,10 +473,10 @@ class Dat(Tensor, Indexed, ContextFree):
             return flattened, count
 
     def get_value(self, *args, **kwargs):
-        return self.data[self.axes.get_offset(*args, **kwargs)]
+        return self.data[self.offset(*args, **kwargs)]
 
     def set_value(self, path, indices, value):
-        self.data[self.axes.get_offset(path, indices)] = value
+        self.data[self.simple_offset(path, indices)] = value
 
     def select_axes(self, indices):
         selected = []

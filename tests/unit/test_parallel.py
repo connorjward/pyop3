@@ -95,7 +95,7 @@ def test_distributed_subaxes_partition_halo_data(paxis):
     root = op3.Axis([1, 1])
     subaxis0 = paxis
     subaxis1 = paxis.copy(id=op3.Axis.unique_id())
-    axes = op3.AxisTree.from_nest({root: [subaxis0, subaxis1]}).freeze()
+    axes = op3.AxisTree.from_nest({root: [subaxis0, subaxis1]})
 
     path0 = freeze(
         {
@@ -146,7 +146,7 @@ def test_nested_parallel_axes_produce_correct_sf(comm, paxis):
     root = op3.Axis([1, 1])
     subaxis0 = paxis
     subaxis1 = paxis.copy(id=op3.Axis.unique_id())
-    axes = op3.AxisTree.from_nest({root: [subaxis0, subaxis1]}).freeze()
+    axes = op3.AxisTree.from_nest({root: [subaxis0, subaxis1]})
 
     rank = comm.rank
     other_rank = (rank + 1) % 2
@@ -170,7 +170,7 @@ def test_partition_iterset_scalar(comm, paxis, with_ghosts):
     array = op3.Dat(paxis, dtype=op3.ScalarType)
 
     if with_ghosts:
-        p = op3.LoopIndex(paxis.axes.freeze())
+        p = op3.LoopIndex(paxis.as_tree())
     else:
         p = paxis.index()
 
@@ -226,7 +226,7 @@ def test_partition_iterset_with_map(comm, paxis, with_ghosts):
     array = op3.Dat(paxis, dtype=op3.ScalarType)
 
     if with_ghosts:
-        p = op3.LoopIndex(paxis.axes.freeze())
+        p = op3.LoopIndex(paxis.as_tree())
     else:
         p = paxis.index()
     tmp = array[map0(p)]

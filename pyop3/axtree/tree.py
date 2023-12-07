@@ -1028,13 +1028,11 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         target_paths = cls._default_target_paths(tree)
         index_exprs = cls._default_index_exprs(tree)
         layout_exprs = index_exprs
-        sf = cls._default_sf(tree)
         return cls(
             tree.parent_to_children,
             target_paths,
             index_exprs,
             layout_exprs,
-            sf,
         )
 
     def index(self):
@@ -1078,6 +1076,10 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
             # assert new_layout != orig_layout
             layouts_[new_path] = new_layout
         return freeze(layouts_)
+
+    @cached_property
+    def sf(self):
+        return cls._default_sf(tree)
 
     @cached_property
     def datamap(self):
@@ -1162,6 +1164,10 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
                 indices |= {subaxis.label: 0}
 
         offset = pym.evaluate(self.layouts[path], indices, ExpressionEvaluator)
+        print_with_rank("self.layouts", self.layouts)
+        print_with_rank("path", path)
+        print_with_rank("indices", indices)
+        print_with_rank("offset", offset)
         return strict_int(offset)
 
     @deprecated("offset")
