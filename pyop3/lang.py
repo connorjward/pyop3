@@ -21,7 +21,7 @@ from pyrsistent import freeze, pmap
 from pyop3.axtree import as_axis_tree
 from pyop3.axtree.tree import ContextFree, ContextSensitive, MultiArrayCollector
 from pyop3.config import config
-from pyop3.distarray2 import DistributedArray
+from pyop3.distarray import DistributedArray
 from pyop3.dtypes import IntType, dtype_limits
 from pyop3.extras.debug import print_with_rank
 from pyop3.itree.tree import (

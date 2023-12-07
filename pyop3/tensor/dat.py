@@ -33,7 +33,7 @@ from pyop3.axtree.tree import (
     _path_and_indices_from_index_tuple,
     _trim_path,
 )
-from pyop3.distarray2 import DistributedArray
+from pyop3.distarray import DistributedArray
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
 from pyop3.extras.debug import print_if_rank, print_with_rank
 from pyop3.itree import IndexTree, as_index_forest, index_axes
