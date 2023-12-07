@@ -1046,7 +1046,7 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
     def layouts(self):
         """Initialise the multi-axis by computing the layout functions."""
         from pyop3.axtree.layout import _collect_at_leaves, _compute_layouts
-        from pyop3.distarray.multiarray import IndexExpressionReplacer
+        from pyop3.itree.tree import IndexExpressionReplacer
 
         if self.is_empty:
             return pmap({pmap(): 0})

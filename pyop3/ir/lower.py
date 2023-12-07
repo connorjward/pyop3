@@ -26,7 +26,7 @@ from pyop3.axtree import Axis, AxisComponent, AxisTree, AxisVariable
 from pyop3.axtree.tree import ContextSensitiveAxisTree
 from pyop3.distarray import Dat, MultiArray
 from pyop3.distarray2 import DistributedArray
-from pyop3.distarray.multiarray import ContextSensitiveMultiArray
+from pyop3.distarray.dat import ContextSensitiveMultiArray
 from pyop3.distarray.petsc import IndexedPetscMat, PetscMat, PetscObject
 from pyop3.dtypes import IntType, PointerType
 from pyop3.extras.debug import print_with_rank
@@ -43,7 +43,11 @@ from pyop3.itree import (
     Subset,
     TabulatedMapComponent,
 )
-from pyop3.itree.tree import CalledMapVariable, LoopIndexVariable
+from pyop3.itree.tree import (
+    CalledMapVariable,
+    IndexExpressionReplacer,
+    LoopIndexVariable,
+)
 from pyop3.lang import (
     INC,
     MAX_RW,
@@ -404,10 +408,6 @@ def parse_loop_properly_this_time(
     iname_replace_map=pmap(),
     jname_replace_map=pmap(),
 ):
-    from pyop3.distarray.multiarray import IndexExpressionReplacer
-
-    print_with_rank(axes)
-
     outer_replace_map = {}
     for _, replace_map in loop_indices.values():
         outer_replace_map.update(replace_map)
@@ -745,8 +745,6 @@ def parse_assignment_properly_this_time(
     axis=None,
     source_path=pmap(),
 ):
-    from pyop3.distarray.multiarray import IndexExpressionReplacer
-
     context = context_from_indices(loop_indices)
     ctx_free_array = array.with_context(context)
 
@@ -931,9 +929,6 @@ def make_temp_expr(temporary, shape, path, jnames, ctx):
 
 
 def subst_layout(axes, source_path, target_path):
-    # TODO move import
-    from pyop3.distarray.multiarray import IndexExpressionReplacer
-
     replace_map = {}
     for axis, cpt in axes.detailed_path(source_path).items():
         replace_map.update(axes.layout_exprs[axis.id, cpt])

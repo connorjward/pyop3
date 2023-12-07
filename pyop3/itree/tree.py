@@ -49,6 +49,47 @@ from pyop3.utils import (
 
 bsearch = pym.var("mybsearch")
 
+
+# FIXME this is copied from loopexpr2loopy VariableReplacer
+class IndexExpressionReplacer(pym.mapper.IdentityMapper):
+    def __init__(self, replace_map):
+        self._replace_map = replace_map
+
+    def map_axis_variable(self, expr):
+        # print_if_rank(0, "replace map ", self._replace_map)
+        # return self._replace_map[expr.axis_label]
+        return self._replace_map.get(expr.axis_label, expr)
+
+    def map_multi_array(self, expr):
+        from pyop3.distarray.dat import MultiArrayVariable
+
+        # print_if_rank(0, self._replace_map)
+        # print_if_rank(0, expr.indices)
+        indices = {axis: self.rec(index) for axis, index in expr.indices.items()}
+        return MultiArrayVariable(expr.array, indices)
+
+    def map_called_map(self, expr):
+        array = expr.function.map_component.array
+
+        # should the following only exist at eval time?
+
+        # the inner_expr tells us the right mapping for the temporary, however,
+        # for maps that are arrays the innermost axis label does not always match
+        # the label used by the temporary. Therefore we need to do a swap here.
+        # I don't like this.
+        # inner_axis = array.axes.leaf_axis
+        # print_if_rank(0, self._replace_map)
+        # print_if_rank(0, expr.parameters)
+        indices = {axis: self.rec(idx) for axis, idx in expr.parameters.items()}
+        # indices[inner_axis.label] = indices.pop(expr.function.full_map.name)
+
+        return CalledMapVariable(expr.function, indices)
+
+    def map_loop_index(self, expr):
+        # this is hacky, if I make this raise a KeyError then we fail in indexing
+        return self._replace_map.get((expr.name, expr.axis), expr)
+
+
 # just use a pmap for this
 # class IndexForest:
 #     def __init__(self, trees: Mapping[Mapping, IndexTree]):
@@ -1170,8 +1211,6 @@ def _compose_bits(
     index_exprs_acc=pmap(),
     layout_exprs_acc=pmap(),
 ):
-    from pyop3.distarray.multiarray import IndexExpressionReplacer
-
     if not indexed_axes:
         return (
             freeze({None: itarget_paths.get(None, pmap())}),
@@ -1330,10 +1369,6 @@ def iter_axis_tree(
     target_path=None,
     index_exprs_acc=None,
 ):
-    from pyop3.distarray.multiarray import IndexExpressionReplacer
-
-    # print_if_rank(0, "index_exprs", index_exprs)
-
     if target_path is None:
         assert index_exprs_acc is None
         target_path = target_paths.get(None, pmap())
@@ -1428,7 +1463,7 @@ def partition_iterset(index: LoopIndex, arrays):
     to be complete before computation can happen').
 
     """
-    from pyop3.distarray.multiarray import Dat, IndexExpressionReplacer
+    from pyop3.distarray.dat import Dat
 
     # take first
     # paraxis = [axis for axis in index.iterset.nodes if axis.sf is not None][0]

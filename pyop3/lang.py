@@ -23,13 +23,11 @@ from pyop3.axtree.tree import ContextFree, ContextSensitive, MultiArrayCollector
 from pyop3.config import config
 from pyop3.distarray import Dat, MultiArray, PetscMat
 from pyop3.distarray2 import DistributedArray
-from pyop3.distarray.multiarray import (
-    ContextSensitiveMultiArray,
-    IndexExpressionReplacer,
-)
+from pyop3.distarray.dat import ContextSensitiveMultiArray
 from pyop3.dtypes import IntType, dtype_limits
 from pyop3.extras.debug import print_with_rank
 from pyop3.itree.tree import (
+    IndexExpressionReplacer,
     _compose_bits,
     _index_axes,
     as_index_forest,
