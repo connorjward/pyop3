@@ -21,9 +21,7 @@ from pyrsistent import freeze, pmap
 from pyop3.axtree import as_axis_tree
 from pyop3.axtree.tree import ContextFree, ContextSensitive, MultiArrayCollector
 from pyop3.config import config
-from pyop3.distarray import Dat, MultiArray, PetscMat
 from pyop3.distarray2 import DistributedArray
-from pyop3.distarray.dat import ContextSensitiveMultiArray
 from pyop3.dtypes import IntType, dtype_limits
 from pyop3.extras.debug import print_with_rank
 from pyop3.itree.tree import (
@@ -33,6 +31,8 @@ from pyop3.itree.tree import (
     as_index_forest,
     partition_iterset,
 )
+from pyop3.tensor import Dat, MultiArray, PetscMat
+from pyop3.tensor.dat import ContextSensitiveMultiArray
 from pyop3.utils import as_tuple, checked_zip, just_one, merge_dicts, unique
 
 

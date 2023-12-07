@@ -24,10 +24,7 @@ from pyrsistent import freeze, pmap
 from pyop3 import utils
 from pyop3.axtree import Axis, AxisComponent, AxisTree, AxisVariable
 from pyop3.axtree.tree import ContextSensitiveAxisTree
-from pyop3.distarray import Dat, MultiArray
 from pyop3.distarray2 import DistributedArray
-from pyop3.distarray.dat import ContextSensitiveMultiArray
-from pyop3.distarray.petsc import IndexedPetscMat, PetscMat, PetscObject
 from pyop3.dtypes import IntType, PointerType
 from pyop3.extras.debug import print_with_rank
 from pyop3.itree import (
@@ -62,6 +59,9 @@ from pyop3.lang import (
     Loop,
 )
 from pyop3.log import logger
+from pyop3.tensor import Dat
+from pyop3.tensor.dat import ContextSensitiveMultiArray
+from pyop3.tensor.petsc import IndexedPetscMat, PetscMat, PetscObject
 from pyop3.utils import (
     PrettyTuple,
     checked_zip,

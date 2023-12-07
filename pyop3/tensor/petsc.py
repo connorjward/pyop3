@@ -12,10 +12,10 @@ from pyrsistent import freeze
 
 from pyop3.axtree import AxisTree
 from pyop3.axtree.tree import ContextFree, ContextSensitive, as_axis_tree
-from pyop3.distarray.base import Tensor
-from pyop3.distarray.dat import ContextSensitiveMultiArray, Dat
 from pyop3.dtypes import ScalarType
 from pyop3.itree import IndexTree
+from pyop3.tensor.base import Tensor
+from pyop3.tensor.dat import ContextSensitiveMultiArray, Dat
 from pyop3.utils import just_one, merge_dicts, single_valued, strictly_all
 
 

@@ -34,11 +34,11 @@ from pyop3.axtree.tree import (
     _trim_path,
 )
 from pyop3.distarray2 import DistributedArray
-from pyop3.distarray.base import Tensor
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
 from pyop3.extras.debug import print_if_rank, print_with_rank
 from pyop3.itree import IndexTree, as_index_forest, index_axes
 from pyop3.itree.tree import CalledMapVariable, collect_loop_indices, iter_axis_tree
+from pyop3.tensor.base import Tensor
 from pyop3.utils import (
     PrettyTuple,
     UniqueNameGenerator,

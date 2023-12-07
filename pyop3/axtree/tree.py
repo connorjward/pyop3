@@ -448,7 +448,7 @@ class Sparsity:
 
 
 def _collect_datamap(axis, *subdatamaps, axes):
-    from pyop3.distarray import Dat
+    from pyop3.tensor import Dat
 
     datamap = {}
     for cidx, component in enumerate(axis.components):
@@ -535,17 +535,11 @@ class AxisComponent(LabelledNodeComponent):
     def has_integer_count(self):
         return isinstance(self.count, numbers.Integral)
 
-    @property
-    def is_ragged(self):
-        from pyop3.distarray import MultiArray
-
-        return isinstance(self.count, MultiArray)
-
     # TODO this is just a traversal - clean up
     def alloc_size(self, axtree, axis):
-        from pyop3.distarray import MultiArray
+        from pyop3.tensor import Dat
 
-        if isinstance(self.count, MultiArray):
+        if isinstance(self.count, Dat):
             npoints = self.count.max_value
         else:
             assert isinstance(self.count, numbers.Integral)
@@ -565,25 +559,6 @@ class AxisComponent(LabelledNodeComponent):
 
         remaining = itertools.dropwhile(lambda o: is_owned_by_process(o), self.overlap)
         return all(isinstance(o, Halo) for o in remaining)
-
-    @property
-    def num_owned(self) -> int:
-        from pyop3.distarray import MultiArray
-
-        """Return the number of owned points."""
-        if isinstance(self.count, MultiArray):
-            # TODO: Might we ever want this to work?
-            raise RuntimeError("nowned is only valid for non-ragged axes")
-
-        if self.overlap is None:
-            return self.count
-        else:
-            return sum(1 for o in self.overlap if is_owned_by_process(o))
-
-    @property
-    def nowned(self):
-        # alias, what is the best name?
-        return self.num_owned
 
 
 class Axis(MultiComponentLabelledNode, LoopIterable):
@@ -793,7 +768,7 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
 
     @staticmethod
     def _parse_numbering(numbering):
-        from pyop3.distarray import Dat
+        from pyop3.tensor import Dat
 
         if numbering is None:
             return None
@@ -1272,7 +1247,7 @@ class Path:
 
 @functools.singledispatch
 def as_axis_tree(arg: Any):
-    from pyop3.distarray import Dat  # cyclic import
+    from pyop3.tensor import Dat  # cyclic import
 
     if isinstance(arg, Dat):
         return as_axis_tree(AxisComponent(arg))
@@ -1321,7 +1296,7 @@ def _(arg: AxisComponent):
 
 @functools.singledispatch
 def _as_axis_component(arg: Any) -> AxisComponent:
-    from pyop3.distarray import Dat  # cyclic import
+    from pyop3.tensor import Dat  # cyclic import
 
     if isinstance(arg, Dat):
         return AxisComponent(arg)

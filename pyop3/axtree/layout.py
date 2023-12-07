@@ -373,7 +373,7 @@ def _compute_layouts(
 def _create_count_array_tree(
     ctree, current_node=None, counts=PrettyTuple(), path=pmap()
 ):
-    from pyop3.distarray import MultiArray
+    from pyop3.tensor import Dat
 
     current_node = current_node or ctree.root
     arrays = {}
@@ -394,7 +394,7 @@ def _create_count_array_tree(
             for parent, child in zip(axes, axes[1:]):
                 parent_to_children[parent.id] = (child,)
             axtree = AxisTree.from_node_map(parent_to_children)
-            countarray = MultiArray(
+            countarray = Dat(
                 axtree,
                 data=np.full(axis_tree_size(axtree), -1, dtype=IntType),
             )
@@ -559,7 +559,7 @@ def _axis_component_size(
 
 @functools.singledispatch
 def _as_int(arg: Any, path, indices):
-    from pyop3.distarray import Dat
+    from pyop3.tensor import Dat
 
     # cyclic import
     if isinstance(arg, Dat):

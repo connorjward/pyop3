@@ -61,7 +61,7 @@ class IndexExpressionReplacer(pym.mapper.IdentityMapper):
         return self._replace_map.get(expr.axis_label, expr)
 
     def map_multi_array(self, expr):
-        from pyop3.distarray.dat import MultiArrayVariable
+        from pyop3.tensor.dat import MultiArrayVariable
 
         # print_if_rank(0, self._replace_map)
         # print_if_rank(0, expr.indices)
@@ -479,7 +479,7 @@ class ContextSensitiveCalledMap(ContextSensitiveLoopIterable):
 
 @functools.singledispatch
 def apply_loop_context(arg, loop_context, *, axes, path):
-    from pyop3.distarray import Dat
+    from pyop3.tensor import Dat
 
     if isinstance(arg, Dat):
         parent = axes._node_from_path(path)
@@ -546,8 +546,7 @@ def combine_contexts(contexts):
 
 @functools.singledispatch
 def collect_loop_indices(arg):
-    # cyclic import
-    from pyop3.distarray import Dat
+    from pyop3.tensor import Dat  # cyclic import
 
     if isinstance(arg, (Dat, Slice, slice, str)):
         return ()
@@ -612,10 +611,9 @@ def loop_contexts_from_iterable(indices):
 
 @functools.singledispatch
 def collect_loop_contexts(arg, *args, **kwargs):
-    # cyclic import
-    from pyop3.distarray import MultiArray
+    from pyop3.tensor import Dat  # cyclic import
 
-    if isinstance(arg, (MultiArray, numbers.Integral)):
+    if isinstance(arg, (Dat, numbers.Integral)):
         return {}
     elif isinstance(arg, collections.abc.Iterable):
         return loop_contexts_from_iterable(arg)
@@ -815,9 +813,9 @@ def _(index: Index, ctx, **kwargs):
 
 @functools.singledispatch
 def as_index_forest(arg: Any, **kwargs):
-    from pyop3.distarray import MultiArray
+    from pyop3.tensor import Dat  # cyclic import
 
-    if isinstance(arg, MultiArray):
+    if isinstance(arg, Dat):
         slice_ = apply_loop_context(arg, loop_context=pmap(), path=pmap(), **kwargs)
         return (IndexTree(slice_),)
     elif isinstance(arg, collections.abc.Sequence):
@@ -1463,7 +1461,7 @@ def partition_iterset(index: LoopIndex, arrays):
     to be complete before computation can happen').
 
     """
-    from pyop3.distarray.dat import Dat
+    from pyop3.tensor import Dat
 
     # take first
     # paraxis = [axis for axis in index.iterset.nodes if axis.sf is not None][0]
