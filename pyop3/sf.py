@@ -5,7 +5,6 @@ from mpi4py import MPI
 from petsc4py import PETSc
 
 from pyop3.dtypes import get_mpi_dtype
-from pyop3.extras.debug import print_with_rank
 from pyop3.utils import just_one
 
 
@@ -85,14 +84,10 @@ class StarForest:
     def reduce_begin(self, *args):
         reduce_args = self._prepare_args(*args)
         self.sf.reduceBegin(*reduce_args)
-        print_with_rank(reduce_args)
-        print_with_rank("reduce begin")
 
     def reduce_end(self, *args):
         reduce_args = self._prepare_args(*args)
         self.sf.reduceEnd(*reduce_args)
-        print_with_rank(reduce_args)
-        print_with_rank("reduce end")
 
     @cached_property
     def _graph(self):

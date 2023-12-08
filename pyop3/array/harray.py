@@ -36,7 +36,6 @@ from pyop3.axtree.tree import (
 )
 from pyop3.buffer import Buffer, DistributedBuffer
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
-from pyop3.extras.debug import print_if_rank, print_with_rank
 from pyop3.itree import IndexTree, as_index_forest, index_axes
 from pyop3.itree.tree import CalledMapVariable, collect_loop_indices, iter_axis_tree
 from pyop3.lang import KernelArgument
@@ -106,13 +105,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
     ):
         super().__init__(name=name, prefix=prefix)
 
-        # TODO This is ugly
-        # temporary_axes = as_axis_tree(axes).freeze()  # used for the temporary
-        # previously layout_axes
-        # drop index_exprs...
         axes = as_axis_tree(axes)
-
-        # axes = as_layout_axes(axes)
 
         if isinstance(data, Buffer):
             # disable for now, temporaries hit this in an annoying way
@@ -139,9 +132,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         self.buffer = data
 
         # instead implement "materialize"
-        # self.temporary_axes = temporary_axes
         self.axes = axes
-        self.layout_axes = axes  # used? likely don't need all these
 
         self.max_value = max_value
 
@@ -167,7 +158,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
 
         loop_contexts = collect_loop_contexts(indices)
         if not loop_contexts:
-            index_tree = just_one(as_index_forest(indices, axes=self.layout_axes))
+            index_tree = just_one(as_index_forest(indices, axes=self.axes))
             (
                 indexed_axes,
                 target_path_per_indexed_cpt,
@@ -350,14 +341,10 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         return strict_int(offset)
 
     def simple_offset(self, path, indices):
-        print_if_rank(0, "self.layouts", self.layouts)
-        print_if_rank(0, "path", path)
-        print_if_rank(0, "indices", indices)
         offset = pym.evaluate(self.layouts[path], indices, ExpressionEvaluator)
         return strict_int(offset)
 
     def iter_indices(self, outer_map):
-        print_with_rank(0, "myiexpr!!!!!!!!!!!!!!!!!!", self.index_exprs)
         return iter_axis_tree(self.axes, self.target_paths, self.index_exprs, outer_map)
 
     def _with_axes(self, axes):
@@ -530,197 +517,3 @@ class ContextSensitiveMultiArray(ContextSensitive, KernelArgument):
 
     def _shared_attr(self, attr: str):
         return single_valued(getattr(a, attr) for a in self.context_map.values())
-
-
-def replace_layout(orig_layout, replace_map):
-    return IndexExpressionReplacer(replace_map)(orig_layout)
-
-
-def as_layout_axes(axes: AxisTree) -> AxisTree:
-    # drop index exprs, everything else drops out
-    return AxisTree(
-        axes.parent_to_children,
-        axes.target_paths,
-        axes._default_index_exprs(),
-        axes.layout_exprs,
-        axes.layouts,
-        sf=axes.sf,
-    )
-
-
-def make_sparsity(
-    iterindex,
-    lmap,
-    rmap,
-    llabels=PrettyTuple(),
-    rlabels=PrettyTuple(),
-    lindices=PrettyTuple(),
-    rindices=PrettyTuple(),
-):
-    if iterindex:
-        if iterindex.children:
-            raise NotImplementedError(
-                "Need to think about what to do when we have more complicated "
-                "iteration sets that have multiple indices (e.g. extruded cells)"
-            )
-
-        if not isinstance(iterindex, Range):
-            raise NotImplementedError(
-                "Need to think about whether maps are reasonable here"
-            )
-
-        if not is_single_valued(idx.id for idx in [iterindex, lmap, rmap]):
-            raise ValueError("Indices must share common roots")
-
-        sparsity = collections.defaultdict(set)
-        for i in range(iterindex.size):
-            subsparsity = make_sparsity(
-                None,
-                lmap.child,
-                rmap.child,
-                llabels | iterindex.label,
-                rlabels | iterindex.label,
-                lindices | i,
-                rindices | i,
-            )
-            for labels, indices in subsparsity.items():
-                sparsity[labels].update(indices)
-        return sparsity
-    elif lmap:
-        if not isinstance(lmap, TabulatedMap):
-            raise NotImplementedError("Need to think about other index types")
-        if len(lmap.children) not in [0, 1]:
-            raise NotImplementedError("Need to think about maps forking")
-
-        new_labels = list(llabels)
-        # first pop the old things
-        for lbl in lmap.from_labels:
-            if lbl != new_labels[-1]:
-                raise ValueError("from_labels must match existing labels")
-            new_labels.pop()
-        # then append the new ones - only do the labels here, indices are
-        # done inside the loop
-        new_labels.extend(lmap.to_labels)
-        new_labels = PrettyTuple(new_labels)
-
-        sparsity = collections.defaultdict(set)
-        for i in range(lmap.size):
-            new_indices = PrettyTuple([lmap.data.get_value(lindices | i)])
-            subsparsity = make_sparsity(
-                None, lmap.child, rmap, new_labels, rlabels, new_indices, rindices
-            )
-            for labels, indices in subsparsity.items():
-                sparsity[labels].update(indices)
-        return sparsity
-    elif rmap:
-        if not isinstance(rmap, TabulatedMap):
-            raise NotImplementedError("Need to think about other index types")
-        if len(rmap.children) not in [0, 1]:
-            raise NotImplementedError("Need to think about maps forking")
-
-        new_labels = list(rlabels)
-        # first pop the old labels
-        for lbl in rmap.from_labels:
-            if lbl != new_labels[-1]:
-                raise ValueError("from_labels must match existing labels")
-            new_labels.pop()
-        # then append the new ones
-        new_labels.extend(rmap.to_labels)
-        new_labels = PrettyTuple(new_labels)
-
-        sparsity = collections.defaultdict(set)
-        for i in range(rmap.size):
-            new_indices = PrettyTuple([rmap.data.get_value(rindices | i)])
-            subsparsity = make_sparsity(
-                None, lmap, rmap.child, llabels, new_labels, lindices, new_indices
-            )
-            for labels, indices in subsparsity.items():
-                sparsity[labels].update(indices)
-        return sparsity
-    else:
-        # at the bottom, record an entry
-        # return {(llabels, rlabels): {(lindices, rindices)}}
-        # TODO: For now assume single values for each of these
-        llabel, rlabel = map(single_valued, [llabels, rlabels])
-        lindex, rindex = map(single_valued, [lindices, rindices])
-        return {(llabel, rlabel): {(lindex, rindex)}}
-
-
-def distribute_sparsity(sparsity, ax1, ax2, owner="row"):
-    if any(ax.nparts > 1 for ax in [ax1, ax2]):
-        raise NotImplementedError("Only dealing with single-part multi-axes for now")
-
-    # how many points need to get sent to other processes?
-    # how many points do I get from other processes?
-    new_sparsity = collections.defaultdict(set)
-    points_to_send = collections.defaultdict(set)
-    for lindex, rindex in sparsity[ax1.part.label, ax2.part.label]:
-        if owner == "row":
-            olabel = ax1.part.overlap[lindex]
-            if is_owned_by_process(olabel):
-                new_sparsity[ax1.part.label, ax2.part.label].add((lindex, rindex))
-            else:
-                points_to_send[olabel.root.rank].add(
-                    (ax1.part.lgmap[lindex], ax2.part.lgmap[rindex])
-                )
-        else:
-            raise NotImplementedError
-
-    # send points
-
-    # first determine how many new points we are getting from each rank
-    comm = single_valued([ax1.sf.comm, ax2.sf.comm]).tompi4py()
-    npoints_to_send = np.array(
-        [len(points_to_send[rank]) for rank in range(comm.size)], dtype=IntType
-    )
-    npoints_to_recv = np.empty_like(npoints_to_send)
-    comm.Alltoall(npoints_to_send, npoints_to_recv)
-
-    # communicate the offsets back
-    from_offsets = np.cumsum(npoints_to_recv)
-    to_offsets = np.empty_like(from_offsets)
-    comm.Alltoall(from_offsets, to_offsets)
-
-    # now send the globally numbered row, col values for each point that
-    # needs to be sent. This is easiest with an SF.
-
-    # nroots is the number of points to send
-    nroots = sum(npoints_to_send)
-    local_points = None  # contiguous storage
-
-    idx = 0
-    remote_points = []
-    for rank in range(comm.size):
-        for i in range(npoints_to_recv[rank]):
-            remote_points.extend([rank, to_offsets[idx]])
-            idx += 1
-
-    sf = PETSc.SF().create(comm)
-    sf.setGraph(nroots, local_points, remote_points)
-
-    # create a buffer to hold the new values
-    # x2 since we are sending row and column numbers
-    new_points = np.empty(sum(npoints_to_recv) * 2, dtype=IntType)
-    rootdata = np.array(
-        [
-            num
-            for rank in range(comm.size)
-            for lnum, rnum in points_to_send[rank]
-            for num in [lnum, rnum]
-        ],
-        dtype=new_points.dtype,
-    )
-
-    mpi_dtype, _ = get_mpi_dtype(np.dtype(IntType))
-    mpi_op = MPI.REPLACE
-    args = (mpi_dtype, rootdata, new_points, mpi_op)
-    sf.bcastBegin(*args)
-    sf.bcastEnd(*args)
-
-    for i in range(sum(npoints_to_recv)):
-        new_sparsity[ax1.part.label, ax2.part.label].add(
-            (new_points[2 * i], new_points[2 * i + 1])
-        )
-
-    # import pdb; pdb.set_trace()
-    return new_sparsity

@@ -22,7 +22,6 @@ from pyop3.axtree import as_axis_tree
 from pyop3.axtree.tree import ContextFree, ContextSensitive, MultiArrayCollector
 from pyop3.config import config
 from pyop3.dtypes import IntType, dtype_limits
-from pyop3.extras.debug import print_with_rank
 from pyop3.utils import as_tuple, checked_zip, just_one, merge_dicts, unique
 
 

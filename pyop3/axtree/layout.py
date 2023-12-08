@@ -114,38 +114,6 @@ def step_size(
         return 1
 
 
-def make_star_forest_per_axis_part(part, comm):
-    if part.is_distributed:
-        # we have a root if a point is shared but doesn't point to another rank
-        nroots = len(
-            [pt for pt in part.overlap if isinstance(pt, Shared) and not pt.root]
-        )
-
-        # which local points are leaves?
-        local_points = [
-            i for i, pt in enumerate(part.overlap) if not is_owned_by_process(pt)
-        ]
-
-        # roots of other processes (rank, index)
-        remote_points = utils.flatten(
-            [pt.root.as_tuple() for pt in part.overlap if not is_owned_by_process(pt)]
-        )
-
-        # import pdb; pdb.set_trace()
-
-        sf = PETSc.SF().create(comm)
-        sf.setGraph(nroots, local_points, remote_points)
-        return sf
-    else:
-        raise NotImplementedError(
-            "Need to think about concatenating star forests. This will happen if mixed."
-        )
-
-
-def attach_owned_star_forest(axis):
-    raise NotImplementedError
-
-
 def has_halo(axes, axis):
     if axis.sf is not None:
         return True

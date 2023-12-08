@@ -8,7 +8,6 @@ import numpy as np
 from mpi4py import MPI
 
 from pyop3.dtypes import ScalarType
-from pyop3.extras.debug import print_if_rank
 from pyop3.lang import KernelArgument
 from pyop3.utils import UniqueNameGenerator, as_tuple, deprecated, readonly
 

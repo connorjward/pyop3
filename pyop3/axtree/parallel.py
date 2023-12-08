@@ -1,14 +1,30 @@
 from __future__ import annotations
 
+import functools
+
 import numpy as np
 from mpi4py import MPI
 from petsc4py import PETSc
 from pyrsistent import pmap
 
 from pyop3.axtree.layout import _as_int, _axis_component_size, step_size
-from pyop3.dtypes import IntType, get_mpi_dtype
-from pyop3.extras.debug import print_with_rank
+from pyop3.dtypes import IntType, as_numpy_dtype, get_mpi_dtype
 from pyop3.utils import checked_zip, just_one, strict_int
+
+
+def reduction_op(op, invec, inoutvec, datatype):
+    dtype = as_numpy_dtype(datatype)
+    invec = np.frombuffer(invec, dtype=dtype)
+    inoutvec = np.frombuffer(inoutvec, dtype=dtype)
+    inoutvec[:] = op(invec, inoutvec)
+
+
+_contig_min_op = MPI.Op.Create(
+    functools.partial(reduction_op, np.minimum), commute=True
+)
+_contig_max_op = MPI.Op.Create(
+    functools.partial(reduction_op, np.maximum), commute=True
+)
 
 
 def partition_ghost_points(axis, sf):
@@ -114,8 +130,6 @@ def grow_dof_sf(axes, axis, path, indices):
         )
         root_offsets[pt] = offset
 
-    print_with_rank("root offsets before", root_offsets)
-
     point_sf.broadcast(root_offsets, MPI.REPLACE)
 
     # for sanity reasons remove the original root values from the buffer
@@ -157,10 +171,5 @@ def grow_dof_sf(axes, axis, path, indices):
             rank = point_sf.iremote[leaf][0]
             remote_leaf_dof_offsets[counter] = [rank, root_offsets[pos] + d]
             counter += 1
-
-    print_with_rank("root offsets: ", root_offsets)
-    print_with_rank("local leaf offsets", local_leaf_offsets)
-    print_with_rank("local dof offsets: ", local_leaf_dof_offsets)
-    print_with_rank("remote offsets: ", remote_leaf_dof_offsets)
 
     return (nroots, local_leaf_dof_offsets, remote_leaf_dof_offsets)

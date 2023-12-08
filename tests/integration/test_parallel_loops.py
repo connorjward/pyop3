@@ -5,7 +5,6 @@ from petsc4py import PETSc
 from pyrsistent import freeze
 
 import pyop3 as op3
-from pyop3.extras.debug import print_with_rank
 from pyop3.ir import LOOPY_LANG_VERSION, LOOPY_TARGET
 from pyop3.utils import just_one
 

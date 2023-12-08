@@ -26,7 +26,6 @@ from pyrsistent import freeze, pmap
 
 from pyop3 import utils
 from pyop3.dtypes import IntType, PointerType, get_mpi_dtype
-from pyop3.extras.debug import print_if_rank, print_with_rank
 from pyop3.sf import StarForest
 from pyop3.tree import (
     LabelledNodeComponent,
@@ -187,264 +186,10 @@ class ExpressionEvaluator(pym.mapper.evaluator.EvaluationMapper):
         # the inner_expr tells us the right mapping for the temporary, however,
         # for maps that are arrays the innermost axis label does not always match
         # the label used by the temporary. Therefore we need to do a swap here.
-        # I don't like this.
-        # print_if_rank(0, repr(array.axes))
-        # print_if_rank(0, "before: ",indices)
         inner_axis = array.axes.leaf_axis
         indices[inner_axis.label] = indices.pop(expr.function.full_map.name)
 
-        # print_if_rank(0, "after:",indices)
-        # print_if_rank(0, repr(expr))
-        # print_if_rank(0, self.context)
         return array.get_value(path, indices)
-
-
-def get_bottom_part(axis):
-    # must be linear
-    return just_one(axis.leaves)
-
-
-def as_multiaxis(axis):
-    if isinstance(axis, MultiAxis):
-        return axis
-    elif isinstance(axis, AxisPart):
-        return MultiAxis(axis)
-    else:
-        raise TypeError
-
-
-# def is_set_up(axtree, axis=None):
-#     """Return ``True`` if all parts (recursively) of the multi-axis have an associated
-#     layout function.
-#     """
-#     axis = axis or axtree.root
-#     return all(
-#         part_is_set_up(axtree, axis, cpt, cidx)
-#         for cidx, cpt in enumerate(axis.components)
-#     )
-
-
-# # this would be an easy place to start with writing a tree visitor instead
-# def part_is_set_up(axtree, axis, cpt):
-#     if (subaxis := axtree.child(axis, cpt)) and not is_set_up(
-#         axtree, subaxis
-#     ):
-#         return False
-#     if (axis.id, component_index) not in axtree._layouts:
-#         return False
-#     return True
-
-
-def has_halo(axes, axis):
-    if axis.sf is not None:
-        return True
-    else:
-        for component in axis.components:
-            subaxis = axes.component_child(axis, component)
-            if subaxis and has_halo(axes, subaxis):
-                return True
-        return False
-    return axis.sf is not None or has_halo(axes, subaxis)
-
-
-def has_independently_indexed_subaxis_parts(axes, axis, cpt):
-    """
-    subaxis parts are independently indexed if they don't depend on the index from
-    ``part``.
-
-    if one sub-part needs this index to determine its extent then we need to create
-    a layout function as the step sizes will differ.
-
-    Note that we need to consider both ragged sizes and permutations here
-    """
-    if subaxis := axes.component_child(axis, cpt):
-        return not any(
-            requires_external_index(axes, subaxis, c) for c in subaxis.components
-        )
-    else:
-        return True
-
-
-def only_linear(func):
-    @functools.wraps(func)
-    def wrapper(self, *args, **kwargs):
-        if not self.is_linear:
-            raise RuntimeError(f"{func.__name__} only admits linear multi-axes")
-        return func(self, *args, **kwargs)
-
-    return wrapper
-
-
-def can_be_affine(axtree, axis, component, component_index):
-    return (
-        has_independently_indexed_subaxis_parts(
-            axtree, axis, component, component_index
-        )
-        and component.permutation is None
-    )
-
-
-def has_constant_start(
-    axtree, axis, component, component_index, outer_axes_are_all_indexed: bool
-):
-    """
-    We will have an affine layout with a constant start (usually zero) if either we are not
-    ragged or if we are ragged but everything above is indexed (i.e. a temporary).
-    """
-    assert can_be_affine(axtree, axis, component, component_index)
-    return isinstance(component.count, numbers.Integral) or outer_axes_are_all_indexed
-
-
-def has_fixed_size(axes, axis, component):
-    return not size_requires_external_index(axes, axis, component)
-
-
-def step_size(
-    axes: AxisTree,
-    axis: Axis,
-    component: AxisComponent,
-    path=pmap(),
-    indices=PrettyTuple(),
-):
-    """Return the size of step required to stride over a multi-axis component.
-
-    Non-constant strides will raise an exception.
-    """
-    if not has_constant_step(axes, axis, component) and not indices:
-        raise ValueError
-    if subaxis := axes.component_child(axis, component):
-        return _axis_size(axes, subaxis, path, indices)
-    else:
-        return 1
-
-
-def make_star_forest_per_axis_part(part, comm):
-    if part.is_distributed:
-        # we have a root if a point is shared but doesn't point to another rank
-        nroots = len(
-            [pt for pt in part.overlap if isinstance(pt, Shared) and not pt.root]
-        )
-
-        # which local points are leaves?
-        local_points = [
-            i for i, pt in enumerate(part.overlap) if not is_owned_by_process(pt)
-        ]
-
-        # roots of other processes (rank, index)
-        remote_points = utils.flatten(
-            [pt.root.as_tuple() for pt in part.overlap if not is_owned_by_process(pt)]
-        )
-
-        # import pdb; pdb.set_trace()
-
-        sf = PETSc.SF().create(comm)
-        sf.setGraph(nroots, local_points, remote_points)
-        return sf
-    else:
-        raise NotImplementedError(
-            "Need to think about concatenating star forests. This will happen if mixed."
-        )
-
-
-def attach_owned_star_forest(axis):
-    raise NotImplementedError
-
-
-@dataclasses.dataclass
-class RemotePoint:
-    rank: numbers.Integral
-    index: numbers.Integral
-
-    def as_tuple(self):
-        return (self.rank, self.index)
-
-
-@dataclasses.dataclass
-class PointOverlapLabel(abc.ABC):
-    pass
-
-
-@dataclasses.dataclass
-class Owned(PointOverlapLabel):
-    pass
-
-
-@dataclasses.dataclass
-class Shared(PointOverlapLabel):
-    root: Optional[RemotePoint] = None
-
-
-@dataclasses.dataclass
-class Halo(PointOverlapLabel):
-    root: RemotePoint
-
-
-def is_owned_by_process(olabel):
-    return isinstance(olabel, Owned) or isinstance(olabel, Shared) and not olabel.root
-
-
-# --------------------- \/ lifted from halo.py \/ -------------------------
-
-
-from pyop3.dtypes import as_numpy_dtype
-
-
-def reduction_op(op, invec, inoutvec, datatype):
-    dtype = as_numpy_dtype(datatype)
-    invec = np.frombuffer(invec, dtype=dtype)
-    inoutvec = np.frombuffer(inoutvec, dtype=dtype)
-    inoutvec[:] = op(invec, inoutvec)
-
-
-_contig_min_op = MPI.Op.Create(
-    functools.partial(reduction_op, np.minimum), commute=True
-)
-_contig_max_op = MPI.Op.Create(
-    functools.partial(reduction_op, np.maximum), commute=True
-)
-
-# --------------------- ^ lifted from halo.py ^ -------------------------
-
-
-class PointLabel(abc.ABC):
-    """Container associating points in an :class:`AxisPart` with a enumerated label."""
-
-
-# TODO: Maybe could make this a little more descriptive a la star forest so we could
-# then automatically generate an SF for the multi-axis.
-class PointOwnershipLabel(PointLabel):
-    """Label indicating parallel point ownership semantics (i.e. owned or halo)."""
-
-    # TODO: Write a factory function/constructor that takes advantage of the fact that
-    # the majority of the points are OWNED and there are only two options so a set is
-    # an efficient choice of data structure.
-    def __init__(self, owned_points, halo_points):
-        owned_set = set(owned_points)
-        halo_set = set(halo_points)
-
-        if len(owned_set) != len(owned_points) or len(halo_set) != len(halo_points):
-            raise ValueError("Labels cannot contain duplicate values")
-        if owned_set.intersection(halo_set):
-            raise ValueError("Points cannot appear with different values")
-
-        self._owned_points = owned_points
-        self._halo_points = halo_points
-
-    def __len__(self):
-        return len(self._owned_points) + len(self._halo_points)
-
-
-# this isn't really a thing I should be caring about - it's just a multi-axis!
-class Sparsity:
-    def __init__(self, maps):
-        if isinstance(maps, collections.abc.Sequence):
-            rmap, cmap = maps
-        else:
-            rmap, cmap = maps, maps
-
-        ...
-
-        raise NotImplementedError
 
 
 def _collect_datamap(axis, *subdatamaps, axes):
@@ -487,10 +232,6 @@ class AxisComponent(LabelledNodeComponent):
 
     fields = LabelledNodeComponent.fields | {
         "count",
-        "overlap",
-        "indexed",
-        "indices",
-        "lgmap",
     }
 
     def __init__(
@@ -499,37 +240,11 @@ class AxisComponent(LabelledNodeComponent):
         label=None,
         *,
         indices=None,
-        overlap=None,
         indexed=False,
         lgmap=None,
     ):
         super().__init__(label=label)
         self.count = count
-        self.indices = indices
-        self.overlap = overlap
-        self.indexed = indexed
-        self.lgmap = lgmap
-        """
-        this property is required because we can hit situations like the following:
-
-            sizes = 3 -> [2, 1, 2] -> [[2, 1], [1], [3, 2]]
-
-        this yields a layout that looks like
-
-            [[0, 2], [3], [4, 7]]
-
-        however, if we have a temporary where we only want the inner two dimensions
-        then we need a layout that looks like the following:
-
-            [[0, 2], [0], [0, 3]]
-
-        This effectively means that we need to zero the offset as we traverse the
-        tree to produce the layout. This is why we need this ``indexed`` flag.
-        """
-
-    @property
-    def is_distributed(self):
-        return self.overlap is not None
 
     @property
     def has_integer_count(self):
@@ -551,14 +266,6 @@ class AxisComponent(LabelledNodeComponent):
             return npoints * axtree.alloc_size(subaxis)
         else:
             return npoints
-
-    @property
-    def has_partitioned_halo(self):
-        if self.overlap is None:
-            return True
-
-        remaining = itertools.dropwhile(lambda o: is_owned_by_process(o), self.overlap)
-        return all(isinstance(o, Halo) for o in remaining)
 
 
 class Axis(MultiComponentLabelledNode, LoopIterable):
@@ -866,55 +573,6 @@ class PartialAxisTree(LabelledTree):
             parent_cpt_label = _as_axis_component_label(parent_component)
         return super().add_node(axis, parent, parent_cpt_label, **kwargs)
 
-    # alias
-    add_subaxis = add_node
-
-    # currently untested but should keep
-    @classmethod
-    def from_layout(cls, layout: Sequence[ConstrainedMultiAxis]) -> Any:  # TODO
-        return order_axes(layout)
-
-    # TODO this is just a regular tree search
-    @deprecated(internal=True)  # I think?
-    def get_part_from_path(self, path, axis=None):
-        axis = axis or self.root
-
-        label, *sublabels = path
-
-        (component, component_index) = just_one(
-            [
-                (cpt, cidx)
-                for cidx, cpt in enumerate(axis.components)
-                if (axis.label, cidx) == label
-            ]
-        )
-        if sublabels:
-            return self.get_part_from_path(
-                sublabels, self.component_child(axis, component)
-            )
-        else:
-            return axis, component
-
-    @deprecated(internal=True)
-    def drop_last(self):
-        """Remove the last subaxis"""
-        if not self.part.subaxis:
-            return None
-        else:
-            return self.copy(
-                parts=[self.part.copy(subaxis=self.part.subaxis.drop_last())]
-            )
-
-    @property
-    @deprecated(internal=True)
-    def is_linear(self):
-        """Return ``True`` if the multi-axis contains no branches at any level."""
-        if self.nparts == 1:
-            return self.part.subaxis.is_linear if self.part.subaxis else True
-        else:
-            return False
-
-    @deprecated()
     def add_subaxis(self, subaxis, *loc):
         return self.add_node(subaxis, *loc)
 
@@ -943,8 +601,6 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         "target_paths",
         "index_exprs",
         "layout_exprs",
-        "layouts",
-        "sf",
     }
 
     def __init__(
@@ -953,7 +609,6 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         target_paths=None,
         index_exprs=None,
         layout_exprs=None,
-        sf=None,
     ):
         if some_but_not_all(
             arg is None for arg in [target_paths, index_exprs, layout_exprs]
@@ -964,7 +619,6 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         self._target_paths = target_paths or self._default_target_paths()
         self._index_exprs = index_exprs or self._default_index_exprs()
         self.layout_exprs = layout_exprs or self._default_layout_exprs()
-        self.sf = sf or self._default_sf()
 
     def __getitem__(self, indices):
         from pyop3.itree.tree import as_index_forest, collect_loop_contexts, index_axes
@@ -1048,7 +702,7 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
 
     @cached_property
     def sf(self):
-        return cls._default_sf(tree)
+        return self._default_sf()
 
     @cached_property
     def datamap(self):
@@ -1057,17 +711,6 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         else:
             dmap = postvisit(self, _collect_datamap, axes=self)
 
-        # for cleverdict in [self.layouts, self.orig_layout_fn]:
-        #     for layout in cleverdict.values():
-        #         for layout_expr in layout.values():
-        #             # catch invalid layouts
-        #             if isinstance(layout_expr, pym.primitives.NaN):
-        #                 continue
-        #             for array in MultiArrayCollector()(layout_expr):
-        #                 dmap.update(array.datamap)
-
-        # TODO
-        # for cleverdict in [self.index_exprs, self.layout_exprs]:
         for cleverdict in [self.index_exprs]:
             for exprs in cleverdict.values():
                 for expr in exprs.values():
@@ -1223,26 +866,6 @@ class ContextSensitiveAxisTree(ContextSensitiveLoopIterable):
     @cached_property
     def datamap(self):
         return merge_dicts(axes.datamap for axes in self.context_map.values())
-
-
-@dataclasses.dataclass(frozen=True)
-class Path:
-    # TODO Make a persistent dict?
-    from_axes: Tuple[Any]  # axis part IDs I guess (or labels)
-    to_axess: Tuple[Any]  # axis part IDs I guess (or labels)
-    arity: int
-    selector: Optional[Any] = None
-    """The thing that chooses between the different possible output axes at runtime."""
-
-    @property
-    def degree(self):
-        return len(self.to_axess)
-
-    @property
-    def to_axes(self):
-        if self.degree != 1:
-            raise RuntimeError("Only for degree 1 paths")
-        return self.to_axess[0]
 
 
 @functools.singledispatch

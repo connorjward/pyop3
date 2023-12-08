@@ -7,7 +7,6 @@ from mpi4py import MPI
 from petsc4py import PETSc
 
 import pyop3 as op3
-from pyop3.extras.debug import print_with_rank
 
 
 @pytest.fixture
