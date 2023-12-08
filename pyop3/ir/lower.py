@@ -901,7 +901,7 @@ def make_array_expr(array, layouts, path, jnames, ctx):
 
 
 def make_temp_expr(temporary, shape, path, jnames, ctx):
-    layout = temporary.layout_axes.layouts[path]
+    layout = temporary.axes.layouts[path]
     temp_offset = make_offset_expr(
         layout,
         jnames,
@@ -1138,7 +1138,7 @@ def _scalar_assignment(
     ctx.add_argument(array)
 
     offset_expr = make_offset_expr(
-        array.layout_axes.layouts[path],
+        array.layouts[path],
         array_labels_to_jnames,
         ctx,
     )
