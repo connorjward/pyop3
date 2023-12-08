@@ -36,7 +36,6 @@ from pyop3.axtree.tree import (
 )
 from pyop3.buffer import Buffer, DistributedBuffer
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
-from pyop3.extras.debug import print_if_rank, print_with_rank
 from pyop3.itree import IndexTree, as_index_forest, index_axes
 from pyop3.itree.tree import CalledMapVariable, collect_loop_indices, iter_axis_tree
 from pyop3.lang import KernelArgument
@@ -342,14 +341,10 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         return strict_int(offset)
 
     def simple_offset(self, path, indices):
-        print_if_rank(0, "self.layouts", self.layouts)
-        print_if_rank(0, "path", path)
-        print_if_rank(0, "indices", indices)
         offset = pym.evaluate(self.layouts[path], indices, ExpressionEvaluator)
         return strict_int(offset)
 
     def iter_indices(self, outer_map):
-        print_with_rank(0, "myiexpr!!!!!!!!!!!!!!!!!!", self.index_exprs)
         return iter_axis_tree(self.axes, self.target_paths, self.index_exprs, outer_map)
 
     def _with_axes(self, axes):

@@ -26,7 +26,6 @@ from pyrsistent import freeze, pmap
 
 from pyop3 import utils
 from pyop3.dtypes import IntType, PointerType, get_mpi_dtype
-from pyop3.extras.debug import print_if_rank, print_with_rank
 from pyop3.sf import StarForest
 from pyop3.tree import (
     LabelledNodeComponent,
@@ -187,15 +186,9 @@ class ExpressionEvaluator(pym.mapper.evaluator.EvaluationMapper):
         # the inner_expr tells us the right mapping for the temporary, however,
         # for maps that are arrays the innermost axis label does not always match
         # the label used by the temporary. Therefore we need to do a swap here.
-        # I don't like this.
-        # print_if_rank(0, repr(array.axes))
-        # print_if_rank(0, "before: ",indices)
         inner_axis = array.axes.leaf_axis
         indices[inner_axis.label] = indices.pop(expr.function.full_map.name)
 
-        # print_if_rank(0, "after:",indices)
-        # print_if_rank(0, repr(expr))
-        # print_if_rank(0, self.context)
         return array.get_value(path, indices)
 
 
@@ -580,55 +573,6 @@ class PartialAxisTree(LabelledTree):
             parent_cpt_label = _as_axis_component_label(parent_component)
         return super().add_node(axis, parent, parent_cpt_label, **kwargs)
 
-    # alias
-    add_subaxis = add_node
-
-    # currently untested but should keep
-    @classmethod
-    def from_layout(cls, layout: Sequence[ConstrainedMultiAxis]) -> Any:  # TODO
-        return order_axes(layout)
-
-    # TODO this is just a regular tree search
-    @deprecated(internal=True)  # I think?
-    def get_part_from_path(self, path, axis=None):
-        axis = axis or self.root
-
-        label, *sublabels = path
-
-        (component, component_index) = just_one(
-            [
-                (cpt, cidx)
-                for cidx, cpt in enumerate(axis.components)
-                if (axis.label, cidx) == label
-            ]
-        )
-        if sublabels:
-            return self.get_part_from_path(
-                sublabels, self.component_child(axis, component)
-            )
-        else:
-            return axis, component
-
-    @deprecated(internal=True)
-    def drop_last(self):
-        """Remove the last subaxis"""
-        if not self.part.subaxis:
-            return None
-        else:
-            return self.copy(
-                parts=[self.part.copy(subaxis=self.part.subaxis.drop_last())]
-            )
-
-    @property
-    @deprecated(internal=True)
-    def is_linear(self):
-        """Return ``True`` if the multi-axis contains no branches at any level."""
-        if self.nparts == 1:
-            return self.part.subaxis.is_linear if self.part.subaxis else True
-        else:
-            return False
-
-    @deprecated()
     def add_subaxis(self, subaxis, *loc):
         return self.add_node(subaxis, *loc)
 
@@ -657,8 +601,6 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         "target_paths",
         "index_exprs",
         "layout_exprs",
-        "layouts",
-        "sf",
     }
 
     def __init__(
@@ -667,7 +609,6 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         target_paths=None,
         index_exprs=None,
         layout_exprs=None,
-        sf=None,
     ):
         if some_but_not_all(
             arg is None for arg in [target_paths, index_exprs, layout_exprs]
@@ -678,7 +619,6 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         self._target_paths = target_paths or self._default_target_paths()
         self._index_exprs = index_exprs or self._default_index_exprs()
         self.layout_exprs = layout_exprs or self._default_layout_exprs()
-        self.sf = sf or self._default_sf()
 
     def __getitem__(self, indices):
         from pyop3.itree.tree import as_index_forest, collect_loop_contexts, index_axes
@@ -762,7 +702,7 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
 
     @cached_property
     def sf(self):
-        return cls._default_sf(tree)
+        return self._default_sf()
 
     @cached_property
     def datamap(self):
@@ -771,17 +711,6 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         else:
             dmap = postvisit(self, _collect_datamap, axes=self)
 
-        # for cleverdict in [self.layouts, self.orig_layout_fn]:
-        #     for layout in cleverdict.values():
-        #         for layout_expr in layout.values():
-        #             # catch invalid layouts
-        #             if isinstance(layout_expr, pym.primitives.NaN):
-        #                 continue
-        #             for array in MultiArrayCollector()(layout_expr):
-        #                 dmap.update(array.datamap)
-
-        # TODO
-        # for cleverdict in [self.index_exprs, self.layout_exprs]:
         for cleverdict in [self.index_exprs]:
             for exprs in cleverdict.values():
                 for expr in exprs.values():
@@ -937,26 +866,6 @@ class ContextSensitiveAxisTree(ContextSensitiveLoopIterable):
     @cached_property
     def datamap(self):
         return merge_dicts(axes.datamap for axes in self.context_map.values())
-
-
-@dataclasses.dataclass(frozen=True)
-class Path:
-    # TODO Make a persistent dict?
-    from_axes: Tuple[Any]  # axis part IDs I guess (or labels)
-    to_axess: Tuple[Any]  # axis part IDs I guess (or labels)
-    arity: int
-    selector: Optional[Any] = None
-    """The thing that chooses between the different possible output axes at runtime."""
-
-    @property
-    def degree(self):
-        return len(self.to_axess)
-
-    @property
-    def to_axes(self):
-        if self.degree != 1:
-            raise RuntimeError("Only for degree 1 paths")
-        return self.to_axess[0]
 
 
 @functools.singledispatch

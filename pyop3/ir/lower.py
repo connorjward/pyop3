@@ -29,7 +29,6 @@ from pyop3.axtree import Axis, AxisComponent, AxisTree, AxisVariable
 from pyop3.axtree.tree import ContextSensitiveAxisTree
 from pyop3.buffer import DistributedBuffer, PackedBuffer
 from pyop3.dtypes import IntType, PointerType
-from pyop3.extras.debug import print_with_rank
 from pyop3.itree import (
     AffineSliceComponent,
     CalledMap,
@@ -442,11 +441,6 @@ def parse_loop_properly_this_time(
         # these aren't jnames!
         my_index_exprs = axes.index_exprs.get((axis.id, component.label), {})
 
-        print_with_rank("myindexexprs", my_index_exprs)
-        print_with_rank("new_iname_rplacemap", new_iname_replace_map)
-        print_with_rank("jname_replace_map", jname_replace_map)
-        print_with_rank("outerreplac", outer_replace_map)
-
         jname_extras = {}
         for axis_label, index_expr in my_index_exprs.items():
             jname_expr = JnameSubstitutor(
@@ -854,10 +848,6 @@ def add_leaf_assignment(
         array_ = array.with_context(context)
         return make_array_expr(
             array,
-            # I think...
-            # not calling substitute layouts from above so loop indices not
-            # present in the layout...
-            # subst_layout(axes, source_path, target_path),
             array_.layouts[target_path],
             target_path,
             iname_replace_map | jname_replace_map,
@@ -917,14 +907,6 @@ def make_temp_expr(temporary, shape, path, jnames, ctx):
     ctx.add_assignment(temp_offset_var, temp_offset)
     temp_offset_var = pym.var(temp_offset_var)
     return pym.subscript(pym.var(temporary.name), extra_indices + (temp_offset_var,))
-
-
-def subst_layout(axes, source_path, target_path):
-    replace_map = {}
-    for axis, cpt in axes.detailed_path(source_path).items():
-        replace_map.update(axes.layout_exprs[axis.id, cpt])
-
-    return IndexExpressionReplacer(replace_map)(axes.layouts[target_path])
 
 
 class JnameSubstitutor(pym.mapper.IdentityMapper):
@@ -1117,17 +1099,6 @@ class VariableReplacer(pym.mapper.IdentityMapper):
         return self._replace_map.get(expr.name, expr)
 
 
-def collect_arrays(expr: pym.primitives.Expr):
-    collector = MultiArrayCollector()
-    return collector(expr)
-
-
-def replace_variables(
-    expr: pym.primitives.Expr, replace_map: dict[str, pym.primitives.Variable]
-):
-    return VariableReplacer(replace_map)(expr)
-
-
 def _scalar_assignment(
     array,
     path,
@@ -1144,22 +1115,6 @@ def _scalar_assignment(
     )
     rexpr = pym.subscript(pym.var(array.name), offset_expr)
     return rexpr
-
-
-def find_axis(axes, path, target, current_axis=None):
-    """Return the axis matching ``target`` along ``path``.
-
-    ``path`` is a mapping between axis labels and the selected component indices.
-    """
-    current_axis = current_axis or axes.root
-
-    if current_axis.label == target:
-        return current_axis
-    else:
-        subaxis = axes.child(current_axis, path[current_axis.label])
-        if not subaxis:
-            assert False, "oops"
-        return find_axis(axes, path, target, subaxis)
 
 
 def context_from_indices(loop_indices):
