@@ -37,8 +37,10 @@ def test_scalar_copy_with_permuted_inner_axis(scalar_copy_kernel):
     axes = op3.AxisTree.from_nest({axis0: axis1})
     paxes = op3.AxisTree.from_nest({axis0: paxis1})
 
-    dat0 = op3.Dat(axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType)
-    dat1 = op3.Dat(paxes, name="dat1", dtype=dat0.dtype)
+    dat0 = op3.HierarchicalArray(
+        axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType
+    )
+    dat1 = op3.HierarchicalArray(paxes, name="dat1", dtype=dat0.dtype)
 
     op3.do_loop(p := axes.index(), scalar_copy_kernel(dat0[p], dat1[p]))
     assert np.allclose(dat1.data_ro, dat0.data_ro)
@@ -55,8 +57,10 @@ def test_vector_copy_with_permuted_axis(vector_copy_kernel):
     paxis0 = axis0.copy(numbering=numbering)
     paxes = op3.AxisTree.from_nest({paxis0: axis1})
 
-    dat0 = op3.Dat(axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType)
-    dat1 = op3.Dat(paxes, name="dat1", dtype=dat0.dtype)
+    dat0 = op3.HierarchicalArray(
+        axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType
+    )
+    dat1 = op3.HierarchicalArray(paxes, name="dat1", dtype=dat0.dtype)
 
     op3.do_loop(p := axes.root.index(), vector_copy_kernel(dat0[p, :], dat1[p, :]))
     assert np.allclose(dat1.data, dat0.data)
@@ -76,8 +80,10 @@ def test_vector_copy_with_two_permuted_axes(vector_copy_kernel):
     paxis1 = axis1.copy(numbering=numbering1)
     paxes = op3.AxisTree.from_nest({paxis0: {paxis1: axis2}})
 
-    dat0 = op3.Dat(axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType)
-    dat1 = op3.Dat(paxes, name="dat1", dtype=dat0.dtype)
+    dat0 = op3.HierarchicalArray(
+        axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType
+    )
+    dat1 = op3.HierarchicalArray(paxes, name="dat1", dtype=dat0.dtype)
 
     iterset = op3.AxisTree.from_nest({axis0: axis1})
     op3.do_loop(p := iterset.index(), vector_copy_kernel(dat0[p, :], dat1[p, :]))
@@ -96,8 +102,10 @@ def test_vector_copy_with_permuted_inner_axis(vector_copy_kernel):
     paxis1 = axis1.copy(numbering=numbering)
     paxes = op3.AxisTree.from_nest({axis0: {paxis1: axis2}})
 
-    dat0 = op3.Dat(axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType)
-    dat1 = op3.Dat(paxes, name="dat1", dtype=dat0.dtype)
+    dat0 = op3.HierarchicalArray(
+        axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType
+    )
+    dat1 = op3.HierarchicalArray(paxes, name="dat1", dtype=dat0.dtype)
 
     iterset = op3.AxisTree.from_nest({axis0: axis1})
     op3.do_loop(p := iterset.index(), vector_copy_kernel(dat0[p, :], dat1[p, :]))
@@ -114,8 +122,10 @@ def test_vector_copy_with_permuted_multi_component_axes(vector_copy_kernel):
     axes = op3.AxisTree.from_nest({root: [op3.Axis(a), op3.Axis(b)]})
     paxes = op3.AxisTree.from_nest({proot: [op3.Axis(a), op3.Axis(b)]})
 
-    dat0 = op3.Dat(axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType)
-    dat1 = op3.Dat(paxes, name="dat1", dtype=dat0.dtype)
+    dat0 = op3.HierarchicalArray(
+        axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType
+    )
+    dat1 = op3.HierarchicalArray(paxes, name="dat1", dtype=dat0.dtype)
 
     op3.do_loop(p := root["b"].index(), vector_copy_kernel(dat0[p, :], dat1[p, :]))
 

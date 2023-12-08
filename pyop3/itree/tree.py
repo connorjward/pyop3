@@ -61,7 +61,7 @@ class IndexExpressionReplacer(pym.mapper.IdentityMapper):
         return self._replace_map.get(expr.axis_label, expr)
 
     def map_multi_array(self, expr):
-        from pyop3.tensor.dat import MultiArrayVariable
+        from pyop3.array.harray import MultiArrayVariable
 
         # print_if_rank(0, self._replace_map)
         # print_if_rank(0, expr.indices)
@@ -479,9 +479,9 @@ class ContextSensitiveCalledMap(ContextSensitiveLoopIterable):
 
 @functools.singledispatch
 def apply_loop_context(arg, loop_context, *, axes, path):
-    from pyop3.tensor import Dat
+    from pyop3.array import HierarchicalArray
 
-    if isinstance(arg, Dat):
+    if isinstance(arg, HierarchicalArray):
         parent = axes._node_from_path(path)
         if parent is not None:
             parent_axis, parent_cpt = parent
@@ -546,9 +546,9 @@ def combine_contexts(contexts):
 
 @functools.singledispatch
 def collect_loop_indices(arg):
-    from pyop3.tensor import Dat  # cyclic import
+    from pyop3.array import HierarchicalArray
 
-    if isinstance(arg, (Dat, Slice, slice, str)):
+    if isinstance(arg, (HierarchicalArray, Slice, slice, str)):
         return ()
     elif isinstance(arg, collections.abc.Iterable):
         return sum(map(collect_loop_indices, arg), ())
@@ -611,9 +611,9 @@ def loop_contexts_from_iterable(indices):
 
 @functools.singledispatch
 def collect_loop_contexts(arg, *args, **kwargs):
-    from pyop3.tensor import Dat  # cyclic import
+    from pyop3.array import HierarchicalArray
 
-    if isinstance(arg, (Dat, numbers.Integral)):
+    if isinstance(arg, (HierarchicalArray, numbers.Integral)):
         return {}
     elif isinstance(arg, collections.abc.Iterable):
         return loop_contexts_from_iterable(arg)
@@ -813,9 +813,9 @@ def _(index: Index, ctx, **kwargs):
 
 @functools.singledispatch
 def as_index_forest(arg: Any, **kwargs):
-    from pyop3.tensor import Dat  # cyclic import
+    from pyop3.array import HierarchicalArray
 
-    if isinstance(arg, Dat):
+    if isinstance(arg, HierarchicalArray):
         slice_ = apply_loop_context(arg, loop_context=pmap(), path=pmap(), **kwargs)
         return (IndexTree(slice_),)
     elif isinstance(arg, collections.abc.Sequence):
@@ -1461,7 +1461,7 @@ def partition_iterset(index: LoopIndex, arrays):
     to be complete before computation can happen').
 
     """
-    from pyop3.tensor import Dat
+    from pyop3.array import HierarchicalArray
 
     # take first
     # paraxis = [axis for axis in index.iterset.nodes if axis.sf is not None][0]
@@ -1602,8 +1602,10 @@ def partition_iterset(index: LoopIndex, arrays):
     subsets = []
     for data in [core, root, leaf]:
         # Constant?
-        size = Dat(AxisTree(), data=np.asarray([len(data)]), dtype=IntType)
-        subset = Dat(
+        size = HierarchicalArray(
+            AxisTree(), data=np.asarray([len(data)]), dtype=IntType
+        )
+        subset = HierarchicalArray(
             Axis([AxisComponent(size, parcpt.label)], paraxis.label), data=data
         )
         subsets.append(subset)

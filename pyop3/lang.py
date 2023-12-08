@@ -20,26 +20,15 @@ from pyrsistent import freeze, pmap
 
 from pyop3.axtree import as_axis_tree
 from pyop3.axtree.tree import ContextFree, ContextSensitive, MultiArrayCollector
-from pyop3.buffer import DistributedBuffer
 from pyop3.config import config
 from pyop3.dtypes import IntType, dtype_limits
 from pyop3.extras.debug import print_with_rank
-from pyop3.itree.tree import (
-    IndexExpressionReplacer,
-    _compose_bits,
-    _index_axes,
-    as_index_forest,
-    partition_iterset,
-)
-from pyop3.tensor import Dat, MultiArray, PetscMat
-from pyop3.tensor.dat import ContextSensitiveMultiArray
 from pyop3.utils import as_tuple, checked_zip, just_one, merge_dicts, unique
 
 
 # TODO I don't think that this belongs in this file, it belongs to the function?
 # create a function.py file?
-# class Intent?
-class Access(enum.Enum):
+class Intent(enum.Enum):
     # developer note, MIN_RW and MIN_WRITE are distinct (unlike PyOP2) to avoid
     # passing "requires_zeroed_output_arguments" around, yuck
 
@@ -51,6 +40,10 @@ class Access(enum.Enum):
     MIN_RW = "min_rw"
     MAX_WRITE = "max_write"
     MAX_RW = "max_rw"
+
+
+# old alias
+Access = Intent
 
 
 READ = Access.READ
@@ -65,6 +58,10 @@ MAX_WRITE = Access.MAX_WRITE
 
 class IntentMismatchError(Exception):
     pass
+
+
+class KernelArgument(abc.ABC):
+    """Class representing objects that may be passed as arguments to kernels."""
 
 
 class LoopExpr(pytools.ImmutableRecord, abc.ABC):
@@ -129,6 +126,7 @@ class Loop(LoopExpr):
 
     def __call__(self, **kwargs):
         from pyop3.ir.lower import compile
+        from pyop3.itree.tree import partition_iterset
 
         if self.is_parallel:
             # interleave computation and communication
@@ -208,6 +206,8 @@ class Loop(LoopExpr):
 
     @cached_property
     def _distarray_args(self):
+        from pyop3.buffer import DistributedBuffer
+
         arrays = {}
         for arg, intent in self.all_function_arguments:
             if (
@@ -323,7 +323,9 @@ def _has_nontrivial_stencil(array):
     # FIXME This is WRONG, there are cases (e.g. support(extfacet)) where
     # the halo might be touched but the size (i.e. map arity) is 1. I need
     # to look at index_exprs probably.
-    if isinstance(array, Dat):
+    from pyop3.array import ContextSensitiveMultiArray, HierarchicalArray
+
+    if isinstance(array, HierarchicalArray):
         return array.axes.size > 1
     elif isinstance(array, ContextSensitiveMultiArray):
         return any(_has_nontrivial_stencil(d) for d in array.context_map.values())
@@ -380,6 +382,8 @@ class Function:
         self._access_descrs = access_descrs
 
     def __call__(self, *args):
+        if not all(isinstance(a, KernelArgument) for a in args):
+            raise TypeError("invalid kernel argument type")
         if len(args) != len(self.argspec):
             raise ValueError(
                 f"Wrong number of arguments provided, expected {len(self.argspec)} "

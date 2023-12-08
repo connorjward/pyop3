@@ -10,12 +10,12 @@ import pymbolic as pym
 from petsc4py import PETSc
 from pyrsistent import freeze
 
+from pyop3.array.base import Array
+from pyop3.array.harray import ContextSensitiveMultiArray, HierarchicalArray
 from pyop3.axtree import AxisTree
 from pyop3.axtree.tree import ContextFree, ContextSensitive, as_axis_tree
 from pyop3.dtypes import ScalarType
 from pyop3.itree import IndexTree
-from pyop3.tensor.base import Tensor
-from pyop3.tensor.dat import ContextSensitiveMultiArray, Dat
 from pyop3.utils import just_one, merge_dicts, single_valued, strictly_all
 
 
@@ -26,17 +26,21 @@ class PetscVariable(pym.primitives.Variable):
         self.obj = obj
 
 
-class PetscObject(abc.ABC):
+class PetscObject(Array, abc.ABC):
     dtype = ScalarType
 
     def as_var(self):
         return PetscVariable(self)
 
 
-class PetscVec(Tensor, PetscObject):
+class PetscVec(PetscObject):
     def __new__(cls, *args, **kwargs):
         # dispatch to different vec types based on -vec_type
         raise NotImplementedError
+
+    @property
+    def valid_ranks(self):
+        return frozenset({0, 1})
 
 
 class PetscVecStandard(PetscVec):
@@ -47,12 +51,16 @@ class PetscVecNest(PetscVec):
     ...
 
 
-class PetscMat(Tensor, PetscObject):
+class PetscMat(PetscObject):
     prefix = "mat"
 
     def __new__(cls, *args, **kwargs):
         # TODO dispatch to different mat types based on -mat_type
         return object.__new__(PetscMatAIJ)
+
+    @property
+    def valid_ranks(self):
+        return frozenset({2})
 
     @functools.cached_property
     def datamap(self):
@@ -91,7 +99,7 @@ class IndexedPetscMat(ContextFree):
 
     def materialize(self):
         axes = AxisTree(self.axes.parent_to_children)
-        return Dat(axes, dtype=self.dtype)
+        return HierarchicalArray(axes, dtype=self.dtype)
 
 
 class PetscMatDense(PetscMat):

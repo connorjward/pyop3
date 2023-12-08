@@ -38,14 +38,16 @@ def test_different_axis_orderings_do_not_change_packing_order():
     data0 = np.arange(npoints).reshape((m0, m1, m2))
     data1 = data0.swapaxes(1, 2)
 
-    dat0_0 = op3.Dat(
+    dat0_0 = op3.HierarchicalArray(
         axes0,
         name="dat0_0",
         data=data0.flatten(),
         dtype=op3.ScalarType,
     )
-    dat0_1 = op3.Dat(axes1, name="dat0_1", data=data1.flatten(), dtype=dat0_0.dtype)
-    dat1 = op3.Dat(axes0, name="dat1", dtype=dat0_0.dtype)
+    dat0_1 = op3.HierarchicalArray(
+        axes1, name="dat0_1", data=data1.flatten(), dtype=dat0_0.dtype
+    )
+    dat1 = op3.HierarchicalArray(axes0, name="dat1", dtype=dat0_0.dtype)
 
     p = axis0.index()
     path = pmap({axis0.label: axis0.component.label})

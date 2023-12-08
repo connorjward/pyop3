@@ -271,7 +271,7 @@ def test_permuted_multi_component_layout_with_zero_sized_subaxis():
 
 def test_ragged_layout():
     nnz_axis = op3.Axis({"pt0": 3}, "ax0")
-    nnz = op3.Dat(nnz_axis, data=np.asarray([2, 1, 2]), dtype=op3.IntType)
+    nnz = op3.HierarchicalArray(nnz_axis, data=np.asarray([2, 1, 2]), dtype=op3.IntType)
 
     axes = op3.AxisTree.from_nest({nnz_axis: op3.Axis({"pt0": nnz}, "ax1")}).freeze()
 
@@ -312,7 +312,7 @@ def test_ragged_layout_with_two_outer_axes():
         {axis0: axis1},
     )
     nnz_data = np.asarray([[2, 1], [1, 2]])
-    nnz = op3.Dat(nnz_axes, data=nnz_data.flatten(), dtype=op3.IntType)
+    nnz = op3.HierarchicalArray(nnz_axes, data=nnz_data.flatten(), dtype=op3.IntType)
 
     axes = op3.AxisTree.from_nest(
         {axis0: {axis1: op3.Axis({"pt0": nnz}, "ax2")}},
@@ -353,9 +353,9 @@ def test_independent_ragged_axes():
     axis1 = op3.Axis({"pt0": 2}, "ax1")
 
     nnz_data0 = np.asarray([2, 1])
-    nnz0 = op3.Dat(axis0, name="nnz0", data=nnz_data0, dtype=op3.IntType)
+    nnz0 = op3.HierarchicalArray(axis0, name="nnz0", data=nnz_data0, dtype=op3.IntType)
     nnz_data1 = np.asarray([1, 0])
-    nnz1 = op3.Dat(axis1, name="nnz1", data=nnz_data1, dtype=op3.IntType)
+    nnz1 = op3.HierarchicalArray(axis1, name="nnz1", data=nnz_data1, dtype=op3.IntType)
 
     axis2 = op3.Axis({"pt0": nnz0, "pt1": nnz1, "pt2": 2}, "ax2")
     axes = op3.AxisTree.from_nest({axis0: {axis1: axis2}})

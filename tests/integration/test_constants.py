@@ -7,11 +7,11 @@ from pyop3.ir import LOOPY_LANG_VERSION, LOOPY_TARGET
 
 # spelling?
 def test_loop_over_parametrised_length(scalar_copy_kernel):
-    length = op3.Dat(op3.AxisTree(), dtype=int)
+    length = op3.HierarchicalArray(op3.AxisTree(), dtype=int)
     iter_axes = op3.Axis([op3.AxisComponent(length, "pt0")], "ax0")
 
     dat_axes = op3.Axis([op3.AxisComponent(10, "pt0")], "ax0")
-    dat = op3.Dat(dat_axes, dtype=int)
+    dat = op3.HierarchicalArray(dat_axes, dtype=int)
 
     one = op3.Function(
         lp.make_kernel(

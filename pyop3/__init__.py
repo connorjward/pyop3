@@ -8,6 +8,7 @@ del pytools
 
 
 import pyop3.transforms
+from pyop3.array import Array, HierarchicalArray, MultiArray, PetscMat
 from pyop3.axtree import Axis, AxisComponent, AxisTree  # noqa: F401
 from pyop3.buffer import DistributedBuffer  # noqa: F401
 from pyop3.dtypes import IntType, ScalarType  # noqa: F401
@@ -36,4 +37,4 @@ from pyop3.lang import (  # noqa: F401
     do_loop,
     loop,
 )
-from pyop3.tensor import Dat, MultiArray, PetscMat  # noqa: F401
+from pyop3.tensor import Dat, Global, Mat, Tensor  # noqa: F401

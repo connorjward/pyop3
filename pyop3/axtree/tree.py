@@ -448,11 +448,11 @@ class Sparsity:
 
 
 def _collect_datamap(axis, *subdatamaps, axes):
-    from pyop3.tensor import Dat
+    from pyop3.array import HierarchicalArray
 
     datamap = {}
     for cidx, component in enumerate(axis.components):
-        if isinstance(count := component.count, Dat):
+        if isinstance(count := component.count, HierarchicalArray):
             datamap.update(count.datamap)
 
     datamap.update(merge_dicts(subdatamaps))
@@ -537,9 +537,9 @@ class AxisComponent(LabelledNodeComponent):
 
     # TODO this is just a traversal - clean up
     def alloc_size(self, axtree, axis):
-        from pyop3.tensor import Dat
+        from pyop3.array import HierarchicalArray
 
-        if isinstance(self.count, Dat):
+        if isinstance(self.count, HierarchicalArray):
             npoints = self.count.max_value
         else:
             assert isinstance(self.count, numbers.Integral)
@@ -768,14 +768,14 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
 
     @staticmethod
     def _parse_numbering(numbering):
-        from pyop3.tensor import Dat
+        from pyop3.array import HierarchicalArray
 
         if numbering is None:
             return None
-        elif isinstance(numbering, Dat):
+        elif isinstance(numbering, HierarchicalArray):
             return numbering
         elif isinstance(numbering, collections.abc.Collection):
-            return Dat(len(numbering), data=numbering, dtype=IntType)
+            return HierarchicalArray(len(numbering), data=numbering, dtype=IntType)
         else:
             raise TypeError(
                 f"{type(numbering).__name__} is not a supported type for numbering"
@@ -1103,7 +1103,7 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
     def freeze(self):
         return self
 
-    # needed here? or just for the Dat? perhaps a free function?
+    # needed here? or just for the HierarchicalArray? perhaps a free function?
     def offset(self, *args, allow_unused=False, insert_zeros=False):
         nargs = len(args)
         if nargs == 2:
@@ -1247,9 +1247,9 @@ class Path:
 
 @functools.singledispatch
 def as_axis_tree(arg: Any):
-    from pyop3.tensor import Dat  # cyclic import
+    from pyop3.array import HierarchicalArray  # cyclic import
 
-    if isinstance(arg, Dat):
+    if isinstance(arg, HierarchicalArray):
         return as_axis_tree(AxisComponent(arg))
     raise TypeError
 
@@ -1296,9 +1296,9 @@ def _(arg: AxisComponent):
 
 @functools.singledispatch
 def _as_axis_component(arg: Any) -> AxisComponent:
-    from pyop3.tensor import Dat  # cyclic import
+    from pyop3.array import HierarchicalArray  # cyclic import
 
-    if isinstance(arg, Dat):
+    if isinstance(arg, HierarchicalArray):
         return AxisComponent(arg)
     else:
         raise TypeError

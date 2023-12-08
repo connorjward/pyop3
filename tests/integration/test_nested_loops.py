@@ -11,8 +11,10 @@ def test_transpose(scalar_copy_kernel):
     axes0 = op3.AxisTree.from_nest({axis0: axis1})
     axes1 = op3.AxisTree.from_nest({axis1: axis0})
 
-    dat0 = op3.Dat(axes0, name="dat0", data=np.arange(axes0.size), dtype=op3.ScalarType)
-    dat1 = op3.Dat(axes1, name="dat1", dtype=dat0.dtype)
+    dat0 = op3.HierarchicalArray(
+        axes0, name="dat0", data=np.arange(axes0.size), dtype=op3.ScalarType
+    )
+    dat1 = op3.HierarchicalArray(axes1, name="dat1", dtype=dat0.dtype)
 
     op3.do_loop(
         p := axis0.index(),
@@ -31,8 +33,10 @@ def test_nested_multi_component_loops(scalar_copy_kernel):
     axis1_dup = axis1.copy(id=axis1.unique_id())
     axes = op3.AxisTree.from_nest({axis0: [axis1, axis1_dup]})
 
-    dat0 = op3.Dat(axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType)
-    dat1 = op3.Dat(axes, name="dat1", dtype=dat0.dtype)
+    dat0 = op3.HierarchicalArray(
+        axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType
+    )
+    dat1 = op3.HierarchicalArray(axes, name="dat1", dtype=dat0.dtype)
 
     op3.do_loop(
         p := axis0.index(),

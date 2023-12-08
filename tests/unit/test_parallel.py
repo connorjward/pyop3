@@ -167,7 +167,7 @@ def test_nested_parallel_axes_produce_correct_sf(comm, paxis):
 @pytest.mark.parallel(nprocs=2)
 @pytest.mark.parametrize("with_ghosts", [False, True])
 def test_partition_iterset_scalar(comm, paxis, with_ghosts):
-    array = op3.Dat(paxis, dtype=op3.ScalarType)
+    array = op3.HierarchicalArray(paxis, dtype=op3.ScalarType)
 
     if with_ghosts:
         p = op3.LoopIndex(paxis.as_tree())
@@ -210,7 +210,7 @@ def test_partition_iterset_with_map(comm, paxis, with_ghosts):
             [[0, 1], [0, 2], [1, 3], [2, 4], [3, 5], [4, 5]], dtype=op3.IntType
         )
     map_axes = op3.AxisTree.from_nest({op3.Axis(6, paxis.label): op3.Axis(2)})
-    map_array = op3.Dat(map_axes, data=map_data.flatten())
+    map_array = op3.HierarchicalArray(map_axes, data=map_data.flatten())
     map0 = op3.Map(
         {
             freeze({axis_label: component_label}): [
@@ -223,7 +223,7 @@ def test_partition_iterset_with_map(comm, paxis, with_ghosts):
         label=axis_label,
     )
 
-    array = op3.Dat(paxis, dtype=op3.ScalarType)
+    array = op3.HierarchicalArray(paxis, dtype=op3.ScalarType)
 
     if with_ghosts:
         p = op3.LoopIndex(paxis.as_tree())

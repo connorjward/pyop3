@@ -22,6 +22,9 @@ from petsc4py import PETSc
 from pyrsistent import freeze, pmap
 
 from pyop3 import utils
+from pyop3.array import HierarchicalArray
+from pyop3.array.harray import ContextSensitiveMultiArray
+from pyop3.array.petsc import IndexedPetscMat, PetscMat, PetscObject
 from pyop3.axtree import Axis, AxisComponent, AxisTree, AxisVariable
 from pyop3.axtree.tree import ContextSensitiveAxisTree
 from pyop3.buffer import DistributedBuffer
@@ -59,9 +62,7 @@ from pyop3.lang import (
     Loop,
 )
 from pyop3.log import logger
-from pyop3.tensor import Dat
-from pyop3.tensor.dat import ContextSensitiveMultiArray
-from pyop3.tensor.petsc import IndexedPetscMat, PetscMat, PetscObject
+from pyop3.tensor import Dat, Tensor
 from pyop3.utils import (
     PrettyTuple,
     checked_zip,
@@ -226,8 +227,8 @@ class LoopyCodegenContext(CodegenContext):
     def _(self, array: ContextSensitiveMultiArray):
         return single_valued(self._dtype(a) for a in array.context_map.values())
 
-    @_dtype.register
-    def _(self, array: Dat):
+    @_dtype.register(HierarchicalArray)
+    def _(self, array):
         return array.dtype
 
     # TODO I think this subclasses Dat
@@ -528,7 +529,7 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
 
         loop_context = context_from_indices(loop_indices)
 
-        assert isinstance(arg, (Dat, ContextSensitiveMultiArray))
+        assert isinstance(arg, (HierarchicalArray, ContextSensitiveMultiArray))
         temporary = arg.with_context(loop_context).materialize()
         indexed_temp = temporary
 
@@ -851,7 +852,7 @@ def add_leaf_assignment(
 ):
     context = context_from_indices(loop_indices)
 
-    assert isinstance(array, (Dat, ContextSensitiveMultiArray))
+    assert isinstance(array, (HierarchicalArray, ContextSensitiveMultiArray))
 
     def array_expr():
         array_ = array.with_context(context)
@@ -960,7 +961,7 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         return varname
 
     def map_called_map(self, expr):
-        if not isinstance(expr.function.map_component.array, Dat):
+        if not isinstance(expr.function.map_component.array, HierarchicalArray):
             raise NotImplementedError("Affine map stuff not supported yet")
 
         # TODO I think I can clean the indexing up a lot here
@@ -1103,7 +1104,7 @@ def register_extent(extent, jnames, ctx):
         return extent
 
     # actually a pymbolic expression
-    if not isinstance(extent, Dat):
+    if not isinstance(extent, HierarchicalArray):
         raise NotImplementedError("need to tidy up assignment logic")
 
     if not extent.axes.is_empty:
@@ -1201,11 +1202,16 @@ def _(array: np.ndarray):
 
 
 @_as_pointer.register
-def _(array: Dat):
+def _(array: HierarchicalArray):
     # TODO if we use the right accessor here we modify the state appropriately
-    return array.array._data.ctypes.data
+    return array.buffer._data.ctypes.data
 
 
 @_as_pointer.register
 def _(array: PetscMat):
     return array.petscmat.handle
+
+
+@_as_pointer.register
+def _(arg: Tensor):
+    return _as_pointer(arg.data)

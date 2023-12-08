@@ -78,11 +78,13 @@ def test_inc_from_tabulated_map(scalar_inc_kernel, vector_inc_kernel, nested):
     map_data = np.asarray([[1, 2, 0], [2, 0, 1], [3, 2, 3], [2, 0, 1]])
 
     axis = op3.Axis({"pt0": m}, "ax0")
-    dat0 = op3.Dat(axis, name="dat0", data=np.arange(axis.size), dtype=op3.ScalarType)
-    dat1 = op3.Dat(axis, name="dat1", dtype=dat0.dtype)
+    dat0 = op3.HierarchicalArray(
+        axis, name="dat0", data=np.arange(axis.size), dtype=op3.ScalarType
+    )
+    dat1 = op3.HierarchicalArray(axis, name="dat1", dtype=dat0.dtype)
 
     map_axes = op3.AxisTree.from_nest({axis: op3.Axis(n)})
-    map_dat = op3.Dat(
+    map_dat = op3.HierarchicalArray(
         map_axes,
         name="map0",
         data=map_data.flatten(),
@@ -127,7 +129,7 @@ def test_inc_from_multi_component_temporary(vector_inc_kernel):
 
     # poor man's identity map
     map_axes0 = op3.AxisTree.from_nest({axis1: op3.Axis(1)})
-    map_dat0 = op3.Dat(
+    map_dat0 = op3.HierarchicalArray(
         map_axes0,
         name="map0",
         data=np.arange(map_axes0.size),
@@ -135,7 +137,7 @@ def test_inc_from_multi_component_temporary(vector_inc_kernel):
     )
 
     map_axes1 = op3.AxisTree.from_nest({axis1: op3.Axis(arity)})
-    map_dat1 = op3.Dat(
+    map_dat1 = op3.HierarchicalArray(
         map_axes1, name="map1", data=map_data.flatten(), dtype=op3.IntType
     )
 
@@ -168,19 +170,21 @@ def test_inc_with_multiple_maps(vector_inc_kernel):
     map_data1 = np.asarray([[1], [1], [3], [0], [2]])
 
     axis = op3.Axis({"pt0": m}, "ax0")
-    dat0 = op3.Dat(axis, name="dat0", data=np.arange(axis.size), dtype=op3.ScalarType)
-    dat1 = op3.Dat(axis, name="dat1", dtype=dat0.dtype)
+    dat0 = op3.HierarchicalArray(
+        axis, name="dat0", data=np.arange(axis.size), dtype=op3.ScalarType
+    )
+    dat1 = op3.HierarchicalArray(axis, name="dat1", dtype=dat0.dtype)
 
     map_axes0 = op3.AxisTree.from_nest({axis: op3.Axis(arity0)})
     map_axes1 = op3.AxisTree.from_nest({axis: op3.Axis(arity1)})
 
-    map_dat0 = op3.Dat(
+    map_dat0 = op3.HierarchicalArray(
         map_axes0,
         name="map0",
         data=map_data0.flatten(),
         dtype=op3.IntType,
     )
-    map_dat1 = op3.Dat(
+    map_dat1 = op3.HierarchicalArray(
         map_axes1,
         name="map1",
         data=map_data1.flatten(),
@@ -218,16 +222,18 @@ def test_inc_with_map_composition(scalar_inc_kernel, vec6_inc_kernel, nested):
     )
 
     axis = op3.Axis({"pt0": m}, "ax0")
-    dat0 = op3.Dat(axis, name="dat0", data=np.arange(m), dtype=op3.ScalarType)
-    dat1 = op3.Dat(axis, name="dat1", dtype=dat0.dtype)
+    dat0 = op3.HierarchicalArray(
+        axis, name="dat0", data=np.arange(m), dtype=op3.ScalarType
+    )
+    dat1 = op3.HierarchicalArray(axis, name="dat1", dtype=dat0.dtype)
 
     map_axes0 = op3.AxisTree.from_nest({axis: op3.Axis(arity0)})
     map_axes1 = op3.AxisTree.from_nest({axis: op3.Axis(arity1)})
 
-    map_dat0 = op3.Dat(
+    map_dat0 = op3.HierarchicalArray(
         map_axes0, name="map0", data=map_data0.flatten(), dtype=op3.IntType
     )
-    map_dat1 = op3.Dat(
+    map_dat1 = op3.HierarchicalArray(
         map_axes1, name="map1", data=map_data1.flatten(), dtype=op3.IntType
     )
 
@@ -277,18 +283,18 @@ def test_vector_inc_with_map_composition(vec2_inc_kernel, vec12_inc_kernel, nest
     axis = op3.Axis({"pt0": m}, "ax0")
 
     dat_axes = op3.AxisTree.from_nest({axis: op3.Axis({"pt0": n}, "ax1")})
-    dat0 = op3.Dat(
+    dat0 = op3.HierarchicalArray(
         dat_axes, name="dat0", data=np.arange(dat_axes.size), dtype=op3.ScalarType
     )
-    dat1 = op3.Dat(dat_axes, name="dat1", dtype=dat0.dtype)
+    dat1 = op3.HierarchicalArray(dat_axes, name="dat1", dtype=dat0.dtype)
 
     map_axes0 = op3.AxisTree.from_nest({axis: op3.Axis(arity0)})
     map_axes1 = op3.AxisTree.from_nest({axis: op3.Axis(arity1)})
 
-    map_dat0 = op3.Dat(
+    map_dat0 = op3.HierarchicalArray(
         map_axes0, name="map0", data=map_data0.flatten(), dtype=op3.IntType
     )
-    map_dat1 = op3.Dat(
+    map_dat1 = op3.HierarchicalArray(
         map_axes1, name="map1", data=map_data1.flatten(), dtype=op3.IntType
     )
 
@@ -371,7 +377,7 @@ def test_map_composition(vec2_inc_kernel):
 
     map_axes0 = op3.AxisTree.from_nest({iterset: op3.Axis(arity0)})
     map_data0 = np.asarray([[2, 4, 0], [6, 7, 1]])
-    map_dat0 = op3.Dat(
+    map_dat0 = op3.HierarchicalArray(
         map_axes0, name="map0", data=map_data0.flatten(), dtype=op3.IntType
     )
     map0 = op3.Map(
@@ -388,7 +394,7 @@ def test_map_composition(vec2_inc_kernel):
     # this map targets the entries in map0 so it can only contain 0s, 1s and 2s
     map_axes1 = op3.AxisTree.from_nest({iterset: op3.Axis(arity1)})
     map_data1 = np.asarray([[0, 2], [2, 1]])
-    map_dat1 = op3.Dat(
+    map_dat1 = op3.HierarchicalArray(
         map_axes1, name="map1", data=map_data1.flatten(), dtype=op3.IntType
     )
     map1 = op3.Map(
@@ -400,10 +406,10 @@ def test_map_composition(vec2_inc_kernel):
         "map1",
     )
 
-    dat0 = op3.Dat(
+    dat0 = op3.HierarchicalArray(
         dat_axis0, name="dat0", data=np.arange(dat_axis0.size), dtype=op3.ScalarType
     )
-    dat1 = op3.Dat(dat_axis1, name="dat1", dtype=dat0.dtype)
+    dat1 = op3.HierarchicalArray(dat_axis1, name="dat1", dtype=dat0.dtype)
 
     op3.do_loop(p := iterset.index(), vec2_inc_kernel(dat0[map0(p)][map1(p)], dat1))
 
@@ -435,7 +441,7 @@ def test_recursive_multi_component_maps():
         [[2, 4, 0], [2, 3, 1], [0, 2, 3], [1, 3, 4], [3, 1, 0]],
     )
     assert np.prod(map_data0_0.shape) == map_axes0_0.size
-    map_dat0_0 = op3.Dat(
+    map_dat0_0 = op3.HierarchicalArray(
         map_axes0_0, name="map0_0", data=map_data0_0.flatten(), dtype=op3.IntType
     )
 
@@ -444,7 +450,7 @@ def test_recursive_multi_component_maps():
     # maps to pt1 so the maximum possible index is n - 1
     map_data0_1 = np.asarray([[4, 5], [2, 1], [0, 3], [5, 0], [3, 2]])
     assert np.prod(map_data0_1.shape) == map_axes0_1.size
-    map_dat0_1 = op3.Dat(
+    map_dat0_1 = op3.HierarchicalArray(
         map_axes0_1, name="map0_1", data=map_data0_1.flatten(), dtype=op3.IntType
     )
 
@@ -453,7 +459,7 @@ def test_recursive_multi_component_maps():
     # maps to pt1 so the maximum possible index is n - 1
     map_data1 = np.asarray([[4], [5], [2], [3], [0], [1]])
     assert np.prod(map_data1.shape) == map_axes1.size
-    map_dat1 = op3.Dat(
+    map_dat1 = op3.HierarchicalArray(
         map_axes1, name="map1", data=map_data1.flatten(), dtype=op3.IntType
     )
 
@@ -472,8 +478,10 @@ def test_recursive_multi_component_maps():
     )
     map1 = map0.copy(name="map1")
 
-    dat0 = op3.Dat(axis, name="dat0", data=np.arange(axis.size), dtype=op3.ScalarType)
-    dat1 = op3.Dat(axis["pt0"], name="dat1", dtype=dat0.dtype)
+    dat0 = op3.HierarchicalArray(
+        axis, name="dat0", data=np.arange(axis.size), dtype=op3.ScalarType
+    )
+    dat1 = op3.HierarchicalArray(axis["pt0"], name="dat1", dtype=dat0.dtype)
 
     # the temporary from the maps will look like:
     # Axis([3, 2], label=map0)
@@ -523,17 +531,17 @@ def test_sum_with_consecutive_maps():
         {op3.Axis({"pt0": m}, "ax1"): op3.Axis({"pt0": n}, "ax2")},
     )
 
-    dat0 = op3.Dat(
+    dat0 = op3.HierarchicalArray(
         dat_axes0, name="dat0", data=np.arange(dat_axes0.size), dtype=op3.ScalarType
     )
-    dat1 = op3.Dat(iterset, name="dat1", dtype=dat0.dtype)
+    dat1 = op3.HierarchicalArray(iterset, name="dat1", dtype=dat0.dtype)
 
     # map0 maps from the iterset to ax1
     map_axes0 = op3.AxisTree.from_nest({iterset: op3.Axis(arity0)})
     map_data0 = np.asarray(
         [[2, 9, 0], [6, 7, 1], [5, 3, 8], [9, 3, 2], [2, 4, 6]],
     )
-    map_dat0 = op3.Dat(
+    map_dat0 = op3.HierarchicalArray(
         map_axes0, name="map0", data=map_data0.flatten(), dtype=op3.IntType
     )
     map0 = op3.Map(
@@ -548,7 +556,7 @@ def test_sum_with_consecutive_maps():
     # map1 maps from the iterset to ax2
     map_axes1 = op3.AxisTree.from_nest({iterset: op3.Axis(arity1)})
     map_data1 = np.asarray([[0, 2], [2, 1], [3, 1], [0, 0], [1, 2]])
-    map_dat1 = op3.Dat(
+    map_dat1 = op3.HierarchicalArray(
         map_axes1, name="map1", data=map_data1.flatten(), dtype=op3.IntType
     )
     map1 = op3.Map(

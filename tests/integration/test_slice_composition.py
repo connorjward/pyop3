@@ -26,13 +26,13 @@ def vec2_copy_kernel():
 
 def test_1d_slice_composition(vec2_copy_kernel):
     m, n = 10, 2
-    dat0 = op3.Dat(
+    dat0 = op3.HierarchicalArray(
         op3.Axis(m),
         name="dat0",
         data=np.arange(m),
         dtype=op3.ScalarType,
     )
-    dat1 = op3.Dat(op3.Axis(n), name="dat1", dtype=dat0.dtype)
+    dat1 = op3.HierarchicalArray(op3.Axis(n), name="dat1", dtype=dat0.dtype)
 
     op3.do_loop(op3.Axis(1).index(), vec2_copy_kernel(dat0[::2][1:3], dat1))
     assert np.allclose(dat1.data_ro, dat0.data_ro[::2][1:3])
@@ -45,8 +45,10 @@ def test_2d_slice_composition(vec2_copy_kernel):
     axes0 = op3.AxisTree.from_nest({op3.Axis(m0): op3.Axis(m1)})
     axis1 = op3.Axis(n)
 
-    dat0 = op3.Dat(axes0, name="dat0", data=np.arange(axes0.size), dtype=op3.ScalarType)
-    dat1 = op3.Dat(axis1, name="dat1", dtype=dat0.dtype)
+    dat0 = op3.HierarchicalArray(
+        axes0, name="dat0", data=np.arange(axes0.size), dtype=op3.ScalarType
+    )
+    dat1 = op3.HierarchicalArray(axis1, name="dat1", dtype=dat0.dtype)
 
     op3.do_loop(
         op3.Axis(1).index(),

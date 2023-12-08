@@ -373,7 +373,7 @@ def _compute_layouts(
 def _create_count_array_tree(
     ctree, current_node=None, counts=PrettyTuple(), path=pmap()
 ):
-    from pyop3.tensor import Dat
+    from pyop3.array import HierarchicalArray
 
     current_node = current_node or ctree.root
     arrays = {}
@@ -394,7 +394,7 @@ def _create_count_array_tree(
             for parent, child in zip(axes, axes[1:]):
                 parent_to_children[parent.id] = (child,)
             axtree = AxisTree.from_node_map(parent_to_children)
-            countarray = Dat(
+            countarray = HierarchicalArray(
                 axtree,
                 data=np.full(axis_tree_size(axtree), -1, dtype=IntType),
             )
@@ -559,10 +559,9 @@ def _axis_component_size(
 
 @functools.singledispatch
 def _as_int(arg: Any, path, indices):
-    from pyop3.tensor import Dat
+    from pyop3.array import HierarchicalArray
 
-    # cyclic import
-    if isinstance(arg, Dat):
+    if isinstance(arg, HierarchicalArray):
         # TODO this might break if we have something like [:, subset]
         # I will need to map the "source" axis (e.g. slice_label0) back
         # to the "target" axis

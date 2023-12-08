@@ -8,6 +8,7 @@ import numpy as np
 from mpi4py import MPI
 
 from pyop3.dtypes import ScalarType
+from pyop3.lang import KernelArgument
 from pyop3.utils import UniqueNameGenerator, as_tuple, deprecated, readonly
 
 
@@ -37,10 +38,16 @@ def not_in_flight(fn):
     return wrapper
 
 
-class Buffer(abc.ABC):
+class Buffer(KernelArgument, abc.ABC):
     DEFAULT_DTYPE = ScalarType
 
+    @property
+    @abc.abstractmethod
+    def dtype(self):
+        pass
 
+
+# TODO should AbstractBuffer be a class and then a serial buffer can be its own class?
 class DistributedBuffer(Buffer):
     """An array distributed across multiple processors with ghost values."""
 
@@ -73,7 +80,7 @@ class DistributedBuffer(Buffer):
             raise IncompatibleStarForestException
 
         self.shape = shape
-        self.dtype = dtype
+        self._dtype = dtype
         self._lazy_data = data
         self.sf = sf
 
@@ -90,6 +97,10 @@ class DistributedBuffer(Buffer):
     # @classmethod
     # def from_array(cls, array: np.ndarray, **kwargs):
     #     return cls(array.shape, array.dtype, data=array, **kwargs)
+
+    @property
+    def dtype(self):
+        return self._dtype
 
     @property
     @not_in_flight
@@ -227,3 +238,20 @@ class DistributedBuffer(Buffer):
     def _reduce_then_broadcast(self):
         self._reduce_leaves_to_roots()
         self._broadcast_roots_to_leaves()
+
+
+class PackedBuffer(Buffer):
+    """Abstract buffer originating from a function call.
+
+    For example, the buffer returned from ``MatGetValues`` is such a "packed"
+    buffer.
+
+    """
+
+    # TODO Haven't exactly decided on the right API here, subclasses?
+    def __init__(self, pack_fn, unpack_fn, dtype):
+        self._dtype = dtype
+
+    @property
+    def dtype(self):
+        return self._dtype

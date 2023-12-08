@@ -17,6 +17,7 @@ from mpi4py import MPI
 from petsc4py import PETSc
 from pyrsistent import freeze, pmap
 
+from pyop3.array.base import Array
 from pyop3.axtree import (
     Axis,
     AxisComponent,
@@ -38,7 +39,7 @@ from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
 from pyop3.extras.debug import print_if_rank, print_with_rank
 from pyop3.itree import IndexTree, as_index_forest, index_axes
 from pyop3.itree.tree import CalledMapVariable, collect_loop_indices, iter_axis_tree
-from pyop3.tensor.base import Tensor
+from pyop3.lang import KernelArgument
 from pyop3.utils import (
     PrettyTuple,
     UniqueNameGenerator,
@@ -80,7 +81,7 @@ class MultiArrayVariable(pym.primitives.Variable):
         )
 
 
-class Dat(Tensor, Indexed, ContextFree):
+class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
     """Multi-dimensional, hierarchical array.
 
     Parameters
@@ -135,7 +136,7 @@ class Dat(Tensor, Indexed, ContextFree):
                 shape, dtype, name=self.name, data=data, sf=axes.sf
             )
 
-        self.array = data
+        self.buffer = data
 
         # instead implement "materialize"
         # self.temporary_axes = temporary_axes
@@ -184,7 +185,7 @@ class Dat(Tensor, Indexed, ContextFree):
                 layout_exprs_per_indexed_cpt,
             )
 
-            return Dat(
+            return HierarchicalArray(
                 indexed_axes,
                 data=self.array,
                 max_value=self.max_value,
@@ -219,7 +220,7 @@ class Dat(Tensor, Indexed, ContextFree):
                 layout_exprs_per_indexed_cpt,
             )
 
-            array_per_context[loop_context] = Dat(
+            array_per_context[loop_context] = HierarchicalArray(
                 indexed_axes,
                 data=self.array,
                 max_value=self.max_value,
@@ -233,6 +234,15 @@ class Dat(Tensor, Indexed, ContextFree):
     # Since __getitem__ is implemented, this class is implicitly considered
     # to be iterable (which it's not). This avoids some confusing behaviour.
     __iter__ = None
+
+    @property
+    def valid_ranks(self):
+        return frozenset(range(self.axes.depth + 1))
+
+    @property
+    @deprecated("buffer")
+    def array(self):
+        return self.buffer
 
     @property
     def dtype(self):
@@ -302,7 +312,7 @@ class Dat(Tensor, Indexed, ContextFree):
         else:
             self.array._reduce_leaves_to_roots()
 
-    def materialize(self) -> Dat:
+    def materialize(self) -> HierarchicalArray:
         """Return a new "unindexed" array with the same shape."""
         # "unindexed" axis tree
         axes = AxisTree(self.axes.parent_to_children)
@@ -430,14 +440,14 @@ class Dat(Tensor, Indexed, ContextFree):
 
 # Needs to be subclass for isinstance checks to work
 # TODO Delete
-class MultiArray(Dat):
-    @deprecated("Dat")
+class MultiArray(HierarchicalArray):
+    @deprecated("HierarchicalArray")
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
 
 # Now ContextSensitiveDat
-class ContextSensitiveMultiArray(ContextSensitive):
+class ContextSensitiveMultiArray(ContextSensitive, KernelArgument):
     def __getitem__(self, indices) -> ContextSensitiveMultiArray:
         from pyop3.itree.tree import (
             _compose_bits,
@@ -478,7 +488,7 @@ class ContextSensitiveMultiArray(ContextSensitive):
                 index_exprs_per_indexed_cpt,
                 layout_exprs_per_indexed_cpt,
             )
-            array_per_context[loop_context] = Dat(
+            array_per_context[loop_context] = HierarchicalArray(
                 indexed_axes,
                 data=self.array,
                 max_value=self.max_value,

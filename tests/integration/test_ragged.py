@@ -12,11 +12,15 @@ def test_scalar_copy_with_ragged_axis(scalar_copy_kernel):
     nnz_data = np.array([3, 2, 1, 3, 2])
 
     root = op3.Axis(m)
-    nnz = op3.Dat(root, name="nnz", data=nnz_data, max_value=3, dtype=op3.IntType)
+    nnz = op3.HierarchicalArray(
+        root, name="nnz", data=nnz_data, max_value=3, dtype=op3.IntType
+    )
 
     axes = op3.AxisTree.from_nest({root: op3.Axis(nnz)})
-    dat0 = op3.Dat(axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType)
-    dat1 = op3.Dat(axes, name="dat1", dtype=dat0.dtype)
+    dat0 = op3.HierarchicalArray(
+        axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType
+    )
+    dat1 = op3.HierarchicalArray(axes, name="dat1", dtype=dat0.dtype)
 
     op3.do_loop(p := axes.index(), scalar_copy_kernel(dat0[p], dat1[p]))
     assert np.allclose(dat1.data_ro, dat0.data_ro)
@@ -28,7 +32,7 @@ def test_scalar_copy_with_two_ragged_axes(scalar_copy_kernel):
     nnz_data1 = np.asarray([1, 1, 5, 4, 2, 3])
 
     axis0 = op3.Axis(m)
-    nnz0 = op3.Dat(
+    nnz0 = op3.HierarchicalArray(
         axis0,
         name="nnz0",
         data=nnz_data0,
@@ -38,12 +42,16 @@ def test_scalar_copy_with_two_ragged_axes(scalar_copy_kernel):
 
     axis1 = op3.Axis(nnz0)
     axes1 = op3.AxisTree.from_nest({axis0: axis1})
-    nnz1 = op3.Dat(axes1, name="nnz1", data=nnz_data1, max_value=5, dtype=op3.IntType)
+    nnz1 = op3.HierarchicalArray(
+        axes1, name="nnz1", data=nnz_data1, max_value=5, dtype=op3.IntType
+    )
 
     axis2 = op3.Axis(nnz1)
     axes2 = op3.AxisTree.from_nest({axis0: {axis1: axis2}})
-    dat0 = op3.Dat(axes2, name="dat0", data=np.arange(axes2.size), dtype=op3.ScalarType)
-    dat1 = op3.Dat(axes2, name="dat1", dtype=dat0.dtype)
+    dat0 = op3.HierarchicalArray(
+        axes2, name="dat0", data=np.arange(axes2.size), dtype=op3.ScalarType
+    )
+    dat1 = op3.HierarchicalArray(axes2, name="dat1", dtype=dat0.dtype)
 
     op3.do_loop(p := axes2.index(), scalar_copy_kernel(dat0[p], dat1[p]))
     assert np.allclose(dat1.data_ro, dat0.data_ro)
@@ -55,19 +63,23 @@ def test_scalar_copy_two_ragged_loops_with_fixed_loop_between(scalar_copy_kernel
     nnz_data1 = flatten([[[1, 2]], [[2, 1], [1, 1], [1, 1]], [[2, 3], [3, 1]]])
 
     axis0 = op3.Axis(m)
-    nnz0 = op3.Dat(axis0, name="nnz0", data=nnz_data0, max_value=3, dtype=op3.IntType)
+    nnz0 = op3.HierarchicalArray(
+        axis0, name="nnz0", data=nnz_data0, max_value=3, dtype=op3.IntType
+    )
 
     axis1 = op3.Axis(nnz0)
     axis2 = op3.Axis(n)
     nnz_axes1 = op3.AxisTree.from_nest({axis0: {axis1: axis2}})
-    nnz1 = op3.Dat(
+    nnz1 = op3.HierarchicalArray(
         nnz_axes1, name="nnz1", data=nnz_data1, max_value=3, dtype=op3.IntType
     )
 
     axis3 = op3.Axis(nnz1)
     axes = op3.AxisTree.from_nest({axis0: {axis1: {axis2: axis3}}})
-    dat0 = op3.Dat(axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType)
-    dat1 = op3.Dat(axes, name="dat1", dtype=dat0.dtype)
+    dat0 = op3.HierarchicalArray(
+        axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType
+    )
+    dat1 = op3.HierarchicalArray(axes, name="dat1", dtype=dat0.dtype)
 
     op3.do_loop(p := axes.index(), scalar_copy_kernel(dat0[p], dat1[p]))
     assert np.allclose(dat1.data_ro, dat0.data_ro)
@@ -80,7 +92,7 @@ def test_scalar_copy_ragged_axis_inside_two_fixed_axes(scalar_copy_kernel):
     axis0 = op3.Axis(m)
     axis1 = op3.Axis(m)
     nnz_axes = op3.AxisTree.from_nest({axis0: axis1})
-    nnz = op3.Dat(
+    nnz = op3.HierarchicalArray(
         nnz_axes,
         name="nnz",
         data=nnz_data,
@@ -90,8 +102,10 @@ def test_scalar_copy_ragged_axis_inside_two_fixed_axes(scalar_copy_kernel):
 
     axis2 = op3.Axis(nnz)
     axes = op3.AxisTree.from_nest({axis0: {axis1: axis2}})
-    dat0 = op3.Dat(axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType)
-    dat1 = op3.Dat(axes, name="dat1", dtype=dat0.dtype)
+    dat0 = op3.HierarchicalArray(
+        axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType
+    )
+    dat1 = op3.HierarchicalArray(axes, name="dat1", dtype=dat0.dtype)
 
     op3.do_loop(p := axes.index(), scalar_copy_kernel(dat0[p], dat1[p]))
     assert np.allclose(dat1.data_ro, dat0.data_ro)
@@ -202,7 +216,7 @@ def test_scalar_copy_of_ragged_component_in_multi_component_axis(scalar_copy_ker
     nnz_data = np.asarray([3, 2, 1, 2, 1])
 
     nnz_axis = op3.Axis({"pt1": m1}, "ax0")
-    nnz = op3.Dat(
+    nnz = op3.HierarchicalArray(
         nnz_axis,
         name="nnz",
         data=nnz_data,
@@ -220,8 +234,10 @@ def test_scalar_copy_of_ragged_component_in_multi_component_axis(scalar_copy_ker
         }
     )
 
-    dat0 = op3.Dat(axes, name="dat0", data=np.arange(axes.size, dtype=op3.ScalarType))
-    dat1 = op3.Dat(axes, name="dat1", dtype=dat0.dtype)
+    dat0 = op3.HierarchicalArray(
+        axes, name="dat0", data=np.arange(axes.size, dtype=op3.ScalarType)
+    )
+    dat1 = op3.HierarchicalArray(axes, name="dat1", dtype=dat0.dtype)
 
     iterset = op3.AxisTree.from_nest(
         {
@@ -243,7 +259,7 @@ def test_scalar_copy_of_permuted_axis_with_ragged_inner_axis(scalar_copy_kernel)
 
     axis0 = op3.Axis(m)
     paxis0 = axis0.copy(numbering=numbering)
-    nnz = op3.Dat(
+    nnz = op3.HierarchicalArray(
         axis0,
         name="nnz",
         data=nnz_data,
@@ -255,8 +271,10 @@ def test_scalar_copy_of_permuted_axis_with_ragged_inner_axis(scalar_copy_kernel)
     axes = op3.AxisTree.from_nest({axis0: axis1})
     paxes = op3.AxisTree.from_nest({paxis0: axis1})
 
-    dat0 = op3.Dat(axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType)
-    dat1 = op3.Dat(paxes, name="dat1", dtype=dat0.dtype)
+    dat0 = op3.HierarchicalArray(
+        axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType
+    )
+    dat1 = op3.HierarchicalArray(paxes, name="dat1", dtype=dat0.dtype)
 
     op3.do_loop(p := axes.index(), scalar_copy_kernel(dat0[p], dat1[p]))
     assert np.allclose(dat1.data_ro, dat0.data_ro)
@@ -269,7 +287,7 @@ def test_scalar_copy_of_permuted_then_ragged_then_permuted_axes(scalar_copy_kern
     num1 = [1, 0]
 
     axis0 = op3.Axis(m)
-    nnz = op3.Dat(
+    nnz = op3.HierarchicalArray(
         axis0,
         name="nnz",
         data=nnz_data,
@@ -285,8 +303,10 @@ def test_scalar_copy_of_permuted_then_ragged_then_permuted_axes(scalar_copy_kern
     paxis2 = axis2.copy(numbering=num1)
     paxes = op3.AxisTree.from_nest({paxis0: {axis1: paxis2}})
 
-    dat0 = op3.Dat(axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType)
-    dat1 = op3.Dat(paxes, name="dat1", dtype=dat0.dtype)
+    dat0 = op3.HierarchicalArray(
+        axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType
+    )
+    dat1 = op3.HierarchicalArray(paxes, name="dat1", dtype=dat0.dtype)
 
     op3.do_loop(p := axes.index(), scalar_copy_kernel(dat0[p], dat1[p]))
     assert np.allclose(dat1.data_ro, dat0.data_ro)

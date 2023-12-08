@@ -41,8 +41,10 @@ def vector_copy_kernel():
 def test_scalar_copy(scalar_copy_kernel):
     m = 10
     axis = op3.Axis(m)
-    dat0 = op3.Dat(axis, name="dat0", data=np.arange(axis.size), dtype=op3.ScalarType)
-    dat1 = op3.Dat(
+    dat0 = op3.HierarchicalArray(
+        axis, name="dat0", data=np.arange(axis.size), dtype=op3.ScalarType
+    )
+    dat1 = op3.HierarchicalArray(
         axis,
         name="dat1",
         dtype=dat0.dtype,
@@ -56,8 +58,10 @@ def test_vector_copy(vector_copy_kernel):
     m, n = 10, 3
 
     axes = op3.AxisTree.from_nest({op3.Axis(m): op3.Axis(n)})
-    dat0 = op3.Dat(axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType)
-    dat1 = op3.Dat(
+    dat0 = op3.HierarchicalArray(
+        axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType
+    )
+    dat1 = op3.HierarchicalArray(
         axes,
         name="dat1",
         dtype=dat0.dtype,
@@ -73,13 +77,13 @@ def test_multi_component_vector_copy(vector_copy_kernel):
     axes = op3.AxisTree.from_nest(
         {op3.Axis({"pt0": m, "pt1": n}): [op3.Axis(a), op3.Axis(b)]}
     )
-    dat0 = op3.Dat(
+    dat0 = op3.HierarchicalArray(
         axes,
         name="dat0",
         data=np.arange(m * a + n * b),
         dtype=op3.ScalarType,
     )
-    dat1 = op3.Dat(
+    dat1 = op3.HierarchicalArray(
         axes,
         name="dat1",
         dtype=dat0.dtype,
@@ -100,8 +104,10 @@ def test_copy_multi_component_temporary(vector_copy_kernel):
     npoints = m * n0 + m * n1
 
     axes = op3.AxisTree.from_nest({op3.Axis(m): op3.Axis([n0, n1])})
-    dat0 = op3.Dat(axes, name="dat0", data=np.arange(npoints), dtype=op3.ScalarType)
-    dat1 = op3.Dat(axes, name="dat1", dtype=dat0.dtype)
+    dat0 = op3.HierarchicalArray(
+        axes, name="dat0", data=np.arange(npoints), dtype=op3.ScalarType
+    )
+    dat1 = op3.HierarchicalArray(axes, name="dat1", dtype=dat0.dtype)
 
     op3.do_loop(p := axes.root.index(), vector_copy_kernel(dat0[p, :], dat1[p, :]))
     assert np.allclose(dat1.data, dat0.data)
@@ -118,10 +124,10 @@ def test_multi_component_scalar_copy_with_two_outer_loops(scalar_copy_kernel):
             ]
         },
     )
-    dat0 = op3.Dat(
+    dat0 = op3.HierarchicalArray(
         axes, name="dat0", data=np.arange(m * a + n * b), dtype=op3.ScalarType
     )
-    dat1 = op3.Dat(axes, name="dat1", dtype=dat0.dtype)
+    dat1 = op3.HierarchicalArray(axes, name="dat1", dtype=dat0.dtype)
 
     op3.do_loop(p := axes["pt1", :].index(), scalar_copy_kernel(dat0[p], dat1[p]))
     assert all(dat1.data[: m * a] == 0)
