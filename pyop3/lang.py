@@ -20,8 +20,8 @@ from pyrsistent import freeze, pmap
 
 from pyop3.axtree import as_axis_tree
 from pyop3.axtree.tree import ContextFree, ContextSensitive, MultiArrayCollector
+from pyop3.buffer import DistributedBuffer
 from pyop3.config import config
-from pyop3.distarray import DistributedArray
 from pyop3.dtypes import IntType, dtype_limits
 from pyop3.extras.debug import print_with_rank
 from pyop3.itree.tree import (
@@ -211,7 +211,7 @@ class Loop(LoopExpr):
         arrays = {}
         for arg, intent in self.all_function_arguments:
             if (
-                not isinstance(arg.array, DistributedArray)
+                not isinstance(arg.array, DistributedBuffer)
                 or not arg.array.is_distributed
             ):
                 continue

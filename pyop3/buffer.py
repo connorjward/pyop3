@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import abc
 import numbers
 from functools import cached_property
 
@@ -36,7 +37,11 @@ def not_in_flight(fn):
     return wrapper
 
 
-class DistributedBuffer:
+class Buffer(abc.ABC):
+    DEFAULT_DTYPE = ScalarType
+
+
+class DistributedBuffer(Buffer):
     """An array distributed across multiple processors with ghost values."""
 
     # NOTE: When GPU support is added, the host-device awareness and
@@ -44,8 +49,6 @@ class DistributedBuffer:
 
     # NOTE: It is probably easiest to treat the data as being "moved into" the
     # DistributedArray. But copies should ideally be avoided?
-
-    DEFAULT_DTYPE = ScalarType
 
     _prefix = "array"
     _name_generator = UniqueNameGenerator()

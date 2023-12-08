@@ -33,7 +33,7 @@ from pyop3.axtree.tree import (
     _path_and_indices_from_index_tuple,
     _trim_path,
 )
-from pyop3.distarray import DistributedArray
+from pyop3.buffer import Buffer, DistributedBuffer
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
 from pyop3.extras.debug import print_if_rank, print_with_rank
 from pyop3.itree import IndexTree, as_index_forest, index_axes
@@ -88,7 +88,7 @@ class Dat(Tensor, Indexed, ContextFree):
 
     """
 
-    DEFAULT_DTYPE = DistributedArray.DEFAULT_DTYPE
+    DEFAULT_DTYPE = Buffer.DEFAULT_DTYPE
 
     def __init__(
         self,
@@ -113,14 +113,12 @@ class Dat(Tensor, Indexed, ContextFree):
 
         # axes = as_layout_axes(axes)
 
-        if isinstance(data, DistributedArray):
+        if isinstance(data, Buffer):
             # disable for now, temporaries hit this in an annoying way
             # if data.sf is not axes.sf:
             #     raise ValueError("Star forests do not match")
             if dtype is not None:
-                raise ValueError(
-                    "If data is a DistributedArray, dtype should not be provided"
-                )
+                raise ValueError("If data is a Buffer, dtype should not be provided")
             pass
         else:
             if isinstance(data, np.ndarray):
@@ -133,7 +131,9 @@ class Dat(Tensor, Indexed, ContextFree):
                 shape = data.shape
             else:
                 shape = axes.size
-            data = DistributedArray(shape, dtype, name=self.name, data=data, sf=axes.sf)
+            data = DistributedBuffer(
+                shape, dtype, name=self.name, data=data, sf=axes.sf
+            )
 
         self.array = data
 

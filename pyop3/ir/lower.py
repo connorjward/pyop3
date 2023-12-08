@@ -24,7 +24,7 @@ from pyrsistent import freeze, pmap
 from pyop3 import utils
 from pyop3.axtree import Axis, AxisComponent, AxisTree, AxisVariable
 from pyop3.axtree.tree import ContextSensitiveAxisTree
-from pyop3.distarray import DistributedArray
+from pyop3.buffer import DistributedBuffer
 from pyop3.dtypes import IntType, PointerType
 from pyop3.extras.debug import print_with_rank
 from pyop3.itree import (
@@ -178,7 +178,7 @@ class LoopyCodegenContext(CodegenContext):
         if isinstance(array.array, PETSc.Mat):
             arg = lp.ValueArg(array.name, dtype=self._dtype(array))
         else:
-            assert isinstance(array.array, DistributedArray)
+            assert isinstance(array.array, DistributedBuffer)
             arg = lp.GlobalArg(array.name, dtype=self._dtype(array), shape=None)
         self._args.append(arg)
 

@@ -151,7 +151,7 @@ def test_nested_parallel_axes_produce_correct_sf(comm, paxis):
     rank = comm.rank
     other_rank = (rank + 1) % 2
 
-    array = op3.DistributedArray(axes.size, sf=axes.sf)
+    array = op3.DistributedBuffer(axes.size, sf=axes.sf)
     array._data[...] = rank
     array._leaves_valid = False
 
