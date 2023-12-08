@@ -505,6 +505,10 @@ class ContextSensitiveMultiArray(ContextSensitive, KernelArgument):
         return self._shared_attr("array")
 
     @property
+    def buffer(self):
+        return self._shared_attr("buffer")
+
+    @property
     def dtype(self):
         return self._shared_attr("dtype")
 

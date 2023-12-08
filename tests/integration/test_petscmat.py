@@ -86,7 +86,7 @@ def test_read_matrix_values():
     # FIXME we need to be able to distinguish row and col DoFs (and the IDs must differ)
     # this should be handled internally somehow
     dofs_ = op3.Axis(4, "dofs_")
-    mat = op3.PetscMat(dofs, dofs_, indices)
+    mat = op3.PetscMat(dofs, dofs_, indices, name="mat")
 
     # put some numbers in the matrix
     sparsity = [

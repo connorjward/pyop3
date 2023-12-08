@@ -226,25 +226,25 @@ def test_parallel_loop_with_map(comm, mesh_axis, cone_map, scalar_copy_kernel):
     #    [rank 1]             x  * -----x-----x-----x-----x
     #                         2  *   0  4  0  4  0  4  0  2
     if comm.rank == 0:
-        assert np.count_nonzero(dat.array._data == 0) == 4
-        assert np.count_nonzero(dat.array._data == 1) == 2
-        assert np.count_nonzero(dat.array._data == 2) == 1
+        assert np.count_nonzero(dat.buffer._data == 0) == 4
+        assert np.count_nonzero(dat.buffer._data == 1) == 2
+        assert np.count_nonzero(dat.buffer._data == 2) == 1
     else:
-        assert np.count_nonzero(dat.array._data == 0) == 4
-        assert np.count_nonzero(dat.array._data == 2) == 2
-        assert np.count_nonzero(dat.array._data == 4) == 3
+        assert np.count_nonzero(dat.buffer._data == 0) == 4
+        assert np.count_nonzero(dat.buffer._data == 2) == 2
+        assert np.count_nonzero(dat.buffer._data == 4) == 3
 
     # there should be a pending reduction
-    assert dat.array._pending_reduction == intent
-    assert not dat.array._roots_valid
-    assert not dat.array._leaves_valid
+    assert dat.buffer._pending_reduction == intent
+    assert not dat.buffer._roots_valid
+    assert not dat.buffer._leaves_valid
 
     # now do the reduction
-    dat.array._reduce_leaves_to_roots()
-    assert dat.array._pending_reduction is None
-    assert dat.array._roots_valid
+    dat.buffer._reduce_leaves_to_roots()
+    assert dat.buffer._pending_reduction is None
+    assert dat.buffer._roots_valid
     # leaves are still not up-to-date, requires a broadcast
-    assert not dat.array._leaves_valid
+    assert not dat.buffer._leaves_valid
 
     # we now expect the (renumbered) values to look like
     #             1  0  2  0  3  *   0  0

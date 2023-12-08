@@ -22,12 +22,12 @@ from petsc4py import PETSc
 from pyrsistent import freeze, pmap
 
 from pyop3 import utils
-from pyop3.array import HierarchicalArray
+from pyop3.array import HierarchicalArray, PackedPetscMatAIJ, PetscMatAIJ
 from pyop3.array.harray import ContextSensitiveMultiArray
-from pyop3.array.petsc import IndexedPetscMat, PetscMat, PetscObject
+from pyop3.array.petsc import PetscMat, PetscObject
 from pyop3.axtree import Axis, AxisComponent, AxisTree, AxisVariable
 from pyop3.axtree.tree import ContextSensitiveAxisTree
-from pyop3.buffer import DistributedBuffer
+from pyop3.buffer import DistributedBuffer, PackedBuffer
 from pyop3.dtypes import IntType, PointerType
 from pyop3.extras.debug import print_with_rank
 from pyop3.itree import (
@@ -176,10 +176,10 @@ class LoopyCodegenContext(CodegenContext):
             )
             return
 
-        if isinstance(array.array, PETSc.Mat):
+        if isinstance(array.buffer, PackedPetscMatAIJ):
             arg = lp.ValueArg(array.name, dtype=self._dtype(array))
         else:
-            assert isinstance(array.array, DistributedBuffer)
+            assert isinstance(array.buffer, DistributedBuffer)
             arg = lp.GlobalArg(array.name, dtype=self._dtype(array), shape=None)
         self._args.append(arg)
 
@@ -229,13 +229,15 @@ class LoopyCodegenContext(CodegenContext):
 
     @_dtype.register(HierarchicalArray)
     def _(self, array):
+        return self._dtype(array.buffer)
+
+    @_dtype.register(DistributedBuffer)
+    def _(self, array):
         return array.dtype
 
-    # TODO I think this subclasses Dat
     @_dtype.register
-    def _(self, array: IndexedPetscMat):
+    def _(self, array: PackedPetscMatAIJ):
         return OpaqueType("Mat")
-        # return array.dtype
 
     @_dtype.register
     def _(self, array: PetscMat):
@@ -482,8 +484,6 @@ def parse_loop_properly_this_time(
                         for myaxislabel, jname_expr in new_jname_replace_map.items()
                     }
                 )
-                # breakpoint()
-
                 for stmt in loop.statements:
                     _compile(
                         stmt,
@@ -516,20 +516,11 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
     # loopy args can contain ragged params too
     loopy_args = call.function.code.default_entrypoint.args[: len(call.arguments)]
     for loopy_arg, arg, spec in checked_zip(loopy_args, call.arguments, call.argspec):
-        # create an appropriate temporary
-        # we need the indices here because the temporary shape needs to be indexed
-        # by the same indices as the original array
-        # is this definitely true??? think so. because it gives us the right loops
-        # but we only really need it to determine "within" or not...
-        # if not isinstance(arg, MultiArray):
-        #     # think PetscMat etc
-        #     raise NotImplementedError(
-        #         "Need to handle indices to create temp shape differently"
-        #     )
-
         loop_context = context_from_indices(loop_indices)
 
         assert isinstance(arg, (HierarchicalArray, ContextSensitiveMultiArray))
+        # FIXME materialize is a bad name here, it implies actually packing the values
+        # into the temporary.
         temporary = arg.with_context(loop_context).materialize()
         indexed_temp = temporary
 
@@ -628,13 +619,15 @@ def parse_assignment(
     # TODO singledispatch
     loop_context = context_from_indices(loop_indices)
 
-    if isinstance(array.with_context(loop_context), IndexedPetscMat):
+    if isinstance(array.with_context(loop_context).buffer, PackedBuffer):
+        if not isinstance(array.with_context(loop_context).buffer, PackedPetscMatAIJ):
+            raise NotImplementedError("TODO")
         parse_assignment_petscmat(
             array.with_context(loop_context), temp, shape, op, loop_indices, codegen_ctx
         )
         return
-    # else:
-    # assert isinstance(assignment, MultiArrayAssignment
+    else:
+        assert isinstance(array.with_context(loop_context).buffer, DistributedBuffer)
 
     # get the right index tree given the loop context
 
@@ -670,10 +663,16 @@ def parse_assignment(
 def parse_assignment_petscmat(array, temp, shape, op, loop_indices, codegen_context):
     ctx = codegen_context
 
-    expr = array.getvalues
-    matvar, rexpr, cexpr = expr.parameters
+    (iraxis, ircpt), (icaxis, iccpt) = array.axes.path_with_nodes(
+        *array.axes.leaf, ordered=True
+    )
+    rkey = (iraxis.id, ircpt)
+    ckey = (icaxis.id, iccpt)
 
-    mat = matvar.obj
+    rexpr = array.index_exprs[rkey][just_one(array.target_paths[rkey])]
+    cexpr = array.index_exprs[ckey][just_one(array.target_paths[ckey])]
+
+    mat = array.buffer.array
 
     # need to generate code like map0[i0] instead of the usual map0[i0, i1]
     # this is because we are passing the full map through to the function call
@@ -725,9 +724,6 @@ def parse_assignment_petscmat(array, temp, shape, op, loop_indices, codegen_cont
         f"MatGetValues({mat.name}, {nrow}, &({irow}), {ncol}, &({icol}), &({temp.name}[0]));"
     )
     codegen_context.add_cinstruction(call_str)
-
-    # debug
-    # codegen_context.add_cinstruction("PetscAttachDebugger();")
 
 
 # TODO now I attach a lot of info to the context-free array, do I need to pass axes around?
@@ -896,12 +892,6 @@ def add_leaf_assignment(
 
 
 def make_array_expr(array, layouts, path, jnames, ctx):
-    """
-
-    Return a list of (assignee, expression) tuples and the array expr used
-    in the assignment.
-
-    """
     array_offset = make_offset_expr(
         layouts,
         jnames,
@@ -934,9 +924,7 @@ def subst_layout(axes, source_path, target_path):
     for axis, cpt in axes.detailed_path(source_path).items():
         replace_map.update(axes.layout_exprs[axis.id, cpt])
 
-    retval = IndexExpressionReplacer(replace_map)(axes.layouts[target_path])
-    # breakpoint()
-    return retval
+    return IndexExpressionReplacer(replace_map)(axes.layouts[target_path])
 
 
 class JnameSubstitutor(pym.mapper.IdentityMapper):
@@ -1005,9 +993,6 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
     def map_call(self, expr):
         if expr.function.name == "mybsearch":
             return self._map_bsearch(expr)
-        elif expr.function.name == "MatGetValues":
-            assert False, "not here"
-            return self._map_matgetvalues(expr)
         else:
             raise NotImplementedError("hmm")
 
@@ -1192,19 +1177,31 @@ def _as_pointer(array) -> int:
 
 # bad name now, "as_kernel_arg"?
 @_as_pointer.register
-def _(array: int):
-    return array
+def _(arg: int):
+    return arg
 
 
 @_as_pointer.register
-def _(array: np.ndarray):
-    return array.ctypes.data
+def _(arg: np.ndarray):
+    return arg.ctypes.data
 
 
 @_as_pointer.register
-def _(array: HierarchicalArray):
+def _(arg: HierarchicalArray):
     # TODO if we use the right accessor here we modify the state appropriately
-    return array.buffer._data.ctypes.data
+    return _as_pointer(arg.buffer)
+
+
+@_as_pointer.register
+def _(arg: DistributedBuffer):
+    # TODO if we use the right accessor here we modify the state appropriately
+    # NOTE: Do not use .data_rw accessor here since this would trigger a halo exchange
+    return _as_pointer(arg._data)
+
+
+@_as_pointer.register
+def _(arg: PackedBuffer):
+    return _as_pointer(arg.array)
 
 
 @_as_pointer.register
