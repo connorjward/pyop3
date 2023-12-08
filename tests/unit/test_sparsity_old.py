@@ -1,11 +1,11 @@
 import pytest
 
+# This file is pretty outdated
+pytest.skip(allow_module_level=True)
+
 from pyop3 import *
 from pyop3.distarray.petsc import *
 from pyop3.extras.debug import print_with_rank
-
-# This file is pretty outdated
-pytest.skip(allow_module_level=True)
 
 
 def test_read_sparse_matrix():

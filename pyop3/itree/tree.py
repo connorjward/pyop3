@@ -27,20 +27,19 @@ from pyop3.axtree import (
     ContextSensitive,
     LoopIterable,
 )
+from pyop3.axtree.layout import _as_int
 from pyop3.axtree.tree import (
     ContextSensitiveAxisTree,
     ContextSensitiveLoopIterable,
     ExpressionEvaluator,
-    FrozenAxisTree,
-    IndexedAxisTree,
-    _as_int,
+    PartialAxisTree,
 )
 from pyop3.dtypes import IntType, get_mpi_dtype
 from pyop3.extras.debug import print_if_rank, print_with_rank
-from pyop3.tree import LabelledNode, LabelledTree, postvisit
+from pyop3.tree import LabelledTree, Node, Tree, postvisit
 from pyop3.utils import (
-    LabelledImmutableRecord,
-    UniquelyIdentifiedImmutableRecord,
+    Identified,
+    Labelled,
     as_tuple,
     checked_zip,
     is_single_valued,
@@ -49,6 +48,47 @@ from pyop3.utils import (
 )
 
 bsearch = pym.var("mybsearch")
+
+
+# FIXME this is copied from loopexpr2loopy VariableReplacer
+class IndexExpressionReplacer(pym.mapper.IdentityMapper):
+    def __init__(self, replace_map):
+        self._replace_map = replace_map
+
+    def map_axis_variable(self, expr):
+        # print_if_rank(0, "replace map ", self._replace_map)
+        # return self._replace_map[expr.axis_label]
+        return self._replace_map.get(expr.axis_label, expr)
+
+    def map_multi_array(self, expr):
+        from pyop3.array.harray import MultiArrayVariable
+
+        # print_if_rank(0, self._replace_map)
+        # print_if_rank(0, expr.indices)
+        indices = {axis: self.rec(index) for axis, index in expr.indices.items()}
+        return MultiArrayVariable(expr.array, indices)
+
+    def map_called_map(self, expr):
+        array = expr.function.map_component.array
+
+        # should the following only exist at eval time?
+
+        # the inner_expr tells us the right mapping for the temporary, however,
+        # for maps that are arrays the innermost axis label does not always match
+        # the label used by the temporary. Therefore we need to do a swap here.
+        # I don't like this.
+        # inner_axis = array.axes.leaf_axis
+        # print_if_rank(0, self._replace_map)
+        # print_if_rank(0, expr.parameters)
+        indices = {axis: self.rec(idx) for axis, idx in expr.parameters.items()}
+        # indices[inner_axis.label] = indices.pop(expr.function.full_map.name)
+
+        return CalledMapVariable(expr.function, indices)
+
+    def map_loop_index(self, expr):
+        # this is hacky, if I make this raise a KeyError then we fail in indexing
+        return self._replace_map.get((expr.name, expr.axis), expr)
+
 
 # just use a pmap for this
 # class IndexForest:
@@ -63,40 +103,47 @@ bsearch = pym.var("mybsearch")
 # the loop context. This is awful for a user to have to build since we
 # need something like a SplitCalledMap. Instead we will just admit any
 # parent_to_children map and do error checking when we convert it to shape.
-class IndexTree(LabelledTree):
-    def __init__(self, root, parent_to_children=pmap(), *, loop_context=pmap()):
-        root, parent_to_children, loop_context = parse_index_tree(
-            root, parent_to_children, loop_context
+class IndexTree(Tree):
+    def __init__(self, parent_to_children=pmap(), *, loop_context=pmap()):
+        super().__init__(parent_to_children)
+        # FIXME, don't need to modify parent_to_children in this function
+        parent_to_children, loop_context = parse_index_tree(
+            self.parent_to_children, loop_context
         )
-        super().__init__(root, parent_to_children)
         self.loop_context = loop_context
 
+    @staticmethod
+    def _parse_node(node):
+        if isinstance(node, Index):
+            return node
+        elif isinstance(node, Axis):
+            return Slice(
+                node.label, [AffineSliceComponent(c.label) for c in node.components]
+            )
+        else:
+            raise TypeError(f"No handler defined for {type(node).__name__}")
 
-def parse_index_tree(root, parent_to_children, loop_context):
-    root = apply_loop_context(root, loop_context)
-    new_parent_to_children = parse_parent_to_children(
-        parent_to_children, root, loop_context
-    )
 
-    return root, pmap(new_parent_to_children), loop_context
+def parse_index_tree(parent_to_children, loop_context):
+    new_parent_to_children = parse_parent_to_children(parent_to_children, loop_context)
+
+    return pmap(new_parent_to_children), loop_context
 
 
-def parse_parent_to_children(parent_to_children, parent, loop_context):
-    if parent.id in parent_to_children:
+def parse_parent_to_children(parent_to_children, loop_context, parent=None):
+    if parent in parent_to_children:
         new_children = []
         subparents_to_children = []
-        for child in parent_to_children[parent.id]:
+        for child in parent_to_children[parent]:
             if child is None:
                 continue
             child = apply_loop_context(child, loop_context)
             new_children.append(child)
             subparents_to_children.append(
-                parse_parent_to_children(parent_to_children, child, loop_context)
+                parse_parent_to_children(parent_to_children, loop_context, child.id)
             )
 
-        return pmap({parent.id: tuple(new_children)}) | merge_dicts(
-            subparents_to_children
-        )
+        return pmap({parent: tuple(new_children)}) | merge_dicts(subparents_to_children)
     else:
         return pmap()
 
@@ -125,19 +172,19 @@ def collect_datamap_from_expression(expr: pym.primitives.Expr) -> dict:
     return _datamap_collector(expr)
 
 
-class SliceComponent(LabelledImmutableRecord, abc.ABC):
-    fields = LabelledImmutableRecord.fields | {"component"}
+class SliceComponent(pytools.ImmutableRecord, abc.ABC):
+    fields = {"component"}
 
-    def __init__(self, component, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, component):
+        super().__init__()
         self.component = component
 
 
 class AffineSliceComponent(SliceComponent):
     fields = SliceComponent.fields | {"start", "stop", "step"}
 
-    def __init__(self, component, start=None, stop=None, step=None, **kwargs):
-        super().__init__(component, **kwargs)
+    def __init__(self, component, start=None, stop=None, step=None):
+        super().__init__(component)
         # use None for the default args here since that agrees with Python slices
         self.start = start if start is not None else 0
         self.stop = stop
@@ -151,8 +198,8 @@ class AffineSliceComponent(SliceComponent):
 class Subset(SliceComponent):
     fields = SliceComponent.fields | {"array"}
 
-    def __init__(self, component, array: MultiArray, **kwargs):
-        super().__init__(component, **kwargs)
+    def __init__(self, component, array: MultiArray):
+        super().__init__(component)
         self.array = array
 
     @property
@@ -160,57 +207,32 @@ class Subset(SliceComponent):
         return self.array.datamap
 
 
-class MapComponent(LabelledImmutableRecord):
-    fields = {
-        "target_axis",
-        "target_component",
-        "arity",
-    } | LabelledImmutableRecord.fields
+class MapComponent(pytools.ImmutableRecord, Labelled, abc.ABC):
+    fields = {"target_axis", "target_component", "label"}
 
-    def __init__(self, target_axis, target_component, arity, **kwargs):
-        super().__init__(**kwargs)
+    def __init__(self, target_axis, target_component, *, label=None):
+        pytools.ImmutableRecord.__init__(self)
+        Labelled.__init__(self, label)
         self.target_axis = target_axis
         self.target_component = target_component
-        self.arity = arity
+
+    @property
+    @abc.abstractmethod
+    def arity(self):
+        pass
 
 
-class MapVariable(pym.primitives.Variable):
-    """Pymbolic variable representing the action of a map."""
-
-    mapper_method = sys.intern("map_map_variable")
-
-    def __init__(self, full_map, map_component):
-        super().__init__(map_component.array.name)
-        self.full_map = full_map
-        self.map_component = map_component
-
-    def __call__(self, *args):
-        return CalledMapVariable(self, *args)
-
-    @functools.cached_property
-    def datamap(self):
-        return self.map_component.datamap
-
-
-class CalledMapVariable(pym.primitives.Call):
-    mapper_method = sys.intern("map_called_map")
-
-    @functools.cached_property
-    def datamap(self):
-        return self.function.datamap | merge_dicts(
-            idx.datamap for idx in self.parameters.values()
-        )
-
-
+# TODO: Implement AffineMapComponent
 class TabulatedMapComponent(MapComponent):
-    fields = MapComponent.fields - {"arity"} | {"array"}
+    fields = MapComponent.fields | {"array"}
 
-    def __init__(self, target_axis, target_component, array, **kwargs):
-        arity = array.axes.leaf_component.count
-        super().__init__(target_axis, target_component, arity, **kwargs)
+    def __init__(self, target_axis, target_component, array, *, label=None):
+        super().__init__(target_axis, target_component, label=label)
         self.array = array
 
-        # self.index_expr = MapVariable(self)
+    @property
+    def arity(self):
+        return self.array.axes.leaf_component.count
 
     # old alias
     @property
@@ -222,23 +244,150 @@ class TabulatedMapComponent(MapComponent):
         return self.array.datamap
 
 
-class AffineMapComponent(MapComponent):
-    fields = MapComponent.fields | {"expr"}
+class Index(Node):
+    @abc.abstractmethod
+    def target_paths(self, context):
+        pass
 
-    def __init__(self, from_labels, to_labels, arity, expr, **kwargs):
-        """
-        Parameters
-        ----------
-        expr:
-            A 2-tuple of pymbolic variables and an expression. We need to split them
-            like this because we need to know the order in which the variables
-            correspond to the axis parts.
-        """
-        if len(expr[0]) != len(from_labels) + 1:
-            raise ValueError("Wrong number of variables in expression")
 
-        self.expr = expr
-        super().__init__(from_labels, to_labels, arity, **kwargs)
+class AbstractLoopIndex(Index, abc.ABC):
+    pass
+
+
+class LoopIndex(AbstractLoopIndex):
+    fields = AbstractLoopIndex.fields | {"iterset"}
+
+    # does the label ever matter here?
+    def __init__(self, iterset, *, id=None):
+        super().__init__(id)
+        self.iterset = iterset
+        self.local_index = LocalLoopIndex(self)
+
+    @property
+    def i(self):
+        return self.local_index
+
+    @property
+    def j(self):
+        # is this evil?
+        return self
+
+    @property
+    def datamap(self):
+        return self.iterset.datamap
+
+    def target_paths(self, context):
+        return (context[self.id],)
+
+    def iter(self, stuff=pmap()):
+        if not isinstance(self.iterset, AxisTree):
+            raise NotImplementedError
+        return iter_axis_tree(
+            self.iterset, self.iterset.target_paths, self.iterset.index_exprs, stuff
+        )
+
+
+class LocalLoopIndex(AbstractLoopIndex):
+    """Class representing a 'local' index."""
+
+    fields = AbstractLoopIndex.fields | {"loop_index"}
+
+    def __init__(self, loop_index: LoopIndex, *, id=None):
+        super().__init__(id)
+        self.loop_index = loop_index
+
+    def target_paths(self, context):
+        return (context[self.id],)
+
+    @property
+    def datamap(self):
+        return self.loop_index.datamap
+
+
+# TODO I want a Slice to have "bits" like a Map/CalledMap does
+# class Slice(Index, Labelled):
+class Slice(Index):
+    """
+
+    A slice can be thought of as a map from a smaller space to the target space.
+
+    Like maps it can also target multiple outputs. This is useful for multi-component
+    axes.
+
+    """
+
+    # TODO remove "label"
+    fields = Index.fields | {"axis", "slices"}
+    # fields = Index.fields | {"axis", "slices", "label"}
+
+    def __init__(self, axis, slices, *, id=None, label=None):
+        super().__init__(id)
+        # Index.__init__(self, id)
+        # Labelled.__init__(self, label)  # remove
+        self.axis = axis
+        self.slices = as_tuple(slices)
+
+    def target_paths(self, context):
+        return tuple(pmap({self.axis: subslice.component}) for subslice in self.slices)
+
+    @property
+    def datamap(self):
+        return merge_dicts([s.datamap for s in self.slices])
+
+    @property
+    def label(self):
+        return self.axis
+
+
+class CalledMap(Index, LoopIterable):
+    # This function cannot be part of an index tree because it has not specialised
+    # to a particular loop index path.
+    # FIXME, is this true?
+    def __init__(self, map, from_index, **kwargs):
+        self.map = map
+        self.from_index = from_index
+        Index.__init__(self, **kwargs)
+
+    def __getitem__(self, indices):
+        raise NotImplementedError("TODO")
+
+    def index(self) -> LoopIndex:
+        contexts = collect_loop_contexts(self)
+        # FIXME this assumption is not always true
+        context = just_one(contexts)
+        axes, target_paths, index_exprs, layout_exprs = collect_shape_index_callback(
+            self, loop_indices=context
+        )
+
+        axes = AxisTree.from_node_map(axes.parent_to_children)
+
+        axes = AxisTree(
+            axes.parent_to_children,
+            target_paths,
+            index_exprs,
+            layout_exprs,
+            axes.layouts,
+        )
+
+        context_sensitive_axes = ContextSensitiveAxisTree({context: axes})
+        return LoopIndex(context_sensitive_axes)
+
+    @property
+    def name(self):
+        return self.map.name
+
+    @property
+    def connectivity(self):
+        return self.map.connectivity
+
+    def target_paths(self, context):
+        targets = []
+        for src_path in self.from_index.target_paths(context):
+            for map_component in self.connectivity[src_path]:
+                targets.append(
+                    pmap({map_component.target_axis: map_component.target_component})
+                )
+        return tuple(targets)
 
 
 class Map(pytools.ImmutableRecord):
@@ -269,70 +418,6 @@ class Map(pytools.ImmutableRecord):
         return pmap(data)
 
 
-class Index(LabelledNode):
-    @abc.abstractmethod
-    def target_paths(self, context):
-        pass
-
-
-# ImmutableRecord?
-class CalledMap(Index, LoopIterable):
-    # This function cannot be part of an index tree because it has not specialised
-    # to a particular loop index path.
-    def __init__(self, map, from_index, **kwargs):
-        self.map = map
-        self.from_index = from_index
-        Index.__init__(self, **kwargs)
-
-    def __getitem__(self, indices):
-        raise NotImplementedError("TODO")
-
-    def index(self) -> LoopIndex:
-        contexts = collect_loop_contexts(self)
-        # FIXME this assumption is not always true
-        context = just_one(contexts)
-        axes, target_paths, index_exprs, layout_exprs = collect_shape_index_callback(
-            self, loop_indices=context
-        )
-
-        axes = IndexedAxisTree(
-            axes.root,
-            axes.parent_to_children,
-            target_paths,
-            index_exprs,
-            layout_exprs,
-        )
-
-        context_sensitive_axes = ContextSensitiveAxisTree({context: axes})
-        return LoopIndex(context_sensitive_axes)
-
-    @property
-    def name(self):
-        return self.map.name
-
-    @property
-    def connectivity(self):
-        return self.map.connectivity
-
-    def target_paths(self, context):
-        targets = []
-        for src_path in self.from_index.target_paths(context):
-            for map_component in self.connectivity[src_path]:
-                targets.append(
-                    pmap({map_component.target_axis: map_component.target_component})
-                )
-        return tuple(targets)
-
-
-class ContextSensitiveCalledMap(ContextSensitiveLoopIterable):
-    pass
-
-
-# no clue if this should be context free, only really makes sense for iterables
-class AbstractLoopIndex(Index, abc.ABC):
-    pass
-
-
 class LoopIndexVariable(pym.primitives.Variable):
     init_arg_names = ("index", "axis")
 
@@ -357,82 +442,46 @@ class LoopIndexVariable(pym.primitives.Variable):
         return self.index.datamap
 
 
-class LoopIndex(AbstractLoopIndex):
-    fields = AbstractLoopIndex.fields | {"iterset"}
+class MapVariable(pym.primitives.Variable):
+    """Pymbolic variable representing the action of a map."""
 
-    def __init__(self, iterset, **kwargs):
-        super().__init__(**kwargs)
-        self.iterset = iterset
-        self.local_index = LocalLoopIndex(self)
+    mapper_method = sys.intern("map_map_variable")
 
-    @property
-    def i(self):
-        return self.local_index
+    def __init__(self, full_map, map_component):
+        super().__init__(map_component.array.name)
+        self.full_map = full_map
+        self.map_component = map_component
 
-    @property
-    def j(self):
-        # is this evil?
-        return self
+    def __call__(self, *args):
+        return CalledMapVariable(self, *args)
 
-    @property
+    @functools.cached_property
     def datamap(self):
-        return self.iterset.datamap
-
-    def target_paths(self, context):
-        return (context[self.id],)
-
-    def iter(self, stuff=pmap()):
-        if not isinstance(self.iterset, (IndexedAxisTree, FrozenAxisTree)):
-            raise NotImplementedError
-        return iter_axis_tree(self.iterset, stuff)
+        return self.map_component.datamap
 
 
-class LocalLoopIndex(AbstractLoopIndex):
-    """Class representing a 'local' index."""
+class CalledMapVariable(pym.primitives.Call):
+    def __str__(self) -> str:
+        return f"{self.function.name}({self.parameters})"
 
-    def __init__(self, loop_index: LoopIndex, **kwargs):
-        super().__init__(**kwargs)
-        self.loop_index = loop_index
+    mapper_method = sys.intern("map_called_map")
 
-    def target_paths(self, context):
-        return (context[self.id],)
-
-    @property
+    @functools.cached_property
     def datamap(self):
-        return self.loop_index.datamap
+        return self.function.datamap | merge_dicts(
+            idx.datamap for idx in self.parameters.values()
+        )
 
 
-# TODO I want a Slice to have "bits" like a Map/CalledMap does
-class Slice(Index):
-    """
-
-    A slice can be thought of as a map from a smaller space to the target space.
-
-    Like maps it can also target multiple outputs. This is useful for multi-component
-    axes.
-
-    """
-
-    fields = Index.fields | {"axis", "slices"}
-
-    def __init__(self, axis, slices: Collection[SliceComponent], **kwargs):
-        super().__init__(**kwargs)
-        self.axis = axis
-        self.slices = as_tuple(slices)
-
-    def target_paths(self, context):
-        return tuple(pmap({self.axis: subslice.component}) for subslice in self.slices)
-
-    @property
-    def datamap(self):
-        return merge_dicts([s.datamap for s in self.slices])
+class ContextSensitiveCalledMap(ContextSensitiveLoopIterable):
+    pass
 
 
 @functools.singledispatch
 def apply_loop_context(arg, loop_context, *, axes, path):
-    from pyop3.distarray import MultiArray
+    from pyop3.array import HierarchicalArray
 
-    if isinstance(arg, MultiArray):
+    if isinstance(arg, HierarchicalArray):
         parent = axes._node_from_path(path)
         if parent is not None:
             parent_axis, parent_cpt = parent
@@ -446,9 +495,13 @@ def apply_loop_context(arg, loop_context, *, axes, path):
         # subsets
         array_axis, array_component = arg.axes.leaf
         for cpt in target_axis.components:
-            slice_cpt = Subset(cpt.label, arg, label=array_component.label)
+            slice_cpt = Subset(cpt.label, arg)
             slice_cpts.append(slice_cpt)
-        return Slice(target_axis.label, slice_cpts, label=array_axis.label)
+        return Slice(target_axis.label, slice_cpts)
+    elif isinstance(arg, str):
+        # component label
+        # FIXME this is not right, only works at top level
+        return Slice(axes.root.label, AffineSliceComponent(arg))
     elif isinstance(arg, numbers.Integral):
         return apply_loop_context(
             slice(arg, arg + 1), loop_context, axes=axes, path=path
@@ -460,6 +513,11 @@ def apply_loop_context(arg, loop_context, *, axes, path):
 @apply_loop_context.register
 def _(index: Index, loop_context, **kwargs):
     return index
+
+
+@apply_loop_context.register
+def _(index: Axis, *args, **kwargs):
+    return Slice(index.label, [AffineSliceComponent(c.label) for c in index.components])
 
 
 @apply_loop_context.register
@@ -488,10 +546,9 @@ def combine_contexts(contexts):
 
 @functools.singledispatch
 def collect_loop_indices(arg):
-    # cyclic import
-    from pyop3.distarray import MultiArray
+    from pyop3.array import HierarchicalArray
 
-    if isinstance(arg, (MultiArray, Slice, slice, str)):
+    if isinstance(arg, (HierarchicalArray, Slice, slice, str)):
         return ()
     elif isinstance(arg, collections.abc.Iterable):
         return sum(map(collect_loop_indices, arg), ())
@@ -554,10 +611,9 @@ def loop_contexts_from_iterable(indices):
 
 @functools.singledispatch
 def collect_loop_contexts(arg, *args, **kwargs):
-    # cyclic import
-    from pyop3.distarray import MultiArray
+    from pyop3.array import HierarchicalArray
 
-    if isinstance(arg, (MultiArray, numbers.Integral)):
+    if isinstance(arg, (HierarchicalArray, numbers.Integral)):
         return {}
     elif isinstance(arg, collections.abc.Iterable):
         return loop_contexts_from_iterable(arg)
@@ -604,14 +660,14 @@ def _(arg: LoopIndex, local=False):
                 contexts.append(loop_context | {arg.id: pmap(extracontext)})
         return tuple(contexts)
     else:
-        assert isinstance(arg.iterset, (FrozenAxisTree, IndexedAxisTree))
+        assert isinstance(arg.iterset, AxisTree)
         iterset = arg.iterset
         contexts = []
-        for leaf in iterset.leaves:
-            source_path = iterset.path(*leaf)
+        for leaf_axis, leaf_cpt in iterset.leaves:
+            source_path = iterset.path(leaf_axis, leaf_cpt)
             target_path = {}
             for axis, cpt in iterset.path_with_nodes(
-                *leaf, and_components=True
+                leaf_axis, leaf_cpt, and_components=True
             ).items():
                 target_path.update(
                     iterset.target_paths[axis.id, cpt.label]
@@ -730,16 +786,16 @@ def index_tree_from_iterable(
             children.append(child)
             subtrees.append(subtree)
 
-        root = index
         parent_to_children = pmap({index.id: children}) | merge_dicts(subtrees)
     else:
-        root = index
-        parent_to_children = pmap()
+        parent_to_children = {}
 
     if first_call:
-        return IndexTree(root, parent_to_children, loop_context=loop_context)
+        assert None not in parent_to_children
+        parent_to_children |= {None: [index]}
+        return IndexTree(parent_to_children, loop_context=loop_context)
     else:
-        return root, parent_to_children
+        return index, parent_to_children
 
 
 @functools.singledispatch
@@ -757,12 +813,12 @@ def _(index: Index, ctx, **kwargs):
 
 @functools.singledispatch
 def as_index_forest(arg: Any, **kwargs):
-    from pyop3.distarray import MultiArray
+    from pyop3.array import HierarchicalArray
 
-    if isinstance(arg, MultiArray):
+    if isinstance(arg, HierarchicalArray):
         slice_ = apply_loop_context(arg, loop_context=pmap(), path=pmap(), **kwargs)
         return (IndexTree(slice_),)
-    elif isinstance(arg, collections.abc.Iterable):
+    elif isinstance(arg, collections.abc.Sequence):
         loop_contexts = collect_loop_contexts(arg) or [pmap()]
         forest = []
         for context in loop_contexts:
@@ -809,9 +865,6 @@ def collect_shape_index_callback(index, *args, **kwargs):
 
 @collect_shape_index_callback.register
 def _(loop_index: LoopIndex, *, loop_indices, **kwargs):
-    # breakpoint()
-    # path = loop_indices[loop_index]
-
     iterset = loop_index.iterset
 
     target_path_per_component = pmap({None: loop_indices[loop_index.id]})
@@ -823,13 +876,12 @@ def _(loop_index: LoopIndex, *, loop_indices, **kwargs):
                     axis: LoopIndexVariable(loop_index, axis)
                     for axis in loop_indices[loop_index.id].keys()
                 }
-                # {axis: LoopIndexVariable(loop_index, axis) for axis in path.keys()}
             )
         }
     )
     layout_exprs_per_component = pmap({None: 0})
     return (
-        AxisTree(),
+        PartialAxisTree(),
         target_path_per_component,
         index_exprs_per_component,
         layout_exprs_per_component,
@@ -854,7 +906,7 @@ def _(local_index: LocalLoopIndex, *args, loop_indices, **kwargs):
 
     layout_exprs_per_cpt = pmap({None: 0})
     return (
-        AxisTree(),
+        PartialAxisTree(),
         target_path_per_cpt,
         index_exprs_per_cpt,
         layout_exprs_per_cpt,
@@ -873,7 +925,6 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
     for subslice in slice_.slices:
         # we are assuming that axes with the same label *must* be identical. They are
         # only allowed to differ in that they have different IDs.
-        cpt_label = subslice.label
         target_axis, target_cpt = prev_axes.find_component(
             slice_.axis, subslice.component, also_node=True
         )
@@ -886,7 +937,7 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
         else:
             assert isinstance(subslice, Subset)
             size = subslice.array.axes.leaf_component.count
-        cpt = AxisComponent(size, label=cpt_label)
+        cpt = AxisComponent(size, label=subslice.component)
         components.append(cpt)
 
         target_path_per_subslice.append(pmap({slice_.axis: subslice.component}))
@@ -908,7 +959,8 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
                 pmap({slice_.label: bsearch(subslice.array.as_var(), layout_var)})
             )
 
-    axes = FrozenAxisTree(Axis(components, label=axis_label))
+    axis = Axis(components, label=axis_label)
+    axes = PartialAxisTree(axis)
     target_path_per_component = {}
     index_exprs_per_component = {}
     layout_exprs_per_component = {}
@@ -918,9 +970,9 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
         index_exprs_per_subslice,
         layout_exprs_per_subslice,
     ):
-        target_path_per_component[axes.root.id, cpt.label] = target_path
-        index_exprs_per_component[axes.root.id, cpt.label] = index_exprs
-        layout_exprs_per_component[axes.root.id, cpt.label] = layout_exprs
+        target_path_per_component[axis.id, cpt.label] = target_path
+        index_exprs_per_component[axis.id, cpt.label] = index_exprs
+        layout_exprs_per_component[axis.id, cpt.label] = layout_exprs
     return (
         axes,
         target_path_per_component,
@@ -938,7 +990,7 @@ def _(called_map: CalledMap, **kwargs):
         _,
     ) = collect_shape_index_callback(called_map.from_index, **kwargs)
 
-    if prior_axes.is_empty:
+    if not prior_axes:
         prior_target_path = prior_target_path_per_cpt[None]
         prior_index_exprs = prior_index_exprs_per_cpt[None]
         (
@@ -949,7 +1001,7 @@ def _(called_map: CalledMap, **kwargs):
         ) = _make_leaf_axis_from_called_map(
             called_map, prior_target_path, prior_index_exprs
         )
-        axes = AxisTree(axis)
+        axes = PartialAxisTree(axis)
     else:
         axes = prior_axes
         target_path_per_cpt = {}
@@ -977,7 +1029,10 @@ def _(called_map: CalledMap, **kwargs):
             ) = _make_leaf_axis_from_called_map(
                 called_map, prior_target_path, prior_index_exprs
             )
-            axes = axes.add_subaxis(subaxis, prior_leaf_axis, prior_leaf_cpt)
+            # axes = axes.add_node(subaxis, prior_leaf_axis, prior_leaf_cpt)
+            axes = axes.add_subtree(
+                PartialAxisTree(subaxis), prior_leaf_axis, prior_leaf_cpt
+            )
             target_path_per_cpt.update(subtarget_paths)
             index_exprs_per_cpt.update(subindex_exprs)
             layout_exprs_per_cpt.update(sublayout_exprs)
@@ -1036,10 +1091,10 @@ def _index_axes(axes, indices: IndexTree, loop_context):
     )
 
     if indexed_axes is None:
-        indexed_axes = AxisTree()
+        indexed_axes = {}
 
     # return the new axes plus the new index expressions per leaf
-    return indexed_axes.freeze(), tpaths, index_expr_per_target, layout_expr_per_target
+    return indexed_axes, tpaths, index_expr_per_target, layout_expr_per_target
 
 
 def _index_axes_rec(
@@ -1057,8 +1112,8 @@ def _index_axes_rec(
         layout_exprs_per_cpt_per_index,
     ) = tuple(map(dict, rest))
 
-    if not axes_per_index.is_empty:
-        leafkeys = [(ax.id, cpt) for ax, cpt in axes_per_index.leaves]
+    if axes_per_index:
+        leafkeys = axes_per_index.leaves
     else:
         leafkeys = [None]
 
@@ -1096,7 +1151,7 @@ def _index_axes_rec(
     axes = axes_per_index
     for k, subax in subaxes.items():
         if subax is not None:
-            if axes.root:
+            if axes:
                 axes = axes.add_subtree(subax, *k)
             else:
                 axes = subax
@@ -1119,13 +1174,15 @@ def index_axes(axes, index_tree):
 
     target_paths, index_exprs, layout_exprs = _compose_bits(
         axes,
+        axes.target_paths,
+        axes.index_exprs,
+        axes.layout_exprs,
         indexed_axes,
         target_path_per_indexed_cpt,
         index_exprs_per_indexed_cpt,
         layout_exprs_per_indexed_cpt,
     )
-    return IndexedAxisTree(
-        indexed_axes.root,
+    return AxisTree(
         indexed_axes.parent_to_children,
         target_paths,
         index_exprs,
@@ -1135,6 +1192,9 @@ def index_axes(axes, index_tree):
 
 def _compose_bits(
     axes,
+    prev_target_paths,
+    prev_index_exprs,
+    prev_layout_exprs,
     indexed_axes,
     itarget_paths,
     iindex_exprs,
@@ -1149,13 +1209,8 @@ def _compose_bits(
     index_exprs_acc=pmap(),
     layout_exprs_acc=pmap(),
 ):
-    from pyop3.distarray.multiarray import IndexExpressionReplacer
-
-    if indexed_axes.is_empty:
+    if not indexed_axes:
         return (
-            # pmap(),
-            # pmap(),
-            # pmap(),
             freeze({None: itarget_paths.get(None, pmap())}),
             freeze({None: iindex_exprs.get(None, pmap())}),
             freeze({None: ilayout_exprs.get(None, pmap())}),
@@ -1165,14 +1220,16 @@ def _compose_bits(
         target_path |= itarget_paths.get(None, {})
         partial_index_exprs |= iindex_exprs.get(None, {})
         # partial_layout_exprs |= ilayout_exprs.get(None, {})
-        visited_target_axes = visited_target_axes.union(target_path.keys())
+
+        # no idea why I put this line here
+        # visited_target_axes = visited_target_axes.union(target_path.keys())
         iaxis = indexed_axes.root
 
     target_path_per_cpt = collections.defaultdict(dict)
     index_exprs = collections.defaultdict(dict)
     layout_exprs = collections.defaultdict(dict)
 
-    for icpt in iaxis.components:
+    for cidx, icpt in enumerate(iaxis.components):
         new_target_path_acc = target_path_acc
         new_index_exprs_acc = index_exprs_acc
 
@@ -1200,12 +1257,12 @@ def _compose_bits(
                 skip = target_axis.label in new_visited_target_axes
                 new_visited_target_axes |= {target_axis.label}
 
-                new_target_path_acc = new_target_path_acc | axes.target_paths.get(
+                new_target_path_acc = new_target_path_acc | prev_target_paths.get(
                     (target_axis.id, target_cpt.label), {}
                 )
 
                 if not skip:
-                    for myaxlabel, mycptlabel in axes.target_paths.get(
+                    for myaxlabel, mycptlabel in prev_target_paths.get(
                         (target_axis.id, target_cpt.label), {}
                     ).items():
                         target_path_per_cpt[iaxis.id, icpt.label][
@@ -1217,7 +1274,7 @@ def _compose_bits(
                 # so the final replace map is target -> f(src)
                 # loop over the original replace map and substitute each value
                 # but drop some bits if indexed out... and final map is per component of the new axtree
-                orig_index_exprs = axes.index_exprs[target_axis.id, target_cpt.label]
+                orig_index_exprs = prev_index_exprs[target_axis.id, target_cpt.label]
                 for axis_label, index_expr in orig_index_exprs.items():
                     # new_index_expr = IndexExpressionReplacer(new_partial_index_exprs)(
                     new_index_expr = IndexExpressionReplacer(new_partial_index_exprs)(
@@ -1238,29 +1295,37 @@ def _compose_bits(
             # we start with src -> f(intermediate)
             # and intermediate -> g(final)
 
-            full_replace_map = merge_dicts(
-                [
-                    axes.layout_exprs[tgt_ax.id, tgt_cpt.label]
-                    for tgt_ax, tgt_cpt in detailed_path.items()
-                ]
-            )
-            for ikey, layout_expr in new_partial_layout_exprs.items():
-                # always 1:1 for layouts
-                mykey, myvalue = just_one(layout_expr.items())
-                mytargetpath = just_one(itarget_paths[ikey].keys())
-                layout_expr_replace_map = {mytargetpath: full_replace_map[mytargetpath]}
-                new_layout_expr = IndexExpressionReplacer(layout_expr_replace_map)(
-                    myvalue
+            # only do this if we are indexing an axis tree, not an array
+            if prev_layout_exprs is not None:
+                full_replace_map = merge_dicts(
+                    [
+                        prev_layout_exprs[tgt_ax.id, tgt_cpt.label]
+                        for tgt_ax, tgt_cpt in detailed_path.items()
+                    ]
                 )
-                layout_exprs[ikey][mykey] = new_layout_expr
+                for ikey, layout_expr in new_partial_layout_exprs.items():
+                    # always 1:1 for layouts
+                    mykey, myvalue = just_one(layout_expr.items())
+                    mytargetpath = just_one(itarget_paths[ikey].keys())
+                    layout_expr_replace_map = {
+                        mytargetpath: full_replace_map[mytargetpath]
+                    }
+                    new_layout_expr = IndexExpressionReplacer(layout_expr_replace_map)(
+                        myvalue
+                    )
+                    layout_exprs[ikey][mykey] = new_layout_expr
 
-        if isubaxis := indexed_axes.child(iaxis, icpt):
+        isubaxis = indexed_axes.child(iaxis, icpt)
+        if isubaxis:
             (
                 subtarget_path,
                 subindex_exprs,
                 sublayout_exprs,
             ) = _compose_bits(
                 axes,
+                prev_target_paths,
+                prev_index_exprs,
+                prev_layout_exprs,
                 indexed_axes,
                 itarget_paths,
                 iindex_exprs,
@@ -1293,45 +1358,68 @@ def _compose_bits(
 
 def iter_axis_tree(
     axes: AxisTree,
+    target_paths,
+    index_exprs,
     outermap,
     axis=None,
     path=pmap(),
     indices=pmap(),
-    target_path=pmap(),
-    index_exprs=pmap(),
+    target_path=None,
+    index_exprs_acc=None,
 ):
-    from pyop3.distarray.multiarray import IndexExpressionReplacer
+    if target_path is None:
+        assert index_exprs_acc is None
+        target_path = target_paths.get(None, pmap())
+
+        myindex_exprs = index_exprs.get(None, pmap())
+        new_exprs = {}
+        for axlabel, index_expr in myindex_exprs.items():
+            new_index = ExpressionEvaluator(outermap)(index_expr)
+            print_with_rank("initialrepr", repr(index_expr))
+            print_with_rank("replacedrepr", repr(new_index))
+            print_with_rank("initial", index_expr)
+            print_with_rank("replaced", new_index)
+            assert new_index != index_expr
+            new_exprs[axlabel] = new_index
+        index_exprs_acc = freeze(new_exprs)
 
     if axes.is_empty:
-        yield pmap(), pmap(), pmap(), pmap()
+        yield pmap(), target_path, pmap(), index_exprs_acc
         return
 
     axis = axis or axes.root
 
     for component in axis.components:
         path_ = path | {axis.label: component.label}
-        target_path_ = target_path | axes.target_paths.get(
-            (axis.id, component.label), {}
-        )
-        myindex_exprs = axes.index_exprs[axis.id, component.label]
+        target_path_ = target_path | target_paths.get((axis.id, component.label), {})
+        myindex_exprs = index_exprs[axis.id, component.label]
         subaxis = axes.child(axis, component)
         for pt in range(_as_int(component.count, path, indices)):
             new_exprs = {}
             for axlabel, index_expr in myindex_exprs.items():
-                # need to replace *not* evaluate because the axis tree could be indexed
-                # with a loop index whose value is not yet known (or pass in context info)
-                # new_index = IndexExpressionReplacer({axis.label: pt})(index_expr)
                 new_index = ExpressionEvaluator(outermap | indices | {axis.label: pt})(
                     index_expr
                 )
+                print_with_rank("initialrepr", repr(index_expr))
+                print_with_rank("replacedrepr", repr(new_index))
+                print_with_rank("initial", index_expr)
+                print_with_rank("replaced", new_index)
                 assert new_index != index_expr
                 new_exprs[axlabel] = new_index
-            index_exprs_ = index_exprs | new_exprs
+            index_exprs_ = index_exprs_acc | new_exprs
             # index_exprs_ = index_exprs | myindex_exprs
             indices_ = indices | {axis.label: pt}
             if subaxis:
                 yield from iter_axis_tree(
-                    axes, outermap, subaxis, path_, indices_, target_path_, index_exprs_
+                    axes,
+                    target_paths,
+                    index_exprs,
+                    outermap,
+                    subaxis,
+                    path_,
+                    indices_,
+                    target_path_,
+                    index_exprs_,
                 )
             else:
                 # yield path_, index_exprs_, indices_
@@ -1373,7 +1461,7 @@ def partition_iterset(index: LoopIndex, arrays):
     to be complete before computation can happen').
 
     """
-    from pyop3.distarray.multiarray import Dat, IndexExpressionReplacer
+    from pyop3.array import HierarchicalArray
 
     # take first
     # paraxis = [axis for axis in index.iterset.nodes if axis.sf is not None][0]
@@ -1389,7 +1477,7 @@ def partition_iterset(index: LoopIndex, arrays):
     is_root_or_leaf_per_array = {}
     for array in arrays:
         # skip purely local arrays
-        if not array.orig_array.array.is_distributed:
+        if not array.array.is_distributed:
             continue
 
         # take first
@@ -1399,7 +1487,7 @@ def partition_iterset(index: LoopIndex, arrays):
         #
         # array_paraxis = array_paraxes[0]
         # sf = array_paraxis.sf
-        sf = array.orig_array.axes.sf  # the dof sf
+        sf = array.array.sf  # the dof sf
 
         # mark leaves and roots
         is_root_or_leaf = np.full(sf.size, ArrayPointLabel.CORE, dtype=np.uint8)
@@ -1431,19 +1519,23 @@ def partition_iterset(index: LoopIndex, arrays):
 
         for array in arrays:
             # skip purely local arrays
-            if not array.orig_array.array.is_distributed:
+            if not array.array.is_distributed:
                 continue
             if labels[parindex] == IterationPointType.LEAF:
                 continue
 
             # loop over stencil
             array = array.with_context({index.id: target_path})
+
+            print_with_rank("array axes", array.axes)
+            print_with_rank("array targetpaths", array.target_paths)
+            print_with_rank("array idxsexprs", array.index_exprs)
             for (
                 array_path,
                 array_target_path,
                 array_indices,
                 array_target_indices,
-            ) in array.axes.index().iter(replace_map):
+            ) in array.iter_indices(replace_map):
                 # allexprs = dict(array.axes.index_exprs.get(None, {}))
                 # if not array.axes.is_empty:
                 #     for myaxis, mycpt in array.axes.path_with_nodes(
@@ -1451,7 +1543,22 @@ def partition_iterset(index: LoopIndex, arrays):
                 #     ).items():
                 #         allexprs.update(array.axes.index_exprs[myaxis.id, mycpt])
                 #
-                offset = array.axes.offset(array_path, array_indices | replace_map)
+                # offset = array.axes.offset(array_path, array_indices | replace_map)
+                # offset = array.offset(
+                #     array_target_path, array_target_indices | replace_map
+                # )
+                # offset = array.simple_offset(array_path, array_indices | replace_map)
+                print_with_rank("array path", array_path)
+                print_with_rank("array idxs", array_indices)
+                print_with_rank("array target path", array_target_path)
+                print_with_rank("array target idxs", array_target_indices)
+                # offset = array.simple_offset(array_target_path, array_target_indices | replace_map)
+
+                print_with_rank("myindices", array_indices | replace_map)
+                # offset = array.simple_offset(array_target_path, array_indices | replace_map)
+                # offset = array.simple_offset(array_target_path, array_target_indices | replace_map)
+
+                offset = array.simple_offset(array_target_path, array_target_indices)
 
                 # allexprs is indexed with the "source" labels but we want a particular
                 # "target" label, need to go backwards... or something
@@ -1495,8 +1602,10 @@ def partition_iterset(index: LoopIndex, arrays):
     subsets = []
     for data in [core, root, leaf]:
         # Constant?
-        size = Dat(AxisTree(), data=np.asarray([len(data)]), dtype=IntType)
-        subset = Dat(
+        size = HierarchicalArray(
+            AxisTree(), data=np.asarray([len(data)]), dtype=IntType
+        )
+        subset = HierarchicalArray(
             Axis([AxisComponent(size, parcpt.label)], paraxis.label), data=data
         )
         subsets.append(subset)
@@ -1509,7 +1618,7 @@ def partition_iterset(index: LoopIndex, arrays):
     new_iterset = index.iterset[
         Slice(
             paraxis.label,
-            [Subset(parcpt.label, subsets[0], label=parcpt.label)],
+            [Subset(parcpt.label, subsets[0])],
             label=paraxis.label,
         )
     ]

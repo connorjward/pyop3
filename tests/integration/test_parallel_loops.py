@@ -89,9 +89,8 @@ def cone_map(comm, mesh_axis):
     ncells = mesh_axis.components[0].count
     nverts = mesh_axis.components[1].count
     arity = 2
-    maxes = op3.AxisTree(
-        op3.Axis([op3.AxisComponent(ncells, "cells")], "mesh", id="root"),
-        {"root": op3.Axis(arity)},
+    maxes = op3.AxisTree.from_nest(
+        {op3.Axis({"cells": ncells}, "mesh"): op3.Axis(arity)},
     )
 
     if comm.rank == 0:
@@ -130,7 +129,7 @@ def cone_map(comm, mesh_axis):
     cell_renumbering = np.empty(ncells, dtype=int)
     min_cell, max_cell = mesh_axis._component_numbering_offsets[:2]
     counter = 0
-    for new_pt, old_pt in enumerate(mesh_axis.numbering):
+    for new_pt, old_pt in enumerate(mesh_axis.numbering.data_ro):
         # is it a cell?
         if min_cell <= old_pt < max_cell:
             old_cell = old_pt - min_cell
@@ -142,7 +141,7 @@ def cone_map(comm, mesh_axis):
     vert_renumbering = np.empty(nverts, dtype=int)
     min_vert, max_vert = mesh_axis._component_numbering_offsets[1:]
     counter = 0
-    for new_pt, old_pt in enumerate(mesh_axis.numbering):
+    for new_pt, old_pt in enumerate(mesh_axis.numbering.data_ro):
         # is it a vertex?
         if min_vert <= old_pt < max_vert:
             old_vert = old_pt - min_vert
@@ -158,7 +157,7 @@ def cone_map(comm, mesh_axis):
             old_vert = old_pt - min_vert
             mdata_renum[new_cell, i] = vert_renumbering[old_vert]
 
-    mdat = op3.Dat(maxes, name="cone", data=mdata_renum.flatten())
+    mdat = op3.HierarchicalArray(maxes, name="cone", data=mdata_renum.flatten())
     return op3.Map(
         {
             freeze({"mesh": "cells"}): [
@@ -175,10 +174,10 @@ def cone_map(comm, mesh_axis):
 def test_parallel_loop(comm, paxis, intent, fill_value):
     assert comm.size == 2
 
-    rank_dat = op3.Dat(
+    rank_dat = op3.HierarchicalArray(
         op3.Axis(1), name="rank", data=np.asarray([comm.rank + 1]), dtype=int
     )
-    dat = op3.Dat(paxis, data=np.full(paxis.size, fill_value, dtype=int))
+    dat = op3.HierarchicalArray(paxis, data=np.full(paxis.size, fill_value, dtype=int))
     knl = set_kernel(1, intent)
 
     op3.do_loop(
@@ -206,19 +205,17 @@ def test_parallel_loop_with_map(comm, mesh_axis, cone_map, scalar_copy_kernel):
     write_value = rank + 1
     other_write_value = other_rank + 1
 
-    rank_dat = op3.Dat(
+    rank_dat = op3.HierarchicalArray(
         op3.Axis(1), name="rank", data=np.asarray([write_value]), dtype=int
     )
-    dat = op3.Dat(mesh_axis, data=np.full(mesh_axis.size, fill_value), dtype=int)
+    dat = op3.HierarchicalArray(
+        mesh_axis, data=np.full(mesh_axis.size, fill_value), dtype=int
+    )
 
     knl = set_kernel(2, intent)
 
-    # since we don't unpick "owned" for indexed axes yet
-    loop_index = mesh_axis.axes.freeze().owned["cells"].index()
-
     op3.do_loop(
-        # c := mesh_axis["cells"].index(),
-        c := loop_index,
+        c := mesh_axis.as_tree().owned["cells"].index(),
         knl(rank_dat, dat[cone_map(c)]),
     )
 
@@ -229,25 +226,25 @@ def test_parallel_loop_with_map(comm, mesh_axis, cone_map, scalar_copy_kernel):
     #    [rank 1]             x  * -----x-----x-----x-----x
     #                         2  *   0  4  0  4  0  4  0  2
     if comm.rank == 0:
-        assert np.count_nonzero(dat.array._data == 0) == 4
-        assert np.count_nonzero(dat.array._data == 1) == 2
-        assert np.count_nonzero(dat.array._data == 2) == 1
+        assert np.count_nonzero(dat.buffer._data == 0) == 4
+        assert np.count_nonzero(dat.buffer._data == 1) == 2
+        assert np.count_nonzero(dat.buffer._data == 2) == 1
     else:
-        assert np.count_nonzero(dat.array._data == 0) == 4
-        assert np.count_nonzero(dat.array._data == 2) == 2
-        assert np.count_nonzero(dat.array._data == 4) == 3
+        assert np.count_nonzero(dat.buffer._data == 0) == 4
+        assert np.count_nonzero(dat.buffer._data == 2) == 2
+        assert np.count_nonzero(dat.buffer._data == 4) == 3
 
     # there should be a pending reduction
-    assert dat.array._pending_reduction == intent
-    assert not dat.array._roots_valid
-    assert not dat.array._leaves_valid
+    assert dat.buffer._pending_reduction == intent
+    assert not dat.buffer._roots_valid
+    assert not dat.buffer._leaves_valid
 
     # now do the reduction
-    dat.array._reduce_leaves_to_roots()
-    assert dat.array._pending_reduction is None
-    assert dat.array._roots_valid
+    dat.buffer._reduce_leaves_to_roots()
+    assert dat.buffer._pending_reduction is None
+    assert dat.buffer._roots_valid
     # leaves are still not up-to-date, requires a broadcast
-    assert not dat.array._leaves_valid
+    assert not dat.buffer._leaves_valid
 
     # we now expect the (renumbered) values to look like
     #             1  0  2  0  3  *   0  0

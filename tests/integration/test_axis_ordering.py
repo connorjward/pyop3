@@ -6,25 +6,9 @@ import pymbolic as pym
 import pytest
 from pyrsistent import pmap
 
-from pyop3 import (
-    INC,
-    READ,
-    WRITE,
-    AffineSliceComponent,
-    Axis,
-    AxisComponent,
-    AxisTree,
-    Function,
-    IndexTree,
-    IntType,
-    MultiArray,
-    ScalarType,
-    Slice,
-    do_loop,
-    loop,
-)
+import pyop3 as op3
 from pyop3.ir import LOOPY_LANG_VERSION, LOOPY_TARGET
-from pyop3.utils import flatten, just_one
+from pyop3.utils import just_one
 
 
 def test_different_axis_orderings_do_not_change_packing_order():
@@ -35,58 +19,54 @@ def test_different_axis_orderings_do_not_change_packing_order():
         [f"{{ [i]: 0 <= i < {m1} }}", f"{{ [j]: 0 <= j < {m2} }}"],
         "y[i, j] = x[i, j]",
         [
-            lp.GlobalArg("x", np.float64, (m1, m2), is_input=True, is_output=False),
-            lp.GlobalArg("y", np.float64, (m1, m2), is_input=False, is_output=True),
+            lp.GlobalArg("x", op3.ScalarType, (m1, m2), is_input=True, is_output=False),
+            lp.GlobalArg("y", op3.ScalarType, (m1, m2), is_input=False, is_output=True),
         ],
-        target=LOOPY_TARGET,
         name="copy",
-        lang_version=(2018, 2),
+        target=LOOPY_TARGET,
+        lang_version=LOOPY_LANG_VERSION,
     )
-    copy_kernel = Function(lpy_kernel, [READ, WRITE])
+    copy_kernel = op3.Function(lpy_kernel, [op3.READ, op3.WRITE])
 
-    axis0 = Axis(m0, "ax0")
-    axis1 = Axis(m1, "ax1")
-    axis2 = Axis(m2, "ax2")
+    axis0 = op3.Axis(m0, "ax0")
+    axis1 = op3.Axis(m1, "ax1")
+    axis2 = op3.Axis(m2, "ax2")
 
-    axes0 = AxisTree(axis0, {axis0.id: [axis1], axis1.id: [axis2]})
-    axes1 = AxisTree(axis0, {axis0.id: [axis2], axis2.id: [axis1]})
+    axes0 = op3.AxisTree.from_nest({axis0: {axis1: axis2}})
+    axes1 = op3.AxisTree.from_nest({axis0: {axis2: axis1}})
 
-    data0 = np.arange(npoints, dtype=ScalarType).reshape((m0, m1, m2))
+    data0 = np.arange(npoints).reshape((m0, m1, m2))
     data1 = data0.swapaxes(1, 2)
 
-    dat0_0 = MultiArray(
+    dat0_0 = op3.HierarchicalArray(
         axes0,
         name="dat0_0",
         data=data0.flatten(),
+        dtype=op3.ScalarType,
     )
-    dat0_1 = MultiArray(axes1, name="dat0_1", data=data1.flatten())
-    dat1 = MultiArray(axes0, name="dat1", data=np.zeros(npoints, dtype=ScalarType))
+    dat0_1 = op3.HierarchicalArray(
+        axes1, name="dat0_1", data=data1.flatten(), dtype=dat0_0.dtype
+    )
+    dat1 = op3.HierarchicalArray(axes0, name="dat1", dtype=dat0_0.dtype)
 
     p = axis0.index()
-    path = pmap({axis0.label: just_one(axis0.components).label})
-
+    path = pmap({axis0.label: axis0.component.label})
     loop_context = pmap({p.id: path})
-    q = IndexTree(
-        p,
+    slice0 = op3.Slice(axis1.label, [op3.AffineSliceComponent(axis1.component.label)])
+    slice1 = op3.Slice(axis2.label, [op3.AffineSliceComponent(axis2.component.label)])
+    q = op3.IndexTree(
         {
-            p.id: [
-                Slice(
-                    "ax1",
-                    [AffineSliceComponent(just_one(axis1.component_labels))],
-                    id="slice0",
-                )
-            ],
-            "slice0": [
-                Slice("ax2", [AffineSliceComponent(just_one(axis2.component_labels))])
-            ],
+            None: (p,),
+            p.id: (slice0,),
+            slice0.id: (slice1,),
         },
         loop_context=loop_context,
     )
 
-    do_loop(p, copy_kernel(dat0_0[q], dat1[q]))
-    assert np.allclose(dat1.data, dat0_0.data)
+    op3.do_loop(p, copy_kernel(dat0_0[q], dat1[q]))
+    assert np.allclose(dat1.data_ro, dat0_0.data_ro)
 
-    dat1.data[...] = 0
+    dat1.data_wo[...] = 0
 
-    do_loop(p, copy_kernel(dat0_1[q], dat1[q]))
-    assert np.allclose(dat1.data, dat0_0.data)
+    op3.do_loop(p, copy_kernel(dat0_1[q], dat1[q]))
+    assert np.allclose(dat1.data_ro, dat0_0.data_ro)

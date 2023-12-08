@@ -18,22 +18,22 @@ import loopy.symbolic
 import numpy as np
 import pymbolic as pym
 import pytools
+from petsc4py import PETSc
 from pyrsistent import freeze, pmap
 
 from pyop3 import utils
+from pyop3.array import HierarchicalArray, PackedPetscMatAIJ, PetscMatAIJ
+from pyop3.array.harray import ContextSensitiveMultiArray
+from pyop3.array.petsc import PetscMat, PetscObject
 from pyop3.axtree import Axis, AxisComponent, AxisTree, AxisVariable
 from pyop3.axtree.tree import ContextSensitiveAxisTree
-from pyop3.distarray import Dat, MultiArray
-from pyop3.distarray.multiarray import ContextSensitiveMultiArray
-from pyop3.distarray.petsc import IndexedPetscMat, PetscMat, PetscObject
+from pyop3.buffer import DistributedBuffer, PackedBuffer
 from pyop3.dtypes import IntType, PointerType
 from pyop3.extras.debug import print_with_rank
 from pyop3.itree import (
-    AffineMapComponent,
     AffineSliceComponent,
     CalledMap,
     Index,
-    IndexedAxisTree,
     IndexTree,
     LocalLoopIndex,
     LoopIndex,
@@ -43,7 +43,11 @@ from pyop3.itree import (
     Subset,
     TabulatedMapComponent,
 )
-from pyop3.itree.tree import CalledMapVariable, LoopIndexVariable
+from pyop3.itree.tree import (
+    CalledMapVariable,
+    IndexExpressionReplacer,
+    LoopIndexVariable,
+)
 from pyop3.lang import (
     INC,
     MAX_RW,
@@ -56,9 +60,9 @@ from pyop3.lang import (
     Assignment,
     CalledFunction,
     Loop,
-    Offset,
 )
 from pyop3.log import logger
+from pyop3.tensor import Dat, Tensor
 from pyop3.utils import (
     PrettyTuple,
     checked_zip,
@@ -172,9 +176,10 @@ class LoopyCodegenContext(CodegenContext):
             )
             return
 
-        if isinstance(array.orig_array, PetscMat):
+        if isinstance(array.buffer, PackedPetscMatAIJ):
             arg = lp.ValueArg(array.name, dtype=self._dtype(array))
         else:
+            assert isinstance(array.buffer, DistributedBuffer)
             arg = lp.GlobalArg(array.name, dtype=self._dtype(array), shape=None)
         self._args.append(arg)
 
@@ -220,11 +225,19 @@ class LoopyCodegenContext(CodegenContext):
 
     @_dtype.register
     def _(self, array: ContextSensitiveMultiArray):
-        return self._dtype(array.orig_array)
+        return single_valued(self._dtype(a) for a in array.context_map.values())
+
+    @_dtype.register(HierarchicalArray)
+    def _(self, array):
+        return self._dtype(array.buffer)
+
+    @_dtype.register(DistributedBuffer)
+    def _(self, array):
+        return array.dtype
 
     @_dtype.register
-    def _(self, array: Dat):
-        return array.dtype
+    def _(self, array: PackedPetscMatAIJ):
+        return OpaqueType("Mat")
 
     @_dtype.register
     def _(self, array: PetscMat):
@@ -398,10 +411,6 @@ def parse_loop_properly_this_time(
     iname_replace_map=pmap(),
     jname_replace_map=pmap(),
 ):
-    from pyop3.distarray.multiarray import IndexExpressionReplacer
-
-    print_with_rank(axes)
-
     outer_replace_map = {}
     for _, replace_map in loop_indices.values():
         outer_replace_map.update(replace_map)
@@ -475,8 +484,6 @@ def parse_loop_properly_this_time(
                         for myaxislabel, jname_expr in new_jname_replace_map.items()
                     }
                 )
-                # breakpoint()
-
                 for stmt in loop.statements:
                     _compile(
                         stmt,
@@ -509,29 +516,12 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
     # loopy args can contain ragged params too
     loopy_args = call.function.code.default_entrypoint.args[: len(call.arguments)]
     for loopy_arg, arg, spec in checked_zip(loopy_args, call.arguments, call.argspec):
-        # create an appropriate temporary
-        # we need the indices here because the temporary shape needs to be indexed
-        # by the same indices as the original array
-        # is this definitely true??? think so. because it gives us the right loops
-        # but we only really need it to determine "within" or not...
-        # if not isinstance(arg, MultiArray):
-        #     # think PetscMat etc
-        #     raise NotImplementedError(
-        #         "Need to handle indices to create temp shape differently"
-        #     )
-
         loop_context = context_from_indices(loop_indices)
 
-        if isinstance(arg, (Dat, ContextSensitiveMultiArray)):
-            axes = arg.with_context(loop_context).temporary_axes.restore()
-        else:
-            assert isinstance(arg, Offset)
-            axes = AxisTree()
-        temporary = Dat(
-            axes,
-            name=ctx.unique_name("t"),
-            dtype=arg.dtype,
-        )
+        assert isinstance(arg, (HierarchicalArray, ContextSensitiveMultiArray))
+        # FIXME materialize is a bad name here, it implies actually packing the values
+        # into the temporary.
+        temporary = arg.with_context(loop_context).materialize()
         indexed_temp = temporary
 
         if loopy_arg.shape is None:
@@ -544,9 +534,7 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
         temporaries.append((arg, indexed_temp, spec.access, shape))
 
         # Register data
-        # TODO more generic check
-        if not isinstance(arg, Offset):
-            ctx.add_argument(arg)
+        ctx.add_argument(arg)
 
         ctx.add_temporary(temporary.name, temporary.dtype, shape)
 
@@ -631,23 +619,20 @@ def parse_assignment(
     # TODO singledispatch
     loop_context = context_from_indices(loop_indices)
 
-    if isinstance(array.with_context(loop_context), IndexedPetscMat):
+    if isinstance(array.with_context(loop_context).buffer, PackedBuffer):
+        if not isinstance(array.with_context(loop_context).buffer, PackedPetscMatAIJ):
+            raise NotImplementedError("TODO")
         parse_assignment_petscmat(
             array.with_context(loop_context), temp, shape, op, loop_indices, codegen_ctx
         )
         return
-    # else:
-    # assert isinstance(assignment, MultiArrayAssignment
+    else:
+        assert isinstance(array.with_context(loop_context).buffer, DistributedBuffer)
 
     # get the right index tree given the loop context
 
-    # TODO cleanup
-    if isinstance(array, Offset):
-        axes = array.with_context(loop_context)
-        minimal_context = array.filter_context(loop_context)
-    else:
-        axes = array.with_context(loop_context).axes
-        minimal_context = array.filter_context(loop_context)
+    axes = array.with_context(loop_context).axes
+    minimal_context = array.filter_context(loop_context)
 
     target_path = {}
     # for _, jnames in new_indices.values():
@@ -678,10 +663,16 @@ def parse_assignment(
 def parse_assignment_petscmat(array, temp, shape, op, loop_indices, codegen_context):
     ctx = codegen_context
 
-    expr = array.getvalues
-    matvar, rexpr, cexpr = expr.parameters
+    (iraxis, ircpt), (icaxis, iccpt) = array.axes.path_with_nodes(
+        *array.axes.leaf, ordered=True
+    )
+    rkey = (iraxis.id, ircpt)
+    ckey = (icaxis.id, iccpt)
 
-    mat = matvar.obj
+    rexpr = array.index_exprs[rkey][just_one(array.target_paths[rkey])]
+    cexpr = array.index_exprs[ckey][just_one(array.target_paths[ckey])]
+
+    mat = array.buffer.array
 
     # need to generate code like map0[i0] instead of the usual map0[i0, i1]
     # this is because we are passing the full map through to the function call
@@ -734,10 +725,8 @@ def parse_assignment_petscmat(array, temp, shape, op, loop_indices, codegen_cont
     )
     codegen_context.add_cinstruction(call_str)
 
-    # debug
-    # codegen_context.add_cinstruction("PetscAttachDebugger();")
 
-
+# TODO now I attach a lot of info to the context-free array, do I need to pass axes around?
 def parse_assignment_properly_this_time(
     array,
     temp,
@@ -753,11 +742,13 @@ def parse_assignment_properly_this_time(
     axis=None,
     source_path=pmap(),
 ):
-    from pyop3.distarray.multiarray import IndexExpressionReplacer
+    context = context_from_indices(loop_indices)
+    ctx_free_array = array.with_context(context)
 
     if axis is None:
         axis = axes.root
-        my_index_exprs = axes.index_exprs.get(None, pmap())
+        target_path = target_path | ctx_free_array.target_paths.get(None, pmap())
+        my_index_exprs = ctx_free_array.index_exprs.get(None, pmap())
         jname_extras = {}
         for axis_label, index_expr in my_index_exprs.items():
             jname_expr = JnameSubstitutor(
@@ -790,7 +781,7 @@ def parse_assignment_properly_this_time(
         codegen_context.add_domain(iname, extent_var)
 
         new_source_path = source_path | {axis.label: component.label}  # not used
-        new_target_path = target_path | axes.target_paths.get(
+        new_target_path = target_path | ctx_free_array.target_paths.get(
             (axis.id, component.label), {}
         )
 
@@ -799,7 +790,7 @@ def parse_assignment_properly_this_time(
         # I don't like that I need to do this here and also when I emit the layout
         # instructions.
         # Do I need the jnames on the way down? Think so for things like ragged...
-        my_index_exprs = axes.index_exprs.get((axis.id, component.label), {})
+        my_index_exprs = ctx_free_array.index_exprs.get((axis.id, component.label), {})
         jname_extras = {}
         for axis_label, index_expr in my_index_exprs.items():
             jname_expr = JnameSubstitutor(
@@ -857,23 +848,22 @@ def add_leaf_assignment(
 ):
     context = context_from_indices(loop_indices)
 
-    if isinstance(array, (Dat, ContextSensitiveMultiArray)):
-        array_expr = functools.partial(
-            make_array_expr,
+    assert isinstance(array, (HierarchicalArray, ContextSensitiveMultiArray))
+
+    def array_expr():
+        array_ = array.with_context(context)
+        return make_array_expr(
             array,
-            array.with_context(context).layouts[source_path],
+            # I think...
+            # not calling substitute layouts from above so loop indices not
+            # present in the layout...
+            # subst_layout(axes, source_path, target_path),
+            array_.layouts[target_path],
             target_path,
             iname_replace_map | jname_replace_map,
             codegen_context,
         )
-    else:
-        assert isinstance(array, Offset)
-        array_expr = functools.partial(
-            make_offset_expr,
-            array.with_context(context).layouts[source_path],
-            iname_replace_map | jname_replace_map,
-            codegen_context,
-        )
+
     temp_expr = functools.partial(
         make_temp_expr,
         temporary,
@@ -902,12 +892,6 @@ def add_leaf_assignment(
 
 
 def make_array_expr(array, layouts, path, jnames, ctx):
-    """
-
-    Return a list of (assignee, expression) tuples and the array expr used
-    in the assignment.
-
-    """
     array_offset = make_offset_expr(
         layouts,
         jnames,
@@ -935,6 +919,14 @@ def make_temp_expr(temporary, shape, path, jnames, ctx):
     return pym.subscript(pym.var(temporary.name), extra_indices + (temp_offset_var,))
 
 
+def subst_layout(axes, source_path, target_path):
+    replace_map = {}
+    for axis, cpt in axes.detailed_path(source_path).items():
+        replace_map.update(axes.layout_exprs[axis.id, cpt])
+
+    return IndexExpressionReplacer(replace_map)(axes.layouts[target_path])
+
+
 class JnameSubstitutor(pym.mapper.IdentityMapper):
     def __init__(self, replace_map, codegen_context):
         self._labels_to_jnames = replace_map
@@ -957,7 +949,7 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         return varname
 
     def map_called_map(self, expr):
-        if not isinstance(expr.function.map_component.array, Dat):
+        if not isinstance(expr.function.map_component.array, HierarchicalArray):
             raise NotImplementedError("Affine map stuff not supported yet")
 
         # TODO I think I can clean the indexing up a lot here
@@ -1001,9 +993,6 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
     def map_call(self, expr):
         if expr.function.name == "mybsearch":
             return self._map_bsearch(expr)
-        elif expr.function.name == "MatGetValues":
-            assert False, "not here"
-            return self._map_matgetvalues(expr)
         else:
             raise NotImplementedError("hmm")
 
@@ -1034,7 +1023,7 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         key_varname = ctx.unique_name("key")
         ctx.add_temporary(key_varname)
         key_var = pym.var(key_varname)
-        key_expr = self._labels_to_jnames[(axis_var.index.id, axis_var.axis)]
+        key_expr = self.rec(axis_var)
         ctx.add_assignment(key_var, key_expr)
 
         # base
@@ -1100,7 +1089,7 @@ def register_extent(extent, jnames, ctx):
         return extent
 
     # actually a pymbolic expression
-    if not isinstance(extent, Dat):
+    if not isinstance(extent, HierarchicalArray):
         raise NotImplementedError("need to tidy up assignment logic")
 
     if not extent.axes.is_empty:
@@ -1188,21 +1177,38 @@ def _as_pointer(array) -> int:
 
 # bad name now, "as_kernel_arg"?
 @_as_pointer.register
-def _(array: int):
-    return array
+def _(arg: int):
+    return arg
 
 
 @_as_pointer.register
-def _(array: np.ndarray):
-    return array.ctypes.data
+def _(arg: np.ndarray):
+    return arg.ctypes.data
 
 
 @_as_pointer.register
-def _(array: Dat):
+def _(arg: HierarchicalArray):
     # TODO if we use the right accessor here we modify the state appropriately
-    return array.array._data.ctypes.data
+    return _as_pointer(arg.buffer)
+
+
+@_as_pointer.register
+def _(arg: DistributedBuffer):
+    # TODO if we use the right accessor here we modify the state appropriately
+    # NOTE: Do not use .data_rw accessor here since this would trigger a halo exchange
+    return _as_pointer(arg._data)
+
+
+@_as_pointer.register
+def _(arg: PackedBuffer):
+    return _as_pointer(arg.array)
 
 
 @_as_pointer.register
 def _(array: PetscMat):
     return array.petscmat.handle
+
+
+@_as_pointer.register
+def _(arg: Tensor):
+    return _as_pointer(arg.data)

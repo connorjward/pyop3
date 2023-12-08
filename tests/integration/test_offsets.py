@@ -3,6 +3,10 @@ import pytest
 
 import pyop3 as op3
 
+# Not sure this is the right approach any more. I want to be able to evaluate
+# arbitrary expressions (of which layouts are just one).
+pytest.skip(allow_module_level=True)
+
 
 def test_copy_offset(scalar_copy_kernel_int):
     m = 10

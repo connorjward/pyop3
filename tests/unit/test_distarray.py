@@ -52,8 +52,8 @@ def array(comm):
     # build the DoF SF
     serial = op3.Axis(npoints)
     axis = op3.Axis.from_serial(serial, sf)
-    axes = op3.AxisTree(axis, {axis.id: op3.Axis(3)}).freeze()
-    return op3.DistributedArray(axes.size, sf=axes.sf)
+    axes = op3.AxisTree.from_nest({axis: op3.Axis(3)}).freeze()
+    return op3.DistributedBuffer(axes.size, sf=axes.sf)
 
 
 @pytest.mark.parallel(nprocs=2)

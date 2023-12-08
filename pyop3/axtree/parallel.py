@@ -5,7 +5,7 @@ from mpi4py import MPI
 from petsc4py import PETSc
 from pyrsistent import pmap
 
-from pyop3.axtree.tree import _as_int, _axis_component_size, step_size
+from pyop3.axtree.layout import _as_int, _axis_component_size, step_size
 from pyop3.dtypes import IntType, get_mpi_dtype
 from pyop3.extras.debug import print_with_rank
 from pyop3.utils import checked_zip, just_one, strict_int
@@ -19,7 +19,7 @@ def partition_ghost_points(axis, sf):
     numbering = np.empty(npoints, dtype=IntType)
     owned_ptr = 0
     ghost_ptr = npoints - sf.nleaves
-    points = axis.numbering if axis.numbering is not None else range(npoints)
+    points = axis.numbering.data_ro if axis.numbering is not None else range(npoints)
     for pt in points:
         if is_owned[pt]:
             numbering[owned_ptr] = pt
@@ -69,7 +69,7 @@ def collect_sf_graphs(axes, axis=None, path=pmap(), indices=pmap()):
 
 
 # perhaps I can defer renumbering the SF to here?
-def grow_dof_sf(axes: FrozenAxisTree, axis, path, indices):
+def grow_dof_sf(axes, axis, path, indices):
     point_sf = axis.sf
     # TODO, use convenience methods
     nroots, ilocal, iremote = point_sf._graph
@@ -81,7 +81,7 @@ def grow_dof_sf(axes: FrozenAxisTree, axis, path, indices):
     # renumbering per component, can skip if no renumbering present
     renumbering = [np.empty(c.count, dtype=int) for c in axis.components]
     counters = [0] * len(axis.components)
-    for new_pt, old_pt in enumerate(axis.numbering):
+    for new_pt, old_pt in enumerate(axis.numbering.data_ro):
         for cidx, (min_, max_) in enumerate(
             zip(component_offsets, component_offsets[1:])
         ):

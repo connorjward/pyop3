@@ -1,9 +1,7 @@
 from .tree import (
-    AffineMapComponent,
     AffineSliceComponent,
     CalledMap,
     Index,
-    IndexedAxisTree,
     IndexTree,
     LocalLoopIndex,
     LoopIndex,

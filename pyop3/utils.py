@@ -1,3 +1,4 @@
+import abc
 import collections
 import functools
 import itertools
@@ -32,26 +33,22 @@ Id = Hashable
 Label = Hashable
 
 
-class UniquelyIdentifiedImmutableRecord(pytools.ImmutableRecord):
-    fields = {"id"}
-
-    def __init__(self, id: Optional[Id] = None):
-        pytools.ImmutableRecord.__init__(self)
+class Identified(abc.ABC):
+    def __init__(self, id):
         self.id = id if id is not None else self.unique_id()
 
     @classmethod
-    def unique_id(cls):
-        return unique_name(f"_{cls.__name__}_id")
+    def unique_id(cls) -> str:
+        return unique_name(f"_id_{cls.__name__}")
 
 
-class LabelledImmutableRecord(UniquelyIdentifiedImmutableRecord):
-    fields = {"label"} | UniquelyIdentifiedImmutableRecord.fields
+class Labelled(abc.ABC):
+    def __init__(self, label):
+        self.label = label if label is not None else self.unique_label()
 
-    def __init__(self, label: Optional[Label] = None, **kwargs):
-        super().__init__(**kwargs)
-        self.label = (
-            label if label is not None else unique_name(f"_{type(self).__name__}_label")
-        )
+    @classmethod
+    def unique_label(cls) -> str:
+        return unique_name(f"_label_{cls.__name__}")
 
 
 def as_tuple(item):
@@ -250,3 +247,41 @@ def deprecated(prefer=None, internal=False):
         return wrapper
 
     return decorator
+
+
+class FrozenRecordException(TypeError):
+    pass
+
+
+def _disabled_record_copy(self, **kwargs):
+    raise FrozenRecordException("Cannot call copy on a frozen record class")
+
+
+def frozen_record(cls):
+    """Class decorator that disables record copying.
+
+    This is required to handle the case where we have `pytools.Record` subclasses
+    that have "correlated" attributes. Consider a case where we have class
+    ``MyClass`` with attributes ``a`` and ``b``, where ``a`` and ``b`` are in some
+    sense related. It is therefore invalid to call ``myobj.copy(a=new_a)`` or
+    ``myobj.copy(b=new_b)`` as that will break the connection between ``a``
+    and ``b``.
+
+    The primary use case for this decorator is for `AxisTree` (non-frozen) and
+    `SetUpAxisTree` (frozen). We want to inherit the full set of methods from
+    `LabelledTree` into `AxisTree`, but when we call `AxisTree.set_up` we no longer
+    want to allow "mutator" methods that add additional axes since the tree now
+    has correlated attributes such as the layout functions and star forest and
+    adding new axes would break them.
+
+    Notes
+    -----
+    This behaviour has been implemented as a class decorator as opposed to
+    a mixin class because, for a mixin class, the disabling behaviour would
+    be dependent on the ordering of the classes in the inheritance hierarchy.
+
+    """
+    if not issubclass(cls, pytools.Record):
+        raise TypeError("frozen_record is only valid for subclasses of pytools.Record")
+    cls.copy = _disabled_record_copy
+    return cls

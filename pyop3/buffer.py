@@ -1,7 +1,6 @@
-# TODO Rename this file to distarray.py and distarray/ to tensor/
-
 from __future__ import annotations
 
+import abc
 import numbers
 from functools import cached_property
 
@@ -9,7 +8,9 @@ import numpy as np
 from mpi4py import MPI
 
 from pyop3.dtypes import ScalarType
-from pyop3.utils import UniqueNameGenerator, deprecated, readonly
+from pyop3.extras.debug import print_if_rank
+from pyop3.lang import KernelArgument
+from pyop3.utils import UniqueNameGenerator, as_tuple, deprecated, readonly
 
 
 class IncompatibleStarForestException(Exception):
@@ -38,46 +39,49 @@ def not_in_flight(fn):
     return wrapper
 
 
-class DistributedArray:
+class Buffer(KernelArgument, abc.ABC):
+    DEFAULT_DTYPE = ScalarType
+
+    @property
+    @abc.abstractmethod
+    def dtype(self):
+        pass
+
+
+# TODO should AbstractBuffer be a class and then a serial buffer can be its own class?
+class DistributedBuffer(Buffer):
     """An array distributed across multiple processors with ghost values."""
 
     # NOTE: When GPU support is added, the host-device awareness and
     # copies should live in this class.
 
-    DEFAULT_DTYPE = ScalarType
+    # NOTE: It is probably easiest to treat the data as being "moved into" the
+    # DistributedArray. But copies should ideally be avoided?
 
     _prefix = "array"
     _name_generator = UniqueNameGenerator()
 
-    def __init__(self, data_or_shape, dtype=None, *, name=None, prefix=None, sf=None):
+    def __init__(
+        self, shape, dtype=None, *, name=None, prefix=None, data=None, sf=None
+    ):
+        shape = as_tuple(shape)
+        if dtype is None:
+            dtype = self.DEFAULT_DTYPE
+
         if name and prefix:
             raise ValueError("Can only specify one of name and prefix")
 
-        # option 1: passed shape
-        if isinstance(data_or_shape, (numbers.Integral, tuple)):
-            data = None
-            shape = (
-                data_or_shape if isinstance(data_or_shape, tuple) else (data_or_shape,)
-            )
-            if not dtype:
-                dtype = self.DEFAULT_DTYPE
-        # option 2: passed a numpy array
-        elif isinstance(data_or_shape, np.ndarray):
-            data = data_or_shape
-            shape = data.shape
-            if len(shape) > 1:
-                raise NotImplementedError
-            if not dtype:
-                dtype = data.dtype
-            data = np.asarray(data, dtype)
-        else:
-            raise TypeError(f"Unexpected type passed to data_or_shape")
+        if data is not None:
+            if data.shape != shape:
+                raise ValueError
+            if data.dtype != dtype:
+                raise ValueError
 
         if sf and shape[0] != sf.size:
             raise IncompatibleStarForestException
 
         self.shape = shape
-        self.dtype = dtype
+        self._dtype = dtype
         self._lazy_data = data
         self.sf = sf
 
@@ -91,8 +95,13 @@ class DistributedArray:
         self._pending_reduction = None
         self._finalizer = None
 
-        # TODO
-        # self._sync_thread = None
+    # @classmethod
+    # def from_array(cls, array: np.ndarray, **kwargs):
+    #     return cls(array.shape, array.dtype, data=array, **kwargs)
+
+    @property
+    def dtype(self):
+        return self._dtype
 
     @property
     @not_in_flight
@@ -230,3 +239,23 @@ class DistributedArray:
     def _reduce_then_broadcast(self):
         self._reduce_leaves_to_roots()
         self._broadcast_roots_to_leaves()
+
+
+class PackedBuffer(Buffer):
+    """Abstract buffer originating from a function call.
+
+    For example, the buffer returned from ``MatGetValues`` is such a "packed"
+    buffer.
+
+    """
+
+    # TODO Haven't exactly decided on the right API here, subclasses?
+    # def __init__(self, pack_fn, unpack_fn, dtype):
+    #     self._dtype = dtype
+    def __init__(self, array):
+        self.array = array
+
+    # needed?
+    @property
+    def dtype(self):
+        return self.array.dtype

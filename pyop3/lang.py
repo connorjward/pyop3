@@ -19,36 +19,16 @@ import pytools
 from pyrsistent import freeze, pmap
 
 from pyop3.axtree import as_axis_tree
-from pyop3.axtree.tree import (
-    ContextFree,
-    ContextSensitive,
-    FrozenAxisTree,
-    MultiArrayCollector,
-)
+from pyop3.axtree.tree import ContextFree, ContextSensitive, MultiArrayCollector
 from pyop3.config import config
-from pyop3.distarray import Dat, MultiArray, PetscMat
-from pyop3.distarray2 import DistributedArray
-from pyop3.distarray.multiarray import (
-    ContextSensitiveMultiArray,
-    IndexExpressionReplacer,
-    substitute_layouts,
-)
 from pyop3.dtypes import IntType, dtype_limits
 from pyop3.extras.debug import print_with_rank
-from pyop3.itree.tree import (
-    IndexedAxisTree,
-    _compose_bits,
-    _index_axes,
-    as_index_forest,
-    partition_iterset,
-)
 from pyop3.utils import as_tuple, checked_zip, just_one, merge_dicts, unique
 
 
 # TODO I don't think that this belongs in this file, it belongs to the function?
 # create a function.py file?
-# class Intent?
-class Access(enum.Enum):
+class Intent(enum.Enum):
     # developer note, MIN_RW and MIN_WRITE are distinct (unlike PyOP2) to avoid
     # passing "requires_zeroed_output_arguments" around, yuck
 
@@ -60,6 +40,10 @@ class Access(enum.Enum):
     MIN_RW = "min_rw"
     MAX_WRITE = "max_write"
     MAX_RW = "max_rw"
+
+
+# old alias
+Access = Intent
 
 
 READ = Access.READ
@@ -74,6 +58,10 @@ MAX_WRITE = Access.MAX_WRITE
 
 class IntentMismatchError(Exception):
     pass
+
+
+class KernelArgument(abc.ABC):
+    """Class representing objects that may be passed as arguments to kernels."""
 
 
 class LoopExpr(pytools.ImmutableRecord, abc.ABC):
@@ -138,6 +126,7 @@ class Loop(LoopExpr):
 
     def __call__(self, **kwargs):
         from pyop3.ir.lower import compile
+        from pyop3.itree.tree import partition_iterset
 
         if self.is_parallel:
             # interleave computation and communication
@@ -217,13 +206,12 @@ class Loop(LoopExpr):
 
     @cached_property
     def _distarray_args(self):
+        from pyop3.buffer import DistributedBuffer
+
         arrays = {}
         for arg, intent in self.all_function_arguments:
-            # catch exceptions in a horrible way
-            if isinstance(arg, Offset):  # should probably remove this type
-                continue
             if (
-                not isinstance(arg.array, DistributedArray)
+                not isinstance(arg.array, DistributedBuffer)
                 or not arg.array.is_distributed
             ):
                 continue
@@ -335,7 +323,9 @@ def _has_nontrivial_stencil(array):
     # FIXME This is WRONG, there are cases (e.g. support(extfacet)) where
     # the halo might be touched but the size (i.e. map arity) is 1. I need
     # to look at index_exprs probably.
-    if isinstance(array, Dat):
+    from pyop3.array import ContextSensitiveMultiArray, HierarchicalArray
+
+    if isinstance(array, HierarchicalArray):
         return array.axes.size > 1
     elif isinstance(array, ContextSensitiveMultiArray):
         return any(_has_nontrivial_stencil(d) for d in array.context_map.values())
@@ -392,6 +382,8 @@ class Function:
         self._access_descrs = access_descrs
 
     def __call__(self, *args):
+        if not all(isinstance(a, KernelArgument) for a in args):
+            raise TypeError("invalid kernel argument type")
         if len(args) != len(self.argspec):
             raise ValueError(
                 f"Wrong number of arguments provided, expected {len(self.argspec)} "
@@ -449,76 +441,6 @@ class CalledFunction(LoopExpr):
                 key=lambda a: a[0].name,
             )
         )
-
-
-class Offset(LoopExpr, ContextSensitive):
-    """Terminal containing the offset of some axis tree given some multi-index."""
-
-    def __init__(self, per_context):
-        LoopExpr.__init__(self)
-        ContextSensitive.__init__(self, per_context)
-
-    # FIXME
-    @property
-    def name(self):
-        return "my_offset"
-
-    @property
-    def dtype(self):
-        return IntType
-
-    @functools.cached_property
-    def datamap(self):
-        return merge_dicts(axes.datamap for axes in self.context_map.values())
-
-
-def offset(axes, indices):
-    axes = as_axis_tree(axes).freeze()
-    axes_per_context = {}
-    for index_tree in as_index_forest(indices, axes=axes):
-        loop_context = index_tree.loop_context
-        (
-            indexed_axes,
-            target_path_per_indexed_cpt,
-            index_exprs_per_indexed_cpt,
-            layout_exprs_per_indexed_cpt,
-        ) = _index_axes(axes, index_tree, loop_context)
-
-        (
-            target_paths,
-            index_exprs,
-            layout_exprs,
-        ) = _compose_bits(
-            axes,
-            indexed_axes,
-            target_path_per_indexed_cpt,
-            index_exprs_per_indexed_cpt,
-            layout_exprs_per_indexed_cpt,
-        )
-
-        new_axes = IndexedAxisTree(
-            indexed_axes.root,
-            indexed_axes.parent_to_children,
-            target_paths,
-            index_exprs,
-            layout_exprs,
-        )
-
-        new_layouts = substitute_layouts(
-            axes,
-            new_axes,
-            target_path_per_indexed_cpt,
-            index_exprs_per_indexed_cpt,
-        )
-        layout_axes = FrozenAxisTree(
-            new_axes.root,
-            new_axes.parent_to_children,
-            target_paths,
-            index_exprs,
-            new_layouts,
-        )
-        axes_per_context[loop_context] = layout_axes
-    return Offset(axes_per_context)
 
 
 class Instruction(pytools.ImmutableRecord):

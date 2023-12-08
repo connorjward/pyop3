@@ -17,6 +17,7 @@ from mpi4py import MPI
 from petsc4py import PETSc
 from pyrsistent import freeze, pmap
 
+from pyop3.array.base import Array
 from pyop3.axtree import (
     Axis,
     AxisComponent,
@@ -25,13 +26,20 @@ from pyop3.axtree import (
     ContextSensitive,
     as_axis_tree,
 )
-from pyop3.axtree.tree import AxisVariable, FrozenAxisTree, MultiArrayCollector
-from pyop3.distarray2 import DistributedArray
-from pyop3.distarray.base import Tensor
+from pyop3.axtree.tree import (
+    AxisVariable,
+    ExpressionEvaluator,
+    Indexed,
+    MultiArrayCollector,
+    _path_and_indices_from_index_tuple,
+    _trim_path,
+)
+from pyop3.buffer import Buffer, DistributedBuffer
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
 from pyop3.extras.debug import print_if_rank, print_with_rank
-from pyop3.itree import IndexedAxisTree, IndexTree, as_index_forest, index_axes
-from pyop3.itree.tree import CalledMapVariable, collect_loop_indices
+from pyop3.itree import IndexTree, as_index_forest, index_axes
+from pyop3.itree.tree import CalledMapVariable, collect_loop_indices, iter_axis_tree
+from pyop3.lang import KernelArgument
 from pyop3.utils import (
     PrettyTuple,
     UniqueNameGenerator,
@@ -42,6 +50,7 @@ from pyop3.utils import (
     merge_dicts,
     readonly,
     single_valued,
+    some_but_not_all,
     strict_int,
     strictly_all,
 )
@@ -49,44 +58,6 @@ from pyop3.utils import (
 
 class IncompatibleShapeError(Exception):
     """TODO, also bad name"""
-
-
-# should be elsewhere, this is copied from loopexpr2loopy VariableReplacer
-class IndexExpressionReplacer(pym.mapper.IdentityMapper):
-    def __init__(self, replace_map):
-        self._replace_map = replace_map
-
-    def map_axis_variable(self, expr):
-        # print_if_rank(0, "replace map ", self._replace_map)
-        # return self._replace_map[expr.axis_label]
-        return self._replace_map.get(expr.axis_label, expr)
-
-    def map_multi_array(self, expr):
-        # print_if_rank(0, self._replace_map)
-        # print_if_rank(0, expr.indices)
-        indices = {axis: self.rec(index) for axis, index in expr.indices.items()}
-        return MultiArrayVariable(expr.array, indices)
-
-    def map_called_map(self, expr):
-        array = expr.function.map_component.array
-
-        # should the following only exist at eval time?
-
-        # the inner_expr tells us the right mapping for the temporary, however,
-        # for maps that are arrays the innermost axis label does not always match
-        # the label used by the temporary. Therefore we need to do a swap here.
-        # I don't like this.
-        # inner_axis = array.axes.leaf_axis
-        # print_if_rank(0, self._replace_map)
-        # print_if_rank(0, expr.parameters)
-        indices = {axis: self.rec(idx) for axis, idx in expr.parameters.items()}
-        # indices[inner_axis.label] = indices.pop(expr.function.full_map.name)
-
-        return CalledMapVariable(expr.function, indices)
-
-    def map_loop_index(self, expr):
-        # this is hacky, if I make this raise a KeyError then we fail in indexing
-        return self._replace_map.get((expr.name, expr.axis), expr)
 
 
 class MultiArrayVariable(pym.primitives.Variable):
@@ -110,57 +81,77 @@ class MultiArrayVariable(pym.primitives.Variable):
         )
 
 
-class Dat(Tensor, ContextFree):
+class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
     """Multi-dimensional, hierarchical array.
 
     Parameters
     ----------
-    sf : ???
-        PETSc star forest connecting values (offsets) in the local array with
-        remote equivalents.
 
     """
 
-    DEFAULT_DTYPE = DistributedArray.DEFAULT_DTYPE
+    DEFAULT_DTYPE = Buffer.DEFAULT_DTYPE
 
     def __init__(
         self,
-        axes: AxisTree,
+        axes,
         dtype=None,
         *,
         data=None,
         max_value=None,
-        **kwargs,
+        target_paths=None,
+        index_exprs=None,
+        layouts=None,
+        name=None,
+        prefix=None,
     ):
-        super().__init__(**kwargs)
+        super().__init__(name=name, prefix=prefix)
 
         # TODO This is ugly
-        temporary_axes = as_axis_tree(axes).freeze()  # used for the temporary
-        axes = layout_axes(axes)
+        # temporary_axes = as_axis_tree(axes).freeze()  # used for the temporary
+        # previously layout_axes
+        # drop index_exprs...
+        axes = as_axis_tree(axes)
 
-        if data is None and dtype is None:
-            dtype = ScalarType
+        # axes = as_layout_axes(axes)
 
-        if isinstance(data, DistributedArray):
+        if isinstance(data, Buffer):
             # disable for now, temporaries hit this in an annoying way
             # if data.sf is not axes.sf:
             #     raise ValueError("Star forests do not match")
             if dtype is not None:
-                raise ValueError(
-                    "If data is a DistributedArray, dtype should not be provided"
-                )
+                raise ValueError("If data is a Buffer, dtype should not be provided")
             pass
-        elif isinstance(data, np.ndarray):
-            data = DistributedArray(data, dtype, name=self.name, sf=axes.sf)
         else:
-            data = DistributedArray(axes.size, dtype, name=self.name, sf=axes.sf)
-        self.array = data
+            if isinstance(data, np.ndarray):
+                dtype = dtype or data.dtype
+            else:
+                dtype = dtype or self.DEFAULT_DTYPE
 
-        self.temporary_axes = temporary_axes
+            if data is not None:
+                data = np.asarray(data, dtype=dtype)
+                shape = data.shape
+            else:
+                shape = axes.size
+            data = DistributedBuffer(
+                shape, dtype, name=self.name, data=data, sf=axes.sf
+            )
+
+        self.buffer = data
+
+        # instead implement "materialize"
+        # self.temporary_axes = temporary_axes
         self.axes = axes
         self.layout_axes = axes  # used? likely don't need all these
 
         self.max_value = max_value
+
+        if some_but_not_all(x is None for x in [target_paths, index_exprs]):
+            raise ValueError
+
+        self._target_paths = target_paths or axes._default_target_paths()
+        self._index_exprs = index_exprs or axes._default_index_exprs()
+
+        self.layouts = layouts or axes.layouts
 
     def __str__(self):
         return self.name
@@ -182,96 +173,80 @@ class Dat(Tensor, ContextFree):
                 target_path_per_indexed_cpt,
                 index_exprs_per_indexed_cpt,
                 layout_exprs_per_indexed_cpt,
-            ) = _index_axes(self.layout_axes, index_tree, pmap())
+            ) = _index_axes(self.axes, index_tree, pmap())
             target_paths, index_exprs, layout_exprs = _compose_bits(
-                self.layout_axes,
+                self.axes,
+                self.target_paths,
+                self.index_exprs,
+                None,
                 indexed_axes,
                 target_path_per_indexed_cpt,
                 index_exprs_per_indexed_cpt,
                 layout_exprs_per_indexed_cpt,
             )
 
-            new_axes = IndexedAxisTree(
-                indexed_axes.root,
-                indexed_axes.parent_to_children,
-                target_paths,
-                index_exprs,
-                layout_exprs,
-            )
-
-            new_layouts = substitute_layouts(
-                self.layout_axes,
-                new_axes,
-                target_path_per_indexed_cpt,
-                index_exprs_per_indexed_cpt,
-            )
-            layout_axes = FrozenAxisTree(
-                new_axes.root,
-                new_axes.parent_to_children,
+            return HierarchicalArray(
+                indexed_axes,
+                data=self.array,
+                max_value=self.max_value,
                 target_paths=target_paths,
                 index_exprs=index_exprs,
-                layouts=new_layouts,
+                layouts=self.layouts,
+                name=self.name,
             )
-            return self._with_axes(layout_axes)
 
         array_per_context = {}
-        for index_tree in as_index_forest(indices, axes=self.layout_axes):
+        for index_tree in as_index_forest(indices, axes=self.axes):
             loop_context = index_tree.loop_context
             (
                 indexed_axes,
                 target_path_per_indexed_cpt,
                 index_exprs_per_indexed_cpt,
                 layout_exprs_per_indexed_cpt,
-            ) = _index_axes(self.layout_axes, index_tree, loop_context)
+            ) = _index_axes(self.axes, index_tree, loop_context)
 
             (
                 target_paths,
                 index_exprs,
                 layout_exprs,
             ) = _compose_bits(
-                self.layout_axes,
+                self.axes,
+                self.target_paths,
+                self.index_exprs,
+                None,
                 indexed_axes,
                 target_path_per_indexed_cpt,
                 index_exprs_per_indexed_cpt,
                 layout_exprs_per_indexed_cpt,
             )
 
-            new_axes = IndexedAxisTree(
-                indexed_axes.root,
-                indexed_axes.parent_to_children,
-                target_paths,
-                index_exprs,
-                layout_exprs,
-            )
-
-            new_layouts = substitute_layouts(
-                self.layout_axes,
-                new_axes,
-                target_path_per_indexed_cpt,
-                index_exprs_per_indexed_cpt,
-            )
-            layout_axes = FrozenAxisTree(
-                new_axes.root,
-                new_axes.parent_to_children,
+            array_per_context[loop_context] = HierarchicalArray(
+                indexed_axes,
+                data=self.array,
+                max_value=self.max_value,
                 target_paths=target_paths,
                 index_exprs=index_exprs,
-                layouts=new_layouts,
+                layouts=self.layouts,
+                name=self.name,
             )
-            array_per_context[loop_context] = self._with_axes(layout_axes)
         return ContextSensitiveMultiArray(array_per_context)
 
-    # TODO remove this
+    # Since __getitem__ is implemented, this class is implicitly considered
+    # to be iterable (which it's not). This avoids some confusing behaviour.
+    __iter__ = None
+
     @property
-    def layouts(self):
-        return self.axes.layouts
+    def valid_ranks(self):
+        return frozenset(range(self.axes.depth + 1))
+
+    @property
+    @deprecated("buffer")
+    def array(self):
+        return self.buffer
 
     @property
     def dtype(self):
         return self.array.dtype
-
-    @property
-    def sf(self) -> StarForest:
-        return self.array.sf
 
     @property
     @deprecated(".data_rw")
@@ -298,6 +273,14 @@ class Dat(Tensor, ContextFree):
         return self.array.data_wo
 
     @property
+    def target_paths(self):
+        return self._target_paths
+
+    @property
+    def index_exprs(self):
+        return self._index_exprs
+
+    @property
     def sf(self):
         return self.array.sf
 
@@ -305,10 +288,17 @@ class Dat(Tensor, ContextFree):
     def datamap(self):
         datamap_ = {self.name: self}
         datamap_.update(self.axes.datamap)
-        datamap_.update(self.layout_axes.datamap)
+        for index_exprs in self.index_exprs.values():
+            for expr in index_exprs.values():
+                for array in MultiArrayCollector()(expr):
+                    datamap_.update(array.datamap)
+        for layout_expr in self.layouts.values():
+            for array in MultiArrayCollector()(layout_expr):
+                datamap_.update(array.datamap)
         return freeze(datamap_)
 
-    def assemble(self):
+    # TODO update docstring
+    def assemble(self, update_leaves=False):
         """Ensure that stored values are up-to-date.
 
         This function is typically only required when accessing the `Dat` in a
@@ -317,16 +307,67 @@ class Dat(Tensor, ContextFree):
         entries in the array would hold undefined values.
 
         """
-        self.array._reduce_then_broadcast()
+        if update_leaves:
+            self.array._reduce_then_broadcast()
+        else:
+            self.array._reduce_leaves_to_roots()
+
+    def materialize(self) -> HierarchicalArray:
+        """Return a new "unindexed" array with the same shape."""
+        # "unindexed" axis tree
+        axes = AxisTree(self.axes.parent_to_children)
+        return type(self)(axes, dtype=self.dtype)
+
+    def offset(self, *args, allow_unused=False, insert_zeros=False):
+        nargs = len(args)
+        if nargs == 2:
+            path, indices = args[0], args[1]
+        else:
+            assert nargs == 1
+            path, indices = _path_and_indices_from_index_tuple(self.axes, args[0])
+
+        if allow_unused:
+            path = _trim_path(self.axes, path)
+
+        if insert_zeros:
+            # extend the path by choosing the zero offset option every time
+            # this is needed if we don't have all the internal bits available
+            while path not in self.layouts:
+                axis, clabel = self.axes._node_from_path(path)
+                subaxis = self.axes.child(axis, clabel)
+                # choose the component that is first in the renumbering
+                if subaxis.numbering:
+                    cidx = subaxis._component_index_from_axis_number(
+                        subaxis.numbering.data_ro[0]
+                    )
+                else:
+                    cidx = 0
+                subcpt = subaxis.components[cidx]
+                path |= {subaxis.label: subcpt.label}
+                indices |= {subaxis.label: 0}
+
+        offset = pym.evaluate(self.layouts[path], indices, ExpressionEvaluator)
+        return strict_int(offset)
+
+    def simple_offset(self, path, indices):
+        print_if_rank(0, "self.layouts", self.layouts)
+        print_if_rank(0, "path", path)
+        print_if_rank(0, "indices", indices)
+        offset = pym.evaluate(self.layouts[path], indices, ExpressionEvaluator)
+        return strict_int(offset)
+
+    def iter_indices(self, outer_map):
+        print_with_rank(0, "myiexpr!!!!!!!!!!!!!!!!!!", self.index_exprs)
+        return iter_axis_tree(self.axes, self.target_paths, self.index_exprs, outer_map)
 
     def _with_axes(self, axes):
         """Return a new `Dat` with new axes pointing to the same data."""
+        assert False, "do not use, it's wrong"
         return type(self)(
             axes,
             data=self.array,
             max_value=self.max_value,
             name=self.name,
-            orig_array=self.orig_array,
         )
 
     def as_var(self):
@@ -342,6 +383,10 @@ class Dat(Tensor, ContextFree):
     @property
     def alloc_size(self):
         return self.axes.alloc_size() if not self.axes.is_empty else 1
+
+    @property
+    def size(self):
+        return self.axes.size
 
     @classmethod
     def from_list(cls, data, axis_labels, name=None, dtype=ScalarType, inc=0):
@@ -379,10 +424,10 @@ class Dat(Tensor, ContextFree):
             return flattened, count
 
     def get_value(self, *args, **kwargs):
-        return self.data[self.axes.get_offset(*args, **kwargs)]
+        return self.data[self.offset(*args, **kwargs)]
 
     def set_value(self, path, indices, value):
-        self.data[self.axes.get_offset(path, indices)] = value
+        self.data[self.simple_offset(path, indices)] = value
 
     def select_axes(self, indices):
         selected = []
@@ -395,14 +440,14 @@ class Dat(Tensor, ContextFree):
 
 # Needs to be subclass for isinstance checks to work
 # TODO Delete
-class MultiArray(Dat):
-    @deprecated("Dat")
+class MultiArray(HierarchicalArray):
+    @deprecated("HierarchicalArray")
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
 
 # Now ContextSensitiveDat
-class ContextSensitiveMultiArray(ContextSensitive):
+class ContextSensitiveMultiArray(ContextSensitive, KernelArgument):
     def __getitem__(self, indices) -> ContextSensitiveMultiArray:
         from pyop3.itree.tree import (
             _compose_bits,
@@ -420,150 +465,87 @@ class ContextSensitiveMultiArray(ContextSensitive):
         context, array = just_one(self.context_map.items())
 
         array_per_context = {}
-        for index_tree in as_index_forest(indices, axes=array.layout_axes):
+        for index_tree in as_index_forest(indices, axes=array.axes):
             loop_context = index_tree.loop_context
             (
                 indexed_axes,
                 target_path_per_indexed_cpt,
                 index_exprs_per_indexed_cpt,
                 layout_exprs_per_indexed_cpt,
-            ) = _index_axes(array.layout_axes, index_tree, loop_context)
+            ) = _index_axes(array.axes, index_tree, loop_context)
 
             (
                 target_paths,
                 index_exprs,
                 layout_exprs,
             ) = _compose_bits(
-                array.layout_axes,
+                array.axes,
+                array.target_paths,
+                array.index_exprs,
+                None,
                 indexed_axes,
                 target_path_per_indexed_cpt,
                 index_exprs_per_indexed_cpt,
                 layout_exprs_per_indexed_cpt,
             )
-
-            new_axes = IndexedAxisTree(
-                indexed_axes.root,
-                indexed_axes.parent_to_children,
-                target_paths,
-                index_exprs,
-                layout_exprs,
+            array_per_context[loop_context] = HierarchicalArray(
+                indexed_axes,
+                data=self.array,
+                max_value=self.max_value,
+                target_paths=target_paths,
+                index_exprs=index_exprs,
+                layouts=self.layouts,
+                name=self.name,
             )
 
-            new_layouts = substitute_layouts(
-                array.layout_axes,
-                new_axes,
-                target_path_per_indexed_cpt,
-                index_exprs_per_indexed_cpt,
-            )
-            layout_axes = FrozenAxisTree(
-                new_axes.root,
-                new_axes.parent_to_children,
-                target_paths,
-                index_exprs,
-                layouts=new_layouts,
-            )
-            array_per_context[loop_context] = array._with_axes(layout_axes)
         return ContextSensitiveMultiArray(array_per_context)
-
-    # don't like this name
-    # FIXME This function returns dats, the "array" function returns a DistributedArray,
-    # this is confusing and should be cleaned up
-    @property
-    def orig_array(self):
-        return single_valued(dat.orig_array for dat in self.context_map.values())
 
     @property
     def array(self):
-        return single_valued(dat.array for dat in self.context_map.values())
+        return self._shared_attr("array")
+
+    @property
+    def buffer(self):
+        return self._shared_attr("buffer")
 
     @property
     def dtype(self):
-        return single_valued(array.dtype for array in self.context_map.values())
+        return self._shared_attr("dtype")
+
+    @property
+    def max_value(self):
+        return self._shared_attr("max_value")
 
     @property
     def name(self):
-        return single_valued(array.name for array in self.context_map.values())
+        return self._shared_attr("name")
+
+    @property
+    def layouts(self):
+        return self._shared_attr("layouts")
 
     @functools.cached_property
     def datamap(self):
         return merge_dicts(array.datamap for array in self.context_map.values())
+
+    def _shared_attr(self, attr: str):
+        return single_valued(getattr(a, attr) for a in self.context_map.values())
 
 
 def replace_layout(orig_layout, replace_map):
     return IndexExpressionReplacer(replace_map)(orig_layout)
 
 
-@functools.singledispatch
-def layout_axes(axes) -> FrozenAxisTree:
-    if isinstance(axes, FrozenAxisTree):
-        return axes
-    else:
-        return as_axis_tree(axes).freeze()
-
-
-@layout_axes.register
-def _(axes: IndexedAxisTree) -> FrozenAxisTree:
-    from pyop3.distarray.multiarray import IndexExpressionReplacer
-
-    if axes.is_empty:
-        raise NotImplementedError
-        # return LayoutAxisTree(axes, freeze({pmap(): 0}))
-        return LayoutAxisTree(axes, NotImplemented)
-
-    # relabel the axis tree, note that the strong statements (i.e. just_one(...), etc)
-    # are *required* rather than me being lazy. If these conditions do not hold then
-    # it is not valid to use this axis tree as a layout.
-    new_root_labels = set()
-    new_root_cpts = []
-    for orig_cpt in axes.root.components:
-        axlabel, clabel = just_one(
-            axes.target_paths[axes.root.id, orig_cpt.label].items()
-        )
-        new_root_labels.add(axlabel)
-        new_root_cpts.append(orig_cpt.copy(label=clabel))
-    new_root_label = just_one(new_root_labels)
-    new_root = axes.root.copy(label=new_root_label, components=new_root_cpts)
-
-    new_parent_to_children = {}
-    for axis_id, subaxes in axes.parent_to_children.items():
-        new_subaxes = []
-        for subaxis in subaxes:
-            if subaxis is None:
-                new_subaxes.append(None)
-                continue
-            axis_labels = set()
-            cpts = []
-            for orig_cpt in subaxis.components:
-                axlabel, clabel = just_one(
-                    axes.target_paths[subaxis.id, orig_cpt.label].items()
-                )
-                axis_labels.add(axlabel)
-                cpts.append(orig_cpt.copy(label=clabel))
-            axis_label = just_one(axis_labels)
-            new_subaxes.append(subaxis.copy(label=axis_label, components=cpts))
-        new_parent_to_children[axis_id] = new_subaxes
-
-    new_axes = FrozenAxisTree(root=new_root, parent_to_children=new_parent_to_children)
-
-    assert axes.layout_exprs
-    layouts_ = {}
-    for leaf in axes.leaves:
-        orig_path = axes.path(*leaf)
-        new_path = {}
-        replace_map = {}
-        for axis, cpt in axes.path_with_nodes(*leaf).items():
-            new_path.update(axes.target_paths[axis.id, cpt])
-            replace_map.update(axes.layout_exprs[axis.id, cpt])
-        new_path = freeze(new_path)
-
-        print(axes.layout_exprs.values())
-        print(replace_map)
-
-        orig_layout = axes.restore().layouts[orig_path]
-        new_layout = IndexExpressionReplacer(replace_map)(orig_layout)
-        assert new_layout != orig_layout
-        layouts_[new_path] = new_layout
-    return FrozenAxisTree(new_axes.root, new_axes.parent_to_children, layouts=layouts_)
+def as_layout_axes(axes: AxisTree) -> AxisTree:
+    # drop index exprs, everything else drops out
+    return AxisTree(
+        axes.parent_to_children,
+        axes.target_paths,
+        axes._default_index_exprs(),
+        axes.layout_exprs,
+        axes.layouts,
+        sf=axes.sf,
+    )
 
 
 def make_sparsity(
@@ -742,36 +724,3 @@ def distribute_sparsity(sparsity, ax1, ax2, owner="row"):
 
     # import pdb; pdb.set_trace()
     return new_sparsity
-
-
-def substitute_layouts(orig_axes, new_axes, target_paths, index_exprs):
-    # replace layout bits that disappear with loop index
-    if new_axes.is_empty:
-        new_layouts = {}
-        orig_path = target_paths[None]
-        new_path = pmap()
-
-        orig_layout = orig_axes.layouts[orig_path]
-        new_layout = IndexExpressionReplacer(index_exprs[None])(orig_layout)
-        new_layouts[new_path] = new_layout
-        # don't silently do nothing
-        assert new_layout != orig_layout
-    else:
-        new_layouts = {}
-        for leaf_axis, leaf_cpt in new_axes.leaves:
-            orig_path = dict(target_paths.get(None, {}))
-            replace_map = dict(index_exprs.get(None, {}))
-            for myaxis, mycpt in new_axes.path_with_nodes(leaf_axis, leaf_cpt).items():
-                orig_path.update(target_paths.get((myaxis.id, mycpt), {}))
-                replace_map.update(index_exprs.get((myaxis.id, mycpt), {}))
-
-            orig_layout = orig_axes.layouts[freeze(orig_path)]
-            new_layout = IndexExpressionReplacer(replace_map)(orig_layout)
-            new_layouts[new_axes.path(leaf_axis, leaf_cpt)] = new_layout
-            # TODO, this sometimes fails, is that valid?
-            # don't silently do nothing
-            # assert new_layout != orig_layout
-
-    # TODO not sure if target paths etc needed to pass through
-    return new_layouts
-    # return FrozenAxisTree(new_axes.root, new_axes.parent_to_children, layouts=new_layouts)

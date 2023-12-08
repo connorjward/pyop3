@@ -8,6 +8,7 @@ from pyop3.ir import LOOPY_LANG_VERSION, LOOPY_TARGET
 from pyop3.utils import flatten
 
 
+@pytest.mark.skip("offset nodes are probably deprecated")
 def test_map_compression(scalar_copy_kernel_int):
     # Produce a point-to-DoF map from a point-to-point map. This should be
     # automated by Mats (but not PetscMats).
@@ -72,20 +73,20 @@ def test_read_matrix_values():
     #
     #   o   o   o   o
     #   x---x---x---x
-    cells = op3.AxisTree(op3.Axis(3, "cells"))
-    dofs = op3.AxisTree(op3.Axis(4, "dofs"))
+    cells = op3.Axis({"cells": 3}, "mesh")
+    dofs = op3.Axis(4, "dofs")
 
     # construct the matrix
-    nnz = op3.MultiArray(
-        dofs, data=np.asarray([2, 3, 3, 2], dtype=op3.IntType), max_value=3
+    nnz = op3.HierarchicalArray(
+        dofs, data=np.asarray([2, 3, 3, 2]), dtype=op3.IntType, max_value=3
     )
-    iaxes = dofs.add_subaxis(op3.Axis(nnz), *dofs.leaf)
+    iaxes = op3.AxisTree.from_nest({dofs: op3.Axis(nnz)})
     idata = flatten([[0, 1], [0, 1, 2], [1, 2, 3], [2, 3]])
-    indices = op3.MultiArray(iaxes, data=np.asarray(idata, dtype=op3.IntType))
+    indices = op3.HierarchicalArray(iaxes, data=np.asarray(idata), dtype=op3.IntType)
     # FIXME we need to be able to distinguish row and col DoFs (and the IDs must differ)
     # this should be handled internally somehow
-    cdofs = op3.AxisTree(op3.Axis(4, "cdofs"))
-    mat = op3.PetscMat(dofs, cdofs, indices)
+    dofs_ = op3.Axis(4, "dofs_")
+    mat = op3.PetscMat(dofs, dofs_, indices, name="mat")
 
     # put some numbers in the matrix
     sparsity = [
@@ -105,34 +106,29 @@ def test_read_matrix_values():
     mat.petscmat.assemble()
 
     # construct the vector to store the accumulated values
-    array = op3.MultiArray(cells, dtype=mat.dtype)
+    dat = op3.HierarchicalArray(cells, dtype=mat.dtype)
 
     # construct the cell -> dof map
-    cells_axis, cells_component = cells.leaf
-    dofs_axis, dofs_component = dofs.leaf
-    cdofs_axis, cdofs_component = cdofs.leaf
-    maxes = cells.add_subaxis(op3.Axis(2), cells_axis, cells_component)
-    mdata = flatten(
-        [[0, 1], [1, 2], [2, 3]],
-    )
-    marray = op3.MultiArray(
-        maxes, name="mapdata", data=np.asarray(mdata, dtype=op3.IntType)
+    map_axes = op3.AxisTree.from_nest({cells: op3.Axis(2)})
+    map_data = np.asarray([[0, 1], [1, 2], [2, 3]], dtype=op3.IntType)
+    map_dat = op3.HierarchicalArray(
+        map_axes,
+        name="map_dat",
+        data=map_data.flatten(),
     )
     map0 = op3.Map(
         {
-            pmap({cells_axis.label: cells_component.label}): [
-                op3.TabulatedMapComponent(dofs_axis.label, dofs_component.label, marray)
+            pmap({"mesh": "cells"}): [
+                op3.TabulatedMapComponent("dofs", dofs.component.label, map_dat)
             ]
         },
         "map0",
     )
-    # so we don't have axes with the same name, again, should live elsewhere
+    # so we don't have axes with the same name, needs cleanup
     map1 = op3.Map(
         {
-            pmap({cells_axis.label: cells_component.label}): [
-                op3.TabulatedMapComponent(
-                    cdofs_axis.label, cdofs_component.label, marray
-                )
+            pmap({"mesh": "cells"}): [
+                op3.TabulatedMapComponent("dofs_", dofs_.component.label, map_dat)
             ]
         },
         "map1",
@@ -141,10 +137,10 @@ def test_read_matrix_values():
     # perform the computation
     lpy_kernel = lp.make_kernel(
         "{ [i,j]: 0 <= i,j < 2 }",
-        "array[0] = array[0] + mat[i, j]",
+        "dat[0] = dat[0] + mat[i, j]",
         [
             lp.GlobalArg("mat", mat.dtype, (2, 2), is_input=True, is_output=False),
-            lp.GlobalArg("array", array.dtype, (1,), is_input=False, is_output=True),
+            lp.GlobalArg("dat", dat.dtype, (1,), is_input=False, is_output=True),
         ],
         name="inc",
         target=LOOPY_TARGET,
@@ -153,16 +149,15 @@ def test_read_matrix_values():
     inc = op3.Function(lpy_kernel, [op3.READ, op3.INC])
     op3.do_loop(
         c := cells.index(),
-        inc(mat[map0(c), map1(c)], array[c]),
+        inc(mat[map0(c), map1(c)], dat[c]),
     )
 
-    expected = np.zeros_like(array.data_ro)
-    map_data = marray.data_ro.reshape((3, 2))
+    expected = np.zeros_like(dat.data_ro)
     for i in range(3):
         idxs = map_data[i : i + 1]
         values = mat.petscmat.getValues(idxs, idxs)
         expected[i] = np.sum(values)
-    assert np.allclose(array.data_ro, expected)
+    assert np.allclose(dat.data_ro, expected)
 
 
 def test_matrix_insertion():

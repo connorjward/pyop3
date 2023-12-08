@@ -49,12 +49,12 @@ def test_loop_over_slices(scalar_copy_kernel, touched, untouched):
 @pytest.mark.parametrize("size,touched", [(6, [2, 3, 5, 0])])
 def test_scalar_copy_of_subset(scalar_copy_kernel, size, touched):
     untouched = list(set(range(size)) - set(touched))
-    subset_axes = Axis(len(touched))
+    subset_axes = Axis([AxisComponent(len(touched), "pt0")], "ax0")
     subset = MultiArray(
         subset_axes, name="subset0", data=np.asarray(touched, dtype=IntType)
     )
 
-    axes = Axis(size)
+    axes = Axis([AxisComponent(size, "pt0")], "ax0")
     dat0 = MultiArray(axes, name="dat0", data=np.arange(axes.size, dtype=ScalarType))
     dat1 = MultiArray(axes, name="dat1", dtype=dat0.dtype)
 
