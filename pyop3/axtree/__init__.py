@@ -1,11 +1,11 @@
 from .tree import (
     Axis,
     AxisComponent,
-    PartialAxisTree,
     AxisTree,
     AxisVariable,
     ContextFree,
     ContextSensitive,
     LoopIterable,
+    PartialAxisTree,
     as_axis_tree,
 )
