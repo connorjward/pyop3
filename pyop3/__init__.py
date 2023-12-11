@@ -9,7 +9,7 @@ del pytools
 
 import pyop3.transforms
 from pyop3.array import Array, HierarchicalArray, MultiArray, PetscMat
-from pyop3.axtree import Axis, AxisComponent, AxisTree  # noqa: F401
+from pyop3.axtree import Axis, AxisComponent, AxisTree, PartialAxisTree  # noqa: F401
 from pyop3.buffer import DistributedBuffer  # noqa: F401
 from pyop3.dtypes import IntType, ScalarType  # noqa: F401
 from pyop3.itree import (  # noqa: F401

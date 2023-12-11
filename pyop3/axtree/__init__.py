@@ -1,6 +1,7 @@
 from .tree import (
     Axis,
     AxisComponent,
+    PartialAxisTree,
     AxisTree,
     AxisVariable,
     ContextFree,

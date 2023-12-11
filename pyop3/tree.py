@@ -298,6 +298,10 @@ class MultiComponentLabelledNode(Node, Labelled):
     def component(self):
         return just_one(self.components)
 
+    def component_index(self, component) -> int:
+        clabel = as_component_label(component)
+        return self.component_labels.index(clabel)
+
 
 class LabelledTree(AbstractTree):
     @deprecated("child")
@@ -305,7 +309,7 @@ class LabelledTree(AbstractTree):
         return self.child(parent, component)
 
     def child(self, parent, component):
-        clabel = self._as_component_label(component)
+        clabel = as_component_label(component)
         cidx = parent.component_labels.index(clabel)
         try:
             return self.parent_to_children[parent.id][cidx]
@@ -415,7 +419,8 @@ class LabelledTree(AbstractTree):
             raise NotImplementedError("TODO")
 
         assert isinstance(parent, MultiComponentLabelledNode)
-        cidx = parent.component_labels.index(component.label)
+        clabel = as_component_label(component)
+        cidx = parent.component_labels.index(clabel)
         parent_to_children = {p: list(ch) for p, ch in self.parent_to_children.items()}
 
         sub_p2c = dict(subtree.parent_to_children)
@@ -463,7 +468,7 @@ class LabelledTree(AbstractTree):
         )
 
     def path(self, node, component, ordered=False):
-        clabel = self._as_component_label(component)
+        clabel = as_component_label(component)
         node_id = self._as_node_id(node)
         path_ = self._paths[node_id, clabel]
         if ordered:
@@ -474,7 +479,7 @@ class LabelledTree(AbstractTree):
     def path_with_nodes(
         self, node, component_label, ordered=False, and_components=False
     ):
-        component_label = self._as_component_label(component_label)
+        component_label = as_component_label(component_label)
         node_id = self._as_node_id(node)
         path_ = self._paths_with_nodes[node_id, component_label]
         if and_components:
@@ -626,12 +631,12 @@ class LabelledTree(AbstractTree):
         else:
             raise TypeError(f"No handler defined for {type(node).__name__}")
 
-    @staticmethod
-    def _as_component_label(component):
-        if isinstance(component, LabelledNodeComponent):
-            return component.label
-        else:
-            return component
+
+def as_component_label(component):
+    if isinstance(component, LabelledNodeComponent):
+        return component.label
+    else:
+        return component
 
 
 def previsit(

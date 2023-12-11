@@ -366,7 +366,7 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
     def ghost_count_per_component(self):
         counts = np.zeros_like(self.components, dtype=int)
         for leaf_index in self.sf.ileaf:
-            counts[self._component_index_from_axis_number(leaf_index)] += 1
+            counts[self._axis_number_to_component_index(leaf_index)] += 1
         return freeze(
             {cpt: count for cpt, count in checked_zip(self.components, counts)}
         )
@@ -411,56 +411,50 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
         """
         return self._tree
 
-    # Note: these functions assume that the numbering follows the plex convention
-    # of numbering each strata contiguously. I think (?) that I effectively also do this.
-    # actually this might well be wrong. we have a renumbering after all - this gives us
-    # the original numbering only
-    def component_number_to_axis_number(self, component, num):
-        component_index = self.components.index(component)
-        canonical = self._component_numbering_offsets[component_index] + num
-        return self._to_renumbered(canonical)
+    def default_to_applied_component_number(self, component, number):
+        cidx = self.component_index(component)
+        return self._default_to_applied_numbering[cidx][number]
 
-    def axis_number_to_component(self, num):
-        # guess, is this the right map (from new numbering to original)?
-        # I don't think so because we have a funky point SF. can we get rid?
-        # num = self.numbering[num]
-        component_index = self._component_index_from_axis_number(num)
-        component_num = num - self._component_numbering_offsets[component_index]
-        # return self.components[component_index], component_num
-        return self.components[component_index], component_num
+    def applied_to_default_component_number(self, component, number):
+        raise NotImplementedError
 
-    def _component_index_from_axis_number(self, num):
-        offsets = self._component_numbering_offsets
-        for i, (min_, max_) in enumerate(zip(offsets, offsets[1:])):
-            if min_ <= num < max_:
-                return i
-        raise ValueError(f"Axis number {num} not found.")
+    def axis_to_component_number(self, number):
+        cidx = self._axis_number_to_component_index(number)
+        return self.components[cidx], number - self._component_offsets[cidx]
 
-    @cached_property
-    def _component_numbering_offsets(self):
-        return (0,) + tuple(np.cumsum([c.count for c in self.components], dtype=int))
-
-    # FIXME bad name
-    def _to_renumbered(self, num):
-        """Convert a flat/canonical/unpermuted axis number to its renumbered equivalent."""
-        if self.numbering is None:
-            return num
-        else:
-            return self._inverse_numbering[num]
-
-    @cached_property
-    def _inverse_numbering(self):
-        # put in utils.py
-        from pyop3.axtree.parallel import invert
-
-        if self.numbering is None:
-            return np.arange(self.count, dtype=IntType)
-        else:
-            return invert(self.numbering.data_ro)
+    def component_to_axis_number(self, component, number):
+        cidx = self.component_index(component)
+        return self._component_offsets[cidx] + number
 
     @cached_property
     def _tree(self):
         return AxisTree(self)
+
+    @cached_property
+    def _component_offsets(self):
+        return (0,) + tuple(np.cumsum([c.count for c in self.components], dtype=int))
+
+    @cached_property
+    def _default_to_applied_numbering(self):
+        renumbering = [np.empty(c.count, dtype=IntType) for c in self.components]
+        counters = [itertools.count() for _ in range(self.degree)]
+        for pt in self.numbering.data_ro:
+            cidx = self._axis_number_to_component_index(pt)
+            old_cpt_pt = pt - self._component_offsets[cidx]
+            renumbering[cidx][old_cpt_pt] = next(counters[cidx])
+        assert all(next(counters[i]) == c.count for i, c in enumerate(self.components))
+        return renumbering
+
+    @cached_property
+    def _applied_to_default_numbering(self):
+        raise NotImplementedError
+
+    def _axis_number_to_component_index(self, number):
+        off = self._component_offsets
+        for i, (min_, max_) in enumerate(zip(off, off[1:])):
+            if min_ <= number < max_:
+                return i
+        raise ValueError(f"{number} not found")
 
     @staticmethod
     def _parse_components(components):
@@ -766,7 +760,7 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
                 subaxis = self.component_child(axis, clabel)
                 # choose the component that is first in the renumbering
                 if subaxis.numbering:
-                    cidx = subaxis._component_index_from_axis_number(
+                    cidx = subaxis._axis_number_to_component_index(
                         subaxis.numbering.data_ro[0]
                     )
                 else:

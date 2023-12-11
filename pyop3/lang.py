@@ -45,14 +45,14 @@ class Intent(enum.Enum):
 Access = Intent
 
 
-READ = Access.READ
-WRITE = Access.WRITE
-RW = Access.RW
-INC = Access.INC
-MIN_RW = Access.MIN_RW
-MIN_WRITE = Access.MIN_WRITE
-MAX_RW = Access.MAX_RW
-MAX_WRITE = Access.MAX_WRITE
+READ = Intent.READ
+WRITE = Intent.WRITE
+RW = Intent.RW
+INC = Intent.INC
+MIN_RW = Intent.MIN_RW
+MIN_WRITE = Intent.MIN_WRITE
+MAX_RW = Intent.MAX_RW
+MAX_WRITE = Intent.MAX_WRITE
 
 
 class IntentMismatchError(Exception):

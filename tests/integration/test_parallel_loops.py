@@ -98,63 +98,16 @@ def cone_map(comm, mesh_axis):
         assert comm.rank == 1
         mdata = np.asarray([[4, 5], [5, 6], [6, 7], [7, 8]])
 
-    # NOTES
-    # Question:
-    # How does one map from the default component-wise numbering to the
-    # correct component-wise numbering of the renumbered axis?
-    #
-    # Example:
-    # Given the renumbering [c1, v2, v0, c0, v1], generate the maps from default to
-    # renumbered (component-wise) points:
-    #
-    #   {c0: c1, c1: c0}, {v0: v1, v1: v2, v2: v0}
-    #
-    # Solution:
-    #
-    # The specified numbering is a map from the new numbering to the old. Therefore
-    # the inverse of this maps from the old numbering to the new. To give an example,
-    # consider the interval mesh numbering [c1, v2, v0, c0, v1]. With plex numbering
-    # this becomes [1, 4, 2, 0, 3]. This tells us that point 0 in the new numbering
-    # corresponds to point 1 in the default numbering, point 1 maps to point 4 and
-    # so on. For this example, the inverse numbering is [3, 0, 2, 4, 1]. This tells
-    # us that point 0 in the default numbering maps to point 3 in the new numbering
-    # and so on.
-    # Given this map, the final thing to do is map from plex-style numbering to
-    # the component-wise numbering used in pyop3. We should be able to do this by
-    # looping over the renumbering (NOT the inverse) and have a counter for each
-    # component.
-
-    # map default cell numbers to their renumbered equivalents
-    cell_renumbering = np.empty(ncells, dtype=int)
-    min_cell, max_cell = mesh_axis._component_numbering_offsets[:2]
-    counter = 0
-    for new_pt, old_pt in enumerate(mesh_axis.numbering.data_ro):
-        # is it a cell?
-        if min_cell <= old_pt < max_cell:
-            old_cell = old_pt - min_cell
-            cell_renumbering[old_cell] = counter
-            counter += 1
-    assert counter == ncells
-
-    # map default vertex numbers to their renumbered equivalents
-    vert_renumbering = np.empty(nverts, dtype=int)
-    min_vert, max_vert = mesh_axis._component_numbering_offsets[1:]
-    counter = 0
-    for new_pt, old_pt in enumerate(mesh_axis.numbering.data_ro):
-        # is it a vertex?
-        if min_vert <= old_pt < max_vert:
-            old_vert = old_pt - min_vert
-            vert_renumbering[old_vert] = counter
-            counter += 1
-    assert counter == nverts
-
     # renumber the map
     mdata_renum = np.empty_like(mdata)
     for old_cell in range(ncells):
-        new_cell = cell_renumbering[old_cell]
+        # new_cell = cell_renumbering[old_cell]
+        new_cell = mesh_axis.default_to_applied_component_number("cells", old_cell)
         for i, old_pt in enumerate(mdata[old_cell]):
-            old_vert = old_pt - min_vert
-            mdata_renum[new_cell, i] = vert_renumbering[old_vert]
+            component, old_vert = mesh_axis.axis_to_component_number(old_pt)
+            assert component.label == "verts"
+            new_vert = mesh_axis.default_to_applied_component_number("verts", old_vert)
+            mdata_renum[new_cell, i] = new_vert
 
     mdat = op3.HierarchicalArray(maxes, name="cone", data=mdata_renum.flatten())
     return op3.Map(
