@@ -37,4 +37,7 @@ from pyop3.lang import (  # noqa: F401
     do_loop,
     loop,
 )
-from pyop3.tensor import Dat, Global, Mat, Tensor  # noqa: F401
+
+# TODO These are just not needed, rely on HArray, PetscMat etc
+# the semantic "mesh" information all comes from firedrake
+# from pyop3.tensor import Dat, Global, Mat, Tensor  # noqa: F401

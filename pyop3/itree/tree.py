@@ -904,6 +904,7 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
         target_axis, target_cpt = prev_axes.find_component(
             slice_.axis, subslice.component, also_node=True
         )
+
         if isinstance(subslice, AffineSliceComponent):
             if subslice.stop is None:
                 stop = target_cpt.count
@@ -1093,31 +1094,32 @@ def _index_axes_rec(
         leafkeys = [None]
 
     subaxes = {}
-    for leafkey in leafkeys:
-        if current_index.id in indices.parent_to_children:
-            for subindex in indices.parent_to_children[current_index.id]:
-                retval = _index_axes_rec(
-                    indices,
-                    current_index=subindex,
-                    **kwargs,
-                )
-                subaxes[leafkey] = retval[0]
+    if current_index.id in indices.parent_to_children:
+        for leafkey, subindex in checked_zip(
+            leafkeys, indices.parent_to_children[current_index.id]
+        ):
+            retval = _index_axes_rec(
+                indices,
+                current_index=subindex,
+                **kwargs,
+            )
+            subaxes[leafkey] = retval[0]
 
-                for key in retval[1].keys():
-                    if key in target_path_per_cpt_per_index:
-                        target_path_per_cpt_per_index[key] = (
-                            target_path_per_cpt_per_index[key] | retval[1][key]
-                        )
-                        index_exprs_per_cpt_per_index[key] = (
-                            index_exprs_per_cpt_per_index[key] | retval[2][key]
-                        )
-                        layout_exprs_per_cpt_per_index[key] = (
-                            layout_exprs_per_cpt_per_index[key] | retval[3][key]
-                        )
-                    else:
-                        target_path_per_cpt_per_index.update({key: retval[1][key]})
-                        index_exprs_per_cpt_per_index.update({key: retval[2][key]})
-                        layout_exprs_per_cpt_per_index.update({key: retval[3][key]})
+            for key in retval[1].keys():
+                if key in target_path_per_cpt_per_index:
+                    target_path_per_cpt_per_index[key] = (
+                        target_path_per_cpt_per_index[key] | retval[1][key]
+                    )
+                    index_exprs_per_cpt_per_index[key] = (
+                        index_exprs_per_cpt_per_index[key] | retval[2][key]
+                    )
+                    layout_exprs_per_cpt_per_index[key] = (
+                        layout_exprs_per_cpt_per_index[key] | retval[3][key]
+                    )
+                else:
+                    target_path_per_cpt_per_index.update({key: retval[1][key]})
+                    index_exprs_per_cpt_per_index.update({key: retval[2][key]})
+                    layout_exprs_per_cpt_per_index.update({key: retval[3][key]})
 
     target_path_per_component = pmap(target_path_per_cpt_per_index)
     index_exprs_per_component = pmap(index_exprs_per_cpt_per_index)

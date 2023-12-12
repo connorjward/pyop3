@@ -195,6 +195,14 @@ def popwhen(predicate, iterable):
     raise KeyError("Predicate does not hold for any items in iterable")
 
 
+def steps(sizes):
+    return (0,) + tuple(np.cumsum(sizes, dtype=int))
+
+
+def pairwise(iterable):
+    return zip(iterable, iterable[1:])
+
+
 def strict_cast(obj, cast):
     new_obj = cast(obj)
     if new_obj != obj:

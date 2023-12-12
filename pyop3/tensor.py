@@ -24,6 +24,10 @@ class Tensor(abc.ABC):
     def rank(self) -> int:
         pass
 
+    @property
+    def dtype(self):
+        return self.array.dtype
+
 
 class Global(Tensor):
     @property
@@ -32,6 +36,9 @@ class Global(Tensor):
 
 
 class Dat(Tensor):
+    def __getitem__(self, indices):
+        return self.array[indices]
+
     @property
     def rank(self) -> int:
         return 1
