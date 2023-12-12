@@ -520,13 +520,21 @@ class LabelledTree(AbstractTree):
         else:
             return self.path_with_nodes(*node, and_components=True)
 
-    # this method is crap, if it fails I don't get any useful feedback!
-    def is_valid_path(self, path):
-        try:
-            self._node_from_path(path)
-            return True
-        except:
-            return False
+    def is_valid_path(self, path, and_leaf=False):
+        if not path:
+            return self.is_empty
+
+        path = dict(path)
+        node = self.root
+        while path:
+            if node is None:
+                return False
+            try:
+                clabel = path.pop(node.label)
+            except KeyError:
+                return False
+            node = self.child(node, clabel)
+        return node is None if and_leaf else True
 
     def find_component(self, node_label, cpt_label, also_node=False):
         """Return the first component in the tree matching the given labels.

@@ -79,6 +79,9 @@ class PetscMat(PetscObject):
             raise AssertionError
 
     def __getitem__(self, indices):
+        if len(indices) != 2:
+            raise ValueError
+
         # TODO also support context-free (see MultiArray.__getitem__)
         array_per_context = {}
         for index_tree in as_index_forest(indices, axes=self.axes):
@@ -86,33 +89,11 @@ class PetscMat(PetscObject):
             loop_context = index_tree.loop_context
             (
                 indexed_axes,
-                # target_path_per_indexed_cpt,
-                # index_exprs_per_indexed_cpt,
                 target_paths,
                 index_exprs,
                 layout_exprs_per_indexed_cpt,
             ) = _index_axes(self.axes, index_tree, loop_context)
 
-            # is this needed? Just use the defaults?
-            # (
-            #     target_paths,
-            #     index_exprs,
-            #     layout_exprs,
-            # ) = _compose_bits(
-            #     self.axes,
-            #     # use the defaults because Mats can only be indexed once
-            #     # (then they turn into Dats)
-            #     self.axes._default_target_paths(),
-            #     self.axes._default_index_exprs(),
-            #     None,
-            #     indexed_axes,
-            #     target_path_per_indexed_cpt,
-            #     index_exprs_per_indexed_cpt,
-            #     layout_exprs_per_indexed_cpt,
-            # )
-
-            # "freeze" the indexed_axes, we want to tabulate the layout of them
-            # (when usually we don't)
             indexed_axes = indexed_axes.set_up()
 
             packed = PackedBuffer(self)

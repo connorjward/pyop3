@@ -1066,8 +1066,13 @@ def _index_axes(axes, indices: IndexTree, loop_context):
         prev_axes=axes,
     )
 
-    if indexed_axes is None:
-        indexed_axes = {}
+    # check that slices etc have not been missed
+    for leaf_iaxis, leaf_icpt in indexed_axes.leaves:
+        target_path = dict(tpaths.get(None, {}))
+        for iaxis, icpt in indexed_axes.path_with_nodes(leaf_iaxis, leaf_icpt).items():
+            target_path.update(tpaths.get((iaxis.id, icpt), {}))
+        if not axes.is_valid_path(target_path, and_leaf=True):
+            raise ValueError("incorrect/insufficient indices")
 
     # return the new axes plus the new index expressions per leaf
     return indexed_axes, tpaths, index_expr_per_target, layout_expr_per_target
