@@ -196,11 +196,24 @@ def popwhen(predicate, iterable):
 
 
 def steps(sizes):
+    sizes = tuple(sizes)
     return (0,) + tuple(np.cumsum(sizes, dtype=int))
 
 
 def pairwise(iterable):
     return zip(iterable, iterable[1:])
+
+
+# stolen from stackoverflow
+# https://stackoverflow.com/questions/11649577/how-to-invert-a-permutation-array-in-numpy
+def invert(p):
+    """Return an array s with which np.array_equal(arr[p][s], arr) is True.
+    The array_like argument p must be some permutation of 0, 1, ..., len(p)-1.
+    """
+    p = np.asanyarray(p)  # in case p is a tuple, etc.
+    s = np.empty_like(p)
+    s[p] = np.arange(p.size)
+    return s
 
 
 def strict_cast(obj, cast):

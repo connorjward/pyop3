@@ -42,6 +42,7 @@ from pyop3.utils import (
     flatten,
     frozen_record,
     has_unique_entries,
+    invert,
     is_single_valued,
     just_one,
     merge_dicts,
@@ -331,6 +332,10 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
         return cls(serial.components, serial.label, numbering=numbering, sf=sf)
 
     @property
+    def comm(self):
+        return self.sf.comm if self.sf else None
+
+    @property
     def size(self):
         return as_axis_tree(self).size
 
@@ -411,6 +416,14 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
         """
         return self._tree
 
+    def component_numbering(self, component):
+        cidx = self.component_index(component)
+        return self._default_to_applied_numbering[cidx]
+
+    def component_permutation(self, component):
+        cidx = self.component_index(component)
+        return self._default_to_applied_permutation[cidx]
+
     def default_to_applied_component_number(self, component, number):
         cidx = self.component_index(component)
         return self._default_to_applied_numbering[cidx][number]
@@ -443,7 +456,11 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
             old_cpt_pt = pt - self._component_offsets[cidx]
             renumbering[cidx][old_cpt_pt] = next(counters[cidx])
         assert all(next(counters[i]) == c.count for i, c in enumerate(self.components))
-        return renumbering
+        return tuple(renumbering)
+
+    @cached_property
+    def _default_to_applied_permutation(self):
+        return tuple(invert(num) for num in self._default_to_applied_numbering)
 
     @cached_property
     def _applied_to_default_numbering(self):
@@ -697,6 +714,14 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
     @cached_property
     def sf(self):
         return self._default_sf()
+
+    @property
+    def comm(self):
+        paraxes = [axis for axis in self.nodes if axis.sf is not None]
+        if not paraxes:
+            return None
+        else:
+            return single_valued(ax.comm for ax in paraxes)
 
     @cached_property
     def datamap(self):

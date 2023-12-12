@@ -25,6 +25,10 @@ class StarForest:
         sf.setGraph(nroots, ilocal, iremote)
         return cls(sf, size)
 
+    @property
+    def comm(self):
+        return self.sf.comm
+
     @cached_property
     def iroot(self):
         """Return the indices of roots on the current process."""

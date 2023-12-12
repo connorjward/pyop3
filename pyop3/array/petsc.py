@@ -66,7 +66,7 @@ class MatType(enum.Enum):
 DEFAULT_MAT_TYPE = MatType.AIJ
 
 
-class PetscMat(PetscObject):
+class PetscMat(PetscObject, abc.ABC):
     prefix = "mat"
 
     def __new__(cls, *args, **kwargs):
@@ -78,6 +78,13 @@ class PetscMat(PetscObject):
         else:
             raise AssertionError
 
+    # like Dat, bad name? handle?
+    @property
+    def array(self):
+        return self.petscmat
+
+
+class MonolithicPetscMat(PetscMat, abc.ABC):
     def __getitem__(self, indices):
         if len(indices) != 2:
             raise ValueError
@@ -118,8 +125,8 @@ class ContextSensitiveIndexedPetscMat(ContextSensitive):
     pass
 
 
-class PetscMatAIJ(PetscMat):
-    def __init__(self, raxes, caxes, sparsity, *, comm=None, name: str = None):
+class PetscMatAIJ(MonolithicPetscMat):
+    def __init__(self, raxes, caxes, sparsity, *, name: str = None):
         raxes = as_axis_tree(raxes)
         caxes = as_axis_tree(caxes)
 
@@ -132,34 +139,7 @@ class PetscMatAIJ(PetscMat):
             # TODO, good exceptions
             raise RuntimeError
 
-        sizes = (raxes.leaf_component.count, caxes.leaf_component.count)
-        nnz = sparsity.axes.leaf_component.count
-        mat = PETSc.Mat().createAIJ(sizes, nnz=nnz.data, comm=comm)
-
-        # fill with zeros (this should be cached)
-        # this could be done as a pyop3 loop (if we get ragged local working) or
-        # explicitly in cython
-        raxis, rcpt = raxes.leaf
-        caxis, ccpt = caxes.leaf
-        # e.g.
-        # map_ = Map({pmap({raxis.label: rcpt.label}): [TabulatedMapComponent(caxes.label, ccpt.label, sparsity)]})
-        # do_loop(p := raxes.index(), write(zeros, mat[p, map_(p)]))
-
-        # but for now do in Python...
-        assert nnz.max_value is not None
-        zeros = np.zeros(nnz.max_value, dtype=self.dtype)
-        for row_idx in range(rcpt.count):
-            cstart = sparsity.axes.offset([row_idx, 0])
-            try:
-                cstop = sparsity.axes.offset([row_idx + 1, 0])
-            except IndexError:
-                # catch the last one
-                cstop = len(sparsity.data_ro)
-            # truncate zeros
-            mat.setValuesLocal(
-                [row_idx], sparsity.data_ro[cstart:cstop], zeros[: cstop - cstart]
-            )
-        mat.assemble()
+        self.petscmat = _alloc_mat(raxes, caxes, sparsity)
 
         self.raxis = raxes.root
         self.caxis = caxes.root
@@ -167,17 +147,33 @@ class PetscMatAIJ(PetscMat):
 
         self.axes = AxisTree.from_nest({self.raxis: self.caxis})
 
-        # copy only needed if we reuse the zero matrix
-        self.petscmat = mat.copy()
 
-    # like Dat, bad name? handle?
-    @property
-    def array(self):
-        return self.petscmat
+class PetscMatBAIJ(MonolithicPetscMat):
+    def __init__(self, raxes, caxes, sparsity, bsize, *, name: str = None):
+        raxes = as_axis_tree(raxes)
+        caxes = as_axis_tree(caxes)
 
+        if isinstance(bsize, numbers.Integral):
+            bsize = (bsize, bsize)
 
-class PetscMatBAIJ(PetscMat):
-    ...
+        super().__init__(name)
+        if any(axes.depth > 1 for axes in [raxes, caxes]):
+            # TODO, good exceptions
+            # raise InvalidDimensionException("Cannot instantiate PetscMats with nested axis trees")
+            raise RuntimeError
+        if any(len(axes.root.components) > 1 for axes in [raxes, caxes]):
+            # TODO, good exceptions
+            raise RuntimeError
+
+        self.petscmat = _alloc_mat(raxes, caxes, sparsity, bsize)
+
+        self.raxis = raxes.root
+        self.caxis = caxes.root
+        self.sparsity = sparsity
+        self.bsize = bsize
+
+        # TODO include bsize here?
+        self.axes = AxisTree.from_nest({self.raxis: self.caxis})
 
 
 class PetscMatNest(PetscMat):
@@ -190,3 +186,46 @@ class PetscMatDense(PetscMat):
 
 class PetscMatPython(PetscMat):
     ...
+
+
+# TODO cache this function and return a copy if possible
+def _alloc_mat(raxes, caxes, sparsity, bsize=None):
+    comm = single_valued([raxes.comm, caxes.comm])
+
+    sizes = (raxes.leaf_component.count, caxes.leaf_component.count)
+    nnz = sparsity.axes.leaf_component.count
+
+    if bsize is None:
+        mat = PETSc.Mat().createAIJ(sizes, nnz=nnz.data, comm=comm)
+    else:
+        mat = PETSc.Mat().createBAIJ(sizes, bsize, nnz=nnz.data, comm=comm)
+
+    # fill with zeros (this should be cached)
+    # this could be done as a pyop3 loop (if we get ragged local working) or
+    # explicitly in cython
+    raxis, rcpt = raxes.leaf
+    caxis, ccpt = caxes.leaf
+    # e.g.
+    # map_ = Map({pmap({raxis.label: rcpt.label}): [TabulatedMapComponent(caxes.label, ccpt.label, sparsity)]})
+    # do_loop(p := raxes.index(), write(zeros, mat[p, map_(p)]))
+
+    # but for now do in Python...
+    assert nnz.max_value is not None
+    if bsize is None:
+        shape = (nnz.max_value,)
+        set_values = mat.setValuesLocal
+    else:
+        rbsize, _ = bsize
+        shape = (nnz.max_value, rbsize)
+        set_values = mat.setValuesBlockedLocal
+    zeros = np.zeros(shape, dtype=PetscMat.dtype)
+    for row_idx in range(rcpt.count):
+        cstart = sparsity.axes.offset([row_idx, 0])
+        try:
+            cstop = sparsity.axes.offset([row_idx + 1, 0])
+        except IndexError:
+            # catch the last one
+            cstop = len(sparsity.data_ro)
+        set_values([row_idx], sparsity.data_ro[cstart:cstop], zeros[: cstop - cstart])
+    mat.assemble()
+    return mat

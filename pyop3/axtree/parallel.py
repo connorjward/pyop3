@@ -49,18 +49,6 @@ def partition_ghost_points(axis, sf):
     return numbering
 
 
-# stolen from stackoverflow
-# https://stackoverflow.com/questions/11649577/how-to-invert-a-permutation-array-in-numpy
-def invert(p):
-    """Return an array s with which np.array_equal(arr[p][s], arr) is True.
-    The array_like argument p must be some permutation of 0, 1, ..., len(p)-1.
-    """
-    p = np.asanyarray(p)  # in case p is a tuple, etc.
-    s = np.empty_like(p)
-    s[p] = np.arange(p.size)
-    return s
-
-
 def collect_sf_graphs(axes, axis=None, path=pmap(), indices=pmap()):
     # NOTE: This function does not check for nested SFs (which should error)
     axis = axis or axes.root
