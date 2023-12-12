@@ -1106,6 +1106,9 @@ def _scalar_assignment(
     # Register data
     ctx.add_argument(array)
 
+    if array.index_exprs != array.axes._default_index_exprs():
+        raise NotImplementedError
+
     offset_expr = make_offset_expr(
         array.layouts[path],
         array_labels_to_jnames,
