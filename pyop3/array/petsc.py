@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import abc
+import enum
 import itertools
 import numbers
 from functools import cached_property
@@ -47,10 +48,6 @@ class PetscVec(PetscObject):
         # dispatch to different vec types based on -vec_type
         raise NotImplementedError
 
-    @property
-    def valid_ranks(self):
-        return frozenset({0, 1})
-
 
 class PetscVecStandard(PetscVec):
     ...
@@ -60,16 +57,75 @@ class PetscVecNest(PetscVec):
     ...
 
 
+class MatType(enum.Enum):
+    AIJ = "aij"
+    BAIJ = "baij"
+
+
+# TODO Better way to specify a default? config?
+DEFAULT_MAT_TYPE = MatType.AIJ
+
+
 class PetscMat(PetscObject):
     prefix = "mat"
 
     def __new__(cls, *args, **kwargs):
-        # TODO dispatch to different mat types based on -mat_type
-        return object.__new__(PetscMatAIJ)
+        mat_type = kwargs.pop("mat_type", DEFAULT_MAT_TYPE)
+        if mat_type == MatType.AIJ:
+            return object.__new__(PetscMatAIJ)
+        elif mat_type == MatType.BAIJ:
+            return object.__new__(PetscMatBAIJ)
+        else:
+            raise AssertionError
 
-    @property
-    def valid_ranks(self):
-        return frozenset({2})
+    def __getitem__(self, indices):
+        # TODO also support context-free (see MultiArray.__getitem__)
+        array_per_context = {}
+        for index_tree in as_index_forest(indices, axes=self.axes):
+            # make a temporary of the right shape
+            loop_context = index_tree.loop_context
+            (
+                indexed_axes,
+                # target_path_per_indexed_cpt,
+                # index_exprs_per_indexed_cpt,
+                target_paths,
+                index_exprs,
+                layout_exprs_per_indexed_cpt,
+            ) = _index_axes(self.axes, index_tree, loop_context)
+
+            # is this needed? Just use the defaults?
+            # (
+            #     target_paths,
+            #     index_exprs,
+            #     layout_exprs,
+            # ) = _compose_bits(
+            #     self.axes,
+            #     # use the defaults because Mats can only be indexed once
+            #     # (then they turn into Dats)
+            #     self.axes._default_target_paths(),
+            #     self.axes._default_index_exprs(),
+            #     None,
+            #     indexed_axes,
+            #     target_path_per_indexed_cpt,
+            #     index_exprs_per_indexed_cpt,
+            #     layout_exprs_per_indexed_cpt,
+            # )
+
+            # "freeze" the indexed_axes, we want to tabulate the layout of them
+            # (when usually we don't)
+            indexed_axes = indexed_axes.set_up()
+
+            packed = PackedBuffer(self)
+
+            array_per_context[loop_context] = HierarchicalArray(
+                indexed_axes,
+                data=packed,
+                target_paths=target_paths,
+                index_exprs=index_exprs,
+                name=self.name,
+            )
+
+        return ContextSensitiveMultiArray(array_per_context)
 
     @cached_property
     def datamap(self):
@@ -78,11 +134,6 @@ class PetscMat(PetscObject):
 
 # is this required?
 class ContextSensitiveIndexedPetscMat(ContextSensitive):
-    pass
-
-
-# Not a super important class, could just inspect type of .array instead?
-class PackedPetscMatAIJ(PackedBuffer):
     pass
 
 
@@ -137,55 +188,6 @@ class PetscMatAIJ(PetscMat):
 
         # copy only needed if we reuse the zero matrix
         self.petscmat = mat.copy()
-
-    def __getitem__(self, indices):
-        # TODO also support context-free (see MultiArray.__getitem__)
-        array_per_context = {}
-        for index_tree in as_index_forest(indices, axes=self.axes):
-            # make a temporary of the right shape
-            loop_context = index_tree.loop_context
-            (
-                indexed_axes,
-                # target_path_per_indexed_cpt,
-                # index_exprs_per_indexed_cpt,
-                target_paths,
-                index_exprs,
-                layout_exprs_per_indexed_cpt,
-            ) = _index_axes(self.axes, index_tree, loop_context)
-
-            # is this needed? Just use the defaults?
-            # (
-            #     target_paths,
-            #     index_exprs,
-            #     layout_exprs,
-            # ) = _compose_bits(
-            #     self.axes,
-            #     # use the defaults because Mats can only be indexed once
-            #     # (then they turn into Dats)
-            #     self.axes._default_target_paths(),
-            #     self.axes._default_index_exprs(),
-            #     None,
-            #     indexed_axes,
-            #     target_path_per_indexed_cpt,
-            #     index_exprs_per_indexed_cpt,
-            #     layout_exprs_per_indexed_cpt,
-            # )
-
-            # "freeze" the indexed_axes, we want to tabulate the layout of them
-            # (when usually we don't)
-            indexed_axes = indexed_axes.set_up()
-
-            packed = PackedPetscMatAIJ(self)
-
-            array_per_context[loop_context] = HierarchicalArray(
-                indexed_axes,
-                data=packed,
-                target_paths=target_paths,
-                index_exprs=index_exprs,
-                name=self.name,
-            )
-
-        return ContextSensitiveMultiArray(array_per_context)
 
     # like Dat, bad name? handle?
     @property

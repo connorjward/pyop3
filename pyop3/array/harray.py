@@ -227,10 +227,6 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
     __iter__ = None
 
     @property
-    def valid_ranks(self):
-        return frozenset(range(self.axes.depth + 1))
-
-    @property
     @deprecated("buffer")
     def array(self):
         return self.buffer

@@ -4,4 +4,4 @@ from .harray import (  # noqa: F401
     HierarchicalArray,
     MultiArray,
 )
-from .petsc import PackedPetscMatAIJ, PetscMat, PetscMatAIJ  # noqa: F401
+from .petsc import PetscMat, PetscMatAIJ  # noqa: F401

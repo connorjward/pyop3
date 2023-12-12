@@ -21,8 +21,7 @@ import pytools
 from petsc4py import PETSc
 from pyrsistent import freeze, pmap
 
-from pyop3 import utils
-from pyop3.array import HierarchicalArray, PackedPetscMatAIJ, PetscMatAIJ
+from pyop3.array import HierarchicalArray, PetscMatAIJ
 from pyop3.array.harray import ContextSensitiveMultiArray
 from pyop3.array.petsc import PetscMat, PetscObject
 from pyop3.axtree import Axis, AxisComponent, AxisTree, AxisVariable
@@ -61,7 +60,6 @@ from pyop3.lang import (
     Loop,
 )
 from pyop3.log import logger
-from pyop3.tensor import Dat, Tensor
 from pyop3.utils import (
     PrettyTuple,
     checked_zip,
@@ -175,7 +173,7 @@ class LoopyCodegenContext(CodegenContext):
             )
             return
 
-        if isinstance(array.buffer, PackedPetscMatAIJ):
+        if isinstance(array.buffer, PackedBuffer):
             arg = lp.ValueArg(array.name, dtype=self._dtype(array))
         else:
             assert isinstance(array.buffer, DistributedBuffer)
@@ -235,8 +233,8 @@ class LoopyCodegenContext(CodegenContext):
         return array.dtype
 
     @_dtype.register
-    def _(self, array: PackedPetscMatAIJ):
-        return OpaqueType("Mat")
+    def _(self, array: PackedBuffer):
+        return self._dtype(array.array)
 
     @_dtype.register
     def _(self, array: PetscMat):
@@ -614,7 +612,7 @@ def parse_assignment(
     loop_context = context_from_indices(loop_indices)
 
     if isinstance(array.with_context(loop_context).buffer, PackedBuffer):
-        if not isinstance(array.with_context(loop_context).buffer, PackedPetscMatAIJ):
+        if not isinstance(array.with_context(loop_context).buffer.array, PetscMatAIJ):
             raise NotImplementedError("TODO")
         parse_assignment_petscmat(
             array.with_context(loop_context), temp, shape, op, loop_indices, codegen_ctx
@@ -1162,8 +1160,3 @@ def _(arg: PackedBuffer):
 @_as_pointer.register
 def _(array: PetscMat):
     return array.petscmat.handle
-
-
-@_as_pointer.register
-def _(arg: Tensor):
-    return _as_pointer(arg.data)
