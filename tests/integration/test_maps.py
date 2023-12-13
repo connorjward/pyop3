@@ -112,7 +112,7 @@ def test_inc_from_tabulated_map(
     )
 
     if indexed == "slice":
-        map_dat = map_dat[:, :2]
+        map_dat = map_dat[:, 1:3]
         kernel = vector2_inc_kernel
     elif indexed == "subset":
         subset_ = op3.HierarchicalArray(
@@ -146,7 +146,7 @@ def test_inc_from_tabulated_map(
     expected = np.zeros_like(dat1.data_ro)
     for i in range(m):
         if indexed == "slice":
-            for j in range(2):
+            for j in range(1, 3):
                 expected[i] += dat0.data_ro[map_data[i, j]]
         elif indexed == "subset":
             for j in [1, 2]:

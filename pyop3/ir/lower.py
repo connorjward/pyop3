@@ -1099,19 +1099,28 @@ class VariableReplacer(pym.mapper.IdentityMapper):
 
 def _scalar_assignment(
     array,
-    path,
-    array_labels_to_jnames,
+    source_path,
+    iname_replace_map,
     ctx,
 ):
     # Register data
     ctx.add_argument(array)
 
-    if array.index_exprs != array.axes._default_index_exprs():
-        raise NotImplementedError
+    index_keys = [None] + [
+        (axis.id, cpt.label)
+        for axis, cpt in array.axes.detailed_path(source_path).items()
+    ]
+    target_path = merge_dicts(array.target_paths.get(key, {}) for key in index_keys)
+    index_exprs = merge_dicts(array.index_exprs.get(key, {}) for key in index_keys)
+
+    jname_replace_map = {}
+    replacer = JnameSubstitutor(iname_replace_map, ctx)
+    for axlabel, index_expr in index_exprs.items():
+        jname_replace_map[axlabel] = replacer(index_expr)
 
     offset_expr = make_offset_expr(
-        array.layouts[path],
-        array_labels_to_jnames,
+        array.layouts[target_path],
+        jname_replace_map,
         ctx,
     )
     rexpr = pym.subscript(pym.var(array.name), offset_expr)
