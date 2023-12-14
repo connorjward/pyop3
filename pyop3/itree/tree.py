@@ -979,6 +979,11 @@ def _(called_map: CalledMap, **kwargs):
             called_map, prior_target_path, prior_index_exprs
         )
         axes = PartialAxisTree(axis)
+
+        # we need to keep track of the index expressions from the loop indices
+        # I think this is fundamentally the same thing that we are already doing for
+        # loop indices
+        index_exprs_per_cpt |= prior_index_exprs_per_cpt
     else:
         axes = prior_axes
         target_path_per_cpt = {}
@@ -1015,9 +1020,9 @@ def _(called_map: CalledMap, **kwargs):
 
     return (
         axes,
-        pmap(target_path_per_cpt),
-        pmap(index_exprs_per_cpt),
-        pmap(layout_exprs_per_cpt),
+        freeze(target_path_per_cpt),
+        freeze(index_exprs_per_cpt),
+        freeze(layout_exprs_per_cpt),
     )
 
 

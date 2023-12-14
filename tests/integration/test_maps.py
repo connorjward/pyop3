@@ -411,7 +411,7 @@ def test_inc_with_variable_arity_map(scalar_inc_kernel):
     expected = np.zeros_like(dat1.data_ro)
     for i in range(m):
         for j in map_data[i]:
-            expected[i] += dat1.data_ro[j]
+            expected[i] += dat0.data_ro[j]
     assert np.allclose(dat1.data_ro, expected)
 
 

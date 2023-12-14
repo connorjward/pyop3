@@ -399,76 +399,84 @@ def parse_loop_properly_this_time(
     *,
     axis=None,
     source_path=pmap(),
-    target_path=pmap(),
-    iname_replace_map=pmap(),
-    jname_replace_map=pmap(),
+    source_replace_map=pmap(),
+    target_path=None,
+    target_replace_map=None,
 ):
+    if axes.is_empty:
+        raise NotImplementedError("does this even make sense?")
+
+    # need to pick bits out of this
     outer_replace_map = {}
     for _, replace_map in loop_indices.values():
         outer_replace_map.update(replace_map)
     outer_replace_map = freeze(outer_replace_map)
 
-    if axes.is_empty:
-        raise NotImplementedError("does this even make sense?")
+    if axis is None:
+        target_path = freeze(axes.target_paths.get(None, {}))
 
-    axis = axis or axes.root
+        # again, repeated this pattern all over the place
+        target_replace_map = {}
+        index_exprs = axes.index_exprs.get(None, {})
+        replacer = JnameSubstitutor(outer_replace_map, codegen_context)
+        for axis_label, index_expr in index_exprs.items():
+            target_replace_map[axis_label] = replacer(index_expr)
+        target_replace_map = freeze(target_replace_map)
 
-    domain_insns = []
-    leaf_data = []
+        axis = axes.root
 
     for component in axis.components:
         iname = codegen_context.unique_name("i")
         extent_var = register_extent(
             component.count,
-            iname_replace_map | jname_replace_map | outer_replace_map,
+            target_replace_map,
             codegen_context,
         )
         codegen_context.add_domain(iname, extent_var)
 
-        new_source_path = source_path | {axis.label: component.label}
-        new_target_path = target_path | axes.target_paths.get(
+        axis_replace_map = {axis.label: pym.var(iname)}
+
+        source_path_ = source_path | {axis.label: component.label}
+        source_replace_map_ = source_replace_map | axis_replace_map
+
+        target_path_ = target_path | axes.target_paths.get(
             (axis.id, component.label), {}
         )
-        new_iname_replace_map = iname_replace_map | {axis.label: pym.var(iname)}
 
-        # these aren't jnames!
-        my_index_exprs = axes.index_exprs.get((axis.id, component.label), {})
-
-        jname_extras = {}
-        for axis_label, index_expr in my_index_exprs.items():
-            jname_expr = JnameSubstitutor(
-                new_iname_replace_map | jname_replace_map | outer_replace_map,
-                codegen_context,
-            )(index_expr)
-            # jname_extras[axis_label] = jname_expr
-            jname_extras[axis_label] = jname_expr
-
-        new_jname_replace_map = jname_replace_map | jname_extras
+        target_replace_map_ = dict(target_replace_map)
+        index_exprs = axes.index_exprs.get((axis.id, component.label), {})
+        replacer = JnameSubstitutor(
+            outer_replace_map | target_replace_map | axis_replace_map, codegen_context
+        )
+        for axis_label, index_expr in index_exprs.items():
+            target_replace_map_[axis_label] = replacer(index_expr)
+        target_replace_map_ = freeze(target_replace_map_)
 
         with codegen_context.within_inames({iname}):
-            if subaxis := axes.child(axis, component):
+            subaxis = axes.child(axis, component)
+            if subaxis:
                 parse_loop_properly_this_time(
                     loop,
                     axes,
                     loop_indices,
                     codegen_context,
                     axis=subaxis,
-                    source_path=new_source_path,
-                    target_path=new_target_path,
-                    iname_replace_map=new_iname_replace_map,
-                    jname_replace_map=new_jname_replace_map,
+                    source_path=source_path_,
+                    source_replace_map=source_replace_map_,
+                    target_path=target_path_,
+                    target_replace_map=target_replace_map_,
                 )
             else:
-                new_iname_replace_map = pmap(
+                index_replace_map = pmap(
                     {
-                        (loop.index.local_index.id, myaxislabel): jname_expr
-                        for myaxislabel, jname_expr in new_iname_replace_map.items()
+                        (loop.index.id, ax): iexpr
+                        for ax, iexpr in target_replace_map_.items()
                     }
                 )
-                new_jname_replace_map = pmap(
+                local_index_replace_map = freeze(
                     {
-                        (loop.index.id, myaxislabel): jname_expr
-                        for myaxislabel, jname_expr in new_jname_replace_map.items()
+                        (loop.index.local_index.id, ax): iexpr
+                        for ax, iexpr in source_replace_map_.items()
                     }
                 )
                 for stmt in loop.statements:
@@ -477,12 +485,12 @@ def parse_loop_properly_this_time(
                         loop_indices
                         | {
                             loop.index: (
-                                new_target_path,
-                                new_jname_replace_map,
+                                target_path_,
+                                index_replace_map,
                             ),
                             loop.index.local_index: (
-                                new_source_path,
-                                new_iname_replace_map,
+                                source_path_,
+                                local_index_replace_map,
                             ),
                         },
                         codegen_context,
@@ -648,7 +656,7 @@ def parse_assignment(
 
 
 def parse_assignment_petscmat(array, temp, shape, op, loop_indices, codegen_context):
-    ctx = codegen_context
+    from pyop3.array.harray import MultiArrayVariable
 
     (iraxis, ircpt), (icaxis, iccpt) = array.axes.path_with_nodes(
         *array.axes.leaf, ordered=True
@@ -674,35 +682,38 @@ def parse_assignment_petscmat(array, temp, shape, op, loop_indices, codegen_cont
     # rexpr = self._flatten(rexpr)
     # cexpr = self._flatten(cexpr)
 
+    assert temp.axes.depth == 2
+    # sniff the right labels from the temporary, they tell us what jnames to substitute
+    rlabel = temp.axes.root.label
+    clabel = temp.axes.leaf_axis.label
+
     iname_expr_replace_map = {}
     for _, replace_map in loop_indices.values():
         iname_expr_replace_map.update(replace_map)
 
     # for now assume that we pass exactly the right map through, do no composition
-    if not isinstance(rexpr, CalledMapVariable) or len(rexpr.parameters) != 2:
+    if not isinstance(rexpr, MultiArrayVariable):
         raise NotImplementedError
 
-    rinner_axis_label = rexpr.function.full_map.name
-
     # substitute a zero for the inner axis, we want to avoid this inner loop
-    new_rexpr = JnameSubstitutor(
-        iname_expr_replace_map | {rinner_axis_label: 0}, codegen_context
-    )(rexpr)
+    new_rexpr = JnameSubstitutor(iname_expr_replace_map | {rlabel: 0}, codegen_context)(
+        rexpr
+    )
 
-    if not isinstance(cexpr, CalledMapVariable) or len(cexpr.parameters) != 2:
+    if not isinstance(cexpr, MultiArrayVariable):
         raise NotImplementedError
-    cinner_axis_label = cexpr.function.full_map.name
+
     # substitute a zero for the inner axis, we want to avoid this inner loop
-    new_cexpr = JnameSubstitutor(
-        iname_expr_replace_map | {cinner_axis_label: 0}, codegen_context
-    )(cexpr)
+    new_cexpr = JnameSubstitutor(iname_expr_replace_map | {clabel: 0}, codegen_context)(
+        cexpr
+    )
 
     # now emit the right line of code, this should properly be a lp.ScalarCallable
     # https://petsc.org/release/manualpages/Mat/MatGetValuesLocal/
     # PetscErrorCode MatGetValuesLocal(Mat mat, PetscInt nrow, const PetscInt irow[], PetscInt ncol, const PetscInt icol[], PetscScalar y[])
-    nrow = rexpr.function.map_component.arity
+    nrow = rexpr.array.axes.leaf_component.count
     irow = new_rexpr
-    ncol = cexpr.function.map_component.arity
+    ncol = cexpr.array.axes.leaf_component.count
     icol = new_cexpr
 
     # can only use GetValuesLocal when lgmaps are set (which I don't yet do)
@@ -1101,6 +1112,7 @@ def register_extent(extent, jnames, ctx):
         path = extent.axes.path(*extent.axes.leaf)
     else:
         path = pmap()
+
     expr = _scalar_assignment(extent, path, jnames, ctx)
 
     varname = ctx.unique_name("p")
@@ -1126,6 +1138,7 @@ def _scalar_assignment(
     # Register data
     ctx.add_argument(array)
 
+    # can this all go?
     index_keys = [None] + [
         (axis.id, cpt.label)
         for axis, cpt in array.axes.detailed_path(source_path).items()
