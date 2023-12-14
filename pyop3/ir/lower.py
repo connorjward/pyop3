@@ -36,16 +36,11 @@ from pyop3.itree import (
     LocalLoopIndex,
     LoopIndex,
     Map,
-    MapVariable,
     Slice,
     Subset,
     TabulatedMapComponent,
 )
-from pyop3.itree.tree import (
-    CalledMapVariable,
-    IndexExpressionReplacer,
-    LoopIndexVariable,
-)
+from pyop3.itree.tree import IndexExpressionReplacer, LoopIndexVariable
 from pyop3.lang import (
     INC,
     MAX_RW,
@@ -918,15 +913,45 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
     # this is cleaner if I do it as a single line expression
     # rather than register assignments for things.
     def map_multi_array(self, expr):
-        path = expr.array.axes.path(*expr.array.axes.leaf)
-        replace_map = {axis: self.rec(index) for axis, index in expr.indices.items()}
-        varname = _scalar_assignment(
-            expr.array,
-            path,
+        # Register data
+        self._codegen_context.add_argument(expr.array)
+
+        # index_keys = [None] + [
+        #     (axis.id, cpt.label)
+        #     for axis, cpt in array.axes.detailed_path(source_path).items()
+        # ]
+        # target_path = merge_dicts(array.target_paths.get(key, {}) for key in index_keys)
+        # index_exprs = merge_dicts(array.index_exprs.get(key, {}) for key in index_keys)
+
+        target_path = expr.target_path
+        index_exprs = expr.index_exprs
+
+        replace_map = {ax: self.rec(expr_) for ax, expr_ in index_exprs.items()}
+
+        # jname_replace_map = {}
+        # replacer = JnameSubstitutor(iname_replace_map, ctx)
+        # for axlabel, index_expr in index_exprs.items():
+        #     jname_replace_map[axlabel] = replacer(index_expr)
+
+        offset_expr = make_offset_expr(
+            expr.array.layouts[target_path],
             replace_map,
             self._codegen_context,
         )
-        return varname
+        rexpr = pym.subscript(pym.var(expr.array.name), offset_expr)
+        return rexpr
+
+        # path = expr.array.axes.path(*expr.array.axes.leaf)
+        # replace_map = {axis: self.rec(index) for axis, index in expr.indices.items()}
+        # varname = _scalar_assignment(
+        #     expr.array,
+        #     path,
+        #     # just a guess
+        #     # replace_map,
+        #     self._labels_to_jnames,
+        #     self._codegen_context,
+        # )
+        # return varname
 
     def map_called_map(self, expr):
         if not isinstance(expr.function.map_component.array, HierarchicalArray):
@@ -1082,11 +1107,6 @@ def register_extent(extent, jnames, ctx):
     ctx.add_temporary(varname)
     ctx.add_assignment(pym.var(varname), expr)
     return varname
-
-
-class MultiArrayCollector(pym.mapper.Collector):
-    def map_multi_array(self, expr):
-        return {expr}
 
 
 class VariableReplacer(pym.mapper.IdentityMapper):

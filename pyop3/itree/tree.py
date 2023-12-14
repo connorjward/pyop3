@@ -58,12 +58,11 @@ class IndexExpressionReplacer(pym.mapper.IdentityMapper):
         return self._replace_map.get(expr.axis_label, expr)
 
     def map_multi_array(self, expr):
-        from pyop3.array.harray import MultiArrayVariable
-
-        indices = {axis: self.rec(index) for axis, index in expr.indices.items()}
-        return MultiArrayVariable(expr.array, indices)
+        index_exprs = {ax: self.rec(iexpr) for ax, iexpr in expr.index_exprs.items()}
+        return type(expr)(expr.array, expr.target_path, index_exprs)
 
     def map_called_map(self, expr):
+        raise NotImplementedError
         array = expr.function.map_component.array
 
         # the inner_expr tells us the right mapping for the temporary, however,
@@ -329,23 +328,25 @@ class CalledMap(Index, LoopIterable):
         raise NotImplementedError("TODO")
 
     def index(self) -> LoopIndex:
-        contexts = collect_loop_contexts(self)
-        # FIXME this assumption is not always true
-        context = just_one(contexts)
-        axes, target_paths, index_exprs, layout_exprs = collect_shape_index_callback(
-            self, loop_indices=context
-        )
+        context_map = {}
+        for context in collect_loop_contexts(self):
+            (
+                axes,
+                target_paths,
+                index_exprs,
+                layout_exprs,
+            ) = collect_shape_index_callback(self, loop_indices=context)
+            # breakpoint()
 
-        axes = AxisTree.from_node_map(axes.parent_to_children)
-
-        axes = AxisTree(
-            axes.parent_to_children,
-            target_paths,
-            index_exprs,
-            layout_exprs,
-        )
-
-        context_sensitive_axes = ContextSensitiveAxisTree({context: axes})
+            axes = AxisTree.from_node_map(axes.parent_to_children)
+            axes = AxisTree(
+                axes.parent_to_children,
+                target_paths,
+                index_exprs,
+                layout_exprs,
+            )
+            context_map[context] = axes
+        context_sensitive_axes = ContextSensitiveAxisTree(context_map)
         return LoopIndex(context_sensitive_axes)
 
     @property
@@ -416,37 +417,6 @@ class LoopIndexVariable(pym.primitives.Variable):
     @property
     def datamap(self):
         return self.index.datamap
-
-
-class MapVariable(pym.primitives.Variable):
-    """Pymbolic variable representing the action of a map."""
-
-    mapper_method = sys.intern("map_map_variable")
-
-    def __init__(self, full_map, map_component):
-        super().__init__(map_component.array.name)
-        self.full_map = full_map
-        self.map_component = map_component
-
-    def __call__(self, *args):
-        return CalledMapVariable(self, *args)
-
-    @functools.cached_property
-    def datamap(self):
-        return self.map_component.datamap
-
-
-class CalledMapVariable(pym.primitives.Call):
-    def __str__(self) -> str:
-        return f"{self.function.name}({self.parameters})"
-
-    mapper_method = sys.intern("map_called_map")
-
-    @functools.cached_property
-    def datamap(self):
-        return self.function.datamap | merge_dicts(
-            idx.datamap for idx in self.parameters.values()
-        )
 
 
 class ContextSensitiveCalledMap(ContextSensitiveLoopIterable):
@@ -625,7 +595,9 @@ def _(arg: LoopIndex, local=False):
                 for axis, cpt in axis_tree.path_with_nodes(
                     *leaf, and_components=True
                 ).items():
-                    target_path.update(axis_tree.target_paths[axis.id, cpt.label])
+                    target_path.update(
+                        axis_tree.target_paths.get((axis.id, cpt.label), {})
+                    )
                 extra_source_context.update(source_path)
                 extracontext.update(target_path)
             if local:
@@ -891,6 +863,8 @@ def _(local_index: LocalLoopIndex, *args, loop_indices, **kwargs):
 
 @collect_shape_index_callback.register
 def _(slice_: Slice, *, prev_axes, **kwargs):
+    from pyop3.array.harray import MultiArrayVariable
+
     components = []
     target_path_per_subslice = []
     index_exprs_per_subslice = []
@@ -929,11 +903,37 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
                 pmap({slice_.label: (layout_var - subslice.start) // subslice.step})
             )
         else:
-            index_exprs_per_subslice.append(
-                pmap({slice_.axis: subslice.array.as_var()})
+            assert isinstance(subslice, Subset)
+
+            # below is also used for maps - cleanup
+            subset_array = subslice.array
+            subset_axes = subset_array.axes
+
+            # must be single component
+            source_path = subset_axes.path(*subset_axes.leaf)
+            index_keys = [None] + [
+                (axis.id, cpt.label)
+                for axis, cpt in subset_axes.detailed_path(source_path).items()
+            ]
+            my_target_path = merge_dicts(
+                subset_array.target_paths.get(key, {}) for key in index_keys
             )
+            old_index_exprs = merge_dicts(
+                subset_array.index_exprs.get(key, {}) for key in index_keys
+            )
+
+            my_index_exprs = {}
+            index_expr_replace_map = {subset_axes.leaf_axis.label: newvar}
+            replacer = IndexExpressionReplacer(index_expr_replace_map)
+            for axlabel, index_expr in old_index_exprs.items():
+                my_index_exprs[axlabel] = replacer(index_expr)
+            subset_var = MultiArrayVariable(
+                subslice.array, my_target_path, my_index_exprs
+            )
+
+            index_exprs_per_subslice.append(pmap({slice_.axis: subset_var}))
             layout_exprs_per_subslice.append(
-                pmap({slice_.label: bsearch(subslice.array.as_var(), layout_var)})
+                pmap({slice_.label: bsearch(subset_var, layout_var)})
             )
 
     axis = Axis(components, label=axis_label)
@@ -1022,6 +1022,8 @@ def _(called_map: CalledMap, **kwargs):
 
 
 def _make_leaf_axis_from_called_map(called_map, prior_target_path, prior_index_exprs):
+    from pyop3.array.harray import MultiArrayVariable
+
     axis_id = Axis.unique_id()
     components = []
     target_path_per_cpt = {}
@@ -1036,11 +1038,37 @@ def _make_leaf_axis_from_called_map(called_map, prior_target_path, prior_index_e
             {map_cpt.target_axis: map_cpt.target_component}
         )
 
-        map_var = MapVariable(called_map, map_cpt)
         axisvar = AxisVariable(called_map.name)
 
+        if not isinstance(map_cpt, TabulatedMapComponent):
+            raise NotImplementedError("Currently we assume only arrays here")
+
+        map_array = map_cpt.array
+        map_axes = map_array.axes
+
+        source_path = map_axes.path(*map_axes.leaf)
+        index_keys = [None] + [
+            (axis.id, cpt.label)
+            for axis, cpt in map_axes.detailed_path(source_path).items()
+        ]
+        my_target_path = merge_dicts(
+            map_array.target_paths.get(key, {}) for key in index_keys
+        )
+        old_index_exprs = merge_dicts(
+            map_array.index_exprs.get(key, {}) for key in index_keys
+        )
+
+        my_index_exprs = {}
+        index_expr_replace_map = prior_index_exprs | {map_axes.leaf_axis.label: axisvar}
+        replacer = IndexExpressionReplacer(index_expr_replace_map)
+        for axlabel, index_expr in old_index_exprs.items():
+            my_index_exprs[axlabel] = replacer(index_expr)
+
+        map_var = MultiArrayVariable(map_cpt.array, my_target_path, my_index_exprs)
+
         index_exprs_per_cpt[axis_id, cpt.label] = {
-            map_cpt.target_axis: map_var(prior_index_exprs | {called_map.name: axisvar})
+            # map_cpt.target_axis: map_var(prior_index_exprs | {called_map.name: axisvar})
+            map_cpt.target_axis: map_var
         }
 
         # don't think that this is possible for maps

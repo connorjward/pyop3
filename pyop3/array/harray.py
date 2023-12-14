@@ -37,7 +37,7 @@ from pyop3.axtree.tree import (
 from pyop3.buffer import Buffer, DistributedBuffer
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
 from pyop3.itree import IndexTree, as_index_forest, index_axes
-from pyop3.itree.tree import CalledMapVariable, collect_loop_indices, iter_axis_tree
+from pyop3.itree.tree import collect_loop_indices, iter_axis_tree
 from pyop3.lang import KernelArgument
 from pyop3.utils import (
     PrettyTuple,
@@ -62,22 +62,17 @@ class IncompatibleShapeError(Exception):
 class MultiArrayVariable(pym.primitives.Variable):
     mapper_method = sys.intern("map_multi_array")
 
-    def __init__(self, array, indices):
+    def __init__(self, array, target_path, index_exprs):
         super().__init__(array.name)
         self.array = array
-        self.indices = freeze(indices)
+        self.target_path = freeze(target_path)
+        self.index_exprs = freeze(index_exprs)
 
-    def __repr__(self) -> str:
-        return f"MultiArrayVariable({self.array!r}, {self.indices!r})"
-
-    def __getinitargs__(self):
-        return self.array, self.indices
-
-    @property
-    def datamap(self):
-        return self.array.datamap | merge_dicts(
-            idx.datamap for idx in self.indices.values()
-        )
+    # def __str__(self) -> str:
+    #     return f"{self.array.name}[{{{', '.join(f'{i[0]}: {i[1]}' for i in self.indices.items())}}}]"
+    #
+    # def __repr__(self) -> str:
+    #     return f"MultiArrayVariable({self.array!r}, {self.indices!r})"
 
 
 class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
@@ -352,16 +347,6 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
             max_value=self.max_value,
             name=self.name,
         )
-
-    def as_var(self):
-        # must not be branched...
-        indices = freeze(
-            {
-                axis: AxisVariable(axis)
-                for axis, _ in self.axes.path(*self.axes.leaf).items()
-            }
-        )
-        return MultiArrayVariable(self, indices)
 
     @property
     def alloc_size(self):

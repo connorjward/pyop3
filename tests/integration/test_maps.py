@@ -1,7 +1,7 @@
 import loopy as lp
 import numpy as np
 import pytest
-from pyrsistent import pmap
+from pyrsistent import freeze, pmap
 
 import pyop3 as op3
 from pyop3.ir import LOOPY_LANG_VERSION, LOOPY_TARGET
@@ -218,8 +218,8 @@ def test_inc_with_multiple_maps(vector_inc_kernel):
     )
     dat1 = op3.HierarchicalArray(axis, name="dat1", dtype=dat0.dtype)
 
-    map_axes0 = op3.AxisTree.from_nest({axis: op3.Axis(arity0)})
-    map_axes1 = op3.AxisTree.from_nest({axis: op3.Axis(arity1)})
+    map_axes0 = op3.AxisTree.from_nest({axis: op3.Axis(arity0, "ax1")})
+    map_axes1 = op3.AxisTree.from_nest({axis: op3.Axis(arity1, "ax1")})
 
     map_dat0 = op3.HierarchicalArray(
         map_axes0,
@@ -241,7 +241,9 @@ def test_inc_with_multiple_maps(vector_inc_kernel):
                 op3.TabulatedMapComponent("ax0", "pt0", map_dat1),
             ],
         },
-        "map0",
+        # FIXME
+        # "map0",
+        "ax1",
     )
 
     op3.do_loop(p := axis.index(), vector_inc_kernel(dat0[map0(p)], dat1[p]))
@@ -381,34 +383,36 @@ def test_vector_inc_with_map_composition(vec2_inc_kernel, vec12_inc_kernel, nest
     assert np.allclose(dat1.data_ro, expected)
 
 
-@pytest.mark.skip(
-    reason="Passing ragged arguments through to the local is not yet supported"
-)
-def test_inc_with_variable_arity_map(ragged_inc_kernel):
+def test_inc_with_variable_arity_map(scalar_inc_kernel):
     m = 3
-    nnzdata = np.asarray([3, 2, 1], dtype=IntType)
-    mapdata = [[2, 1, 0], [2, 1], [2]]
+    axis = op3.Axis({"pt0": m}, "ax0")
+    dat0 = op3.HierarchicalArray(
+        axis, name="dat0", data=np.arange(axis.size, dtype=op3.ScalarType)
+    )
+    dat1 = op3.HierarchicalArray(axis, name="dat1", dtype=dat0.dtype)
 
-    axes = AxisTree(Axis(m, "ax0"))
-    dat0 = MultiArray(axes, name="dat0", data=np.arange(m, dtype=ScalarType))
-    dat1 = MultiArray(axes, name="dat1", data=np.zeros(m, dtype=ScalarType))
+    nnz_data = np.asarray([3, 2, 1], dtype=op3.IntType)
+    nnz = op3.HierarchicalArray(axis, name="nnz", data=nnz_data, max_value=3)
 
-    nnz = MultiArray(axes, name="nnz", data=nnzdata, max_value=3)
-
-    maxes = axes.add_subaxis(Axis(nnz, "ax1"), axes.leaf)
-    map0 = MultiArray(
-        maxes, name="map0", data=np.asarray(flatten(mapdata), dtype=IntType)
+    map_axes = op3.AxisTree.from_nest({axis: op3.Axis(nnz)})
+    map_data = [[2, 1, 0], [2, 1], [2]]
+    map_array = np.asarray(flatten(map_data), dtype=op3.IntType)
+    map_dat = op3.HierarchicalArray(map_axes, name="map0", data=map_array)
+    map0 = op3.Map(
+        {freeze({"ax0": "pt0"}): [op3.TabulatedMapComponent("ax0", "pt0", map_dat)]},
+        name="map0",
     )
 
-    p = IndexTree(Index(Range("ax0", m)))
-    q = p.put_node(
-        Index(TabulatedMap([("ax0", 0)], [("ax0", 0)], arity=nnz[p], data=map0[p])),
-        p.leaf,
+    op3.do_loop(
+        p := axis.index(),
+        op3.loop(q := map0(p).index(), scalar_inc_kernel(dat0[q], dat1[p])),
     )
 
-    do_loop(p, ragged_inc_kernel(dat0[q], dat1[p]))
-
-    assert np.allclose(dat1.data, [sum(xs) for xs in mapdata])
+    expected = np.zeros_like(dat1.data_ro)
+    for i in range(m):
+        for j in map_data[i]:
+            expected[i] += dat1.data_ro[j]
+    assert np.allclose(dat1.data_ro, expected)
 
 
 def test_map_composition(vec2_inc_kernel):

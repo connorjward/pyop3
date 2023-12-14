@@ -7,6 +7,7 @@ del pytools.RecordWithoutPickling.__getattr__
 del pytools
 
 
+import pyop3.ir
 import pyop3.transforms
 from pyop3.array import Array, HierarchicalArray, MultiArray, PetscMat
 from pyop3.axtree import Axis, AxisComponent, AxisTree, PartialAxisTree  # noqa: F401

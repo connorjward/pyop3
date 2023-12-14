@@ -39,9 +39,6 @@ class PetscVariable(pym.primitives.Variable):
 class PetscObject(Array, abc.ABC):
     dtype = ScalarType
 
-    def as_var(self):
-        return PetscVariable(self)
-
 
 class PetscVec(PetscObject):
     def __new__(cls, *args, **kwargs):

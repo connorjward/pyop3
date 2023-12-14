@@ -506,18 +506,12 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
 
 
 class MultiArrayCollector(pym.mapper.Collector):
-    def map_called_map(self, expr):
-        return self.rec(expr.function) | set.union(
-            *(self.rec(idx) for idx in expr.parameters.values())
-        )
+    def map_multi_array(self, array_var):
+        return {array_var.array} | {
+            arr for iexpr in array_var.index_exprs.values() for arr in self.rec(iexpr)
+        }
 
-    def map_map_variable(self, expr):
-        return {expr.map_component.array}
-
-    def map_multi_array(self, expr):
-        return {expr}
-
-    def map_nan(self, expr):
+    def map_nan(self, nan):
         return set()
 
 

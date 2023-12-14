@@ -185,6 +185,8 @@ def _compute_layouts(
     axis=None,
     path=pmap(),
 ):
+    from pyop3.array.harray import MultiArrayVariable
+
     axis = axis or axes.root
     layouts = {}
     steps = {}
@@ -309,7 +311,28 @@ def _compute_layouts(
             _tabulate_count_array_tree(axes, axis, fulltree, offset, setting_halo=True)
 
             for subpath, offset_data in fulltree.items():
-                layouts[path | subpath] = offset_data.as_var()
+                # TODO avoid copy paste stuff, this is the same as in itree/tree.py
+
+                offset_axes = offset_data.axes
+
+                # must be single component
+                source_path = offset_axes.path(*offset_axes.leaf)
+                index_keys = [None] + [
+                    (axis.id, cpt.label)
+                    for axis, cpt in offset_axes.detailed_path(source_path).items()
+                ]
+                my_target_path = merge_dicts(
+                    offset_data.target_paths.get(key, {}) for key in index_keys
+                )
+                my_index_exprs = merge_dicts(
+                    offset_data.index_exprs.get(key, {}) for key in index_keys
+                )
+
+                offset_var = MultiArrayVariable(
+                    offset_data, my_target_path, my_index_exprs
+                )
+
+                layouts[path | subpath] = offset_var
             ctree = None
             steps = {path: _axis_size(axes, axis)}
 

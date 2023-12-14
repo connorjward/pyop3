@@ -6,7 +6,6 @@ from .tree import (
     LocalLoopIndex,
     LoopIndex,
     Map,
-    MapVariable,
     Slice,
     SliceComponent,
     Subset,
