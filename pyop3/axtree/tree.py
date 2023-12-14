@@ -416,6 +416,7 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
         """
         return self._tree
 
+    # Ideally I want to cythonize a lot of these methods
     def component_numbering(self, component):
         cidx = self.component_index(component)
         return self._default_to_applied_numbering[cidx]
@@ -438,6 +439,10 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
     def component_to_axis_number(self, component, number):
         cidx = self.component_index(component)
         return self._component_offsets[cidx] + number
+
+    def renumber_point(self, component, point):
+        renumbering = self.component_numbering(component)
+        return renumbering[point]
 
     @cached_property
     def _tree(self):
