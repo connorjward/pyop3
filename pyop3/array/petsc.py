@@ -96,6 +96,7 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
                 target_paths,
                 index_exprs,
                 layout_exprs_per_indexed_cpt,
+                domain_index_exprs,
             ) = _index_axes(self.axes, index_tree, loop_context)
 
             indexed_axes = indexed_axes.set_up()
@@ -107,6 +108,7 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
                 data=packed,
                 target_paths=target_paths,
                 index_exprs=index_exprs,
+                domain_index_exprs=domain_index_exprs,
                 name=self.name,
             )
 

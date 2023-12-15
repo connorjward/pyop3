@@ -426,36 +426,20 @@ def parse_loop_properly_this_time(
         axis = axes.root
 
     for component in axis.components:
+        axis_index_exprs = axes.index_exprs.get((axis.id, component.label), {})
+        index_exprs_ = index_exprs | axis_index_exprs
+
         # Maps "know" about indices that aren't otherwise available. Eg map(p)
         # knows about p and this isn't accessible to axes.index_exprs except via
         # the index expression
-
-        input_index_exprs = {}
-        axis_index_exprs = axes.index_exprs.get((axis.id, component.label), {})
-        for ax, iexpr in axis_index_exprs.items():
-            # TODO define as abstract property
-            if isinstance(iexpr, CalledMapVariable):
-                input_index_exprs.update(iexpr.input_index_exprs)
-
-        index_exprs_ = index_exprs | axis_index_exprs
-
-        # extra_target_replace_map = {}
-        # for axlabel, index_expr in index_exprs.items():
-        #     # TODO define as abstract property
-        #     if isinstance(index_expr, CalledMapVariable):
-        #         replacer = JnameSubstitutor(
-        #             outer_replace_map | target_replace_map, codegen_context
-        #         )
-        #         for axis_label, index_expr in index_expr.in_index_exprs.items():
-        #             extra_target_replace_map[axis_label] = replacer(index_expr)
-        # extra_target_replace_map = freeze(extra_target_replace_map)
-
-        # breakpoint()
+        domain_index_exprs = axes.domain_index_exprs.get(
+            (axis.id, component.label), pmap()
+        )
 
         iname = codegen_context.unique_name("i")
         extent_var = register_extent(
             component.count,
-            index_exprs | input_index_exprs,
+            index_exprs | domain_index_exprs,
             # TODO just put these in the default replace map
             iname_replace_map | outer_replace_map,
             codegen_context,
@@ -775,13 +759,6 @@ def parse_assignment_properly_this_time(
         axis = axes.root
         target_path = target_path | ctx_free_array.target_paths.get(None, pmap())
         index_exprs = ctx_free_array.index_exprs.get(None, pmap())
-        # jname_extras = {}
-        # for axis_label, index_expr in my_index_exprs.items():
-        #     jname_expr = JnameSubstitutor(
-        #         iname_replace_map | jname_replace_map, codegen_context
-        #     )(index_expr)
-        #     jname_extras[axis_label] = jname_expr
-        # jname_replace_map = jname_replace_map | jname_extras
 
     if axes.is_empty:
         add_leaf_assignment(
@@ -801,9 +778,16 @@ def parse_assignment_properly_this_time(
 
     for component in axis.components:
         iname = codegen_context.unique_name("i")
-        # TODO also do the magic for ragged things here
+
+        # map magic
+        domain_index_exprs = ctx_free_array.domain_index_exprs.get(
+            (axis.id, component.label), pmap()
+        )
         extent_var = register_extent(
-            component.count, index_exprs, iname_replace_map, codegen_context
+            component.count,
+            index_exprs | domain_index_exprs,
+            iname_replace_map,
+            codegen_context,
         )
         codegen_context.add_domain(iname, extent_var)
 
@@ -814,20 +798,9 @@ def parse_assignment_properly_this_time(
 
         new_iname_replace_map = iname_replace_map | {axis.label: pym.var(iname)}
 
-        # I don't like that I need to do this here and also when I emit the layout
-        # instructions.
-        # Do I need the jnames on the way down? Think so for things like ragged...
         index_exprs_ = index_exprs | ctx_free_array.index_exprs.get(
             (axis.id, component.label), {}
         )
-        # jname_extras = {}
-        # for axis_label, index_expr in my_index_exprs.items():
-        #     jname_expr = JnameSubstitutor(
-        #         new_iname_replace_map | jname_replace_map, codegen_context
-        #     )(index_expr)
-        #     jname_extras[axis_label] = jname_expr
-        # new_jname_replace_map = jname_replace_map | jname_extras
-        # new_jname_replace_map = new_iname_replace_map
 
         with codegen_context.within_inames({iname}):
             if subaxis := axes.child(axis, component):

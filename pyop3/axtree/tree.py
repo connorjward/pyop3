@@ -605,6 +605,7 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         "target_paths",
         "index_exprs",
         "layout_exprs",
+        "domain_index_exprs",
     }
 
     def __init__(
@@ -613,6 +614,7 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         target_paths=None,
         index_exprs=None,
         layout_exprs=None,
+        domain_index_exprs=pmap(),
     ):
         if some_but_not_all(
             arg is None for arg in [target_paths, index_exprs, layout_exprs]
@@ -623,6 +625,7 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         self._target_paths = target_paths or self._default_target_paths()
         self._index_exprs = index_exprs or self._default_index_exprs()
         self.layout_exprs = layout_exprs or self._default_layout_exprs()
+        self.domain_index_exprs = domain_index_exprs
 
     def __getitem__(self, indices):
         from pyop3.itree.tree import as_index_forest, collect_loop_contexts, index_axes
@@ -694,8 +697,8 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
             new_path = {}
             replace_map = {}
             for axis, cpt in self.path_with_nodes(*leaf).items():
-                new_path.update(self.target_paths[axis.id, cpt])
-                replace_map.update(self.layout_exprs[axis.id, cpt])
+                new_path.update(self.target_paths.get((axis.id, cpt), {}))
+                replace_map.update(self.layout_exprs.get((axis.id, cpt), {}))
             new_path = freeze(new_path)
 
             orig_layout = layouts[orig_path]

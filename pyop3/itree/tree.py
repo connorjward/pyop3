@@ -63,16 +63,6 @@ class IndexExpressionReplacer(pym.mapper.IdentityMapper):
         index_exprs = {ax: self.rec(iexpr) for ax, iexpr in expr.index_exprs.items()}
         return MultiArrayVariable(expr.array, expr.target_path, index_exprs)
 
-    def map_called_map(self, expr):
-        raise NotImplementedError
-        array = expr.function.map_component.array
-
-        # the inner_expr tells us the right mapping for the temporary, however,
-        # for maps that are arrays the innermost axis label does not always match
-        # the label used by the temporary. Therefore we need to do a swap here.
-        indices = {axis: self.rec(idx) for axis, idx in expr.parameters.items()}
-        return CalledMapVariable(expr.function, indices)
-
     def map_loop_index(self, expr):
         # this is hacky, if I make this raise a KeyError then we fail in indexing
         return self._replace_map.get((expr.name, expr.axis), expr)
@@ -337,16 +327,18 @@ class CalledMap(Index, LoopIterable):
                 target_paths,
                 index_exprs,
                 layout_exprs,
+                domain_index_exprs,
             ) = collect_shape_index_callback(self, loop_indices=context)
             # breakpoint()
 
-            axes = AxisTree.from_node_map(axes.parent_to_children)
             axes = AxisTree(
                 axes.parent_to_children,
                 target_paths,
                 index_exprs,
                 layout_exprs,
+                domain_index_exprs,
             )
+            # breakpoint()
             context_map[context] = axes
         context_sensitive_axes = ContextSensitiveAxisTree(context_map)
         return LoopIndex(context_sensitive_axes)
@@ -586,6 +578,8 @@ def _(arg: LocalLoopIndex):
 
 @collect_loop_contexts.register
 def _(arg: LoopIndex, local=False):
+    # I think that this is wrong! not enough detected
+    # breakpoint()
     if isinstance(arg.iterset, ContextSensitiveAxisTree):
         contexts = []
         for loop_context, axis_tree in arg.iterset.context_map.items():
@@ -600,14 +594,13 @@ def _(arg: LoopIndex, local=False):
                     target_path.update(
                         axis_tree.target_paths.get((axis.id, cpt.label), {})
                     )
-                extra_source_context.update(source_path)
-                extracontext.update(target_path)
-            if local:
-                contexts.append(
-                    loop_context | {arg.local_index.id: pmap(extra_source_context)}
-                )
-            else:
-                contexts.append(loop_context | {arg.id: pmap(extracontext)})
+
+                if local:
+                    contexts.append(
+                        loop_context | {arg.local_index.id: pmap(source_path)}
+                    )
+                else:
+                    contexts.append(loop_context | {arg.id: pmap(target_path)})
         return tuple(contexts)
     else:
         assert isinstance(arg.iterset, AxisTree)
@@ -835,6 +828,7 @@ def _(loop_index: LoopIndex, *, loop_indices, **kwargs):
         target_path_per_component,
         index_exprs_per_component,
         layout_exprs_per_component,
+        pmap(),
     )
 
 
@@ -860,6 +854,7 @@ def _(local_index: LocalLoopIndex, *args, loop_indices, **kwargs):
         target_path_per_cpt,
         index_exprs_per_cpt,
         layout_exprs_per_cpt,
+        pmap(),
     )
 
 
@@ -957,6 +952,7 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
         target_path_per_component,
         index_exprs_per_component,
         layout_exprs_per_component,
+        pmap(),
     )
 
 
@@ -967,6 +963,7 @@ def _(called_map: CalledMap, **kwargs):
         prior_target_path_per_cpt,
         prior_index_exprs_per_cpt,
         _,
+        prior_domain_index_exprs_per_cpt,
     ) = collect_shape_index_callback(called_map.from_index, **kwargs)
 
     if not prior_axes:
@@ -977,35 +974,18 @@ def _(called_map: CalledMap, **kwargs):
             target_path_per_cpt,
             index_exprs_per_cpt,
             layout_exprs_per_cpt,
+            domain_index_exprs_per_cpt,
         ) = _make_leaf_axis_from_called_map(
             called_map, prior_target_path, prior_index_exprs
         )
         axes = PartialAxisTree(axis)
 
-        # FIXME I think that this logic is truly awful, and it doesn't even work
-        # for nested ragged things!
-        # we need to keep track of the index expressions from the loop indices
-        # I think this is fundamentally the same thing that we are already doing for
-        # loop indices
-        # if None in index_exprs_per_cpt:
-        #     index_exprs_per_cpt = dict(index_exprs_per_cpt)
-        #     breakpoint()
-        #     index_exprs_per_cpt[None] |= prior_index_exprs_per_cpt.get(None, pmap())
-        #     index_exprs_per_cpt = freeze(index_exprs_per_cpt)
-        # else:
-        #     index_exprs_per_cpt |= {None: prior_index_exprs_per_cpt.get(None, pmap())}
-
     else:
         axes = prior_axes
         target_path_per_cpt = {}
-        # if None in index_exprs_per_cpt:
-        #     index_exprs_per_cpt = dict(index_exprs_per_cpt)
-        #     index_exprs_per_cpt[None] |= prior_index_exprs_per_cpt.get(None, pmap())
-        #     index_exprs_per_cpt = freeze(index_exprs_per_cpt)
-        # else:
-        # index_exprs_per_cpt = {None: prior_index_exprs_per_cpt.get(None, pmap())}
         index_exprs_per_cpt = {}
         layout_exprs_per_cpt = {}
+        domain_index_exprs_per_cpt = {}
         for prior_leaf_axis, prior_leaf_cpt in prior_axes.leaves:
             prior_target_path = prior_target_path_per_cpt.get(None, pmap())
             prior_index_exprs = prior_index_exprs_per_cpt.get(None, pmap())
@@ -1025,6 +1005,7 @@ def _(called_map: CalledMap, **kwargs):
                 subtarget_paths,
                 subindex_exprs,
                 sublayout_exprs,
+                subdomain_index_exprs,
             ) = _make_leaf_axis_from_called_map(
                 called_map, prior_target_path, prior_index_exprs
             )
@@ -1034,12 +1015,21 @@ def _(called_map: CalledMap, **kwargs):
             target_path_per_cpt.update(subtarget_paths)
             index_exprs_per_cpt.update(subindex_exprs)
             layout_exprs_per_cpt.update(sublayout_exprs)
+            domain_index_exprs_per_cpt.update(subdomain_index_exprs)
+
+            # does this work?
+            # need to track these for nested ragged things
+            # breakpoint()
+            # index_exprs_per_cpt.update({(prior_leaf_axis.id, prior_leaf_cpt.label): prior_index_exprs})
+            domain_index_exprs_per_cpt.update(prior_domain_index_exprs_per_cpt)
+            # layout_exprs_per_cpt.update(...)
 
     return (
         axes,
         freeze(target_path_per_cpt),
         freeze(index_exprs_per_cpt),
         freeze(layout_exprs_per_cpt),
+        freeze(domain_index_exprs_per_cpt),
     )
 
 
@@ -1051,6 +1041,7 @@ def _make_leaf_axis_from_called_map(called_map, prior_target_path, prior_index_e
     target_path_per_cpt = {}
     index_exprs_per_cpt = {}
     layout_exprs_per_cpt = {}
+    domain_index_exprs_per_cpt = {}
 
     for map_cpt in called_map.map.connectivity[prior_target_path]:
         cpt = AxisComponent(map_cpt.arity, label=map_cpt.label)
@@ -1093,6 +1084,7 @@ def _make_leaf_axis_from_called_map(called_map, prior_target_path, prior_index_e
             my_index_exprs[axlabel] = replacer(index_expr)
         new_inner_index_expr = my_index_exprs
 
+        # breakpoint()
         map_var = CalledMapVariable(
             map_cpt.array, my_target_path, prior_index_exprs, new_inner_index_expr
         )
@@ -1107,9 +1099,17 @@ def _make_leaf_axis_from_called_map(called_map, prior_target_path, prior_index_e
             called_map.name: pym.primitives.NaN(IntType)
         }
 
+        domain_index_exprs_per_cpt[axis_id, cpt.label] = prior_index_exprs
+
     axis = Axis(components, label=called_map.name, id=axis_id)
 
-    return axis, target_path_per_cpt, index_exprs_per_cpt, layout_exprs_per_cpt
+    return (
+        axis,
+        target_path_per_cpt,
+        index_exprs_per_cpt,
+        layout_exprs_per_cpt,
+        domain_index_exprs_per_cpt,
+    )
 
 
 def _index_axes(axes, indices: IndexTree, loop_context):
@@ -1118,6 +1118,7 @@ def _index_axes(axes, indices: IndexTree, loop_context):
         tpaths,
         index_expr_per_target,
         layout_expr_per_target,
+        domain_index_exprs,
     ) = _index_axes_rec(
         indices,
         current_index=indices.root,
@@ -1134,7 +1135,13 @@ def _index_axes(axes, indices: IndexTree, loop_context):
             raise ValueError("incorrect/insufficient indices")
 
     # return the new axes plus the new index expressions per leaf
-    return indexed_axes, tpaths, index_expr_per_target, layout_expr_per_target
+    return (
+        indexed_axes,
+        tpaths,
+        index_expr_per_target,
+        layout_expr_per_target,
+        domain_index_exprs,
+    )
 
 
 def _index_axes_rec(
@@ -1150,6 +1157,7 @@ def _index_axes_rec(
         target_path_per_cpt_per_index,
         index_exprs_per_cpt_per_index,
         layout_exprs_per_cpt_per_index,
+        domain_index_exprs_per_cpt_per_index,
     ) = tuple(map(dict, rest))
 
     if axes_per_index:
@@ -1185,9 +1193,13 @@ def _index_axes_rec(
                     index_exprs_per_cpt_per_index.update({key: retval[2][key]})
                     layout_exprs_per_cpt_per_index.update({key: retval[3][key]})
 
-    target_path_per_component = pmap(target_path_per_cpt_per_index)
-    index_exprs_per_component = pmap(index_exprs_per_cpt_per_index)
-    layout_exprs_per_component = pmap(layout_exprs_per_cpt_per_index)
+                assert key not in domain_index_exprs_per_cpt_per_index
+                domain_index_exprs_per_cpt_per_index[key] = retval[4].get(key, pmap())
+
+    target_path_per_component = freeze(target_path_per_cpt_per_index)
+    index_exprs_per_component = freeze(index_exprs_per_cpt_per_index)
+    layout_exprs_per_component = freeze(layout_exprs_per_cpt_per_index)
+    domain_index_exprs_per_cpt_per_index = freeze(domain_index_exprs_per_cpt_per_index)
 
     axes = axes_per_index
     for k, subax in subaxes.items():
@@ -1202,6 +1214,7 @@ def _index_axes_rec(
         target_path_per_component,
         index_exprs_per_component,
         layout_exprs_per_component,
+        domain_index_exprs_per_cpt_per_index,
     )
 
 
@@ -1211,6 +1224,7 @@ def index_axes(axes, index_tree):
         target_path_per_indexed_cpt,
         index_exprs_per_indexed_cpt,
         layout_exprs_per_indexed_cpt,
+        domain_index_exprs,
     ) = _index_axes(axes, index_tree, loop_context=index_tree.loop_context)
 
     target_paths, index_exprs, layout_exprs = _compose_bits(
@@ -1228,6 +1242,7 @@ def index_axes(axes, index_tree):
         target_paths,
         index_exprs,
         layout_exprs,
+        domain_index_exprs,
     )
 
 
