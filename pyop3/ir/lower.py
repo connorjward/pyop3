@@ -22,7 +22,7 @@ from petsc4py import PETSc
 from pyrsistent import freeze, pmap
 
 from pyop3.array import HierarchicalArray, PetscMatAIJ
-from pyop3.array.harray import ContextSensitiveMultiArray
+from pyop3.array.harray import CalledMapVariable, ContextSensitiveMultiArray
 from pyop3.array.petsc import PetscMat, PetscObject
 from pyop3.axtree import Axis, AxisComponent, AxisTree, AxisVariable
 from pyop3.axtree.tree import ContextSensitiveAxisTree
@@ -399,14 +399,14 @@ def parse_loop_properly_this_time(
     *,
     axis=None,
     source_path=pmap(),
-    source_replace_map=pmap(),
+    iname_replace_map=pmap(),
     target_path=None,
-    target_replace_map=None,
+    index_exprs=None,
 ):
     if axes.is_empty:
         raise NotImplementedError("does this even make sense?")
 
-    # need to pick bits out of this
+    # need to pick bits out of this, could be neater
     outer_replace_map = {}
     for _, replace_map in loop_indices.values():
         outer_replace_map.update(replace_map)
@@ -416,20 +416,48 @@ def parse_loop_properly_this_time(
         target_path = freeze(axes.target_paths.get(None, {}))
 
         # again, repeated this pattern all over the place
-        target_replace_map = {}
-        index_exprs = axes.index_exprs.get(None, {})
-        replacer = JnameSubstitutor(outer_replace_map, codegen_context)
-        for axis_label, index_expr in index_exprs.items():
-            target_replace_map[axis_label] = replacer(index_expr)
-        target_replace_map = freeze(target_replace_map)
+        # target_replace_map = {}
+        index_exprs = freeze(axes.index_exprs.get(None, {}))
+        # replacer = JnameSubstitutor(outer_replace_map, codegen_context)
+        # for axis_label, index_expr in index_exprs.items():
+        #     target_replace_map[axis_label] = replacer(index_expr)
+        # target_replace_map = freeze(target_replace_map)
 
         axis = axes.root
 
     for component in axis.components:
+        # Maps "know" about indices that aren't otherwise available. Eg map(p)
+        # knows about p and this isn't accessible to axes.index_exprs except via
+        # the index expression
+
+        input_index_exprs = {}
+        axis_index_exprs = axes.index_exprs.get((axis.id, component.label), {})
+        for ax, iexpr in axis_index_exprs.items():
+            # TODO define as abstract property
+            if isinstance(iexpr, CalledMapVariable):
+                input_index_exprs.update(iexpr.input_index_exprs)
+
+        index_exprs_ = index_exprs | axis_index_exprs
+
+        # extra_target_replace_map = {}
+        # for axlabel, index_expr in index_exprs.items():
+        #     # TODO define as abstract property
+        #     if isinstance(index_expr, CalledMapVariable):
+        #         replacer = JnameSubstitutor(
+        #             outer_replace_map | target_replace_map, codegen_context
+        #         )
+        #         for axis_label, index_expr in index_expr.in_index_exprs.items():
+        #             extra_target_replace_map[axis_label] = replacer(index_expr)
+        # extra_target_replace_map = freeze(extra_target_replace_map)
+
+        # breakpoint()
+
         iname = codegen_context.unique_name("i")
         extent_var = register_extent(
             component.count,
-            target_replace_map,
+            index_exprs | input_index_exprs,
+            # TODO just put these in the default replace map
+            iname_replace_map | outer_replace_map,
             codegen_context,
         )
         codegen_context.add_domain(iname, extent_var)
@@ -437,20 +465,11 @@ def parse_loop_properly_this_time(
         axis_replace_map = {axis.label: pym.var(iname)}
 
         source_path_ = source_path | {axis.label: component.label}
-        source_replace_map_ = source_replace_map | axis_replace_map
+        iname_replace_map_ = iname_replace_map | axis_replace_map
 
         target_path_ = target_path | axes.target_paths.get(
             (axis.id, component.label), {}
         )
-
-        target_replace_map_ = dict(target_replace_map)
-        index_exprs = axes.index_exprs.get((axis.id, component.label), {})
-        replacer = JnameSubstitutor(
-            outer_replace_map | target_replace_map | axis_replace_map, codegen_context
-        )
-        for axis_label, index_expr in index_exprs.items():
-            target_replace_map_[axis_label] = replacer(index_expr)
-        target_replace_map_ = freeze(target_replace_map_)
 
         with codegen_context.within_inames({iname}):
             subaxis = axes.child(axis, component)
@@ -462,21 +481,28 @@ def parse_loop_properly_this_time(
                     codegen_context,
                     axis=subaxis,
                     source_path=source_path_,
-                    source_replace_map=source_replace_map_,
+                    iname_replace_map=iname_replace_map_,
                     target_path=target_path_,
-                    target_replace_map=target_replace_map_,
+                    index_exprs=index_exprs_,
                 )
             else:
+                target_replace_map = {}
+                replacer = JnameSubstitutor(
+                    outer_replace_map | iname_replace_map_, codegen_context
+                )
+                for axis_label, index_expr in index_exprs_.items():
+                    target_replace_map[axis_label] = replacer(index_expr)
+
                 index_replace_map = pmap(
                     {
                         (loop.index.id, ax): iexpr
-                        for ax, iexpr in target_replace_map_.items()
+                        for ax, iexpr in target_replace_map.items()
                     }
                 )
                 local_index_replace_map = freeze(
                     {
                         (loop.index.local_index.id, ax): iexpr
-                        for ax, iexpr in source_replace_map_.items()
+                        for ax, iexpr in iname_replace_map_.items()
                     }
                 )
                 for stmt in loop.statements:
@@ -650,7 +676,9 @@ def parse_assignment(
         loop_indices,
         codegen_ctx,
         iname_replace_map=jname_replace_map,
-        jname_replace_map=jname_replace_map,
+        # jname_replace_map=jname_replace_map,
+        # probably wrong
+        index_exprs=pmap(),
         target_path=target_path,
     )
 
@@ -734,10 +762,10 @@ def parse_assignment_properly_this_time(
     loop_indices,
     codegen_context,
     *,
-    iname_replace_map,
-    jname_replace_map,
-    target_path,
     axis=None,
+    iname_replace_map,
+    target_path,
+    index_exprs,
     source_path=pmap(),
 ):
     context = context_from_indices(loop_indices)
@@ -746,14 +774,14 @@ def parse_assignment_properly_this_time(
     if axis is None:
         axis = axes.root
         target_path = target_path | ctx_free_array.target_paths.get(None, pmap())
-        my_index_exprs = ctx_free_array.index_exprs.get(None, pmap())
-        jname_extras = {}
-        for axis_label, index_expr in my_index_exprs.items():
-            jname_expr = JnameSubstitutor(
-                iname_replace_map | jname_replace_map, codegen_context
-            )(index_expr)
-            jname_extras[axis_label] = jname_expr
-        jname_replace_map = jname_replace_map | jname_extras
+        index_exprs = ctx_free_array.index_exprs.get(None, pmap())
+        # jname_extras = {}
+        # for axis_label, index_expr in my_index_exprs.items():
+        #     jname_expr = JnameSubstitutor(
+        #         iname_replace_map | jname_replace_map, codegen_context
+        #     )(index_expr)
+        #     jname_extras[axis_label] = jname_expr
+        # jname_replace_map = jname_replace_map | jname_extras
 
     if axes.is_empty:
         add_leaf_assignment(
@@ -764,8 +792,8 @@ def parse_assignment_properly_this_time(
             axes,
             source_path,
             target_path,
+            index_exprs,
             iname_replace_map,
-            jname_replace_map,
             codegen_context,
             loop_indices,
         )
@@ -773,8 +801,9 @@ def parse_assignment_properly_this_time(
 
     for component in axis.components:
         iname = codegen_context.unique_name("i")
+        # TODO also do the magic for ragged things here
         extent_var = register_extent(
-            component.count, iname_replace_map | jname_replace_map, codegen_context
+            component.count, index_exprs, iname_replace_map, codegen_context
         )
         codegen_context.add_domain(iname, extent_var)
 
@@ -788,14 +817,16 @@ def parse_assignment_properly_this_time(
         # I don't like that I need to do this here and also when I emit the layout
         # instructions.
         # Do I need the jnames on the way down? Think so for things like ragged...
-        my_index_exprs = ctx_free_array.index_exprs.get((axis.id, component.label), {})
-        jname_extras = {}
-        for axis_label, index_expr in my_index_exprs.items():
-            jname_expr = JnameSubstitutor(
-                new_iname_replace_map | jname_replace_map, codegen_context
-            )(index_expr)
-            jname_extras[axis_label] = jname_expr
-        new_jname_replace_map = jname_replace_map | jname_extras
+        index_exprs_ = index_exprs | ctx_free_array.index_exprs.get(
+            (axis.id, component.label), {}
+        )
+        # jname_extras = {}
+        # for axis_label, index_expr in my_index_exprs.items():
+        #     jname_expr = JnameSubstitutor(
+        #         new_iname_replace_map | jname_replace_map, codegen_context
+        #     )(index_expr)
+        #     jname_extras[axis_label] = jname_expr
+        # new_jname_replace_map = jname_replace_map | jname_extras
         # new_jname_replace_map = new_iname_replace_map
 
         with codegen_context.within_inames({iname}):
@@ -812,7 +843,7 @@ def parse_assignment_properly_this_time(
                     source_path=new_source_path,
                     target_path=new_target_path,
                     iname_replace_map=new_iname_replace_map,
-                    jname_replace_map=new_jname_replace_map,
+                    index_exprs=index_exprs_,
                 )
 
             else:
@@ -824,8 +855,8 @@ def parse_assignment_properly_this_time(
                     axes,
                     new_source_path,
                     new_target_path,
+                    index_exprs_,
                     new_iname_replace_map,
-                    new_jname_replace_map,
                     codegen_context,
                     loop_indices,
                 )
@@ -839,8 +870,8 @@ def add_leaf_assignment(
     axes,
     source_path,
     target_path,
+    index_exprs,
     iname_replace_map,
-    jname_replace_map,
     codegen_context,
     loop_indices,
 ):
@@ -849,12 +880,17 @@ def add_leaf_assignment(
     assert isinstance(array, (HierarchicalArray, ContextSensitiveMultiArray))
 
     def array_expr():
+        replace_map = {}
+        replacer = JnameSubstitutor(iname_replace_map, codegen_context)
+        for axis, index_expr in index_exprs.items():
+            replace_map[axis] = replacer(index_expr)
+
         array_ = array.with_context(context)
         return make_array_expr(
             array,
             array_.layouts[target_path],
             target_path,
-            iname_replace_map | jname_replace_map,
+            replace_map,
             codegen_context,
         )
 
@@ -927,22 +963,10 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         # Register data
         self._codegen_context.add_argument(expr.array)
 
-        # index_keys = [None] + [
-        #     (axis.id, cpt.label)
-        #     for axis, cpt in array.axes.detailed_path(source_path).items()
-        # ]
-        # target_path = merge_dicts(array.target_paths.get(key, {}) for key in index_keys)
-        # index_exprs = merge_dicts(array.index_exprs.get(key, {}) for key in index_keys)
-
         target_path = expr.target_path
         index_exprs = expr.index_exprs
 
         replace_map = {ax: self.rec(expr_) for ax, expr_ in index_exprs.items()}
-
-        # jname_replace_map = {}
-        # replacer = JnameSubstitutor(iname_replace_map, ctx)
-        # for axlabel, index_expr in index_exprs.items():
-        #     jname_replace_map[axlabel] = replacer(index_expr)
 
         offset_expr = make_offset_expr(
             expr.array.layouts[target_path],
@@ -951,18 +975,6 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         )
         rexpr = pym.subscript(pym.var(expr.array.name), offset_expr)
         return rexpr
-
-        # path = expr.array.axes.path(*expr.array.axes.leaf)
-        # replace_map = {axis: self.rec(index) for axis, index in expr.indices.items()}
-        # varname = _scalar_assignment(
-        #     expr.array,
-        #     path,
-        #     # just a guess
-        #     # replace_map,
-        #     self._labels_to_jnames,
-        #     self._codegen_context,
-        # )
-        # return varname
 
     def map_called_map(self, expr):
         if not isinstance(expr.function.map_component.array, HierarchicalArray):
@@ -1069,7 +1081,14 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         # nitems
         nitems_varname = ctx.unique_name("nitems")
         ctx.add_temporary(nitems_varname)
-        nitems_expr = register_extent(leaf_component.count, replace_map, ctx)
+
+        myindexexprs = {}
+        for ax, cpt in indices.axes.path_with_nodes(leaf_axis, leaf_component).items():
+            myindexexprs.update(indices.index_exprs[ax.id, cpt])
+
+        nitems_expr = register_extent(
+            leaf_component.count, myindexexprs, replace_map, ctx
+        )
 
         # result
         found_varname = ctx.unique_name("ptr")
@@ -1100,7 +1119,7 @@ def make_offset_expr(
     return JnameSubstitutor(jname_replace_map, codegen_context)(layouts)
 
 
-def register_extent(extent, jnames, ctx):
+def register_extent(extent, index_exprs, iname_replace_map, ctx):
     if isinstance(extent, numbers.Integral):
         return extent
 
@@ -1113,7 +1132,7 @@ def register_extent(extent, jnames, ctx):
     else:
         path = pmap()
 
-    expr = _scalar_assignment(extent, path, jnames, ctx)
+    expr = _scalar_assignment(extent, path, index_exprs, iname_replace_map, ctx)
 
     varname = ctx.unique_name("p")
     ctx.add_temporary(varname)
@@ -1132,6 +1151,7 @@ class VariableReplacer(pym.mapper.IdentityMapper):
 def _scalar_assignment(
     array,
     source_path,
+    index_exprs,
     iname_replace_map,
     ctx,
 ):
@@ -1144,7 +1164,7 @@ def _scalar_assignment(
         for axis, cpt in array.axes.detailed_path(source_path).items()
     ]
     target_path = merge_dicts(array.target_paths.get(key, {}) for key in index_keys)
-    index_exprs = merge_dicts(array.index_exprs.get(key, {}) for key in index_keys)
+    # index_exprs = merge_dicts(array.index_exprs.get(key, {}) for key in index_keys)
 
     jname_replace_map = {}
     replacer = JnameSubstitutor(iname_replace_map, ctx)

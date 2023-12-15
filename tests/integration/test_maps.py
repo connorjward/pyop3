@@ -136,10 +136,12 @@ def test_inc_from_tabulated_map(
     )
 
     if nested:
-        op3.do_loop(
+        # op3.do_loop(
+        loop = op3.loop(
             p := axis.index(),
             op3.loop(q := map0(p).index(), scalar_inc_kernel(dat0[q], dat1[p])),
         )
+        loop()
     else:
         op3.do_loop(p := axis.index(), kernel(dat0[map0(p)], dat1[p]))
 

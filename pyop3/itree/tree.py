@@ -58,8 +58,10 @@ class IndexExpressionReplacer(pym.mapper.IdentityMapper):
         return self._replace_map.get(expr.axis_label, expr)
 
     def map_multi_array(self, expr):
+        from pyop3.array.harray import MultiArrayVariable
+
         index_exprs = {ax: self.rec(iexpr) for ax, iexpr in expr.index_exprs.items()}
-        return type(expr)(expr.array, expr.target_path, index_exprs)
+        return MultiArrayVariable(expr.array, expr.target_path, index_exprs)
 
     def map_called_map(self, expr):
         raise NotImplementedError
@@ -980,13 +982,28 @@ def _(called_map: CalledMap, **kwargs):
         )
         axes = PartialAxisTree(axis)
 
+        # FIXME I think that this logic is truly awful, and it doesn't even work
+        # for nested ragged things!
         # we need to keep track of the index expressions from the loop indices
         # I think this is fundamentally the same thing that we are already doing for
         # loop indices
-        index_exprs_per_cpt |= prior_index_exprs_per_cpt
+        # if None in index_exprs_per_cpt:
+        #     index_exprs_per_cpt = dict(index_exprs_per_cpt)
+        #     breakpoint()
+        #     index_exprs_per_cpt[None] |= prior_index_exprs_per_cpt.get(None, pmap())
+        #     index_exprs_per_cpt = freeze(index_exprs_per_cpt)
+        # else:
+        #     index_exprs_per_cpt |= {None: prior_index_exprs_per_cpt.get(None, pmap())}
+
     else:
         axes = prior_axes
         target_path_per_cpt = {}
+        # if None in index_exprs_per_cpt:
+        #     index_exprs_per_cpt = dict(index_exprs_per_cpt)
+        #     index_exprs_per_cpt[None] |= prior_index_exprs_per_cpt.get(None, pmap())
+        #     index_exprs_per_cpt = freeze(index_exprs_per_cpt)
+        # else:
+        # index_exprs_per_cpt = {None: prior_index_exprs_per_cpt.get(None, pmap())}
         index_exprs_per_cpt = {}
         layout_exprs_per_cpt = {}
         for prior_leaf_axis, prior_leaf_cpt in prior_axes.leaves:
@@ -1027,7 +1044,7 @@ def _(called_map: CalledMap, **kwargs):
 
 
 def _make_leaf_axis_from_called_map(called_map, prior_target_path, prior_index_exprs):
-    from pyop3.array.harray import MultiArrayVariable
+    from pyop3.array.harray import CalledMapVariable
 
     axis_id = Axis.unique_id()
     components = []
@@ -1051,6 +1068,8 @@ def _make_leaf_axis_from_called_map(called_map, prior_target_path, prior_index_e
         map_array = map_cpt.array
         map_axes = map_array.axes
 
+        assert map_axes.depth == 2
+
         source_path = map_axes.path(*map_axes.leaf)
         index_keys = [None] + [
             (axis.id, cpt.label)
@@ -1059,17 +1078,24 @@ def _make_leaf_axis_from_called_map(called_map, prior_target_path, prior_index_e
         my_target_path = merge_dicts(
             map_array.target_paths.get(key, {}) for key in index_keys
         )
-        old_index_exprs = merge_dicts(
-            map_array.index_exprs.get(key, {}) for key in index_keys
-        )
+
+        # the outer index is provided from "prior" whereas the inner one requires
+        # a replacement
+        map_leaf_axis, map_leaf_component = map_axes.leaf
+        old_inner_index_expr = map_array.index_exprs[
+            map_leaf_axis.id, map_leaf_component.label
+        ]
 
         my_index_exprs = {}
-        index_expr_replace_map = prior_index_exprs | {map_axes.leaf_axis.label: axisvar}
+        index_expr_replace_map = {map_axes.leaf_axis.label: axisvar}
         replacer = IndexExpressionReplacer(index_expr_replace_map)
-        for axlabel, index_expr in old_index_exprs.items():
+        for axlabel, index_expr in old_inner_index_expr.items():
             my_index_exprs[axlabel] = replacer(index_expr)
+        new_inner_index_expr = my_index_exprs
 
-        map_var = MultiArrayVariable(map_cpt.array, my_target_path, my_index_exprs)
+        map_var = CalledMapVariable(
+            map_cpt.array, my_target_path, prior_index_exprs, new_inner_index_expr
+        )
 
         index_exprs_per_cpt[axis_id, cpt.label] = {
             # map_cpt.target_axis: map_var(prior_index_exprs | {called_map.name: axisvar})
