@@ -429,6 +429,9 @@ class CalledFunction(LoopExpr):
     # FIXME NEXT: Expand ContextSensitive things here
     @property
     def all_function_arguments(self):
+        from pyop3.itree import LoopIndex
+
+        # skip non-data arguments
         return tuple(
             sorted(
                 [
@@ -436,6 +439,7 @@ class CalledFunction(LoopExpr):
                     for arg, intent in checked_zip(
                         self.arguments, self.function._access_descrs
                     )
+                    if not isinstance(arg, LoopIndex)
                 ],
                 key=lambda a: a[0].name,
             )

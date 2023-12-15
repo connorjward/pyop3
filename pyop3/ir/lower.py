@@ -40,7 +40,11 @@ from pyop3.itree import (
     Subset,
     TabulatedMapComponent,
 )
-from pyop3.itree.tree import IndexExpressionReplacer, LoopIndexVariable
+from pyop3.itree.tree import (
+    IndexExpressionReplacer,
+    LoopIndexVariable,
+    collect_shape_index_callback,
+)
 from pyop3.lang import (
     INC,
     MAX_RW,
@@ -523,10 +527,30 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
     for loopy_arg, arg, spec in checked_zip(loopy_args, call.arguments, call.argspec):
         loop_context = context_from_indices(loop_indices)
 
-        assert isinstance(arg, (HierarchicalArray, ContextSensitiveMultiArray))
-        # FIXME materialize is a bad name here, it implies actually packing the values
-        # into the temporary.
-        temporary = arg.with_context(loop_context).materialize()
+        if isinstance(arg, (HierarchicalArray, ContextSensitiveMultiArray)):
+            # FIXME materialize is a bad name here, it implies actually packing the values
+            # into the temporary.
+            temporary = arg.with_context(loop_context).materialize()
+        else:
+            assert isinstance(arg, LoopIndex)
+
+            # this is the same as CalledMap.index
+            (
+                axes,
+                target_paths,
+                index_exprs,
+                _,
+                domain_index_exprs,
+            ) = collect_shape_index_callback(arg, loop_indices=loop_context)
+
+            temporary = HierarchicalArray(
+                axes.set_up(),
+                dtype=arg.dtype,
+                target_paths=target_paths,
+                index_exprs=index_exprs,
+                domain_index_exprs=domain_index_exprs,
+                prefix="t",
+            )
         indexed_temp = temporary
 
         if loopy_arg.shape is None:
@@ -539,7 +563,8 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
         temporaries.append((arg, indexed_temp, spec.access, shape))
 
         # Register data
-        ctx.add_argument(arg)
+        if isinstance(arg, (HierarchicalArray, ContextSensitiveMultiArray)):
+            ctx.add_argument(arg)
 
         ctx.add_temporary(temporary.name, temporary.dtype, shape)
 
@@ -551,7 +576,7 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
             indices.append(pym.var(iname))
         indices = tuple(indices)
 
-        subarrayrefs[arg.name] = lp.symbolic.SubArrayRef(
+        subarrayrefs[arg] = lp.symbolic.SubArrayRef(
             indices, pym.subscript(pym.var(temporary.name), indices)
         )
 
@@ -574,14 +599,14 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
     # TODO this is pretty much the same as what I do in fix_intents in loopexpr.py
     # probably best to combine them - could add a sensible check there too.
     assignees = tuple(
-        subarrayrefs[arg.name]
+        subarrayrefs[arg]
         for arg, spec in checked_zip(call.arguments, call.argspec)
         if spec.access in {WRITE, RW, INC, MIN_RW, MIN_WRITE, MAX_RW, MAX_WRITE}
     )
     expression = pym.primitives.Call(
         pym.var(call.function.code.default_entrypoint.name),
         tuple(
-            subarrayrefs[arg.name]
+            subarrayrefs[arg]
             for arg, spec in checked_zip(call.arguments, call.argspec)
             if spec.access in {READ, RW, INC, MIN_RW, MAX_RW}
         )
@@ -624,15 +649,27 @@ def parse_assignment(
     # TODO singledispatch
     loop_context = context_from_indices(loop_indices)
 
-    if isinstance(array.with_context(loop_context).buffer, PackedBuffer):
-        if not isinstance(array.with_context(loop_context).buffer.array, PetscMatAIJ):
-            raise NotImplementedError("TODO")
-        parse_assignment_petscmat(
-            array.with_context(loop_context), temp, shape, op, loop_indices, codegen_ctx
-        )
-        return
+    if isinstance(array, (HierarchicalArray, ContextSensitiveMultiArray)):
+        if isinstance(array.with_context(loop_context).buffer, PackedBuffer):
+            if not isinstance(
+                array.with_context(loop_context).buffer.array, PetscMatAIJ
+            ):
+                raise NotImplementedError("TODO")
+            parse_assignment_petscmat(
+                array.with_context(loop_context),
+                temp,
+                shape,
+                op,
+                loop_indices,
+                codegen_ctx,
+            )
+            return
+        else:
+            assert isinstance(
+                array.with_context(loop_context).buffer, DistributedBuffer
+            )
     else:
-        assert isinstance(array.with_context(loop_context).buffer, DistributedBuffer)
+        assert isinstance(array, LoopIndex)
 
     # get the right index tree given the loop context
 
@@ -850,22 +887,36 @@ def add_leaf_assignment(
 ):
     context = context_from_indices(loop_indices)
 
-    assert isinstance(array, (HierarchicalArray, ContextSensitiveMultiArray))
+    if isinstance(array, (HierarchicalArray, ContextSensitiveMultiArray)):
 
-    def array_expr():
-        replace_map = {}
-        replacer = JnameSubstitutor(iname_replace_map, codegen_context)
-        for axis, index_expr in index_exprs.items():
-            replace_map[axis] = replacer(index_expr)
+        def array_expr():
+            replace_map = {}
+            replacer = JnameSubstitutor(iname_replace_map, codegen_context)
+            for axis, index_expr in index_exprs.items():
+                replace_map[axis] = replacer(index_expr)
 
-        array_ = array.with_context(context)
-        return make_array_expr(
-            array,
-            array_.layouts[target_path],
-            target_path,
-            replace_map,
-            codegen_context,
-        )
+            array_ = array.with_context(context)
+            return make_array_expr(
+                array,
+                array_.layouts[target_path],
+                target_path,
+                replace_map,
+                codegen_context,
+            )
+
+    else:
+        assert isinstance(array, LoopIndex)
+        if array.axes.depth != 0:
+            raise NotImplementedError("Tricky when dealing with vectors here")
+
+        def array_expr():
+            replace_map = {}
+            replacer = JnameSubstitutor(iname_replace_map, codegen_context)
+            for axis, index_expr in index_exprs.items():
+                replace_map[axis] = replacer(index_expr)
+
+            axis = array.iterset.root
+            return replace_map[axis.label]
 
     temp_expr = functools.partial(
         make_temp_expr,

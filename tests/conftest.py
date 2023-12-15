@@ -1,3 +1,6 @@
+import numbers
+
+import loopy as lp
 import pytest
 from mpi4py import MPI
 from petsc4py import PETSc
@@ -62,3 +65,33 @@ def paxis(comm, sf):
         numbering = [0, 4, 1, 2, 5, 3]
     serial = op3.Axis(6, numbering=numbering)
     return op3.Axis.from_serial(serial, sf)
+
+
+class Helper:
+    @staticmethod
+    def copy_kernel(shape, dtype=op3.ScalarType):
+        if isinstance(shape, numbers.Number):
+            shape = (shape,)
+
+        inames = tuple(f"i_{i}" for i, _ in enumerate(shape))
+        domains = tuple(
+            f"{{ [{iname}]: 0 <= {iname} < {s} }}" for iname, s in zip(inames, shape)
+        )
+        inames_str = ",".join(inames)
+        insn = f"y[{inames_str}] = x[{inames_str}]"
+        lpy_kernel = lp.make_kernel(
+            domains,
+            insn,
+            [
+                lp.GlobalArg("x", shape=shape, dtype=dtype),
+                lp.GlobalArg("y", shape=shape, dtype=dtype),
+            ],
+            target=op3.ir.LOOPY_TARGET,
+            lang_version=op3.ir.LOOPY_LANG_VERSION,
+        )
+        return op3.Function(lpy_kernel, [op3.READ, op3.WRITE])
+
+
+@pytest.fixture(scope="session")
+def factory():
+    return Helper()

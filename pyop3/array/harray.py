@@ -31,6 +31,7 @@ from pyop3.axtree.tree import (
     ExpressionEvaluator,
     Indexed,
     MultiArrayCollector,
+    PartialAxisTree,
     _path_and_indices_from_index_tuple,
     _trim_path,
 )
@@ -142,6 +143,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
                 shape = data.shape
             else:
                 shape = axes.size
+
             data = DistributedBuffer(
                 shape, dtype, name=self.name, data=data, sf=axes.sf
             )

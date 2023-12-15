@@ -35,6 +35,7 @@ from pyop3.axtree.tree import (
     PartialAxisTree,
 )
 from pyop3.dtypes import IntType, get_mpi_dtype
+from pyop3.lang import KernelArgument
 from pyop3.tree import LabelledTree, Node, Tree, postvisit
 from pyop3.utils import (
     Identified,
@@ -212,14 +213,20 @@ class TabulatedMapComponent(MapComponent):
         return self.array.datamap
 
 
+# NOTE: In principle it should be possible to pass any index to a kernel (e.g.
+# kernel(map(p))). However, this is complicated so I am only implementing the
+# scalar LoopIndex case for now.
 class Index(Node):
+    # this is awful, but I need indices to pretend to be arrays in order
+    # to be able to pass them around
+    # this should be renamed
     @abc.abstractmethod
-    def target_paths(self, context):
+    def target_paths2(self, context):
         pass
 
 
-class AbstractLoopIndex(Index, abc.ABC):
-    pass
+class AbstractLoopIndex(Index, KernelArgument, ContextSensitive, abc.ABC):
+    dtype = IntType
 
 
 class LoopIndex(AbstractLoopIndex):
@@ -235,16 +242,57 @@ class LoopIndex(AbstractLoopIndex):
     def i(self):
         return self.local_index
 
+    # needed for compat with other kernel arguments
     @property
-    def j(self):
-        # is this evil?
-        return self
+    def axes(self):
+        # return self.iterset
+        return AxisTree()
+
+    @property
+    def target_paths(self):
+        # FIXME fairly sure that this is wrong
+        # FIXME, this class may need to track loop context
+        # return pmap()
+        return self.iterset.target_paths
+
+    @property
+    def index_exprs(self):
+        root = self.iterset.root
+        # return freeze({None: {axis.label: LoopIndexVariable(self, axis.label)}})
+
+        # this is definitely wrong
+        return freeze(
+            {
+                None: {
+                    axis: LoopIndexVariable(self, axis)
+                    for axis in self.iterset.target_paths[root.id, root.component.label]
+                }
+            }
+        )
+
+    @property
+    def domain_index_exprs(self):
+        return self.iterset.domain_index_exprs
 
     @property
     def datamap(self):
         return self.iterset.datamap
 
-    def target_paths(self, context):
+    # bit hacky to do this
+    def with_context(self, context):
+        if isinstance(self.iterset, ContextFree):
+            return self
+        else:
+            return type(self)(self.iterset.with_context(context), id=self.id)
+
+    # also hacky
+    def filter_context(self, context):
+        if isinstance(self.iterset, ContextFree):
+            return pmap()
+        else:
+            return self.iterset.filter_context(context)
+
+    def target_paths2(self, context):
         return (context[self.id],)
 
     def iter(self, stuff=pmap()):
@@ -264,7 +312,7 @@ class LocalLoopIndex(AbstractLoopIndex):
         super().__init__(id)
         self.loop_index = loop_index
 
-    def target_paths(self, context):
+    def target_paths2(self, context):
         return (context[self.id],)
 
     @property
@@ -295,7 +343,7 @@ class Slice(Index):
         self.axis = axis
         self.slices = as_tuple(slices)
 
-    def target_paths(self, context):
+    def target_paths2(self, context):
         return tuple(pmap({self.axis: subslice.component}) for subslice in self.slices)
 
     @property
@@ -321,7 +369,7 @@ class CalledMap(Index, LoopIterable):
 
     def index(self) -> LoopIndex:
         context_map = {}
-        for context in collect_loop_contexts(self):
+        for context in collect_loop_contexts(self.from_index):
             (
                 axes,
                 target_paths,
@@ -351,9 +399,9 @@ class CalledMap(Index, LoopIterable):
     def connectivity(self):
         return self.map.connectivity
 
-    def target_paths(self, context):
+    def target_paths2(self, context):
         targets = []
-        for src_path in self.from_index.target_paths(context):
+        for src_path in self.from_index.target_paths2(context):
             for map_component in self.connectivity[src_path]:
                 targets.append(
                     pmap({map_component.target_axis: map_component.target_component})
@@ -539,6 +587,8 @@ def loop_contexts_from_iterable(indices):
 
     # add on context-free contexts, these cannot already be included
     for index in indices:
+        # think this is old now
+        continue
         if not isinstance(index, ContextSensitive):
             continue
         loop_index, paths = index.loop_context
@@ -720,7 +770,7 @@ def index_tree_from_iterable(
         children = []
         subtrees = []
         # used to be leaves...
-        for target_path in index.target_paths(loop_context):
+        for target_path in index.target_paths2(loop_context):
             assert target_path
             new_path = path | target_path
             child, subtree = index_tree_from_iterable(
