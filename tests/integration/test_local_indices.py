@@ -31,7 +31,6 @@ def test_copy_slice(scalar_copy_kernel):
     assert np.allclose(dat1.data_ro, dat0.data_ro[::2])
 
 
-# TODO xfail if vector thing passed
 def test_pass_loop_index_as_argument(factory):
     m = 10
     axes = op3.Axis(m)
@@ -40,3 +39,15 @@ def test_pass_loop_index_as_argument(factory):
     copy_kernel = factory.copy_kernel(1, dtype=dat.dtype)
     op3.do_loop(p := axes.index(), copy_kernel(p, dat[p]))
     assert (dat.data_ro == list(range(m))).all()
+
+
+def test_pass_multi_component_loop_index_as_argument(factory):
+    m, n = 10, 12
+    axes = op3.Axis([m, n])
+    dat = op3.HierarchicalArray(axes, dtype=op3.IntType)
+
+    copy_kernel = factory.copy_kernel(1, dtype=dat.dtype)
+    op3.do_loop(p := axes.index(), copy_kernel(p, dat[p]))
+
+    expected = list(range(m)) + list(range(n))
+    assert (dat.data_ro == expected).all()

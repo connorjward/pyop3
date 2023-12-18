@@ -9,6 +9,7 @@ import itertools
 import math
 import numbers
 import sys
+from functools import cached_property
 from typing import Any, Collection, Hashable, Mapping, Sequence
 
 import numpy as np
@@ -23,6 +24,7 @@ from pyop3.axtree import (
     AxisComponent,
     AxisTree,
     AxisVariable,
+    ContextAware,
     ContextFree,
     ContextSensitive,
     LoopIterable,
@@ -213,10 +215,9 @@ class TabulatedMapComponent(MapComponent):
         return self.array.datamap
 
 
-# NOTE: In principle it should be possible to pass any index to a kernel (e.g.
-# kernel(map(p))). However, this is complicated so I am only implementing the
-# scalar LoopIndex case for now.
-class Index(Node):
+class Index(Node, KernelArgument):
+    dtype = IntType
+
     # this is awful, but I need indices to pretend to be arrays in order
     # to be able to pass them around
     # this should be renamed
@@ -225,75 +226,100 @@ class Index(Node):
         pass
 
 
-class AbstractLoopIndex(Index, KernelArgument, ContextSensitive, abc.ABC):
-    dtype = IntType
+class ContextFreeIndex(Index, ContextFree, abc.ABC):
+    @property
+    def target_paths(self):
+        raise NotImplementedError
+
+    @property
+    def index_exprs(self):
+        raise NotImplementedError
 
 
-class LoopIndex(AbstractLoopIndex):
-    fields = AbstractLoopIndex.fields | {"iterset"}
+class ContextSensitiveIndex(Index, ContextSensitive, abc.ABC):
+    def __init__(self, context_map, *, id=None):
+        Index.__init__(self, id)
+        ContextSensitive.__init__(self, context_map)
 
-    # does the label ever matter here?
+
+class AbstractLoopIndex(ContextFreeIndex, abc.ABC):
+    pass
+
+
+# Is this really an index? I dont think it's valid in an index tree
+class LoopIndex(Index, ContextAware):
+    """
+    Parameters
+    ----------
+    iterset: AxisTree or ContextSensitiveAxisTree (!!!)
+        Only add context later on
+
+    """
+
     def __init__(self, iterset, *, id=None):
-        super().__init__(id)
+        super().__init__(id=id)
         self.iterset = iterset
-        self.local_index = LocalLoopIndex(self)
+
+    @property
+    def local_index(self):
+        return LocalLoopIndex(self)
 
     @property
     def i(self):
         return self.local_index
 
-    # needed for compat with other kernel arguments
+    def with_context(self, context):
+        iterset = self.iterset.with_context(context)
+        path = context[self.id]
+        return ContextFreeLoopIndex(iterset, path, id=self.id)
+
+    # old function, FIXME
+    def target_paths2(self, context):
+        raise NotImplementedError
+
+    # unsure if this is required
+    @property
+    def datamap(self):
+        return self.iterset.datamap
+
+
+# FIXME class hierarchy is very confusing
+class ContextFreeLoopIndex(Index):
+    def __init__(self, iterset: AxisTree, path, *, id=None):
+        super().__init__(id=id)
+        self.iterset = iterset
+        self.path = freeze(path)
+
     @property
     def axes(self):
-        # return self.iterset
         return AxisTree()
 
     @property
     def target_paths(self):
-        # FIXME fairly sure that this is wrong
-        # FIXME, this class may need to track loop context
-        # return pmap()
-        return self.iterset.target_paths
+        return freeze({None: self.path})
 
     @property
     def index_exprs(self):
-        root = self.iterset.root
-        # return freeze({None: {axis.label: LoopIndexVariable(self, axis.label)}})
-
-        # this is definitely wrong
         return freeze(
-            {
-                None: {
-                    axis: LoopIndexVariable(self, axis)
-                    for axis in self.iterset.target_paths[root.id, root.component.label]
-                }
-            }
+            {None: {axis: LoopIndexVariable(self, axis) for axis in self.path.keys()}}
         )
 
     @property
+    def layout_exprs(self):
+        # FIXME, no clue if this is right or not
+        return freeze({None: 0})
+
+    @property
     def domain_index_exprs(self):
-        return self.iterset.domain_index_exprs
+        return pmap()
 
     @property
     def datamap(self):
         return self.iterset.datamap
 
-    # bit hacky to do this
-    def with_context(self, context):
-        if isinstance(self.iterset, ContextFree):
-            return self
-        else:
-            return type(self)(self.iterset.with_context(context), id=self.id)
-
-    # also hacky
-    def filter_context(self, context):
-        if isinstance(self.iterset, ContextFree):
-            return pmap()
-        else:
-            return self.iterset.filter_context(context)
-
+    # old function
     def target_paths2(self, context):
-        return (context[self.id],)
+        return self.path
 
     def iter(self, stuff=pmap()):
         if not isinstance(self.iterset, AxisTree):
@@ -425,10 +451,16 @@ class Map(pytools.ImmutableRecord):
         self.connectivity = connectivity
         self.name = name
 
-    def __call__(self, index) -> Union[CalledMap, ContextSensitiveCalledMap]:
-        return CalledMap(self, index)
+    def __call__(self, index):
+        contexts = collect_loop_contexts(index)
+        if contexts:
+            return ContextSensitiveIndex(
+                {CalledMap(self, index.with_context(context)) for context in contexts}
+            )
+        else:
+            return CalledMap(self, index)
 
-    @functools.cached_property
+    @cached_property
     def datamap(self):
         data = {}
         for bit in self.connectivity.values():
@@ -804,6 +836,12 @@ def _(index: Index, ctx, **kwargs):
     return IndexTree(index, loop_context=ctx)
 
 
+@as_index_tree.register
+def _(index: LoopIndex, context, **kwargs):
+    index = index.with_context(context)
+    return IndexTree(index, loop_context=context)
+
+
 @functools.singledispatch
 def as_index_forest(arg: Any, **kwargs):
     from pyop3.array import HierarchicalArray
@@ -858,27 +896,19 @@ def collect_shape_index_callback(index, *args, **kwargs):
 
 @collect_shape_index_callback.register
 def _(loop_index: LoopIndex, *, loop_indices, **kwargs):
-    iterset = loop_index.iterset
-
-    target_path_per_component = pmap({None: loop_indices[loop_index.id]})
-    # fairly sure that here I want the *output* path of the loop indices
-    index_exprs_per_component = pmap(
-        {
-            None: pmap(
-                {
-                    axis: LoopIndexVariable(loop_index, axis)
-                    for axis in loop_indices[loop_index.id].keys()
-                }
-            )
-        }
+    return collect_shape_index_callback(
+        loop_index.with_context(loop_indices), loop_indices=loop_indices, **kwargs
     )
-    layout_exprs_per_component = pmap({None: 0})
+
+
+@collect_shape_index_callback.register
+def _(loop_index: ContextFreeLoopIndex, *, loop_indices, **kwargs):
     return (
-        PartialAxisTree(),
-        target_path_per_component,
-        index_exprs_per_component,
-        layout_exprs_per_component,
-        pmap(),
+        loop_index.axes,
+        loop_index.target_paths,
+        loop_index.index_exprs,
+        loop_index.layout_exprs,
+        loop_index.domain_index_exprs,
     )
 
 

@@ -673,18 +673,20 @@ def parse_assignment(
 
     # get the right index tree given the loop context
 
+    # TODO Is this right to remove? Can it be handled further down?
     axes = array.with_context(loop_context).axes
-    minimal_context = array.filter_context(loop_context)
-
-    target_path = {}
-    # for _, jnames in new_indices.values():
-    for loop_index, (path, iname_expr) in loop_indices.items():
-        if loop_index in minimal_context:
-            # assert all(k not in jname_replace_map for k in iname_expr)
-            # jname_replace_map.update(iname_expr)
-            target_path.update(path)
-    # jname_replace_map = freeze(jname_replace_map)
-    target_path = freeze(target_path)
+    # minimal_context = array.filter_context(loop_context)
+    #
+    # target_path = {}
+    # # for _, jnames in new_indices.values():
+    # for loop_index, (path, iname_expr) in loop_indices.items():
+    #     if loop_index in minimal_context:
+    #         # assert all(k not in jname_replace_map for k in iname_expr)
+    #         # jname_replace_map.update(iname_expr)
+    #         target_path.update(path)
+    # # jname_replace_map = freeze(jname_replace_map)
+    # target_path = freeze(target_path)
+    target_path = pmap()
 
     jname_replace_map = merge_dicts(mymap for _, mymap in loop_indices.values())
 
@@ -906,7 +908,10 @@ def add_leaf_assignment(
 
     else:
         assert isinstance(array, LoopIndex)
-        if array.axes.depth != 0:
+
+        array_ = array.with_context(context)
+
+        if array_.axes.depth != 0:
             raise NotImplementedError("Tricky when dealing with vectors here")
 
         def array_expr():
@@ -915,7 +920,7 @@ def add_leaf_assignment(
             for axis, index_expr in index_exprs.items():
                 replace_map[axis] = replacer(index_expr)
 
-            axis = array.iterset.root
+            axis = array_.iterset.root
             return replace_map[axis.label]
 
     temp_expr = functools.partial(
