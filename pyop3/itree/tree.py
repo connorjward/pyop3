@@ -248,8 +248,15 @@ class ContextSensitiveIndex(Index, ContextSensitive, abc.ABC):
         ContextSensitive.__init__(self, context_map)
 
 
-class AbstractLoopIndex(KernelArgument, Identified, ContextAware, abc.ABC):
+class AbstractLoopIndex(
+    pytools.ImmutableRecord, KernelArgument, Identified, ContextAware, abc.ABC
+):
     dtype = IntType
+    fields = {"id"}
+
+    def __init__(self, id=None):
+        pytools.ImmutableRecord.__init__(self)
+        Identified.__init__(self, id)
 
 
 # Is this really an index? I dont think it's valid in an index tree
@@ -1461,7 +1468,7 @@ def iter_axis_tree(
     axes: AxisTree,
     target_paths,
     index_exprs,
-    outermap,
+    outer_loops=pmap(),
     axis=None,
     path=pmap(),
     indices=pmap(),
@@ -1475,7 +1482,7 @@ def iter_axis_tree(
         myindex_exprs = index_exprs.get(None, pmap())
         new_exprs = {}
         for axlabel, index_expr in myindex_exprs.items():
-            new_index = ExpressionEvaluator(outermap)(index_expr)
+            new_index = ExpressionEvaluator(outer_loops)(index_expr)
             assert new_index != index_expr
             new_exprs[axlabel] = new_index
         index_exprs_acc = freeze(new_exprs)
@@ -1494,9 +1501,9 @@ def iter_axis_tree(
         for pt in range(_as_int(component.count, path, indices)):
             new_exprs = {}
             for axlabel, index_expr in myindex_exprs.items():
-                new_index = ExpressionEvaluator(outermap | indices | {axis.label: pt})(
-                    index_expr
-                )
+                new_index = ExpressionEvaluator(
+                    outer_loops | indices | {axis.label: pt}
+                )(index_expr)
                 assert new_index != index_expr
                 new_exprs[axlabel] = new_index
             index_exprs_ = index_exprs_acc | new_exprs
@@ -1506,7 +1513,7 @@ def iter_axis_tree(
                     axes,
                     target_paths,
                     index_exprs,
-                    outermap,
+                    outer_loops,
                     subaxis,
                     path_,
                     indices_,
@@ -1579,7 +1586,7 @@ def partition_iterset(index: LoopIndex, arrays):
         is_root_or_leaf_per_array[array.name] = is_root_or_leaf
 
     labels = np.full(paraxis.size, IterationPointType.CORE, dtype=np.uint8)
-    for path, target_path, indices, target_indices in index.iter():
+    for path, target_path, indices, target_indices in index.iterset.iter():
         parindex = indices[paraxis.label]
         assert isinstance(parindex, numbers.Integral)
 
@@ -1642,7 +1649,6 @@ def partition_iterset(index: LoopIndex, arrays):
         Slice(
             paraxis.label,
             [Subset(parcpt.label, subsets[0])],
-            label=paraxis.label,
         )
     ]
 

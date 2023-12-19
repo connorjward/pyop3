@@ -5,15 +5,15 @@ from pyrsistent import freeze
 import pyop3 as op3
 
 
-def test_loop_index_iter_flat():
+def test_axes_iter_flat():
     iterset = op3.Axis({"pt0": 5}, "ax0")
     expected = [
         (freeze({"ax0": "pt0"}),) * 2 + (freeze({"ax0": i}),) * 2 for i in range(5)
     ]
-    assert list(iterset.index().iter()) == expected
+    assert list(iterset.iter()) == expected
 
 
-def test_loop_index_iter_nested():
+def test_axes_iter_nested():
     iterset = op3.AxisTree.from_nest(
         {
             op3.Axis({"pt0": 5}, "ax0"): op3.Axis({"pt0": 3}, "ax1"),
@@ -26,10 +26,10 @@ def test_loop_index_iter_nested():
         for i in range(5)
         for j in range(3)
     ]
-    assert list(iterset.index().iter()) == expected
+    assert list(iterset.iter()) == expected
 
 
-def test_loop_index_iter_multi_component():
+def test_axes_iter_multi_component():
     iterset = op3.Axis({"pt0": 3, "pt1": 3}, "ax0")
 
     path0 = freeze({"ax0": "pt0"})
@@ -37,4 +37,4 @@ def test_loop_index_iter_multi_component():
     expected = [(path0,) * 2 + (freeze({"ax0": i}),) * 2 for i in range(3)] + [
         (path1,) * 2 + (freeze({"ax0": i}),) * 2 for i in range(3)
     ]
-    assert list(iterset.index().iter()) == expected
+    assert list(iterset.iter()) == expected

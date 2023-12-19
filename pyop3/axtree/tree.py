@@ -392,6 +392,9 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
     def index(self):
         return self._tree.index()
 
+    def iter(self):
+        return self._tree.iter()
+
     @property
     def target_path_per_component(self):
         return self._tree.target_path_per_component
@@ -710,6 +713,16 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         from pyop3.itree import LoopIndex
 
         return LoopIndex(self.owned)
+
+    def iter(self, outer_loops=pmap()):
+        from pyop3.itree.tree import iter_axis_tree
+
+        return iter_axis_tree(
+            self,
+            self.target_paths,
+            self.index_exprs,
+            outer_loops,
+        )
 
     @property
     def target_paths(self):
