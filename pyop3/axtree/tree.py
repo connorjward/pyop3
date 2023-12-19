@@ -628,7 +628,9 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         self.domain_index_exprs = domain_index_exprs
 
     def __getitem__(self, indices):
-        from pyop3.itree.tree import as_index_forest, collect_loop_contexts, index_axes
+        from pyop3.itree.tree import as_index_forest, index_axes
+
+        raise NotImplementedError("TODO")
 
         if indices is Ellipsis:
             indices = index_tree_from_ellipsis(self)

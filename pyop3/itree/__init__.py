@@ -11,6 +11,5 @@ from .tree import (
     Subset,
     TabulatedMapComponent,
     as_index_forest,
-    collect_loop_contexts,
     index_axes,
 )

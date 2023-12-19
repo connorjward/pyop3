@@ -23,7 +23,6 @@ from pyop3.itree.tree import (
     _index_axes,
     as_index_forest,
     as_index_tree,
-    collect_loop_contexts,
     index_axes,
 )
 from pyop3.utils import just_one, merge_dicts, single_valued, strictly_all

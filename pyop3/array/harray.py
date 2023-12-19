@@ -38,7 +38,7 @@ from pyop3.axtree.tree import (
 from pyop3.buffer import Buffer, DistributedBuffer
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
 from pyop3.itree import IndexTree, as_index_forest, index_axes
-from pyop3.itree.tree import collect_loop_indices, iter_axis_tree
+from pyop3.itree.tree import iter_axis_tree
 from pyop3.lang import KernelArgument
 from pyop3.utils import (
     PrettyTuple,
@@ -172,30 +172,29 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
             _compose_bits,
             _index_axes,
             as_index_tree,
-            collect_loop_contexts,
             index_axes,
         )
 
-        loop_contexts = collect_loop_contexts(indices)
-        # breakpoint()
-        if not loop_contexts:
-            index_tree = just_one(as_index_forest(indices, axes=self.axes))
-            (
-                indexed_axes,
-                target_path_per_indexed_cpt,
-                index_exprs_per_indexed_cpt,
-                layout_exprs_per_indexed_cpt,
-                domain_index_exprs,
-            ) = _index_axes(self.axes, index_tree, pmap())
+        index_forest = as_index_forest(indices, axes=self.axes)
+        if len(index_forest) == 1 and not index_forest[0].loop_context:
+            index_tree = just_one(index_forest)
+            # (
+            #     indexed_axes,
+            #     target_path_per_indexed_cpt,
+            #     index_exprs_per_indexed_cpt,
+            #     layout_exprs_per_indexed_cpt,
+            #     domain_index_exprs,
+            # ) = _index_axes(index_tree, pmap(), self.axes)
+            indexed_axes = _index_axes(index_tree, pmap(), self.axes)
             target_paths, index_exprs, layout_exprs = _compose_bits(
                 self.axes,
                 self.target_paths,
                 self.index_exprs,
                 None,
                 indexed_axes,
-                target_path_per_indexed_cpt,
-                index_exprs_per_indexed_cpt,
-                layout_exprs_per_indexed_cpt,
+                indexed_axes.target_paths,
+                indexed_axes.index_exprs,
+                indexed_axes.layout_exprs,
             )
 
             return HierarchicalArray(
@@ -204,7 +203,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
                 max_value=self.max_value,
                 target_paths=target_paths,
                 index_exprs=index_exprs,
-                domain_index_exprs=domain_index_exprs,
+                domain_index_exprs=indexed_axes.domain_index_exprs,
                 layouts=self.layouts,
                 name=self.name,
             )
@@ -212,13 +211,14 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         array_per_context = {}
         for index_tree in as_index_forest(indices, axes=self.axes):
             loop_context = index_tree.loop_context
-            (
-                indexed_axes,
-                target_path_per_indexed_cpt,
-                index_exprs_per_indexed_cpt,
-                layout_exprs_per_indexed_cpt,
-                domain_index_exprs,
-            ) = _index_axes(self.axes, index_tree, loop_context)
+            # (
+            #     indexed_axes,
+            #     target_path_per_indexed_cpt,
+            #     index_exprs_per_indexed_cpt,
+            #     layout_exprs_per_indexed_cpt,
+            #     domain_index_exprs,
+            # ) = _index_axes(self.axes, index_tree, loop_context)
+            indexed_axes = _index_axes(index_tree, loop_context, self.axes)
 
             (
                 target_paths,
@@ -230,9 +230,9 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
                 self.index_exprs,
                 None,
                 indexed_axes,
-                target_path_per_indexed_cpt,
-                index_exprs_per_indexed_cpt,
-                layout_exprs_per_indexed_cpt,
+                indexed_axes.target_paths,
+                indexed_axes.index_exprs,
+                indexed_axes.layout_exprs,
             )
 
             array_per_context[loop_context] = HierarchicalArray(
@@ -241,7 +241,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
                 layouts=self.layouts,
                 target_paths=target_paths,
                 index_exprs=index_exprs,
-                domain_index_exprs=domain_index_exprs,
+                domain_index_exprs=indexed_axes.domain_index_exprs,
                 name=self.name,
                 max_value=self.max_value,
             )
@@ -451,27 +451,21 @@ class ContextSensitiveMultiArray(ContextSensitive, KernelArgument):
             _compose_bits,
             _index_axes,
             as_index_tree,
-            collect_loop_contexts,
             index_axes,
         )
-
-        loop_contexts = collect_loop_contexts(indices)
-        if not loop_contexts:
-            raise NotImplementedError("code path untested")
 
         # FIXME for now assume that there is only one context
         context, array = just_one(self.context_map.items())
 
+        index_forest = as_index_forest(indices, axes=array.axes)
+
+        if len(index_forest) == 1 and not index_forest[0].loop_context:
+            raise NotImplementedError("code path untested")
+
         array_per_context = {}
-        for index_tree in as_index_forest(indices, axes=array.axes):
+        for index_tree in index_forest:
             loop_context = index_tree.loop_context
-            (
-                indexed_axes,
-                target_path_per_indexed_cpt,
-                index_exprs_per_indexed_cpt,
-                layout_exprs_per_indexed_cpt,
-                domain_index_exprs,
-            ) = _index_axes(array.axes, index_tree, loop_context)
+            indexed_axes = _index_axes(index_tree, loop_context, array.axes)
 
             (
                 target_paths,
@@ -483,9 +477,9 @@ class ContextSensitiveMultiArray(ContextSensitive, KernelArgument):
                 array.index_exprs,
                 None,
                 indexed_axes,
-                target_path_per_indexed_cpt,
-                index_exprs_per_indexed_cpt,
-                layout_exprs_per_indexed_cpt,
+                indexed_axes.target_paths,
+                indexed_axes.index_exprs,
+                indexed_axes.layout_exprs,
             )
             array_per_context[loop_context] = HierarchicalArray(
                 indexed_axes,
@@ -493,7 +487,7 @@ class ContextSensitiveMultiArray(ContextSensitive, KernelArgument):
                 max_value=self.max_value,
                 target_paths=target_paths,
                 index_exprs=index_exprs,
-                domain_index_exprs=domain_index_exprs,
+                domain_index_exprs=indexed_axes.domain_index_exprs,
                 layouts=self.layouts,
                 name=self.name,
             )

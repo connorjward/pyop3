@@ -1,14 +1,9 @@
-import ctypes
-
 import loopy as lp
 import numpy as np
-import pymbolic as pym
-import pytest
 from pyrsistent import pmap
 
 import pyop3 as op3
 from pyop3.ir import LOOPY_LANG_VERSION, LOOPY_TARGET
-from pyop3.utils import just_one
 
 
 def test_different_axis_orderings_do_not_change_packing_order():
@@ -52,12 +47,13 @@ def test_different_axis_orderings_do_not_change_packing_order():
     p = axis0.index()
     path = pmap({axis0.label: axis0.component.label})
     loop_context = pmap({p.id: path})
+    cf_p = p.with_context(loop_context)
     slice0 = op3.Slice(axis1.label, [op3.AffineSliceComponent(axis1.component.label)])
     slice1 = op3.Slice(axis2.label, [op3.AffineSliceComponent(axis2.component.label)])
     q = op3.IndexTree(
         {
-            None: (p,),
-            p.id: (slice0,),
+            None: (cf_p,),
+            cf_p.id: (slice0,),
             slice0.id: (slice1,),
         },
         loop_context=loop_context,

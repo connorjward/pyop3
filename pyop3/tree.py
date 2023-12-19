@@ -3,6 +3,7 @@ from __future__ import annotations
 import abc
 import collections
 import functools
+from collections import defaultdict
 from collections.abc import Hashable, Sequence
 from functools import cached_property
 from itertools import chain
@@ -235,10 +236,58 @@ class Tree(AbstractTree):
             parent_to_children = {
                 k: list(v) for k, v in self.parent_to_children.items()
             }
-            parent_to_children[parent.id].append(node)
-            # missing root, not used I think
-            raise NotImplementedError
+
+            # defaultdict?
+            if parent.id in parent_to_children:
+                parent_to_children[parent.id].append(node)
+            else:
+                parent_to_children[parent.id] = [node]
             return self.copy(parent_to_children=parent_to_children)
+
+    def add_subtree(
+        self,
+        subtree,
+        parent=None,
+        *,
+        uniquify=False,
+    ):
+        if uniquify:
+            raise NotImplementedError("TODO")
+
+        if not parent:
+            raise NotImplementedError("TODO")
+
+        # mutable
+        parent_to_children = defaultdict(
+            list, {p: list(cs) for p, cs in self.parent_to_children.items()}
+        )
+
+        sub_p2c = dict(subtree.parent_to_children)
+        subroot = just_one(sub_p2c.pop(None))
+        parent_to_children[parent.id].append(subroot)
+        parent_to_children.update(sub_p2c)
+        return self.copy(parent_to_children=parent_to_children)
+
+    # I think that "path" is a bad term here since we don't have labels, ancestors?
+    def path_with_nodes(self, node):
+        node_id = self._as_node_id(node)
+        return self._paths_with_nodes[node_id]
+
+    @cached_property
+    def _paths_with_nodes(self):
+        return self._paths_with_nodes_rec()
+
+    def _paths_with_nodes_rec(self, node=None, path=()):
+        if node is None:
+            node = self.root
+
+        path_ = path + (node,)
+
+        paths = {node.id: path_}
+        for child in self.children(node):
+            subpaths = self._paths_with_nodes_rec(child, path_)
+            paths.update(subpaths)
+        return freeze(paths)
 
     @classmethod
     def _from_nest(cls, nest):
@@ -382,7 +431,6 @@ class LabelledTree(AbstractTree):
             node, node.with_modified_component(component, **kwargs)
         )
 
-    # invalid for frozen trees
     def add_subtree(
         self,
         subtree,
