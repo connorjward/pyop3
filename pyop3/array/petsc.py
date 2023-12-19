@@ -18,13 +18,7 @@ from pyop3.axtree.tree import ContextFree, ContextSensitive, as_axis_tree
 from pyop3.buffer import PackedBuffer
 from pyop3.dtypes import ScalarType
 from pyop3.itree import IndexTree
-from pyop3.itree.tree import (
-    _compose_bits,
-    _index_axes,
-    as_index_forest,
-    as_index_tree,
-    index_axes,
-)
+from pyop3.itree.tree import _compose_bits, _index_axes, as_index_forest, as_index_tree
 from pyop3.utils import just_one, merge_dicts, single_valued, strictly_all
 
 
@@ -87,27 +81,20 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
 
         # TODO also support context-free (see MultiArray.__getitem__)
         array_per_context = {}
-        for index_tree in as_index_forest(indices, axes=self.axes):
+        for loop_context, index_tree in as_index_forest(
+            indices, axes=self.axes
+        ).items():
             # make a temporary of the right shape
-            loop_context = index_tree.loop_context
-            (
-                indexed_axes,
-                target_paths,
-                index_exprs,
-                layout_exprs_per_indexed_cpt,
-                domain_index_exprs,
-            ) = _index_axes(self.axes, index_tree, loop_context)
-
-            indexed_axes = indexed_axes.set_up()
+            indexed_axes = _index_axes(index_tree, loop_context, self.axes)
 
             packed = PackedBuffer(self)
 
             array_per_context[loop_context] = HierarchicalArray(
                 indexed_axes,
                 data=packed,
-                target_paths=target_paths,
-                index_exprs=index_exprs,
-                domain_index_exprs=domain_index_exprs,
+                target_paths=indexed_axes.target_paths,
+                index_exprs=indexed_axes.index_exprs,
+                domain_index_exprs=indexed_axes.domain_index_exprs,
                 name=self.name,
             )
 
@@ -201,8 +188,11 @@ def _alloc_mat(raxes, caxes, sparsity, bsize=None):
     # fill with zeros (this should be cached)
     # this could be done as a pyop3 loop (if we get ragged local working) or
     # explicitly in cython
-    raxis, rcpt = raxes.leaf
-    caxis, ccpt = caxes.leaf
+    raxis = raxes.leaf_axis
+    caxis = caxes.leaf_axis
+    rcpt = raxes.leaf_component
+    ccpt = caxes.leaf_component
+
     # e.g.
     # map_ = Map({pmap({raxis.label: rcpt.label}): [TabulatedMapComponent(caxes.label, ccpt.label, sparsity)]})
     # do_loop(p := raxes.index(), write(zeros, mat[p, map_(p)]))

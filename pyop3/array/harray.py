@@ -37,7 +37,7 @@ from pyop3.axtree.tree import (
 )
 from pyop3.buffer import Buffer, DistributedBuffer
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
-from pyop3.itree import IndexTree, as_index_forest, index_axes
+from pyop3.itree import IndexTree, as_index_forest
 from pyop3.itree.tree import iter_axis_tree
 from pyop3.lang import KernelArgument
 from pyop3.utils import (
@@ -168,24 +168,13 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         return self.name
 
     def __getitem__(self, indices) -> Union[MultiArray, ContextSensitiveMultiArray]:
-        from pyop3.itree.tree import (
-            _compose_bits,
-            _index_axes,
-            as_index_tree,
-            index_axes,
-        )
+        from pyop3.itree.tree import _compose_bits, _index_axes, as_index_tree
 
         index_forest = as_index_forest(indices, axes=self.axes)
-        if len(index_forest) == 1 and not index_forest[0].loop_context:
-            index_tree = just_one(index_forest)
-            # (
-            #     indexed_axes,
-            #     target_path_per_indexed_cpt,
-            #     index_exprs_per_indexed_cpt,
-            #     layout_exprs_per_indexed_cpt,
-            #     domain_index_exprs,
-            # ) = _index_axes(index_tree, pmap(), self.axes)
+        if len(index_forest) == 1 and pmap() in index_forest:
+            index_tree = just_one(index_forest.values())
             indexed_axes = _index_axes(index_tree, pmap(), self.axes)
+
             target_paths, index_exprs, layout_exprs = _compose_bits(
                 self.axes,
                 self.target_paths,
@@ -209,15 +198,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
             )
 
         array_per_context = {}
-        for index_tree in as_index_forest(indices, axes=self.axes):
-            loop_context = index_tree.loop_context
-            # (
-            #     indexed_axes,
-            #     target_path_per_indexed_cpt,
-            #     index_exprs_per_indexed_cpt,
-            #     layout_exprs_per_indexed_cpt,
-            #     domain_index_exprs,
-            # ) = _index_axes(self.axes, index_tree, loop_context)
+        for loop_context, index_tree in index_forest.items():
             indexed_axes = _index_axes(index_tree, loop_context, self.axes)
 
             (
@@ -447,24 +428,18 @@ class MultiArray(HierarchicalArray):
 # Now ContextSensitiveDat
 class ContextSensitiveMultiArray(ContextSensitive, KernelArgument):
     def __getitem__(self, indices) -> ContextSensitiveMultiArray:
-        from pyop3.itree.tree import (
-            _compose_bits,
-            _index_axes,
-            as_index_tree,
-            index_axes,
-        )
+        from pyop3.itree.tree import _compose_bits, _index_axes, as_index_tree
 
         # FIXME for now assume that there is only one context
         context, array = just_one(self.context_map.items())
 
         index_forest = as_index_forest(indices, axes=array.axes)
 
-        if len(index_forest) == 1 and not index_forest[0].loop_context:
+        if len(index_forest) == 1 and pmap() in index_forest:
             raise NotImplementedError("code path untested")
 
         array_per_context = {}
-        for index_tree in index_forest:
-            loop_context = index_tree.loop_context
+        for loop_context, index_tree in index_forest.items():
             indexed_axes = _index_axes(index_tree, loop_context, array.axes)
 
             (

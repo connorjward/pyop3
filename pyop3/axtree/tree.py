@@ -31,6 +31,7 @@ from pyop3.tree import (
     LabelledNodeComponent,
     LabelledTree,
     MultiComponentLabelledNode,
+    as_component_label,
     postvisit,
     previsit,
 )
@@ -238,6 +239,11 @@ class AxisComponent(LabelledNodeComponent):
         indexed=False,
         lgmap=None,
     ):
+        from pyop3.array import HierarchicalArray
+
+        if not isinstance(count, (numbers.Integral, HierarchicalArray)):
+            raise TypeError("Invalid count type")
+
         super().__init__(label=label)
         self.count = count
 
@@ -290,8 +296,9 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
             if sum(c.count for c in components) != numbering.size:
                 raise ValueError
 
-        super().__init__(components, label=label, id=id)
+        super().__init__(label=label, id=id)
 
+        self.components = components
         self.numbering = numbering
         self.sf = sf
 
@@ -324,6 +331,18 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
         # renumber the serial axis to store ghost entries at the end of the vector
         numbering = partition_ghost_points(serial, sf)
         return cls(serial.components, serial.label, numbering=numbering, sf=sf)
+
+    @property
+    def component_labels(self):
+        return tuple(c.label for c in self.components)
+
+    @property
+    def component(self):
+        return just_one(self.components)
+
+    def component_index(self, component) -> int:
+        clabel = as_component_label(component)
+        return self.component_labels.index(clabel)
 
     @property
     def comm(self):
@@ -586,7 +605,9 @@ class PartialAxisTree(LabelledTree):
 
     @property
     def leaf_component(self):
-        return self.leaf[1]
+        leaf_axis, leaf_clabel = self.leaf
+        leaf_cidx = leaf_axis.component_index(leaf_clabel)
+        return leaf_axis.components[leaf_cidx]
 
     @cached_property
     def size(self):
@@ -628,21 +649,39 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         self.domain_index_exprs = domain_index_exprs
 
     def __getitem__(self, indices):
-        from pyop3.itree.tree import as_index_forest, index_axes
-
-        raise NotImplementedError("TODO")
+        from pyop3.itree.tree import _compose_bits, _index_axes, as_index_forest
 
         if indices is Ellipsis:
+            raise NotImplementedError("TODO")
             indices = index_tree_from_ellipsis(self)
 
-        if not collect_loop_contexts(indices):
-            index_tree = just_one(as_index_forest(indices, axes=self))
-            return index_axes(self, index_tree)
-
         axis_trees = {}
-        for index_tree in as_index_forest(indices, axes=self):
-            axis_trees[index_tree.loop_context] = index_axes(self, index_tree)
-        return ContextSensitiveAxisTree(axis_trees)
+        for context, index_tree in as_index_forest(indices, axes=self).items():
+            indexed_axes = _index_axes(index_tree, context, self)
+
+            target_paths, index_exprs, layout_exprs = _compose_bits(
+                self,
+                self.target_paths,
+                self.index_exprs,
+                self.layout_exprs,
+                indexed_axes,
+                indexed_axes.target_paths,
+                indexed_axes.index_exprs,
+                indexed_axes.layout_exprs,
+            )
+            axis_tree = AxisTree(
+                indexed_axes.parent_to_children,
+                target_paths,
+                index_exprs,
+                layout_exprs,
+                indexed_axes.domain_index_exprs,
+            )
+            axis_trees[context] = axis_tree
+
+        if len(axis_trees) == 1 and just_one(axis_trees.keys()) == pmap():
+            return axis_trees[pmap()]
+        else:
+            return ContextSensitiveAxisTree(axis_trees)
 
     @classmethod
     def from_nest(cls, nest) -> AxisTree:

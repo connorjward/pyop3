@@ -38,7 +38,7 @@ from pyop3.axtree.tree import (
 )
 from pyop3.dtypes import IntType, get_mpi_dtype
 from pyop3.lang import KernelArgument
-from pyop3.tree import LabelledTree, Node, Tree, postvisit
+from pyop3.tree import LabelledTree, MultiComponentLabelledNode, Node, Tree, postvisit
 from pyop3.utils import (
     Identified,
     Labelled,
@@ -71,31 +71,8 @@ class IndexExpressionReplacer(pym.mapper.IdentityMapper):
         return self._replace_map.get((expr.name, expr.axis), expr)
 
 
-# index trees are different to axis trees because we know less about
-# the possible attaching components. In particular a CalledMap can
-# have different "attaching components"/output components depending on
-# the loop context. This is awful for a user to have to build since we
-# need something like a SplitCalledMap. Instead we will just admit any
-# parent_to_children map and do error checking when we convert it to shape.
-class IndexTree(Tree):
-    def __init__(self, parent_to_children=pmap(), *, loop_context=pmap()):
-        super().__init__(parent_to_children)
-        # FIXME, don't need to modify parent_to_children in this function
-        # parent_to_children, loop_context = parse_index_tree(
-        #     self.parent_to_children, loop_context
-        # )
-        self.loop_context = freeze(loop_context)
-
-    @staticmethod
-    def _parse_node(node):
-        if isinstance(node, Index):
-            return node
-        elif isinstance(node, Axis):
-            return Slice(
-                node.label, [AffineSliceComponent(c.label) for c in node.components]
-            )
-        else:
-            raise TypeError(f"No handler defined for {type(node).__name__}")
+class IndexTree(LabelledTree):
+    pass
 
 
 def parse_index_tree(parent_to_children, loop_context):
@@ -203,7 +180,11 @@ class TabulatedMapComponent(MapComponent):
 
     @property
     def arity(self):
-        return self.array.axes.leaf_component.count
+        # TODO clean this up in AxisTree
+        axes = self.array.axes
+        leaf_axis, leaf_clabel = axes.leaf
+        leaf_cidx = leaf_axis.component_index(leaf_clabel)
+        return leaf_axis.components[leaf_cidx].count
 
     # old alias
     @property
@@ -215,8 +196,28 @@ class TabulatedMapComponent(MapComponent):
         return self.array.datamap
 
 
-class Index(Node, KernelArgument):
-    dtype = IntType
+class Index(MultiComponentLabelledNode):
+    fields = MultiComponentLabelledNode.fields | {"component_labels"}
+
+    def __init__(self, label=None, *, component_labels=None, id=None):
+        super().__init__(label, id=id)
+        self._component_labels = component_labels
+
+    @property
+    @abc.abstractmethod
+    def leaf_target_paths(self):
+        # rename to just target paths?
+        pass
+
+    @property
+    def component_labels(self):
+        if self._component_labels is None:
+            # do this for now (since leaf_target_paths currently requires an
+            # instantiated object to determine)
+            self._component_labels = tuple(
+                self.unique_label() for _ in self.leaf_target_paths
+            )
+        return self._component_labels
 
 
 class ContextFreeIndex(Index, ContextFree, abc.ABC):
@@ -247,8 +248,8 @@ class ContextSensitiveIndex(Index, ContextSensitive, abc.ABC):
         ContextSensitive.__init__(self, context_map)
 
 
-class AbstractLoopIndex(Index, ContextAware, abc.ABC):
-    pass
+class AbstractLoopIndex(KernelArgument, Identified, ContextAware, abc.ABC):
+    dtype = IntType
 
 
 # Is this really an index? I dont think it's valid in an index tree
@@ -337,6 +338,10 @@ class LocalLoopIndex(AbstractLoopIndex):
         super().__init__(id)
         self.loop_index = loop_index
 
+    @property
+    def iterset(self):
+        return self.loop_index.iterset
+
     def with_context(self, context):
         # not sure about this
         iterset = self.loop_index.iterset.with_context(context)
@@ -359,16 +364,12 @@ class Slice(ContextFreeIndex):
 
     """
 
-    fields = Index.fields | {"axis", "slices"}
+    fields = Index.fields | {"axis", "slices"} - {"label"}
 
-    def __init__(self, axis, slices, *, id=None, label=None):
-        super().__init__(id)
+    def __init__(self, axis, slices, *, id=None):
+        super().__init__(label=axis, id=id)
         self.axis = axis
         self.slices = as_tuple(slices)
-
-    @property
-    def label(self):
-        return self.axis
 
     @cached_property
     def leaf_target_paths(self):
@@ -409,30 +410,24 @@ class Map(pytools.ImmutableRecord):
         return pmap(data)
 
 
-class CalledMap(Index, LoopIterable):
-    # This function cannot be part of an index tree because it has not specialised
-    # to a particular loop index path.
-    # FIXME, is this true?
-    # Think so, we want a ContextFree index instead
-    def __init__(self, map, from_index, **kwargs):
+class CalledMap(LoopIterable):
+    def __init__(self, map, from_index):
         self.map = map
         self.from_index = from_index
-        Index.__init__(self, **kwargs)
 
     def __getitem__(self, indices):
         raise NotImplementedError("TODO")
 
     def index(self) -> LoopIndex:
         context_map = {
-            itree.loop_context: _index_axes(itree, itree.loop_context)
-            for itree in as_index_forest(self)
+            ctx: _index_axes(itree, ctx) for ctx, itree in as_index_forest(self).items()
         }
         context_sensitive_axes = ContextSensitiveAxisTree(context_map)
         return LoopIndex(context_sensitive_axes)
 
     def with_context(self, context):
         cf_index = self.from_index.with_context(context)
-        return ContextFreeCalledMap(self.map, cf_index, id=self.id)
+        return ContextFreeCalledMap(self.map, cf_index)
 
     @property
     def name(self):
@@ -682,6 +677,7 @@ def index_tree_from_iterable(
         return index, parent_to_children
 
 
+# not sure that this is a useful method, want to have context instead?
 @functools.singledispatch
 def as_index_tree(arg, loop_context, **kwargs):
     if isinstance(arg, collections.abc.Iterable):
@@ -714,80 +710,85 @@ def _(index: AbstractLoopIndex, context, **kwargs):
 
 
 @functools.singledispatch
-def as_index_forest(arg: Any, **kwargs):
+def as_index_forest(arg: Any, *, axes=None, path=pmap(), **kwargs):
     from pyop3.array import HierarchicalArray
 
     if isinstance(arg, HierarchicalArray):
-        slice_ = apply_loop_context(arg, loop_context=pmap(), path=pmap(), **kwargs)
-        return (IndexTree(slice_),)
+        # NOTE: This is the same behaviour as for slices
+        parent = axes._node_from_path(path)
+        if parent is not None:
+            parent_axis, parent_cpt = parent
+            target_axis = axes.child(parent_axis, parent_cpt)
+        else:
+            target_axis = axes.root
+
+        if target_axis.degree > 1:
+            raise ValueError(
+                "Passing arrays as indices is only allowed when there is no ambiguity"
+            )
+
+        slice_cpt = Subset(target_axis.component.label, arg)
+        slice_ = Slice(target_axis.label, [slice_cpt])
+        return freeze({pmap(): IndexTree(slice_)})
     else:
-        raise TypeError
+        raise TypeError(f"No handler provided for {type(arg).__name__}")
 
 
-# FIXME This algorithm now requires some serious thought. How do I get the right
-# target paths? Just an outer product of some sort? E.g. a map is a single node and
-# its number of children doesn't, I think, matter.
 @as_index_forest.register
 def _(indices: collections.abc.Sequence, *, path=pmap(), loop_context=pmap(), **kwargs):
-    breakpoint()
     index, *subindices = indices
 
-    if isinstance(index, collections.abc.Sequence):
-        # what's the right exception? Some sort of BadIndexException?
-        raise ValueError("Nested iterables are not supported")
+    # FIXME This fails because strings are considered sequences, perhaps we should
+    # cast component labels into their own type?
+    # if isinstance(index, collections.abc.Sequence):
+    #     # what's the right exception? Some sort of BadIndexException?
+    #     raise ValueError("Nested iterables are not supported")
 
-    forest = []
-    for tree in as_index_forest(index, **kwargs):
-        context_ = loop_context | tree.loop_context
+    forest = {}
+    # TODO, it is a bad pattern to build a forest here when I really just want to convert
+    # a single index
+    for context, tree in as_index_forest(
+        index, path=path, loop_context=loop_context, **kwargs
+    ).items():
+        # converting a single index should only produce index trees with depth 1
+        assert tree.depth == 1
+        cf_index = tree.root
+
         if subindices:
-            for leaf, target_path in checked_zip(
-                tree.leaves, target_path_per_leaf(tree)
+            for clabel, target_path in checked_zip(
+                cf_index.component_labels, cf_index.leaf_target_paths
             ):
                 path_ = path | target_path
 
-                for subtree in as_index_forest(
-                    subindices, path=path_, loop_context=context_, **kwargs
-                ):
-                    tree = tree.add_subtree(subtree, tree.leaf)
-                    # because loop context shouldn't be an attribute
-                    tree = IndexTree(
-                        tree.parent_to_children, loop_context=subtree.loop_context
-                    )
-                    forest.append(tree)
+                subforest = as_index_forest(
+                    subindices,
+                    path=path | target_path,
+                    loop_context=loop_context | context,
+                    **kwargs,
+                )
+                for subctx, subtree in subforest.items():
+                    forest[subctx] = tree.add_subtree(subtree, cf_index, clabel)
         else:
-            forest.append(tree)
-    return tuple(forest)
+            forest[context] = tree
+    return freeze(forest)
 
 
-def target_path_per_leaf(index_tree, index=None):
-    if index is None:
-        index = index_tree.root
-
-    target_paths = []
-    if index.id in index_tree.parent_to_children:
-        for child, target_path in checked_zip(
-            index_tree.parent_to_children[index.id], index.leaf_target_paths
-        ):
-            ...
-
-
-# TODO I prefer a mapping of contexts here over making it a property of the tree
 @as_index_forest.register
 def _(index_tree: IndexTree, **kwargs):
-    return (index_tree,)
+    return freeze({pmap(): index_tree})
 
 
 @as_index_forest.register
 def _(index: ContextFreeIndex, **kwargs):
-    return (IndexTree(index),)
+    return freeze({pmap(): IndexTree(index)})
 
 
 # TODO This function can definitely be refactored
 @as_index_forest.register
-def _(index: AbstractLoopIndex, **kwargs):
+def _(index: AbstractLoopIndex, *, loop_context=pmap(), **kwargs):
     local = isinstance(index, LocalLoopIndex)
 
-    forest = []
+    forest = {}
     if isinstance(index.iterset, ContextSensitive):
         for context, axes in index.iterset.context_map.items():
             if axes.is_empty:
@@ -795,12 +796,14 @@ def _(index: AbstractLoopIndex, **kwargs):
                 target_path = axes.target_paths.get(None, pmap())
 
                 if local:
-                    context_ = context | {index.local_index.id: source_path}
+                    context_ = (
+                        loop_context | context | {index.local_index.id: source_path}
+                    )
                 else:
-                    context_ = context | {index.id: target_path}
+                    context_ = loop_context | context | {index.id: target_path}
 
                 cf_index = index.with_context(context_)
-                forest.append(IndexTree(cf_index, loop_context=context_))
+                forest[context_] = IndexTree(cf_index)
             else:
                 for leaf in axes.leaves:
                     source_path = axes.path(*leaf)
@@ -811,12 +814,12 @@ def _(index: AbstractLoopIndex, **kwargs):
                         target_path |= axes.target_paths.get((axis.id, cpt.label), {})
 
                     if local:
-                        context_ = context | {index.local_index.id: source_path}
+                        context_ = loop_context | context | {index.id: source_path}
                     else:
-                        context_ = context | {index.id: target_path}
+                        context_ = loop_context | context | {index.id: target_path}
 
                     cf_index = index.with_context(context_)
-                    forest.append(IndexTree(cf_index, loop_context=context_))
+                    forest[context_] = IndexTree(cf_index)
     else:
         assert isinstance(index.iterset, ContextFree)
         for leaf_axis, leaf_cpt in index.iterset.leaves:
@@ -827,27 +830,28 @@ def _(index: AbstractLoopIndex, **kwargs):
             ).items():
                 target_path |= index.iterset.target_paths[axis.id, cpt.label]
             if local:
-                context = {index.local_index.id: source_path}
+                context = loop_context | {index.id: source_path}
             else:
-                context = {index.id: target_path}
+                context = loop_context | {index.id: target_path}
 
             cf_index = index.with_context(context)
-            forest.append(IndexTree(cf_index, loop_context=context))
-    return tuple(forest)
+            forest[context] = IndexTree(cf_index)
+    return freeze(forest)
 
 
 @as_index_forest.register
 def _(called_map: CalledMap, **kwargs):
-    forest = []
-    for index_tree in as_index_forest(called_map.from_index, **kwargs):
-        context = index_tree.loop_context
+    forest = {}
+    input_forest = as_index_forest(called_map.from_index, **kwargs)
+    for context in input_forest.keys():
         cf_called_map = called_map.with_context(context)
-        # index_tree_ = index_tree.add_node(called_map.with_context(context), index_tree.leaf)
-        # # bad that loop context is an attribute!
-        # index_tree_ = IndexTree(index_tree_.parent_to_children, loop_context=context)
-        index_tree_ = IndexTree(cf_called_map, loop_context=context)
-        forest.append(index_tree_)
-    return tuple(forest)
+        forest[context] = IndexTree(cf_called_map)
+    return freeze(forest)
+
+
+@as_index_forest.register
+def _(index: numbers.Integral, **kwargs):
+    return as_index_forest(slice(index, index + 1), **kwargs)
 
 
 @as_index_forest.register
@@ -855,22 +859,24 @@ def _(slice_: slice, *, axes=None, path=pmap(), loop_context=pmap(), **kwargs):
     if axes is None:
         raise RuntimeError("invalid slice usage")
 
-    breakpoint()
-
     parent = axes._node_from_path(path)
     if parent is not None:
         parent_axis, parent_cpt = parent
         target_axis = axes.child(parent_axis, parent_cpt)
     else:
         target_axis = axes.root
-    slice_cpts = []
-    for cpt in target_axis.components:
-        slice_cpt = AffineSliceComponent(
-            cpt.label, slice_.start, slice_.stop, slice_.step
+
+    if target_axis.degree > 1:
+        # badindexexception?
+        raise ValueError(
+            "Cannot slice multi-component things using generic slices, ambiguous"
         )
-        slice_cpts.append(slice_cpt)
-    slice_ = Slice(target_axis.label, slice_cpts)
-    return (IndexTree(slice_, loop_context=loop_context),)
+
+    slice_cpt = AffineSliceComponent(
+        target_axis.component.label, slice_.start, slice_.stop, slice_.step
+    )
+    slice_ = Slice(target_axis.label, [slice_cpt])
+    return freeze({loop_context: IndexTree(slice_)})
 
 
 @as_index_forest.register
@@ -1148,7 +1154,7 @@ def _make_leaf_axis_from_called_map(called_map, prior_target_path, prior_index_e
         # a replacement
         map_leaf_axis, map_leaf_component = map_axes.leaf
         old_inner_index_expr = map_array.index_exprs[
-            map_leaf_axis.id, map_leaf_component.label
+            map_leaf_axis.id, map_leaf_component
         ]
 
         my_index_exprs = {}
@@ -1246,6 +1252,8 @@ def _index_axes_rec(
         for leafkey, subindex in checked_zip(
             leafkeys, indices.parent_to_children[current_index.id]
         ):
+            if subindex is None:
+                continue
             retval = _index_axes_rec(
                 indices,
                 current_index=subindex,
@@ -1291,29 +1299,6 @@ def _index_axes_rec(
         index_exprs_per_component,
         layout_exprs_per_component,
         domain_index_exprs_per_cpt_per_index,
-    )
-
-
-# FIXME why this and also _index_axes?
-def index_axes(axes, index_tree):
-    indexed_axes = _index_axes(index_tree, index_tree.loop_context, axes)
-
-    target_paths, index_exprs, layout_exprs = _compose_bits(
-        axes,
-        axes.target_paths,
-        axes.index_exprs,
-        axes.layout_exprs,
-        indexed_axes,
-        indexed_axes.target_paths,
-        indexed_axes.index_exprs,
-        indexed_axes.layout_exprs,
-    )
-    return AxisTree(
-        indexed_axes.parent_to_children,
-        target_paths,
-        index_exprs,
-        layout_exprs,
-        indexed_axes.domain_index_exprs,
     )
 
 

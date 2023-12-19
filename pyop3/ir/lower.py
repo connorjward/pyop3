@@ -527,28 +527,22 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
     for loopy_arg, arg, spec in checked_zip(loopy_args, call.arguments, call.argspec):
         loop_context = context_from_indices(loop_indices)
 
+        # do we need the original arg any more?
+        cf_arg = arg.with_context(loop_context)
+
         if isinstance(arg, (HierarchicalArray, ContextSensitiveMultiArray)):
             # FIXME materialize is a bad name here, it implies actually packing the values
             # into the temporary.
-            temporary = arg.with_context(loop_context).materialize()
+            temporary = cf_arg.materialize()
         else:
             assert isinstance(arg, LoopIndex)
 
-            # this is the same as CalledMap.index
-            (
-                axes,
-                target_paths,
-                index_exprs,
-                _,
-                domain_index_exprs,
-            ) = collect_shape_index_callback(arg, loop_indices=loop_context)
-
             temporary = HierarchicalArray(
-                axes.set_up(),
-                dtype=arg.dtype,
-                target_paths=target_paths,
-                index_exprs=index_exprs,
-                domain_index_exprs=domain_index_exprs,
+                cf_arg.axes,
+                dtype=arg.dtype,  # cf_?
+                target_paths=cf_arg.target_paths,
+                index_exprs=cf_arg.index_exprs,
+                domain_index_exprs=cf_arg.domain_index_exprs,
                 prefix="t",
             )
         indexed_temp = temporary
@@ -1060,7 +1054,8 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         indices_var, axis_var = expr.parameters
         indices = indices_var.array
 
-        leaf_axis, leaf_component = indices.axes.leaf
+        leaf_axis = indices.axes.leaf_axis
+        leaf_component = indices.axes.leaf_component
         ctx = self._codegen_context
 
         # should do elsewhere?

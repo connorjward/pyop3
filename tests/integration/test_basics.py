@@ -80,7 +80,7 @@ def test_multi_component_vector_copy(vector_copy_kernel):
     dat0 = op3.HierarchicalArray(
         axes,
         name="dat0",
-        data=np.arange(m * a + n * b),
+        data=np.arange(axes.size),
         dtype=op3.ScalarType,
     )
     dat1 = op3.HierarchicalArray(
@@ -94,22 +94,33 @@ def test_multi_component_vector_copy(vector_copy_kernel):
         vector_copy_kernel(dat0[p, :], dat1[p, :]),
     )
 
-    assert all(dat1.data[: m * a] == 0)
-    assert all(dat1.data[m * a :] == dat0.data[m * a :])
+    assert (dat1.data[: m * a] == 0).all()
+    assert (dat1.data[m * a :] == dat0.data[m * a :]).all()
 
 
 def test_copy_multi_component_temporary(vector_copy_kernel):
     m = 4
     n0, n1 = 2, 1
-    npoints = m * n0 + m * n1
 
-    axes = op3.AxisTree.from_nest({op3.Axis(m): op3.Axis([n0, n1])})
+    axes = op3.AxisTree.from_nest(
+        {op3.Axis(m): op3.Axis({"pt0": n0, "pt1": n1}, "ax1")}
+    )
     dat0 = op3.HierarchicalArray(
-        axes, name="dat0", data=np.arange(npoints), dtype=op3.ScalarType
+        axes,
+        name="dat0",
+        data=np.arange(axes.size, dtype=op3.ScalarType),
     )
     dat1 = op3.HierarchicalArray(axes, name="dat1", dtype=dat0.dtype)
 
-    op3.do_loop(p := axes.root.index(), vector_copy_kernel(dat0[p, :], dat1[p, :]))
+    # An explicit slice object is required because typical slice notation ":" is
+    # ambiguous when there are multiple components that might be getting sliced.
+    slice_ = op3.Slice(
+        "ax1", [op3.AffineSliceComponent("pt0"), op3.AffineSliceComponent("pt1")]
+    )
+
+    op3.do_loop(
+        p := axes.root.index(), vector_copy_kernel(dat0[p, slice_], dat1[p, slice_])
+    )
     assert np.allclose(dat1.data, dat0.data)
 
 

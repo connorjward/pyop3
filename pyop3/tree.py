@@ -328,28 +328,20 @@ class LabelledNodeComponent(pytools.ImmutableRecord, Labelled):
 
 
 class MultiComponentLabelledNode(Node, Labelled):
-    fields = Node.fields | {"components", "label"}
+    fields = Node.fields | {"label"}
 
-    def __init__(self, components, label=None, *, id=None):
+    def __init__(self, label=None, *, id=None):
         Node.__init__(self, id)
         Labelled.__init__(self, label)
-        self.components = as_tuple(components)
 
     @property
     def degree(self) -> int:
-        return len(self.components)
+        return len(self.component_labels)
 
     @property
+    @abc.abstractmethod
     def component_labels(self):
-        return tuple(c.label for c in self.components)
-
-    @property
-    def component(self):
-        return just_one(self.components)
-
-    def component_index(self, component) -> int:
-        clabel = as_component_label(component)
-        return self.component_labels.index(clabel)
+        pass
 
 
 class LabelledTree(AbstractTree):
@@ -368,9 +360,9 @@ class LabelledTree(AbstractTree):
     @cached_property
     def leaves(self):
         return tuple(
-            (node, cpt)
+            (node, clabel)
             for node in self.nodes
-            for cidx, cpt in enumerate(node.components)
+            for cidx, clabel in enumerate(node.component_labels)
             if self.parent_to_children.get(node.id, [None] * node.degree)[cidx] is None
         )
 

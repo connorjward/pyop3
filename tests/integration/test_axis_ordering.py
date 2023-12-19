@@ -3,7 +3,6 @@ import numpy as np
 from pyrsistent import pmap
 
 import pyop3 as op3
-from pyop3.ir import LOOPY_LANG_VERSION, LOOPY_TARGET
 
 
 def test_different_axis_orderings_do_not_change_packing_order():
@@ -18,8 +17,8 @@ def test_different_axis_orderings_do_not_change_packing_order():
             lp.GlobalArg("y", op3.ScalarType, (m1, m2), is_input=False, is_output=True),
         ],
         name="copy",
-        target=LOOPY_TARGET,
-        lang_version=LOOPY_LANG_VERSION,
+        target=op3.ir.LOOPY_TARGET,
+        lang_version=op3.ir.LOOPY_LANG_VERSION,
     )
     copy_kernel = op3.Function(lpy_kernel, [op3.READ, op3.WRITE])
 
@@ -56,7 +55,6 @@ def test_different_axis_orderings_do_not_change_packing_order():
             cf_p.id: (slice0,),
             slice0.id: (slice1,),
         },
-        loop_context=loop_context,
     )
 
     op3.do_loop(p, copy_kernel(dat0_0[q], dat1[q]))

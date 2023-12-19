@@ -173,11 +173,18 @@ def has_constant_step(axes: AxisTree, axis, cpt):
 # use this to build a tree of sizes that we use to construct
 # the right count arrays
 class CustomNode(MultiComponentLabelledNode):
-    fields = MultiComponentLabelledNode.fields | {"counts"}
+    fields = MultiComponentLabelledNode.fields | {"counts", "component_labels"}
 
-    def __init__(self, counts, **kwargs):
+    def __init__(self, counts, *, component_labels=None, **kwargs):
         super().__init__(counts, **kwargs)
         self.counts = tuple(counts)
+        self._component_labels = component_labels
+
+    @property
+    def component_labels(self):
+        if self._component_labels is None:
+            self._component_labels = tuple(self.unique_label() for _ in self.counts)
+        return self._component_labels
 
 
 def _compute_layouts(
@@ -264,11 +271,7 @@ def _compute_layouts(
             for c in axis.components:
                 step = step_size(axes, axis, c)
                 layouts.update(
-                    {
-                        path
-                        # | {axis.label: c.label}: AffineLayout(axis.label, c.label, step)
-                        | {axis.label: c.label}: AxisVariable(axis.label) * step
-                    }
+                    {path | {axis.label: c.label}: AxisVariable(axis.label) * step}
                 )
 
         # layouts and steps are just propagated from below
