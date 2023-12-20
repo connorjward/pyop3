@@ -1012,8 +1012,8 @@ def _(arg: tuple) -> AxisComponent:
 
 
 @functools.singledispatch
-def _as_axis_component_label(arg: Any) -> ComponentLabel:
-    if isinstance(arg, ComponentLabel):
+def _as_axis_component_label(arg: Any):
+    if isinstance(arg, str):
         return arg
     else:
         raise TypeError(f"No handler registered for {type(arg).__name__}")

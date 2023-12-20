@@ -343,6 +343,10 @@ class MultiComponentLabelledNode(Node, Labelled):
     def component_labels(self):
         pass
 
+    @property
+    def component_label(self):
+        return just_one(self.component_labels)
+
 
 class LabelledTree(AbstractTree):
     @deprecated("child")
@@ -387,7 +391,7 @@ class LabelledTree(AbstractTree):
                         "Must specify a component for parents with multiple components"
                     )
             else:
-                parent_cpt_label = parent_component
+                parent_cpt_label = as_component_label(parent_component)
 
             cpt_index = parent.component_labels.index(parent_cpt_label)
 

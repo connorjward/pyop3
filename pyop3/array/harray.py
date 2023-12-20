@@ -168,7 +168,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         return self.name
 
     def __getitem__(self, indices) -> Union[MultiArray, ContextSensitiveMultiArray]:
-        from pyop3.itree.tree import _compose_bits, _index_axes, as_index_tree
+        from pyop3.itree.tree import _compose_bits, _index_axes
 
         index_forest = as_index_forest(indices, axes=self.axes)
         if len(index_forest) == 1 and pmap() in index_forest:
@@ -428,7 +428,7 @@ class MultiArray(HierarchicalArray):
 # Now ContextSensitiveDat
 class ContextSensitiveMultiArray(ContextSensitive, KernelArgument):
     def __getitem__(self, indices) -> ContextSensitiveMultiArray:
-        from pyop3.itree.tree import _compose_bits, _index_axes, as_index_tree
+        from pyop3.itree.tree import _compose_bits, _index_axes
 
         # FIXME for now assume that there is only one context
         context, array = just_one(self.context_map.items())

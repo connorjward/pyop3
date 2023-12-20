@@ -18,7 +18,7 @@ from pyop3.axtree.tree import ContextFree, ContextSensitive, as_axis_tree
 from pyop3.buffer import PackedBuffer
 from pyop3.dtypes import ScalarType
 from pyop3.itree import IndexTree
-from pyop3.itree.tree import _compose_bits, _index_axes, as_index_forest, as_index_tree
+from pyop3.itree.tree import _compose_bits, _index_axes, as_index_forest
 from pyop3.utils import just_one, merge_dicts, single_valued, strictly_all
 
 
