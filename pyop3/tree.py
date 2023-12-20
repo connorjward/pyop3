@@ -48,6 +48,7 @@ class Node(pytools.ImmutableRecord, Identified):
         Identified.__init__(self, id)
 
 
+# TODO delete this class, no longer different tree types
 class AbstractTree(pytools.ImmutableRecord, abc.ABC):
     fields = {"parent_to_children"}
 
@@ -204,119 +205,6 @@ class AbstractTree(pytools.ImmutableRecord, abc.ABC):
     @staticmethod
     def _as_node_id(node):
         return node.id if isinstance(node, Node) else node
-
-
-class Tree(AbstractTree):
-    @cached_property
-    def leaves(self):
-        return tuple(
-            node
-            for node in self.nodes
-            if all(c is None for c in self.parent_to_children.get(node.id, ()))
-        )
-
-    def add_node(
-        self,
-        node,
-        parent=None,
-        uniquify=False,
-    ):
-        if parent is None:
-            if not self.is_empty:
-                raise ValueError("Cannot add multiple roots")
-            return self.copy(parent_to_children={None: (node,)})
-        else:
-            parent = self._as_node(parent)
-            if node in self:
-                if uniquify:
-                    node = node.copy(id=node.unique_id())
-                else:
-                    raise ValueError("Cannot insert a node with the same ID")
-
-            parent_to_children = {
-                k: list(v) for k, v in self.parent_to_children.items()
-            }
-
-            # defaultdict?
-            if parent.id in parent_to_children:
-                parent_to_children[parent.id].append(node)
-            else:
-                parent_to_children[parent.id] = [node]
-            return self.copy(parent_to_children=parent_to_children)
-
-    def add_subtree(
-        self,
-        subtree,
-        parent=None,
-        *,
-        uniquify=False,
-    ):
-        if uniquify:
-            raise NotImplementedError("TODO")
-
-        if not parent:
-            raise NotImplementedError("TODO")
-
-        # mutable
-        parent_to_children = defaultdict(
-            list, {p: list(cs) for p, cs in self.parent_to_children.items()}
-        )
-
-        sub_p2c = dict(subtree.parent_to_children)
-        subroot = just_one(sub_p2c.pop(None))
-        parent_to_children[parent.id].append(subroot)
-        parent_to_children.update(sub_p2c)
-        return self.copy(parent_to_children=parent_to_children)
-
-    # I think that "path" is a bad term here since we don't have labels, ancestors?
-    def path_with_nodes(self, node):
-        node_id = self._as_node_id(node)
-        return self._paths_with_nodes[node_id]
-
-    @cached_property
-    def _paths_with_nodes(self):
-        return self._paths_with_nodes_rec()
-
-    def _paths_with_nodes_rec(self, node=None, path=()):
-        if node is None:
-            node = self.root
-
-        path_ = path + (node,)
-
-        paths = {node.id: path_}
-        for child in self.children(node):
-            subpaths = self._paths_with_nodes_rec(child, path_)
-            paths.update(subpaths)
-        return freeze(paths)
-
-    @classmethod
-    def _from_nest(cls, nest):
-        # TODO add appropriate exception classes
-        if isinstance(nest, collections.abc.Mapping):
-            assert len(nest) == 1
-            node, subnodes = just_one(nest.items())
-            node = cls._parse_node(node)
-
-            if isinstance(subnodes, collections.abc.Mapping):
-                if len(subnodes) == 1 and isinstance(just_one(subnodes.keys()), Node):
-                    # just one subnode
-                    subnodes = [subnodes]
-                else:
-                    raise ValueError
-            elif not isinstance(subnodes, collections.abc.Sequence):
-                subnodes = [subnodes]
-
-            children = []
-            parent_to_children = {}
-            for subnode in subnodes:
-                subnode_, sub_p2c = cls._from_nest(subnode)
-                children.append(subnode_)
-                parent_to_children.update(sub_p2c)
-            parent_to_children[node.id] = children
-            return node, parent_to_children
-        else:
-            node = cls._parse_node(nest)
-            return node, {}
 
 
 class LabelledNodeComponent(pytools.ImmutableRecord, Labelled):

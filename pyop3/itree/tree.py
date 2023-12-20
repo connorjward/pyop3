@@ -38,7 +38,7 @@ from pyop3.axtree.tree import (
 )
 from pyop3.dtypes import IntType, get_mpi_dtype
 from pyop3.lang import KernelArgument
-from pyop3.tree import LabelledTree, MultiComponentLabelledNode, Node, Tree, postvisit
+from pyop3.tree import LabelledTree, MultiComponentLabelledNode, postvisit
 from pyop3.utils import (
     Identified,
     Labelled,
