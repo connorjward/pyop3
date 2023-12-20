@@ -18,6 +18,7 @@ from pyop3.utils import (
     Identified,
     Label,
     Labelled,
+    UniqueNameGenerator,
     apply_at,
     as_tuple,
     checked_zip,
@@ -37,6 +38,10 @@ class NodeNotFoundException(Exception):
 
 
 class EmptyTreeException(Exception):
+    pass
+
+
+class InvalidTreeException(ValueError):
     pass
 
 
@@ -331,17 +336,9 @@ class LabelledTree(AbstractTree):
             If ``False``, duplicate ``ids`` between the tree and subtree
             will raise an exception. If ``True``, the ``ids`` will be changed
             to avoid the clash.
+            Also fixes node labels.
 
-        Notes
-        -----
-        This function returns a parent-to-children mapping instead of a new tree
-        because it is non-trivial to unpick the impact of adding new nodes to the
-        tree. For example a new star forest may need to be computed. It, for now,
-        is preferable to make trees as "immutable as possible".
         """
-        if uniquify:
-            raise NotImplementedError("TODO")
-
         if some_but_not_all([parent, component]):
             raise ValueError(
                 "Either both or neither of parent and component must be defined"
@@ -359,7 +356,43 @@ class LabelledTree(AbstractTree):
         subroot = just_one(sub_p2c.pop(None))
         parent_to_children[parent.id][cidx] = subroot
         parent_to_children.update(sub_p2c)
+
+        if uniquify:
+            self._uniquify_node_labels(parent_to_children)
+            self._uniquify_node_ids(parent_to_children)
+
         return self.copy(parent_to_children=parent_to_children)
+
+    def _uniquify_node_labels(self, node_map, node=None, seen_labels=None):
+        if not node_map:
+            return
+
+        if node is None:
+            node = just_one(node_map[None])
+            seen_labels = frozenset({node.label})
+
+        for i, subnode in enumerate(node_map.get(node.id, [])):
+            if subnode is None:
+                continue
+            if subnode.label in seen_labels:
+                new_label = UniqueNameGenerator(set(seen_labels))(subnode.label)
+                assert new_label not in seen_labels
+                subnode = subnode.copy(label=new_label)
+                node_map[node.id][i] = subnode
+            self._uniquify_node_labels(node_map, subnode, seen_labels | {subnode.label})
+
+    def _uniquify_node_ids(self, node_map):
+        seen_ids = set()
+        for parent_id, nodes in node_map.items():
+            for i, node in enumerate(nodes):
+                if node is None:
+                    continue
+                if node.id in seen_ids:
+                    new_id = UniqueNameGenerator(seen_ids)(node.id)
+                    assert new_id not in seen_ids
+                    node = node.copy(id=new_id)
+                    node_map[parent_id][i] = node
+                seen_ids.add(node.id)
 
     @cached_property
     def _paths(self):

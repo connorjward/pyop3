@@ -389,10 +389,12 @@ class Map(pytools.ImmutableRecord):
 
     fields = {"connectivity", "name"}
 
-    def __init__(self, connectivity, name, **kwargs) -> None:
+    def __init__(self, connectivity, name=None, **kwargs) -> None:
         super().__init__(**kwargs)
         self.connectivity = connectivity
-        self.name = name
+
+        # TODO delete entirely
+        # self.name = name
 
     def __call__(self, index):
         return CalledMap(self, index)
@@ -859,20 +861,18 @@ def _(called_map: ContextFreeCalledMap, **kwargs):
             ) = _make_leaf_axis_from_called_map(
                 called_map, prior_target_path, prior_index_exprs
             )
+
             axes = axes.add_subtree(
-                PartialAxisTree(subaxis), prior_leaf_axis, prior_leaf_cpt
+                PartialAxisTree(subaxis),
+                prior_leaf_axis,
+                prior_leaf_cpt,
             )
             target_path_per_cpt.update(subtarget_paths)
             index_exprs_per_cpt.update(subindex_exprs)
             layout_exprs_per_cpt.update(sublayout_exprs)
             domain_index_exprs_per_cpt.update(subdomain_index_exprs)
 
-            # does this work?
-            # need to track these for nested ragged things
-            # breakpoint()
-            # index_exprs_per_cpt.update({(prior_leaf_axis.id, prior_leaf_cpt.label): prior_index_exprs})
             domain_index_exprs_per_cpt.update(prior_domain_index_exprs_per_cpt)
-            # layout_exprs_per_cpt.update(...)
 
     return (
         axes,
@@ -901,7 +901,7 @@ def _make_leaf_axis_from_called_map(called_map, prior_target_path, prior_index_e
             {map_cpt.target_axis: map_cpt.target_component}
         )
 
-        axisvar = AxisVariable(called_map.name)
+        axisvar = AxisVariable(called_map.id)
 
         if not isinstance(map_cpt, TabulatedMapComponent):
             raise NotImplementedError("Currently we assume only arrays here")
@@ -934,24 +934,20 @@ def _make_leaf_axis_from_called_map(called_map, prior_target_path, prior_index_e
             my_index_exprs[axlabel] = replacer(index_expr)
         new_inner_index_expr = my_index_exprs
 
-        # breakpoint()
         map_var = CalledMapVariable(
             map_cpt.array, my_target_path, prior_index_exprs, new_inner_index_expr
         )
 
-        index_exprs_per_cpt[axis_id, cpt.label] = {
-            # map_cpt.target_axis: map_var(prior_index_exprs | {called_map.name: axisvar})
-            map_cpt.target_axis: map_var
-        }
+        index_exprs_per_cpt[axis_id, cpt.label] = {map_cpt.target_axis: map_var}
 
         # don't think that this is possible for maps
         layout_exprs_per_cpt[axis_id, cpt.label] = {
-            called_map.name: pym.primitives.NaN(IntType)
+            called_map.id: pym.primitives.NaN(IntType)
         }
 
         domain_index_exprs_per_cpt[axis_id, cpt.label] = prior_index_exprs
 
-    axis = Axis(components, label=called_map.name, id=axis_id)
+    axis = Axis(components, label=called_map.id, id=axis_id)
 
     return (
         axis,

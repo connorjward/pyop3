@@ -481,6 +481,10 @@ def parse_loop_properly_this_time(
                 for axis_label, index_expr in index_exprs_.items():
                     target_replace_map[axis_label] = replacer(index_expr)
 
+                # debug
+                # breakpoint()
+                # target_replace_map is wrong
+
                 index_replace_map = pmap(
                     {
                         (loop.index.id, ax): iexpr

@@ -417,12 +417,171 @@ def test_inc_with_variable_arity_map(scalar_inc_kernel):
     assert np.allclose(dat1.data_ro, expected)
 
 
+def test_loop_over_multiple_ragged_maps(factory):
+    m = 5
+    axis = op3.Axis({"pt0": m}, "ax0")
+    dat0 = op3.HierarchicalArray(
+        axis, name="dat0", data=np.arange(axis.size, dtype=op3.IntType)
+    )
+    dat1 = op3.HierarchicalArray(axis, name="dat1", dtype=dat0.dtype)
+
+    # map0
+    nnz0_data = np.asarray([3, 2, 1, 0, 3], dtype=op3.IntType)
+    nnz0 = op3.HierarchicalArray(axis, name="nnz0", data=nnz0_data)
+
+    map0_axes = op3.AxisTree.from_nest({axis: op3.Axis(nnz0)})
+    map0_data = [[2, 4, 0], [3, 3], [1], [], [4, 2, 1]]
+    map0_array = np.asarray(op3.utils.flatten(map0_data), dtype=op3.IntType)
+    map0_dat = op3.HierarchicalArray(map0_axes, name="map0", data=map0_array)
+    map0 = op3.Map(
+        {freeze({"ax0": "pt0"}): [op3.TabulatedMapComponent("ax0", "pt0", map0_dat)]},
+        name="map0",
+    )
+
+    # map1
+    nnz1_data = np.asarray([2, 0, 3, 1, 2], dtype=op3.IntType)
+    nnz1 = op3.HierarchicalArray(axis, name="nnz1", data=nnz1_data)
+
+    map1_axes = op3.AxisTree.from_nest({axis: op3.Axis(nnz1)})
+    map1_data = [[4, 0], [], [1, 0, 0], [3], [2, 3]]
+    map1_array = np.asarray(op3.utils.flatten(map1_data), dtype=op3.IntType)
+    map1_dat = op3.HierarchicalArray(map1_axes, name="map1", data=map1_array)
+    map1 = op3.Map(
+        {freeze({"ax0": "pt0"}): [op3.TabulatedMapComponent("ax0", "pt0", map1_dat)]},
+        name="map1",
+    )
+
+    inc = factory.inc_kernel(1, op3.IntType)
+
+    op3.do_loop(
+        p := axis.index(),
+        op3.loop(
+            q := map1(map0(p)).index(),
+            inc(dat0[q], dat1[p]),
+        ),
+    )
+
+    expected = np.zeros_like(dat1.data_ro)
+    for i in range(m):
+        for j in map0_data[i]:
+            for k in map1_data[j]:
+                expected[i] += dat0.data_ro[k]
+    assert (dat1.data_ro == expected).all()
+
+
+def test_loop_over_multiple_multi_component_ragged_maps(factory):
+    m, n = 5, 6
+    axis = op3.Axis({"pt0": m, "pt1": n}, "ax0")
+    dat0 = op3.HierarchicalArray(
+        axis, name="dat0", data=np.arange(axis.size, dtype=op3.IntType)
+    )
+    dat1 = op3.HierarchicalArray(axis, name="dat1", dtype=dat0.dtype)
+
+    # pt0 -> pt0
+    nnz00_data = np.asarray([3, 2, 1, 0, 3], dtype=op3.IntType)
+    nnz00 = op3.HierarchicalArray(axis["pt0"], name="nnz00", data=nnz00_data)
+    map0_axes0 = op3.AxisTree.from_nest({axis["pt0"].root: op3.Axis(nnz00)})
+    map0_data0 = [[2, 4, 0], [3, 3], [1], [], [4, 2, 1]]
+    map0_array0 = np.asarray(op3.utils.flatten(map0_data0), dtype=op3.IntType)
+    map0_dat0 = op3.HierarchicalArray(map0_axes0, name="map00", data=map0_array0)
+
+    # pt0 -> pt1
+    nnz01_data = np.asarray([1, 3, 2, 1, 0, 4], dtype=op3.IntType)
+    nnz01 = op3.HierarchicalArray(axis["pt1"], name="nnz01", data=nnz01_data)
+    map0_axes1 = op3.AxisTree.from_nest({axis["pt1"].root: op3.Axis(nnz01)})
+    map0_data1 = [[2], [3, 3, 5], [1, 0], [2], [], [1, 4, 2, 1]]
+    map0_array1 = np.asarray(op3.utils.flatten(map0_data1), dtype=op3.IntType)
+    map0_dat1 = op3.HierarchicalArray(map0_axes1, name="map01", data=map0_array1)
+
+    # pt1 -> pt1 (pt1 -> pt0 not implemented)
+    nnz1_data = np.asarray([2, 2, 1, 3, 0, 2], dtype=op3.IntType)
+    nnz1 = op3.HierarchicalArray(axis["pt1"], name="nnz1", data=nnz1_data)
+    map1_axes = op3.AxisTree.from_nest({axis["pt1"].root: op3.Axis(nnz1)})
+    map1_data = [[2, 5], [0, 1], [3], [5, 5, 5], [], [2, 1]]
+    map1_array = np.asarray(op3.utils.flatten(map1_data), dtype=op3.IntType)
+    map1_dat = op3.HierarchicalArray(map1_axes, name="map1", data=map1_array)
+
+    map_ = op3.Map(
+        {
+            freeze({"ax0": "pt0"}): [
+                op3.TabulatedMapComponent("ax0", "pt0", map0_dat0),
+                op3.TabulatedMapComponent("ax0", "pt1", map0_dat1),
+            ],
+            freeze({"ax0": "pt1"}): [
+                op3.TabulatedMapComponent("ax0", "pt1", map1_dat),
+            ],
+        },
+        name="map_",
+    )
+
+    inc = factory.inc_kernel(1, op3.IntType)
+
+    op3.do_loop(
+        p := axis["pt0"].index(),
+        op3.loop(
+            q := map_(map_(p)).index(),
+            inc(dat0[q], dat1[p]),
+        ),
+    )
+
+    # To see what is going on we can determine the expected result in two
+    # ways: one pythonically and one equivalent to the generated code.
+    # We leave both here for reference as they aid in understanding what
+    # the code is doing.
+    expected_pythonic = np.zeros_like(dat1.data_ro)
+    for i in range(m):
+        # pt0 -> pt0 -> pt0
+        for j in map0_data0[i]:
+            for k in map0_data0[j]:
+                expected_pythonic[i] += dat0.data_ro[k]
+        # pt0 -> pt0 -> pt1
+        for j in map0_data0[i]:
+            for k in map0_data1[j]:
+                # add m since we are targeting pt1
+                expected_pythonic[i] += dat0.data_ro[k + m]
+        # pt0 -> pt1 -> pt1
+        for j in map0_data1[i]:
+            for k in map1_data[j]:
+                # add m since we are targeting pt1
+                expected_pythonic[i] += dat0.data_ro[k + m]
+
+    expected_codegen = np.zeros_like(dat1.data_ro)
+    for i in range(m):
+        # pt0 -> pt0 -> pt0
+        for j in range(nnz00_data[i]):
+            map_idx = map0_data0[i][j]
+            for k in range(nnz00_data[map_idx]):
+                ptr = map0_data0[map_idx][k]
+                expected_codegen[i] += dat0.data_ro[ptr]
+        # pt0 -> pt0 -> pt1
+        for j in range(nnz00_data[i]):
+            map_idx = map0_data0[i][j]
+            for k in range(nnz01_data[map_idx]):
+                # add m since we are targeting pt1
+                ptr = map0_data1[map_idx][k] + m
+                expected_codegen[i] += dat0.data_ro[ptr]
+        # pt0 -> pt1 -> pt1
+        for j in range(nnz01_data[i]):
+            map_idx = map0_data1[i][j]
+            for k in range(nnz1_data[map_idx]):
+                # add m since we are targeting pt1
+                ptr = map1_data[map_idx][k] + m
+                expected_codegen[i] += dat0.data_ro[ptr]
+
+    assert (expected_pythonic == expected_codegen).all()
+    assert (dat1.data_ro == expected_pythonic).all()
+
+
 def test_map_composition(vec2_inc_kernel):
     arity0, arity1 = 3, 2
 
     iterset = op3.Axis({"pt0": 2}, "ax0")
     dat_axis0 = op3.Axis(10)
     dat_axis1 = op3.Axis(arity1)
+    dat0 = op3.HierarchicalArray(
+        dat_axis0, name="dat0", data=np.arange(dat_axis0.size, dtype=op3.ScalarType)
+    )
+    dat1 = op3.HierarchicalArray(dat_axis1, name="dat1", dtype=dat0.dtype)
 
     map_axes0 = op3.AxisTree.from_nest({iterset: op3.Axis(arity0)})
     map_data0 = np.asarray([[2, 4, 0], [6, 7, 1]])
@@ -437,8 +596,18 @@ def test_map_composition(vec2_inc_kernel):
                 ),
             ],
         },
-        "map0",
     )
+
+    # The labelling for intermediate maps is quite opaque, we use the ID of the
+    # ContextFreeCalledMap nodes in the index tree. This is so we do not hit any
+    # conflicts when we compose the same map multiple times. I am unsure how to
+    # expose this to the user nicely, and this is a use case I do not imagine
+    # anyone actually wanting, so I am unpicking the right label from the
+    # intermediate indexed object.
+    p = iterset.index()
+    indexed_dat0 = dat0[map0(p)]
+    cf_indexed_dat0 = indexed_dat0.with_context({p.id: {"ax0": "pt0"}})
+    called_map_node = op3.utils.just_one(cf_indexed_dat0.axes.nodes)
 
     # this map targets the entries in map0 so it can only contain 0s, 1s and 2s
     map_axes1 = op3.AxisTree.from_nest({iterset: op3.Axis(arity1)})
@@ -449,18 +618,14 @@ def test_map_composition(vec2_inc_kernel):
     map1 = op3.Map(
         {
             pmap({"ax0": "pt0"}): [
-                op3.TabulatedMapComponent("map0", "a", map_dat1),
+                op3.TabulatedMapComponent(
+                    called_map_node.label, called_map_node.component.label, map_dat1
+                ),
             ],
         },
-        "map1",
     )
 
-    dat0 = op3.HierarchicalArray(
-        dat_axis0, name="dat0", data=np.arange(dat_axis0.size), dtype=op3.ScalarType
-    )
-    dat1 = op3.HierarchicalArray(dat_axis1, name="dat1", dtype=dat0.dtype)
-
-    op3.do_loop(p := iterset.index(), vec2_inc_kernel(dat0[map0(p)][map1(p)], dat1))
+    op3.do_loop(p, vec2_inc_kernel(indexed_dat0[map1(p)], dat1))
 
     expected = np.zeros_like(dat1.data_ro)
     for i in range(iterset.size):

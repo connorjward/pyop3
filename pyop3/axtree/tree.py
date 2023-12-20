@@ -113,8 +113,8 @@ class ContextSensitive(ContextAware, abc.ABC):
         key = {}
         for loop_index, path in context.items():
             if loop_index in self.keys:
-                key.update({loop_index: path})
-        return pmap(key)
+                key.update({loop_index: freeze(path)})
+        return freeze(key)
 
 
 # this is basically just syntactic sugar, might not be needed
@@ -564,8 +564,31 @@ class PartialAxisTree(LabelledTree):
     ):
         super().__init__(parent_to_children)
 
+        # TODO Move check to generic LabelledTree
+        self._check_node_labels_unique_in_paths(self.parent_to_children)
+
         # makea  cached property, then delete this method
         self._layout_exprs = AxisTree._default_index_exprs(self)
+
+    @classmethod
+    def _check_node_labels_unique_in_paths(
+        cls, node_map, node=None, seen_labels=frozenset()
+    ):
+        from pyop3.tree import InvalidTreeException
+
+        if not node_map:
+            return
+
+        if node is None:
+            node = just_one(node_map[None])
+
+        if node.label in seen_labels:
+            raise InvalidTreeException("Duplicate labels found along a path")
+
+        for subnode in filter(None, node_map.get(node.id, [])):
+            cls._check_node_labels_unique_in_paths(
+                node_map, subnode, seen_labels | {node.label}
+            )
 
     def set_up(self):
         return AxisTree.from_partial_tree(self)

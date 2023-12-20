@@ -68,20 +68,42 @@ def paxis(comm, sf):
 
 
 class Helper:
-    @staticmethod
-    def copy_kernel(shape, dtype=op3.ScalarType):
+    @classmethod
+    def copy_kernel(cls, shape, dtype=op3.ScalarType):
+        inames = cls._inames_from_shape(shape)
+        inames_str = ",".join(inames)
+        insn = f"y[{inames_str}] = x[{inames_str}]"
+
+        lpy_kernel = cls._loopy_kernel(shape, insn, dtype)
+        return op3.Function(lpy_kernel, [op3.READ, op3.WRITE])
+
+    @classmethod
+    def inc_kernel(cls, shape, dtype=op3.ScalarType):
+        inames = cls._inames_from_shape(shape)
+        inames_str = ",".join(inames)
+        insn = f"y[{inames_str}] = y[{inames_str}] + x[{inames_str}]"
+
+        lpy_kernel = cls._loopy_kernel(shape, insn, dtype)
+        return op3.Function(lpy_kernel, [op3.READ, op3.INC])
+
+    @classmethod
+    def _inames_from_shape(cls, shape):
+        if isinstance(shape, numbers.Number):
+            shape = (shape,)
+        return tuple(f"i_{i}" for i, _ in enumerate(shape))
+
+    @classmethod
+    def _loopy_kernel(cls, shape, insns, dtype):
         if isinstance(shape, numbers.Number):
             shape = (shape,)
 
-        inames = tuple(f"i_{i}" for i, _ in enumerate(shape))
+        inames = cls._inames_from_shape(shape)
         domains = tuple(
             f"{{ [{iname}]: 0 <= {iname} < {s} }}" for iname, s in zip(inames, shape)
         )
-        inames_str = ",".join(inames)
-        insn = f"y[{inames_str}] = x[{inames_str}]"
-        lpy_kernel = lp.make_kernel(
+        return lp.make_kernel(
             domains,
-            insn,
+            insns,
             [
                 lp.GlobalArg("x", shape=shape, dtype=dtype),
                 lp.GlobalArg("y", shape=shape, dtype=dtype),
@@ -89,7 +111,6 @@ class Helper:
             target=op3.ir.LOOPY_TARGET,
             lang_version=op3.ir.LOOPY_LANG_VERSION,
         )
-        return op3.Function(lpy_kernel, [op3.READ, op3.WRITE])
 
 
 @pytest.fixture(scope="session")
