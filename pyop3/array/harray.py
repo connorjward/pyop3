@@ -37,8 +37,6 @@ from pyop3.axtree.tree import (
 )
 from pyop3.buffer import Buffer, DistributedBuffer
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
-from pyop3.itree import IndexTree, as_index_forest
-from pyop3.itree.tree import iter_axis_tree
 from pyop3.lang import KernelArgument
 from pyop3.utils import (
     PrettyTuple,
@@ -168,7 +166,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         return self.name
 
     def __getitem__(self, indices) -> Union[MultiArray, ContextSensitiveMultiArray]:
-        from pyop3.itree.tree import _compose_bits, _index_axes
+        from pyop3.itree.tree import _compose_bits, _index_axes, as_index_forest
 
         index_forest = as_index_forest(indices, axes=self.axes)
         if len(index_forest) == 1 and pmap() in index_forest:
@@ -215,6 +213,9 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
                 indexed_axes.index_exprs,
                 indexed_axes.layout_exprs,
             )
+
+            if self.name == "debug":
+                breakpoint()
 
             array_per_context[loop_context] = HierarchicalArray(
                 indexed_axes,
@@ -347,7 +348,16 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         return strict_int(offset)
 
     def iter_indices(self, outer_map):
-        return iter_axis_tree(self.axes, self.target_paths, self.index_exprs, outer_map)
+        from pyop3.itree.tree import iter_axis_tree
+
+        return iter_axis_tree(
+            self.axes.index(),
+            self.axes,
+            self.target_paths,
+            self.index_exprs,
+            self.domain_index_exprs,
+            outer_map,
+        )
 
     def _with_axes(self, axes):
         """Return a new `Dat` with new axes pointing to the same data."""
@@ -428,7 +438,7 @@ class MultiArray(HierarchicalArray):
 # Now ContextSensitiveDat
 class ContextSensitiveMultiArray(ContextSensitive, KernelArgument):
     def __getitem__(self, indices) -> ContextSensitiveMultiArray:
-        from pyop3.itree.tree import _compose_bits, _index_axes
+        from pyop3.itree.tree import _compose_bits, _index_axes, as_index_forest
 
         # FIXME for now assume that there is only one context
         context, array = just_one(self.context_map.items())

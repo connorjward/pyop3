@@ -918,8 +918,10 @@ def add_leaf_assignment(
             for axis, index_expr in index_exprs.items():
                 replace_map[axis] = replacer(index_expr)
 
-            axis = array_.iterset.root
-            return replace_map[axis.label]
+            if len(replace_map) > 1:
+                # use leaf_target_path to get the right bits from replace_map?
+                raise NotImplementedError("Needs more thought")
+            return just_one(replace_map.values())
 
     temp_expr = functools.partial(
         make_temp_expr,

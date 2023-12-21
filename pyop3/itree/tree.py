@@ -17,8 +17,9 @@ import pymbolic as pym
 import pyrsistent
 import pytools
 from mpi4py import MPI
-from pyrsistent import freeze, pmap
+from pyrsistent import PMap, freeze, pmap
 
+from pyop3.array import HierarchicalArray
 from pyop3.axtree import (
     Axis,
     AxisComponent,
@@ -323,7 +324,11 @@ class ContextFreeLoopIndex(ContextFreeIndex):
         if not isinstance(self.iterset, AxisTree):
             raise NotImplementedError
         return iter_axis_tree(
-            self.iterset, self.iterset.target_paths, self.iterset.index_exprs, stuff
+            self.iterset,
+            self.iterset.target_paths,
+            self.iterset.index_exprs,
+            self.iterset.domain_index_exprs,
+            stuff,
         )
 
 
@@ -415,6 +420,54 @@ class CalledMap(LoopIterable):
 
     def __getitem__(self, indices):
         raise NotImplementedError("TODO")
+        # figure out the current loop context, just a single loop index
+        from_index = self.from_index
+        while isinstance(from_index, CalledMap):
+            from_index = from_index.from_index
+        existing_loop_contexts = tuple(
+            freeze({from_index.id: path}) for path in from_index.paths
+        )
+
+        index_forest = {}
+        for existing_context in existing_loop_contexts:
+            axes = self.with_context(existing_context)
+            index_forest.update(
+                as_index_forest(indices, axes=axes, loop_context=existing_context)
+            )
+
+        array_per_context = {}
+        for loop_context, index_tree in index_forest.items():
+            indexed_axes = _index_axes(index_tree, loop_context, self.axes)
+
+            (
+                target_paths,
+                index_exprs,
+                layout_exprs,
+            ) = _compose_bits(
+                self.axes,
+                self.target_paths,
+                self.index_exprs,
+                None,
+                indexed_axes,
+                indexed_axes.target_paths,
+                indexed_axes.index_exprs,
+                indexed_axes.layout_exprs,
+            )
+
+            if self.name == "debug":
+                breakpoint()
+
+            array_per_context[loop_context] = HierarchicalArray(
+                indexed_axes,
+                data=self.array,
+                layouts=self.layouts,
+                target_paths=target_paths,
+                index_exprs=index_exprs,
+                domain_index_exprs=indexed_axes.domain_index_exprs,
+                name=self.name,
+                max_value=self.max_value,
+            )
+        return ContextSensitiveMultiArray(array_per_context)
 
     def index(self) -> LoopIndex:
         context_map = {
@@ -422,6 +475,21 @@ class CalledMap(LoopIterable):
         }
         context_sensitive_axes = ContextSensitiveAxisTree(context_map)
         return LoopIndex(context_sensitive_axes)
+
+    def iter(self, outer_loops=frozenset()):
+        loop_context = merge_dicts(
+            iter_entry.loop_context for iter_entry in outer_loops
+        )
+        cf_called_map = self.with_context(loop_context)
+        # breakpoint()
+        return iter_axis_tree(
+            self.index(),
+            cf_called_map.axes,
+            cf_called_map.target_paths,
+            cf_called_map.index_exprs,
+            cf_called_map.domain_index_exprs,
+            outer_loops,
+        )
 
     def with_context(self, context):
         cf_index = self.from_index.with_context(context)
@@ -700,7 +768,7 @@ def collect_shape_index_callback(index, *args, **kwargs):
 
 
 @collect_shape_index_callback.register
-def _(loop_index: ContextFreeLoopIndex, *, loop_indices, **kwargs):
+def _(loop_index: ContextFreeLoopIndex, **kwargs):
     return (
         loop_index.axes,
         loop_index.target_paths,
@@ -729,11 +797,21 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
         )
 
         if isinstance(subslice, AffineSliceComponent):
-            if subslice.stop is None:
-                stop = target_cpt.count
+            # TODO handle this is in a test, slices of ragged things
+            if isinstance(target_cpt.count, HierarchicalArray):
+                if (
+                    subslice.stop is not None
+                    or subslice.start != 0
+                    or subslice.step != 1
+                ):
+                    raise NotImplementedError("TODO")
+                size = target_cpt.count
             else:
-                stop = subslice.stop
-            size = math.ceil((stop - subslice.start) / subslice.step)
+                if subslice.stop is None:
+                    stop = target_cpt.count
+                else:
+                    stop = subslice.stop
+                size = math.ceil((stop - subslice.start) / subslice.step)
         else:
             assert isinstance(subslice, Subset)
             size = subslice.array.axes.leaf_component.count
@@ -1223,45 +1301,95 @@ def _compose_bits(
     )
 
 
+@dataclasses.dataclass(frozen=True)
+class IndexIteratorEntry:
+    index: LoopIndex
+    source_path: PMap
+    target_path: PMap
+    source_exprs: PMap
+    target_exprs: PMap
+
+    @property
+    def loop_context(self):
+        return freeze({self.index.id: self.target_path})
+
+    @property
+    def target_replace_map(self):
+        return freeze(
+            {(self.index.id, ax): expr for ax, expr in self.target_exprs.items()}
+        )
+
+
 def iter_axis_tree(
+    loop_index: LoopIndex,
     axes: AxisTree,
     target_paths,
     index_exprs,
-    outer_loops=pmap(),
+    domain_index_exprs,
+    outer_loops=frozenset(),
     axis=None,
     path=pmap(),
     indices=pmap(),
     target_path=None,
     index_exprs_acc=None,
 ):
+    outer_replace_map = merge_dicts(
+        iter_entry.target_replace_map for iter_entry in outer_loops
+    )
     if target_path is None:
         assert index_exprs_acc is None
         target_path = target_paths.get(None, pmap())
 
         myindex_exprs = index_exprs.get(None, pmap())
+        evaluator = ExpressionEvaluator(outer_replace_map)
         new_exprs = {}
         for axlabel, index_expr in myindex_exprs.items():
-            new_index = ExpressionEvaluator(outer_loops)(index_expr)
+            new_index = evaluator(index_expr)
             assert new_index != index_expr
             new_exprs[axlabel] = new_index
         index_exprs_acc = freeze(new_exprs)
 
     if axes.is_empty:
-        yield pmap(), target_path, pmap(), index_exprs_acc
+        yield IndexIteratorEntry(
+            loop_index, pmap(), target_path, pmap(), index_exprs_acc
+        )
         return
 
     axis = axis or axes.root
 
     for component in axis.components:
+        # for efficiency do these outside the loop
         path_ = path | {axis.label: component.label}
         target_path_ = target_path | target_paths.get((axis.id, component.label), {})
-        myindex_exprs = index_exprs[axis.id, component.label]
+        myindex_exprs = index_exprs.get((axis.id, component.label), pmap())
         subaxis = axes.child(axis, component)
-        for pt in range(_as_int(component.count, path, indices)):
+
+        # convert domain_index_exprs into path + indices (for looping over ragged maps)
+        my_domain_index_exprs = domain_index_exprs.get(
+            (axis.id, component.label), pmap()
+        )
+        if my_domain_index_exprs and isinstance(component.count, HierarchicalArray):
+            if len(my_domain_index_exprs) > 1:
+                raise NotImplementedError("Needs more thought")
+            assert component.count.axes.depth == 1
+            my_root = component.count.axes.root
+            my_domain_path = freeze({my_root.label: my_root.component.label})
+
+            evaluator = ExpressionEvaluator(outer_replace_map)
+            my_domain_indices = {
+                ax: evaluator(expr) for ax, expr in my_domain_index_exprs.items()
+            }
+        else:
+            my_domain_path = pmap()
+            my_domain_indices = pmap()
+
+        for pt in range(
+            _as_int(component.count, path | my_domain_path, indices | my_domain_indices)
+        ):
             new_exprs = {}
             for axlabel, index_expr in myindex_exprs.items():
                 new_index = ExpressionEvaluator(
-                    outer_loops | indices | {axis.label: pt}
+                    outer_replace_map | indices | {axis.label: pt}
                 )(index_expr)
                 assert new_index != index_expr
                 new_exprs[axlabel] = new_index
@@ -1269,9 +1397,11 @@ def iter_axis_tree(
             indices_ = indices | {axis.label: pt}
             if subaxis:
                 yield from iter_axis_tree(
+                    loop_index,
                     axes,
                     target_paths,
                     index_exprs,
+                    domain_index_exprs,
                     outer_loops,
                     subaxis,
                     path_,
@@ -1280,7 +1410,9 @@ def iter_axis_tree(
                     index_exprs_,
                 )
             else:
-                yield path_, target_path_, indices_, index_exprs_
+                yield IndexIteratorEntry(
+                    loop_index, path_, target_path_, indices_, index_exprs_
+                )
 
 
 class ArrayPointLabel(enum.IntEnum):
@@ -1345,12 +1477,16 @@ def partition_iterset(index: LoopIndex, arrays):
         is_root_or_leaf_per_array[array.name] = is_root_or_leaf
 
     labels = np.full(paraxis.size, IterationPointType.CORE, dtype=np.uint8)
-    for path, target_path, indices, target_indices in index.iterset.iter():
-        parindex = indices[paraxis.label]
+    for p in index.iterset.iter():
+        # hack because I wrote bad code and mix up loop indices and itersets
+        p = dataclasses.replace(p, index=index)
+
+        parindex = p.source_exprs[paraxis.label]
         assert isinstance(parindex, numbers.Integral)
 
+        # needed?
         replace_map = freeze(
-            {(index.id, axis): i for axis, i in target_indices.items()}
+            {(index.id, axis): i for axis, i in p.target_exprs.items()}
         )
 
         for array in arrays:
@@ -1361,15 +1497,10 @@ def partition_iterset(index: LoopIndex, arrays):
                 continue
 
             # loop over stencil
-            array = array.with_context({index.id: target_path})
+            array = array.with_context({index.id: p.target_path})
 
-            for (
-                array_path,
-                array_target_path,
-                array_indices,
-                array_target_indices,
-            ) in array.iter_indices(replace_map):
-                offset = array.simple_offset(array_target_path, array_target_indices)
+            for q in array.iter_indices({p}):
+                offset = array.simple_offset(q.target_path, q.target_exprs)
 
                 point_label = is_root_or_leaf_per_array[array.name][offset]
                 if point_label == ArrayPointLabel.LEAF:

@@ -173,20 +173,6 @@ class ExpressionEvaluator(pym.mapper.evaluator.EvaluationMapper):
     def map_loop_index(self, expr):
         return self.context[expr.name, expr.axis]
 
-    def map_called_map(self, expr):
-        array = expr.function.map_component.array
-        indices = {axis: self.rec(idx) for axis, idx in expr.parameters.items()}
-
-        path = array.axes.path(*array.axes.leaf)
-
-        # the inner_expr tells us the right mapping for the temporary, however,
-        # for maps that are arrays the innermost axis label does not always match
-        # the label used by the temporary. Therefore we need to do a swap here.
-        inner_axis = array.axes.leaf_axis
-        indices[inner_axis.label] = indices.pop(expr.function.full_map.name)
-
-        return array.get_value(path, indices)
-
 
 def _collect_datamap(axis, *subdatamaps, axes):
     from pyop3.array import HierarchicalArray
@@ -737,13 +723,15 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
 
         return LoopIndex(self.owned)
 
-    def iter(self, outer_loops=pmap()):
+    def iter(self, outer_loops=frozenset()):
         from pyop3.itree.tree import iter_axis_tree
 
         return iter_axis_tree(
+            self.index(),
             self,
             self.target_paths,
             self.index_exprs,
+            self.domain_index_exprs,
             outer_loops,
         )
 
