@@ -3,7 +3,6 @@ import numpy as np
 import pytest
 
 import pyop3 as op3
-from pyop3.ir import LOOPY_LANG_VERSION, LOOPY_TARGET
 
 
 @pytest.mark.parametrize(
@@ -14,7 +13,7 @@ from pyop3.ir import LOOPY_LANG_VERSION, LOOPY_TARGET
         (slice(None, None, 2), slice(1, None, 2)),
     ],
 )
-def test_loop_over_slices(scalar_copy_kernel, touched, untouched):
+def test_loop_over_slices(touched, untouched, factory):
     npoints = 10
     axes = op3.Axis(npoints)
     dat0 = op3.HierarchicalArray(
@@ -22,59 +21,47 @@ def test_loop_over_slices(scalar_copy_kernel, touched, untouched):
     )
     dat1 = op3.HierarchicalArray(axes, name="dat1", dtype=dat0.dtype)
 
-    op3.do_loop(p := axes[touched].index(), scalar_copy_kernel(dat0[p], dat1[p]))
+    copy = factory.copy_kernel(1, dat0.dtype)
+    op3.do_loop(p := axes[touched].index(), copy(dat0[p], dat1[p]))
     assert np.allclose(dat1.data_ro[untouched], 0)
     assert np.allclose(dat1.data_ro[touched], dat0.data_ro[touched])
 
 
 @pytest.mark.parametrize("size,touched", [(6, [2, 3, 5, 0])])
-def test_scalar_copy_of_subset(scalar_copy_kernel, size, touched):
+def test_scalar_copy_of_subset(size, touched, factory):
     untouched = list(set(range(size)) - set(touched))
-    subset_axes = op3.Axis({"pt0": len(touched)}, "ax0")
+    subset_axes = op3.Axis(len(touched))
     subset = op3.HierarchicalArray(
         subset_axes, name="subset0", data=np.asarray(touched), dtype=op3.IntType
     )
 
-    axes = op3.Axis({"pt0": size}, "ax0")
+    axes = op3.Axis(size)
     dat0 = op3.HierarchicalArray(
         axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType
     )
     dat1 = op3.HierarchicalArray(axes, name="dat1", dtype=dat0.dtype)
 
-    op3.do_loop(p := axes[subset].index(), scalar_copy_kernel(dat0[p], dat1[p]))
+    copy = factory.copy_kernel(1, dat0.dtype)
+    op3.do_loop(p := axes[subset].index(), copy(dat0[p], dat1[p]))
     assert np.allclose(dat1.data_ro[touched], dat0.data_ro[touched])
     assert np.allclose(dat1.data_ro[untouched], 0)
 
 
 @pytest.mark.parametrize("size,indices", [(6, [2, 3, 5, 0])])
-def test_write_to_subset(scalar_copy_kernel, size, indices):
+def test_write_to_subset(size, indices, factory):
     n = len(indices)
 
-    subset_axes = op3.Axis({"pt0": n}, "ax0")
+    subset_axes = op3.Axis(n)
     subset = op3.HierarchicalArray(
-        subset_axes, name="subset0", data=np.asarray(indices), dtype=op3.IntType
+        subset_axes, name="subset0", data=np.asarray(indices, dtype=op3.IntType)
     )
 
-    axes = op3.Axis({"pt0": size}, "ax0")
+    axes = op3.Axis(size)
     dat0 = op3.HierarchicalArray(
-        axes, name="dat0", data=np.arange(axes.size), dtype=op3.IntType
+        axes, name="dat0", data=np.arange(axes.size, dtype=op3.IntType)
     )
     dat1 = op3.HierarchicalArray(subset_axes, name="dat1", dtype=dat0.dtype)
 
-    kernel = op3.Function(
-        lp.make_kernel(
-            f"{{ [i]: 0 <= i < {n} }}",
-            "y[i] = x[i]",
-            [
-                lp.GlobalArg("x", shape=(n,), dtype=dat0.dtype),
-                lp.GlobalArg("y", shape=(n,), dtype=dat0.dtype),
-            ],
-            name="copy",
-            target=LOOPY_TARGET,
-            lang_version=LOOPY_LANG_VERSION,
-        ),
-        [op3.READ, op3.WRITE],
-    )
-
-    op3.do_loop(op3.Axis(1).index(), kernel(dat0[subset], dat1))
+    copy = factory.copy_kernel(n, dat0.dtype)
+    op3.do_loop(op3.Axis(1).index(), copy(dat0[subset], dat1))
     assert (dat1.data_ro == indices).all()
