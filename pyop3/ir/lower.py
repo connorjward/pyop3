@@ -61,6 +61,7 @@ from pyop3.lang import (
 from pyop3.log import logger
 from pyop3.utils import (
     PrettyTuple,
+    UniqueNameGenerator,
     checked_zip,
     just_one,
     merge_dicts,
@@ -86,6 +87,18 @@ class AssignmentType(enum.Enum):
     ZERO = enum.auto()
 
 
+class Renamer(pym.mapper.IdentityMapper):
+    def __init__(self, replace_map):
+        super().__init__()
+        self._replace_map = replace_map
+
+    def map_variable(self, var):
+        try:
+            return pym.var(self._replace_map[var.name])
+        except KeyError:
+            return var
+
+
 class CodegenContext(abc.ABC):
     pass
 
@@ -97,10 +110,12 @@ class LoopyCodegenContext(CodegenContext):
         self._args = []
         self._subkernels = []
 
+        self.actual_to_kernel_rename_map = {}
+
         self._within_inames = frozenset()
         self._last_insn_id = None
 
-        self._name_generator = pytools.UniqueNameGenerator()
+        self._name_generator = UniqueNameGenerator()
 
     @property
     def domains(self):
@@ -112,12 +127,18 @@ class LoopyCodegenContext(CodegenContext):
 
     @property
     def arguments(self):
-        # TODO should renumber things here
         return tuple(self._args)
 
     @property
     def subkernels(self):
         return tuple(self._subkernels)
+
+    @property
+    def kernel_to_actual_rename_map(self):
+        return {
+            kernel: actual
+            for actual, kernel in self.actual_to_kernel_rename_map.items()
+        }
 
     def add_domain(self, iname, *args):
         nargs = len(args)
@@ -130,6 +151,10 @@ class LoopyCodegenContext(CodegenContext):
         self._domains.append(domain_str)
 
     def add_assignment(self, assignee, expression, prefix="insn"):
+        renamer = Renamer(self.actual_to_kernel_rename_map)
+        assignee = renamer(assignee)
+        expression = renamer(expression)
+
         insn = lp.Assignment(
             assignee,
             expression,
@@ -164,19 +189,18 @@ class LoopyCodegenContext(CodegenContext):
         self._add_instruction(insn)
 
     def add_argument(self, array):
-        # FIXME if self._args is a set then we can add duplicates here provided
-        # that we canonically renumber at a later point
-        if array.name in [a.name for a in self._args]:
-            logger.debug(
-                f"Skipping adding {array.name} to the codegen context as it is already present"
-            )
+        if array.name in self.actual_to_kernel_rename_map:
             return
 
+        arg_name = self.actual_to_kernel_rename_map.setdefault(
+            array.name, self.unique_name("arg")
+        )
+
         if isinstance(array.buffer, PackedBuffer):
-            arg = lp.ValueArg(array.name, dtype=self._dtype(array))
+            arg = lp.ValueArg(arg_name, dtype=self._dtype(array))
         else:
             assert isinstance(array.buffer, DistributedBuffer)
-            arg = lp.GlobalArg(array.name, dtype=self._dtype(array), shape=None)
+            arg = lp.GlobalArg(arg_name, dtype=self._dtype(array), shape=None)
         self._args.append(arg)
 
     def add_temporary(self, name, dtype=IntType, shape=()):
@@ -188,9 +212,6 @@ class LoopyCodegenContext(CodegenContext):
 
     # I am not sure that this belongs here, I generate names separately from adding domains etc
     def unique_name(self, prefix):
-        # add prefix to the generator so names are generated starting with
-        # "prefix_0" instead of "prefix"
-        self._name_generator.add_name(prefix, conflicting_ok=True)
         return self._name_generator(prefix)
 
     @contextlib.contextmanager
@@ -245,19 +266,21 @@ class LoopyCodegenContext(CodegenContext):
 
 
 class CodegenResult:
-    # TODO also accept a map from input arrays to the renumbered ones, helpful for replacement
-    def __init__(self, expr, ir):
+    def __init__(self, expr, ir, arg_replace_map):
         self.expr = expr
         self.ir = ir
+        self.arg_replace_map = arg_replace_map
 
     def __call__(self, **kwargs):
         from pyop3.target import compile_loopy
 
-        args = [
-            _as_pointer(kwargs.get(arg.name, self.expr.datamap[arg.name]))
-            for arg in self.ir.default_entrypoint.args
-        ]
-        compile_loopy(self.ir)(*args)
+        data_args = []
+        for kernel_arg in self.ir.default_entrypoint.args:
+            actual_arg_name = self.arg_replace_map.get(kernel_arg.name, kernel_arg.name)
+            array = kwargs.get(actual_arg_name, self.expr.datamap[actual_arg_name])
+            data_arg = _as_pointer(array)
+            data_args.append(data_arg)
+        compile_loopy(self.ir)(*data_args)
 
     def target_code(self, target):
         raise NotImplementedError("TODO")
@@ -365,7 +388,7 @@ def compile(expr: LoopExpr, name="mykernel"):
     tu = tu.with_entrypoints("mykernel")
 
     # breakpoint()
-    return CodegenResult(expr, tu)
+    return CodegenResult(expr, tu, ctx.kernel_to_actual_rename_map)
 
 
 @functools.singledispatch
@@ -761,15 +784,16 @@ def parse_assignment_petscmat(array, temp, shape, op, loop_indices, codegen_cont
     # https://petsc.org/release/manualpages/Mat/MatGetValuesLocal/
     # PetscErrorCode MatGetValuesLocal(Mat mat, PetscInt nrow, const PetscInt irow[], PetscInt ncol, const PetscInt icol[], PetscScalar y[])
     nrow = rexpr.array.axes.leaf_component.count
-    irow = new_rexpr
     ncol = cexpr.array.axes.leaf_component.count
-    icol = new_cexpr
+
+    # rename things
+    mat_name = codegen_context.actual_to_kernel_rename_map[mat.name]
+    renamer = Renamer(codegen_context.actual_to_kernel_rename_map)
+    irow = renamer(new_rexpr)
+    icol = renamer(new_cexpr)
 
     # can only use GetValuesLocal when lgmaps are set (which I don't yet do)
-    call_str = (
-        # f"MatGetValuesLocal({mat.name}, {nrow}, &({irow}), {ncol}, &({icol}), &({temp.name}[0]));"
-        f"MatGetValues({mat.name}, {nrow}, &({irow}), {ncol}, &({icol}), &({temp.name}[0]));"
-    )
+    call_str = f"MatGetValues({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({temp.name}[0]));"
     codegen_context.add_cinstruction(call_str)
 
 
@@ -971,10 +995,10 @@ def make_temp_expr(temporary, shape, path, jnames, ctx):
     # linearly index it here
     extra_indices = (0,) * (len(shape) - 1)
     # also has to be a scalar, not an expression
-    temp_offset_var = ctx.unique_name("off")
-    ctx.add_temporary(temp_offset_var)
+    temp_offset_name = ctx.unique_name("off")
+    temp_offset_var = pym.var(temp_offset_name)
+    ctx.add_temporary(temp_offset_name)
     ctx.add_assignment(temp_offset_var, temp_offset)
-    temp_offset_var = pym.var(temp_offset_var)
     return pym.subscript(pym.var(temporary.name), extra_indices + (temp_offset_var,))
 
 
@@ -1103,9 +1127,15 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
             self._codegen_context,
         )
         base_varname = ctx.unique_name("base")
+
+        # rename things
+        indices_name = ctx.actual_to_kernel_rename_map[indices.name]
+        renamer = Renamer(ctx.actual_to_kernel_rename_map)
+        start_expr = renamer(start_expr)
+
         # breaks if unsigned
         ctx.add_cinstruction(
-            f"int32_t* {base_varname} = {indices.name} + {start_expr};", {indices.name}
+            f"int32_t* {base_varname} = {indices_name} + {start_expr};", {indices_name}
         )
 
         # nitems
