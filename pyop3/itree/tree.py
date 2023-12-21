@@ -1484,11 +1484,6 @@ def partition_iterset(index: LoopIndex, arrays):
         parindex = p.source_exprs[paraxis.label]
         assert isinstance(parindex, numbers.Integral)
 
-        # needed?
-        replace_map = freeze(
-            {(index.id, axis): i for axis, i in p.target_exprs.items()}
-        )
-
         for array in arrays:
             # skip purely local arrays
             if not array.array.is_distributed:
