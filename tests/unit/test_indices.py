@@ -1,6 +1,4 @@
-import numpy as np
-import pytest
-from pyrsistent import freeze
+from pyrsistent import freeze, pmap
 
 import pyop3 as op3
 
@@ -62,3 +60,43 @@ def test_axes_iter_multi_component():
         assert False
     except StopIteration:
         pass
+
+
+def test_index_forest_inserts_extra_slices():
+    axes = op3.AxisTree.from_nest(
+        {
+            op3.Axis({"pt0": 5}, "ax0"): op3.Axis({"pt0": 3}, "ax1"),
+        },
+    )
+    iforest = op3.itree.as_index_forest(slice(None), axes=axes)
+
+    # since there are no loop indices, the index forest should contain a single entry
+    assert len(iforest) == 1
+    assert pmap() in iforest.keys()
+
+    itree = iforest[pmap()]
+    assert itree.depth == 2
+
+
+def test_multi_component_index_forest_inserts_extra_slices():
+    axes = op3.AxisTree.from_nest(
+        {
+            op3.Axis({"pt0": 5, "pt1": 4}, "ax0"): {
+                "pt0": op3.Axis({"pt0": 3}, "ax1"),
+                "pt1": op3.Axis({"pt0": 2}, "ax1"),
+            }
+        },
+    )
+    iforest = op3.itree.as_index_forest(
+        op3.Slice("ax1", [op3.AffineSliceComponent("pt0")]), axes=axes
+    )
+
+    # since there are no loop indices, the index forest should contain a single entry
+    assert len(iforest) == 1
+    assert pmap() in iforest.keys()
+
+    itree = iforest[pmap()]
+    assert itree.depth == 2
+    assert itree.root.label == "ax1"
+    assert all(index.label == "ax0" for index, _ in itree.leaves)
+    assert len(itree.leaves) == 2

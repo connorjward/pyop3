@@ -143,7 +143,11 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
                 shape = axes.size
 
             data = DistributedBuffer(
-                shape, dtype, name=self.name, data=data, sf=axes.sf
+                shape,
+                axes.sf or axes.comm,
+                dtype,
+                name=self.name,
+                data=data,
             )
 
         self.buffer = data
@@ -280,7 +284,8 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
 
     @cached_property
     def datamap(self):
-        datamap_ = {self.name: self}
+        datamap_ = {}
+        datamap_.update(self.buffer.datamap)
         datamap_.update(self.axes.datamap)
         for index_exprs in self.index_exprs.values():
             for expr in index_exprs.values():
@@ -292,6 +297,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         return freeze(datamap_)
 
     # TODO update docstring
+    # TODO is this a property of the buffer?
     def assemble(self, update_leaves=False):
         """Ensure that stored values are up-to-date.
 
@@ -425,6 +431,18 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
             selected.append(current_axis)
             current_axis = current_axis.get_part(idx.npart).subaxis
         return tuple(selected)
+
+    @property
+    def vec_ro(self):
+        # FIXME: This does not work for the case when the array here is indexed in some
+        # way. E.g. dat[::2] since the full buffer is returned.
+        return self.buffer.vec_ro
+
+    @property
+    def vec_wo(self):
+        # FIXME: This does not work for the case when the array here is indexed in some
+        # way. E.g. dat[::2] since the full buffer is returned.
+        return self.buffer.vec_wo
 
 
 # Needs to be subclass for isinstance checks to work

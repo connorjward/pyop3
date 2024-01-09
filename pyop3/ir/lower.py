@@ -671,7 +671,10 @@ def parse_assignment(
     loop_context = context_from_indices(loop_indices)
 
     if isinstance(array, (HierarchicalArray, ContextSensitiveMultiArray)):
-        if isinstance(array.with_context(loop_context).buffer, PackedBuffer):
+        if (
+            isinstance(array.with_context(loop_context).buffer, PackedBuffer)
+            and op != AssignmentType.ZERO
+        ):
             if not isinstance(
                 array.with_context(loop_context).buffer.array, PetscMatAIJ
             ):
@@ -686,9 +689,10 @@ def parse_assignment(
             )
             return
         else:
-            assert isinstance(
-                array.with_context(loop_context).buffer, DistributedBuffer
-            )
+            # assert isinstance(
+            #     array.with_context(loop_context).buffer, DistributedBuffer
+            # )
+            pass
     else:
         assert isinstance(array, LoopIndex)
 
@@ -730,71 +734,122 @@ def parse_assignment(
 def parse_assignment_petscmat(array, temp, shape, op, loop_indices, codegen_context):
     from pyop3.array.harray import MultiArrayVariable
 
-    (iraxis, ircpt), (icaxis, iccpt) = array.axes.path_with_nodes(
-        *array.axes.leaf, ordered=True
-    )
-    rkey = (iraxis.id, ircpt)
-    ckey = (icaxis.id, iccpt)
-
-    rexpr = array.index_exprs[rkey][just_one(array.target_paths[rkey])]
-    cexpr = array.index_exprs[ckey][just_one(array.target_paths[ckey])]
-
-    mat = array.buffer.array
-
-    # need to generate code like map0[i0] instead of the usual map0[i0, i1]
-    # this is because we are passing the full map through to the function call
-
-    # similarly we also need to be careful to interrupt this function early
-    # we don't want to emit loops for things!
-
-    # I believe that this is probably the right place to be flattening the map
-    # expressions. We want to have already done any clever substitution for arity 1
-    # objects.
-
-    # rexpr = self._flatten(rexpr)
-    # cexpr = self._flatten(cexpr)
-
-    assert temp.axes.depth == 2
-    # sniff the right labels from the temporary, they tell us what jnames to substitute
-    rlabel = temp.axes.root.label
-    clabel = temp.axes.leaf_axis.label
-
-    iname_expr_replace_map = {}
-    for _, replace_map in loop_indices.values():
-        iname_expr_replace_map.update(replace_map)
-
-    # for now assume that we pass exactly the right map through, do no composition
-    if not isinstance(rexpr, MultiArrayVariable):
-        raise NotImplementedError
-
-    # substitute a zero for the inner axis, we want to avoid this inner loop
-    new_rexpr = JnameSubstitutor(iname_expr_replace_map | {rlabel: 0}, codegen_context)(
-        rexpr
-    )
-
-    if not isinstance(cexpr, MultiArrayVariable):
-        raise NotImplementedError
-
-    # substitute a zero for the inner axis, we want to avoid this inner loop
-    new_cexpr = JnameSubstitutor(iname_expr_replace_map | {clabel: 0}, codegen_context)(
-        cexpr
-    )
-
     # now emit the right line of code, this should properly be a lp.ScalarCallable
     # https://petsc.org/release/manualpages/Mat/MatGetValuesLocal/
     # PetscErrorCode MatGetValuesLocal(Mat mat, PetscInt nrow, const PetscInt irow[], PetscInt ncol, const PetscInt icol[], PetscScalar y[])
-    nrow = rexpr.array.axes.leaf_component.count
-    ncol = cexpr.array.axes.leaf_component.count
+    # nrow = rexpr.array.axes.leaf_component.count
+    # ncol = cexpr.array.axes.leaf_component.count
+    # TODO check this? could compare matches temp (flat) size
+    nrow, ncol = shape
+
+    mat = array.buffer.mat
 
     # rename things
     mat_name = codegen_context.actual_to_kernel_rename_map[mat.name]
-    renamer = Renamer(codegen_context.actual_to_kernel_rename_map)
-    irow = renamer(new_rexpr)
-    icol = renamer(new_cexpr)
+    # renamer = Renamer(codegen_context.actual_to_kernel_rename_map)
+    # irow = renamer(array.buffer.rmap)
+    # icol = renamer(array.buffer.cmap)
+    rmap = array.buffer.rmap
+    cmap = array.buffer.cmap
+    codegen_context.add_argument(rmap)
+    codegen_context.add_argument(cmap)
+    irow = f"{codegen_context.actual_to_kernel_rename_map[rmap.name]}[0]"
+    icol = f"{codegen_context.actual_to_kernel_rename_map[cmap.name]}[0]"
 
     # can only use GetValuesLocal when lgmaps are set (which I don't yet do)
-    call_str = f"MatGetValues({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({temp.name}[0]));"
+    if op == AssignmentType.READ:
+        call_str = f"MatGetValues({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({temp.name}[0]));"
+    elif op == AssignmentType.WRITE:
+        call_str = f"MatSetValues({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({temp.name}[0]), INSERT_VALUES);"
+    elif op == AssignmentType.INC:
+        call_str = f"MatSetValues({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({temp.name}[0]), ADD_VALUES);"
+    else:
+        raise NotImplementedError
     codegen_context.add_cinstruction(call_str)
+    return
+
+    ### old code below ###
+
+    # we should flatten the array before this point as an earlier pass
+    # if array.axes.depth != 2:
+    #     raise ValueError
+
+    # TODO We currently emit separate calls to MatSetValues if we have
+    # multi-component arrays. This is naturally quite inefficient and we
+    # could do things in a single call if we could "compress" the data
+    # correctly beforehand. This is an optimisation I want to implement
+    # generically though.
+    for leaf_axis, leaf_cpt in array.axes.leaves:
+        # This is wrong - we now have shape to deal with...
+        (iraxis, ircpt), (icaxis, iccpt) = array.axes.path_with_nodes(
+            leaf_axis, leaf_cpt, ordered=True
+        )
+        rkey = (iraxis.id, ircpt)
+        ckey = (icaxis.id, iccpt)
+
+        rexpr = array.index_exprs[rkey][just_one(array.target_paths[rkey])]
+        cexpr = array.index_exprs[ckey][just_one(array.target_paths[ckey])]
+
+        mat = array.buffer.array
+
+        # need to generate code like map0[i0] instead of the usual map0[i0, i1]
+        # this is because we are passing the full map through to the function call
+
+        # similarly we also need to be careful to interrupt this function early
+        # we don't want to emit loops for things!
+
+        # I believe that this is probably the right place to be flattening the map
+        # expressions. We want to have already done any clever substitution for arity 1
+        # objects.
+
+        # rexpr = self._flatten(rexpr)
+        # cexpr = self._flatten(cexpr)
+
+        assert temp.axes.depth == 2
+        # sniff the right labels from the temporary, they tell us what jnames to substitute
+        rlabel = temp.axes.root.label
+        clabel = temp.axes.leaf_axis.label
+
+        iname_expr_replace_map = {}
+        for _, replace_map in loop_indices.values():
+            iname_expr_replace_map.update(replace_map)
+
+        # for now assume that we pass exactly the right map through, do no composition
+        if not isinstance(rexpr, MultiArrayVariable):
+            raise NotImplementedError
+
+        # substitute a zero for the inner axis, we want to avoid this inner loop
+        new_rexpr = JnameSubstitutor(
+            iname_expr_replace_map | {rlabel: 0}, codegen_context
+        )(rexpr)
+
+        if not isinstance(cexpr, MultiArrayVariable):
+            raise NotImplementedError
+
+        # substitute a zero for the inner axis, we want to avoid this inner loop
+        new_cexpr = JnameSubstitutor(
+            iname_expr_replace_map | {clabel: 0}, codegen_context
+        )(cexpr)
+
+        # now emit the right line of code, this should properly be a lp.ScalarCallable
+        # https://petsc.org/release/manualpages/Mat/MatGetValuesLocal/
+        # PetscErrorCode MatGetValuesLocal(Mat mat, PetscInt nrow, const PetscInt irow[], PetscInt ncol, const PetscInt icol[], PetscScalar y[])
+        nrow = rexpr.array.axes.leaf_component.count
+        ncol = cexpr.array.axes.leaf_component.count
+
+        # rename things
+        mat_name = codegen_context.actual_to_kernel_rename_map[mat.name]
+        renamer = Renamer(codegen_context.actual_to_kernel_rename_map)
+        irow = renamer(new_rexpr)
+        icol = renamer(new_cexpr)
+
+        # can only use GetValuesLocal when lgmaps are set (which I don't yet do)
+        if op == AssignmentType.READ:
+            call_str = f"MatGetValues({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({temp.name}[0]));"
+        # elif op == AssignmentType.WRITE:
+        else:
+            raise NotImplementedError
+        codegen_context.add_cinstruction(call_str)
 
 
 # TODO now I attach a lot of info to the context-free array, do I need to pass axes around?

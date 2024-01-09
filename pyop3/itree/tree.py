@@ -39,7 +39,12 @@ from pyop3.axtree.tree import (
 )
 from pyop3.dtypes import IntType, get_mpi_dtype
 from pyop3.lang import KernelArgument
-from pyop3.tree import LabelledTree, MultiComponentLabelledNode, postvisit
+from pyop3.tree import (
+    LabelledNodeComponent,
+    LabelledTree,
+    MultiComponentLabelledNode,
+    postvisit,
+)
 from pyop3.utils import (
     Identified,
     Labelled,
@@ -101,12 +106,13 @@ def collect_datamap_from_expression(expr: pym.primitives.Expr) -> dict:
     return _datamap_collector(expr)
 
 
-class SliceComponent(pytools.ImmutableRecord, abc.ABC):
-    fields = {"component"}
-
+class SliceComponent(LabelledNodeComponent, abc.ABC):
     def __init__(self, component):
-        super().__init__()
-        self.component = component
+        super().__init__(component)
+
+    @property
+    def component(self):
+        return self.label
 
 
 class AffineSliceComponent(SliceComponent):
@@ -368,9 +374,14 @@ class Slice(ContextFreeIndex):
     fields = Index.fields | {"axis", "slices"} - {"label"}
 
     def __init__(self, axis, slices, *, id=None):
+        # super().__init__(label=axis, id=id, component_labels=[s.label for s in slices])
         super().__init__(label=axis, id=id)
         self.axis = axis
         self.slices = as_tuple(slices)
+
+    @property
+    def components(self):
+        return self.slices
 
     @cached_property
     def leaf_target_paths(self):
@@ -413,8 +424,9 @@ class Map(pytools.ImmutableRecord):
         return pmap(data)
 
 
-class CalledMap(LoopIterable):
-    def __init__(self, map, from_index):
+class CalledMap(Identified, LoopIterable):
+    def __init__(self, map, from_index, *, id=None):
+        Identified.__init__(self, id=id)
         self.map = map
         self.from_index = from_index
 
@@ -493,7 +505,7 @@ class CalledMap(LoopIterable):
 
     def with_context(self, context):
         cf_index = self.from_index.with_context(context)
-        return ContextFreeCalledMap(self.map, cf_index)
+        return ContextFreeCalledMap(self.map, cf_index, id=self.id)
 
     @property
     def name(self):
@@ -514,6 +526,10 @@ class ContextFreeCalledMap(Index, ContextFree):
     @property
     def name(self) -> str:
         return self.map.name
+
+    @property
+    def components(self):
+        return self.map.connectivity[self.index.target_paths]
 
     @cached_property
     def leaf_target_paths(self):
@@ -577,8 +593,17 @@ class ContextSensitiveCalledMap(ContextSensitiveLoopIterable):
     pass
 
 
+# TODO make kwargs explicit
+def as_index_forest(forest: Any, *, axes=None, **kwargs):
+    forest = _as_index_forest(forest, axes=axes, **kwargs)
+    if axes is not None:
+        forest = _validated_index_forest(forest, axes=axes, **kwargs)
+    return forest
+
+
 @functools.singledispatch
-def as_index_forest(arg: Any, *, axes=None, path=pmap(), **kwargs):
+def _as_index_forest(arg: Any, *, axes=None, path=pmap(), **kwargs):
+    # FIXME no longer a cyclic import
     from pyop3.array import HierarchicalArray
 
     if isinstance(arg, HierarchicalArray):
@@ -602,7 +627,7 @@ def as_index_forest(arg: Any, *, axes=None, path=pmap(), **kwargs):
         raise TypeError(f"No handler provided for {type(arg).__name__}")
 
 
-@as_index_forest.register
+@_as_index_forest.register
 def _(indices: collections.abc.Sequence, *, path=pmap(), loop_context=pmap(), **kwargs):
     index, *subindices = indices
 
@@ -615,7 +640,7 @@ def _(indices: collections.abc.Sequence, *, path=pmap(), loop_context=pmap(), **
     forest = {}
     # TODO, it is a bad pattern to build a forest here when I really just want to convert
     # a single index
-    for context, tree in as_index_forest(
+    for context, tree in _as_index_forest(
         index, path=path, loop_context=loop_context, **kwargs
     ).items():
         # converting a single index should only produce index trees with depth 1
@@ -626,9 +651,7 @@ def _(indices: collections.abc.Sequence, *, path=pmap(), loop_context=pmap(), **
             for clabel, target_path in checked_zip(
                 cf_index.component_labels, cf_index.leaf_target_paths
             ):
-                path_ = path | target_path
-
-                subforest = as_index_forest(
+                subforest = _as_index_forest(
                     subindices,
                     path=path | target_path,
                     loop_context=loop_context | context,
@@ -641,23 +664,23 @@ def _(indices: collections.abc.Sequence, *, path=pmap(), loop_context=pmap(), **
     return freeze(forest)
 
 
-@as_index_forest.register
+@_as_index_forest.register
 def _(forest: collections.abc.Mapping, **kwargs):
     return forest
 
 
-@as_index_forest.register
+@_as_index_forest.register
 def _(index_tree: IndexTree, **kwargs):
     return freeze({pmap(): index_tree})
 
 
-@as_index_forest.register
+@_as_index_forest.register
 def _(index: ContextFreeIndex, **kwargs):
     return freeze({pmap(): IndexTree(index)})
 
 
 # TODO This function can definitely be refactored
-@as_index_forest.register
+@_as_index_forest.register
 def _(index: AbstractLoopIndex, *, loop_context=pmap(), **kwargs):
     local = isinstance(index, LocalLoopIndex)
 
@@ -712,22 +735,22 @@ def _(index: AbstractLoopIndex, *, loop_context=pmap(), **kwargs):
     return freeze(forest)
 
 
-@as_index_forest.register
+@_as_index_forest.register
 def _(called_map: CalledMap, **kwargs):
     forest = {}
-    input_forest = as_index_forest(called_map.from_index, **kwargs)
+    input_forest = _as_index_forest(called_map.from_index, **kwargs)
     for context in input_forest.keys():
         cf_called_map = called_map.with_context(context)
         forest[context] = IndexTree(cf_called_map)
     return freeze(forest)
 
 
-@as_index_forest.register
+@_as_index_forest.register
 def _(index: numbers.Integral, **kwargs):
-    return as_index_forest(slice(index, index + 1), **kwargs)
+    return _as_index_forest(slice(index, index + 1), **kwargs)
 
 
-@as_index_forest.register
+@_as_index_forest.register
 def _(slice_: slice, *, axes=None, path=pmap(), loop_context=pmap(), **kwargs):
     if axes is None:
         raise RuntimeError("invalid slice usage")
@@ -752,14 +775,77 @@ def _(slice_: slice, *, axes=None, path=pmap(), loop_context=pmap(), **kwargs):
     return freeze({loop_context: IndexTree(slice_)})
 
 
-@as_index_forest.register
+@_as_index_forest.register
 def _(label: str, *, axes, **kwargs):
     # if we use a string then we assume we are taking a full slice of the
     # top level axis
     axis = axes.root
     component = just_one(c for c in axis.components if c.label == label)
     slice_ = Slice(axis.label, [AffineSliceComponent(component.label)])
-    return as_index_forest(slice_, axes=axes, **kwargs)
+    return _as_index_forest(slice_, axes=axes, **kwargs)
+
+
+def _validated_index_forest(forest, *, axes):
+    """
+    Insert slices and check things work OK.
+    """
+    assert axes is not None, "Cannot validate if axes are unknown"
+
+    return freeze(
+        {ctx: _validated_index_tree(tree, axes=axes) for ctx, tree in forest.items()}
+    )
+
+
+def _validated_index_tree(tree, index=None, *, axes, path=pmap()):
+    if index is None:
+        index = tree.root
+
+    new_tree = IndexTree(index)
+
+    for clabel, path_ in checked_zip(index.component_labels, index.leaf_target_paths):
+        if subindex := tree.child(index, clabel):
+            subtree = _validated_index_tree(
+                tree,
+                subindex,
+                axes=axes,
+                path=path | path_,
+            )
+        else:
+            subtree = _collect_extra_slices(axes, path | path_)
+
+        if subtree:
+            new_tree = new_tree.add_subtree(
+                subtree,
+                index,
+                clabel,
+            )
+
+    return new_tree
+
+
+def _collect_extra_slices(axes, path, *, axis=None):
+    if axis is None:
+        axis = axes.root
+
+    if axis.label in path:
+        if subaxis := axes.child(axis, path[axis.label]):
+            return _collect_extra_slices(axes, path, axis=subaxis)
+        else:
+            return None
+    else:
+        index_tree = IndexTree(
+            Slice(axis.label, [AffineSliceComponent(c.label) for c in axis.components])
+        )
+        for cpt, clabel in checked_zip(
+            axis.components, index_tree.root.component_labels
+        ):
+            if subaxis := axes.child(axis, cpt):
+                subtree = _collect_extra_slices(axes, path, axis=subaxis)
+                if subtree:
+                    index_tree = index_tree.add_subtree(
+                        subtree, index_tree.root, clabel
+                    )
+        return index_tree
 
 
 @functools.singledispatch

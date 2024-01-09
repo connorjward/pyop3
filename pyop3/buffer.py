@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import abc
-import numbers
+import contextlib
 from functools import cached_property
 
 import numpy as np
 from mpi4py import MPI
+from petsc4py import PETSc
+from pyrsistent import freeze
 
 from pyop3.dtypes import ScalarType
-from pyop3.lang import KernelArgument
+from pyop3.lang import READ, WRITE, KernelArgument
+from pyop3.sf import StarForest
 from pyop3.utils import UniqueNameGenerator, as_tuple, deprecated, readonly
 
 
@@ -46,6 +49,11 @@ class Buffer(KernelArgument, abc.ABC):
     def dtype(self):
         pass
 
+    @property
+    @abc.abstractmethod
+    def datamap(self):
+        pass
+
 
 # TODO should AbstractBuffer be a class and then a serial buffer can be its own class?
 class DistributedBuffer(Buffer):
@@ -61,7 +69,14 @@ class DistributedBuffer(Buffer):
     _name_generator = UniqueNameGenerator()
 
     def __init__(
-        self, shape, dtype=None, *, name=None, prefix=None, data=None, sf=None
+        self,
+        shape,
+        sf_or_comm,
+        dtype=None,
+        *,
+        name=None,
+        prefix=None,
+        data=None,
     ):
         shape = as_tuple(shape)
         if dtype is None:
@@ -76,13 +91,21 @@ class DistributedBuffer(Buffer):
             if data.dtype != dtype:
                 raise ValueError
 
-        if sf and shape[0] != sf.size:
-            raise IncompatibleStarForestException
+        if isinstance(sf_or_comm, StarForest):
+            sf = sf_or_comm
+            comm = sf.comm
+            # TODO I don't really like having shape as an argument...
+            if sf and shape[0] != sf.size:
+                raise IncompatibleStarForestException
+        else:
+            sf = None
+            comm = sf_or_comm
 
         self.shape = shape
         self._dtype = dtype
         self._lazy_data = data
         self.sf = sf
+        self.comm = comm
 
         self.name = name or self._name_generator(prefix or self._prefix)
 
@@ -93,6 +116,8 @@ class DistributedBuffer(Buffer):
         self._leaves_valid = True
         self._pending_reduction = None
         self._finalizer = None
+
+        self._lazy_vec = None
 
     # @classmethod
     # def from_array(cls, array: np.ndarray, **kwargs):
@@ -147,6 +172,31 @@ class DistributedBuffer(Buffer):
     @property
     def is_distributed(self) -> bool:
         return self.sf is not None
+
+    @property
+    def datamap(self):
+        return freeze({self.name: self})
+
+    @contextlib.contextmanager
+    def vec_context(self, intent):
+        """Wrap the buffer in a PETSc Vec.
+
+        TODO implement intent parameter
+
+        """
+        yield self._vec
+        # if access is not Access.READ:
+        #     self.halo_valid = False
+
+    @property
+    def vec_ro(self):
+        # TODO I don't think that intent is the right thing here. We really only have
+        # READ, WRITE or RW
+        return self.vec_context(READ)
+
+    @property
+    def vec_wo(self):
+        return self.vec_context(WRITE)
 
     @property
     def _data(self):
@@ -238,6 +288,19 @@ class DistributedBuffer(Buffer):
     def _reduce_then_broadcast(self):
         self._reduce_leaves_to_roots()
         self._broadcast_roots_to_leaves()
+
+    @property
+    def _vec(self):
+        if self.dtype != PETSc.ScalarType:
+            raise RuntimeError(
+                f"Cannot create a Vec with data type {self.dtype}, "
+                "must be {PETSc.ScalarType}"
+            )
+
+        if self._lazy_vec is None:
+            vec = PETSc.Vec().createWithArray(self._owned_data, comm=self.comm)
+            self._lazy_vec = vec
+        return self._lazy_vec
 
 
 class PackedBuffer(Buffer):

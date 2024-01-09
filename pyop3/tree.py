@@ -352,14 +352,19 @@ class LabelledTree(AbstractTree):
         cidx = parent.component_labels.index(clabel)
         parent_to_children = {p: list(ch) for p, ch in self.parent_to_children.items()}
 
-        sub_p2c = dict(subtree.parent_to_children)
+        sub_p2c = {p: list(ch) for p, ch in subtree.parent_to_children.items()}
+        if uniquify:
+            self._uniquify_node_ids(sub_p2c, set(parent_to_children.keys()))
+            assert (
+                len(set(sub_p2c.keys()) & set(parent_to_children.keys()) - {None}) == 0
+            )
+
         subroot = just_one(sub_p2c.pop(None))
         parent_to_children[parent.id][cidx] = subroot
         parent_to_children.update(sub_p2c)
 
         if uniquify:
             self._uniquify_node_labels(parent_to_children)
-            self._uniquify_node_ids(parent_to_children)
 
         return self.copy(parent_to_children=parent_to_children)
 
@@ -381,18 +386,23 @@ class LabelledTree(AbstractTree):
                 node_map[node.id][i] = subnode
             self._uniquify_node_labels(node_map, subnode, seen_labels | {subnode.label})
 
-    def _uniquify_node_ids(self, node_map):
-        seen_ids = set()
-        for parent_id, nodes in node_map.items():
-            for i, node in enumerate(nodes):
-                if node is None:
-                    continue
-                if node.id in seen_ids:
-                    new_id = UniqueNameGenerator(seen_ids)(node.id)
-                    assert new_id not in seen_ids
-                    node = node.copy(id=new_id)
-                    node_map[parent_id][i] = node
-                seen_ids.add(node.id)
+    # do as a traversal since there is an ordering constraint in how we replace IDs
+    def _uniquify_node_ids(self, node_map, existing_ids, node=None):
+        if not node_map:
+            return
+
+        node_id = node.id if node is not None else None
+        for i, subnode in enumerate(node_map.get(node_id, [])):
+            if subnode is None:
+                continue
+            if subnode.id in existing_ids:
+                new_id = UniqueNameGenerator(existing_ids)(subnode.id)
+                assert new_id not in existing_ids
+                existing_ids.add(new_id)
+                new_subnode = subnode.copy(id=new_id)
+                node_map[node_id][i] = new_subnode
+                node_map[new_id] = node_map.pop(subnode.id)
+                self._uniquify_node_ids(node_map, existing_ids, new_subnode)
 
     @cached_property
     def _paths(self):

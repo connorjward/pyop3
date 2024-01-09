@@ -723,11 +723,12 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
 
         return LoopIndex(self.owned)
 
-    def iter(self, outer_loops=frozenset()):
+    def iter(self, outer_loops=frozenset(), loop_index=None):
         from pyop3.itree.tree import iter_axis_tree
 
         return iter_axis_tree(
-            self.index(),
+            # hack because sometimes we know the right loop index to use
+            loop_index or self.index(),
             self,
             self.target_paths,
             self.index_exprs,
