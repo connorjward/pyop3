@@ -244,3 +244,29 @@ def test_partition_iterset_with_map(comm, paxis, with_ghosts):
     assert np.equal(icore.data_ro, expected_icore).all()
     assert np.equal(iroot.data_ro, expected_iroot).all()
     assert np.equal(ileaf.data_ro, expected_ileaf).all()
+
+
+@pytest.mark.parallel(nprocs=2)
+@pytest.mark.parametrize("intent", [op3.WRITE, op3.INC])
+def test_shared_array(comm, intent):
+    sf = op3.sf.single_star(comm, 3)
+    axes = op3.AxisTree.from_nest({op3.Axis(3, sf=sf): op3.Axis(2)})
+    shared = op3.HierarchicalArray(axes)
+
+    assert (shared.data_ro == 0).all()
+
+    if comm.rank == 0:
+        shared.buffer._data[...] = 1
+    else:
+        assert comm.rank == 1
+        shared.buffer._data[...] = 2
+    shared.buffer._leaves_valid = False
+    shared.buffer._pending_reduction = intent
+
+    shared.assemble()
+
+    if intent == op3.WRITE:
+        assert (shared.data_ro == 1).all()
+    else:
+        assert intent == op3.INC
+        assert (shared.data_ro == 3).all()

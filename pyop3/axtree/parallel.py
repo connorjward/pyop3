@@ -83,17 +83,22 @@ def grow_dof_sf(axes, axis, path, indices):
     npoints = component_offsets[-1]
 
     # renumbering per component, can skip if no renumbering present
-    renumbering = [np.empty(c.count, dtype=int) for c in axis.components]
-    counters = [0] * len(axis.components)
-    for new_pt, old_pt in enumerate(axis.numbering.data_ro):
-        for cidx, (min_, max_) in enumerate(
-            zip(component_offsets, component_offsets[1:])
-        ):
-            if min_ <= old_pt < max_:
-                renumbering[cidx][old_pt - min_] = counters[cidx]
-                counters[cidx] += 1
-                break
-    assert all(count == c.count for count, c in checked_zip(counters, axis.components))
+    if axis.numbering is not None:
+        renumbering = [np.empty(c.count, dtype=int) for c in axis.components]
+        counters = [0] * len(axis.components)
+        for new_pt, old_pt in enumerate(axis.numbering.data_ro):
+            for cidx, (min_, max_) in enumerate(
+                zip(component_offsets, component_offsets[1:])
+            ):
+                if min_ <= old_pt < max_:
+                    renumbering[cidx][old_pt - min_] = counters[cidx]
+                    counters[cidx] += 1
+                    break
+        assert all(
+            count == c.count for count, c in checked_zip(counters, axis.components)
+        )
+    else:
+        renumbering = [np.arange(c.count, dtype=int) for c in axis.components]
 
     # effectively build the section
     root_offsets = np.full(npoints, -1, IntType)

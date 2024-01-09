@@ -38,6 +38,7 @@ from pyop3.axtree.tree import (
 from pyop3.buffer import Buffer, DistributedBuffer
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
 from pyop3.lang import KernelArgument
+from pyop3.sf import single_star
 from pyop3.utils import (
     PrettyTuple,
     UniqueNameGenerator,

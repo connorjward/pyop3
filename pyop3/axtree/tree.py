@@ -922,8 +922,7 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
                 iremotes.append(iremote)
             ilocal = np.concatenate(ilocals)
             iremote = np.concatenate(iremotes)
-            # fixme, get the right comm (and ensure consistency)
-            return StarForest.from_graph(self.size, nroots, ilocal, iremote)
+            return StarForest.from_graph(self.size, nroots, ilocal, iremote, self.comm)
 
 
 class ContextSensitiveAxisTree(ContextSensitiveLoopIterable):

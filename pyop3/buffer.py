@@ -222,9 +222,10 @@ class DistributedBuffer(Buffer):
     @cached_property
     def _reduction_ops(self):
         # TODO Move this import out, requires moving location of these intents
-        from pyop3.lang import INC
+        from pyop3.lang import INC, WRITE
 
         return {
+            WRITE: MPI.REPLACE,
             INC: MPI.SUM,
         }
 

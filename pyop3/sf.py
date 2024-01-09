@@ -20,8 +20,8 @@ class StarForest:
         self.size = size
 
     @classmethod
-    def from_graph(cls, size: int, nroots: int, ilocal, iremote, comm=None):
-        sf = PETSc.SF().create(comm or PETSc.Sys.getDefaultComm())
+    def from_graph(cls, size: int, nroots: int, ilocal, iremote, comm):
+        sf = PETSc.SF().create(comm)
         sf.setGraph(nroots, ilocal, iremote)
         return cls(sf, size)
 
@@ -112,3 +112,22 @@ class StarForest:
         # what about cdim?
         dtype, _ = get_mpi_dtype(from_buffer.dtype)
         return (dtype, from_buffer, to_buffer, op)
+
+
+def single_star(comm, size=1, root=0):
+    """Construct a star forest containing a single star.
+
+    The single star has leaves on all ranks apart from the "root" rank that
+    point to the same shared data. This is useful for describing globally
+    consistent data structures.
+
+    """
+    nroots = size
+    if comm.rank == root:
+        # there are no leaves on the root process
+        ilocal = []
+        iremote = []
+    else:
+        ilocal = np.arange(size, dtype=np.int32)
+        iremote = [(root, i) for i in ilocal]
+    return StarForest.from_graph(size, nroots, ilocal, iremote, comm)
