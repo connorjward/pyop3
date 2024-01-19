@@ -219,9 +219,6 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
                 indexed_axes.layout_exprs,
             )
 
-            if self.name == "debug":
-                breakpoint()
-
             array_per_context[loop_context] = HierarchicalArray(
                 indexed_axes,
                 data=self.array,
@@ -283,6 +280,10 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
     def sf(self):
         return self.array.sf
 
+    @property
+    def comm(self):
+        return self.buffer.comm
+
     @cached_property
     def datamap(self):
         datamap_ = {}
@@ -316,7 +317,15 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
     def materialize(self) -> HierarchicalArray:
         """Return a new "unindexed" array with the same shape."""
         # "unindexed" axis tree
-        axes = AxisTree(self.axes.parent_to_children)
+        # strip parallel semantics (in a bad way)
+        parent_to_children = collections.defaultdict(list)
+        for p, cs in self.axes.parent_to_children.items():
+            for c in cs:
+                if c is not None and c.sf is not None:
+                    c = c.copy(sf=None)
+                parent_to_children[p].append(c)
+
+        axes = AxisTree(parent_to_children)
         return type(self)(axes, dtype=self.dtype)
 
     def offset(self, *args, allow_unused=False, insert_zeros=False):
@@ -432,6 +441,31 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
             selected.append(current_axis)
             current_axis = current_axis.get_part(idx.npart).subaxis
         return tuple(selected)
+
+    def copy(self, other):
+        """Copy the contents of the array into another."""
+        # NOTE: Is copy_to/copy_into a clearer name for this?
+        # TODO: Check that self and other are compatible, should have same axes and dtype
+        # for sure
+        # TODO: We can optimise here and copy the private data attribute and set halo
+        # validity. Here we do the simple but hopefully correct thing.
+        other.data_wo[...] = self.data_ro
+
+    def zero(self):
+        # FIXME: This does not work for the case when the array here is indexed in some
+        # way. E.g. dat[::2] since the full buffer is returned.
+        self.data_wo[...] = 0
+
+    @property
+    @deprecated(".vec_rw")
+    def vec(self):
+        return self.vec_rw
+
+    @property
+    def vec_rw(self):
+        # FIXME: This does not work for the case when the array here is indexed in some
+        # way. E.g. dat[::2] since the full buffer is returned.
+        return self.buffer.vec_rw
 
     @property
     def vec_ro(self):

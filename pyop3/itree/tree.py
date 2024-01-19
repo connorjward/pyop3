@@ -466,9 +466,6 @@ class CalledMap(Identified, LoopIterable):
                 indexed_axes.layout_exprs,
             )
 
-            if self.name == "debug":
-                breakpoint()
-
             array_per_context[loop_context] = HierarchicalArray(
                 indexed_axes,
                 data=self.array,
@@ -1461,7 +1458,7 @@ def iter_axis_tree(
             my_root = component.count.axes.root
             my_domain_path = freeze({my_root.label: my_root.component.label})
 
-            evaluator = ExpressionEvaluator(outer_replace_map)
+            evaluator = ExpressionEvaluator(outer_replace_map | indices)
             my_domain_indices = {
                 ax: evaluator(expr) for ax, expr in my_domain_index_exprs.items()
             }
@@ -1469,6 +1466,12 @@ def iter_axis_tree(
             my_domain_path = pmap()
             my_domain_indices = pmap()
 
+        if not isinstance(component.count, int):
+            debug = _as_int(
+                component.count, path | my_domain_path, indices | my_domain_indices
+            )
+            # breakpoint()
+            # print(debug)
         for pt in range(
             _as_int(component.count, path | my_domain_path, indices | my_domain_indices)
         ):
@@ -1479,6 +1482,7 @@ def iter_axis_tree(
                 )(index_expr)
                 assert new_index != index_expr
                 new_exprs[axlabel] = new_index
+            # breakpoint()
             index_exprs_ = index_exprs_acc | new_exprs
             indices_ = indices | {axis.label: pt}
             if subaxis:
@@ -1496,9 +1500,15 @@ def iter_axis_tree(
                     index_exprs_,
                 )
             else:
+                # if STOP:
+                #     breakpoint()
                 yield IndexIteratorEntry(
                     loop_index, path_, target_path_, indices_, index_exprs_
                 )
+
+
+# debug
+STOP = False
 
 
 class ArrayPointLabel(enum.IntEnum):

@@ -504,10 +504,6 @@ def parse_loop_properly_this_time(
                 for axis_label, index_expr in index_exprs_.items():
                     target_replace_map[axis_label] = replacer(index_expr)
 
-                # debug
-                # breakpoint()
-                # target_replace_map is wrong
-
                 index_replace_map = pmap(
                     {
                         (loop.index.id, ax): iexpr
@@ -566,11 +562,11 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
 
             temporary = HierarchicalArray(
                 cf_arg.axes,
-                dtype=arg.dtype,  # cf_?
+                dtype=arg.dtype,
                 target_paths=cf_arg.target_paths,
                 index_exprs=cf_arg.index_exprs,
                 domain_index_exprs=cf_arg.domain_index_exprs,
-                prefix="t",
+                name=ctx.unique_name("t"),
             )
         indexed_temp = temporary
 
@@ -751,10 +747,21 @@ def parse_assignment_petscmat(array, temp, shape, op, loop_indices, codegen_cont
     # icol = renamer(array.buffer.cmap)
     rmap = array.buffer.rmap
     cmap = array.buffer.cmap
+    rloop_index = array.buffer.rindex
+    cloop_index = array.buffer.cindex
+    riname = just_one(loop_indices[rloop_index][1].values())
+    ciname = just_one(loop_indices[cloop_index][1].values())
+
+    context = context_from_indices(loop_indices)
+    rsize = rmap[rloop_index].with_context(context).size
+    csize = cmap[cloop_index].with_context(context).size
+
+    # breakpoint()
+
     codegen_context.add_argument(rmap)
     codegen_context.add_argument(cmap)
-    irow = f"{codegen_context.actual_to_kernel_rename_map[rmap.name]}[0]"
-    icol = f"{codegen_context.actual_to_kernel_rename_map[cmap.name]}[0]"
+    irow = f"{codegen_context.actual_to_kernel_rename_map[rmap.name]}[{riname}*{rsize}]"
+    icol = f"{codegen_context.actual_to_kernel_rename_map[cmap.name]}[{ciname}*{csize}]"
 
     # can only use GetValuesLocal when lgmaps are set (which I don't yet do)
     if op == AssignmentType.READ:

@@ -417,7 +417,8 @@ def test_inc_with_variable_arity_map(scalar_inc_kernel):
     assert np.allclose(dat1.data_ro, expected)
 
 
-def test_loop_over_multiple_ragged_maps(factory):
+@pytest.mark.parametrize("method", ["codegen", "python"])
+def test_loop_over_multiple_ragged_maps(factory, method):
     m = 5
     axis = op3.Axis({"pt0": m}, "ax0")
     dat0 = op3.HierarchicalArray(
@@ -453,13 +454,21 @@ def test_loop_over_multiple_ragged_maps(factory):
 
     inc = factory.inc_kernel(1, op3.IntType)
 
-    op3.do_loop(
-        p := axis.index(),
-        op3.loop(
-            q := map1(map0(p)).index(),
-            inc(dat0[q], dat1[p]),
-        ),
-    )
+    if method == "codegen":
+        op3.do_loop(
+            p := axis.index(),
+            op3.loop(
+                q := map1(map0(p)).index(),
+                inc(dat0[q], dat1[p]),
+            ),
+        )
+    else:
+        assert method == "python"
+        for p in axis.iter():
+            for q in map1(map0(p.index)).iter({p}):
+                prev_val = dat1.get_value(p.target_path, p.target_exprs)
+                inc = dat0.get_value(q.target_path, q.target_exprs)
+                dat1.set_value(p.target_path, p.target_exprs, prev_val + inc)
 
     expected = np.zeros_like(dat1.data_ro)
     for i in range(m):
@@ -469,7 +478,8 @@ def test_loop_over_multiple_ragged_maps(factory):
     assert (dat1.data_ro == expected).all()
 
 
-def test_loop_over_multiple_multi_component_ragged_maps(factory):
+@pytest.mark.parametrize("method", ["codegen", "python"])
+def test_loop_over_multiple_multi_component_ragged_maps(factory, method):
     m, n = 5, 6
     axis = op3.Axis({"pt0": m, "pt1": n}, "ax0")
     dat0 = op3.HierarchicalArray(
@@ -516,13 +526,21 @@ def test_loop_over_multiple_multi_component_ragged_maps(factory):
 
     inc = factory.inc_kernel(1, op3.IntType)
 
-    op3.do_loop(
-        p := axis["pt0"].index(),
-        op3.loop(
-            q := map_(map_(p)).index(),
-            inc(dat0[q], dat1[p]),
-        ),
-    )
+    if method == "codegen":
+        op3.do_loop(
+            p := axis["pt0"].index(),
+            op3.loop(
+                q := map_(map_(p)).index(),
+                inc(dat0[q], dat1[p]),
+            ),
+        )
+    else:
+        assert method == "python"
+        for p in axis["pt0"].iter():
+            for q in map_(map_(p.index)).iter({p}):
+                prev_val = dat1.get_value(p.target_path, p.target_exprs)
+                inc = dat0.get_value(q.target_path, q.target_exprs)
+                dat1.set_value(p.target_path, p.target_exprs, prev_val + inc)
 
     # To see what is going on we can determine the expected result in two
     # ways: one pythonically and one equivalent to the generated code.
@@ -637,7 +655,8 @@ def test_map_composition(vec2_inc_kernel):
     assert np.allclose(dat1.data_ro, expected)
 
 
-def test_recursive_multi_component_maps():
+@pytest.mark.parametrize("method", ["codegen", "python"])
+def test_recursive_multi_component_maps(method):
     m, n = 5, 6
     arity0_0, arity0_1, arity1 = 3, 2, 1
 
@@ -716,9 +735,17 @@ def test_recursive_multi_component_maps():
         target=LOOPY_TARGET,
         lang_version=LOOPY_LANG_VERSION,
     )
-    sum_kernel = op3.Function(lpy_kernel, [op3.READ, op3.WRITE])
+    sum_kernel = op3.Function(lpy_kernel, [op3.READ, op3.INC])
 
-    op3.do_loop(p := axis["pt0"].index(), sum_kernel(dat0[map1(map0(p))], dat1[p]))
+    if method == "codegen":
+        op3.do_loop(p := axis["pt0"].index(), sum_kernel(dat0[map1(map0(p))], dat1[p]))
+    else:
+        assert method == "python"
+        for p in axis["pt0"].iter():
+            for q in map1(map0(p.index)).iter({p}):
+                prev_val = dat1.get_value(p.target_path, p.target_exprs)
+                inc = dat0.get_value(q.target_path, q.target_exprs)
+                dat1.set_value(p.target_path, p.target_exprs, prev_val + inc)
 
     expected = np.zeros_like(dat1.data_ro)
     for i in range(m):

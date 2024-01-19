@@ -332,7 +332,7 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
 
     @property
     def comm(self):
-        return self.sf.comm if self.sf else None
+        return self.sf.comm if self.sf else MPI.COMM_SELF
 
     @property
     def size(self):
@@ -781,7 +781,7 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
     def comm(self):
         paraxes = [axis for axis in self.nodes if axis.sf is not None]
         if not paraxes:
-            return None
+            return MPI.COMM_SELF
         else:
             return single_valued(ax.comm for ax in paraxes)
 
@@ -825,6 +825,9 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         return self[slice_]
 
     def freeze(self):
+        return self
+
+    def as_tree(self):
         return self
 
     # needed here? or just for the HierarchicalArray? perhaps a free function?

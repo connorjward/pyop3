@@ -5,6 +5,7 @@ from mpi4py import MPI
 from petsc4py import PETSc
 
 from pyop3.dtypes import get_mpi_dtype
+from pyop3.mpi import internal_comm
 from pyop3.utils import just_one
 
 
@@ -18,6 +19,9 @@ class StarForest:
     def __init__(self, sf, size: int):
         self.sf = sf
         self.size = size
+
+        # don't like this pattern
+        self._comm = internal_comm(sf.comm)
 
     @classmethod
     def from_graph(cls, size: int, nroots: int, ilocal, iremote, comm):

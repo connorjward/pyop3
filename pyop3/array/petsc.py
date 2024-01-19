@@ -22,8 +22,10 @@ from pyop3.axtree.tree import (
     as_axis_tree,
 )
 from pyop3.buffer import PackedBuffer
+from pyop3.cache import cached
 from pyop3.dtypes import IntType, ScalarType
 from pyop3.itree.tree import CalledMap, LoopIndex, _index_axes, as_index_forest
+from pyop3.mpi import hash_comm
 from pyop3.utils import deprecated, just_one, merge_dicts, single_valued, strictly_all
 
 
@@ -81,6 +83,9 @@ class PetscMat(PetscObject, abc.ABC):
     def assemble(self):
         self.mat.assemble()
 
+    def zero(self):
+        self.mat.zeroEntries()
+
 
 class MonolithicPetscMat(PetscMat, abc.ABC):
     def __getitem__(self, indices):
@@ -110,19 +115,30 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
         rmap_axes = rmap_axes.set_up()
         rmap = HierarchicalArray(rmap_axes, dtype=IntType)
 
+        import pyop3.itree.tree
+
+        pyop3.itree.tree.STOP = True
+
         for p in riterset.iter(loop_index=rloop_index):
             for q in rindex.iter({p}):
+                print(q.target_path)
+                if (
+                    self.raxes[q.index]
+                    .with_context(p.loop_context | q.loop_context)
+                    .size
+                    > 0
+                ):
+                    print(q.target_exprs)
+                    # breakpoint()
+                else:
+                    print("not using")
                 for q_ in (
                     self.raxes[q.index]
                     .with_context(p.loop_context | q.loop_context)
                     .iter({q})
                 ):
-                    # leaf_axis = rmap_axes.child(*rmap_axes._node_from_path(p.source_path))
-                    # leaf_clabel = str(q.target_path)
-                    # path = p.source_path | {leaf_axis.label: leaf_clabel}
-                    # path = p.source_path | q_.target_path
+                    # breakpoint()
                     path = p.source_path | q.source_path | q_.source_path
-                    # indices = p.source_exprs | {leaf_axis.label: next(counters[q_.target_path])}
                     indices = p.source_exprs | q.source_exprs | q_.source_exprs
                     offset = self.raxes.offset(
                         q_.target_path, q_.target_exprs, insert_zeros=True
@@ -130,7 +146,11 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
                     rmap.set_value(path, indices, offset)
 
         # FIXME being extremely lazy, rmap and cmap are NOT THE SAME
+        cloop_index = rloop_index
         cmap = rmap
+
+        print(rmap.data)
+        # breakpoint()
 
         # Combine the loop contexts of the row and column indices. Consider
         # a loop over a multi-component axis with components "a" and "b":
@@ -174,7 +194,7 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
             indexed_raxes = _index_axes(rtree, ctx, self.raxes)
             indexed_caxes = _index_axes(ctree, ctx, self.caxes)
 
-            packed = PackedPetscMat(self, rmap, cmap)
+            packed = PackedPetscMat(self, rmap, cmap, rloop_index, cloop_index)
 
             indexed_axes = PartialAxisTree(indexed_raxes.parent_to_children)
             for leaf_axis, leaf_cpt in indexed_raxes.leaves:
@@ -204,10 +224,12 @@ class ContextSensitiveIndexedPetscMat(ContextSensitive):
 
 
 class PackedPetscMat(PackedBuffer):
-    def __init__(self, mat, rmap, cmap):
+    def __init__(self, mat, rmap, cmap, rindex, cindex):
         super().__init__(mat)
         self.rmap = rmap
         self.cmap = cmap
+        self.rindex = rindex
+        self.cindex = cindex
 
     @property
     def mat(self):
@@ -224,21 +246,14 @@ class PetscMatAIJ(MonolithicPetscMat):
         caxes = as_axis_tree(caxes)
         mat = _alloc_mat(points, adjacency, raxes, caxes)
 
-        # TODO this is quite ugly
-        # axes = PartialAxisTree(raxes.parent_to_children)
-        # for leaf_axis, leaf_cpt in raxes.leaves:
-        #     axes = axes.add_subtree(caxes, leaf_axis, leaf_cpt, uniquify=True)
-        # breakpoint()
-
         super().__init__(name)
 
         self.mat = mat
         self.raxes = raxes
         self.caxes = caxes
-        # self.axes = axes
 
     @property
-    @deprecated("mat")
+    # @deprecated("mat") ???
     def petscmat(self):
         return self.mat
 
@@ -286,17 +301,36 @@ class PetscMatPython(PetscMat):
 
 # TODO cache this function and return a copy if possible
 # TODO is there a better name? It does a bit more than allocate
+
+# TODO Perhaps tie this cache to the mesh with a context manager?
+
+
 def _alloc_mat(points, adjacency, raxes, caxes, bsize=None):
+    template_mat = _alloc_template_mat(points, adjacency, raxes, caxes, bsize)
+    return template_mat.copy()
+
+
+_sparsity_cache = {}
+
+
+def _alloc_template_mat_cache_key(points, adjacency, raxes, caxes, bsize=None):
+    # TODO include comm in cache key, requires adding internal comm stuff
+    # comm = single_valued([raxes._comm, caxes._comm])
+    # return (hash_comm(comm), points, adjacency, raxes, caxes, bsize)
+    return (points, adjacency, raxes, caxes, bsize)
+
+
+@cached(_sparsity_cache, key=_alloc_template_mat_cache_key)
+def _alloc_template_mat(points, adjacency, raxes, caxes, bsize=None):
     if bsize is not None:
         raise NotImplementedError
 
+    # TODO internal comm?
     comm = single_valued([raxes.comm, caxes.comm])
 
-    # sizes = (raxes.leaf_component.count, caxes.leaf_component.count)
-    # nnz = sparsity.axes.leaf_component.count
     sizes = (raxes.size, caxes.size)
 
-    # 1. Determine the nonzero pattern by filling a preallocator matrix
+    # Determine the nonzero pattern by filling a preallocator matrix
     prealloc_mat = PETSc.Mat().create(comm)
     prealloc_mat.setType(PETSc.Mat.Type.PREALLOCATOR)
     prealloc_mat.setSizes(sizes)
@@ -304,9 +338,9 @@ def _alloc_mat(points, adjacency, raxes, caxes, bsize=None):
 
     for p in points.iter():
         for q in adjacency(p.index).iter({p}):
-            for p_ in raxes[p.index, :].with_context(p.loop_context).iter({p}):
+            for p_ in raxes[p.index].with_context(p.loop_context).iter({p}):
                 for q_ in (
-                    caxes[q.index, :]
+                    caxes[q.index]
                     .with_context(p.loop_context | q.loop_context)
                     .iter({q})
                 ):
@@ -315,188 +349,10 @@ def _alloc_mat(points, adjacency, raxes, caxes, bsize=None):
                     row = raxes.offset(p_.target_path, p_.target_exprs)
                     col = caxes.offset(q_.target_path, q_.target_exprs)
                     prealloc_mat.setValue(row, col, 666)
-
     prealloc_mat.assemble()
 
+    # Now build the matrix from this preallocator
     mat = PETSc.Mat().createAIJ(sizes, comm=comm)
     mat.preallocateWithMatPreallocator(prealloc_mat)
-    mat.assemble()
-    return mat
-
-    mat.view()
-
-    raise NotImplementedError
-
-    ###
-
-    # NOTE: A lot of this code is very similar to op3.transforms.compress
-    # In fact, it is almost exactly identical and the outputs are the same!
-    # The only difference, I think, is that one produces a big array
-    # whereas the other produces a map. This needs some more thought.
-    # ---
-    # I think it might be fair to say that a sparsity and adjacency maps are
-    # completely equivalent to each other. Constructing the indices explicitly
-    # isn't actually very helpful.
-
-    # currently unused
-    # inc_lpy_kernel = lp.make_kernel(
-    #     "{ [i]: 0 <= i < 1 }",
-    #     "x[i] = x[i] + 1",
-    #     [lp.GlobalArg("x", shape=(1,), dtype=utils.IntType)],
-    #     name="inc",
-    #     target=op3.ir.LOOPY_TARGET,
-    #     lang_version=op3.ir.LOOPY_LANG_VERSION,
-    # )
-    # inc_kernel = op3.Function(inc_lpy_kernel, [op3.INC])
-
-    iterset = mesh.points.as_tree()
-
-    # prepare nonzero arrays
-    sizess = {}
-    for leaf_axis, leaf_clabel in iterset.leaves:
-        iterset_path = iterset.path(leaf_axis, leaf_clabel)
-
-        # bit unpleasant to have to create a loop index for this
-        sizes = {}
-        index = iterset.index()
-        cf_map = adjacency(index).with_context({index.id: iterset_path})
-        for target_path in cf_map.leaf_target_paths:
-            if iterset.depth != 1:
-                # TODO For now we assume iterset to have depth 1
-                raise NotImplementedError
-            # The axes of the size array correspond only to the specific
-            # components selected from iterset by iterset_path.
-            clabels = (op3.utils.just_one(iterset_path.values()),)
-            subiterset = iterset[clabels]
-
-            # subiterset is an axis tree with depth 1, we only want the axis
-            assert subiterset.depth == 1
-            subiterset = subiterset.root
-
-            sizes[target_path] = op3.HierarchicalArray(
-                subiterset, dtype=utils.IntType, prefix="nnz"
-            )
-        sizess[iterset_path] = sizes
-    sizess = freeze(sizess)
-
-    # count nonzeros
-    # TODO Currently a Python loop because nnz is context sensitive and things get
-    # confusing. I think context sensitivity might be better not tied to a loop index.
-    # op3.do_loop(
-    #     p := mesh.points.index(),
-    #     op3.loop(
-    #         q := adjacency(p).index(),
-    #         inc_kernel(nnz[p])  # TODO would be nice to support __setitem__ for this
-    #     ),
-    # )
-    for p in iterset.iter():
-        counter = collections.defaultdict(lambda: 0)
-        for q in adjacency(p.index).iter({p}):
-            counter[q.target_path] += 1
-
-        for target_path, npoints in counter.items():
-            nnz = sizess[p.source_path][target_path]
-            nnz.set_value(p.source_path, p.source_exprs, npoints)
-
-    # now populate the sparsity
-    # unused
-    # set_lpy_kernel = lp.make_kernel(
-    #     "{ [i]: 0 <= i < 1 }",
-    #     "y[i] = x[i]",
-    #     [lp.GlobalArg("x", shape=(1,), dtype=utils.IntType),
-    #      lp.GlobalArg("y", shape=(1,), dtype=utils.IntType)],
-    #     name="set",
-    #     target=op3.ir.LOOPY_TARGET,
-    #     lang_version=op3.ir.LOOPY_LANG_VERSION,
-    # )
-    # set_kernel = op3.Function(set_lpy_kernel, [op3.READ, op3.WRITE])
-
-    # prepare sparsity, note that this is different to how we produce the maps since
-    # the result is a single array
-    subaxes = {}
-    for iterset_path, sizes in sizess.items():
-        axlabel, clabel = op3.utils.just_one(iterset_path.items())
-        assert axlabel == mesh.name
-        subaxes[clabel] = op3.Axis(
-            [
-                op3.AxisComponent(nnz, label=str(target_path))
-                for target_path, nnz in sizes.items()
-            ],
-            "inner",
-        )
-    sparsity_axes = op3.AxisTree.from_nest(
-        {mesh.points.copy(numbering=None, sf=None): subaxes}
-    )
-    sparsity = op3.HierarchicalArray(
-        sparsity_axes, dtype=utils.IntType, prefix="sparsity"
-    )
-
-    # The following works if I define .enumerate() (needs to be a counter, not
-    # just a loop index).
-    # op3.do_loop(
-    #     p := mesh.points.index(),
-    #     op3.loop(
-    #         q := adjacency(p).enumerate(),
-    #         set_kernel(q, indices[p, q.i])
-    #     ),
-    # )
-    for p in iterset.iter():
-        # this is needed because a simple enumerate cannot distinguish between
-        # different labels
-        counters = collections.defaultdict(itertools.count)
-        for q in adjacency(p.index).iter({p}):
-            leaf_axis = sparsity.axes.child(
-                *sparsity.axes._node_from_path(p.source_path)
-            )
-            leaf_clabel = str(q.target_path)
-            path = p.source_path | {leaf_axis.label: leaf_clabel}
-            indices = p.source_exprs | {leaf_axis.label: next(counters[q.target_path])}
-            # we expect maps to only output a single target index
-            q_value = op3.utils.just_one(q.target_exprs.values())
-            sparsity.set_value(path, indices, q_value)
-
-    return sparsity
-
-    ###
-
-    # 2. Create the actual matrix to use
-
-    # 3. Insert zeros
-
-    if bsize is None:
-        mat = PETSc.Mat().createAIJ(sizes, nnz=nnz.data, comm=comm)
-    else:
-        mat = PETSc.Mat().createBAIJ(sizes, bsize, nnz=nnz.data, comm=comm)
-
-    # fill with zeros (this should be cached)
-    # this could be done as a pyop3 loop (if we get ragged local working) or
-    # explicitly in cython
-    raxis = raxes.leaf_axis
-    caxis = caxes.leaf_axis
-    rcpt = raxes.leaf_component
-    ccpt = caxes.leaf_component
-
-    # e.g.
-    # map_ = Map({pmap({raxis.label: rcpt.label}): [TabulatedMapComponent(caxes.label, ccpt.label, sparsity)]})
-    # do_loop(p := raxes.index(), write(zeros, mat[p, map_(p)]))
-
-    # but for now do in Python...
-    assert nnz.max_value is not None
-    if bsize is None:
-        shape = (nnz.max_value,)
-        set_values = mat.setValuesLocal
-    else:
-        rbsize, _ = bsize
-        shape = (nnz.max_value, rbsize)
-        set_values = mat.setValuesBlockedLocal
-    zeros = np.zeros(shape, dtype=PetscMat.dtype)
-    for row_idx in range(rcpt.count):
-        cstart = sparsity.axes.offset([row_idx, 0])
-        try:
-            cstop = sparsity.axes.offset([row_idx + 1, 0])
-        except IndexError:
-            # catch the last one
-            cstop = len(sparsity.data_ro)
-        set_values([row_idx], sparsity.data_ro[cstart:cstop], zeros[: cstop - cstart])
     mat.assemble()
     return mat

@@ -10,7 +10,7 @@ from petsc4py import PETSc
 from pyrsistent import freeze
 
 from pyop3.dtypes import ScalarType
-from pyop3.lang import READ, WRITE, KernelArgument
+from pyop3.lang import READ, RW, WRITE, KernelArgument
 from pyop3.sf import StarForest
 from pyop3.utils import UniqueNameGenerator, as_tuple, deprecated, readonly
 
@@ -105,6 +105,8 @@ class DistributedBuffer(Buffer):
         self._dtype = dtype
         self._lazy_data = data
         self.sf = sf
+
+        assert comm is not None
         self.comm = comm
 
         self.name = name or self._name_generator(prefix or self._prefix)
@@ -174,6 +176,10 @@ class DistributedBuffer(Buffer):
         return self.sf is not None
 
     @property
+    def leaves_valid(self) -> bool:
+        return self._leaves_valid
+
+    @property
     def datamap(self):
         return freeze({self.name: self})
 
@@ -187,6 +193,17 @@ class DistributedBuffer(Buffer):
         yield self._vec
         # if access is not Access.READ:
         #     self.halo_valid = False
+
+    @property
+    @deprecated(".vec_rw")
+    def vec(self):
+        return self.vec_rw
+
+    @property
+    def vec_rw(self):
+        # TODO I don't think that intent is the right thing here. We really only have
+        # READ, WRITE or RW
+        return self.vec_context(RW)
 
     @property
     def vec_ro(self):
@@ -206,7 +223,7 @@ class DistributedBuffer(Buffer):
 
     @property
     def _owned_data(self):
-        if self.is_distributed:
+        if self.is_distributed and self.sf.nleaves > 0:
             return self._data[: -self.sf.nleaves]
         else:
             return self._data
