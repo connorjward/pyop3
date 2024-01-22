@@ -24,7 +24,7 @@ from pyrsistent import freeze, pmap
 from pyop3.array import HierarchicalArray, PetscMatAIJ
 from pyop3.array.harray import CalledMapVariable, ContextSensitiveMultiArray
 from pyop3.array.petsc import PetscMat, PetscObject
-from pyop3.axtree import Axis, AxisComponent, AxisTree, AxisVariable
+from pyop3.axtree import Axis, AxisComponent, AxisTree, AxisVariable, ContextFree
 from pyop3.axtree.tree import ContextSensitiveAxisTree
 from pyop3.buffer import DistributedBuffer, PackedBuffer
 from pyop3.dtypes import IntType, PointerType
@@ -56,6 +56,7 @@ from pyop3.lang import (
     WRITE,
     Assignment,
     CalledFunction,
+    ContextAwareLoop,
     Loop,
 )
 from pyop3.log import logger
@@ -404,12 +405,12 @@ def _compile(expr: Any, loop_indices, ctx: LoopyCodegenContext) -> None:
 
 @_compile.register
 def _(
-    loop: Loop,
+    loop: ContextAwareLoop,
     loop_indices,
     codegen_context: LoopyCodegenContext,
 ) -> None:
-    loop_context = context_from_indices(loop_indices)
-    iterset = loop.index.iterset.with_context(loop_context)
+    iterset = loop.index.iterset
+    assert isinstance(iterset, ContextFree)
 
     loop_index_replace_map = {}
     for _, replace_map in loop_indices.values():
@@ -522,7 +523,7 @@ def parse_loop_properly_this_time(
                         for ax, iexpr in iname_replace_map_.items()
                     }
                 )
-                for stmt in loop.statements:
+                for stmt in loop.statements[source_path_]:
                     _compile(
                         stmt,
                         loop_indices
@@ -552,7 +553,10 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
         loop_context = context_from_indices(loop_indices)
 
         # do we need the original arg any more?
-        cf_arg = arg.with_context(loop_context)
+        # TODO cleanup
+        # cf_arg = arg.with_context(loop_context)
+        cf_arg = arg
+        assert isinstance(cf_arg, ContextFree)
 
         if isinstance(arg, (HierarchicalArray, ContextSensitiveMultiArray)):
             # FIXME materialize is a bad name here, it implies actually packing the values
@@ -666,6 +670,8 @@ def parse_assignment(
 ):
     # TODO singledispatch
     loop_context = context_from_indices(loop_indices)
+
+    assert isinstance(array, ContextFree)
 
     if isinstance(array, (HierarchicalArray, ContextSensitiveMultiArray)):
         if (

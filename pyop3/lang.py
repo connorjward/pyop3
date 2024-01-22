@@ -70,6 +70,10 @@ class KernelArgument(abc.ABC):
 
 
 class Instruction(UniqueRecord, abc.ABC):
+    pass
+
+
+class ContextAwareInstruction(Instruction):
     @property
     @abc.abstractmethod
     def datamap(self):
@@ -109,10 +113,24 @@ class Loop(Instruction):
         self.index = index
         self.statements = as_tuple(statements)
 
+    def __call__(self, **kwargs):
+        from pyop3.ir.lower import compile
+
+        return compile(self)(**kwargs)
+
+
+class ContextAwareLoop(ContextAwareInstruction):
+    fields = Instruction.fields | {"index", "statements"}
+
+    def __init__(self, index, statements, **kwargs):
+        super().__init__(**kwargs)
+        self.index = index
+        self.statements = statements
+
     @cached_property
     def datamap(self):
         return self.index.datamap | merge_dicts(
-            stmt.datamap for stmt in self.statements
+            stmt.datamap for stmts in self.statements.values() for stmt in stmts
         )
 
     def __call__(self, **kwargs):

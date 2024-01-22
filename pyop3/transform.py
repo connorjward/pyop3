@@ -10,7 +10,7 @@ from pyrsistent import freeze, pmap
 from pyop3.array import ContextSensitiveMultiArray, HierarchicalArray
 from pyop3.axtree import Axis, AxisTree
 from pyop3.itree import Map, TabulatedMapComponent
-from pyop3.lang import CalledFunction, Instruction, Loop, Terminal
+from pyop3.lang import CalledFunction, ContextAwareLoop, Instruction, Loop, Terminal
 from pyop3.utils import just_one
 
 
@@ -32,25 +32,29 @@ class LoopContextExpander(Transformer):
     @_apply.register
     def _(self, loop: Loop, *, context):
         cf_iterset = loop.index.iterset.with_context(context)
-        source_paths = cf_iterset.ordered_leaf_paths
+        source_paths = cf_iterset.leaf_paths
         target_paths = cf_iterset.leaf_target_paths
         assert len(source_paths) == len(target_paths)
 
         if len(source_paths) == 1:
             # single component iterset, no branching required
+            source_path = just_one(source_paths)
             target_path = just_one(target_paths)
+
             context_ = context | {loop.index.id: target_path}
-            return loop.copy(
-                index=loop.index.copy(iterset=cf_iterset),
-                statements=[self._apply(s, context=context_) for s in loop.statements],
+            statements = {
+                source_path: tuple(
+                    self._apply(stmt, context=context_) for stmt in loop.statements
+                )
+            }
+            return ContextAwareLoop(
+                loop.index.copy(iterset=cf_iterset),
+                statements,
             )
         else:
-            assert len(target_paths) > 1
-            raise NotImplementedError
+            assert len(source_paths) > 1
             cf_loops = []
-            # TODO loop.index.paths?
             for source_path, target_path in checked_zip(source_paths, target_paths):
-                slices = [Slice(cpt) for _, cpt in source_path]
                 # wont work yet
                 target_path = loop.index.target_paths[path]
                 # cf_index = ???
@@ -59,9 +63,9 @@ class LoopContextExpander(Transformer):
                 cf_statements = [self._apply(s, replace_map | {loop.index: cf_index})]
                 cf_loop = loop.copy(index=cf_index, statements=cf_statements)
                 cf_loops.append(cf_loop)
-            return MultiLoop(
-                # loop.copy(
-            )
+
+            raise NotImplementedError("TODO")
+            return ContextAwareLoop(cf_loops)
 
     @_apply.register
     def _(self, terminal: Terminal, *, context):
