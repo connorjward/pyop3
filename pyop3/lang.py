@@ -201,6 +201,11 @@ class Loop(Instruction):
 
         arrays = {}
         for arg, intent in self.kernel_arguments:
+            # TODO cleanup
+            from pyop3.itree import LoopIndex
+
+            if isinstance(arg, LoopIndex):
+                continue
             if (
                 not isinstance(arg.array, DistributedBuffer)
                 or not arg.array.is_distributed

@@ -524,8 +524,6 @@ def parse_loop_properly_this_time(
                         loop_indices
                         | {
                             loop.index.id: (
-                                source_path_,
-                                target_path_,
                                 local_index_replace_map,
                                 index_replace_map,
                             ),
@@ -543,8 +541,6 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
     # loopy args can contain ragged params too
     loopy_args = call.function.code.default_entrypoint.args[: len(call.arguments)]
     for loopy_arg, arg, spec in checked_zip(loopy_args, call.arguments, call.argspec):
-        # loop_context = context_from_indices(loop_indices)
-
         # do we need the original arg any more?
         # TODO cleanup
         # cf_arg = arg.with_context(loop_context)
@@ -662,21 +658,14 @@ def parse_assignment(
     codegen_ctx,
 ):
     # TODO singledispatch
-    loop_context = context_from_indices(loop_indices)
-
     assert isinstance(array, ContextFree)
 
     if isinstance(array, (HierarchicalArray, ContextSensitiveMultiArray)):
-        if (
-            isinstance(array.with_context(loop_context).buffer, PackedBuffer)
-            and op != AssignmentType.ZERO
-        ):
-            if not isinstance(
-                array.with_context(loop_context).buffer.array, PetscMatAIJ
-            ):
+        if isinstance(array.buffer, PackedBuffer) and op != AssignmentType.ZERO:
+            if not isinstance(array.buffer.array, PetscMatAIJ):
                 raise NotImplementedError("TODO")
             parse_assignment_petscmat(
-                array.with_context(loop_context),
+                array,
                 temp,
                 shape,
                 op,
@@ -685,9 +674,6 @@ def parse_assignment(
             )
             return
         else:
-            # assert isinstance(
-            #     array.with_context(loop_context).buffer, DistributedBuffer
-            # )
             pass
     else:
         assert isinstance(array, ContextFreeLoopIndex)
@@ -695,7 +681,7 @@ def parse_assignment(
     # get the right index tree given the loop context
 
     # TODO Is this right to remove? Can it be handled further down?
-    axes = array.with_context(loop_context).axes
+    axes = array.axes
     # minimal_context = array.filter_context(loop_context)
     #
     # target_path = {}
@@ -752,6 +738,7 @@ def parse_assignment_petscmat(array, temp, shape, op, loop_indices, codegen_cont
     riname = just_one(loop_indices[rloop_index][1].values())
     ciname = just_one(loop_indices[cloop_index][1].values())
 
+    raise NotImplementedError("Loop context stuff should already be handled")
     context = context_from_indices(loop_indices)
     rsize = rmap[rloop_index].with_context(context).size
     csize = cmap[cloop_index].with_context(context).size
@@ -875,8 +862,7 @@ def parse_assignment_properly_this_time(
     index_exprs,
     source_path=pmap(),
 ):
-    context = context_from_indices(loop_indices)
-    ctx_free_array = array.with_context(context)
+    ctx_free_array = array
 
     if axis is None:
         axis = axes.root
@@ -971,8 +957,6 @@ def add_leaf_assignment(
     codegen_context,
     loop_indices,
 ):
-    context = context_from_indices(loop_indices)
-
     if isinstance(array, (HierarchicalArray, ContextSensitiveMultiArray)):
 
         def array_expr():
@@ -981,7 +965,7 @@ def add_leaf_assignment(
             for axis, index_expr in index_exprs.items():
                 replace_map[axis] = replacer(index_expr)
 
-            array_ = array.with_context(context)
+            array_ = array
             return make_array_expr(
                 array,
                 array_.layouts[target_path],
@@ -993,7 +977,7 @@ def add_leaf_assignment(
     else:
         assert isinstance(array, ContextFreeLoopIndex)
 
-        array_ = array.with_context(context)
+        array_ = array
 
         if array_.axes.depth != 0:
             raise NotImplementedError("Tricky when dealing with vectors here")
@@ -1132,10 +1116,10 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
 
     def map_loop_index(self, expr):
         if isinstance(expr, LocalLoopIndexVariable):
-            return self._labels_to_jnames[expr.name][2][expr.name, expr.axis]
+            return self._labels_to_jnames[expr.name][0][expr.name, expr.axis]
         else:
             assert isinstance(expr, LoopIndexVariable)
-            return self._labels_to_jnames[expr.name][3][expr.name, expr.axis]
+            return self._labels_to_jnames[expr.name][1][expr.name, expr.axis]
 
     def map_call(self, expr):
         if expr.function.name == "mybsearch":
@@ -1304,14 +1288,6 @@ def _scalar_assignment(
     )
     rexpr = pym.subscript(pym.var(array.name), offset_expr)
     return rexpr
-
-
-# TODO should be able to get rid of this function
-def context_from_indices(loop_indices):
-    loop_context = {}
-    for loop_index, (src_path, target_path, _, _) in loop_indices.items():
-        loop_context[loop_index] = (src_path, target_path)
-    return freeze(loop_context)
 
 
 # lives here??
