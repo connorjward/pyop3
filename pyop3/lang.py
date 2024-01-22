@@ -114,9 +114,194 @@ class Loop(Instruction):
         self.statements = as_tuple(statements)
 
     def __call__(self, **kwargs):
+        # TODO just parse into ContextAwareLoop and call that
+        from pyop3.ir.lower import compile
+        from pyop3.itree.tree import partition_iterset
+
+        if self.is_parallel:
+            # interleave computation and communication
+            new_index, (icore, iroot, ileaf) = partition_iterset(
+                self.index, [a for a, _ in self.kernel_arguments]
+            )
+
+            assert self.index.id == new_index.id
+
+            # substitute subsets into loopexpr, should maybe be done in partition_iterset
+            parallel_loop = self.copy(index=new_index)
+            code = compile(parallel_loop)
+
+            # interleave communication and computation
+            initializers, finalizerss = self._array_updates()
+
+            for init in initializers:
+                init()
+
+            # replace the parallel axis subset with one for the specific indices here
+            extent = just_one(icore.axes.root.components).count
+            core_kwargs = merge_dicts(
+                [kwargs, {icore.name: icore, extent.name: extent}]
+            )
+            code(**core_kwargs)
+
+            # await reductions
+            for fin in finalizerss[0]:
+                fin()
+
+            # roots
+            # replace the parallel axis subset with one for the specific indices here
+            root_extent = just_one(iroot.axes.root.components).count
+            root_kwargs = merge_dicts(
+                [kwargs, {icore.name: iroot, extent.name: root_extent}]
+            )
+            code(**root_kwargs)
+
+            # await broadcasts
+            for fin in finalizerss[1]:
+                fin()
+
+            # leaves
+            leaf_extent = just_one(ileaf.axes.root.components).count
+            leaf_kwargs = merge_dicts(
+                [kwargs, {icore.name: ileaf, extent.name: leaf_extent}]
+            )
+            code(**leaf_kwargs)
+
+            # also may need to eagerly assemble Mats, or be clever and spike the accessors?
+        else:
+            compile(self)(**kwargs)
+
+    @cached_property
+    def loopy_code(self):
         from pyop3.ir.lower import compile
 
-        return compile(self)(**kwargs)
+        return compile(self)
+
+    @cached_property
+    def is_parallel(self):
+        return len(self._distarray_args) > 0
+
+    @cached_property
+    def kernel_arguments(self):
+        args = {}
+        for stmt in self.statements:
+            for arg, intent in stmt.kernel_arguments:
+                assert isinstance(arg, KernelArgument)
+                if arg not in args:
+                    args[arg] = intent
+                else:
+                    if args[arg] != intent:
+                        raise NotImplementedError(
+                            "Kernel argument used with differing intents"
+                        )
+        return tuple((arg, intent) for arg, intent in args.items())
+
+    @cached_property
+    def _distarray_args(self):
+        from pyop3.buffer import DistributedBuffer
+
+        arrays = {}
+        for arg, intent in self.kernel_arguments:
+            if (
+                not isinstance(arg.array, DistributedBuffer)
+                or not arg.array.is_distributed
+            ):
+                continue
+            if arg.array not in arrays:
+                arrays[arg.array] = (intent, _has_nontrivial_stencil(arg))
+            else:
+                if arrays[arg.array][0] != intent:
+                    # I think that it does not make sense to access arrays with
+                    # different intents in the same kernel but that it is
+                    # always OK if the same intent is used.
+                    raise IntentMismatchError
+
+                # We need to know if *any* uses of a particular array touch ghost points
+                if not arrays[arg.array][1] and _has_nontrivial_stencil(arg):
+                    arrays[arg.array] = (intent, True)
+
+        # now sort
+        return tuple(
+            (arr, *arrays[arr]) for arr in sorted(arrays.keys(), key=lambda a: a.name)
+        )
+
+    def _array_updates(self):
+        """Collect appropriate callables for updating shared values in the right order.
+
+        Returns
+        -------
+        (initializers, (finalizers0, finalizers1))
+            Collections of callables to be executed at the right times.
+
+        """
+        initializers = []
+        finalizerss = ([], [])
+        for array, intent, touches_ghost_points in self._distarray_args:
+            if intent in {READ, RW}:
+                if touches_ghost_points:
+                    if not array._roots_valid:
+                        initializers.append(array._reduce_leaves_to_roots_begin)
+                        finalizerss[0].extend(
+                            [
+                                array._reduce_leaves_to_roots_end,
+                                array._broadcast_roots_to_leaves_begin,
+                            ]
+                        )
+                        finalizerss[1].append(array._broadcast_roots_to_leaves_end)
+                    else:
+                        initializers.append(array._broadcast_roots_to_leaves_begin)
+                        finalizerss[1].append(array._broadcast_roots_to_leaves_end)
+                else:
+                    if not array._roots_valid:
+                        initializers.append(array._reduce_leaves_to_roots_begin)
+                        finalizerss[0].append(array._reduce_leaves_to_roots_end)
+
+            elif intent == WRITE:
+                # Assumes that all points are written to (i.e. not a subset). If
+                # this is not the case then a manual reduction is needed.
+                array._leaves_valid = False
+                array._pending_reduction = None
+
+            elif intent in {INC, MIN_WRITE, MIN_RW, MAX_WRITE, MAX_RW}:  # reductions
+                # We don't need to update roots if performing the same reduction
+                # again. For example we can increment into an array as many times
+                # as we want. The reduction only needs to be done when the
+                # data is read.
+                if array._roots_valid or intent == array._pending_reduction:
+                    pass
+                else:
+                    # We assume that all points are visited, and therefore that
+                    # WRITE accesses do not need to update roots. If only a subset
+                    # of entities are written to then a manual reduction is required.
+                    # This is the same assumption that we make for data_wo and is
+                    # explained in the documentation.
+                    if intent in {INC, MIN_RW, MAX_RW}:
+                        assert array._pending_reduction is not None
+                        initializers.append(array._reduce_leaves_to_roots_begin)
+                        finalizerss[0].append(array._reduce_leaves_to_roots_end)
+
+                # We are modifying owned values so the leaves must now be wrong
+                array._leaves_valid = False
+
+                # If ghost points are not modified then no future reduction is required
+                if not touches_ghost_points:
+                    array._pending_reduction = None
+                else:
+                    array._pending_reduction = intent
+
+                    # set leaves to appropriate nil value
+                    if intent == INC:
+                        array._data[array.sf.ileaf] = 0
+                    elif intent in {MIN_WRITE, MIN_RW}:
+                        array._data[array.sf.ileaf] = dtype_limits(array.dtype).max
+                    elif intent in {MAX_WRITE, MAX_RW}:
+                        array._data[array.sf.ileaf] = dtype_limits(array.dtype).min
+                    else:
+                        raise AssertionError
+
+            else:
+                raise AssertionError
+
+        return initializers, finalizerss
 
 
 class ContextAwareLoop(ContextAwareInstruction):
