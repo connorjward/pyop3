@@ -270,13 +270,16 @@ class LoopIndex(AbstractLoopIndex):
     def i(self):
         return self.local_index
 
-    # TODO hacky
-    @property
-    def paths(self):
-        if not isinstance(self.iterset, ContextFree):
-            raise NotImplementedError("Haven't thought hard enough about this")
-        return tuple(self.iterset.path(*leaf) for leaf in self.iterset.leaves)
-
+    # @property
+    # def paths(self):
+    #     return tuple(self.iterset.path(*leaf) for leaf in self.iterset.leaves)
+    #
+    # NOTE: This is confusing terminology. A loop index can be context-sensitive
+    # in two senses:
+    # 1. axes.index() is context-sensitive if axes is multi-component
+    # 2. axes[p].index() is context-sensitive if p is context-sensitive
+    # I think this can be resolved by considering axes[p] and axes as "iterset"
+    # and handling that separately.
     def with_context(self, context):
         iterset = self.iterset.with_context(context)
         path = context[self.id]
@@ -299,6 +302,7 @@ class ContextFreeLoopIndex(ContextFreeIndex):
     def leaf_target_paths(self):
         return (self.path,)
 
+    # TODO is this better as an alias for iterset?
     @property
     def axes(self):
         return AxisTree()

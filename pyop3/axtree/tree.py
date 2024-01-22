@@ -774,6 +774,16 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         return freeze(layouts_)
 
     @cached_property
+    def leaf_target_paths(self):
+        return tuple(
+            merge_dicts(
+                self.target_paths[ax.id, clabel]
+                for ax, clabel in self.path_with_nodes(*leaf, ordered=True)
+            )
+            for leaf in self.leaves
+        )
+
+    @cached_property
     def sf(self):
         return self._default_sf()
 

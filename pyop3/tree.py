@@ -467,6 +467,10 @@ class LabelledTree(AbstractTree):
         else:
             return pmap(path_)
 
+    @cached_property
+    def ordered_leaf_paths(self):
+        return tuple(self.path(*leaf, ordered=True) for leaf in self.leaves)
+
     def _node_from_path(self, path):
         if not path:
             return None

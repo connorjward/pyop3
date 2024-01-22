@@ -13,17 +13,22 @@ from functools import cached_property, partial
 from typing import Iterable, Sequence, Tuple
 from weakref import WeakValueDictionary
 
-import loopy as lp
 import numpy as np
-import pymbolic as pym
 import pytools
-from pyrsistent import freeze, pmap
+from pyrsistent import freeze
 
 from pyop3.axtree import as_axis_tree
 from pyop3.axtree.tree import ContextFree, ContextSensitive, MultiArrayCollector
 from pyop3.config import config
 from pyop3.dtypes import IntType, dtype_limits
-from pyop3.utils import as_tuple, checked_zip, just_one, merge_dicts, unique
+from pyop3.utils import (
+    UniqueRecord,
+    as_tuple,
+    checked_zip,
+    just_one,
+    merge_dicts,
+    unique,
+)
 
 
 # TODO I don't think that this belongs in this file, it belongs to the function?
@@ -64,61 +69,45 @@ class KernelArgument(abc.ABC):
     """Class representing objects that may be passed as arguments to kernels."""
 
 
-# TODO use pymbolic instead of pytools, better nest-ability
-class Instruction(pytools.ImmutableRecord, abc.ABC):
-    fields = set()
-
+class Instruction(UniqueRecord, abc.ABC):
     @property
     @abc.abstractmethod
     def datamap(self):
         """Map from names to arrays."""
-        pass
 
+    # TODO I think this can be combined with datamap
     @property
     @abc.abstractmethod
     def kernel_arguments(self):
         """Kernel arguments and their intents.
 
-        The arguments are sorted by name.
+        The arguments are ordered according to when they first appear in
+        the expression.
+
+        Notes
+        -----
+        At the moment arguments are not allowed to appear in the expression
+        multiple times with different intents. This would required thought into
+        how to resolve read-after-write and similar dependencies.
 
         """
-        pass
 
 
 class Loop(Instruction):
-    fields = Instruction.fields | {"index", "statements", "id", "depends_on"}
+    fields = Instruction.fields | {"index", "statements"}
 
     # doubt that I need an ID here
     id_generator = pytools.UniqueNameGenerator()
 
     def __init__(
         self,
-        index: IndexTree,
-        statements: Sequence[LoopExpr],
-        id=None,
-        depends_on=frozenset(),
+        index: LoopIndex,
+        statements: Iterable[Instruction],
+        **kwargs,
     ):
-        # FIXME
-        # assert isinstance(index, pyop3.tensors.Indexed)
-        if not id:
-            id = self.id_generator("loop")
-
-        super().__init__()
-
+        super().__init__(**kwargs)
         self.index = index
         self.statements = as_tuple(statements)
-        self.id = id
-        # I think this can go if I generate code properly
-        self.depends_on = depends_on
-
-    # maybe these should not exist? backwards compat
-    @property
-    def axes(self):
-        return self.index.axes
-
-    @property
-    def indices(self):
-        return self.index.indices
 
     @cached_property
     def datamap(self):
@@ -178,7 +167,7 @@ class Loop(Instruction):
             )
             code(**leaf_kwargs)
 
-            # also may need to eagerly assemble Mats, or be clever?
+            # also may need to eagerly assemble Mats, or be clever and spike the accessors?
         else:
             compile(self)(**kwargs)
 
@@ -317,6 +306,7 @@ class Loop(Instruction):
 
 
 # TODO singledispatch
+# TODO perhaps this is simply "has non unit stride"?
 def _has_nontrivial_stencil(array):
     """
 
@@ -336,10 +326,14 @@ def _has_nontrivial_stencil(array):
         raise TypeError
 
 
-class Terminal(Instruction):
+class Terminal(Instruction, abc.ABC):
     @cached_property
     def datamap(self):
         return merge_dicts(a.datamap for a, _ in self.kernel_arguments)
+
+    @abc.abstractmethod
+    def with_arguments(self, arguments: Iterable[KernelArgument]):
+        pass
 
 
 @dataclasses.dataclass(frozen=True)
@@ -420,7 +414,12 @@ class Function:
 
 
 class CalledFunction(Terminal):
-    def __init__(self, function, arguments):
+    fields = Terminal.fields | {"function", "arguments"}
+
+    def __init__(
+        self, function: Function, arguments: Iterable[KernelArgument], **kwargs
+    ) -> None:
+        super().__init__(**kwargs)
         self.function = function
         self.arguments = arguments
 
@@ -437,13 +436,19 @@ class CalledFunction(Terminal):
         return tuple(
             (arg, intent)
             for arg, intent in checked_zip(self.arguments, self.function._access_descrs)
+            # this isn't right, loop indices do not count here
             if isinstance(arg, KernelArgument)
         )
 
+    def with_arguments(self, arguments):
+        return self.copy(arguments=arguments)
 
-class Assignment(Terminal):
-    def __init__(self, assignee, expression):
-        super().__init__()
+
+class Assignment(Terminal, abc.ABC):
+    fields = Terminal.fields | {"assignee", "expression"}
+
+    def __init__(self, assignee, expression, **kwargs):
+        super().__init__(**kwargs)
         self.assignee = assignee
         self.expression = expression
 

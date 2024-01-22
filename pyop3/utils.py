@@ -51,6 +51,15 @@ class Labelled(abc.ABC):
         return unique_name(f"_label_{cls.__name__}")
 
 
+# TODO is Identified really useful?
+class UniqueRecord(pytools.ImmutableRecord, Identified):
+    fields = {"id"}
+
+    def __init__(self, id=None):
+        pytools.ImmutableRecord.__init__(self)
+        Identified.__init__(self, id)
+
+
 def as_tuple(item):
     if isinstance(item, collections.abc.Sequence):
         return tuple(item)

@@ -8,7 +8,7 @@ del pytools
 
 
 import pyop3.ir
-import pyop3.transforms
+import pyop3.transform
 from pyop3.array import Array, HierarchicalArray, MultiArray, PetscMat
 from pyop3.axtree import Axis, AxisComponent, AxisTree, PartialAxisTree  # noqa: F401
 from pyop3.buffer import DistributedBuffer  # noqa: F401

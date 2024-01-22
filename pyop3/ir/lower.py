@@ -336,7 +336,13 @@ class BinarySearchCallable(lp.ScalarCallable):
 
 
 # prefer generate_code?
-def compile(expr: LoopExpr, name="mykernel"):
+def compile(expr: Instruction, name="mykernel"):
+    # preprocess expr before lowering
+    from pyop3.transform import expand_implicit_pack_unpack, expand_loop_contexts
+
+    expr = expand_loop_contexts(expr)
+    # expr = expand_implicit_pack_unpack(expr)
+
     ctx = LoopyCodegenContext()
     _compile(expr, pmap(), ctx)
 
@@ -536,11 +542,6 @@ def parse_loop_properly_this_time(
 
 @_compile.register
 def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
-    """
-    Turn an exprs.FunctionCall into a series of assignment instructions etc.
-    Handles packing/accessor logic.
-    """
-
     temporaries = []
     subarrayrefs = {}
     extents = {}
