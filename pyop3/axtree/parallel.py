@@ -101,6 +101,7 @@ def grow_dof_sf(axes, axis, path, indices):
         renumbering = [np.arange(c.count, dtype=int) for c in axis.components]
 
     # effectively build the section
+    new_nroots = 0
     root_offsets = np.full(npoints, -1, IntType)
     for pt in point_sf.iroot:
         # convert to a component-wise numbering
@@ -122,6 +123,13 @@ def grow_dof_sf(axes, axis, path, indices):
             insert_zeros=True,
         )
         root_offsets[pt] = offset
+        new_nroots += step_size(
+            axes,
+            axis,
+            selected_component,
+            path | {axis.label: selected_component.label},
+            indices | {axis.label: component_num},
+        )
 
     point_sf.broadcast(root_offsets, MPI.REPLACE)
 
@@ -165,4 +173,4 @@ def grow_dof_sf(axes, axis, path, indices):
             remote_leaf_dof_offsets[counter] = [rank, root_offsets[pos] + d]
             counter += 1
 
-    return (nroots, local_leaf_dof_offsets, remote_leaf_dof_offsets)
+    return (new_nroots, local_leaf_dof_offsets, remote_leaf_dof_offsets)

@@ -151,7 +151,7 @@ def test_nested_parallel_axes_produce_correct_sf(comm, paxis):
     rank = comm.rank
     other_rank = (rank + 1) % 2
 
-    array = op3.DistributedBuffer(axes.size, sf=axes.sf)
+    array = op3.DistributedBuffer(axes.size, axes.sf)
     array._data[...] = rank
     array._leaves_valid = False
 
@@ -266,7 +266,8 @@ def test_shared_array(comm, intent):
     shared.assemble()
 
     if intent == op3.WRITE:
-        assert (shared.data_ro == 1).all()
+        # we reduce from leaves (which store a 2) to roots (which store a 1)
+        assert (shared.data_ro == 2).all()
     else:
         assert intent == op3.INC
         assert (shared.data_ro == 3).all()

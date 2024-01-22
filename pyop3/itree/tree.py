@@ -342,6 +342,20 @@ class ContextFreeLoopIndex(ContextFreeIndex):
         )
 
 
+# TODO This is properly awful, needs a big cleanup
+class ContextFreeLocalLoopIndex(ContextFreeLoopIndex):
+    @property
+    def index_exprs(self):
+        return freeze(
+            {
+                None: {
+                    axis: LocalLoopIndexVariable(self, axis)
+                    for axis in self.path.keys()
+                }
+            }
+        )
+
+
 # class LocalLoopIndex(AbstractLoopIndex):
 class LocalLoopIndex:
     """Class representing a 'local' index."""
@@ -350,9 +364,9 @@ class LocalLoopIndex:
         # super().__init__(id)
         self.loop_index = loop_index
 
-    @property
-    def id(self):
-        return self.loop_index.id
+    # @property
+    # def id(self):
+    #     return self.loop_index.id
 
     @property
     def iterset(self):
@@ -361,8 +375,8 @@ class LocalLoopIndex:
     def with_context(self, context):
         # not sure about this
         iterset = self.loop_index.iterset.with_context(context)
-        path, _ = context[self.id]  # here different from LoopIndex
-        return ContextFreeLoopIndex(iterset, path, id=self.id)
+        path, _ = context[self.loop_index.id]  # here different from LoopIndex
+        return ContextFreeLocalLoopIndex(iterset, path, id=self.loop_index.id)
 
     @property
     def datamap(self):
@@ -595,6 +609,10 @@ class LoopIndexVariable(pym.primitives.Variable):
         return self.index.datamap
 
 
+class LocalLoopIndexVariable(LoopIndexVariable):
+    pass
+
+
 class ContextSensitiveCalledMap(ContextSensitiveLoopIterable):
     pass
 
@@ -728,7 +746,9 @@ def _(index, *, loop_context=pmap(), **kwargs):
                 leaf_axis, leaf_cpt, and_components=True
             ).items():
                 target_path |= index.iterset.target_paths[axis.id, cpt.label]
-            context = loop_context | {index.id: (source_path, target_path)}
+            # TODO cleanup
+            my_id = index.id if not local else index.loop_index.id
+            context = loop_context | {my_id: (source_path, target_path)}
 
             cf_index = index.with_context(context)
             forest[context] = IndexTree(cf_index)
@@ -1591,7 +1611,7 @@ def partition_iterset(index: LoopIndex, arrays):
                 continue
 
             # loop over stencil
-            array = array.with_context({index.id: p.target_path})
+            array = array.with_context({index.id: (p.source_path, p.target_path)})
 
             for q in array.iter_indices({p}):
                 offset = array.simple_offset(q.target_path, q.target_exprs)

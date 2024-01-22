@@ -41,7 +41,9 @@ from pyop3.itree import (
     TabulatedMapComponent,
 )
 from pyop3.itree.tree import (
+    ContextFreeLoopIndex,
     IndexExpressionReplacer,
+    LocalLoopIndexVariable,
     LoopIndexVariable,
     collect_shape_index_callback,
 )
@@ -409,17 +411,9 @@ def _(
     loop_indices,
     codegen_context: LoopyCodegenContext,
 ) -> None:
-    iterset = loop.index.iterset
-    assert isinstance(iterset, ContextFree)
-
-    loop_index_replace_map = {}
-    for _, replace_map in loop_indices.values():
-        loop_index_replace_map.update(replace_map)
-    loop_index_replace_map = pmap(loop_index_replace_map)
-
     parse_loop_properly_this_time(
         loop,
-        iterset,
+        loop.index.iterset,
         loop_indices,
         codegen_context,
     )
@@ -441,10 +435,11 @@ def parse_loop_properly_this_time(
         raise NotImplementedError("does this even make sense?")
 
     # need to pick bits out of this, could be neater
-    outer_replace_map = {}
-    for _, replace_map in loop_indices.values():
-        outer_replace_map.update(replace_map)
-    outer_replace_map = freeze(outer_replace_map)
+    # outer_replace_map = {}
+    # for k, (_, _, replace_map, rep2) in loop_indices.items():
+    #     outer_replace_map[k] = (replace_map, rep2)
+    # outer_replace_map = freeze(outer_replace_map)
+    outer_replace_map = loop_indices
 
     if axis is None:
         target_path = freeze(axes.target_paths.get(None, {}))
@@ -519,7 +514,7 @@ def parse_loop_properly_this_time(
                 )
                 local_index_replace_map = freeze(
                     {
-                        (loop.index.local_index.id, ax): iexpr
+                        (loop.index.id, ax): iexpr
                         for ax, iexpr in iname_replace_map_.items()
                     }
                 )
@@ -528,13 +523,11 @@ def parse_loop_properly_this_time(
                         stmt,
                         loop_indices
                         | {
-                            loop.index: (
-                                target_path_,
-                                index_replace_map,
-                            ),
-                            loop.index.local_index: (
+                            loop.index.id: (
                                 source_path_,
+                                target_path_,
                                 local_index_replace_map,
+                                index_replace_map,
                             ),
                         },
                         codegen_context,
@@ -550,7 +543,7 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
     # loopy args can contain ragged params too
     loopy_args = call.function.code.default_entrypoint.args[: len(call.arguments)]
     for loopy_arg, arg, spec in checked_zip(loopy_args, call.arguments, call.argspec):
-        loop_context = context_from_indices(loop_indices)
+        # loop_context = context_from_indices(loop_indices)
 
         # do we need the original arg any more?
         # TODO cleanup
@@ -563,11 +556,11 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
             # into the temporary.
             temporary = cf_arg.materialize()
         else:
-            assert isinstance(arg, LoopIndex)
+            # assert isinstance(arg, LoopIndex)
 
             temporary = HierarchicalArray(
                 cf_arg.axes,
-                dtype=arg.dtype,
+                dtype=IntType,
                 target_paths=cf_arg.target_paths,
                 index_exprs=cf_arg.index_exprs,
                 domain_index_exprs=cf_arg.domain_index_exprs,
@@ -697,7 +690,7 @@ def parse_assignment(
             # )
             pass
     else:
-        assert isinstance(array, LoopIndex)
+        assert isinstance(array, ContextFreeLoopIndex)
 
     # get the right index tree given the loop context
 
@@ -716,7 +709,9 @@ def parse_assignment(
     # target_path = freeze(target_path)
     target_path = pmap()
 
-    jname_replace_map = merge_dicts(mymap for _, mymap in loop_indices.values())
+    # jname_replace_map = merge_dicts(mymap for _, mymap in loop_indices.values())
+    # TODO cleanup
+    jname_replace_map = loop_indices
 
     parse_assignment_properly_this_time(
         array,
@@ -727,8 +722,6 @@ def parse_assignment(
         loop_indices,
         codegen_ctx,
         iname_replace_map=jname_replace_map,
-        # jname_replace_map=jname_replace_map,
-        # probably wrong
         index_exprs=pmap(),
         target_path=target_path,
     )
@@ -998,7 +991,7 @@ def add_leaf_assignment(
             )
 
     else:
-        assert isinstance(array, LoopIndex)
+        assert isinstance(array, ContextFreeLoopIndex)
 
         array_ = array.with_context(context)
 
@@ -1138,7 +1131,11 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         return jname_expr
 
     def map_loop_index(self, expr):
-        return self._labels_to_jnames[expr.name, expr.axis]
+        if isinstance(expr, LocalLoopIndexVariable):
+            return self._labels_to_jnames[expr.name][2][expr.name, expr.axis]
+        else:
+            assert isinstance(expr, LoopIndexVariable)
+            return self._labels_to_jnames[expr.name][3][expr.name, expr.axis]
 
     def map_call(self, expr):
         if expr.function.name == "mybsearch":
@@ -1309,10 +1306,11 @@ def _scalar_assignment(
     return rexpr
 
 
+# TODO should be able to get rid of this function
 def context_from_indices(loop_indices):
     loop_context = {}
-    for loop_index, (path, _) in loop_indices.items():
-        loop_context[loop_index.id] = path
+    for loop_index, (src_path, target_path, _, _) in loop_indices.items():
+        loop_context[loop_index] = (src_path, target_path)
     return freeze(loop_context)
 
 

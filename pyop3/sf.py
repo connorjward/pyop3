@@ -126,12 +126,13 @@ def single_star(comm, size=1, root=0):
     consistent data structures.
 
     """
-    nroots = size
     if comm.rank == root:
         # there are no leaves on the root process
+        nroots = size
         ilocal = []
         iremote = []
     else:
+        nroots = 0
         ilocal = np.arange(size, dtype=np.int32)
         iremote = [(root, i) for i in ilocal]
     return StarForest.from_graph(size, nroots, ilocal, iremote, comm)
