@@ -6,6 +6,7 @@ import contextlib
 import dataclasses
 import enum
 import functools
+import numbers
 import operator
 from collections import defaultdict
 from functools import cached_property, partial
@@ -63,27 +64,29 @@ class KernelArgument(abc.ABC):
     """Class representing objects that may be passed as arguments to kernels."""
 
 
-class LoopExpr(pytools.ImmutableRecord, abc.ABC):
+# TODO use pymbolic instead of pytools, better nest-ability
+class Instruction(pytools.ImmutableRecord, abc.ABC):
     fields = set()
 
     @property
     @abc.abstractmethod
     def datamap(self):
-        """Map from names to arrays.
+        """Map from names to arrays."""
+        pass
 
-        weakref since we don't want to hold a reference to these things?
+    @property
+    @abc.abstractmethod
+    def kernel_arguments(self):
+        """Kernel arguments and their intents.
+
+        The arguments are sorted by name.
+
         """
         pass
 
-    # nice for drawing diagrams
-    # @property
-    # @abc.abstractmethod
-    # def operands(self) -> tuple["LoopExpr"]:
-    #     pass
 
-
-class Loop(LoopExpr):
-    fields = LoopExpr.fields | {"index", "statements", "id", "depends_on"}
+class Loop(Instruction):
+    fields = Instruction.fields | {"index", "statements", "id", "depends_on"}
 
     # doubt that I need an ID here
     id_generator = pytools.UniqueNameGenerator()
@@ -130,7 +133,7 @@ class Loop(LoopExpr):
         if self.is_parallel:
             # interleave computation and communication
             new_index, (icore, iroot, ileaf) = partition_iterset(
-                self.index, [a for a, _ in self.all_function_arguments]
+                self.index, [a for a, _ in self.kernel_arguments]
             )
 
             assert self.index.id == new_index.id
@@ -190,25 +193,26 @@ class Loop(LoopExpr):
         return len(self._distarray_args) > 0
 
     @cached_property
-    def all_function_arguments(self):
-        # TODO overly verbose
-        func_args = {}
+    def kernel_arguments(self):
+        args = {}
         for stmt in self.statements:
-            for arg, intent in stmt.all_function_arguments:
-                if arg not in func_args:
-                    func_args[arg] = intent
-        # now sort
-        return tuple(
-            (arg, func_args[arg])
-            for arg in sorted(func_args.keys(), key=lambda a: a.name)
-        )
+            for arg, intent in stmt.kernel_arguments:
+                assert isinstance(arg, KernelArgument)
+                if arg not in args:
+                    args[arg] = intent
+                else:
+                    if args[arg] != intent:
+                        raise NotImplementedError(
+                            "Kernel argument used with differing intents"
+                        )
+        return tuple((arg, intent) for arg, intent in args.items())
 
     @cached_property
     def _distarray_args(self):
         from pyop3.buffer import DistributedBuffer
 
         arrays = {}
-        for arg, intent in self.all_function_arguments:
+        for arg, intent in self.kernel_arguments:
             if (
                 not isinstance(arg.array, DistributedBuffer)
                 or not arg.array.is_distributed
@@ -332,6 +336,12 @@ def _has_nontrivial_stencil(array):
         raise TypeError
 
 
+class Terminal(Instruction):
+    @cached_property
+    def datamap(self):
+        return merge_dicts(a.datamap for a, _ in self.kernel_arguments)
+
+
 @dataclasses.dataclass(frozen=True)
 class ArgumentSpec:
     access: Intent
@@ -409,14 +419,10 @@ class Function:
         return self.code.default_entrypoint.name
 
 
-class CalledFunction(LoopExpr):
+class CalledFunction(Terminal):
     def __init__(self, function, arguments):
         self.function = function
         self.arguments = arguments
-
-    @functools.cached_property
-    def datamap(self):
-        return merge_dicts([arg.datamap for arg in self.arguments])
 
     @property
     def name(self):
@@ -426,85 +432,40 @@ class CalledFunction(LoopExpr):
     def argspec(self):
         return self.function.argspec
 
-    # FIXME NEXT: Expand ContextSensitive things here
     @property
-    def all_function_arguments(self):
-        from pyop3.itree import LoopIndex
-
-        # skip non-data arguments
+    def kernel_arguments(self):
         return tuple(
-            sorted(
-                [
-                    (arg, intent)
-                    for arg, intent in checked_zip(
-                        self.arguments, self.function._access_descrs
-                    )
-                    if not isinstance(arg, LoopIndex)
-                ],
-                key=lambda a: a[0].name,
-            )
+            (arg, intent)
+            for arg, intent in checked_zip(self.arguments, self.function._access_descrs)
+            if isinstance(arg, KernelArgument)
         )
 
 
-class Instruction(pytools.ImmutableRecord):
-    fields = set()
+class Assignment(Terminal):
+    def __init__(self, assignee, expression):
+        super().__init__()
+        self.assignee = assignee
+        self.expression = expression
 
 
-class Assignment(Instruction):
-    fields = Instruction.fields | {"tensor", "temporary", "shape"}
+class ReplaceAssignment(Assignment):
+    """Like PETSC_INSERT_VALUES."""
 
-    def __init__(self, tensor, temporary, shape, **kwargs):
-        self.tensor = tensor
-        self.temporary = temporary
-        self.shape = shape
-        super().__init__(**kwargs)
-
-    # better name
-    @property
-    def array(self):
-        return self.tensor
+    @cached_property
+    def kernel_arguments(self):
+        if not isinstance(self.expression, numbers.Number):
+            raise NotImplementedError("Complicated rvalues not yet supported")
+        return ((self.assignee, WRITE),)
 
 
-class Read(Assignment):
-    @property
-    def lhs(self):
-        return self.temporary
+class AddAssignment(Assignment):
+    """Like PETSC_ADD_VALUES."""
 
-    @property
-    def rhs(self):
-        return self.tensor
-
-
-class Write(Assignment):
-    @property
-    def lhs(self):
-        return self.tensor
-
-    @property
-    def rhs(self):
-        return self.temporary
-
-
-class Increment(Assignment):
-    @property
-    def lhs(self):
-        return self.tensor
-
-    @property
-    def rhs(self):
-        return self.temporary
-
-
-class Zero(Assignment):
-    @property
-    def lhs(self):
-        return self.temporary
-
-    # FIXME
-    @property
-    def rhs(self):
-        # return 0
-        return self.tensor
+    @cached_property
+    def kernel_arguments(self):
+        if not isinstance(self.expression, numbers.Number):
+            raise NotImplementedError("Complicated rvalues not yet supported")
+        return ((self.assignee, INC),)
 
 
 def loop(*args, **kwargs):

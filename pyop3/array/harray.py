@@ -489,7 +489,13 @@ class MultiArray(HierarchicalArray):
 
 
 # Now ContextSensitiveDat
-class ContextSensitiveMultiArray(ContextSensitive, KernelArgument):
+class ContextSensitiveMultiArray(Array, ContextSensitive):
+    def __init__(self, arrays):
+        name = single_valued(a.name for a in arrays.values())
+
+        Array.__init__(self, name)
+        ContextSensitive.__init__(self, arrays)
+
     def __getitem__(self, indices) -> ContextSensitiveMultiArray:
         from pyop3.itree.tree import _compose_bits, _index_axes, as_index_forest
 
@@ -547,10 +553,6 @@ class ContextSensitiveMultiArray(ContextSensitive, KernelArgument):
     @property
     def max_value(self):
         return self._shared_attr("max_value")
-
-    @property
-    def name(self):
-        return self._shared_attr("name")
 
     @property
     def layouts(self):

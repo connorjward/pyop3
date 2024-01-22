@@ -392,8 +392,8 @@ def compile(expr: LoopExpr, name="mykernel"):
 
 
 @functools.singledispatch
-def _compile(expr: Any, ctx: LoopyCodegenContext) -> None:
-    raise TypeError
+def _compile(expr: Any, loop_indices, ctx: LoopyCodegenContext) -> None:
+    raise TypeError(f"No handler defined for {type(expr).__name__}")
 
 
 @_compile.register

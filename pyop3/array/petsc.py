@@ -25,6 +25,7 @@ from pyop3.buffer import PackedBuffer
 from pyop3.cache import cached
 from pyop3.dtypes import IntType, ScalarType
 from pyop3.itree.tree import CalledMap, LoopIndex, _index_axes, as_index_forest
+from pyop3.lang import do_loop, loop
 from pyop3.mpi import hash_comm
 from pyop3.utils import deprecated, just_one, merge_dicts, single_valued, strictly_all
 
@@ -57,6 +58,7 @@ class PetscVecNest(PetscVec):
 class MatType(enum.Enum):
     AIJ = "aij"
     BAIJ = "baij"
+    PREALLOCATOR = "preallocator"
 
 
 class PetscMat(PetscObject, abc.ABC):
@@ -115,29 +117,13 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
         rmap_axes = rmap_axes.set_up()
         rmap = HierarchicalArray(rmap_axes, dtype=IntType)
 
-        import pyop3.itree.tree
-
-        pyop3.itree.tree.STOP = True
-
         for p in riterset.iter(loop_index=rloop_index):
             for q in rindex.iter({p}):
-                print(q.target_path)
-                if (
-                    self.raxes[q.index]
-                    .with_context(p.loop_context | q.loop_context)
-                    .size
-                    > 0
-                ):
-                    print(q.target_exprs)
-                    # breakpoint()
-                else:
-                    print("not using")
                 for q_ in (
                     self.raxes[q.index]
                     .with_context(p.loop_context | q.loop_context)
                     .iter({q})
                 ):
-                    # breakpoint()
                     path = p.source_path | q.source_path | q_.source_path
                     indices = p.source_exprs | q.source_exprs | q_.source_exprs
                     offset = self.raxes.offset(
@@ -148,9 +134,6 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
         # FIXME being extremely lazy, rmap and cmap are NOT THE SAME
         cloop_index = rloop_index
         cmap = rmap
-
-        print(rmap.data)
-        # breakpoint()
 
         # Combine the loop contexts of the row and column indices. Consider
         # a loop over a multi-component axis with components "a" and "b":
@@ -287,6 +270,19 @@ class PetscMatBAIJ(MonolithicPetscMat):
         self.axes = AxisTree.from_nest({self.raxis: self.caxis})
 
 
+class PetscMatPreallocator(MonolithicPetscMat):
+    def __init__(self, points, adjacency, raxes, caxes, *, name: str = None):
+        # TODO internal comm?
+        comm = single_valued([raxes.comm, caxes.comm])
+        mat = PETSc.Mat().create(comm)
+        mat.setType(PETSc.Mat.Type.PREALLOCATOR)
+        mat.setSizes((raxes.size, caxes.size))
+        mat.setUp()
+
+        super().__init__(name)
+        self.mat = mat
+
+
 class PetscMatNest(PetscMat):
     ...
 
@@ -325,30 +321,30 @@ def _alloc_template_mat(points, adjacency, raxes, caxes, bsize=None):
     if bsize is not None:
         raise NotImplementedError
 
-    # TODO internal comm?
-    comm = single_valued([raxes.comm, caxes.comm])
-
-    sizes = (raxes.size, caxes.size)
-
     # Determine the nonzero pattern by filling a preallocator matrix
-    prealloc_mat = PETSc.Mat().create(comm)
-    prealloc_mat.setType(PETSc.Mat.Type.PREALLOCATOR)
-    prealloc_mat.setSizes(sizes)
-    prealloc_mat.setUp()
+    prealloc_mat = PetscMatPreallocator(points, adjacency, raxes, caxes)
 
-    for p in points.iter():
-        for q in adjacency(p.index).iter({p}):
-            for p_ in raxes[p.index].with_context(p.loop_context).iter({p}):
-                for q_ in (
-                    caxes[q.index]
-                    .with_context(p.loop_context | q.loop_context)
-                    .iter({q})
-                ):
-                    # NOTE: It is more efficient (but less readable) to
-                    # compute this higher up in the loop nest
-                    row = raxes.offset(p_.target_path, p_.target_exprs)
-                    col = caxes.offset(q_.target_path, q_.target_exprs)
-                    prealloc_mat.setValue(row, col, 666)
+    do_loop(
+        p := points.index(),
+        loop(
+            q := adjacency(p).index(),
+            prealloc_mat[p, q].assign(666),
+        ),
+    )
+
+    # for p in points.iter():
+    #     for q in adjacency(p.index).iter({p}):
+    #         for p_ in raxes[p.index].with_context(p.loop_context).iter({p}):
+    #             for q_ in (
+    #                 caxes[q.index]
+    #                 .with_context(p.loop_context | q.loop_context)
+    #                 .iter({q})
+    #             ):
+    #                 # NOTE: It is more efficient (but less readable) to
+    #                 # compute this higher up in the loop nest
+    #                 row = raxes.offset(p_.target_path, p_.target_exprs)
+    #                 col = caxes.offset(q_.target_path, q_.target_exprs)
+    #                 prealloc_mat.setValue(row, col, 666)
     prealloc_mat.assemble()
 
     # Now build the matrix from this preallocator
