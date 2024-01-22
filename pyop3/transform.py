@@ -11,7 +11,7 @@ from pyop3.array import ContextSensitiveMultiArray, HierarchicalArray
 from pyop3.axtree import Axis, AxisTree
 from pyop3.itree import Map, TabulatedMapComponent
 from pyop3.lang import CalledFunction, ContextAwareLoop, Instruction, Loop, Terminal
-from pyop3.utils import just_one
+from pyop3.utils import checked_zip, just_one
 
 
 # TODO Is this generic for other parsers/transformers? Esp. lower.py
@@ -41,31 +41,25 @@ class LoopContextExpander(Transformer):
             source_path = just_one(source_paths)
             target_path = just_one(target_paths)
 
-            context_ = context | {loop.index.id: target_path}
+            context_ = context | {loop.index.id: (source_path, target_path)}
             statements = {
                 source_path: tuple(
                     self._apply(stmt, context=context_) for stmt in loop.statements
                 )
             }
-            return ContextAwareLoop(
-                loop.index.copy(iterset=cf_iterset),
-                statements,
-            )
         else:
             assert len(source_paths) > 1
-            cf_loops = []
+            statements = {}
             for source_path, target_path in checked_zip(source_paths, target_paths):
-                # wont work yet
-                target_path = loop.index.target_paths[path]
-                # cf_index = ???
-                # index
-                raise NotImplementedError
-                cf_statements = [self._apply(s, replace_map | {loop.index: cf_index})]
-                cf_loop = loop.copy(index=cf_index, statements=cf_statements)
-                cf_loops.append(cf_loop)
+                context_ = context | {loop.index.id: (source_path, target_path)}
+                statements[source_path] = tuple(
+                    self._apply(stmt, context=context_) for stmt in loop.statements
+                )
 
-            raise NotImplementedError("TODO")
-            return ContextAwareLoop(cf_loops)
+        return ContextAwareLoop(
+            loop.index.copy(iterset=cf_iterset),
+            statements,
+        )
 
     @_apply.register
     def _(self, terminal: Terminal, *, context):

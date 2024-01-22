@@ -624,7 +624,9 @@ def test_map_composition(vec2_inc_kernel):
     # intermediate indexed object.
     p = iterset.index()
     indexed_dat0 = dat0[map0(p)]
-    cf_indexed_dat0 = indexed_dat0.with_context({p.id: {"ax0": "pt0"}})
+    cf_indexed_dat0 = indexed_dat0.with_context(
+        {p.id: ({"ax0": "pt0"}, {"ax0": "pt0"})}
+    )
     called_map_node = op3.utils.just_one(cf_indexed_dat0.axes.nodes)
 
     # this map targets the entries in map0 so it can only contain 0s, 1s and 2s

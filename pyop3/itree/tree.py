@@ -282,7 +282,7 @@ class LoopIndex(AbstractLoopIndex):
     # and handling that separately.
     def with_context(self, context):
         iterset = self.iterset.with_context(context)
-        path = context[self.id]
+        _, path = context[self.id]
         return ContextFreeLoopIndex(iterset, path, id=self.id)
 
     # unsure if this is required
@@ -342,12 +342,17 @@ class ContextFreeLoopIndex(ContextFreeIndex):
         )
 
 
-class LocalLoopIndex(AbstractLoopIndex):
+# class LocalLoopIndex(AbstractLoopIndex):
+class LocalLoopIndex:
     """Class representing a 'local' index."""
 
-    def __init__(self, loop_index: LoopIndex, *, id=None):
-        super().__init__(id)
+    def __init__(self, loop_index: LoopIndex):
+        # super().__init__(id)
         self.loop_index = loop_index
+
+    @property
+    def id(self):
+        return self.loop_index.id
 
     @property
     def iterset(self):
@@ -356,7 +361,7 @@ class LocalLoopIndex(AbstractLoopIndex):
     def with_context(self, context):
         # not sure about this
         iterset = self.loop_index.iterset.with_context(context)
-        path = context[self.id]
+        path, _ = context[self.id]  # here different from LoopIndex
         return ContextFreeLoopIndex(iterset, path, id=self.id)
 
     @property
@@ -681,8 +686,9 @@ def _(index: ContextFreeIndex, **kwargs):
 
 
 # TODO This function can definitely be refactored
-@_as_index_forest.register
-def _(index: AbstractLoopIndex, *, loop_context=pmap(), **kwargs):
+@_as_index_forest.register(AbstractLoopIndex)
+@_as_index_forest.register(LocalLoopIndex)
+def _(index, *, loop_context=pmap(), **kwargs):
     local = isinstance(index, LocalLoopIndex)
 
     forest = {}
@@ -692,12 +698,9 @@ def _(index: AbstractLoopIndex, *, loop_context=pmap(), **kwargs):
                 source_path = pmap()
                 target_path = axes.target_paths.get(None, pmap())
 
-                if local:
-                    context_ = (
-                        loop_context | context | {index.local_index.id: source_path}
-                    )
-                else:
-                    context_ = loop_context | context | {index.id: target_path}
+                context_ = (
+                    loop_context | context | {index.id: (source_path, target_path)}
+                )
 
                 cf_index = index.with_context(context_)
                 forest[context_] = IndexTree(cf_index)
@@ -710,10 +713,9 @@ def _(index: AbstractLoopIndex, *, loop_context=pmap(), **kwargs):
                     ).items():
                         target_path |= axes.target_paths.get((axis.id, cpt.label), {})
 
-                    if local:
-                        context_ = loop_context | context | {index.id: source_path}
-                    else:
-                        context_ = loop_context | context | {index.id: target_path}
+                    context_ = (
+                        loop_context | context | {index.id: (source_path, target_path)}
+                    )
 
                     cf_index = index.with_context(context_)
                     forest[context_] = IndexTree(cf_index)
@@ -726,10 +728,7 @@ def _(index: AbstractLoopIndex, *, loop_context=pmap(), **kwargs):
                 leaf_axis, leaf_cpt, and_components=True
             ).items():
                 target_path |= index.iterset.target_paths[axis.id, cpt.label]
-            if local:
-                context = loop_context | {index.id: source_path}
-            else:
-                context = loop_context | {index.id: target_path}
+            context = loop_context | {index.id: (source_path, target_path)}
 
             cf_index = index.with_context(context)
             forest[context] = IndexTree(cf_index)
@@ -1398,7 +1397,7 @@ class IndexIteratorEntry:
 
     @property
     def loop_context(self):
-        return freeze({self.index.id: self.target_path})
+        return freeze({self.index.id: (self.source_path, self.target_path)})
 
     @property
     def target_replace_map(self):

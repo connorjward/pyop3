@@ -777,7 +777,7 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
     def leaf_target_paths(self):
         return tuple(
             merge_dicts(
-                self.target_paths[ax.id, clabel]
+                self.target_paths.get((ax.id, clabel), {})
                 for ax, clabel in self.path_with_nodes(*leaf, ordered=True)
             )
             for leaf in self.leaves
