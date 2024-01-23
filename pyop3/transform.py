@@ -8,7 +8,7 @@ import itertools
 from pyrsistent import freeze, pmap
 
 from pyop3.array import ContextSensitiveMultiArray, HierarchicalArray
-from pyop3.axtree import Axis, AxisTree, ContextFree
+from pyop3.axtree import Axis, AxisTree, ContextFree, ContextSensitive
 from pyop3.buffer import NullBuffer
 from pyop3.itree import Map, TabulatedMapComponent
 from pyop3.lang import (
@@ -17,6 +17,7 @@ from pyop3.lang import (
     RW,
     WRITE,
     AddAssignment,
+    Assignment,
     CalledFunction,
     ContextAwareLoop,
     Instruction,
@@ -75,8 +76,18 @@ class LoopContextExpander(Transformer):
         )
 
     @_apply.register
-    def _(self, terminal: Terminal, *, context):
+    def _(self, terminal: CalledFunction, *, context):
         cf_args = [a.with_context(context) for a in terminal.arguments]
+        return terminal.with_arguments(cf_args)
+
+    @_apply.register
+    def _(self, terminal: Assignment, *, context):
+        cf_args = []
+        for arg in terminal.arguments:
+            cf_arg = (
+                arg.with_context(context) if isinstance(arg, ContextSensitive) else arg
+            )
+            cf_args.append(cf_arg)
         return terminal.with_arguments(cf_args)
 
 
@@ -108,7 +119,11 @@ class ImplicitPackUnpackExpander(Transformer):
         )
 
     @_apply.register
-    def _(self, terminal: Terminal):
+    def _(self, assignment: Assignment):
+        return (assignment,)
+
+    @_apply.register
+    def _(self, terminal: CalledFunction):
         gathers = []
         scatters = []
         arguments = []

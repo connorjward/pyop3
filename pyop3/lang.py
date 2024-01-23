@@ -670,6 +670,11 @@ class Assignment(Terminal, abc.ABC):
         self.expression = expression
 
     @property
+    def arguments(self):
+        # FIXME Not sure this is right for complicated expressions
+        return (self.assignee, self.expression)
+
+    @property
     def arrays(self):
         from pyop3.array import HierarchicalArray
 

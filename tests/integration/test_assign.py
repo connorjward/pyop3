@@ -10,7 +10,7 @@ def test_assign_number(mode):
         axes = op3.AxisTree(root)
     else:
         assert mode == "vector"
-        axes = op3.AxisTree({root: op3.Axis(3)})
+        axes = op3.AxisTree.from_nest({root: op3.Axis(3)})
 
     dat = op3.HierarchicalArray(axes, dtype=op3.IntType)
     assert (dat.data_ro == 0).all()
