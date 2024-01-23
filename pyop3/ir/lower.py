@@ -859,6 +859,8 @@ def parse_assignment_properly_this_time(
             codegen_context.add_argument(array)
             target_paths[array] = array.target_paths.get(None, pmap())
             index_exprs[array] = array.index_exprs.get(None, pmap())
+        target_paths = freeze(target_paths)
+        index_exprs = freeze(index_exprs)
 
     if axes.is_empty:
         add_leaf_assignment(
@@ -871,13 +873,12 @@ def parse_assignment_properly_this_time(
         )
         return
 
-    raise NotImplementedError
-
     for component in axis.components:
         iname = codegen_context.unique_name("i")
 
-        # map magic
-        domain_index_exprs = ctx_free_array.domain_index_exprs.get(
+        # register a loop
+        # does this work for assignments to temporaries?
+        domain_index_exprs = assignment.assignee.domain_index_exprs.get(
             (axis.id, component.label), pmap()
         )
         extent_var = register_extent(
@@ -888,42 +889,34 @@ def parse_assignment_properly_this_time(
         )
         codegen_context.add_domain(iname, extent_var)
 
-        new_source_path = source_path | {axis.label: component.label}  # not used
-        new_target_path = target_path | ctx_free_array.target_paths.get(
-            (axis.id, component.label), {}
-        )
-
         new_iname_replace_map = iname_replace_map | {axis.label: pym.var(iname)}
 
-        index_exprs_ = index_exprs | ctx_free_array.index_exprs.get(
-            (axis.id, component.label), {}
-        )
+        target_paths_ = dict(target_paths)
+        index_exprs_ = dict(index_exprs)
+        for array in assignment.arrays:
+            target_paths_[array] |= array.target_paths.get(
+                (axis.id, component.label), {}
+            )
+            index_exprs_[array] |= array.index_exprs.get((axis.id, component.label), {})
+        target_paths_ = freeze(target_paths_)
+        index_exprs_ = freeze(index_exprs_)
 
         with codegen_context.within_inames({iname}):
             if subaxis := axes.child(axis, component):
                 parse_assignment_properly_this_time(
-                    assignee,
-                    expression,
-                    shape,
-                    op,
+                    assignment,
                     loop_indices,
                     codegen_context,
-                    axis=subaxis,
-                    source_path=new_source_path,
-                    target_path=new_target_path,
                     iname_replace_map=new_iname_replace_map,
+                    axis=subaxis,
+                    target_paths=target_paths_,
                     index_exprs=index_exprs_,
                 )
 
             else:
                 add_leaf_assignment(
-                    assignee,
-                    expression,
-                    shape,
-                    op,
-                    axes,
-                    new_source_path,
-                    new_target_path,
+                    assignment,
+                    target_paths_,
                     index_exprs_,
                     new_iname_replace_map,
                     codegen_context,

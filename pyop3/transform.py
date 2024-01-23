@@ -117,8 +117,10 @@ class ImplicitPackUnpackExpander(Transformer):
                 arg, ContextFree
             ), "Loop contexts should already be expanded"
             if _requires_pack_unpack(arg):
+                # this is a nasty hack - shouldn't reuse layouts from arg.axes
+                axes = AxisTree(arg.axes.parent_to_children)
                 temporary = HierarchicalArray(
-                    arg.axes,
+                    axes,
                     data=NullBuffer(arg.dtype),  # does this need a size?
                     name=self._name_generator("t"),
                 )
