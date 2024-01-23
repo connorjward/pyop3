@@ -11,6 +11,7 @@ import itertools
 import numbers
 import operator
 import textwrap
+from functools import cached_property
 from typing import Any, Dict, FrozenSet, Optional, Sequence, Tuple, Union
 
 import loopy as lp
@@ -26,7 +27,7 @@ from pyop3.array.harray import CalledMapVariable, ContextSensitiveMultiArray
 from pyop3.array.petsc import PetscMat, PetscObject
 from pyop3.axtree import Axis, AxisComponent, AxisTree, AxisVariable, ContextFree
 from pyop3.axtree.tree import ContextSensitiveAxisTree
-from pyop3.buffer import DistributedBuffer, PackedBuffer
+from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
 from pyop3.dtypes import IntType, PointerType
 from pyop3.itree import (
     AffineSliceComponent,
@@ -56,15 +57,18 @@ from pyop3.lang import (
     READ,
     RW,
     WRITE,
+    AddAssignment,
     Assignment,
     CalledFunction,
     ContextAwareLoop,
     Loop,
+    ReplaceAssignment,
 )
 from pyop3.log import logger
 from pyop3.utils import (
     PrettyTuple,
     UniqueNameGenerator,
+    as_tuple,
     checked_zip,
     just_one,
     merge_dicts,
@@ -192,6 +196,15 @@ class LoopyCodegenContext(CodegenContext):
         self._add_instruction(insn)
 
     def add_argument(self, array):
+        if isinstance(array.buffer, NullBuffer):
+            # could rename array like the rest
+            # TODO do i need to be clever about shapes?
+            temp = lp.TemporaryVariable(
+                array.name, dtype=array.dtype, shape=(array.size,)
+            )
+            self._args.append(temp)
+            return
+
         if array.name in self.actual_to_kernel_rename_map:
             return
 
@@ -206,6 +219,7 @@ class LoopyCodegenContext(CodegenContext):
             arg = lp.GlobalArg(arg_name, dtype=self._dtype(array), shape=None)
         self._args.append(arg)
 
+    # can this now go?
     def add_temporary(self, name, dtype=IntType, shape=()):
         temp = lp.TemporaryVariable(name, dtype=dtype, shape=shape)
         self._args.append(temp)
@@ -270,9 +284,13 @@ class LoopyCodegenContext(CodegenContext):
 
 class CodegenResult:
     def __init__(self, expr, ir, arg_replace_map):
-        self.expr = expr
+        self.expr = as_tuple(expr)
         self.ir = ir
         self.arg_replace_map = arg_replace_map
+
+    @cached_property
+    def datamap(self):
+        return merge_dicts(e.datamap for e in self.expr)
 
     def __call__(self, **kwargs):
         from pyop3.target import compile_loopy
@@ -280,7 +298,7 @@ class CodegenResult:
         data_args = []
         for kernel_arg in self.ir.default_entrypoint.args:
             actual_arg_name = self.arg_replace_map.get(kernel_arg.name, kernel_arg.name)
-            array = kwargs.get(actual_arg_name, self.expr.datamap[actual_arg_name])
+            array = kwargs.get(actual_arg_name, self.datamap[actual_arg_name])
             data_arg = _as_pointer(array)
             data_args.append(data_arg)
         compile_loopy(self.ir)(*data_args)
@@ -344,10 +362,13 @@ def compile(expr: Instruction, name="mykernel"):
     from pyop3.transform import expand_implicit_pack_unpack, expand_loop_contexts
 
     expr = expand_loop_contexts(expr)
-    # expr = expand_implicit_pack_unpack(expr)
+    expr = expand_implicit_pack_unpack(expr)
 
     ctx = LoopyCodegenContext()
-    _compile(expr, pmap(), ctx)
+
+    # expr can be a tuple if we don't start with a loop
+    for e in as_tuple(expr):
+        _compile(e, pmap(), ctx)
 
     # add a no-op instruction touching all of the kernel arguments so they are
     # not silently dropped
@@ -541,28 +562,12 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
     # loopy args can contain ragged params too
     loopy_args = call.function.code.default_entrypoint.args[: len(call.arguments)]
     for loopy_arg, arg, spec in checked_zip(loopy_args, call.arguments, call.argspec):
-        # do we need the original arg any more?
-        # TODO cleanup
-        # cf_arg = arg.with_context(loop_context)
-        cf_arg = arg
-        assert isinstance(cf_arg, ContextFree)
-
-        if isinstance(arg, (HierarchicalArray, ContextSensitiveMultiArray)):
-            # FIXME materialize is a bad name here, it implies actually packing the values
-            # into the temporary.
-            temporary = cf_arg.materialize()
-        else:
-            # assert isinstance(arg, LoopIndex)
-
-            temporary = HierarchicalArray(
-                cf_arg.axes,
-                dtype=IntType,
-                target_paths=cf_arg.target_paths,
-                index_exprs=cf_arg.index_exprs,
-                domain_index_exprs=cf_arg.domain_index_exprs,
-                name=ctx.unique_name("t"),
-            )
-        indexed_temp = temporary
+        # this check fails because we currently assume that all arrays require packing
+        # from pyop3.transform import _requires_pack_unpack
+        # assert not _requires_pack_unpack(arg)
+        # old names
+        temporary = arg
+        indexed_temp = arg
 
         if loopy_arg.shape is None:
             shape = (temporary.alloc_size,)
@@ -574,6 +579,7 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
         temporaries.append((arg, indexed_temp, spec.access, shape))
 
         # Register data
+        # TODO This might be bad for temporaries
         if isinstance(arg, (HierarchicalArray, ContextSensitiveMultiArray)):
             ctx.add_argument(arg)
 
@@ -625,48 +631,54 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
     )
 
     # gathers
-    for arg, temp, access, shape in temporaries:
-        if access in {READ, RW, MIN_RW, MAX_RW}:
-            op = AssignmentType.READ
-        else:
-            assert access in {WRITE, INC, MIN_WRITE, MAX_WRITE}
-            op = AssignmentType.ZERO
-        parse_assignment(arg, temp, shape, op, loop_indices, ctx)
+    # for arg, temp, access, shape in temporaries:
+    #     if access in {READ, RW, MIN_RW, MAX_RW}:
+    #         op = AssignmentType.READ
+    #     else:
+    #         assert access in {WRITE, INC, MIN_WRITE, MAX_WRITE}
+    #         op = AssignmentType.ZERO
+    #     parse_assignment(arg, temp, shape, op, loop_indices, ctx)
 
     ctx.add_function_call(assignees, expression)
     ctx.add_subkernel(call.function.code)
 
     # scatters
-    for arg, temp, access, shape in temporaries:
-        if access == READ:
-            continue
-        elif access in {WRITE, RW, MIN_RW, MIN_WRITE, MAX_RW, MAX_WRITE}:
-            op = AssignmentType.WRITE
-        else:
-            assert access == INC
-            op = AssignmentType.INC
-        parse_assignment(arg, temp, shape, op, loop_indices, ctx)
+    # for arg, temp, access, shape in temporaries:
+    #     if access == READ:
+    #         continue
+    #     elif access in {WRITE, RW, MIN_RW, MIN_WRITE, MAX_RW, MAX_WRITE}:
+    #         op = AssignmentType.WRITE
+    #     else:
+    #         assert access == INC
+    #         op = AssignmentType.INC
+    #     parse_assignment(arg, temp, shape, op, loop_indices, ctx)
 
 
 # FIXME this is practically identical to what we do in build_loop
+@_compile.register(Assignment)
 def parse_assignment(
-    array,
-    temp,
-    shape,
-    op,
+    assignment,
+    # shape,
+    # op,
     loop_indices,
     codegen_ctx,
 ):
-    # TODO singledispatch
-    assert isinstance(array, ContextFree)
+    assignee = assignment.assignee
+    expression = assignment.expression
 
-    if isinstance(array, (HierarchicalArray, ContextSensitiveMultiArray)):
-        if isinstance(array.buffer, PackedBuffer) and op != AssignmentType.ZERO:
-            if not isinstance(array.buffer.array, PetscMatAIJ):
+    shape = "notshape"
+    op = "notop"
+
+    # TODO singledispatch
+    assert isinstance(assignee, ContextFree)
+
+    if isinstance(assignee, (HierarchicalArray, ContextSensitiveMultiArray)):
+        if isinstance(assignee.buffer, PackedBuffer) and op != AssignmentType.ZERO:
+            if not isinstance(assignee.buffer.array, PetscMatAIJ):
                 raise NotImplementedError("TODO")
             parse_assignment_petscmat(
-                array,
-                temp,
+                assignee,
+                expression,
                 shape,
                 op,
                 loop_indices,
@@ -676,40 +688,17 @@ def parse_assignment(
         else:
             pass
     else:
-        assert isinstance(array, ContextFreeLoopIndex)
-
-    # get the right index tree given the loop context
-
-    # TODO Is this right to remove? Can it be handled further down?
-    axes = array.axes
-    # minimal_context = array.filter_context(loop_context)
-    #
-    # target_path = {}
-    # # for _, jnames in new_indices.values():
-    # for loop_index, (path, iname_expr) in loop_indices.items():
-    #     if loop_index in minimal_context:
-    #         # assert all(k not in jname_replace_map for k in iname_expr)
-    #         # jname_replace_map.update(iname_expr)
-    #         target_path.update(path)
-    # # jname_replace_map = freeze(jname_replace_map)
-    # target_path = freeze(target_path)
-    target_path = pmap()
+        assert isinstance(assignee, ContextFreeLoopIndex)
 
     # jname_replace_map = merge_dicts(mymap for _, mymap in loop_indices.values())
     # TODO cleanup
     jname_replace_map = loop_indices
 
     parse_assignment_properly_this_time(
-        array,
-        temp,
-        shape,
-        op,
-        axes,
+        assignment,
         loop_indices,
         codegen_ctx,
         iname_replace_map=jname_replace_map,
-        index_exprs=pmap(),
-        target_path=target_path,
     )
 
 
@@ -848,42 +837,41 @@ def parse_assignment_petscmat(array, temp, shape, op, loop_indices, codegen_cont
 
 # TODO now I attach a lot of info to the context-free array, do I need to pass axes around?
 def parse_assignment_properly_this_time(
-    array,
-    temp,
-    shape,
-    op,
-    axes,
+    assignment,
     loop_indices,
     codegen_context,
     *,
-    axis=None,
     iname_replace_map,
-    target_path,
-    index_exprs,
-    source_path=pmap(),
+    # TODO document these under "Other Parameters"
+    axis=None,
+    target_paths=None,
+    index_exprs=None,
 ):
-    ctx_free_array = array
+    axes = assignment.assignee.axes
 
     if axis is None:
+        assert target_paths is None and index_exprs is None
         axis = axes.root
-        target_path = target_path | ctx_free_array.target_paths.get(None, pmap())
-        index_exprs = ctx_free_array.index_exprs.get(None, pmap())
+
+        target_paths = {}
+        index_exprs = {}
+        for array in assignment.arrays:
+            codegen_context.add_argument(array)
+            target_paths[array] = array.target_paths.get(None, pmap())
+            index_exprs[array] = array.index_exprs.get(None, pmap())
 
     if axes.is_empty:
         add_leaf_assignment(
-            array,
-            temp,
-            shape,
-            op,
-            axes,
-            source_path,
-            target_path,
+            assignment,
+            target_paths,
             index_exprs,
             iname_replace_map,
             codegen_context,
             loop_indices,
         )
         return
+
+    raise NotImplementedError
 
     for component in axis.components:
         iname = codegen_context.unique_name("i")
@@ -914,11 +902,10 @@ def parse_assignment_properly_this_time(
         with codegen_context.within_inames({iname}):
             if subaxis := axes.child(axis, component):
                 parse_assignment_properly_this_time(
-                    array,
-                    temp,
+                    assignee,
+                    expression,
                     shape,
                     op,
-                    axes,
                     loop_indices,
                     codegen_context,
                     axis=subaxis,
@@ -930,8 +917,8 @@ def parse_assignment_properly_this_time(
 
             else:
                 add_leaf_assignment(
-                    array,
-                    temp,
+                    assignee,
+                    expression,
                     shape,
                     op,
                     axes,
@@ -945,85 +932,93 @@ def parse_assignment_properly_this_time(
 
 
 def add_leaf_assignment(
-    array,
-    temporary,
-    shape,
-    op,
-    axes,
-    source_path,
-    target_path,
+    assignment,
+    target_paths,
     index_exprs,
     iname_replace_map,
     codegen_context,
     loop_indices,
 ):
-    if isinstance(array, (HierarchicalArray, ContextSensitiveMultiArray)):
+    # if isinstance(array, (HierarchicalArray, ContextSensitiveMultiArray)):
+    #
+    #     def array_expr():
+    #         replace_map = {}
+    #         replacer = JnameSubstitutor(iname_replace_map, codegen_context)
+    #         for axis, index_expr in index_exprs.items():
+    #             replace_map[axis] = replacer(index_expr)
+    #
+    #         array_ = array
+    #         return make_array_expr(
+    #             array,
+    #             array_.layouts[target_path],
+    #             target_path,
+    #             replace_map,
+    #             codegen_context,
+    #         )
+    #
+    # else:
+    #     assert isinstance(array, ContextFreeLoopIndex)
+    #
+    #     array_ = array
+    #
+    #     if array_.axes.depth != 0:
+    #         raise NotImplementedError("Tricky when dealing with vectors here")
+    #
+    #     def array_expr():
+    #         replace_map = {}
+    #         replacer = JnameSubstitutor(iname_replace_map, codegen_context)
+    #         for axis, index_expr in index_exprs.items():
+    #             replace_map[axis] = replacer(index_expr)
+    #
+    #         if len(replace_map) > 1:
+    #             # use leaf_target_path to get the right bits from replace_map?
+    #             raise NotImplementedError("Needs more thought")
+    #         return just_one(replace_map.values())
+    #
+    # temp_expr = functools.partial(
+    #     make_temp_expr,
+    #     temporary,
+    #     shape,
+    #     source_path,
+    #     iname_replace_map,
+    #     codegen_context,
+    # )
+    larr = assignment.assignee
+    rarr = assignment.expression
 
-        def array_expr():
-            replace_map = {}
-            replacer = JnameSubstitutor(iname_replace_map, codegen_context)
-            for axis, index_expr in index_exprs.items():
-                replace_map[axis] = replacer(index_expr)
-
-            array_ = array
-            return make_array_expr(
-                array,
-                array_.layouts[target_path],
-                target_path,
-                replace_map,
-                codegen_context,
-            )
-
+    if isinstance(rarr, HierarchicalArray):
+        rexpr = make_array_expr(
+            rarr,
+            target_paths[rarr],
+            index_exprs[rarr],
+            iname_replace_map,
+            codegen_context,
+        )
     else:
-        assert isinstance(array, ContextFreeLoopIndex)
+        assert isinstance(rarr, numbers.Number)
+        rexpr = rarr
 
-        array_ = array
-
-        if array_.axes.depth != 0:
-            raise NotImplementedError("Tricky when dealing with vectors here")
-
-        def array_expr():
-            replace_map = {}
-            replacer = JnameSubstitutor(iname_replace_map, codegen_context)
-            for axis, index_expr in index_exprs.items():
-                replace_map[axis] = replacer(index_expr)
-
-            if len(replace_map) > 1:
-                # use leaf_target_path to get the right bits from replace_map?
-                raise NotImplementedError("Needs more thought")
-            return just_one(replace_map.values())
-
-    temp_expr = functools.partial(
-        make_temp_expr,
-        temporary,
-        shape,
-        source_path,
-        iname_replace_map,
-        codegen_context,
+    lexpr = make_array_expr(
+        larr, target_paths[larr], index_exprs[larr], iname_replace_map, codegen_context
     )
 
-    if op == AssignmentType.READ:
-        lexpr = temp_expr()
-        rexpr = array_expr()
-    elif op == AssignmentType.WRITE:
-        lexpr = array_expr()
-        rexpr = temp_expr()
-    elif op == AssignmentType.INC:
-        lexpr = array_expr()
-        rexpr = lexpr + temp_expr()
-    elif op == AssignmentType.ZERO:
-        lexpr = temp_expr()
-        rexpr = 0
+    if isinstance(assignment, AddAssignment):
+        rexpr = lexpr + rexpr
     else:
-        raise AssertionError("Invalid assignment type")
+        assert isinstance(assignment, ReplaceAssignment)
 
     codegen_context.add_assignment(lexpr, rexpr)
 
 
-def make_array_expr(array, layouts, path, jnames, ctx):
+def make_array_expr(array, target_path, index_exprs, inames, ctx):
+    replace_map = {}
+    replacer = JnameSubstitutor(inames, ctx)
+    for axis, index_expr in index_exprs.items():
+        replace_map[axis] = replacer(index_expr)
+
     array_offset = make_offset_expr(
-        layouts,
-        jnames,
+        array.layouts[target_path],
+        replace_map,
         ctx,
     )
     return pym.subscript(pym.var(array.name), array_offset)

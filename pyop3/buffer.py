@@ -7,7 +7,7 @@ from functools import cached_property
 import numpy as np
 from mpi4py import MPI
 from petsc4py import PETSc
-from pyrsistent import freeze
+from pyrsistent import freeze, pmap
 
 from pyop3.dtypes import ScalarType
 from pyop3.lang import READ, RW, WRITE, KernelArgument
@@ -55,7 +55,30 @@ class Buffer(KernelArgument, abc.ABC):
         pass
 
 
-# TODO should AbstractBuffer be a class and then a serial buffer can be its own class?
+class NullBuffer(Buffer):
+    """A buffer that does not carry data.
+
+    This is useful for handling temporaries when we generate code. For much
+    of the compilation we want to treat temporaries like ordinary arrays but
+    they are not passed as kernel arguments nor do they have any parallel
+    semantics.
+
+    """
+
+    def __init__(self, dtype=None):
+        if dtype is None:
+            dtype = self.DEFAULT_DTYPE
+        self._dtype = dtype
+
+    @property
+    def dtype(self):
+        return self._dtype
+
+    @property
+    def datamap(self):
+        return pmap()
+
+
 class DistributedBuffer(Buffer):
     """An array distributed across multiple processors with ghost values."""
 

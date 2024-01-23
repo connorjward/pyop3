@@ -8,10 +8,23 @@ import itertools
 from pyrsistent import freeze, pmap
 
 from pyop3.array import ContextSensitiveMultiArray, HierarchicalArray
-from pyop3.axtree import Axis, AxisTree
+from pyop3.axtree import Axis, AxisTree, ContextFree
+from pyop3.buffer import NullBuffer
 from pyop3.itree import Map, TabulatedMapComponent
-from pyop3.lang import CalledFunction, ContextAwareLoop, Instruction, Loop, Terminal
-from pyop3.utils import checked_zip, just_one
+from pyop3.lang import (
+    INC,
+    READ,
+    RW,
+    WRITE,
+    AddAssignment,
+    CalledFunction,
+    ContextAwareLoop,
+    Instruction,
+    Loop,
+    ReplaceAssignment,
+    Terminal,
+)
+from pyop3.utils import UniqueNameGenerator, checked_zip, just_one
 
 
 # TODO Is this generic for other parsers/transformers? Esp. lower.py
@@ -72,6 +85,9 @@ def expand_loop_contexts(expr: Instruction):
 
 
 class ImplicitPackUnpackExpander(Transformer):
+    def __init__(self):
+        self._name_generator = UniqueNameGenerator()
+
     def apply(self, expr):
         return self._apply(expr)
 
@@ -81,18 +97,51 @@ class ImplicitPackUnpackExpander(Transformer):
 
     # TODO Can I provide a generic "operands" thing? Put in the parent class?
     @_apply.register
-    def _(self, loop: Loop):
-        return loop.copy(statements=[self._apply(s) for s in loop.statements])
+    def _(self, loop: ContextAwareLoop):
+        return (
+            loop.copy(
+                statements={
+                    ctx: [stmt_ for stmt in stmts for stmt_ in self._apply(stmt)]
+                    for ctx, stmts in loop.statements.items()
+                }
+            ),
+        )
 
     @_apply.register
     def _(self, terminal: Terminal):
-        for arg, intent in terminal.arguments:
-            assert (
-                not isinstance(arg, ContextSensitive),
-                "Loop contexts should already be expanded",
-            )
-            if has_unit_stride(arg):
-                pass
+        gathers = []
+        scatters = []
+        arguments = []
+        for arg, intent in terminal.kernel_arguments:
+            assert isinstance(
+                arg, ContextFree
+            ), "Loop contexts should already be expanded"
+            if _requires_pack_unpack(arg):
+                temporary = HierarchicalArray(
+                    arg.axes,
+                    data=NullBuffer(arg.dtype),  # does this need a size?
+                    name=self._name_generator("t"),
+                )
+
+                if intent == READ:
+                    gathers.append(ReplaceAssignment(temporary, arg))
+                elif intent == WRITE:
+                    gathers.append(ReplaceAssignment(temporary, 0))
+                    scatters.append(ReplaceAssignment(arg, temporary))
+                elif intent == RW:
+                    gathers.append(ReplaceAssignment(temporary, arg))
+                    scatters.append(ReplaceAssignment(arg, temporary))
+                else:
+                    assert intent == INC
+                    gathers.append(ReplaceAssignment(temporary, 0))
+                    scatters.append(AddAssignment(arg, temporary))
+
+                arguments.append(temporary)
+
+            else:
+                arguments.append(arg)
+
+        return (*gathers, terminal.with_arguments(arguments), *scatters)
 
 
 # TODO check this docstring renders correctly
@@ -121,15 +170,13 @@ def expand_implicit_pack_unpack(expr: Instruction):
     in some contexts but not others.
 
     """
-    return ImplicitPackUnpackExpander(expr).apply()
+    return ImplicitPackUnpackExpander().apply(expr)
 
 
 def _requires_pack_unpack(arg):
-    return isinstance(arg, HierarchicalArray) and not _has_unit_stride(arg)
-
-
-def _has_unit_stride(array):
-    return
+    # TODO in theory packing isn't required for arrays that are contiguous,
+    # but this is hard to determine
+    return isinstance(arg, HierarchicalArray)
 
 
 # *below is old untested code*

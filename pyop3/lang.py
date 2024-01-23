@@ -660,15 +660,42 @@ class Assignment(Terminal, abc.ABC):
         self.assignee = assignee
         self.expression = expression
 
+    @property
+    def arrays(self):
+        from pyop3.array import HierarchicalArray
+
+        arrays_ = [self.assignee]
+        if isinstance(self.expression, HierarchicalArray):
+            arrays_.append(self.expression)
+        else:
+            if not isinstance(self.expression, numbers.Number):
+                raise NotImplementedError
+        return tuple(arrays_)
+        # collector = MultiArrayCollector()
+        # return collector(self.assignee) | collector(self.expression)
+
+    def with_arguments(self, arguments):
+        if len(arguments) != 2:
+            raise ValueError("Must provide 2 arguments")
+
+        assignee, expression = arguments
+        return self.copy(assignee=assignee, expression=expression)
+
 
 class ReplaceAssignment(Assignment):
     """Like PETSC_INSERT_VALUES."""
 
     @cached_property
     def kernel_arguments(self):
-        if not isinstance(self.expression, numbers.Number):
+        from pyop3.array import HierarchicalArray
+
+        if isinstance(self.expression, HierarchicalArray):
+            extra = ((self.expression, READ),)
+        elif isinstance(self.expression, numbers.Number):
+            extra = ()
+        else:
             raise NotImplementedError("Complicated rvalues not yet supported")
-        return ((self.assignee, WRITE),)
+        return ((self.assignee, WRITE),) + extra
 
 
 class AddAssignment(Assignment):
