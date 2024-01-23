@@ -112,10 +112,13 @@ class ImplicitPackUnpackExpander(Transformer):
         gathers = []
         scatters = []
         arguments = []
-        for arg, intent in terminal.kernel_arguments:
+        for (arg, intent), shape in checked_zip(
+            terminal.kernel_arguments, terminal.argument_shapes
+        ):
             assert isinstance(
                 arg, ContextFree
             ), "Loop contexts should already be expanded"
+
             if _requires_pack_unpack(arg):
                 # this is a nasty hack - shouldn't reuse layouts from arg.axes
                 axes = AxisTree(arg.axes.parent_to_children)
@@ -123,6 +126,7 @@ class ImplicitPackUnpackExpander(Transformer):
                     axes,
                     data=NullBuffer(arg.dtype),  # does this need a size?
                     name=self._name_generator("t"),
+                    _shape=shape,
                 )
 
                 if intent == READ:

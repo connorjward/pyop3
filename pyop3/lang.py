@@ -539,6 +539,11 @@ class Terminal(Instruction, abc.ABC):
     def datamap(self):
         return merge_dicts(a.datamap for a, _ in self.kernel_arguments)
 
+    @property
+    @abc.abstractmethod
+    def argument_shapes(self):
+        pass
+
     @abc.abstractmethod
     def with_arguments(self, arguments: Iterable[KernelArgument]):
         pass
@@ -648,6 +653,10 @@ class CalledFunction(Terminal):
             if isinstance(arg, KernelArgument)
         )
 
+    @property
+    def argument_shapes(self):
+        return tuple(arg.shape for arg in self.function.code.default_entrypoint.args)
+
     def with_arguments(self, arguments):
         return self.copy(arguments=arguments)
 
@@ -673,6 +682,10 @@ class Assignment(Terminal, abc.ABC):
         return tuple(arrays_)
         # collector = MultiArrayCollector()
         # return collector(self.assignee) | collector(self.expression)
+
+    @property
+    def argument_shapes(self):
+        return (None,) * len(self.kernel_arguments)
 
     def with_arguments(self, arguments):
         if len(arguments) != 2:

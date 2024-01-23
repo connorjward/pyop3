@@ -197,13 +197,18 @@ class LoopyCodegenContext(CodegenContext):
 
     def add_argument(self, array):
         if isinstance(array.buffer, NullBuffer):
+            assert array._shape is not None
+
             # could rename array like the rest
             # TODO do i need to be clever about shapes?
             temp = lp.TemporaryVariable(
-                array.name, dtype=array.dtype, shape=(array.size,)
+                array.name, dtype=array.dtype, shape=array._shape
             )
             self._args.append(temp)
             return
+        else:
+            # we only set this property for temporaries
+            assert array._shape is None
 
         if array.name in self.actual_to_kernel_rename_map:
             return
@@ -417,6 +422,9 @@ def compile(expr: Instruction, name="mykernel"):
 
     tu = tu.with_entrypoints("mykernel")
 
+    # done by attaching "shape" to HierarchicalArray
+    # tu = match_caller_callee_dimensions(tu)
+
     # breakpoint()
     return CodegenResult(expr, tu, ctx.kernel_to_actual_rename_map)
 
@@ -583,7 +591,8 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
         if isinstance(arg, (HierarchicalArray, ContextSensitiveMultiArray)):
             ctx.add_argument(arg)
 
-        ctx.add_temporary(temporary.name, temporary.dtype, shape)
+        # this should already be done in an assignment
+        # ctx.add_temporary(temporary.name, temporary.dtype, shape)
 
         # subarrayref nonsense/magic
         indices = []
@@ -630,28 +639,8 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
         + tuple(extents.values()),
     )
 
-    # gathers
-    # for arg, temp, access, shape in temporaries:
-    #     if access in {READ, RW, MIN_RW, MAX_RW}:
-    #         op = AssignmentType.READ
-    #     else:
-    #         assert access in {WRITE, INC, MIN_WRITE, MAX_WRITE}
-    #         op = AssignmentType.ZERO
-    #     parse_assignment(arg, temp, shape, op, loop_indices, ctx)
-
     ctx.add_function_call(assignees, expression)
     ctx.add_subkernel(call.function.code)
-
-    # scatters
-    # for arg, temp, access, shape in temporaries:
-    #     if access == READ:
-    #         continue
-    #     elif access in {WRITE, RW, MIN_RW, MIN_WRITE, MAX_RW, MAX_WRITE}:
-    #         op = AssignmentType.WRITE
-    #     else:
-    #         assert access == INC
-    #         op = AssignmentType.INC
-    #     parse_assignment(arg, temp, shape, op, loop_indices, ctx)
 
 
 # FIXME this is practically identical to what we do in build_loop
@@ -986,13 +975,19 @@ def add_leaf_assignment(
             index_exprs[rarr],
             iname_replace_map,
             codegen_context,
+            rarr._shape,
         )
     else:
         assert isinstance(rarr, numbers.Number)
         rexpr = rarr
 
     lexpr = make_array_expr(
-        larr, target_paths[larr], index_exprs[larr], iname_replace_map, codegen_context
+        larr,
+        target_paths[larr],
+        index_exprs[larr],
+        iname_replace_map,
+        codegen_context,
+        larr._shape,
     )
 
     if isinstance(assignment, AddAssignment):
@@ -1003,7 +998,7 @@ def add_leaf_assignment(
     codegen_context.add_assignment(lexpr, rexpr)
 
 
-def make_array_expr(array, target_path, index_exprs, inames, ctx):
+def make_array_expr(array, target_path, index_exprs, inames, ctx, shape):
     replace_map = {}
     replacer = JnameSubstitutor(inames, ctx)
     for axis, index_expr in index_exprs.items():
@@ -1014,7 +1009,21 @@ def make_array_expr(array, target_path, index_exprs, inames, ctx):
         replace_map,
         ctx,
     )
-    return pym.subscript(pym.var(array.name), array_offset)
+
+    # hack to handle the fact that temporaries can have shape but we want to
+    # linearly index it here
+    if shape is not None:
+        extra_indices = (0,) * (len(shape) - 1)
+        # also has to be a scalar, not an expression
+        temp_offset_name = ctx.unique_name("j")
+        temp_offset_var = pym.var(temp_offset_name)
+        ctx.add_temporary(temp_offset_name)
+        ctx.add_assignment(temp_offset_var, array_offset)
+        indices = extra_indices + (temp_offset_var,)
+    else:
+        indices = (array_offset,)
+
+    return pym.subscript(pym.var(array.name), indices)
 
 
 def make_temp_expr(temporary, shape, path, jnames, ctx):

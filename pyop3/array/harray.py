@@ -119,6 +119,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         domain_index_exprs=pmap(),
         name=None,
         prefix=None,
+        _shape=None,
     ):
         super().__init__(name=name, prefix=prefix)
 
@@ -166,6 +167,9 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         self.domain_index_exprs = domain_index_exprs
 
         self.layouts = layouts or axes.layouts
+
+        # bit of a hack to get shapes matching when we can inner kernels
+        self._shape = _shape
 
     def __str__(self):
         return self.name
