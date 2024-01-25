@@ -760,6 +760,7 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         layouts = freeze(dict(layoutsnew))
 
         layouts_ = {}
+        # FIXME: we store layouts at more than just the leaves now!
         for leaf in self.leaves:
             orig_path = self.path(*leaf)
             new_path = {}

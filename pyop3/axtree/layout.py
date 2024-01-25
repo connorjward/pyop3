@@ -521,20 +521,14 @@ def _collect_at_leaves(
     prior=0,
 ):
     axis = axis or axes.root
+
     acc = {}
-
     for cpt in axis.components:
-        new_path = path | {axis.label: cpt.label}
-        if new_path in values:
-            # prior_ = prior | {axis.label: values[new_path]}
-            prior_ = prior + values[new_path]
-        else:
-            prior_ = prior
+        path_ = path | {axis.label: cpt.label}
+        prior_ = prior + values.get(path_, 0)
+        acc[path_] = prior_
         if subaxis := axes.component_child(axis, cpt):
-            acc.update(_collect_at_leaves(axes, values, subaxis, new_path, prior_))
-        else:
-            acc[new_path] = prior_
-
+            acc.update(_collect_at_leaves(axes, values, subaxis, path_, prior_))
     return acc
 
 
