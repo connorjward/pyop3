@@ -275,7 +275,11 @@ class PackedPetscMat(PackedBuffer):
 
     @cached_property
     def datamap(self):
-        return self.mat.datamap | self.rmap.datamap | self.cmap.datamap
+        datamap_ = self.mat.datamap | self.rmap.datamap | self.cmap.datamap
+        for s in self.shape:
+            if isinstance(s, HierarchicalArray):
+                datamap_ |= s.datamap
+        return datamap_
 
 
 class PetscMatAIJ(MonolithicPetscMat):
@@ -400,7 +404,9 @@ def _alloc_template_mat(points, adjacency, raxes, caxes, bsize=None):
     prealloc_mat.assemble()
 
     # Now build the matrix from this preallocator
+    sizes = (raxes.size, caxes.size)
+    comm = single_valued([raxes.comm, caxes.comm])
     mat = PETSc.Mat().createAIJ(sizes, comm=comm)
-    mat.preallocateWithMatPreallocator(prealloc_mat)
+    mat.preallocateWithMatPreallocator(prealloc_mat.mat)
     mat.assemble()
     return mat

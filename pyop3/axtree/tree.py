@@ -760,20 +760,19 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         layouts = freeze(dict(layoutsnew))
 
         layouts_ = {}
-        # FIXME: we store layouts at more than just the leaves now!
-        for leaf in self.leaves:
-            orig_path = self.path(*leaf)
-            new_path = {}
-            replace_map = {}
-            for axis, cpt in self.path_with_nodes(*leaf).items():
-                new_path.update(self.target_paths.get((axis.id, cpt), {}))
-                replace_map.update(self.layout_exprs.get((axis.id, cpt), {}))
-            new_path = freeze(new_path)
+        for axis in self.nodes:
+            for component in axis.components:
+                orig_path = self.path(axis, component)
+                new_path = {}
+                replace_map = {}
+                for ax, cpt in self.path_with_nodes(axis, component).items():
+                    new_path.update(self.target_paths.get((ax.id, cpt), {}))
+                    replace_map.update(self.layout_exprs.get((ax.id, cpt), {}))
+                new_path = freeze(new_path)
 
-            orig_layout = layouts[orig_path]
-            new_layout = IndexExpressionReplacer(replace_map)(orig_layout)
-            # assert new_layout != orig_layout
-            layouts_[new_path] = new_layout
+                orig_layout = layouts[orig_path]
+                new_layout = IndexExpressionReplacer(replace_map)(orig_layout)
+                layouts_[new_path] = new_layout
         return freeze(layouts_)
 
     @cached_property

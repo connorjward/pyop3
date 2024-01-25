@@ -110,13 +110,16 @@ class AbstractTree(pytools.ImmutableRecord, abc.ABC):
         # NOTE: Keep this sorted! Else strange results occur
         if self.is_empty:
             return ()
-        return tuple(
-            {
-                node
-                for node in chain.from_iterable(self.parent_to_children.values())
-                if node is not None
-            }
-        )
+        return self._collect_nodes(self.root)
+
+    def _collect_nodes(self, node):
+        assert not self.is_empty
+        nodes = [node]
+        for subnode in self.children(node):
+            if subnode is None:
+                continue
+            nodes.extend(self._collect_nodes(subnode))
+        return tuple(nodes)
 
     @property
     @abc.abstractmethod

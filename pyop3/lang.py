@@ -199,7 +199,16 @@ class Loop(Instruction):
 
     @cached_property
     def _distarray_args(self):
+        # this fails because arg.array for ContextSensitive PetscMats fails
+        # a cleanup is needed, but we just want serial for now
+        from mpi4py import MPI
+
         from pyop3.buffer import DistributedBuffer
+
+        if MPI.COMM_WORLD.size > 1:
+            raise NotImplementedError("parallel needs work here")
+        else:
+            return ()
 
         arrays = {}
         for arg, intent in self.kernel_arguments:

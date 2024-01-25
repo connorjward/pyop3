@@ -737,10 +737,14 @@ def _(assignment, loop_indices, codegen_context):
     else:
         csize_var = csize
 
-    rlayouts = rmap.layouts[rmap.axes.root.id, rmap.axes.root.component.label]
+    rlayouts = rmap.layouts[
+        freeze({rmap.axes.root.label: rmap.axes.root.component.label})
+    ]
     roffset = JnameSubstitutor(my_replace_map, codegen_context)(rlayouts)
 
-    clayouts = cmap.layouts[cmap.axes.root.id, cmap.axes.root.component.label]
+    clayouts = cmap.layouts[
+        freeze({cmap.axes.root.label: cmap.axes.root.component.label})
+    ]
     coffset = JnameSubstitutor(my_replace_map, codegen_context)(clayouts)
 
     irow = f"{rmap_name}[{roffset}]"
@@ -1016,7 +1020,10 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
     # rather than register assignments for things.
     def map_multi_array(self, expr):
         # Register data
+        # if STOP:
+        #     breakpoint()
         self._codegen_context.add_argument(expr.array)
+        new_name = self._codegen_context.actual_to_kernel_rename_map[expr.array.name]
 
         target_path = expr.target_path
         index_exprs = expr.index_exprs
@@ -1028,7 +1035,7 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
             replace_map,
             self._codegen_context,
         )
-        rexpr = pym.subscript(pym.var(expr.array.name), offset_expr)
+        rexpr = pym.subscript(pym.var(new_name), offset_expr)
         return rexpr
 
     def map_called_map(self, expr):
