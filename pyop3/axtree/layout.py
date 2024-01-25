@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import functools
+import itertools
 import numbers
 import sys
 from collections import defaultdict
@@ -13,7 +14,7 @@ from pyrsistent import freeze, pmap
 from pyop3.axtree.tree import Axis, AxisComponent, AxisTree
 from pyop3.dtypes import IntType, PointerType
 from pyop3.tree import LabelledTree, MultiComponentLabelledNode
-from pyop3.utils import PrettyTuple, merge_dicts, strict_int, strictly_all
+from pyop3.utils import PrettyTuple, just_one, merge_dicts, strict_int, strictly_all
 
 
 # hacky class for index_exprs to work, needs cleaning up
@@ -151,7 +152,12 @@ def collect_externally_indexed_axes(axes, axis=None, component=None, path=pmap()
         assert component is None
         for component in axes.root.components:
             external_axes.update(
-                collect_externally_indexed_axes(axes, axes.root, component)
+                {
+                    ax.label: ax
+                    for ax in collect_externally_indexed_axes(
+                        axes, axes.root, component
+                    )
+                }
             )
     else:
         csize = component.count
@@ -165,21 +171,22 @@ def collect_externally_indexed_axes(axes, axis=None, component=None, path=pmap()
                     if caxis.label in path:
                         assert path[caxis.label] == ccpt, "Paths do not match"
                     else:
-                        external_axes[caxis] = None
+                        external_axes[caxis.label] = caxis
         else:
             assert isinstance(csize, numbers.Integral)
             if subaxis := axes.child(axis, component):
                 path_ = path | {axis.label: component.label}
                 for subcpt in subaxis.components:
                     external_axes.update(
-                        collect_externally_indexed_axes(axes, subaxis, subcpt, path_)
+                        {
+                            ax.label: ax
+                            for ax in collect_externally_indexed_axes(
+                                axes, subaxis, subcpt, path_
+                            )
+                        }
                     )
 
-    # top level return is a tuple
-    if not path:
-        return tuple(external_axes.keys())
-    else:
-        return external_axes
+    return tuple(external_axes.values())
 
 
 def has_constant_step(axes: AxisTree, axis, cpt):
@@ -538,9 +545,28 @@ def axis_tree_size(axes: AxisTree) -> int:
     example, an array with shape ``(10, 3)`` will have a size of 30.
 
     """
+    from pyop3.array import HierarchicalArray
+
     if axes.is_empty:
         return 1
-    return _axis_size(axes, axes.root, pmap(), pmap())
+
+    external_axes = collect_externally_indexed_axes(axes)
+    if len(external_axes) == 0:
+        return _axis_size(axes, axes.root)
+
+    # axis size is now an array
+    if len(external_axes) > 1:
+        raise NotImplementedError("TODO")
+
+    size_axis = just_one(external_axes)
+    sizes = HierarchicalArray(size_axis, dtype=IntType, prefix="size")
+    outer_loops = tuple(ax.iter() for ax in external_axes)
+    for idxs in itertools.product(*outer_loops):
+        path = merge_dicts(idx.source_path for idx in idxs)
+        indices = merge_dicts(idx.source_exprs for idx in idxs)
+        size = _axis_size(axes, axes.root, path, indices)
+        sizes.set_value(path, indices, size)
+    return sizes
 
 
 def _axis_size(
@@ -561,9 +587,6 @@ def _axis_component_size(
     path=pmap(),
     indices=pmap(),
 ):
-    if size_requires_external_index(axes, axis, component, path):
-        raise NotImplementedError
-
     count = _as_int(component.count, path, indices)
     if subaxis := axes.component_child(axis, component):
         return sum(

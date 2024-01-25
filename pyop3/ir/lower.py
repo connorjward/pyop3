@@ -201,6 +201,9 @@ class LoopyCodegenContext(CodegenContext):
 
     def add_argument(self, array):
         if isinstance(array.buffer, NullBuffer):
+            if array.name in self.actual_to_kernel_rename_map:
+                return
+
             # Temporaries can have variable size, hence we allocate space for the
             # largest possible array
             shape = array._shape if array._shape is not None else (array.alloc_size,)
@@ -209,6 +212,11 @@ class LoopyCodegenContext(CodegenContext):
             # TODO do i need to be clever about shapes?
             temp = lp.TemporaryVariable(array.name, dtype=array.dtype, shape=shape)
             self._args.append(temp)
+
+            # hasty no-op, refactor
+            arg_name = self.actual_to_kernel_rename_map.setdefault(
+                array.name, array.name
+            )
             return
         else:
             # we only set this property for temporaries
@@ -676,8 +684,8 @@ def _(assignment, loop_indices, codegen_context):
         raise NotImplementedError(
             "For simplicity we currently assume a single outer loop"
         )
-    replace_map = just_one(loop_indices.values())
-    iname = just_one(replace_map.values())
+    iname_replace_map, _ = just_one(loop_indices.values())
+    iname = just_one(iname_replace_map.values())
 
     # now emit the right line of code, this should properly be a lp.ScalarCallable
     # https://petsc.org/release/manualpages/Mat/MatGetValuesLocal/
@@ -687,23 +695,59 @@ def _(assignment, loop_indices, codegen_context):
     rmap = assignment.mat_arg.buffer.rmap
     cmap = assignment.mat_arg.buffer.cmap
 
-    rsize, csize = assignment.mat_arg.buffer.shape
-    # these sizes can be expressions that need evaluating
-    breakpoint()
+    # TODO cleanup
+    codegen_context.add_argument(assignment.mat_arg)
+    codegen_context.add_argument(array)
+    codegen_context.add_argument(rmap)
+    codegen_context.add_argument(cmap)
 
     mat_name = codegen_context.actual_to_kernel_rename_map[mat.name]
     array_name = codegen_context.actual_to_kernel_rename_map[array.name]
     rmap_name = codegen_context.actual_to_kernel_rename_map[rmap.name]
     cmap_name = codegen_context.actual_to_kernel_rename_map[cmap.name]
 
-    codegen_context.add_argument(rmap)
-    codegen_context.add_argument(cmap)
+    # these sizes can be expressions that need evaluating
+    rsize, csize = assignment.mat_arg.buffer.shape
 
-    irow = f"{rmap_name}[{iname}*{rsize}]"
-    icol = f"{cmap_name}[{iname}*{csize}]"
+    my_replace_map = {}
+    for mappings in loop_indices.values():
+        global_map, _ = mappings
+        for (_, k), v in global_map.items():
+            my_replace_map[k] = v
+
+    if not isinstance(rsize, numbers.Integral):
+        rindex_exprs = merge_dicts(
+            rsize.index_exprs.get((ax.id, clabel), {})
+            for ax, clabel in rsize.axes.path_with_nodes(*rsize.axes.leaf).items()
+        )
+        rsize_var = register_extent(
+            rsize, rindex_exprs, my_replace_map, codegen_context
+        )
+    else:
+        rsize_var = rsize
+
+    if not isinstance(csize, numbers.Integral):
+        cindex_exprs = merge_dicts(
+            csize.index_exprs.get((ax.id, clabel), {})
+            for ax, clabel in csize.axes.path_with_nodes(*csize.axes.leaf).items()
+        )
+        csize_var = register_extent(
+            csize, cindex_exprs, my_replace_map, codegen_context
+        )
+    else:
+        csize_var = csize
+
+    rlayouts = rmap.layouts[rmap.axes.root.id, rmap.axes.root.component.label]
+    roffset = JnameSubstitutor(my_replace_map, codegen_context)(rlayouts)
+
+    clayouts = cmap.layouts[cmap.axes.root.id, cmap.axes.root.component.label]
+    coffset = JnameSubstitutor(my_replace_map, codegen_context)(clayouts)
+
+    irow = f"{rmap_name}[{roffset}]"
+    icol = f"{cmap_name}[{coffset}]"
 
     call_str = _petsc_mat_insn(
-        assignment, mat_name, array_name, rsize, csize, irow, icol
+        assignment, mat_name, array_name, rsize_var, csize_var, irow, icol
     )
     codegen_context.add_cinstruction(call_str)
 

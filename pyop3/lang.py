@@ -735,6 +735,10 @@ class PetscMatInstruction(Instruction):
         self.mat_arg = mat_arg
         self.array_arg = array_arg
 
+    @property
+    def datamap(self):
+        return self.mat_arg.datamap | self.array_arg.datamap
+
 
 class PetscMatLoad(PetscMatInstruction):
     ...
