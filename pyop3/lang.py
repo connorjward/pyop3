@@ -1,3 +1,5 @@
+# TODO Rename this file insn.py - the pyop3 language is everything, not just this
+
 from __future__ import annotations
 
 import abc
@@ -725,6 +727,26 @@ class AddAssignment(Assignment):
     @cached_property
     def kernel_arguments(self):
         return ((self.assignee, INC),) + self._expression_kernel_arguments
+
+
+# inherit from Assignment?
+class PetscMatInstruction(Instruction):
+    def __init__(self, mat_arg, array_arg):
+        self.mat_arg = mat_arg
+        self.array_arg = array_arg
+
+
+class PetscMatLoad(PetscMatInstruction):
+    ...
+
+
+class PetscMatStore(PetscMatInstruction):
+    ...
+
+
+# potentially confusing name
+class PetscMatAdd(PetscMatInstruction):
+    ...
 
 
 def loop(*args, **kwargs):

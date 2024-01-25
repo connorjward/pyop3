@@ -3,13 +3,13 @@ from __future__ import annotations
 import abc
 import collections
 import functools
-import itertools
+import numbers
 
 from pyrsistent import freeze, pmap
 
-from pyop3.array import ContextSensitiveMultiArray, HierarchicalArray
+from pyop3.array import ContextSensitiveMultiArray, HierarchicalArray, PetscMat
 from pyop3.axtree import Axis, AxisTree, ContextFree, ContextSensitive
-from pyop3.buffer import NullBuffer
+from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
 from pyop3.itree import Map, TabulatedMapComponent
 from pyop3.lang import (
     INC,
@@ -22,6 +22,9 @@ from pyop3.lang import (
     ContextAwareLoop,
     Instruction,
     Loop,
+    PetscMatAdd,
+    PetscMatLoad,
+    PetscMatStore,
     ReplaceAssignment,
     Terminal,
 )
@@ -67,7 +70,13 @@ class LoopContextExpander(Transformer):
             for source_path, target_path in checked_zip(source_paths, target_paths):
                 context_ = context | {loop.index.id: (source_path, target_path)}
                 statements[source_path] = tuple(
-                    self._apply(stmt, context=context_) for stmt in loop.statements
+                    filter(
+                        None,
+                        (
+                            self._apply(stmt, context=context_)
+                            for stmt in loop.statements
+                        ),
+                    )
                 )
 
         return ContextAwareLoop(
@@ -82,13 +91,24 @@ class LoopContextExpander(Transformer):
 
     @_apply.register
     def _(self, terminal: Assignment, *, context):
+        valid = True
         cf_args = []
         for arg in terminal.arguments:
-            cf_arg = (
-                arg.with_context(context) if isinstance(arg, ContextSensitive) else arg
-            )
+            try:
+                cf_arg = (
+                    arg.with_context(context)
+                    if isinstance(arg, ContextSensitive)
+                    else arg
+                )
+            except KeyError:
+                # assignment is not valid in this context, do nothing
+                valid = False
+                break
             cf_args.append(cf_arg)
-        return terminal.with_arguments(cf_args)
+        if valid:
+            return terminal.with_arguments(cf_args)
+        else:
+            return None
 
 
 def expand_loop_contexts(expr: Instruction):
@@ -120,11 +140,63 @@ class ImplicitPackUnpackExpander(Transformer):
 
     @_apply.register
     def _(self, assignment: Assignment):
-        return (assignment,)
+        # same as for CalledFunction
+        gathers = []
+        # NOTE: scatters are executed in LIFO order
+        scatters = []
+        arguments = []
+
+        # lazy coding, tidy up
+        if isinstance(assignment, ReplaceAssignment):
+            access = WRITE
+        else:
+            assert isinstance(assignment, AddAssignment)
+            access = INC
+        for arg, intent in [
+            (assignment.assignee, access),
+            (assignment.expression, READ),
+        ]:
+            if isinstance(arg, numbers.Number):
+                arguments.append(arg)
+                continue
+
+            # emit function calls for PetscMat
+            # this is a separate stage to the assignment operations because one
+            # can index a packed mat. E.g. mat[p, q][::2] would decompose into
+            # two calls, one to pack t0 <- mat[p, q] and another to pack t1 <- t0[::2]
+            if isinstance(arg.buffer, PackedBuffer):
+                # TODO add PackedPetscMat as a subclass of buffer?
+                if not isinstance(arg.buffer.array, PetscMat):
+                    raise NotImplementedError("Only handle Mat at the moment")
+
+                axes = AxisTree(arg.axes.parent_to_children)
+                new_arg = HierarchicalArray(
+                    axes,
+                    data=NullBuffer(arg.dtype),  # does this need a size?
+                    name=self._name_generator("t"),
+                )
+
+                if intent == READ:
+                    gathers.append(PetscMatLoad(arg, new_arg))
+                elif intent == WRITE:
+                    scatters.insert(0, PetscMatStore(arg, new_arg))
+                elif intent == RW:
+                    gathers.append(PetscMatLoad(arg, new_arg))
+                    scatters.insert(0, PetscMatStore(arg, new_arg))
+                else:
+                    assert intent == INC
+                    scatters.insert(0, PetscMatAdd(arg, new_arg))
+
+                arguments.append(new_arg)
+            else:
+                arguments.append(arg)
+
+        return (*gathers, assignment.with_arguments(arguments), *scatters)
 
     @_apply.register
     def _(self, terminal: CalledFunction):
         gathers = []
+        # NOTE: scatters are executed in LIFO order
         scatters = []
         arguments = []
         for (arg, intent), shape in checked_zip(
@@ -134,6 +206,38 @@ class ImplicitPackUnpackExpander(Transformer):
                 arg, ContextFree
             ), "Loop contexts should already be expanded"
 
+            # emit function calls for PetscMat
+            # this is a separate stage to the assignment operations because one
+            # can index a packed mat. E.g. mat[p, q][::2] would decompose into
+            # two calls, one to pack t0 <- mat[p, q] and another to pack t1 <- t0[::2]
+            if isinstance(arg.buffer, PackedBuffer):
+                # TODO add PackedPetscMat as a subclass of buffer?
+                if not isinstance(arg.buffer.array, PetscMat):
+                    raise NotImplementedError("Only handle Mat at the moment")
+
+                axes = AxisTree(arg.axes.parent_to_children)
+                new_arg = HierarchicalArray(
+                    axes,
+                    data=NullBuffer(arg.dtype),  # does this need a size?
+                    name=self._name_generator("t"),
+                )
+
+                if intent == READ:
+                    gathers.append(PetscMatLoad(arg, new_arg))
+                elif intent == WRITE:
+                    scatters.insert(0, PetscMatStore(arg, new_arg))
+                elif intent == RW:
+                    gathers.append(PetscMatLoad(arg, new_arg))
+                    scatters.insert(0, PetscMatStore(arg, new_arg))
+                else:
+                    assert intent == INC
+                    scatters.insert(0, PetscMatAdd(arg, new_arg))
+
+                # the rest of the packing code is now dealing with the result of this
+                # function call
+                arg = new_arg
+
+            # unpick pack/unpack instructions
             if _requires_pack_unpack(arg):
                 # this is a nasty hack - shouldn't reuse layouts from arg.axes
                 axes = AxisTree(arg.axes.parent_to_children)
@@ -148,14 +252,14 @@ class ImplicitPackUnpackExpander(Transformer):
                     gathers.append(ReplaceAssignment(temporary, arg))
                 elif intent == WRITE:
                     gathers.append(ReplaceAssignment(temporary, 0))
-                    scatters.append(ReplaceAssignment(arg, temporary))
+                    scatters.insert(0, ReplaceAssignment(arg, temporary))
                 elif intent == RW:
                     gathers.append(ReplaceAssignment(temporary, arg))
-                    scatters.append(ReplaceAssignment(arg, temporary))
+                    scatters.insert(0, ReplaceAssignment(arg, temporary))
                 else:
                     assert intent == INC
                     gathers.append(ReplaceAssignment(temporary, 0))
-                    scatters.append(AddAssignment(arg, temporary))
+                    scatters.insert(0, AddAssignment(arg, temporary))
 
                 arguments.append(temporary)
 
@@ -197,6 +301,18 @@ def expand_implicit_pack_unpack(expr: Instruction):
 def _requires_pack_unpack(arg):
     # TODO in theory packing isn't required for arrays that are contiguous,
     # but this is hard to determine
+    # FIXME, we inefficiently copy matrix temporaries here because this
+    # doesn't identify requiring pack/unpack properly. To demonstrate
+    #   kernel(mat[p, q])
+    # gets turned into
+    #   t0 <- mat[p, q]
+    #   kernel(t0)
+    # However, the array mat[p, q] is actually retrieved from MatGetValues
+    # so we really have something like
+    #   MatGetValues(mat, ..., t0)
+    #   t1 <- t0
+    #   kernel(t1)
+    # and the same for unpacking
     return isinstance(arg, HierarchicalArray)
 
 

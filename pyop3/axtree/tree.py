@@ -94,8 +94,10 @@ class ContextSensitive(ContextAware, abc.ABC):
     #
     #     """
     #
-    def __init__(self, context_map: pmap[pmap[LoopIndex, pmap[str, str]], ContextFree]):
-        self.context_map = pmap(context_map)
+    def __init__(self, context_map):
+        if isinstance(context_map, pyrsistent.PMap):
+            raise TypeError("context_map must be deterministically ordered")
+        self.context_map = context_map
 
     @cached_property
     def keys(self):

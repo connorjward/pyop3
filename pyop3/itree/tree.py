@@ -582,7 +582,7 @@ class ContextFreeCalledMap(Index, ContextFree):
     # TODO This is bad design, unroll the traversal and store as properties
     @cached_property
     def _axes_info(self):
-        return collect_shape_index_callback(self)
+        return collect_shape_index_callback(self, include_loop_index_shape=False)
 
 
 class LoopIndexVariable(pym.primitives.Variable):
@@ -620,6 +620,8 @@ class ContextSensitiveCalledMap(ContextSensitiveLoopIterable):
 # TODO make kwargs explicit
 def as_index_forest(forest: Any, *, axes=None, **kwargs):
     forest = _as_index_forest(forest, axes=axes, **kwargs)
+    assert isinstance(forest, dict), "must be ordered"
+    # print(forest)
     if axes is not None:
         forest = _validated_index_forest(forest, axes=axes, **kwargs)
     return forest
@@ -646,7 +648,7 @@ def _as_index_forest(arg: Any, *, axes=None, path=pmap(), **kwargs):
 
         slice_cpt = Subset(target_axis.component.label, arg)
         slice_ = Slice(target_axis.label, [slice_cpt])
-        return freeze({pmap(): IndexTree(slice_)})
+        return {pmap(): IndexTree(slice_)}
     else:
         raise TypeError(f"No handler provided for {type(arg).__name__}")
 
@@ -685,7 +687,7 @@ def _(indices: collections.abc.Sequence, *, path=pmap(), loop_context=pmap(), **
                     forest[subctx] = tree.add_subtree(subtree, cf_index, clabel)
         else:
             forest[context] = tree
-    return freeze(forest)
+    return forest
 
 
 @_as_index_forest.register
@@ -695,12 +697,12 @@ def _(forest: collections.abc.Mapping, **kwargs):
 
 @_as_index_forest.register
 def _(index_tree: IndexTree, **kwargs):
-    return freeze({pmap(): index_tree})
+    return {pmap(): index_tree}
 
 
 @_as_index_forest.register
 def _(index: ContextFreeIndex, **kwargs):
-    return freeze({pmap(): IndexTree(index)})
+    return {pmap(): IndexTree(index)}
 
 
 # TODO This function can definitely be refactored
@@ -752,7 +754,7 @@ def _(index, *, loop_context=pmap(), **kwargs):
 
             cf_index = index.with_context(context)
             forest[context] = IndexTree(cf_index)
-    return freeze(forest)
+    return forest
 
 
 @_as_index_forest.register
@@ -762,7 +764,7 @@ def _(called_map: CalledMap, **kwargs):
     for context in input_forest.keys():
         cf_called_map = called_map.with_context(context)
         forest[context] = IndexTree(cf_called_map)
-    return freeze(forest)
+    return forest
 
 
 @_as_index_forest.register
@@ -792,7 +794,7 @@ def _(slice_: slice, *, axes=None, path=pmap(), loop_context=pmap(), **kwargs):
         target_axis.component.label, slice_.start, slice_.stop, slice_.step
     )
     slice_ = Slice(target_axis.label, [slice_cpt])
-    return freeze({loop_context: IndexTree(slice_)})
+    return {loop_context: IndexTree(slice_)}
 
 
 @_as_index_forest.register
@@ -811,9 +813,7 @@ def _validated_index_forest(forest, *, axes):
     """
     assert axes is not None, "Cannot validate if axes are unknown"
 
-    return freeze(
-        {ctx: _validated_index_tree(tree, axes=axes) for ctx, tree in forest.items()}
-    )
+    return {ctx: _validated_index_tree(tree, axes=axes) for ctx, tree in forest.items()}
 
 
 def _validated_index_tree(tree, index=None, *, axes, path=pmap()):
@@ -874,11 +874,39 @@ def collect_shape_index_callback(index, *args, **kwargs):
 
 
 @collect_shape_index_callback.register
-def _(loop_index: ContextFreeLoopIndex, **kwargs):
+def _(loop_index: ContextFreeLoopIndex, *, include_loop_index_shape, **kwargs):
+    if include_loop_index_shape:
+        slices = []
+        iterset = loop_index.iterset
+        axis = iterset.root
+        while axis is not None:
+            cpt = loop_index.path[axis.label]
+            slices.append(Slice(axis.label, AffineSliceComponent(cpt)))
+            axis = iterset.child(axis, cpt)
+
+        axes = loop_index.iterset[slices]
+        leaf_axis, leaf_cpt = axes.leaf
+
+        # target_paths = freeze(
+        #     {(leaf_axis.id, leaf_cpt): {axis: cpt for axis,cpt in loop_index.path.items()}}
+        # )
+        target_paths = loop_index.target_paths
+        index_exprs = freeze(
+            {
+                (leaf_axis.id, leaf_cpt.label): {
+                    axis: AxisVariable(axis) for axis in loop_index.path.keys()
+                }
+            }
+        )
+    else:
+        axes = loop_index.axes
+        target_paths = loop_index.target_paths
+        index_exprs = loop_index.index_exprs
+
     return (
-        loop_index.axes,
-        loop_index.target_paths,
-        loop_index.index_exprs,
+        axes,
+        target_paths,
+        index_exprs,
         loop_index.layout_exprs,
         loop_index.domain_index_exprs,
     )
@@ -1017,7 +1045,7 @@ def _(called_map: ContextFreeCalledMap, **kwargs):
         axes = PartialAxisTree(axis)
 
     else:
-        axes = prior_axes
+        axes = PartialAxisTree(prior_axes.parent_to_children)
         target_path_per_cpt = {}
         index_exprs_per_cpt = {}
         layout_exprs_per_cpt = {}
@@ -1029,12 +1057,12 @@ def _(called_map: ContextFreeCalledMap, **kwargs):
             for myaxis, mycomponent_label in prior_axes.path_with_nodes(
                 prior_leaf_axis.id, prior_leaf_cpt
             ).items():
-                prior_target_path |= prior_target_path_per_cpt[
-                    myaxis.id, mycomponent_label
-                ]
-                prior_index_exprs |= prior_index_exprs_per_cpt[
-                    myaxis.id, mycomponent_label
-                ]
+                prior_target_path |= prior_target_path_per_cpt.get(
+                    (myaxis.id, mycomponent_label), {}
+                )
+                prior_index_exprs |= prior_index_exprs_per_cpt.get(
+                    (myaxis.id, mycomponent_label), {}
+                )
 
             (
                 subaxis,
@@ -1108,7 +1136,7 @@ def _make_leaf_axis_from_called_map(called_map, prior_target_path, prior_index_e
         # a replacement
         map_leaf_axis, map_leaf_component = map_axes.leaf
         old_inner_index_expr = map_array.index_exprs[
-            map_leaf_axis.id, map_leaf_component
+            map_leaf_axis.id, map_leaf_component.label
         ]
 
         my_index_exprs = {}
@@ -1142,7 +1170,9 @@ def _make_leaf_axis_from_called_map(called_map, prior_target_path, prior_index_e
     )
 
 
-def _index_axes(indices: IndexTree, loop_context, axes=None):
+def _index_axes(
+    indices: IndexTree, loop_context, axes=None, include_loop_index_shape=False
+):
     (
         indexed_axes,
         tpaths,
@@ -1154,10 +1184,10 @@ def _index_axes(indices: IndexTree, loop_context, axes=None):
         current_index=indices.root,
         loop_indices=loop_context,
         prev_axes=axes,
+        include_loop_index_shape=include_loop_index_shape,
     )
-
     # check that slices etc have not been missed
-    if axes is not None:
+    if axes is not None and not include_loop_index_shape:
         for leaf_iaxis, leaf_icpt in indexed_axes.leaves:
             target_path = dict(tpaths.get(None, {}))
             for iaxis, icpt in indexed_axes.path_with_nodes(
@@ -1235,13 +1265,13 @@ def _index_axes_rec(
     layout_exprs_per_component = freeze(layout_exprs_per_cpt_per_index)
     domain_index_exprs_per_cpt_per_index = freeze(domain_index_exprs_per_cpt_per_index)
 
-    axes = axes_per_index
+    axes = PartialAxisTree(axes_per_index.parent_to_children)
     for k, subax in subaxes.items():
         if subax is not None:
             if axes:
                 axes = axes.add_subtree(subax, *k)
             else:
-                axes = subax
+                axes = PartialAxisTree(subax.parent_to_children)
 
     return (
         axes,
@@ -1489,12 +1519,6 @@ def iter_axis_tree(
             my_domain_path = pmap()
             my_domain_indices = pmap()
 
-        if not isinstance(component.count, int):
-            debug = _as_int(
-                component.count, path | my_domain_path, indices | my_domain_indices
-            )
-            # breakpoint()
-            # print(debug)
         for pt in range(
             _as_int(component.count, path | my_domain_path, indices | my_domain_indices)
         ):
@@ -1523,15 +1547,9 @@ def iter_axis_tree(
                     index_exprs_,
                 )
             else:
-                # if STOP:
-                #     breakpoint()
                 yield IndexIteratorEntry(
                     loop_index, path_, target_path_, indices_, index_exprs_
                 )
-
-
-# debug
-STOP = False
 
 
 class ArrayPointLabel(enum.IntEnum):

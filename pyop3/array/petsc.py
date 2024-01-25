@@ -25,7 +25,7 @@ from pyop3.buffer import PackedBuffer
 from pyop3.cache import cached
 from pyop3.dtypes import IntType, ScalarType
 from pyop3.itree.tree import CalledMap, LoopIndex, _index_axes, as_index_forest
-from pyop3.lang import do_loop, loop
+from pyop3.lang import PetscMatStore, do_loop, loop
 from pyop3.mpi import hash_comm
 from pyop3.utils import deprecated, just_one, merge_dicts, single_valued, strictly_all
 
@@ -67,15 +67,17 @@ class PetscMat(PetscObject, abc.ABC):
     prefix = "mat"
 
     def __new__(cls, *args, **kwargs):
-        mat_type_str = kwargs.pop("mat_type", cls.DEFAULT_MAT_TYPE)
-        mat_type = MatType(mat_type_str)
-
-        if mat_type == MatType.AIJ:
-            return object.__new__(PetscMatAIJ)
-        elif mat_type == MatType.BAIJ:
-            return object.__new__(PetscMatBAIJ)
+        if cls is PetscMat:
+            mat_type_str = kwargs.pop("mat_type", cls.DEFAULT_MAT_TYPE)
+            mat_type = MatType(mat_type_str)
+            if mat_type == MatType.AIJ:
+                return object.__new__(PetscMatAIJ)
+            elif mat_type == MatType.BAIJ:
+                return object.__new__(PetscMatBAIJ)
+            else:
+                raise AssertionError
         else:
-            raise AssertionError
+            return object.__new__(cls)
 
     # like Dat, bad name? handle?
     @property
@@ -85,55 +87,27 @@ class PetscMat(PetscObject, abc.ABC):
     def assemble(self):
         self.mat.assemble()
 
+    def assign(self, other):
+        return PetscMatStore(self, other)
+
     def zero(self):
         self.mat.zeroEntries()
 
 
 class MonolithicPetscMat(PetscMat, abc.ABC):
+    def __init__(self, raxes, caxes, *, name=None):
+        raxes = as_axis_tree(raxes)
+        caxes = as_axis_tree(caxes)
+
+        super().__init__(name)
+
+        self.raxes = raxes
+        self.caxes = caxes
+
     def __getitem__(self, indices):
         # TODO also support context-free (see MultiArray.__getitem__)
         if len(indices) != 2:
             raise ValueError
-
-        rindex, cindex = indices
-
-        # Build the flattened row and column maps
-        rloop_index = rindex
-        while isinstance(rloop_index, CalledMap):
-            rloop_index = rloop_index.from_index
-        assert isinstance(rloop_index, LoopIndex)
-
-        # build the map
-        riterset = rloop_index.iterset
-        my_raxes = self.raxes[rindex]
-        rmap_axes = PartialAxisTree(riterset.parent_to_children)
-        if len(rmap_axes.leaves) > 1:
-            raise NotImplementedError
-        for leaf in rmap_axes.leaves:
-            # TODO the leaves correspond to the paths/contexts, cleanup
-            # FIXME just do this for now since we only have one leaf
-            axes_to_add = just_one(my_raxes.context_map.values())
-            rmap_axes = rmap_axes.add_subtree(axes_to_add, *leaf)
-        rmap_axes = rmap_axes.set_up()
-        rmap = HierarchicalArray(rmap_axes, dtype=IntType)
-
-        for p in riterset.iter(loop_index=rloop_index):
-            for q in rindex.iter({p}):
-                for q_ in (
-                    self.raxes[q.index]
-                    .with_context(p.loop_context | q.loop_context)
-                    .iter({q})
-                ):
-                    path = p.source_path | q.source_path | q_.source_path
-                    indices = p.source_exprs | q.source_exprs | q_.source_exprs
-                    offset = self.raxes.offset(
-                        q_.target_path, q_.target_exprs, insert_zeros=True
-                    )
-                    rmap.set_value(path, indices, offset)
-
-        # FIXME being extremely lazy, rmap and cmap are NOT THE SAME
-        cloop_index = rloop_index
-        cmap = rmap
 
         # Combine the loop contexts of the row and column indices. Consider
         # a loop over a multi-component axis with components "a" and "b":
@@ -163,13 +137,15 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
         #     {p: "b", q: "x"}: [rtree1, ctree0],
         #     {p: "b", q: "y"}: [rtree1, ctree1],
         #   }
+
+        rtrees = as_index_forest(indices[0], axes=self.raxes)
+        ctrees = as_index_forest(indices[1], axes=self.caxes)
         rcforest = {}
-        for rctx, rtree in as_index_forest(rindex, axes=self.raxes).items():
-            for cctx, ctree in as_index_forest(cindex, axes=self.caxes).items():
+        for rctx, rtree in rtrees.items():
+            for cctx, ctree in ctrees.items():
                 # skip if the row and column contexts are incompatible
-                for idx, path in cctx.items():
-                    if idx in rctx and rctx[idx] != path:
-                        continue
+                if any(idx in rctx and rctx[idx] != path for idx, path in cctx.items()):
+                    continue
                 rcforest[rctx | cctx] = (rtree, ctree)
 
         arrays = {}
@@ -177,7 +153,87 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
             indexed_raxes = _index_axes(rtree, ctx, self.raxes)
             indexed_caxes = _index_axes(ctree, ctx, self.caxes)
 
-            packed = PackedPetscMat(self, rmap, cmap, rloop_index, cloop_index)
+            full_raxes = _index_axes(
+                rtree, ctx, self.raxes, include_loop_index_shape=True
+            )
+            full_caxes = _index_axes(
+                ctree, ctx, self.caxes, include_loop_index_shape=True
+            )
+
+            if full_raxes.size == 0 or full_caxes.size == 0:
+                continue
+
+            ###
+
+            # Build the flattened row and column maps
+            # rindex = just_one(rtree.nodes)
+            # rloop_index = rtree
+            # while isinstance(rloop_index, CalledMap):
+            #     rloop_index = rloop_index.from_index
+            # assert isinstance(rloop_index, LoopIndex)
+            #
+            # # build the map
+            # riterset = rloop_index.iterset
+            # my_raxes = self.raxes[rindex]
+            # rmap_axes = PartialAxisTree(riterset.parent_to_children)
+            # # if len(rmap_axes.leaves) > 1:
+            # #     raise NotImplementedError
+            # for leaf in rmap_axes.leaves:
+            #     # TODO the leaves correspond to the paths/contexts, cleanup
+            #     # FIXME just do this for now since we only have one leaf
+            #     axes_to_add = just_one(my_raxes.context_map.values())
+            #     rmap_axes = rmap_axes.add_subtree(axes_to_add, *leaf)
+            # rmap_axes = rmap_axes.set_up()
+            # rmap_axes = full_raxes.set_up()
+            rmap_axes = full_raxes
+            rlayouts = AxisTree(rmap_axes.parent_to_children).layouts
+            rmap = HierarchicalArray(rmap_axes, dtype=IntType, layouts=rlayouts)
+            # cmap_axes = full_caxes.set_up()
+            cmap_axes = full_caxes
+            clayouts = AxisTree(cmap_axes.parent_to_children).layouts
+            cmap = HierarchicalArray(cmap_axes, dtype=IntType, layouts=clayouts)
+
+            # do_loop(
+            #     p := rloop_index,
+            #     loop(
+            #         q := rindex,
+            #         rmap[p, q.i].assign(TODO)
+            #     ),
+            # )
+
+            # for p in riterset.iter(loop_index=rloop_index):
+            #     for q in rindex.iter({p}):
+            #         for q_ in (
+            #             self.raxes[q.index]
+            #             .with_context(p.loop_context | q.loop_context)
+            #             .iter({q})
+            #         ):
+            #             path = p.source_path | q.source_path | q_.source_path
+            #             indices = p.source_exprs | q.source_exprs | q_.source_exprs
+            #             offset = self.raxes.offset(
+            #                 q_.target_path, q_.target_exprs, insert_zeros=True
+            #             )
+            #             rmap.set_value(path, indices, offset)
+            for p in rmap_axes.iter():
+                path = p.source_path
+                indices = p.source_exprs
+                offset = self.raxes.offset(
+                    p.target_path, p.target_exprs, insert_zeros=True
+                )
+                rmap.set_value(path, indices, offset)
+
+            for p in cmap_axes.iter():
+                path = p.source_path
+                indices = p.source_exprs
+                offset = self.caxes.offset(
+                    p.target_path, p.target_exprs, insert_zeros=True
+                )
+                cmap.set_value(path, indices, offset)
+
+            ###
+
+            shape = (indexed_raxes.size, indexed_caxes.size)
+            packed = PackedPetscMat(self, rmap, cmap, shape)
 
             indexed_axes = PartialAxisTree(indexed_raxes.parent_to_children)
             for leaf_axis, leaf_cpt in indexed_raxes.leaves:
@@ -207,12 +263,11 @@ class ContextSensitiveIndexedPetscMat(ContextSensitive):
 
 
 class PackedPetscMat(PackedBuffer):
-    def __init__(self, mat, rmap, cmap, rindex, cindex):
+    def __init__(self, mat, rmap, cmap, shape):
         super().__init__(mat)
         self.rmap = rmap
         self.cmap = cmap
-        self.rindex = rindex
-        self.cindex = cindex
+        self.shape = shape
 
     @property
     def mat(self):
@@ -229,11 +284,8 @@ class PetscMatAIJ(MonolithicPetscMat):
         caxes = as_axis_tree(caxes)
         mat = _alloc_mat(points, adjacency, raxes, caxes)
 
-        super().__init__(name)
-
+        super().__init__(raxes, caxes, name=name)
         self.mat = mat
-        self.raxes = raxes
-        self.caxes = caxes
 
     @property
     # @deprecated("mat") ???
@@ -279,7 +331,7 @@ class PetscMatPreallocator(MonolithicPetscMat):
         mat.setSizes((raxes.size, caxes.size))
         mat.setUp()
 
-        super().__init__(name)
+        super().__init__(raxes, caxes, name=name)
         self.mat = mat
 
 
@@ -295,7 +347,6 @@ class PetscMatPython(PetscMat):
     ...
 
 
-# TODO cache this function and return a copy if possible
 # TODO is there a better name? It does a bit more than allocate
 
 # TODO Perhaps tie this cache to the mesh with a context manager?
@@ -326,10 +377,11 @@ def _alloc_template_mat(points, adjacency, raxes, caxes, bsize=None):
 
     do_loop(
         p := points.index(),
-        loop(
-            q := adjacency(p).index(),
-            prealloc_mat[p, q].assign(666),
-        ),
+        # loop(
+        #     q := adjacency(p).index(),
+        #     prealloc_mat[p, q].assign(666),
+        # ),
+        prealloc_mat[p, adjacency(p)].assign(666),
     )
 
     # for p in points.iter():

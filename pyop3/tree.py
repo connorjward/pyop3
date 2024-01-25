@@ -107,9 +107,10 @@ class AbstractTree(pytools.ImmutableRecord, abc.ABC):
 
     @cached_property
     def nodes(self):
+        # NOTE: Keep this sorted! Else strange results occur
         if self.is_empty:
-            return frozenset()
-        return frozenset(
+            return ()
+        return tuple(
             {
                 node
                 for node in chain.from_iterable(self.parent_to_children.values())
@@ -256,12 +257,22 @@ class LabelledTree(AbstractTree):
 
     @cached_property
     def leaves(self):
-        return tuple(
-            (node, clabel)
-            for node in self.nodes
-            for cidx, clabel in enumerate(node.component_labels)
-            if self.parent_to_children.get(node.id, [None] * node.degree)[cidx] is None
-        )
+        # NOTE: ordered!!
+        if self.is_empty:
+            return ()
+        else:
+            return self._collect_leaves(self.root)
+
+    def _collect_leaves(self, node):
+        assert not self.is_empty
+        leaves = []
+        for component in node.components:
+            subnode = self.child(node, component)
+            if subnode:
+                leaves.extend(self._collect_leaves(subnode))
+            else:
+                leaves.append((node, component))
+        return tuple(leaves)
 
     def add_node(
         self,

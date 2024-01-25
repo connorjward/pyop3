@@ -62,6 +62,10 @@ from pyop3.lang import (
     CalledFunction,
     ContextAwareLoop,
     Loop,
+    PetscMatAdd,
+    PetscMatInstruction,
+    PetscMatLoad,
+    PetscMatStore,
     ReplaceAssignment,
 )
 from pyop3.log import logger
@@ -197,13 +201,13 @@ class LoopyCodegenContext(CodegenContext):
 
     def add_argument(self, array):
         if isinstance(array.buffer, NullBuffer):
-            assert array._shape is not None
+            # Temporaries can have variable size, hence we allocate space for the
+            # largest possible array
+            shape = array._shape if array._shape is not None else (array.alloc_size,)
 
             # could rename array like the rest
             # TODO do i need to be clever about shapes?
-            temp = lp.TemporaryVariable(
-                array.name, dtype=array.dtype, shape=array._shape
-            )
+            temp = lp.TemporaryVariable(array.name, dtype=array.dtype, shape=shape)
             self._args.append(temp)
             return
         else:
@@ -647,181 +651,82 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
 @_compile.register(Assignment)
 def parse_assignment(
     assignment,
-    # shape,
-    # op,
     loop_indices,
     codegen_ctx,
 ):
-    assignee = assignment.assignee
-    expression = assignment.expression
-
-    shape = "notshape"
-    op = "notop"
-
-    # TODO singledispatch
-    assert isinstance(assignee, ContextFree)
-
-    if isinstance(assignee, (HierarchicalArray, ContextSensitiveMultiArray)):
-        if isinstance(assignee.buffer, PackedBuffer) and op != AssignmentType.ZERO:
-            if not isinstance(assignee.buffer.array, PetscMatAIJ):
-                raise NotImplementedError("TODO")
-            parse_assignment_petscmat(
-                assignee,
-                expression,
-                shape,
-                op,
-                loop_indices,
-                codegen_ctx,
-            )
-            return
-        else:
-            pass
-    else:
-        assert isinstance(assignee, ContextFreeLoopIndex)
-
-    # jname_replace_map = merge_dicts(mymap for _, mymap in loop_indices.values())
-    # TODO cleanup
-    jname_replace_map = loop_indices
-
+    # this seems wrong
     parse_assignment_properly_this_time(
         assignment,
         loop_indices,
         codegen_ctx,
-        iname_replace_map=jname_replace_map,
     )
 
 
-def parse_assignment_petscmat(array, temp, shape, op, loop_indices, codegen_context):
-    from pyop3.array.harray import MultiArrayVariable
+@_compile.register(PetscMatInstruction)
+def _(assignment, loop_indices, codegen_context):
+    # FIXME, need to track loop indices properly. I think that it should be
+    # possible to index a matrix like
+    #
+    #     loop(p, loop(q, mat[[p, q], [p, q]].assign(666)))
+    #
+    # but the current class design does not keep track of loop indices. For
+    # now we assume there is only a single outer loop and that this is used
+    # to index the row and column maps.
+    if len(loop_indices) != 1:
+        raise NotImplementedError(
+            "For simplicity we currently assume a single outer loop"
+        )
+    replace_map = just_one(loop_indices.values())
+    iname = just_one(replace_map.values())
 
     # now emit the right line of code, this should properly be a lp.ScalarCallable
     # https://petsc.org/release/manualpages/Mat/MatGetValuesLocal/
-    # PetscErrorCode MatGetValuesLocal(Mat mat, PetscInt nrow, const PetscInt irow[], PetscInt ncol, const PetscInt icol[], PetscScalar y[])
-    # nrow = rexpr.array.axes.leaf_component.count
-    # ncol = cexpr.array.axes.leaf_component.count
-    # TODO check this? could compare matches temp (flat) size
-    nrow, ncol = shape
 
-    mat = array.buffer.mat
+    mat = assignment.mat_arg.buffer.mat
+    array = assignment.array_arg
+    rmap = assignment.mat_arg.buffer.rmap
+    cmap = assignment.mat_arg.buffer.cmap
 
-    # rename things
+    rsize, csize = assignment.mat_arg.buffer.shape
+    # these sizes can be expressions that need evaluating
+    breakpoint()
+
     mat_name = codegen_context.actual_to_kernel_rename_map[mat.name]
-    # renamer = Renamer(codegen_context.actual_to_kernel_rename_map)
-    # irow = renamer(array.buffer.rmap)
-    # icol = renamer(array.buffer.cmap)
-    rmap = array.buffer.rmap
-    cmap = array.buffer.cmap
-    rloop_index = array.buffer.rindex
-    cloop_index = array.buffer.cindex
-    riname = just_one(loop_indices[rloop_index][1].values())
-    ciname = just_one(loop_indices[cloop_index][1].values())
-
-    raise NotImplementedError("Loop context stuff should already be handled")
-    context = context_from_indices(loop_indices)
-    rsize = rmap[rloop_index].with_context(context).size
-    csize = cmap[cloop_index].with_context(context).size
-
-    # breakpoint()
+    array_name = codegen_context.actual_to_kernel_rename_map[array.name]
+    rmap_name = codegen_context.actual_to_kernel_rename_map[rmap.name]
+    cmap_name = codegen_context.actual_to_kernel_rename_map[cmap.name]
 
     codegen_context.add_argument(rmap)
     codegen_context.add_argument(cmap)
-    irow = f"{codegen_context.actual_to_kernel_rename_map[rmap.name]}[{riname}*{rsize}]"
-    icol = f"{codegen_context.actual_to_kernel_rename_map[cmap.name]}[{ciname}*{csize}]"
 
-    # can only use GetValuesLocal when lgmaps are set (which I don't yet do)
-    if op == AssignmentType.READ:
-        call_str = f"MatGetValues({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({temp.name}[0]));"
-    elif op == AssignmentType.WRITE:
-        call_str = f"MatSetValues({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({temp.name}[0]), INSERT_VALUES);"
-    elif op == AssignmentType.INC:
-        call_str = f"MatSetValues({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({temp.name}[0]), ADD_VALUES);"
-    else:
-        raise NotImplementedError
+    irow = f"{rmap_name}[{iname}*{rsize}]"
+    icol = f"{cmap_name}[{iname}*{csize}]"
+
+    call_str = _petsc_mat_insn(
+        assignment, mat_name, array_name, rsize, csize, irow, icol
+    )
     codegen_context.add_cinstruction(call_str)
-    return
 
-    ### old code below ###
 
-    # we should flatten the array before this point as an earlier pass
-    # if array.axes.depth != 2:
-    #     raise ValueError
+@functools.singledispatch
+def _petsc_mat_insn(assignment, *args):
+    raise TypeError(f"{assignment} not recognised")
 
-    # TODO We currently emit separate calls to MatSetValues if we have
-    # multi-component arrays. This is naturally quite inefficient and we
-    # could do things in a single call if we could "compress" the data
-    # correctly beforehand. This is an optimisation I want to implement
-    # generically though.
-    for leaf_axis, leaf_cpt in array.axes.leaves:
-        # This is wrong - we now have shape to deal with...
-        (iraxis, ircpt), (icaxis, iccpt) = array.axes.path_with_nodes(
-            leaf_axis, leaf_cpt, ordered=True
-        )
-        rkey = (iraxis.id, ircpt)
-        ckey = (icaxis.id, iccpt)
 
-        rexpr = array.index_exprs[rkey][just_one(array.target_paths[rkey])]
-        cexpr = array.index_exprs[ckey][just_one(array.target_paths[ckey])]
+# can only use GetValuesLocal when lgmaps are set (which I don't yet do)
+@_petsc_mat_insn.register
+def _(assignment: PetscMatLoad, mat_name, array_name, nrow, ncol, irow, icol):
+    return f"MatGetValues({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]));"
 
-        mat = array.buffer.array
 
-        # need to generate code like map0[i0] instead of the usual map0[i0, i1]
-        # this is because we are passing the full map through to the function call
+@_petsc_mat_insn.register
+def _(assignment: PetscMatStore, mat_name, array_name, nrow, ncol, irow, icol):
+    return f"MatSetValues({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]), INSERT_VALUES);"
 
-        # similarly we also need to be careful to interrupt this function early
-        # we don't want to emit loops for things!
 
-        # I believe that this is probably the right place to be flattening the map
-        # expressions. We want to have already done any clever substitution for arity 1
-        # objects.
-
-        # rexpr = self._flatten(rexpr)
-        # cexpr = self._flatten(cexpr)
-
-        assert temp.axes.depth == 2
-        # sniff the right labels from the temporary, they tell us what jnames to substitute
-        rlabel = temp.axes.root.label
-        clabel = temp.axes.leaf_axis.label
-
-        iname_expr_replace_map = {}
-        for _, replace_map in loop_indices.values():
-            iname_expr_replace_map.update(replace_map)
-
-        # for now assume that we pass exactly the right map through, do no composition
-        if not isinstance(rexpr, MultiArrayVariable):
-            raise NotImplementedError
-
-        # substitute a zero for the inner axis, we want to avoid this inner loop
-        new_rexpr = JnameSubstitutor(
-            iname_expr_replace_map | {rlabel: 0}, codegen_context
-        )(rexpr)
-
-        if not isinstance(cexpr, MultiArrayVariable):
-            raise NotImplementedError
-
-        # substitute a zero for the inner axis, we want to avoid this inner loop
-        new_cexpr = JnameSubstitutor(
-            iname_expr_replace_map | {clabel: 0}, codegen_context
-        )(cexpr)
-
-        # now emit the right line of code, this should properly be a lp.ScalarCallable
-        # https://petsc.org/release/manualpages/Mat/MatGetValuesLocal/
-        # PetscErrorCode MatGetValuesLocal(Mat mat, PetscInt nrow, const PetscInt irow[], PetscInt ncol, const PetscInt icol[], PetscScalar y[])
-        nrow = rexpr.array.axes.leaf_component.count
-        ncol = cexpr.array.axes.leaf_component.count
-
-        # rename things
-        mat_name = codegen_context.actual_to_kernel_rename_map[mat.name]
-        renamer = Renamer(codegen_context.actual_to_kernel_rename_map)
-        irow = renamer(new_rexpr)
-        icol = renamer(new_cexpr)
-
-        # can only use GetValuesLocal when lgmaps are set (which I don't yet do)
-        if op == AssignmentType.READ:
-            call_str = f"MatGetValues({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({temp.name}[0]));"
-        # elif op == AssignmentType.WRITE:
-        else:
-            raise NotImplementedError
-        codegen_context.add_cinstruction(call_str)
+@_petsc_mat_insn.register
+def _(assignment: PetscMatAdd, mat_name, array_name, nrow, ncol, irow, icol):
+    return f"MatSetValues({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]), ADD_VALUES);"
 
 
 # TODO now I attach a lot of info to the context-free array, do I need to pass axes around?
@@ -830,7 +735,7 @@ def parse_assignment_properly_this_time(
     loop_indices,
     codegen_context,
     *,
-    iname_replace_map,
+    iname_replace_map=pmap(),
     # TODO document these under "Other Parameters"
     axis=None,
     target_paths=None,
@@ -851,12 +756,19 @@ def parse_assignment_properly_this_time(
         target_paths = freeze(target_paths)
         index_exprs = freeze(index_exprs)
 
+    # these cannot be "local" loop indices
+    extra_extent_index_exprs = {}
+    for mappings in loop_indices.values():
+        global_map, _ = mappings
+        for (_, k), v in global_map.items():
+            extra_extent_index_exprs[k] = v
+
     if axes.is_empty:
         add_leaf_assignment(
             assignment,
             target_paths,
             index_exprs,
-            iname_replace_map,
+            iname_replace_map | extra_extent_index_exprs,
             codegen_context,
             loop_indices,
         )
@@ -870,9 +782,12 @@ def parse_assignment_properly_this_time(
         domain_index_exprs = assignment.assignee.domain_index_exprs.get(
             (axis.id, component.label), pmap()
         )
+
         extent_var = register_extent(
             component.count,
-            index_exprs | domain_index_exprs,
+            index_exprs[assignment.assignee]
+            | extra_extent_index_exprs
+            | domain_index_exprs,
             iname_replace_map,
             codegen_context,
         )
@@ -907,7 +822,7 @@ def parse_assignment_properly_this_time(
                     assignment,
                     target_paths_,
                     index_exprs_,
-                    new_iname_replace_map,
+                    new_iname_replace_map | extra_extent_index_exprs,
                     codegen_context,
                     loop_indices,
                 )
@@ -1112,20 +1027,20 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         return jname_expr
 
     def map_loop_index(self, expr):
+        # FIXME pretty sure I have broken local loop index stuff
         if isinstance(expr, LocalLoopIndexVariable):
-            return self._labels_to_jnames[expr.name][0][expr.name, expr.axis]
+            # return self._labels_to_jnames[expr.name][0][expr.name, expr.axis]
+            return self._labels_to_jnames[expr.axis]
         else:
             assert isinstance(expr, LoopIndexVariable)
-            return self._labels_to_jnames[expr.name][1][expr.name, expr.axis]
+            # return self._labels_to_jnames[expr.name][1][expr.name, expr.axis]
+            return self._labels_to_jnames[expr.axis]
 
     def map_call(self, expr):
         if expr.function.name == "mybsearch":
             return self._map_bsearch(expr)
         else:
             raise NotImplementedError("hmm")
-
-    # def _flatten(self, expr):
-    #     for
 
     def _map_bsearch(self, expr):
         indices_var, axis_var = expr.parameters
@@ -1324,4 +1239,4 @@ def _(arg: PackedBuffer):
 
 @_as_pointer.register
 def _(array: PetscMat):
-    return array.petscmat.handle
+    return array.mat.handle

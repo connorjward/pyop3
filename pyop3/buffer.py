@@ -352,9 +352,6 @@ class PackedBuffer(Buffer):
 
     """
 
-    # TODO Haven't exactly decided on the right API here, subclasses?
-    # def __init__(self, pack_fn, unpack_fn, dtype):
-    #     self._dtype = dtype
     def __init__(self, array):
         self.array = array
 
