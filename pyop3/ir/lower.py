@@ -475,13 +475,6 @@ def parse_loop_properly_this_time(
     if axes.is_empty:
         raise NotImplementedError("does this even make sense?")
 
-    # need to pick bits out of this, could be neater
-    # outer_replace_map = {}
-    # for k, (_, _, replace_map, rep2) in loop_indices.items():
-    #     outer_replace_map[k] = (replace_map, rep2)
-    # outer_replace_map = freeze(outer_replace_map)
-    outer_replace_map = loop_indices
-
     if axis is None:
         target_path = freeze(axes.target_paths.get(None, {}))
 
@@ -507,11 +500,11 @@ def parse_loop_properly_this_time(
         )
 
         iname = codegen_context.unique_name("i")
+        # breakpoint()
         extent_var = register_extent(
             component.count,
             index_exprs | domain_index_exprs,
-            # TODO just put these in the default replace map
-            iname_replace_map | outer_replace_map,
+            iname_replace_map | loop_indices,
             codegen_context,
         )
         codegen_context.add_domain(iname, extent_var)
@@ -542,23 +535,27 @@ def parse_loop_properly_this_time(
             else:
                 target_replace_map = {}
                 replacer = JnameSubstitutor(
-                    outer_replace_map | iname_replace_map_, codegen_context
+                    # outer_replace_map | iname_replace_map_, codegen_context
+                    iname_replace_map_ | loop_indices,
+                    codegen_context,
                 )
                 for axis_label, index_expr in index_exprs_.items():
                     target_replace_map[axis_label] = replacer(index_expr)
 
-                index_replace_map = pmap(
-                    {
-                        (loop.index.id, ax): iexpr
-                        for ax, iexpr in target_replace_map.items()
-                    }
-                )
-                local_index_replace_map = freeze(
-                    {
-                        (loop.index.id, ax): iexpr
-                        for ax, iexpr in iname_replace_map_.items()
-                    }
-                )
+                # index_replace_map = pmap(
+                #     {
+                #         (loop.index.id, ax): iexpr
+                #         for ax, iexpr in target_replace_map.items()
+                #     }
+                # )
+                # local_index_replace_map = freeze(
+                #     {
+                #         (loop.index.id, ax): iexpr
+                #         for ax, iexpr in iname_replace_map_.items()
+                #     }
+                # )
+                index_replace_map = target_replace_map
+                local_index_replace_map = iname_replace_map_
                 for stmt in loop.statements[source_path_]:
                     _compile(
                         stmt,
@@ -805,18 +802,18 @@ def parse_assignment_properly_this_time(
         index_exprs = freeze(index_exprs)
 
     # these cannot be "local" loop indices
-    extra_extent_index_exprs = {}
-    for mappings in loop_indices.values():
-        global_map, _ = mappings
-        for (_, k), v in global_map.items():
-            extra_extent_index_exprs[k] = v
+    # extra_extent_index_exprs = {}
+    # for mappings in loop_indices.values():
+    #     global_map, _ = mappings
+    #     for (_, k), v in global_map.items():
+    #         extra_extent_index_exprs[k] = v
 
     if axes.is_empty:
         add_leaf_assignment(
             assignment,
             target_paths,
             index_exprs,
-            iname_replace_map | extra_extent_index_exprs,
+            iname_replace_map | loop_indices,
             codegen_context,
             loop_indices,
         )
@@ -833,9 +830,7 @@ def parse_assignment_properly_this_time(
 
         extent_var = register_extent(
             component.count,
-            index_exprs[assignment.assignee]
-            | extra_extent_index_exprs
-            | domain_index_exprs,
+            index_exprs[assignment.assignee] | loop_indices | domain_index_exprs,
             iname_replace_map,
             codegen_context,
         )
@@ -870,7 +865,7 @@ def parse_assignment_properly_this_time(
                     assignment,
                     target_paths_,
                     index_exprs_,
-                    new_iname_replace_map | extra_extent_index_exprs,
+                    new_iname_replace_map | loop_indices,
                     codegen_context,
                     loop_indices,
                 )
@@ -884,50 +879,6 @@ def add_leaf_assignment(
     codegen_context,
     loop_indices,
 ):
-    # if isinstance(array, (HierarchicalArray, ContextSensitiveMultiArray)):
-    #
-    #     def array_expr():
-    #         replace_map = {}
-    #         replacer = JnameSubstitutor(iname_replace_map, codegen_context)
-    #         for axis, index_expr in index_exprs.items():
-    #             replace_map[axis] = replacer(index_expr)
-    #
-    #         array_ = array
-    #         return make_array_expr(
-    #             array,
-    #             array_.layouts[target_path],
-    #             target_path,
-    #             replace_map,
-    #             codegen_context,
-    #         )
-    #
-    # else:
-    #     assert isinstance(array, ContextFreeLoopIndex)
-    #
-    #     array_ = array
-    #
-    #     if array_.axes.depth != 0:
-    #         raise NotImplementedError("Tricky when dealing with vectors here")
-    #
-    #     def array_expr():
-    #         replace_map = {}
-    #         replacer = JnameSubstitutor(iname_replace_map, codegen_context)
-    #         for axis, index_expr in index_exprs.items():
-    #             replace_map[axis] = replacer(index_expr)
-    #
-    #         if len(replace_map) > 1:
-    #             # use leaf_target_path to get the right bits from replace_map?
-    #             raise NotImplementedError("Needs more thought")
-    #         return just_one(replace_map.values())
-    #
-    # temp_expr = functools.partial(
-    #     make_temp_expr,
-    #     temporary,
-    #     shape,
-    #     source_path,
-    #     iname_replace_map,
-    #     codegen_context,
-    # )
     larr = assignment.assignee
     rarr = assignment.expression
 
@@ -972,7 +923,6 @@ def make_array_expr(array, target_path, index_exprs, inames, ctx, shape):
         replace_map,
         ctx,
     )
-
     # hack to handle the fact that temporaries can have shape but we want to
     # linearly index it here
     if shape is not None:
@@ -1010,11 +960,11 @@ def make_temp_expr(temporary, shape, path, jnames, ctx):
 
 class JnameSubstitutor(pym.mapper.IdentityMapper):
     def __init__(self, replace_map, codegen_context):
-        self._labels_to_jnames = replace_map
+        self._replace_map = replace_map
         self._codegen_context = codegen_context
 
     def map_axis_variable(self, expr):
-        return self._labels_to_jnames[expr.axis_label]
+        return self._replace_map[expr.axis_label]
 
     # this is cleaner if I do it as a single line expression
     # rather than register assignments for things.
@@ -1048,7 +998,7 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
 
         # handle [map0(p)][map1(p)] where map0 does not have an associated loop
         try:
-            jname = self._labels_to_jnames[expr.function.full_map.name]
+            jname = self._replace_map[expr.function.full_map.name]
         except KeyError:
             jname = self._codegen_context.unique_name("j")
             self._codegen_context.add_temporary(jname)
@@ -1080,12 +1030,10 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
     def map_loop_index(self, expr):
         # FIXME pretty sure I have broken local loop index stuff
         if isinstance(expr, LocalLoopIndexVariable):
-            # return self._labels_to_jnames[expr.name][0][expr.name, expr.axis]
-            return self._labels_to_jnames[expr.axis]
+            return self._replace_map[expr.id][0][expr.axis]
         else:
             assert isinstance(expr, LoopIndexVariable)
-            # return self._labels_to_jnames[expr.name][1][expr.name, expr.axis]
-            return self._labels_to_jnames[expr.axis]
+            return self._replace_map[expr.id][1][expr.axis]
 
     def map_call(self, expr):
         if expr.function.name == "mybsearch":
@@ -1123,7 +1071,7 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
 
         # base
         replace_map = {}
-        for key, replace_expr in self._labels_to_jnames.items():
+        for key, replace_expr in self._replace_map.items():
             # for (LoopIndex_id0, axis0)
             if isinstance(key, tuple):
                 replace_map[key[1]] = replace_expr

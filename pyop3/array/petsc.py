@@ -381,10 +381,6 @@ def _alloc_template_mat(points, adjacency, raxes, caxes, bsize=None):
 
     do_loop(
         p := points.index(),
-        # loop(
-        #     q := adjacency(p).index(),
-        #     prealloc_mat[p, q].assign(666),
-        # ),
         prealloc_mat[p, adjacency(p)].assign(666),
     )
 

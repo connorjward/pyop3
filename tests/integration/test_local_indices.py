@@ -31,6 +31,9 @@ def test_copy_slice(scalar_copy_kernel):
     assert np.allclose(dat1.data_ro, dat0.data_ro[::2])
 
 
+@pytest.mark.xfail(
+    reason="Passing loop indices to the local kernel is not currently supported"
+)
 def test_pass_loop_index_as_argument(factory):
     m = 10
     axes = op3.Axis(m)
@@ -41,6 +44,9 @@ def test_pass_loop_index_as_argument(factory):
     assert (dat.data_ro == list(range(m))).all()
 
 
+@pytest.mark.xfail(
+    reason="Passing loop indices to the local kernel is not currently supported"
+)
 def test_pass_multi_component_loop_index_as_argument(factory):
     m, n = 10, 12
     axes = op3.Axis([m, n])

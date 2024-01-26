@@ -199,29 +199,17 @@ class Loop(Instruction):
 
     @cached_property
     def _distarray_args(self):
-        # this fails because arg.array for ContextSensitive PetscMats fails
-        # a cleanup is needed, but we just want serial for now
-        from mpi4py import MPI
-
-        from pyop3.buffer import DistributedBuffer
-
-        if MPI.COMM_WORLD.size > 1:
-            raise NotImplementedError("parallel needs work here")
-        else:
-            return ()
+        from pyop3.array import ContextSensitiveMultiArray, HierarchicalArray
 
         arrays = {}
         for arg, intent in self.kernel_arguments:
-            # TODO cleanup
-            from pyop3.itree import LoopIndex
+            if isinstance(arg, ContextSensitiveMultiArray):
+                # take first
+                arg, *_ = arg.context_map.values()
 
-            if isinstance(arg, LoopIndex):
+            if not isinstance(arg, HierarchicalArray) or not arg.buffer.is_distributed:
                 continue
-            if (
-                not isinstance(arg.array, DistributedBuffer)
-                or not arg.array.is_distributed
-            ):
-                continue
+
             if arg.array not in arrays:
                 arrays[arg.array] = (intent, _has_nontrivial_stencil(arg))
             else:

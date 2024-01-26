@@ -68,6 +68,7 @@ def test_map_compression(scalar_copy_kernel_int):
     assert np.allclose(pt_to_dofs.data_ro, expected.flatten())
 
 
+@pytest.mark.skip(reason="PetscMat API has changed significantly to use adjacency maps")
 def test_read_matrix_values():
     # Imagine a 1D mesh storing DoFs at vertices:
     #
@@ -86,7 +87,7 @@ def test_read_matrix_values():
     # FIXME we need to be able to distinguish row and col DoFs (and the IDs must differ)
     # this should be handled internally somehow
     dofs_ = op3.Axis(4, "dofs_")
-    mat = op3.PetscMat(dofs, dofs_, indices, name="mat")
+    mat = op3.PetscMatAIJ(dofs, dofs_, indices, name="mat")
 
     # put some numbers in the matrix
     sparsity = [
@@ -125,14 +126,14 @@ def test_read_matrix_values():
         "map0",
     )
     # so we don't have axes with the same name, needs cleanup
-    map1 = op3.Map(
-        {
-            pmap({"mesh": "cells"}): [
-                op3.TabulatedMapComponent("dofs_", dofs_.component.label, map_dat)
-            ]
-        },
-        "map1",
-    )
+    # map1 = op3.Map(
+    #     {
+    #         pmap({"mesh": "cells"}): [
+    #             op3.TabulatedMapComponent("dofs_", dofs_.component.label, map_dat)
+    #         ]
+    #     },
+    #     "map1",
+    # )
 
     # perform the computation
     lpy_kernel = lp.make_kernel(

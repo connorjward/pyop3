@@ -198,6 +198,7 @@ class Index(MultiComponentLabelledNode):
 
     @property
     def component_labels(self):
+        # TODO cleanup
         if self._component_labels is None:
             # do this for now (since leaf_target_paths currently requires an
             # instantiated object to determine)
@@ -1589,8 +1590,8 @@ def partition_iterset(index: LoopIndex, arrays):
     from pyop3.array import HierarchicalArray
 
     # take first
-    if index.iterset.depth > 1:
-        raise NotImplementedError("Need a good way to sniff the parallel axis")
+    # if index.iterset.depth > 1:
+    #     raise NotImplementedError("Need a good way to sniff the parallel axis")
     paraxis = index.iterset.root
 
     # FIXME, need indices per component
