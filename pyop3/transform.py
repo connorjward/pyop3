@@ -175,6 +175,7 @@ class ImplicitPackUnpackExpander(Transformer):
                     data=NullBuffer(arg.dtype),  # does this need a size?
                     name=self._name_generator("t"),
                 )
+                breakpoint()
 
                 if intent == READ:
                     gathers.append(PetscMatLoad(arg, new_arg))

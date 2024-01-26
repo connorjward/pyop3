@@ -200,6 +200,7 @@ class Loop(Instruction):
     @cached_property
     def _distarray_args(self):
         from pyop3.array import ContextSensitiveMultiArray, HierarchicalArray
+        from pyop3.buffer import DistributedBuffer
 
         arrays = {}
         for arg, intent in self.kernel_arguments:
@@ -207,7 +208,11 @@ class Loop(Instruction):
                 # take first
                 arg, *_ = arg.context_map.values()
 
-            if not isinstance(arg, HierarchicalArray) or not arg.buffer.is_distributed:
+            if (
+                not isinstance(arg, HierarchicalArray)
+                or not isinstance(arg.buffer, DistributedBuffer)
+                or arg.buffer.sf is None
+            ):
                 continue
 
             if arg.array not in arrays:

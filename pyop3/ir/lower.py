@@ -828,10 +828,23 @@ def parse_assignment_properly_this_time(
             (axis.id, component.label), pmap()
         )
 
+        # TODO move to register_extent
+        if isinstance(component.count, HierarchicalArray):
+            count_axes = component.count.axes
+            count_exprs = {}
+            for count_axis, count_cpt in count_axes.path_with_nodes(
+                *count_axes.leaf
+            ).items():
+                count_exprs.update(
+                    component.count.index_exprs.get((count_axis.id, count_cpt), {})
+                )
+        else:
+            count_exprs = {}
+
         extent_var = register_extent(
             component.count,
-            index_exprs[assignment.assignee] | loop_indices | domain_index_exprs,
-            iname_replace_map,
+            index_exprs[assignment.assignee] | count_exprs | domain_index_exprs,
+            iname_replace_map | loop_indices,
             codegen_context,
         )
         codegen_context.add_domain(iname, extent_var)

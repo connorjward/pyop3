@@ -160,6 +160,7 @@ def collect_externally_indexed_axes(axes, axis=None, component=None, path=pmap()
                 }
             )
     else:
+        path_ = path | {axis.label: component.label}
         csize = component.count
         if isinstance(csize, HierarchicalArray):
             if csize.axes.is_empty:
@@ -168,14 +169,14 @@ def collect_externally_indexed_axes(axes, axis=None, component=None, path=pmap()
                 # is the path sufficient? i.e. do we have enough externally provided indices
                 # to correctly index the axis?
                 for caxis, ccpt in csize.axes.path_with_nodes(*csize.axes.leaf).items():
-                    if caxis.label in path:
-                        assert path[caxis.label] == ccpt, "Paths do not match"
+                    if caxis.label in path_:
+                        assert path_[caxis.label] == ccpt, "Paths do not match"
                     else:
+                        # also return an expr?
                         external_axes[caxis.label] = caxis
         else:
             assert isinstance(csize, numbers.Integral)
             if subaxis := axes.child(axis, component):
-                path_ = path | {axis.label: component.label}
                 for subcpt in subaxis.components:
                     external_axes.update(
                         {
