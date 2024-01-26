@@ -707,6 +707,11 @@ def _(index: ContextFreeIndex, **kwargs):
     return {pmap(): IndexTree(index)}
 
 
+@_as_index_forest.register
+def _(index: ContextFreeCalledMap, **kwargs):
+    return {pmap(): IndexTree(index)}
+
+
 # TODO This function can definitely be refactored
 @_as_index_forest.register(AbstractLoopIndex)
 @_as_index_forest.register(LocalLoopIndex)
@@ -1116,7 +1121,12 @@ def _make_leaf_axis_from_called_map(called_map, prior_target_path, prior_index_e
     domain_index_exprs_per_cpt = {}
 
     for map_cpt in called_map.map.connectivity[prior_target_path]:
-        cpt = AxisComponent(map_cpt.arity, label=map_cpt.label)
+        if isinstance(map_cpt.arity, HierarchicalArray):
+            arity = map_cpt.arity[called_map.index]
+        else:
+            assert isinstance(map_cpt.arity, numbers.Integral)
+            arity = map_cpt.arity
+        cpt = AxisComponent(arity, label=map_cpt.label)
         components.append(cpt)
 
         target_path_per_cpt[axis_id, cpt.label] = pmap(
@@ -1511,28 +1521,18 @@ def iter_axis_tree(
         myindex_exprs = index_exprs.get((axis.id, component.label), pmap())
         subaxis = axes.child(axis, component)
 
-        # convert domain_index_exprs into path + indices (for looping over ragged maps)
-        my_domain_index_exprs = domain_index_exprs.get(
-            (axis.id, component.label), pmap()
-        )
-        if my_domain_index_exprs and isinstance(component.count, HierarchicalArray):
-            if len(my_domain_index_exprs) > 1:
-                raise NotImplementedError("Needs more thought")
-            assert component.count.axes.depth == 1
-            my_root = component.count.axes.root
-            my_domain_path = freeze({my_root.label: my_root.component.label})
-
-            evaluator = ExpressionEvaluator(outer_replace_map | indices)
-            my_domain_indices = {
-                ax: evaluator(expr) for ax, expr in my_domain_index_exprs.items()
-            }
+        # bit of a hack
+        if isinstance(component.count, HierarchicalArray):
+            mypath = component.count.target_paths.get(None, {})
+            if not component.count.axes.is_empty:
+                for cax, ccpt in component.count.axes.path_with_nodes(
+                    *component.count.axes.leaf
+                ):
+                    mypath.update(component.count.target_paths.get((cax.id, ccpt), {}))
         else:
-            my_domain_path = pmap()
-            my_domain_indices = pmap()
+            mypath = pmap()
 
-        for pt in range(
-            _as_int(component.count, path | my_domain_path, indices | my_domain_indices)
-        ):
+        for pt in range(_as_int(component.count, mypath, indices | outer_replace_map)):
             new_exprs = {}
             for axlabel, index_expr in myindex_exprs.items():
                 new_index = ExpressionEvaluator(

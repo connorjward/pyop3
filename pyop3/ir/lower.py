@@ -504,7 +504,7 @@ def parse_loop_properly_this_time(
         extent_var = register_extent(
             component.count,
             # index_exprs | domain_index_exprs,
-            index_exprs,
+            # component.count.index_exprs,
             iname_replace_map | loop_indices,
             codegen_context,
         )
@@ -846,7 +846,7 @@ def parse_assignment_properly_this_time(
         extent_var = register_extent(
             component.count,
             # index_exprs[assignment.assignee] | count_exprs | domain_index_exprs,
-            index_exprs[assignment.assignee],
+            # index_exprs[assignment.assignee],
             iname_replace_map | loop_indices,
             codegen_context,
         )
@@ -1156,7 +1156,8 @@ def make_offset_expr(
     return JnameSubstitutor(jname_replace_map, codegen_context)(layouts)
 
 
-def register_extent(extent, index_exprs, iname_replace_map, ctx):
+# def register_extent(extent, index_exprs, iname_replace_map, ctx):
+def register_extent(extent, iname_replace_map, ctx):
     if isinstance(extent, numbers.Integral):
         return extent
 
@@ -1168,6 +1169,12 @@ def register_extent(extent, index_exprs, iname_replace_map, ctx):
         path = extent.axes.path(*extent.axes.leaf)
     else:
         path = pmap()
+
+    index_exprs = extent.index_exprs.get(None, {})
+    # extent must be linear
+    if not extent.axes.is_empty:
+        for axis, cpt in extent.axes.path_with_nodes(*extent.axes.leaf).items():
+            index_exprs.update(extent.index_exprs[axis.id, cpt])
 
     expr = _scalar_assignment(extent, path, index_exprs, iname_replace_map, ctx)
 

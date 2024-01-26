@@ -364,7 +364,19 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
                 path |= {subaxis.label: subcpt.label}
                 indices |= {subaxis.label: 0}
 
-        offset = pym.evaluate(self.layouts[path], indices, ExpressionEvaluator)
+        from pyop3.itree.tree import IndexExpressionReplacer
+
+        replace_map = {}
+        replacer = IndexExpressionReplacer(indices)
+        myexprs = dict(self.index_exprs.get(None, {}))
+        for axis, cpt in self.axes.path_with_nodes(
+            *self.axes._node_from_path(path)
+        ).items():
+            myexprs.update(self.index_exprs.get((axis.id, cpt), {}))
+
+        for axis, index_expr in myexprs.items():
+            replace_map[axis] = replacer(index_expr)
+        offset = pym.evaluate(self.layouts[path], replace_map, ExpressionEvaluator)
         return strict_int(offset)
 
     def simple_offset(self, path, indices):

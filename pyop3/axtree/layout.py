@@ -137,9 +137,29 @@ def requires_external_index(axtree, axis, component_index):
 
 
 def size_requires_external_index(axes, axis, component, path=pmap()):
-    return len(collect_externally_indexed_axes(axes, axis, component, path)) > 0
+    count = component.count
+    if not component.has_integer_count:
+        # is the path sufficient? i.e. do we have enough externally provided indices
+        # to correctly index the axis?
+        if count.axes.is_empty:
+            return False
+        for axlabel, clabel in count.axes.path(*count.axes.leaf).items():
+            if axlabel in path:
+                assert path[axlabel] == clabel
+            else:
+                return True
+    else:
+        if subaxis := axes.component_child(axis, component):
+            for c in subaxis.components:
+                # path_ = path | {subaxis.label: c.label}
+                path_ = path | {axis.label: component.label}
+                if size_requires_external_index(axes, subaxis, c, path_):
+                    return True
+    return False
 
 
+# NOTE: I am not sure that this is really required any more. We just want to
+# check for loop indices in any index_exprs
 def collect_externally_indexed_axes(axes, axis=None, component=None, path=pmap()):
     from pyop3.array import HierarchicalArray
 
@@ -147,47 +167,76 @@ def collect_externally_indexed_axes(axes, axis=None, component=None, path=pmap()
         return ()
 
     # use a dict as an ordered set
-    external_axes = {}
     if axis is None:
         assert component is None
+
+        external_axes = {}
         for component in axes.root.components:
             external_axes.update(
                 {
-                    ax.label: ax
+                    # NOTE: no longer axes
+                    ax.id: ax
                     for ax in collect_externally_indexed_axes(
                         axes, axes.root, component
                     )
                 }
             )
+        return tuple(external_axes.values())
+
+    external_axes = {}
+    csize = component.count
+    if isinstance(csize, HierarchicalArray):
+        # is the path sufficient? i.e. do we have enough externally provided indices
+        # to correctly index the axis?
+        # can skip?
+        # for caxis, ccpt in csize.axes.path_with_nodes(*csize.axes.leaf).items():
+        #     if caxis.label in path:
+        #         assert path[caxis.label] == ccpt, "Paths do not match"
+        #     else:
+        #         # also return an expr?
+        #         external_axes[caxis.label] = caxis
+        loop_indices = collect_external_loops(csize.index_exprs.get(None, {}))
+        if not csize.axes.is_empty:
+            for caxis, ccpt in csize.axes.path_with_nodes(*csize.axes.leaf).items():
+                loop_indices.update(
+                    collect_external_loops(csize.index_exprs.get((caxis.id, ccpt), {}))
+                )
+        for index in sorted(loop_indices, key=lambda i: i.id):
+            external_axes[index.id] = index
     else:
-        path_ = path | {axis.label: component.label}
-        csize = component.count
-        if isinstance(csize, HierarchicalArray):
-            if csize.axes.is_empty:
-                pass
-            else:
-                # is the path sufficient? i.e. do we have enough externally provided indices
-                # to correctly index the axis?
-                for caxis, ccpt in csize.axes.path_with_nodes(*csize.axes.leaf).items():
-                    if caxis.label in path_:
-                        assert path_[caxis.label] == ccpt, "Paths do not match"
-                    else:
-                        # also return an expr?
-                        external_axes[caxis.label] = caxis
-        else:
-            assert isinstance(csize, numbers.Integral)
-            if subaxis := axes.child(axis, component):
-                for subcpt in subaxis.components:
-                    external_axes.update(
-                        {
-                            ax.label: ax
-                            for ax in collect_externally_indexed_axes(
-                                axes, subaxis, subcpt, path_
-                            )
-                        }
+        assert isinstance(csize, numbers.Integral)
+
+    path_ = path | {axis.label: component.label}
+    if subaxis := axes.child(axis, component):
+        for subcpt in subaxis.components:
+            external_axes.update(
+                {
+                    # NOTE: no longer axes
+                    ax.id: ax
+                    for ax in collect_externally_indexed_axes(
+                        axes, subaxis, subcpt, path_
                     )
+                }
+            )
 
     return tuple(external_axes.values())
+
+
+class LoopIndexCollector(pym.mapper.Collector):
+    def map_loop_index(self, index):
+        return {index}
+
+    def map_called_map_variable(self, index):
+        return {
+            idx
+            for index_expr in index.input_index_exprs.values()
+            for idx in self.rec(index_expr)
+        }
+
+
+def collect_external_loops(index_exprs):
+    collector = LoopIndexCollector()
+    return set.union(set(), *(collector(expr) for expr in index_exprs.values()))
 
 
 def has_constant_step(axes: AxisTree, axis, cpt):
@@ -605,7 +654,8 @@ def _as_int(arg: Any, path, indices):
         # TODO this might break if we have something like [:, subset]
         # I will need to map the "source" axis (e.g. slice_label0) back
         # to the "target" axis
-        return arg.get_value(path, indices, allow_unused=True)
+        # return arg.get_value(path, indices, allow_unused=True)
+        return arg.get_value(path, indices, allow_unused=False)
     else:
         raise TypeError
 

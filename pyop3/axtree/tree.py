@@ -749,11 +749,32 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
     @cached_property
     def layouts(self):
         """Initialise the multi-axis by computing the layout functions."""
-        from pyop3.axtree.layout import _collect_at_leaves, _compute_layouts
+        from pyop3.axtree.layout import (
+            _collect_at_leaves,
+            _compute_layouts,
+            collect_externally_indexed_axes,
+        )
         from pyop3.itree.tree import IndexExpressionReplacer
 
         if self.is_empty:
             return pmap({pmap(): 0})
+
+        # If we have ragged temporaries it is possible for the size and layout of
+        # the array to vary depending on some external index. For a simple example
+        # consider a ragged array with size (3, [2, 1, 3]). If we loop over the
+        # outer axis only we get a temporary with size 2 then 1 then 3.
+        # In this case we can still determine the layouts easily without worrying
+        # about this - it's a flat array with stride 1. Things get hard once the
+        # temporary has multiple dimensions because the layout function will vary
+        # depending on the outer index. We have the same issue if the temporary
+        # is multi-component.
+        # This is not implemented so we abort if it is not the simplest case.
+        external_axes = collect_externally_indexed_axes(self)
+        if len(external_axes) > 0:
+            if self.depth > 1 or len(self.root.components) > 1:
+                raise NotImplementedError("This is hard, see comment above")
+            path = self.path(*self.leaf)
+            return freeze({path: AxisVariable(self.root.label)})
 
         layouts, _, _, _ = _compute_layouts(self, self.root)
         layoutsnew = _collect_at_leaves(self, layouts)
@@ -809,9 +830,6 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
                 for expr in exprs.values():
                     for array in MultiArrayCollector()(expr):
                         dmap.update(array.datamap)
-        for layout_expr in self.layouts.values():
-            for array in MultiArrayCollector()(layout_expr):
-                dmap.update(array.datamap)
         return pmap(dmap)
 
     @cached_property
