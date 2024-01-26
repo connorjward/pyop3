@@ -187,11 +187,17 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
             # rmap_axes = full_raxes.set_up()
             rmap_axes = full_raxes
             rlayouts = AxisTree(rmap_axes.parent_to_children).layouts
-            rmap = HierarchicalArray(rmap_axes, dtype=IntType, layouts=rlayouts)
+            rdiexpr = rmap_axes.domain_index_exprs
+            rmap = HierarchicalArray(
+                rmap_axes, dtype=IntType, layouts=rlayouts, domain_index_exprs=rdiexpr
+            )
             # cmap_axes = full_caxes.set_up()
             cmap_axes = full_caxes
             clayouts = AxisTree(cmap_axes.parent_to_children).layouts
-            cmap = HierarchicalArray(cmap_axes, dtype=IntType, layouts=clayouts)
+            cdiexpr = cmap_axes.domain_index_exprs
+            cmap = HierarchicalArray(
+                cmap_axes, dtype=IntType, layouts=clayouts, domain_index_exprs=cdiexpr
+            )
 
             # do_loop(
             #     p := rloop_index,
@@ -247,7 +253,9 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
                 data=packed,
                 target_paths=indexed_axes.target_paths,
                 index_exprs=indexed_axes.index_exprs,
-                domain_index_exprs=indexed_axes.domain_index_exprs,
+                # domain_index_exprs=indexed_axes.domain_index_exprs,
+                domain_index_exprs=indexed_raxes.domain_index_exprs
+                | indexed_caxes.domain_index_exprs,
                 name=self.name,
             )
         return ContextSensitiveMultiArray(arrays)

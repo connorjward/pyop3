@@ -325,7 +325,8 @@ class ContextFreeLoopIndex(ContextFreeIndex):
 
     @property
     def domain_index_exprs(self):
-        return pmap()
+        # I think
+        return self.index_exprs
 
     @property
     def datamap(self):
@@ -921,6 +922,7 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
     target_path_per_subslice = []
     index_exprs_per_subslice = []
     layout_exprs_per_subslice = []
+    # domain_index_exprs_per_subslice = []
 
     axis_label = slice_.label
 
@@ -998,25 +1000,32 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
                 pmap({slice_.label: bsearch(subset_var, layout_var)})
             )
 
+        # not sure what this would be
+        # domain_index_exprs_per_subslice.append(None)
+
     axis = Axis(components, label=axis_label)
     axes = PartialAxisTree(axis)
     target_path_per_component = {}
     index_exprs_per_component = {}
     layout_exprs_per_component = {}
+    domain_index_exprs = {}
     for cpt, target_path, index_exprs, layout_exprs in checked_zip(
         components,
         target_path_per_subslice,
         index_exprs_per_subslice,
         layout_exprs_per_subslice,
+        # domain_index_exprs_per_subslice,
     ):
         target_path_per_component[axis.id, cpt.label] = target_path
         index_exprs_per_component[axis.id, cpt.label] = index_exprs
         layout_exprs_per_component[axis.id, cpt.label] = layout_exprs
+        # domain_index_exprs[axis.id, cpt.label] = dexpr
     return (
         axes,
         target_path_per_component,
         index_exprs_per_component,
         layout_exprs_per_component,
+        # domain_index_exprs,
         pmap(),
     )
 
@@ -1258,13 +1267,13 @@ def _index_axes_rec(
                     index_exprs_per_cpt_per_index.update({key: retval[2][key]})
                     layout_exprs_per_cpt_per_index.update({key: retval[3][key]})
 
-                assert key not in domain_index_exprs_per_cpt_per_index
-                domain_index_exprs_per_cpt_per_index[key] = retval[4].get(key, pmap())
+                # assert key not in domain_index_exprs_per_cpt_per_index
+                # domain_index_exprs_per_cpt_per_index[key] = retval[4].get(key, pmap())
 
     target_path_per_component = freeze(target_path_per_cpt_per_index)
     index_exprs_per_component = freeze(index_exprs_per_cpt_per_index)
     layout_exprs_per_component = freeze(layout_exprs_per_cpt_per_index)
-    domain_index_exprs_per_cpt_per_index = freeze(domain_index_exprs_per_cpt_per_index)
+    # domain_index_exprs_per_cpt_per_index = freeze(domain_index_exprs_per_cpt_per_index)
 
     axes = PartialAxisTree(axes_per_index.parent_to_children)
     for k, subax in subaxes.items():
@@ -1279,7 +1288,8 @@ def _index_axes_rec(
         target_path_per_component,
         index_exprs_per_component,
         layout_exprs_per_component,
-        domain_index_exprs_per_cpt_per_index,
+        # domain_index_exprs_per_cpt_per_index,
+        pmap(),
     )
 
 
