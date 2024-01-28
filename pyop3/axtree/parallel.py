@@ -60,7 +60,7 @@ def collect_sf_graphs(axes, axis=None, path=pmap(), indices=pmap()):
         for component in axis.components:
             subaxis = axes.child(axis, component)
             if subaxis is not None:
-                for pt in range(_as_int(component.count, path, indices)):
+                for pt in range(_as_int(component.count, indices, path)):
                     graphs.extend(
                         collect_sf_graphs(
                             axes,
@@ -118,17 +118,16 @@ def grow_dof_sf(axes, axis, path, indices):
         assert component_num is not None
 
         offset = axes.offset(
-            path | {axis.label: selected_component.label},
             indices | {axis.label: component_num},
-            insert_zeros=True,
+            path | {axis.label: selected_component.label},
         )
         root_offsets[pt] = offset
         new_nroots += step_size(
             axes,
             axis,
             selected_component,
-            path | {axis.label: selected_component.label},
             indices | {axis.label: component_num},
+            path | {axis.label: selected_component.label},
         )
 
     point_sf.broadcast(root_offsets, MPI.REPLACE)
@@ -153,9 +152,8 @@ def grow_dof_sf(axes, axis, path, indices):
         assert component_num is not None
 
         offset = axes.offset(
-            path | {axis.label: selected_component.label},
             indices | {axis.label: component_num},
-            insert_zeros=True,
+            path | {axis.label: selected_component.label},
         )
         local_leaf_offsets[myindex] = offset
         leaf_ndofs[myindex] = step_size(axes, axis, selected_component)

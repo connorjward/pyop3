@@ -1119,13 +1119,7 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         nitems_varname = ctx.unique_name("nitems")
         ctx.add_temporary(nitems_varname)
 
-        myindexexprs = {}
-        for ax, cpt in indices.axes.path_with_nodes(leaf_axis, leaf_component).items():
-            myindexexprs.update(indices.index_exprs[ax.id, cpt])
-
-        nitems_expr = register_extent(
-            leaf_component.count, myindexexprs, replace_map, ctx
-        )
+        nitems_expr = register_extent(leaf_component.count, replace_map, ctx)
 
         # result
         found_varname = ctx.unique_name("ptr")
@@ -1156,7 +1150,6 @@ def make_offset_expr(
     return JnameSubstitutor(jname_replace_map, codegen_context)(layouts)
 
 
-# def register_extent(extent, index_exprs, iname_replace_map, ctx):
 def register_extent(extent, iname_replace_map, ctx):
     if isinstance(extent, numbers.Integral):
         return extent

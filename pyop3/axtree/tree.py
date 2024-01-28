@@ -168,12 +168,13 @@ class ExpressionEvaluator(pym.mapper.evaluator.EvaluationMapper):
         return self.context[expr.axis_label]
 
     def map_multi_array(self, array_var):
-        target_path = array_var.target_path
-        index_exprs = {ax: self.rec(idx) for ax, idx in array_var.index_exprs.items()}
-        return array_var.array.get_value(target_path, index_exprs)
+        # indices = {ax: self.rec(idx) for ax, idx in array_var.index_exprs.items()}
+        return array_var.array.get_value(
+            self.context, array_var.target_path, array_var.index_exprs
+        )
 
     def map_loop_index(self, expr):
-        return self.context[expr.name, expr.axis]
+        return self.context[expr.id][expr.axis]
 
 
 def _collect_datamap(axis, *subdatamaps, axes):
@@ -860,37 +861,10 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
     def as_tree(self):
         return self
 
-    # needed here? or just for the HierarchicalArray? perhaps a free function?
-    def offset(self, *args, allow_unused=False, insert_zeros=False):
-        nargs = len(args)
-        if nargs == 2:
-            path, indices = args[0], args[1]
-        else:
-            assert nargs == 1
-            path, indices = _path_and_indices_from_index_tuple(self, args[0])
+    def offset(self, indices, target_path=None, index_exprs=None):
+        from pyop3.axtree.layout import eval_offset
 
-        if allow_unused:
-            path = _trim_path(self, path)
-
-        if insert_zeros:
-            # extend the path by choosing the zero offset option every time
-            # this is needed if we don't have all the internal bits available
-            while path not in self.layouts:
-                axis, clabel = self._node_from_path(path)
-                subaxis = self.component_child(axis, clabel)
-                # choose the component that is first in the renumbering
-                if subaxis.numbering:
-                    cidx = subaxis._axis_number_to_component_index(
-                        subaxis.numbering.data_ro[0]
-                    )
-                else:
-                    cidx = 0
-                subcpt = subaxis.components[cidx]
-                path |= {subaxis.label: subcpt.label}
-                indices |= {subaxis.label: 0}
-
-        offset = pym.evaluate(self.layouts[path], indices, ExpressionEvaluator)
-        return strict_int(offset)
+        return eval_offset(self, self.layouts, indices, target_path, index_exprs)
 
     @cached_property
     def owned_size(self):
@@ -1066,52 +1040,3 @@ def _as_axis_component_label(arg: Any):
 @_as_axis_component_label.register
 def _(component: AxisComponent):
     return component.label
-
-
-def _path_and_indices_from_index_tuple(axes, index_tuple):
-    from pyop3.axtree.layout import _as_int
-
-    path = pmap()
-    indices = pmap()
-    axis = axes.root
-    for index in index_tuple:
-        if axis is None:
-            raise IndexError("Too many indices provided")
-        if isinstance(index, numbers.Integral):
-            if axis.degree > 1:
-                raise IndexError(
-                    "Cannot index multi-component array with integers, a "
-                    "2-tuple of (component index, index value) is needed"
-                )
-            cpt_label = axis.components[0].label
-        else:
-            cpt_label, index = index
-
-        cpt_index = axis.component_labels.index(cpt_label)
-
-        if index < 0:
-            # In theory we could still get this to work...
-            raise IndexError("Cannot use negative indices")
-        # TODO need to pass indices here for ragged things
-        if index >= _as_int(axis.components[cpt_index].count, path, indices):
-            raise IndexError("Index is too large")
-
-        indices |= {axis.label: index}
-        path |= {axis.label: cpt_label}
-        axis = axes.component_child(axis, cpt_label)
-
-    if axis is not None:
-        raise IndexError("Insufficient number of indices given")
-
-    return path, indices
-
-
-def _trim_path(axes: AxisTree, path) -> pmap:
-    """Drop unused axes from the axis path."""
-    new_path = {}
-    axis = axes.root
-    while axis:
-        cpt_label = path[axis.label]
-        new_path[axis.label] = cpt_label
-        axis = axes.component_child(axis, cpt_label)
-    return pmap(new_path)

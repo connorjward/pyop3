@@ -466,9 +466,9 @@ def test_loop_over_multiple_ragged_maps(factory, method):
         assert method == "python"
         for p in axis.iter():
             for q in map1(map0(p.index)).iter({p}):
-                prev_val = dat1.get_value(p.target_path, p.target_exprs)
-                inc = dat0.get_value(q.target_path, q.target_exprs)
-                dat1.set_value(p.target_path, p.target_exprs, prev_val + inc)
+                prev_val = dat1.get_value(p.target_exprs, p.target_path)
+                inc = dat0.get_value(q.target_exprs, q.target_path)
+                dat1.set_value(p.target_exprs, prev_val + inc, p.target_path)
 
     expected = np.zeros_like(dat1.data_ro)
     for i in range(m):
@@ -538,9 +538,9 @@ def test_loop_over_multiple_multi_component_ragged_maps(factory, method):
         assert method == "python"
         for p in axis["pt0"].iter():
             for q in map_(map_(p.index)).iter({p}):
-                prev_val = dat1.get_value(p.target_path, p.target_exprs)
-                inc = dat0.get_value(q.target_path, q.target_exprs)
-                dat1.set_value(p.target_path, p.target_exprs, prev_val + inc)
+                prev_val = dat1.get_value(p.target_exprs, p.target_path)
+                inc = dat0.get_value(q.target_exprs, q.target_path)
+                dat1.set_value(p.target_exprs, prev_val + inc, p.target_path)
 
     # To see what is going on we can determine the expected result in two
     # ways: one pythonically and one equivalent to the generated code.
@@ -745,9 +745,9 @@ def test_recursive_multi_component_maps(method):
         assert method == "python"
         for p in axis["pt0"].iter():
             for q in map1(map0(p.index)).iter({p}):
-                prev_val = dat1.get_value(p.target_path, p.target_exprs)
-                inc = dat0.get_value(q.target_path, q.target_exprs)
-                dat1.set_value(p.target_path, p.target_exprs, prev_val + inc)
+                prev_val = dat1.get_value(p.target_exprs, p.target_path)
+                inc = dat0.get_value(q.target_exprs, q.target_path)
+                dat1.set_value(p.target_exprs, prev_val + inc, p.target_path)
 
     expected = np.zeros_like(dat1.data_ro)
     for i in range(m):

@@ -26,14 +26,13 @@ from pyop3.axtree import (
     ContextSensitive,
     as_axis_tree,
 )
+from pyop3.axtree.layout import eval_offset
 from pyop3.axtree.tree import (
     AxisVariable,
     ExpressionEvaluator,
     Indexed,
     MultiArrayCollector,
     PartialAxisTree,
-    _path_and_indices_from_index_tuple,
-    _trim_path,
 )
 from pyop3.buffer import Buffer, DistributedBuffer
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
@@ -336,52 +335,8 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         axes = AxisTree(parent_to_children)
         return type(self)(axes, dtype=self.dtype)
 
-    def offset(self, *args, allow_unused=False, insert_zeros=False):
-        nargs = len(args)
-        if nargs == 2:
-            path, indices = args[0], args[1]
-        else:
-            assert nargs == 1
-            path, indices = _path_and_indices_from_index_tuple(self.axes, args[0])
-
-        if allow_unused:
-            path = _trim_path(self.axes, path)
-
-        if insert_zeros:
-            # extend the path by choosing the zero offset option every time
-            # this is needed if we don't have all the internal bits available
-            while path not in self.layouts:
-                axis, clabel = self.axes._node_from_path(path)
-                subaxis = self.axes.child(axis, clabel)
-                # choose the component that is first in the renumbering
-                if subaxis.numbering:
-                    cidx = subaxis._component_index_from_axis_number(
-                        subaxis.numbering.data_ro[0]
-                    )
-                else:
-                    cidx = 0
-                subcpt = subaxis.components[cidx]
-                path |= {subaxis.label: subcpt.label}
-                indices |= {subaxis.label: 0}
-
-        from pyop3.itree.tree import IndexExpressionReplacer
-
-        replace_map = {}
-        replacer = IndexExpressionReplacer(indices)
-        myexprs = dict(self.index_exprs.get(None, {}))
-        for axis, cpt in self.axes.path_with_nodes(
-            *self.axes._node_from_path(path)
-        ).items():
-            myexprs.update(self.index_exprs.get((axis.id, cpt), {}))
-
-        for axis, index_expr in myexprs.items():
-            replace_map[axis] = replacer(index_expr)
-        offset = pym.evaluate(self.layouts[path], replace_map, ExpressionEvaluator)
-        return strict_int(offset)
-
-    def simple_offset(self, path, indices):
-        offset = pym.evaluate(self.layouts[path], indices, ExpressionEvaluator)
-        return strict_int(offset)
+    def offset(self, indices, target_path=None, index_exprs=None):
+        return eval_offset(self.axes, self.layouts, indices, target_path, index_exprs)
 
     def iter_indices(self, outer_map):
         from pyop3.itree.tree import iter_axis_tree
@@ -448,11 +403,11 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
                 count.append(y)
             return flattened, count
 
-    def get_value(self, *args, **kwargs):
-        return self.data[self.offset(*args, **kwargs)]
+    def get_value(self, indices, target_path=None, index_exprs=None):
+        return self.data[self.offset(indices, target_path, index_exprs)]
 
-    def set_value(self, path, indices, value):
-        self.data[self.simple_offset(path, indices)] = value
+    def set_value(self, indices, value, target_path=None, index_exprs=None):
+        self.data[self.offset(indices, target_path, index_exprs)] = value
 
     def select_axes(self, indices):
         selected = []

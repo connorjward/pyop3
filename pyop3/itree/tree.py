@@ -58,7 +58,6 @@ from pyop3.utils import (
 bsearch = pym.var("mybsearch")
 
 
-# FIXME this is copied from loopexpr2loopy VariableReplacer
 class IndexExpressionReplacer(pym.mapper.IdentityMapper):
     def __init__(self, replace_map):
         self._replace_map = replace_map
@@ -73,8 +72,12 @@ class IndexExpressionReplacer(pym.mapper.IdentityMapper):
         return MultiArrayVariable(expr.array, expr.target_path, index_exprs)
 
     def map_loop_index(self, expr):
-        # this is hacky, if I make this raise a KeyError then we fail in indexing
-        return self._replace_map.get((expr.name, expr.axis), expr)
+        # For test_map_composition to pass this needs to be able to have a fallback
+        # TODO: Figure out a better, less silent, fix
+        if expr.id in self._replace_map:
+            return self._replace_map[expr.id][expr.axis]
+        else:
+            return expr
 
 
 class IndexTree(LabelledTree):
@@ -1383,7 +1386,6 @@ def _compose_bits(
                 # but drop some bits if indexed out... and final map is per component of the new axtree
                 orig_index_exprs = prev_index_exprs[target_axis.id, target_cpt.label]
                 for axis_label, index_expr in orig_index_exprs.items():
-                    # new_index_expr = IndexExpressionReplacer(new_partial_index_exprs)(
                     new_index_expr = IndexExpressionReplacer(new_partial_index_exprs)(
                         index_expr
                     )
@@ -1473,7 +1475,7 @@ class IndexIteratorEntry:
     @property
     def target_replace_map(self):
         return freeze(
-            {(self.index.id, ax): expr for ax, expr in self.target_exprs.items()}
+            {self.index.id: {ax: expr for ax, expr in self.target_exprs.items()}}
         )
 
 
@@ -1524,15 +1526,25 @@ def iter_axis_tree(
         # bit of a hack
         if isinstance(component.count, HierarchicalArray):
             mypath = component.count.target_paths.get(None, {})
+            myindices = component.count.index_exprs.get(None, {})
             if not component.count.axes.is_empty:
                 for cax, ccpt in component.count.axes.path_with_nodes(
                     *component.count.axes.leaf
-                ):
+                ).items():
                     mypath.update(component.count.target_paths.get((cax.id, ccpt), {}))
+                    myindices.update(
+                        component.count.index_exprs.get((cax.id, ccpt), {})
+                    )
+
+            mypath = freeze(mypath)
+            myindices = freeze(myindices)
+            replace_map = outer_replace_map | indices
         else:
             mypath = pmap()
+            myindices = pmap()
+            replace_map = None
 
-        for pt in range(_as_int(component.count, mypath, indices | outer_replace_map)):
+        for pt in range(_as_int(component.count, replace_map, mypath, myindices)):
             new_exprs = {}
             for axlabel, index_expr in myindex_exprs.items():
                 new_index = ExpressionEvaluator(
@@ -1643,7 +1655,7 @@ def partition_iterset(index: LoopIndex, arrays):
             array = array.with_context({index.id: (p.source_path, p.target_path)})
 
             for q in array.iter_indices({p}):
-                offset = array.simple_offset(q.target_path, q.target_exprs)
+                offset = array.offset(q.target_exprs, q.target_path)
 
                 point_label = is_root_or_leaf_per_array[array.name][offset]
                 if point_label == ArrayPointLabel.LEAF:

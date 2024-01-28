@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import collections
 import functools
 import itertools
 import numbers
@@ -11,10 +12,17 @@ import numpy as np
 import pymbolic as pym
 from pyrsistent import freeze, pmap
 
-from pyop3.axtree.tree import Axis, AxisComponent, AxisTree
+from pyop3.axtree.tree import Axis, AxisComponent, AxisTree, ExpressionEvaluator
 from pyop3.dtypes import IntType, PointerType
 from pyop3.tree import LabelledTree, MultiComponentLabelledNode
-from pyop3.utils import PrettyTuple, just_one, merge_dicts, strict_int, strictly_all
+from pyop3.utils import (
+    PrettyTuple,
+    as_tuple,
+    just_one,
+    merge_dicts,
+    strict_int,
+    strictly_all,
+)
 
 
 # hacky class for index_exprs to work, needs cleaning up
@@ -101,6 +109,7 @@ def step_size(
     axis: Axis,
     component: AxisComponent,
     path=pmap(),
+    index_exprs=pmap(),
     indices=PrettyTuple(),
 ):
     """Return the size of step required to stride over a multi-axis component.
@@ -110,7 +119,7 @@ def step_size(
     if not has_constant_step(axes, axis, component) and not indices:
         raise ValueError
     if subaxis := axes.component_child(axis, component):
-        return _axis_size(axes, subaxis, path, indices)
+        return _axis_size(axes, subaxis, path, index_exprs, indices)
     else:
         return 1
 
@@ -494,23 +503,24 @@ def _tabulate_count_array_tree(
     count_arrays,
     offset,
     path=pmap(),
+    index_exprs=pmap(),
     indices=pmap(),
     is_owned=True,
     setting_halo=False,
 ):
-    npoints = sum(_as_int(c.count, path, indices) for c in axis.components)
+    npoints = sum(_as_int(c.count, indices, path) for c in axis.components)
 
     point_to_component_id = np.empty(npoints, dtype=np.int8)
     point_to_component_num = np.empty(npoints, dtype=PointerType)
     *strata_offsets, _ = [0] + list(
-        np.cumsum([_as_int(c.count, path, indices) for c in axis.components])
+        np.cumsum([_as_int(c.count, indices, path) for c in axis.components])
     )
     pos = 0
     point = 0
     # TODO this is overkill, we can just inspect the ranges?
     for cidx, component in enumerate(axis.components):
         # can determine this once above
-        csize = _as_int(component.count, path, indices)
+        csize = _as_int(component.count, indices, path)
         for i in range(csize):
             point_to_component_id[point] = cidx
             # this is now just the identity with an offset?
@@ -535,16 +545,21 @@ def _tabulate_count_array_tree(
         new_strata_pt = counters[selected_component_id]
         counters[selected_component_id] += 1
 
+        # TODO I think that index_exprs can be dropped here
         new_path = path | {axis.label: selected_component.label}
+        new_index_exprs = index_exprs | {axis.label: AxisVariable(axis.label)}
         new_indices = indices | {axis.label: new_strata_pt}
         if new_path in count_arrays:
             if is_owned and not setting_halo or not is_owned and setting_halo:
-                count_arrays[new_path].set_value(new_path, new_indices, offset.value)
+                count_arrays[new_path].set_value(
+                    new_indices, offset.value, new_path, new_index_exprs
+                )
                 offset += step_size(
                     axes,
                     axis,
                     selected_component,
                     new_path,
+                    new_index_exprs,
                     new_indices,
                 )
         else:
@@ -556,6 +571,7 @@ def _tabulate_count_array_tree(
                 count_arrays,
                 offset,
                 new_path,
+                new_index_exprs,
                 new_indices,
                 is_owned=is_owned,
                 setting_halo=setting_halo,
@@ -617,10 +633,12 @@ def _axis_size(
     axes: AxisTree,
     axis: Axis,
     path=pmap(),
+    index_exprs=pmap(),
     indices=pmap(),
-) -> int:
+):
     return sum(
-        _axis_component_size(axes, axis, cpt, path, indices) for cpt in axis.components
+        _axis_component_size(axes, axis, cpt, path, index_exprs, indices)
+        for cpt in axis.components
     )
 
 
@@ -628,16 +646,18 @@ def _axis_component_size(
     axes: AxisTree,
     axis: Axis,
     component: AxisComponent,
-    path=pmap(),
+    target_path=pmap(),
+    index_exprs=pmap(),
     indices=pmap(),
 ):
-    count = _as_int(component.count, path, indices)
+    count = _as_int(component.count, indices, target_path, index_exprs)
     if subaxis := axes.component_child(axis, component):
         return sum(
             _axis_size(
                 axes,
                 subaxis,
-                path | {axis.label: component.label},
+                target_path | {axis.label: component.label},
+                index_exprs | {axis.label: AxisVariable(axis.label)},
                 indices | {axis.label: i},
             )
             for i in range(count)
@@ -647,21 +667,20 @@ def _axis_component_size(
 
 
 @functools.singledispatch
-def _as_int(arg: Any, path, indices):
+def _as_int(arg: Any, indices, target_path=None, index_exprs=None):
     from pyop3.array import HierarchicalArray
 
     if isinstance(arg, HierarchicalArray):
         # TODO this might break if we have something like [:, subset]
         # I will need to map the "source" axis (e.g. slice_label0) back
         # to the "target" axis
-        # return arg.get_value(path, indices, allow_unused=True)
-        return arg.get_value(path, indices, allow_unused=False)
+        return arg.get_value(indices, target_path, index_exprs)
     else:
         raise TypeError
 
 
 @_as_int.register
-def _(arg: numbers.Real, path, indices):
+def _(arg: numbers.Real, *args):
     return strict_int(arg)
 
 
@@ -684,3 +703,42 @@ def _collect_sizes_rec(axes, axis) -> pmap:
                     if sizes[loc] != size:
                         raise RuntimeError
     return pmap(sizes)
+
+
+def eval_offset(axes, layouts, indices, target_path=None, index_exprs=None):
+    indices = freeze(indices)
+    if target_path is not None:
+        target_path = freeze(target_path)
+    if index_exprs is not None:
+        index_exprs = freeze(index_exprs)
+
+    if target_path is None:
+        # if a path is not specified we assume that the axes/array are
+        # unindexed and single component
+        target_path = axes.path(*axes.leaf)
+
+    # if the provided indices are not a dict then we assume that they apply in order
+    # as we go down the selected path of the tree
+    if not isinstance(indices, collections.abc.Mapping):
+        # a single index is treated like a 1-tuple
+        indices = as_tuple(indices)
+
+        indices_ = {}
+        axis = axes.root
+        for idx in indices:
+            indices_[axis.label] = idx
+            cpt_label = target_path[axis.label]
+            axis = axes.child(axis, cpt_label)
+        indices = indices_
+
+    if index_exprs is not None:
+        replace_map_new = {}
+        replacer = ExpressionEvaluator(indices)
+        for axis, index_expr in index_exprs.items():
+            replace_map_new[axis] = replacer(index_expr)
+        indices_ = replace_map_new
+    else:
+        indices_ = indices
+
+    offset = pym.evaluate(layouts[target_path], indices_, ExpressionEvaluator)
+    return strict_int(offset)
