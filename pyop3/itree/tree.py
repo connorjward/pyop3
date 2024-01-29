@@ -302,6 +302,9 @@ class ContextFreeLoopIndex(ContextFreeIndex):
         self.iterset = iterset
         self.path = freeze(path)
 
+    def with_context(self, context, *args):
+        return self
+
     @property
     def leaf_target_paths(self):
         return (self.path,)
@@ -371,7 +374,7 @@ class LocalLoopIndex:
     def iterset(self):
         return self.loop_index.iterset
 
-    def with_context(self, context, axes):
+    def with_context(self, context, axes=None):
         # not sure about this
         iterset = self.loop_index.iterset.with_context(context)
         path, _ = context[self.loop_index.id]  # here different from LoopIndex
@@ -540,7 +543,9 @@ class CalledMap(Identified, LoopIterable):
             for mcpt in self.connectivity[path]
             # if axes is None we are *building* the axes from this map
             if axes is None
-            or axes.is_valid_path({mcpt.target_axis: mcpt.target_component})
+            or axes.is_valid_path(
+                {mcpt.target_axis: mcpt.target_component}, complete=False
+            )
         )
         if len(leaf_target_paths) == 0:
             raise RuntimeError
@@ -568,8 +573,23 @@ class ContextFreeCalledMap(Index):
         self.from_index = index
 
     # TODO cleanup
-    def with_context(self, *args):
-        return self
+    def with_context(self, context, axes=None):
+        # maybe this line isn't needed?
+        # cf_index = self.from_index.with_context(context, axes)
+        cf_index = self.index
+        leaf_target_paths = tuple(
+            freeze({mcpt.target_axis: mcpt.target_component})
+            for path in cf_index.leaf_target_paths
+            for mcpt in self.map.connectivity[path]
+            # if axes is None we are *building* the axes from this map
+            if axes is None
+            or axes.is_valid_path(
+                {mcpt.target_axis: mcpt.target_component}, complete=False
+            )
+        )
+        if len(leaf_target_paths) == 0:
+            raise RuntimeError
+        return ContextFreeCalledMap(self.map, cf_index, leaf_target_paths, id=self.id)
 
     @property
     def name(self) -> str:
@@ -648,6 +668,7 @@ class ContextSensitiveCalledMap(ContextSensitiveLoopIterable):
 
 # TODO make kwargs explicit
 def as_index_forest(forest: Any, *, axes=None, **kwargs):
+    # breakpoint()
     forest = _as_index_forest(forest, axes=axes, **kwargs)
     assert isinstance(forest, dict), "must be ordered"
     # print(forest)
@@ -800,6 +821,7 @@ def _(called_map, *, axes, **kwargs):
     input_forest = _as_index_forest(called_map.from_index, axes=axes, **kwargs)
     for context in input_forest.keys():
         cf_called_map = called_map.with_context(context, axes)
+        # breakpoint()
         forest[context] = IndexTree(cf_called_map)
     return forest
 
@@ -861,7 +883,8 @@ def _validated_index_tree(tree, index=None, *, axes, path=pmap()):
 
     all_leaves_skipped = True
     for clabel, path_ in checked_zip(index.component_labels, index.leaf_target_paths):
-        if not axes.is_valid_path(path | path_):
+        # can I get rid of this check? The index tree should be correct
+        if not axes.is_valid_path(path | path_, complete=False):
             continue
 
         all_leaves_skipped = False
@@ -1163,7 +1186,7 @@ def _make_leaf_axis_from_called_map(
     all_skipped = True
     for map_cpt in called_map.map.connectivity[prior_target_path]:
         if prev_axes is not None and not prev_axes.is_valid_path(
-            {map_cpt.target_axis: map_cpt.target_component}
+            {map_cpt.target_axis: map_cpt.target_component}, complete=False
         ):
             continue
 
@@ -1262,7 +1285,7 @@ def _index_axes(
                 leaf_iaxis, leaf_icpt
             ).items():
                 target_path.update(tpaths.get((iaxis.id, icpt), {}))
-            if not axes.is_valid_path(target_path, and_leaf=True):
+            if not axes.is_valid_path(target_path, leaf=True):
                 raise ValueError("incorrect/insufficient indices")
 
     return AxisTree(

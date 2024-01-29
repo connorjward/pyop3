@@ -3,6 +3,7 @@ from __future__ import annotations
 import abc
 import collections
 import functools
+import operator
 from collections import defaultdict
 from collections.abc import Hashable, Sequence
 from functools import cached_property
@@ -517,34 +518,24 @@ class LabelledTree(AbstractTree):
         else:
             return self.path_with_nodes(*node, and_components=True)
 
-    def is_valid_path(self, path, and_leaf=False):
-        all_paths = [
-            set(self.path(node, cpt).items())
-            for node in self.nodes
-            for cpt in node.components
-        ]
+    def is_valid_path(self, path, complete=True, leaf=False):
+        if leaf:
+            all_paths = [set(self.path(node, cpt).items()) for node, cpt in self.leaves]
+        else:
+            all_paths = [
+                set(self.path(node, cpt).items())
+                for node in self.nodes
+                for cpt in node.components
+            ]
 
         path_set = set(path.items())
 
+        compare = operator.eq if complete else operator.le
+
         for path_ in all_paths:
-            if path_set <= path_:
+            if compare(path_set, path_):
                 return True
         return False
-
-        if not path:
-            return self.is_empty
-
-        path = dict(path)
-        node = self.root
-        while path:
-            if node is None:
-                return False
-            try:
-                clabel = path.pop(node.label)
-            except KeyError:
-                return False
-            node = self.child(node, clabel)
-        return node is None if and_leaf else True
 
     def find_component(self, node_label, cpt_label, also_node=False):
         """Return the first component in the tree matching the given labels.
