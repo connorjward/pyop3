@@ -284,7 +284,7 @@ class LoopIndex(AbstractLoopIndex):
     # 2. axes[p].index() is context-sensitive if p is context-sensitive
     # I think this can be resolved by considering axes[p] and axes as "iterset"
     # and handling that separately.
-    def with_context(self, context):
+    def with_context(self, context, *args):
         iterset = self.iterset.with_context(context)
         _, path = context[self.id]
         return ContextFreeLoopIndex(iterset, path, id=self.id)
@@ -327,11 +327,6 @@ class ContextFreeLoopIndex(ContextFreeIndex):
         return freeze({None: 0})
 
     @property
-    def domain_index_exprs(self):
-        # I think
-        return self.index_exprs
-
-    @property
     def datamap(self):
         return self.iterset.datamap
 
@@ -342,7 +337,6 @@ class ContextFreeLoopIndex(ContextFreeIndex):
             self.iterset,
             self.iterset.target_paths,
             self.iterset.index_exprs,
-            self.iterset.domain_index_exprs,
             stuff,
         )
 
@@ -377,7 +371,7 @@ class LocalLoopIndex:
     def iterset(self):
         return self.loop_index.iterset
 
-    def with_context(self, context):
+    def with_context(self, context, axes):
         # not sure about this
         iterset = self.loop_index.iterset.with_context(context)
         path, _ = context[self.loop_index.id]  # here different from LoopIndex
@@ -500,7 +494,6 @@ class CalledMap(Identified, LoopIterable):
                 layouts=self.layouts,
                 target_paths=target_paths,
                 index_exprs=index_exprs,
-                domain_index_exprs=indexed_axes.domain_index_exprs,
                 name=self.name,
                 max_value=self.max_value,
             )
@@ -524,13 +517,34 @@ class CalledMap(Identified, LoopIterable):
             cf_called_map.axes,
             cf_called_map.target_paths,
             cf_called_map.index_exprs,
-            cf_called_map.domain_index_exprs,
             outer_loops,
         )
 
-    def with_context(self, context):
-        cf_index = self.from_index.with_context(context)
-        return ContextFreeCalledMap(self.map, cf_index, id=self.id)
+    def with_context(self, context, axes=None):
+        # TODO stole this docstring from elsewhere, correct it
+        """Remove map outputs that are not present in the axes.
+
+        This is useful for the case where we have a general map acting on a
+        restricted set of axes. An example would be a cell closure map (maps
+        cells to cells, edges and vertices) acting on a data structure that
+        only holds values on vertices. The cell-to-cell and cell-to-edge elements
+        of the closure map would produce spurious entries in the index tree.
+
+        If the map has no valid outputs then an exception will be raised.
+
+        """
+        cf_index = self.from_index.with_context(context, axes)
+        leaf_target_paths = tuple(
+            freeze({mcpt.target_axis: mcpt.target_component})
+            for path in cf_index.leaf_target_paths
+            for mcpt in self.connectivity[path]
+            # if axes is None we are *building* the axes from this map
+            if axes is None
+            or axes.is_valid_path({mcpt.target_axis: mcpt.target_component})
+        )
+        if len(leaf_target_paths) == 0:
+            raise RuntimeError
+        return ContextFreeCalledMap(self.map, cf_index, leaf_target_paths, id=self.id)
 
     @property
     def name(self):
@@ -541,28 +555,40 @@ class CalledMap(Identified, LoopIterable):
         return self.map.connectivity
 
 
-class ContextFreeCalledMap(Index, ContextFree):
-    def __init__(self, map, index, *, id=None):
+# class ContextFreeCalledMap(Index, ContextFree):
+class ContextFreeCalledMap(Index):
+    def __init__(self, map, index, leaf_target_paths, *, id=None):
         super().__init__(id=id)
         self.map = map
         # better to call it "input_index"?
         self.index = index
+        self._leaf_target_paths = leaf_target_paths
+
+        # alias for compat with ContextFreeCalledMap
+        self.from_index = index
+
+    # TODO cleanup
+    def with_context(self, *args):
+        return self
 
     @property
     def name(self) -> str:
         return self.map.name
 
-    @property
-    def components(self):
-        return self.map.connectivity[self.index.target_paths]
+    # is this ever used?
+    # @property
+    # def components(self):
+    #     return self.map.connectivity[self.index.target_paths]
 
-    @cached_property
+    @property
     def leaf_target_paths(self):
-        return tuple(
-            freeze({mcpt.target_axis: mcpt.target_component})
-            for path in self.index.leaf_target_paths
-            for mcpt in self.map.connectivity[path]
-        )
+        return self._leaf_target_paths
+
+    #     return tuple(
+    #         freeze({mcpt.target_axis: mcpt.target_component})
+    #         for path in self.index.leaf_target_paths
+    #         for mcpt in self.map.connectivity[path]
+    #     )
 
     @cached_property
     def axes(self):
@@ -580,14 +606,12 @@ class ContextFreeCalledMap(Index, ContextFree):
     def layout_exprs(self):
         return self._axes_info[3]
 
-    @cached_property
-    def domain_index_exprs(self):
-        return self._axes_info[4]
-
     # TODO This is bad design, unroll the traversal and store as properties
     @cached_property
     def _axes_info(self):
-        return collect_shape_index_callback(self, include_loop_index_shape=False)
+        return collect_shape_index_callback(
+            self, include_loop_index_shape=False, prev_axes=None
+        )
 
 
 class LoopIndexVariable(pym.primitives.Variable):
@@ -682,6 +706,8 @@ def _(indices: collections.abc.Sequence, *, path=pmap(), loop_context=pmap(), **
             for clabel, target_path in checked_zip(
                 cf_index.component_labels, cf_index.leaf_target_paths
             ):
+                # if not kwargs["axes"].is_valid_path(path|target_path):
+                #     continue
                 subforest = _as_index_forest(
                     subindices,
                     path=path | target_path,
@@ -710,9 +736,9 @@ def _(index: ContextFreeIndex, **kwargs):
     return {pmap(): IndexTree(index)}
 
 
-@_as_index_forest.register
-def _(index: ContextFreeCalledMap, **kwargs):
-    return {pmap(): IndexTree(index)}
+# @_as_index_forest.register
+# def _(index: ContextFreeCalledMap, **kwargs):
+#     return {pmap(): IndexTree(index)}
 
 
 # TODO This function can definitely be refactored
@@ -767,12 +793,13 @@ def _(index, *, loop_context=pmap(), **kwargs):
     return forest
 
 
-@_as_index_forest.register
-def _(called_map: CalledMap, **kwargs):
+@_as_index_forest.register(CalledMap)
+@_as_index_forest.register(ContextFreeCalledMap)
+def _(called_map, *, axes, **kwargs):
     forest = {}
-    input_forest = _as_index_forest(called_map.from_index, **kwargs)
+    input_forest = _as_index_forest(called_map.from_index, axes=axes, **kwargs)
     for context in input_forest.keys():
-        cf_called_map = called_map.with_context(context)
+        cf_called_map = called_map.with_context(context, axes)
         forest[context] = IndexTree(cf_called_map)
     return forest
 
@@ -832,7 +859,13 @@ def _validated_index_tree(tree, index=None, *, axes, path=pmap()):
 
     new_tree = IndexTree(index)
 
+    all_leaves_skipped = True
     for clabel, path_ in checked_zip(index.component_labels, index.leaf_target_paths):
+        if not axes.is_valid_path(path | path_):
+            continue
+
+        all_leaves_skipped = False
+
         if subindex := tree.child(index, clabel):
             subtree = _validated_index_tree(
                 tree,
@@ -850,6 +883,8 @@ def _validated_index_tree(tree, index=None, *, axes, path=pmap()):
                 clabel,
             )
 
+    # TODO make this nicer
+    assert not all_leaves_skipped, "this means leaf_target_paths missed everything"
     return new_tree
 
 
@@ -918,7 +953,6 @@ def _(loop_index: ContextFreeLoopIndex, *, include_loop_index_shape, **kwargs):
         target_paths,
         index_exprs,
         loop_index.layout_exprs,
-        loop_index.domain_index_exprs,
     )
 
 
@@ -930,7 +964,6 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
     target_path_per_subslice = []
     index_exprs_per_subslice = []
     layout_exprs_per_subslice = []
-    # domain_index_exprs_per_subslice = []
 
     axis_label = slice_.label
 
@@ -1008,45 +1041,43 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
                 pmap({slice_.label: bsearch(subset_var, layout_var)})
             )
 
-        # not sure what this would be
-        # domain_index_exprs_per_subslice.append(None)
-
     axis = Axis(components, label=axis_label)
     axes = PartialAxisTree(axis)
     target_path_per_component = {}
     index_exprs_per_component = {}
     layout_exprs_per_component = {}
-    domain_index_exprs = {}
     for cpt, target_path, index_exprs, layout_exprs in checked_zip(
         components,
         target_path_per_subslice,
         index_exprs_per_subslice,
         layout_exprs_per_subslice,
-        # domain_index_exprs_per_subslice,
     ):
         target_path_per_component[axis.id, cpt.label] = target_path
         index_exprs_per_component[axis.id, cpt.label] = index_exprs
         layout_exprs_per_component[axis.id, cpt.label] = layout_exprs
-        # domain_index_exprs[axis.id, cpt.label] = dexpr
     return (
         axes,
         target_path_per_component,
         index_exprs_per_component,
         layout_exprs_per_component,
-        # domain_index_exprs,
-        pmap(),
     )
 
 
 @collect_shape_index_callback.register
-def _(called_map: ContextFreeCalledMap, **kwargs):
+def _(
+    called_map: ContextFreeCalledMap, *, include_loop_index_shape, prev_axes, **kwargs
+):
     (
         prior_axes,
         prior_target_path_per_cpt,
         prior_index_exprs_per_cpt,
         _,
-        prior_domain_index_exprs_per_cpt,
-    ) = collect_shape_index_callback(called_map.index, **kwargs)
+    ) = collect_shape_index_callback(
+        called_map.index,
+        include_loop_index_shape=include_loop_index_shape,
+        prev_axes=prev_axes,
+        **kwargs,
+    )
 
     if not prior_axes:
         prior_target_path = prior_target_path_per_cpt[None]
@@ -1056,9 +1087,12 @@ def _(called_map: ContextFreeCalledMap, **kwargs):
             target_path_per_cpt,
             index_exprs_per_cpt,
             layout_exprs_per_cpt,
-            domain_index_exprs_per_cpt,
         ) = _make_leaf_axis_from_called_map(
-            called_map, prior_target_path, prior_index_exprs
+            called_map,
+            prior_target_path,
+            prior_index_exprs,
+            include_loop_index_shape,
+            prev_axes,
         )
         axes = PartialAxisTree(axis)
 
@@ -1067,7 +1101,6 @@ def _(called_map: ContextFreeCalledMap, **kwargs):
         target_path_per_cpt = {}
         index_exprs_per_cpt = {}
         layout_exprs_per_cpt = {}
-        domain_index_exprs_per_cpt = {}
         for prior_leaf_axis, prior_leaf_cpt in prior_axes.leaves:
             prior_target_path = prior_target_path_per_cpt.get(None, pmap())
             prior_index_exprs = prior_index_exprs_per_cpt.get(None, pmap())
@@ -1087,9 +1120,12 @@ def _(called_map: ContextFreeCalledMap, **kwargs):
                 subtarget_paths,
                 subindex_exprs,
                 sublayout_exprs,
-                subdomain_index_exprs,
             ) = _make_leaf_axis_from_called_map(
-                called_map, prior_target_path, prior_index_exprs
+                called_map,
+                prior_target_path,
+                prior_index_exprs,
+                include_loop_index_shape,
+                prev_axes,
             )
 
             axes = axes.add_subtree(
@@ -1100,20 +1136,22 @@ def _(called_map: ContextFreeCalledMap, **kwargs):
             target_path_per_cpt.update(subtarget_paths)
             index_exprs_per_cpt.update(subindex_exprs)
             layout_exprs_per_cpt.update(sublayout_exprs)
-            domain_index_exprs_per_cpt.update(subdomain_index_exprs)
-
-            domain_index_exprs_per_cpt.update(prior_domain_index_exprs_per_cpt)
 
     return (
         axes,
         freeze(target_path_per_cpt),
         freeze(index_exprs_per_cpt),
         freeze(layout_exprs_per_cpt),
-        freeze(domain_index_exprs_per_cpt),
     )
 
 
-def _make_leaf_axis_from_called_map(called_map, prior_target_path, prior_index_exprs):
+def _make_leaf_axis_from_called_map(
+    called_map,
+    prior_target_path,
+    prior_index_exprs,
+    include_loop_index_shape,
+    prev_axes,
+):
     from pyop3.array.harray import CalledMapVariable
 
     axis_id = Axis.unique_id()
@@ -1121,13 +1159,21 @@ def _make_leaf_axis_from_called_map(called_map, prior_target_path, prior_index_e
     target_path_per_cpt = {}
     index_exprs_per_cpt = {}
     layout_exprs_per_cpt = {}
-    domain_index_exprs_per_cpt = {}
 
+    all_skipped = True
     for map_cpt in called_map.map.connectivity[prior_target_path]:
-        if isinstance(map_cpt.arity, HierarchicalArray):
+        if prev_axes is not None and not prev_axes.is_valid_path(
+            {map_cpt.target_axis: map_cpt.target_component}
+        ):
+            continue
+
+        all_skipped = False
+        if (
+            isinstance(map_cpt.arity, HierarchicalArray)
+            and not include_loop_index_shape
+        ):
             arity = map_cpt.arity[called_map.index]
         else:
-            assert isinstance(map_cpt.arity, numbers.Integral)
             arity = map_cpt.arity
         cpt = AxisComponent(arity, label=map_cpt.label)
         components.append(cpt)
@@ -1180,7 +1226,8 @@ def _make_leaf_axis_from_called_map(called_map, prior_target_path, prior_index_e
             called_map.id: pym.primitives.NaN(IntType)
         }
 
-        domain_index_exprs_per_cpt[axis_id, cpt.label] = prior_index_exprs
+    if all_skipped:
+        raise RuntimeError("map does not target any relevant axes")
 
     axis = Axis(components, label=called_map.id, id=axis_id)
 
@@ -1189,7 +1236,6 @@ def _make_leaf_axis_from_called_map(called_map, prior_target_path, prior_index_e
         target_path_per_cpt,
         index_exprs_per_cpt,
         layout_exprs_per_cpt,
-        domain_index_exprs_per_cpt,
     )
 
 
@@ -1201,7 +1247,6 @@ def _index_axes(
         tpaths,
         index_expr_per_target,
         layout_expr_per_target,
-        domain_index_exprs,
     ) = _index_axes_rec(
         indices,
         current_index=indices.root,
@@ -1225,7 +1270,6 @@ def _index_axes(
         target_paths=tpaths,
         index_exprs=index_expr_per_target,
         layout_exprs=layout_expr_per_target,
-        domain_index_exprs=domain_index_exprs,
     )
 
 
@@ -1242,7 +1286,6 @@ def _index_axes_rec(
         target_path_per_cpt_per_index,
         index_exprs_per_cpt_per_index,
         layout_exprs_per_cpt_per_index,
-        domain_index_exprs_per_cpt_per_index,
     ) = tuple(map(dict, rest))
 
     if axes_per_index:
@@ -1280,13 +1323,9 @@ def _index_axes_rec(
                     index_exprs_per_cpt_per_index.update({key: retval[2][key]})
                     layout_exprs_per_cpt_per_index.update({key: retval[3][key]})
 
-                # assert key not in domain_index_exprs_per_cpt_per_index
-                # domain_index_exprs_per_cpt_per_index[key] = retval[4].get(key, pmap())
-
     target_path_per_component = freeze(target_path_per_cpt_per_index)
     index_exprs_per_component = freeze(index_exprs_per_cpt_per_index)
     layout_exprs_per_component = freeze(layout_exprs_per_cpt_per_index)
-    # domain_index_exprs_per_cpt_per_index = freeze(domain_index_exprs_per_cpt_per_index)
 
     axes = PartialAxisTree(axes_per_index.parent_to_children)
     for k, subax in subaxes.items():
@@ -1301,8 +1340,6 @@ def _index_axes_rec(
         target_path_per_component,
         index_exprs_per_component,
         layout_exprs_per_component,
-        # domain_index_exprs_per_cpt_per_index,
-        pmap(),
     )
 
 
@@ -1484,7 +1521,6 @@ def iter_axis_tree(
     axes: AxisTree,
     target_paths,
     index_exprs,
-    domain_index_exprs,
     outer_loops=frozenset(),
     axis=None,
     path=pmap(),
@@ -1561,7 +1597,6 @@ def iter_axis_tree(
                     axes,
                     target_paths,
                     index_exprs,
-                    domain_index_exprs,
                     outer_loops,
                     subaxis,
                     path_,

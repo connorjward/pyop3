@@ -224,17 +224,16 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
                 path = p.source_path
                 indices = p.source_exprs
                 offset = self.raxes.offset(
-                    p.target_path, p.target_exprs, insert_zeros=True
+                    p.target_exprs,
+                    p.target_path,
                 )
-                rmap.set_value(path, indices, offset)
+                rmap.set_value(indices, offset, path)
 
             for p in cmap_axes.iter():
                 path = p.source_path
                 indices = p.source_exprs
-                offset = self.caxes.offset(
-                    p.target_path, p.target_exprs, insert_zeros=True
-                )
-                cmap.set_value(path, indices, offset)
+                offset = self.caxes.offset(p.target_exprs, p.target_path)
+                cmap.set_value(indices, offset, path)
 
             ###
 

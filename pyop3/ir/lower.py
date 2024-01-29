@@ -492,19 +492,10 @@ def parse_loop_properly_this_time(
         axis_index_exprs = axes.index_exprs.get((axis.id, component.label), {})
         index_exprs_ = index_exprs | axis_index_exprs
 
-        # Maps "know" about indices that aren't otherwise available. Eg map(p)
-        # knows about p and this isn't accessible to axes.index_exprs except via
-        # the index expression
-        # domain_index_exprs = axes.domain_index_exprs.get(
-        #     (axis.id, component.label), pmap()
-        # )
-
         iname = codegen_context.unique_name("i")
         # breakpoint()
         extent_var = register_extent(
             component.count,
-            # index_exprs | domain_index_exprs,
-            # component.count.index_exprs,
             iname_replace_map | loop_indices,
             codegen_context,
         )
@@ -824,12 +815,6 @@ def parse_assignment_properly_this_time(
     for component in axis.components:
         iname = codegen_context.unique_name("i")
 
-        # register a loop
-        # does this work for assignments to temporaries?
-        # domain_index_exprs = assignment.assignee.domain_index_exprs.get(
-        #     (axis.id, component.label), pmap()
-        # )
-
         # TODO move to register_extent
         if isinstance(component.count, HierarchicalArray):
             count_axes = component.count.axes
@@ -845,8 +830,6 @@ def parse_assignment_properly_this_time(
 
         extent_var = register_extent(
             component.count,
-            # index_exprs[assignment.assignee] | count_exprs | domain_index_exprs,
-            # index_exprs[assignment.assignee],
             iname_replace_map | loop_indices,
             codegen_context,
         )

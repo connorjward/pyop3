@@ -115,7 +115,6 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         layouts=None,
         target_paths=None,
         index_exprs=None,
-        domain_index_exprs=pmap(),
         name=None,
         prefix=None,
         _shape=None,
@@ -167,7 +166,6 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
 
         self._target_paths = target_paths or axes._default_target_paths()
         self._index_exprs = index_exprs or axes._default_index_exprs()
-        self.domain_index_exprs = domain_index_exprs
 
         self.layouts = layouts or axes.layouts
 
@@ -202,7 +200,6 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
                 max_value=self.max_value,
                 target_paths=target_paths,
                 index_exprs=index_exprs,
-                domain_index_exprs=indexed_axes.domain_index_exprs,
                 layouts=self.layouts,
                 name=self.name,
             )
@@ -232,7 +229,6 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
                 layouts=self.layouts,
                 target_paths=target_paths,
                 index_exprs=index_exprs,
-                domain_index_exprs=indexed_axes.domain_index_exprs,
                 name=self.name,
                 max_value=self.max_value,
             )
@@ -346,7 +342,6 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
             self.axes,
             self.target_paths,
             self.index_exprs,
-            self.domain_index_exprs,
             outer_map,
         )
 
@@ -506,7 +501,6 @@ class ContextSensitiveMultiArray(Array, ContextSensitive):
                 max_value=self.max_value,
                 target_paths=target_paths,
                 index_exprs=index_exprs,
-                domain_index_exprs=indexed_axes.domain_index_exprs,
                 layouts=self.layouts,
                 name=self.name,
             )

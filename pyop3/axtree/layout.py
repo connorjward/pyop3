@@ -119,7 +119,7 @@ def step_size(
     if not has_constant_step(axes, axis, component) and not indices:
         raise ValueError
     if subaxis := axes.component_child(axis, component):
-        return _axis_size(axes, subaxis, path, index_exprs, indices)
+        return _axis_size(axes, subaxis, indices, path, index_exprs)
     else:
         return 1
 
@@ -618,26 +618,27 @@ def axis_tree_size(axes: AxisTree) -> int:
     if len(external_axes) > 1:
         raise NotImplementedError("TODO")
 
-    size_axis = just_one(external_axes)
+    size_axis = just_one(external_axes).index.iterset
     sizes = HierarchicalArray(size_axis, dtype=IntType, prefix="size")
-    outer_loops = tuple(ax.iter() for ax in external_axes)
+    outer_loops = tuple(ax.index.iterset.iter() for ax in external_axes)
     for idxs in itertools.product(*outer_loops):
-        path = merge_dicts(idx.source_path for idx in idxs)
         indices = merge_dicts(idx.source_exprs for idx in idxs)
-        size = _axis_size(axes, axes.root, path, indices)
-        sizes.set_value(path, indices, size)
+        path = merge_dicts(idx.source_path for idx in idxs)
+        index_exprs = {ax: AxisVariable(ax) for ax in path.keys()}
+        size = _axis_size(axes, axes.root, indices, path, index_exprs)
+        sizes.set_value(indices, size, path)
     return sizes
 
 
 def _axis_size(
     axes: AxisTree,
     axis: Axis,
-    path=pmap(),
-    index_exprs=pmap(),
     indices=pmap(),
+    target_path=pmap(),
+    index_exprs=pmap(),
 ):
     return sum(
-        _axis_component_size(axes, axis, cpt, path, index_exprs, indices)
+        _axis_component_size(axes, axis, cpt, indices, target_path, index_exprs)
         for cpt in axis.components
     )
 
@@ -646,9 +647,9 @@ def _axis_component_size(
     axes: AxisTree,
     axis: Axis,
     component: AxisComponent,
+    indices=pmap(),
     target_path=pmap(),
     index_exprs=pmap(),
-    indices=pmap(),
 ):
     count = _as_int(component.count, indices, target_path, index_exprs)
     if subaxis := axes.component_child(axis, component):
@@ -656,9 +657,9 @@ def _axis_component_size(
             _axis_size(
                 axes,
                 subaxis,
+                indices | {axis.label: i},
                 target_path | {axis.label: component.label},
                 index_exprs | {axis.label: AxisVariable(axis.label)},
-                indices | {axis.label: i},
             )
             for i in range(count)
         )

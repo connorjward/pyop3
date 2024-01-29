@@ -385,6 +385,35 @@ def test_vector_inc_with_map_composition(vec2_inc_kernel, vec12_inc_kernel, nest
     assert np.allclose(dat1.data_ro, expected)
 
 
+def test_partial_map_connectivity(vector2_inc_kernel):
+    axis = op3.Axis({"pt0": 3}, "ax0")
+    dat0 = op3.HierarchicalArray(axis, data=np.arange(3, dtype=op3.ScalarType))
+    dat1 = op3.HierarchicalArray(axis, dtype=dat0.dtype)
+
+    map_axes = op3.AxisTree.from_nest({axis: op3.Axis(2)})
+    map_data = [[0, 1], [2, 0], [2, 2]]
+    map_array = np.asarray(flatten(map_data), dtype=op3.IntType)
+    map_dat = op3.HierarchicalArray(map_axes, data=map_array)
+
+    # Some elements of map_ are not present in axis, so should be ignored
+    map_ = op3.Map(
+        {
+            freeze({"ax0": "pt0"}): [
+                op3.TabulatedMapComponent("ax0", "pt0", map_dat),
+                op3.TabulatedMapComponent("not_ax0", "not_pt0", map_dat),
+            ]
+        },
+    )
+
+    op3.do_loop(p := axis.index(), vector2_inc_kernel(dat0[map_(p)], dat1[p]))
+
+    expected = np.zeros_like(dat1.data_ro)
+    for i in range(3):
+        for j in range(2):
+            expected[i] += dat0.data_ro[map_data[i][j]]
+    assert np.allclose(dat1.data_ro, expected)
+
+
 def test_inc_with_variable_arity_map(scalar_inc_kernel):
     m = 3
     axis = op3.Axis({"pt0": m}, "ax0")
@@ -496,10 +525,10 @@ def test_loop_over_multiple_multi_component_ragged_maps(factory, method):
     map0_dat0 = op3.HierarchicalArray(map0_axes0, name="map00", data=map0_array0)
 
     # pt0 -> pt1
-    nnz01_data = np.asarray([1, 3, 2, 1, 0, 4], dtype=op3.IntType)
-    nnz01 = op3.HierarchicalArray(axis["pt1"], name="nnz01", data=nnz01_data)
-    map0_axes1 = op3.AxisTree.from_nest({axis["pt1"].root: op3.Axis(nnz01)})
-    map0_data1 = [[2], [3, 3, 5], [1, 0], [2], [], [1, 4, 2, 1]]
+    nnz01_data = np.asarray([1, 2, 1, 0, 4], dtype=op3.IntType)
+    nnz01 = op3.HierarchicalArray(axis["pt0"], name="nnz01", data=nnz01_data)
+    map0_axes1 = op3.AxisTree.from_nest({axis["pt0"].root: op3.Axis(nnz01)})
+    map0_data1 = [[2], [1, 0], [2], [], [1, 4, 2, 1]]
     map0_array1 = np.asarray(op3.utils.flatten(map0_data1), dtype=op3.IntType)
     map0_dat1 = op3.HierarchicalArray(map0_axes1, name="map01", data=map0_array1)
 

@@ -641,7 +641,6 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         "target_paths",
         "index_exprs",
         "layout_exprs",
-        "domain_index_exprs",
     }
 
     def __init__(
@@ -650,7 +649,6 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         target_paths=None,
         index_exprs=None,
         layout_exprs=None,
-        domain_index_exprs=pmap(),
     ):
         if some_but_not_all(
             arg is None for arg in [target_paths, index_exprs, layout_exprs]
@@ -661,7 +659,6 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         self._target_paths = target_paths or self._default_target_paths()
         self._index_exprs = index_exprs or self._default_index_exprs()
         self.layout_exprs = layout_exprs or self._default_layout_exprs()
-        self.domain_index_exprs = domain_index_exprs
 
     def __getitem__(self, indices):
         from pyop3.itree.tree import _compose_bits, _index_axes, as_index_forest
@@ -689,7 +686,6 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
                 target_paths,
                 index_exprs,
                 layout_exprs,
-                indexed_axes.domain_index_exprs,
             )
             axis_trees[context] = axis_tree
 
@@ -735,7 +731,6 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
             self,
             self.target_paths,
             self.index_exprs,
-            self.domain_index_exprs,
             outer_loops,
         )
 

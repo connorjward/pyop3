@@ -518,6 +518,19 @@ class LabelledTree(AbstractTree):
             return self.path_with_nodes(*node, and_components=True)
 
     def is_valid_path(self, path, and_leaf=False):
+        all_paths = [
+            set(self.path(node, cpt).items())
+            for node in self.nodes
+            for cpt in node.components
+        ]
+
+        path_set = set(path.items())
+
+        for path_ in all_paths:
+            if path_set <= path_:
+                return True
+        return False
+
         if not path:
             return self.is_empty
 

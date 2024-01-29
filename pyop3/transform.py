@@ -174,7 +174,6 @@ class ImplicitPackUnpackExpander(Transformer):
                     axes,
                     data=NullBuffer(arg.dtype),  # does this need a size?
                     name=self._name_generator("t"),
-                    domain_index_exprs=arg.domain_index_exprs,
                 )
 
                 if intent == READ:
@@ -221,7 +220,6 @@ class ImplicitPackUnpackExpander(Transformer):
                     axes,
                     data=NullBuffer(arg.dtype),  # does this need a size?
                     name=self._name_generator("t"),
-                    domain_index_exprs=arg.domain_index_exprs,
                 )
 
                 if intent == READ:
