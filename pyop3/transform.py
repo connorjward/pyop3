@@ -172,6 +172,7 @@ class ImplicitPackUnpackExpander(Transformer):
                 axes = AxisTree(arg.axes.parent_to_children)
                 new_arg = HierarchicalArray(
                     axes,
+                    layouts=arg.layouts,
                     data=NullBuffer(arg.dtype),  # does this need a size?
                     name=self._name_generator("t"),
                 )

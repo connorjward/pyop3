@@ -153,95 +153,36 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
             indexed_raxes = _index_axes(rtree, ctx, self.raxes)
             indexed_caxes = _index_axes(ctree, ctx, self.caxes)
 
-            full_raxes = _index_axes(
+            if indexed_raxes.size == 0 or indexed_caxes.size == 0:
+                continue
+
+            rmap_axes = _index_axes(
                 rtree, ctx, self.raxes, include_loop_index_shape=True
             )
-            full_caxes = _index_axes(
+            cmap_axes = _index_axes(
                 ctree, ctx, self.caxes, include_loop_index_shape=True
             )
 
-            if full_raxes.size == 0 or full_caxes.size == 0:
-                continue
-
-            ###
-
-            # Build the flattened row and column maps
-            # rindex = just_one(rtree.nodes)
-            # rloop_index = rtree
-            # while isinstance(rloop_index, CalledMap):
-            #     rloop_index = rloop_index.from_index
-            # assert isinstance(rloop_index, LoopIndex)
-            #
-            # # build the map
-            # riterset = rloop_index.iterset
-            # my_raxes = self.raxes[rindex]
-            # rmap_axes = PartialAxisTree(riterset.parent_to_children)
-            # # if len(rmap_axes.leaves) > 1:
-            # #     raise NotImplementedError
-            # for leaf in rmap_axes.leaves:
-            #     # TODO the leaves correspond to the paths/contexts, cleanup
-            #     # FIXME just do this for now since we only have one leaf
-            #     axes_to_add = just_one(my_raxes.context_map.values())
-            #     rmap_axes = rmap_axes.add_subtree(axes_to_add, *leaf)
-            # rmap_axes = rmap_axes.set_up()
-            # rmap_axes = full_raxes.set_up()
-            rmap_axes = full_raxes
             rlayouts = AxisTree(rmap_axes.parent_to_children).layouts
-            # rdiexpr = rmap_axes.domain_index_exprs
             rmap = HierarchicalArray(
-                # rmap_axes, dtype=IntType, layouts=rlayouts, domain_index_exprs=rdiexpr
                 rmap_axes,
                 dtype=IntType,
                 layouts=rlayouts,
             )
-            # cmap_axes = full_caxes.set_up()
-            cmap_axes = full_caxes
             clayouts = AxisTree(cmap_axes.parent_to_children).layouts
-            # cdiexpr = cmap_axes.domain_index_exprs
             cmap = HierarchicalArray(
-                # cmap_axes, dtype=IntType, layouts=clayouts, domain_index_exprs=cdiexpr
                 cmap_axes,
                 dtype=IntType,
                 layouts=clayouts,
             )
 
-            # do_loop(
-            #     p := rloop_index,
-            #     loop(
-            #         q := rindex,
-            #         rmap[p, q.i].assign(TODO)
-            #     ),
-            # )
-
-            # for p in riterset.iter(loop_index=rloop_index):
-            #     for q in rindex.iter({p}):
-            #         for q_ in (
-            #             self.raxes[q.index]
-            #             .with_context(p.loop_context | q.loop_context)
-            #             .iter({q})
-            #         ):
-            #             path = p.source_path | q.source_path | q_.source_path
-            #             indices = p.source_exprs | q.source_exprs | q_.source_exprs
-            #             offset = self.raxes.offset(
-            #                 q_.target_path, q_.target_exprs, insert_zeros=True
-            #             )
-            #             rmap.set_value(path, indices, offset)
             for p in rmap_axes.iter():
-                path = p.source_path
-                myindices = p.source_exprs
-                offset = self.raxes.offset(
-                    p.target_exprs,
-                    p.target_path,
-                )
-                rmap.set_value(myindices, offset, path)
+                offset = self.raxes.offset(p.target_exprs, p.target_path)
+                rmap.set_value(p.source_exprs, offset, p.source_path)
 
             for p in cmap_axes.iter():
-                path = p.source_path
-                myindices = p.source_exprs
                 offset = self.caxes.offset(p.target_exprs, p.target_path)
-                cmap.set_value(myindices, offset, path)
-
-            ###
+                cmap.set_value(p.source_exprs, offset, p.source_path)
 
             shape = (indexed_raxes.size, indexed_caxes.size)
             packed = PackedPetscMat(self, rmap, cmap, shape)
@@ -389,9 +330,17 @@ def _alloc_template_mat(points, adjacency, raxes, caxes, bsize=None):
     # Determine the nonzero pattern by filling a preallocator matrix
     prealloc_mat = PetscMatPreallocator(points, adjacency, raxes, caxes)
 
+    # this one is tough because the temporary can have wacky shape
+    # do_loop(
+    #     p := points.index(),
+    #     prealloc_mat[p, adjacency(p)].assign(666),
+    # )
     do_loop(
         p := points.index(),
-        prealloc_mat[p, adjacency(p)].assign(666),
+        loop(
+            q := adjacency(p).index(),
+            prealloc_mat[p, q].assign(666),
+        ),
     )
 
     # for p in points.iter():

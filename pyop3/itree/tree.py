@@ -289,13 +289,16 @@ class LoopIndex(AbstractLoopIndex):
         source_path, path = context[self.id]
 
         # think I want this sorted...
-        slices = [
-            Slice(ax, [AffineSliceComponent(cpt)]) for ax, cpt in source_path.items()
-        ]
+        slices = []
+        axis = iterset.root
+        while axis is not None:
+            cpt = source_path[axis.label]
+            slices.append(Slice(axis.label, AffineSliceComponent(cpt)))
+            axis = iterset.child(axis, cpt)
 
         # the iterset is a single-component full slice of the overall iterset
         iterset_ = iterset[slices]
-        return ContextFreeLoopIndex(iterset_, path, id=self.id)
+        return ContextFreeLoopIndex(iterset_, source_path, path, id=self.id)
 
     # unsure if this is required
     @property
@@ -305,9 +308,10 @@ class LoopIndex(AbstractLoopIndex):
 
 # FIXME class hierarchy is very confusing
 class ContextFreeLoopIndex(ContextFreeIndex):
-    def __init__(self, iterset: AxisTree, path, *, id=None):
+    def __init__(self, iterset: AxisTree, source_path, path, *, id=None):
         super().__init__(id=id)
         self.iterset = iterset
+        self.source_path = freeze(source_path)
         self.path = freeze(path)
 
     def with_context(self, context, *args):
@@ -386,7 +390,7 @@ class LocalLoopIndex:
         # not sure about this
         iterset = self.loop_index.iterset.with_context(context)
         path, _ = context[self.loop_index.id]  # here different from LoopIndex
-        return ContextFreeLocalLoopIndex(iterset, path, id=self.loop_index.id)
+        return ContextFreeLocalLoopIndex(iterset, path, path, id=self.loop_index.id)
 
     @property
     def datamap(self):
@@ -956,7 +960,7 @@ def _(loop_index: ContextFreeLoopIndex, *, include_loop_index_shape, **kwargs):
         iterset = loop_index.iterset
         axis = iterset.root
         while axis is not None:
-            cpt = loop_index.path[axis.label]
+            cpt = loop_index.source_path[axis.label]
             slices.append(Slice(axis.label, AffineSliceComponent(cpt)))
             axis = iterset.child(axis, cpt)
 

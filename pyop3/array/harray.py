@@ -167,7 +167,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         self._target_paths = target_paths or axes._default_target_paths()
         self._index_exprs = index_exprs or axes._default_index_exprs()
 
-        self.layouts = layouts or axes.layouts
+        self.layouts = layouts if layouts is not None else axes.layouts
 
         # bit of a hack to get shapes matching when we can inner kernels
         self._shape = _shape

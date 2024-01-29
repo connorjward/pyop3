@@ -794,13 +794,6 @@ def parse_assignment_properly_this_time(
         target_paths = freeze(target_paths)
         index_exprs = freeze(index_exprs)
 
-    # these cannot be "local" loop indices
-    # extra_extent_index_exprs = {}
-    # for mappings in loop_indices.values():
-    #     global_map, _ = mappings
-    #     for (_, k), v in global_map.items():
-    #         extra_extent_index_exprs[k] = v
-
     if axes.is_empty:
         add_leaf_assignment(
             assignment,
@@ -818,13 +811,14 @@ def parse_assignment_properly_this_time(
         # TODO move to register_extent
         if isinstance(component.count, HierarchicalArray):
             count_axes = component.count.axes
-            count_exprs = {}
-            for count_axis, count_cpt in count_axes.path_with_nodes(
-                *count_axes.leaf
-            ).items():
-                count_exprs.update(
-                    component.count.index_exprs.get((count_axis.id, count_cpt), {})
-                )
+            count_exprs = dict(component.count.index_exprs.get(None, {}))
+            if not count_axes.is_empty:
+                for count_axis, count_cpt in count_axes.path_with_nodes(
+                    *count_axes.leaf
+                ).items():
+                    count_exprs.update(
+                        component.count.index_exprs.get((count_axis.id, count_cpt), {})
+                    )
         else:
             count_exprs = {}
 
