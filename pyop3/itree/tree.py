@@ -286,8 +286,16 @@ class LoopIndex(AbstractLoopIndex):
     # and handling that separately.
     def with_context(self, context, *args):
         iterset = self.iterset.with_context(context)
-        _, path = context[self.id]
-        return ContextFreeLoopIndex(iterset, path, id=self.id)
+        source_path, path = context[self.id]
+
+        # think I want this sorted...
+        slices = [
+            Slice(ax, [AffineSliceComponent(cpt)]) for ax, cpt in source_path.items()
+        ]
+
+        # the iterset is a single-component full slice of the overall iterset
+        iterset_ = iterset[slices]
+        return ContextFreeLoopIndex(iterset_, path, id=self.id)
 
     # unsure if this is required
     @property
@@ -1444,7 +1452,9 @@ def _compose_bits(
                 # so the final replace map is target -> f(src)
                 # loop over the original replace map and substitute each value
                 # but drop some bits if indexed out... and final map is per component of the new axtree
-                orig_index_exprs = prev_index_exprs[target_axis.id, target_cpt.label]
+                orig_index_exprs = prev_index_exprs.get(
+                    (target_axis.id, target_cpt.label), pmap()
+                )
                 for axis_label, index_expr in orig_index_exprs.items():
                     new_index_expr = IndexExpressionReplacer(new_partial_index_exprs)(
                         index_expr
@@ -1467,7 +1477,7 @@ def _compose_bits(
             if prev_layout_exprs is not None:
                 full_replace_map = merge_dicts(
                     [
-                        prev_layout_exprs[tgt_ax.id, tgt_cpt.label]
+                        prev_layout_exprs.get((tgt_ax.id, tgt_cpt.label), pmap())
                         for tgt_ax, tgt_cpt in detailed_path.items()
                     ]
                 )
@@ -1475,9 +1485,10 @@ def _compose_bits(
                     # always 1:1 for layouts
                     mykey, myvalue = just_one(layout_expr.items())
                     mytargetpath = just_one(itarget_paths[ikey].keys())
-                    layout_expr_replace_map = {
-                        mytargetpath: full_replace_map[mytargetpath]
-                    }
+                    # layout_expr_replace_map = {
+                    #     mytargetpath: full_replace_map[mytargetpath]
+                    # }
+                    layout_expr_replace_map = full_replace_map
                     new_layout_expr = IndexExpressionReplacer(layout_expr_replace_map)(
                         myvalue
                     )
