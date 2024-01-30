@@ -497,7 +497,7 @@ def _tabulate_count_array_tree(
     is_owned=True,
     setting_halo=False,
 ):
-    npoints = sum(_as_int(c.count, indices, path) for c in axis.components)
+    npoints = sum(_as_int(c.count, indices) for c in axis.components)
 
     offsets = component_offsets(axis, indices)
 
@@ -507,35 +507,34 @@ def _tabulate_count_array_tree(
         if axis.sf is not None:
             is_owned = new_pt < axis.sf.nowned
 
-        selected_component, _ = component_number_from_offsets(axis, old_pt, offsets)
+        component, _ = component_number_from_offsets(axis, old_pt, offsets)
 
-        new_strata_pt = next(counters[selected_component])
+        new_strata_pt = next(counters[component])
 
-        new_path = path | {axis.label: selected_component.label}
-        new_indices = indices | {axis.label: new_strata_pt}
-        if new_path in count_arrays:
+        path_ = path | {axis.label: component.label}
+        indices_ = indices | {axis.label: new_strata_pt}
+        if path_ in count_arrays:
             if is_owned and not setting_halo or not is_owned and setting_halo:
-                count_arrays[new_path].set_value(
-                    new_indices,
+                count_arrays[path_].set_value(
+                    indices_,
                     offset.value,
-                    new_path,
                 )
                 offset += step_size(
                     axes,
                     axis,
-                    selected_component,
-                    new_indices,
+                    component,
+                    indices_,
                 )
         else:
-            subaxis = axes.component_child(axis, selected_component)
+            subaxis = axes.component_child(axis, component)
             assert subaxis
             _tabulate_count_array_tree(
                 axes,
                 subaxis,
                 count_arrays,
                 offset,
-                new_path,
-                new_indices,
+                path_,
+                indices_,
                 is_owned=is_owned,
                 setting_halo=setting_halo,
             )
