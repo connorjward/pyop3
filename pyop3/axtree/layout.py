@@ -117,7 +117,6 @@ def step_size(
     axis: Axis,
     component: AxisComponent,
     path=pmap(),
-    index_exprs=pmap(),
     indices=PrettyTuple(),
 ):
     """Return the size of step required to stride over a multi-axis component.
@@ -127,7 +126,7 @@ def step_size(
     if not has_constant_step(axes, axis, component) and not indices:
         raise ValueError
     if subaxis := axes.component_child(axis, component):
-        return _axis_size(axes, subaxis, indices, path, index_exprs)
+        return _axis_size(axes, subaxis, indices, path)
     else:
         return 1
 
@@ -559,7 +558,6 @@ def _tabulate_count_array_tree(
                     axis,
                     selected_component,
                     new_path,
-                    None,
                     new_indices,
                 )
         else:
@@ -636,10 +634,9 @@ def _axis_size(
     axis: Axis,
     indices=pmap(),
     target_path=pmap(),
-    index_exprs=pmap(),
 ):
     return sum(
-        _axis_component_size(axes, axis, cpt, indices, target_path, index_exprs)
+        _axis_component_size(axes, axis, cpt, indices, target_path)
         for cpt in axis.components
     )
 
@@ -650,9 +647,8 @@ def _axis_component_size(
     component: AxisComponent,
     indices=pmap(),
     target_path=pmap(),
-    index_exprs=pmap(),
 ):
-    count = _as_int(component.count, indices, target_path, index_exprs)
+    count = _as_int(component.count, indices, target_path)
     if subaxis := axes.component_child(axis, component):
         return sum(
             _axis_size(
@@ -660,8 +656,6 @@ def _axis_component_size(
                 subaxis,
                 indices | {axis.label: i},
                 target_path | {axis.label: component.label},
-                # index_exprs | {axis.label: AxisVariable(axis.label)},
-                None,
             )
             for i in range(count)
         )
