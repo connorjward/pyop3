@@ -755,7 +755,7 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         item, *iterable = iterable
         tree = PartialAxisTree(as_axis_tree(item).parent_to_children)
         for item in iterable:
-            tree = tree.add_subtree(item, *tree.leaf)
+            tree = tree.add_subtree(as_axis_tree(item), *tree.leaf)
         return tree.set_up()
 
     @classmethod

@@ -642,7 +642,7 @@ class ContextFreeCalledMap(Index):
     @cached_property
     def _axes_info(self):
         return collect_shape_index_callback(
-            self, include_loop_index_shape=False, prev_axes=None
+            self, (), include_loop_index_shape=False, prev_axes=None
         )
 
 
@@ -954,8 +954,9 @@ def collect_shape_index_callback(index, *args, **kwargs):
 
 
 @collect_shape_index_callback.register
-def _(loop_index: ContextFreeLoopIndex, *, include_loop_index_shape, **kwargs):
+def _(loop_index: ContextFreeLoopIndex, indices, *, include_loop_index_shape, **kwargs):
     if include_loop_index_shape:
+        assert False, "old code"
         slices = []
         iterset = loop_index.iterset
         breakpoint()
@@ -993,7 +994,7 @@ def _(loop_index: ContextFreeLoopIndex, *, include_loop_index_shape, **kwargs):
 
 
 @collect_shape_index_callback.register
-def _(slice_: Slice, *, prev_axes, **kwargs):
+def _(slice_: Slice, indices, *, prev_axes, **kwargs):
     from pyop3.array.harray import MultiArrayVariable
 
     components = []
@@ -1019,7 +1020,10 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
                     or subslice.step != 1
                 ):
                     raise NotImplementedError("TODO")
-                size = target_cpt.count
+                if len(indices) == 0:
+                    size = target_cpt.count
+                else:
+                    size = target_cpt.count[indices]
             else:
                 if subslice.stop is None:
                     stop = target_cpt.count
@@ -1101,7 +1105,12 @@ def _(slice_: Slice, *, prev_axes, **kwargs):
 
 @collect_shape_index_callback.register
 def _(
-    called_map: ContextFreeCalledMap, *, include_loop_index_shape, prev_axes, **kwargs
+    called_map: ContextFreeCalledMap,
+    indices,
+    *,
+    include_loop_index_shape,
+    prev_axes,
+    **kwargs,
 ):
     (
         prior_axes,
@@ -1110,6 +1119,7 @@ def _(
         _,
     ) = collect_shape_index_callback(
         called_map.index,
+        indices,
         include_loop_index_shape=include_loop_index_shape,
         prev_axes=prev_axes,
         **kwargs,
@@ -1285,6 +1295,7 @@ def _index_axes(
         layout_expr_per_target,
     ) = _index_axes_rec(
         indices,
+        (),
         current_index=indices.root,
         loop_indices=loop_context,
         prev_axes=axes,
@@ -1311,11 +1322,12 @@ def _index_axes(
 
 def _index_axes_rec(
     indices,
+    indices_acc,
     *,
     current_index,
     **kwargs,
 ):
-    index_data = collect_shape_index_callback(current_index, **kwargs)
+    index_data = collect_shape_index_callback(current_index, indices_acc, **kwargs)
     axes_per_index, *rest = index_data
 
     (
@@ -1336,8 +1348,11 @@ def _index_axes_rec(
         ):
             if subindex is None:
                 continue
+            indices_acc_ = indices_acc + (current_index,)
+
             retval = _index_axes_rec(
                 indices,
+                indices_acc_,
                 current_index=subindex,
                 **kwargs,
             )
