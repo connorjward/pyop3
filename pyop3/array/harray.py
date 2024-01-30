@@ -155,10 +155,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
             )
 
         self.buffer = data
-
-        # instead implement "materialize"
-        self.axes = axes
-
+        self._axes = axes
         self.max_value = max_value
 
         if some_but_not_all(x is None for x in [target_paths, index_exprs]):
@@ -167,7 +164,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         self._target_paths = target_paths or axes._default_target_paths()
         self._index_exprs = index_exprs or axes._default_index_exprs()
 
-        self.layouts = layouts if layouts is not None else axes.layouts
+        self._layouts = layouts if layouts is not None else axes.layouts
 
         # bit of a hack to get shapes matching when we can inner kernels
         self._shape = _shape
@@ -272,12 +269,20 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         return self.array.data_wo
 
     @property
+    def axes(self):
+        return self._axes
+
+    @property
     def target_paths(self):
         return self._target_paths
 
     @property
     def index_exprs(self):
         return self._index_exprs
+
+    @property
+    def layouts(self):
+        return self._layouts
 
     @property
     def sf(self):

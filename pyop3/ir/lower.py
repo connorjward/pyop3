@@ -776,29 +776,21 @@ def parse_assignment_properly_this_time(
     iname_replace_map=pmap(),
     # TODO document these under "Other Parameters"
     axis=None,
-    target_paths=None,
-    index_exprs=None,
+    path=None,
 ):
     axes = assignment.assignee.axes
 
-    if axis is None:
-        assert target_paths is None and index_exprs is None
-        axis = axes.root
-
-        target_paths = {}
-        index_exprs = {}
+    if strictly_all(x is None for x in [axis, path]):
         for array in assignment.arrays:
             codegen_context.add_argument(array)
-            target_paths[array] = array.target_paths.get(None, pmap())
-            index_exprs[array] = array.index_exprs.get(None, pmap())
-        target_paths = freeze(target_paths)
-        index_exprs = freeze(index_exprs)
+
+        axis = axes.root
+        path = pmap()
 
     if axes.is_empty:
         add_leaf_assignment(
             assignment,
-            target_paths,
-            index_exprs,
+            path,
             iname_replace_map | loop_indices,
             codegen_context,
             loop_indices,
@@ -808,20 +800,6 @@ def parse_assignment_properly_this_time(
     for component in axis.components:
         iname = codegen_context.unique_name("i")
 
-        # TODO move to register_extent
-        if isinstance(component.count, HierarchicalArray):
-            count_axes = component.count.axes
-            count_exprs = dict(component.count.index_exprs.get(None, {}))
-            if not count_axes.is_empty:
-                for count_axis, count_cpt in count_axes.path_with_nodes(
-                    *count_axes.leaf
-                ).items():
-                    count_exprs.update(
-                        component.count.index_exprs.get((count_axis.id, count_cpt), {})
-                    )
-        else:
-            count_exprs = {}
-
         extent_var = register_extent(
             component.count,
             iname_replace_map | loop_indices,
@@ -829,17 +807,8 @@ def parse_assignment_properly_this_time(
         )
         codegen_context.add_domain(iname, extent_var)
 
+        path_ = path | {axis.label: component.label}
         new_iname_replace_map = iname_replace_map | {axis.label: pym.var(iname)}
-
-        target_paths_ = dict(target_paths)
-        index_exprs_ = dict(index_exprs)
-        for array in assignment.arrays:
-            target_paths_[array] |= array.target_paths.get(
-                (axis.id, component.label), {}
-            )
-            index_exprs_[array] |= array.index_exprs.get((axis.id, component.label), {})
-        target_paths_ = freeze(target_paths_)
-        index_exprs_ = freeze(index_exprs_)
 
         with codegen_context.within_inames({iname}):
             if subaxis := axes.child(axis, component):
@@ -849,15 +818,13 @@ def parse_assignment_properly_this_time(
                     codegen_context,
                     iname_replace_map=new_iname_replace_map,
                     axis=subaxis,
-                    target_paths=target_paths_,
-                    index_exprs=index_exprs_,
+                    path=path_,
                 )
 
             else:
                 add_leaf_assignment(
                     assignment,
-                    target_paths_,
-                    index_exprs_,
+                    path_,
                     new_iname_replace_map | loop_indices,
                     codegen_context,
                     loop_indices,
@@ -866,8 +833,7 @@ def parse_assignment_properly_this_time(
 
 def add_leaf_assignment(
     assignment,
-    target_paths,
-    index_exprs,
+    path,
     iname_replace_map,
     codegen_context,
     loop_indices,
@@ -878,8 +844,7 @@ def add_leaf_assignment(
     if isinstance(rarr, HierarchicalArray):
         rexpr = make_array_expr(
             rarr,
-            target_paths[rarr],
-            index_exprs[rarr],
+            path,
             iname_replace_map,
             codegen_context,
             rarr._shape,
@@ -890,8 +855,7 @@ def add_leaf_assignment(
 
     lexpr = make_array_expr(
         larr,
-        target_paths[larr],
-        index_exprs[larr],
+        path,
         iname_replace_map,
         codegen_context,
         larr._shape,
@@ -905,15 +869,10 @@ def add_leaf_assignment(
     codegen_context.add_assignment(lexpr, rexpr)
 
 
-def make_array_expr(array, target_path, index_exprs, inames, ctx, shape):
-    replace_map = {}
-    replacer = JnameSubstitutor(inames, ctx)
-    for axis, index_expr in index_exprs.items():
-        replace_map[axis] = replacer(index_expr)
-
+def make_array_expr(array, path, inames, ctx, shape):
     array_offset = make_offset_expr(
-        array.layouts[target_path],
-        replace_map,
+        array.subst_layouts[path],
+        inames,
         ctx,
     )
     # hack to handle the fact that temporaries can have shape but we want to
@@ -930,25 +889,6 @@ def make_array_expr(array, target_path, index_exprs, inames, ctx, shape):
         indices = (array_offset,)
 
     return pym.subscript(pym.var(array.name), indices)
-
-
-def make_temp_expr(temporary, shape, path, jnames, ctx):
-    layout = temporary.axes.layouts[path]
-    temp_offset = make_offset_expr(
-        layout,
-        jnames,
-        ctx,
-    )
-
-    # hack to handle the fact that temporaries can have shape but we want to
-    # linearly index it here
-    extra_indices = (0,) * (len(shape) - 1)
-    # also has to be a scalar, not an expression
-    temp_offset_name = ctx.unique_name("off")
-    temp_offset_var = pym.var(temp_offset_name)
-    ctx.add_temporary(temp_offset_name)
-    ctx.add_assignment(temp_offset_var, temp_offset)
-    return pym.subscript(pym.var(temporary.name), extra_indices + (temp_offset_var,))
 
 
 class JnameSubstitutor(pym.mapper.IdentityMapper):

@@ -58,6 +58,11 @@ from pyop3.utils import (
 class Indexed(abc.ABC):
     @property
     @abc.abstractmethod
+    def axes(self):
+        pass
+
+    @property
+    @abc.abstractmethod
     def target_paths(self):
         pass
 
@@ -65,6 +70,50 @@ class Indexed(abc.ABC):
     @abc.abstractmethod
     def index_exprs(self):
         pass
+
+    @property
+    @abc.abstractmethod
+    def layouts(self):
+        pass
+
+    @cached_property
+    def subst_layouts(self):
+        return self._subst_layouts()
+
+    def _subst_layouts(self, axis=None, path=None, target_path=None, index_exprs=None):
+        from pyop3.itree.tree import IndexExpressionReplacer
+
+        layouts = {}
+        if strictly_all(x is None for x in [axis, path, target_path, index_exprs]):
+            path = pmap()  # or None?
+            target_path = self.target_paths.get(None, pmap())
+            index_exprs = self.index_exprs.get(None, pmap())
+
+            replacer = IndexExpressionReplacer(index_exprs)
+            layouts[path] = replacer(self.layouts[target_path])
+
+            if not self.axes.is_empty:
+                layouts.update(
+                    self._subst_layouts(self.axes.root, path, target_path, index_exprs)
+                )
+        else:
+            for component in axis.components:
+                path_ = path | {axis.label: component.label}
+                target_path_ = target_path | self.target_paths.get(
+                    (axis.id, component.label), {}
+                )
+                index_exprs_ = index_exprs | self.index_exprs.get(
+                    (axis.id, component.label), {}
+                )
+
+                replacer = IndexExpressionReplacer(index_exprs_)
+                layouts[path_] = replacer(self.layouts[target_path_])
+
+                if subaxis := self.axes.child(axis, component):
+                    layouts.update(
+                        self._subst_layouts(subaxis, path_, target_path_, index_exprs_)
+                    )
+        return freeze(layouts)
 
 
 class ContextAware(abc.ABC):
@@ -701,6 +750,15 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         return cls.from_node_map(node_map)
 
     @classmethod
+    def from_iterable(cls, iterable) -> AxisTree:
+        # NOTE: This currently only works for linear trees
+        item, *iterable = iterable
+        tree = PartialAxisTree(as_axis_tree(item).parent_to_children)
+        for item in iterable:
+            tree = tree.add_subtree(item, *tree.leaf)
+        return tree.set_up()
+
+    @classmethod
     def from_node_map(cls, node_map):
         tree = PartialAxisTree(node_map)
         return cls.from_partial_tree(tree)
@@ -735,6 +793,10 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         )
 
     @property
+    def axes(self):
+        return self
+
+    @property
     def target_paths(self):
         return self._target_paths
 
@@ -765,18 +827,18 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         # depending on the outer index. We have the same issue if the temporary
         # is multi-component.
         # This is not implemented so we abort if it is not the simplest case.
-        external_axes = collect_externally_indexed_axes(self)
-        if len(external_axes) > 0:
-            if self.depth > 1 or len(self.root.components) > 1:
-                raise NotImplementedError("This is hard, see comment above")
-            path = self.path(*self.leaf)
-            return freeze({path: AxisVariable(self.root.label)})
+        # external_axes = collect_externally_indexed_axes(self)
+        # if len(external_axes) > 0:
+        #     if self.depth > 1 or len(self.root.components) > 1:
+        #         raise NotImplementedError("This is hard, see comment above")
+        #     path = self.path(*self.leaf)
+        #     return freeze({path: AxisVariable(self.root.label)})
 
         layouts, _, _, _ = _compute_layouts(self, self.root)
         layoutsnew = _collect_at_leaves(self, layouts)
         layouts = freeze(dict(layoutsnew))
 
-        layouts_ = {}
+        layouts_ = {pmap(): 0}
         for axis in self.nodes:
             for component in axis.components:
                 orig_path = self.path(axis, component)

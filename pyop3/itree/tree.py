@@ -958,6 +958,7 @@ def _(loop_index: ContextFreeLoopIndex, *, include_loop_index_shape, **kwargs):
     if include_loop_index_shape:
         slices = []
         iterset = loop_index.iterset
+        breakpoint()
         axis = iterset.root
         while axis is not None:
             cpt = loop_index.source_path[axis.label]

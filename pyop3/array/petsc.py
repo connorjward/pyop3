@@ -15,6 +15,7 @@ from pyrsistent import freeze
 from pyop3.array.base import Array
 from pyop3.array.harray import ContextSensitiveMultiArray, HierarchicalArray
 from pyop3.axtree import AxisTree
+from pyop3.axtree.layout import collect_external_loops
 from pyop3.axtree.tree import (
     ContextFree,
     ContextSensitive,
@@ -156,24 +157,27 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
             if indexed_raxes.size == 0 or indexed_caxes.size == 0:
                 continue
 
-            rmap_axes = _index_axes(
-                rtree, ctx, self.raxes, include_loop_index_shape=True
+            router_loops = collect_external_loops(
+                indexed_raxes, indexed_raxes.index_exprs, linear=True
             )
-            cmap_axes = _index_axes(
-                ctree, ctx, self.caxes, include_loop_index_shape=True
+            couter_loops = collect_external_loops(
+                indexed_caxes, indexed_caxes.index_exprs, linear=True
             )
 
-            rlayouts = AxisTree(rmap_axes.parent_to_children).layouts
+            rmap_axes = AxisTree.from_iterable(
+                [*(l.index.iterset for l in router_loops), indexed_raxes]
+            )
+            cmap_axes = AxisTree.from_iterable(
+                [*(l.index.iterset for l in couter_loops), indexed_caxes]
+            )
+
             rmap = HierarchicalArray(
                 rmap_axes,
                 dtype=IntType,
-                layouts=rlayouts,
             )
-            clayouts = AxisTree(cmap_axes.parent_to_children).layouts
             cmap = HierarchicalArray(
                 cmap_axes,
                 dtype=IntType,
-                layouts=clayouts,
             )
 
             for p in rmap_axes.iter():

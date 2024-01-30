@@ -4,6 +4,7 @@ import collections
 import functools
 import itertools
 import numbers
+import operator
 import sys
 from collections import defaultdict
 from typing import Optional
@@ -169,6 +170,7 @@ def size_requires_external_index(axes, axis, component, path=pmap()):
 
 # NOTE: I am not sure that this is really required any more. We just want to
 # check for loop indices in any index_exprs
+# No, we need this because loop indices do not necessarily mean we need extra shape.
 def collect_externally_indexed_axes(axes, axis=None, component=None, path=pmap()):
     from pyop3.array import HierarchicalArray
 
@@ -197,19 +199,7 @@ def collect_externally_indexed_axes(axes, axis=None, component=None, path=pmap()
     if isinstance(csize, HierarchicalArray):
         # is the path sufficient? i.e. do we have enough externally provided indices
         # to correctly index the axis?
-        # can skip?
-        # for caxis, ccpt in csize.axes.path_with_nodes(*csize.axes.leaf).items():
-        #     if caxis.label in path:
-        #         assert path[caxis.label] == ccpt, "Paths do not match"
-        #     else:
-        #         # also return an expr?
-        #         external_axes[caxis.label] = caxis
-        loop_indices = collect_external_loops(csize.index_exprs.get(None, {}))
-        if not csize.axes.is_empty:
-            for caxis, ccpt in csize.axes.path_with_nodes(*csize.axes.leaf).items():
-                loop_indices.update(
-                    collect_external_loops(csize.index_exprs.get((caxis.id, ccpt), {}))
-                )
+        loop_indices = collect_external_loops(csize.axes, csize.index_exprs)
         for index in sorted(loop_indices, key=lambda i: i.id):
             external_axes[index.id] = index
     else:
@@ -231,21 +221,61 @@ def collect_externally_indexed_axes(axes, axis=None, component=None, path=pmap()
     return tuple(external_axes.values())
 
 
-class LoopIndexCollector(pym.mapper.Collector):
+class LoopIndexCollector(pym.mapper.CombineMapper):
+    def __init__(self, linear: bool):
+        super().__init__()
+        self._linear = linear
+
+    def combine(self, values):
+        if self._linear:
+            return sum(values, start=())
+        else:
+            return functools.reduce(operator.or_, values, frozenset())
+
+    def map_algebraic_leaf(self, expr):
+        return () if self._linear else frozenset()
+
     def map_loop_index(self, index):
-        return {index}
+        rec = collect_external_loops(
+            index.index.iterset, index.index.iterset.index_exprs, linear=self._linear
+        )
+        if self._linear:
+            return rec + (index,)
+        else:
+            return rec | {index}
+
+    def map_multi_array(self, array):
+        if self._linear:
+            return tuple(
+                item for expr in array.index_exprs.values() for item in self.rec(expr)
+            )
+        else:
+            return frozenset(
+                {item for expr in array.index_exprs.values() for item in self.rec(expr)}
+            )
 
     def map_called_map_variable(self, index):
-        return {
+        result = (
             idx
             for index_expr in index.input_index_exprs.values()
             for idx in self.rec(index_expr)
-        }
+        )
+        return tuple(*result) if self._linear else frozenset(result)
 
 
-def collect_external_loops(index_exprs):
-    collector = LoopIndexCollector()
-    return set.union(set(), *(collector(expr) for expr in index_exprs.values()))
+def collect_external_loops(axes, index_exprs, linear=False):
+    collector = LoopIndexCollector(linear)
+    keys = [None]
+    if not axes.is_empty:
+        leaves = (axes.leaf,) if linear else axes.leaves
+        keys.extend((ax.id, cpt.label) for ax, cpt in leaves)
+    result = (
+        loop
+        for key in keys
+        for expr in index_exprs.get(key, {}).values()
+        for loop in collector(expr)
+    )
+    return tuple(result) if linear else frozenset(result)
 
 
 def has_constant_step(axes: AxisTree, axis, cpt):
@@ -586,9 +616,11 @@ def _collect_at_leaves(
     path=pmap(),
     prior=0,
 ):
-    axis = axis or axes.root
-
     acc = {}
+    if axis is None:
+        axis = axes.root
+        acc[pmap()] = 0
+
     for cpt in axis.components:
         path_ = path | {axis.label: cpt.label}
         prior_ = prior + values.get(path_, 0)
