@@ -127,7 +127,7 @@ def grow_dof_sf(axes, axis, path, indices):
             axis,
             selected_component,
             indices | {axis.label: component_num},
-            path | {axis.label: selected_component.label},
+            # path | {axis.label: selected_component.label},
         )
 
     point_sf.broadcast(root_offsets, MPI.REPLACE)

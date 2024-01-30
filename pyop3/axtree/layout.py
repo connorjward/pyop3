@@ -118,7 +118,6 @@ def step_size(
     axes: AxisTree,
     axis: Axis,
     component: AxisComponent,
-    path=pmap(),
     indices=PrettyTuple(),
 ):
     """Return the size of step required to stride over a multi-axis component.
@@ -128,7 +127,7 @@ def step_size(
     if not has_constant_step(axes, axis, component) and not indices:
         raise ValueError
     if subaxis := axes.component_child(axis, component):
-        return _axis_size(axes, subaxis, indices, path)
+        return _axis_size(axes, subaxis, indices)
     else:
         return 1
 
@@ -517,21 +516,6 @@ def _tabulate_count_array_tree(
 ):
     npoints = sum(_as_int(c.count, indices, path) for c in axis.components)
 
-    # point_to_component_id = np.empty(npoints, dtype=np.int8)
-    # point_to_component_num = np.empty(npoints, dtype=PointerType)
-    # pos = 0
-    # point = 0
-    # # TODO this is overkill, we can just inspect the ranges?
-    # for cidx, component in enumerate(axis.components):
-    #     # can determine this once above
-    #     csize = _as_int(component.count, indices, path)
-    #     for i in range(csize):
-    #         point_to_component_id[point] = cidx
-    #         # this is now just the identity with an offset?
-    #         point_to_component_num[point] = i
-    #         point += 1
-    #     pos += csize
-
     offsets = component_offsets(axis, indices)
 
     counters = {c: itertools.count() for c in axis.components}
@@ -557,7 +541,6 @@ def _tabulate_count_array_tree(
                     axes,
                     axis,
                     selected_component,
-                    new_path,
                     new_indices,
                 )
         else:
@@ -633,11 +616,9 @@ def _axis_size(
     axes: AxisTree,
     axis: Axis,
     indices=pmap(),
-    target_path=pmap(),
 ):
     return sum(
-        _axis_component_size(axes, axis, cpt, indices, target_path)
-        for cpt in axis.components
+        _axis_component_size(axes, axis, cpt, indices) for cpt in axis.components
     )
 
 
@@ -646,16 +627,14 @@ def _axis_component_size(
     axis: Axis,
     component: AxisComponent,
     indices=pmap(),
-    target_path=pmap(),
 ):
-    count = _as_int(component.count, indices, target_path)
+    count = _as_int(component.count, indices)
     if subaxis := axes.component_child(axis, component):
         return sum(
             _axis_size(
                 axes,
                 subaxis,
                 indices | {axis.label: i},
-                target_path | {axis.label: component.label},
             )
             for i in range(count)
         )
@@ -712,7 +691,7 @@ def eval_offset(axes, layouts, indices, target_path=None, index_exprs=None):
     if target_path is None:
         # if a path is not specified we assume that the axes/array are
         # unindexed and single component
-        target_path = axes.path(*axes.leaf)
+        target_path = axes.path(*axes.leaf) if not axes.is_empty else pmap()
 
     # if the provided indices are not a dict then we assume that they apply in order
     # as we go down the selected path of the tree
