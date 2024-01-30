@@ -834,7 +834,7 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         #     path = self.path(*self.leaf)
         #     return freeze({path: AxisVariable(self.root.label)})
 
-        layouts, _, _, _ = _compute_layouts(self, self.root)
+        layouts, _, _ = _compute_layouts(self, self.root)
         layoutsnew = _collect_at_leaves(self, layouts)
         layouts = freeze(dict(layoutsnew))
 

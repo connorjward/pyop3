@@ -13,12 +13,19 @@ import numpy as np
 import pymbolic as pym
 from pyrsistent import freeze, pmap
 
-from pyop3.axtree.tree import Axis, AxisComponent, AxisTree, ExpressionEvaluator
+from pyop3.axtree.tree import (
+    Axis,
+    AxisComponent,
+    AxisTree,
+    ExpressionEvaluator,
+    PartialAxisTree,
+)
 from pyop3.dtypes import IntType, PointerType
 from pyop3.tree import LabelledTree, MultiComponentLabelledNode
 from pyop3.utils import (
     PrettyTuple,
     as_tuple,
+    checked_zip,
     just_one,
     merge_dicts,
     strict_int,
@@ -320,21 +327,17 @@ def _compute_layouts(
     steps = {}
 
     # Post-order traversal
-    # make sure to catch children that are None
-    csubroots = []
     csubtrees = []
     sublayoutss = []
     for cpt in axis.components:
         if subaxis := axes.component_child(axis, cpt):
-            sublayouts, csubroot, csubtree, substeps = _compute_layouts(
+            sublayouts, csubtree, substeps = _compute_layouts(
                 axes, subaxis, path | {axis.label: cpt.label}
             )
             sublayoutss.append(sublayouts)
-            csubroots.append(csubroot)
             csubtrees.append(csubtree)
             steps.update(substeps)
         else:
-            csubroots.append(None)
             csubtrees.append(None)
             sublayoutss.append(defaultdict(list))
 
@@ -373,21 +376,16 @@ def _compute_layouts(
         if has_halo(axes, axis) or not all(
             has_constant_step(axes, axis, c) for c in axis.components
         ):
-            croot = CustomNode(
-                [(cpt.count, axis.label, cpt.label) for cpt in axis.components]
-            )
+            ctree = PartialAxisTree(axis)
+            # we enforce here that all subaxes must be tabulated, is this always
+            # needed?
             if strictly_all(sub is not None for sub in csubtrees):
-                cparent_to_children = pmap(
-                    {croot.id: [sub for sub in csubroots]}
-                ) | merge_dicts(sub for sub in csubtrees)
-            else:
-                cparent_to_children = {}
-            ctree = cparent_to_children
+                for component, subtree in checked_zip(axis.components, csubtrees):
+                    ctree = ctree.add_subtree(subtree, axis, component)
         else:
             # we must be at the bottom of a ragged patch - therefore don't
             # add to shape of things
             # in theory if we are ragged and permuted then we do want to include this level
-            croot = None
             ctree = None
             for c in axis.components:
                 step = step_size(axes, axis, c)
@@ -397,7 +395,7 @@ def _compute_layouts(
 
         # layouts and steps are just propagated from below
         layouts.update(merge_dicts(sublayoutss))
-        return layouts, croot, ctree, steps
+        return layouts, ctree, steps
 
     # 2. add layouts here
     else:
@@ -409,21 +407,12 @@ def _compute_layouts(
             or has_halo(axes, axis)
             and axis == axes.root
         ):
-            # super ick
-            bits = []
-            for cpt in axis.components:
-                axlabel, clabel = axis.label, cpt.label
-                bits.append((cpt.count, axlabel, clabel))
-            croot = CustomNode(bits)
+            ctree = PartialAxisTree(axis.copy(numbering=None))
+            # we enforce here that all subaxes must be tabulated, is this always
+            # needed?
             if strictly_all(sub is not None for sub in csubtrees):
-                cparent_to_children = pmap(
-                    {croot.id: [sub for sub in csubroots]}
-                ) | merge_dicts(sub for sub in csubtrees)
-            else:
-                cparent_to_children = {}
-
-            cparent_to_children |= {None: (croot,)}
-            ctree = LabelledTree(cparent_to_children)
+                for component, subtree in checked_zip(axis.components, csubtrees):
+                    ctree = ctree.add_subtree(subtree, axis, component)
 
             fulltree = _create_count_array_tree(ctree)
 
@@ -461,7 +450,7 @@ def _compute_layouts(
             steps = {path: _axis_size(axes, axis)}
 
             layouts.update(merge_dicts(sublayoutss))
-            return layouts, None, ctree, steps
+            return layouts, ctree, steps
 
         # must therefore be affine
         else:
@@ -480,45 +469,37 @@ def _compute_layouts(
 
                 layouts.update(sublayouts)
             steps = {path: _axis_size(axes, axis)}
-            return layouts, None, None, steps
+            return layouts, None, steps
 
 
-# I don't think that this actually needs to be a tree, just return a dict
-# TODO I need to clean this up a lot now I'm using component labels
-def _create_count_array_tree(
-    ctree, current_node=None, counts=PrettyTuple(), path=pmap()
-):
+def _create_count_array_tree(ctree, axis=None, axes_acc=None, path=pmap()):
     from pyop3.array import HierarchicalArray
 
-    current_node = current_node or ctree.root
+    if strictly_all(x is None for x in [axis, axes_acc]):
+        axis = ctree.root
+        axes_acc = ()
+
     arrays = {}
-
-    for cidx in range(current_node.degree):
-        count, axis_label, cpt_label = current_node.counts[cidx]
-
-        child = ctree.children(current_node)[cidx]
-        new_path = path | {axis_label: cpt_label}
-        if child is None:
+    for component in axis.components:
+        path_ = path | {axis.label: component.label}
+        if subaxis := ctree.child(axis, component):
+            arrays.update(
+                _create_count_array_tree(
+                    ctree,
+                    subaxis,
+                    axes_acc + (axis[component.label],),
+                    path_,
+                )
+            )
+        else:
             # make a multiarray here from the given sizes
-            axes = [
-                Axis({clabel: ct}, axlabel)
-                for (ct, axlabel, clabel) in counts | current_node.counts[cidx]
-            ]
+            axes = axes_acc + (axis[component.label],)
             axtree = AxisTree.from_iterable(axes)
             countarray = HierarchicalArray(
                 axtree,
                 data=np.full(axis_tree_size(axtree), -1, dtype=IntType),
             )
-            arrays[new_path] = countarray
-        else:
-            arrays.update(
-                _create_count_array_tree(
-                    ctree,
-                    child,
-                    counts | current_node.counts[cidx],
-                    new_path,
-                )
-            )
+            arrays[path_] = countarray
 
     return arrays
 
