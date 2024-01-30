@@ -637,6 +637,15 @@ class PartialAxisTree(LabelledTree):
         self._layout_exprs = AxisTree._default_index_exprs(self)
 
     @classmethod
+    def from_iterable(cls, iterable):
+        # NOTE: This currently only works for linear trees
+        item, *iterable = iterable
+        tree = PartialAxisTree(as_axis_tree(item).parent_to_children)
+        for item in iterable:
+            tree = tree.add_subtree(as_axis_tree(item), *tree.leaf)
+        return tree
+
+    @classmethod
     def _check_node_labels_unique_in_paths(
         cls, node_map, node=None, seen_labels=frozenset()
     ):
@@ -778,13 +787,16 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         return cls.from_node_map(node_map)
 
     @classmethod
-    def from_iterable(cls, iterable) -> AxisTree:
-        # NOTE: This currently only works for linear trees
-        item, *iterable = iterable
-        tree = PartialAxisTree(as_axis_tree(item).parent_to_children)
-        for item in iterable:
-            tree = tree.add_subtree(as_axis_tree(item), *tree.leaf)
-        return tree.set_up()
+    def from_iterable(
+        cls, iterable, *, target_paths=None, index_exprs=None, layout_exprs=None
+    ) -> AxisTree:
+        tree = PartialAxisTree.from_iterable(iterable)
+        return AxisTree(
+            tree.parent_to_children,
+            target_paths=target_paths,
+            index_exprs=index_exprs,
+            layout_exprs=layout_exprs,
+        )
 
     @classmethod
     def from_node_map(cls, node_map):
@@ -862,7 +874,7 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         #     path = self.path(*self.leaf)
         #     return freeze({path: AxisVariable(self.root.label)})
 
-        layouts, _, _ = _compute_layouts(self, self.root)
+        layouts, _, _, _ = _compute_layouts(self, self.root)
         layoutsnew = _collect_at_leaves(self, layouts)
         layouts = freeze(dict(layoutsnew))
 

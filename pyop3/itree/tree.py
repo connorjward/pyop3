@@ -349,6 +349,7 @@ class ContextFreeLoopIndex(ContextFreeIndex):
         if not isinstance(self.iterset, AxisTree):
             raise NotImplementedError
         return iter_axis_tree(
+            self,
             self.iterset,
             self.iterset.target_paths,
             self.iterset.index_exprs,
