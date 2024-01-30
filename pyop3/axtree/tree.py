@@ -47,8 +47,10 @@ from pyop3.utils import (
     is_single_valued,
     just_one,
     merge_dicts,
+    pairwise,
     single_valued,
     some_but_not_all,
+    steps,
     strict_int,
     strictly_all,
     unique,
@@ -487,6 +489,7 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
         raise NotImplementedError
 
     def axis_to_component_number(self, number):
+        # return axis_to_component_number(self, number)
         cidx = self._axis_number_to_component_index(number)
         return self.components[cidx], number - self._component_offsets[cidx]
 
@@ -557,6 +560,23 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
             raise TypeError(
                 f"{type(numbering).__name__} is not a supported type for numbering"
             )
+
+
+def axis_to_component_number(axis, number, context=pmap()):
+    offsets = component_offsets(axis, context)
+    cidx = None
+    for i, (min_, max_) in enumerate(pairwise(offsets)):
+        if min_ <= number < max_:
+            cidx = i
+            break
+    assert cidx is not None
+    return axis.components[cidx], number - offsets[cidx]
+
+
+def component_offsets(axis, context):
+    from pyop3.axtree.layout import _as_int
+
+    return steps([_as_int(c.count, context) for c in axis.components])
 
 
 class MultiArrayCollector(pym.mapper.Collector):

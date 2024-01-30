@@ -62,6 +62,10 @@ class StarForest:
         return self._graph[0]
 
     @property
+    def nowned(self):
+        return self.size - self.nleaves
+
+    @property
     def nleaves(self):
         return len(self.ileaf)
 

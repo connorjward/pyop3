@@ -509,8 +509,7 @@ def _tabulate_count_array_tree(
     axis,
     count_arrays,
     offset,
-    path=pmap(),
-    index_exprs=pmap(),
+    path=pmap(),  # might not be needed
     indices=pmap(),
     is_owned=True,
     setting_halo=False,
@@ -535,38 +534,32 @@ def _tabulate_count_array_tree(
             point += 1
         pos += csize
 
-    counters = np.zeros(len(axis.components), dtype=int)
+    counters = {c: itertools.count() for c in axis.components}
     points = axis.numbering.data_ro if axis.numbering is not None else range(npoints)
     for new_pt, old_pt in enumerate(points):
         if axis.sf is not None:
-            # more efficient outside of loop
-            _, ilocal, _ = axis.sf._graph
-            is_owned = new_pt < npoints - len(ilocal)
+            is_owned = new_pt < axis.sf.nowned
 
-        # equivalent to plex strata
         selected_component_id = point_to_component_id[old_pt]
-        # selected_component_num = point_to_component_num[old_pt]
-        selected_component_num = old_pt - strata_offsets[selected_component_id]
         selected_component = axis.components[selected_component_id]
 
-        new_strata_pt = counters[selected_component_id]
-        counters[selected_component_id] += 1
+        new_strata_pt = next(counters[selected_component])
 
-        # TODO I think that index_exprs can be dropped here
         new_path = path | {axis.label: selected_component.label}
-        new_index_exprs = index_exprs | {axis.label: AxisVariable(axis.label)}
         new_indices = indices | {axis.label: new_strata_pt}
         if new_path in count_arrays:
             if is_owned and not setting_halo or not is_owned and setting_halo:
                 count_arrays[new_path].set_value(
-                    new_indices, offset.value, new_path, new_index_exprs
+                    new_indices,
+                    offset.value,
+                    new_path,
                 )
                 offset += step_size(
                     axes,
                     axis,
                     selected_component,
                     new_path,
-                    new_index_exprs,
+                    None,
                     new_indices,
                 )
         else:
@@ -578,7 +571,6 @@ def _tabulate_count_array_tree(
                 count_arrays,
                 offset,
                 new_path,
-                new_index_exprs,
                 new_indices,
                 is_owned=is_owned,
                 setting_halo=setting_halo,
@@ -668,7 +660,8 @@ def _axis_component_size(
                 subaxis,
                 indices | {axis.label: i},
                 target_path | {axis.label: component.label},
-                index_exprs | {axis.label: AxisVariable(axis.label)},
+                # index_exprs | {axis.label: AxisVariable(axis.label)},
+                None,
             )
             for i in range(count)
         )
