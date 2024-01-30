@@ -501,14 +501,10 @@ def _create_count_array_tree(
         if child is None:
             # make a multiarray here from the given sizes
             axes = [
-                Axis([(ct, clabel)], axlabel)
+                Axis({clabel: ct}, axlabel)
                 for (ct, axlabel, clabel) in counts | current_node.counts[cidx]
             ]
-            root = axes[0]
-            parent_to_children = {None: (root,)}
-            for parent, child in zip(axes, axes[1:]):
-                parent_to_children[parent.id] = (child,)
-            axtree = AxisTree.from_node_map(parent_to_children)
+            axtree = AxisTree.from_iterable(axes)
             countarray = HierarchicalArray(
                 axtree,
                 data=np.full(axis_tree_size(axtree), -1, dtype=IntType),
