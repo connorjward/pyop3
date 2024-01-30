@@ -1003,20 +1003,23 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         ctx.add_assignment(key_var, key_expr)
 
         # base
+        # replace loop indices with axis variables - this feels very hacky
         replace_map = {}
         for key, replace_expr in self._replace_map.items():
-            # for (LoopIndex_id0, axis0)
-            if isinstance(key, tuple):
-                replace_map[key[1]] = replace_expr
+            # loop indices
+            if isinstance(replace_expr, tuple):
+                # use target exprs
+                replace_expr = replace_expr[1]
+                for ax, rep_expr in replace_expr.items():
+                    replace_map[ax] = rep_expr
             else:
-                assert isinstance(key, str)
                 replace_map[key] = replace_expr
         # and set start to zero
         start_replace_map = replace_map.copy()
         start_replace_map[leaf_axis.label] = 0
 
         start_expr = make_offset_expr(
-            indices.layouts[indices.axes.path(leaf_axis, leaf_component)],
+            indices.subst_layouts[indices.axes.path(leaf_axis, leaf_component)],
             start_replace_map,
             self._codegen_context,
         )

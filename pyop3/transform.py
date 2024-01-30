@@ -314,6 +314,11 @@ def _requires_pack_unpack(arg):
     #   t1 <- t0
     #   kernel(t1)
     # and the same for unpacking
+
+    # if subst_layouts and layouts are the same I *think* it is safe to avoid a pack/unpack
+    # however, it is overly restrictive since we could pass something like dat[i0, :] directly
+    # to a local kernel
+    # return isinstance(arg, HierarchicalArray) and arg.subst_layouts != arg.layouts
     return isinstance(arg, HierarchicalArray)
 
 
