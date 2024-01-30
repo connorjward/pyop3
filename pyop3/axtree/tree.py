@@ -562,8 +562,15 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
             )
 
 
+# Do I ever want this? component_offsets is expensive so we don't want to
+# do it every time
 def axis_to_component_number(axis, number, context=pmap()):
     offsets = component_offsets(axis, context)
+    return component_number_from_offsets(axis, number, offsets)
+
+
+# TODO move into layout.py
+def component_number_from_offsets(axis, number, offsets):
     cidx = None
     for i, (min_, max_) in enumerate(pairwise(offsets)):
         if min_ <= number < max_:
@@ -573,6 +580,7 @@ def axis_to_component_number(axis, number, context=pmap()):
     return axis.components[cidx], number - offsets[cidx]
 
 
+# TODO move into layout.py
 def component_offsets(axis, context):
     from pyop3.axtree.layout import _as_int
 

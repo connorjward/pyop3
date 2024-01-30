@@ -19,6 +19,8 @@ from pyop3.axtree.tree import (
     AxisTree,
     ExpressionEvaluator,
     PartialAxisTree,
+    component_number_from_offsets,
+    component_offsets,
 )
 from pyop3.dtypes import IntType, PointerType
 from pyop3.tree import LabelledTree, MultiComponentLabelledNode
@@ -515,23 +517,22 @@ def _tabulate_count_array_tree(
 ):
     npoints = sum(_as_int(c.count, indices, path) for c in axis.components)
 
-    point_to_component_id = np.empty(npoints, dtype=np.int8)
-    point_to_component_num = np.empty(npoints, dtype=PointerType)
-    *strata_offsets, _ = [0] + list(
-        np.cumsum([_as_int(c.count, indices, path) for c in axis.components])
-    )
-    pos = 0
-    point = 0
-    # TODO this is overkill, we can just inspect the ranges?
-    for cidx, component in enumerate(axis.components):
-        # can determine this once above
-        csize = _as_int(component.count, indices, path)
-        for i in range(csize):
-            point_to_component_id[point] = cidx
-            # this is now just the identity with an offset?
-            point_to_component_num[point] = i
-            point += 1
-        pos += csize
+    # point_to_component_id = np.empty(npoints, dtype=np.int8)
+    # point_to_component_num = np.empty(npoints, dtype=PointerType)
+    # pos = 0
+    # point = 0
+    # # TODO this is overkill, we can just inspect the ranges?
+    # for cidx, component in enumerate(axis.components):
+    #     # can determine this once above
+    #     csize = _as_int(component.count, indices, path)
+    #     for i in range(csize):
+    #         point_to_component_id[point] = cidx
+    #         # this is now just the identity with an offset?
+    #         point_to_component_num[point] = i
+    #         point += 1
+    #     pos += csize
+
+    offsets = component_offsets(axis, indices)
 
     counters = {c: itertools.count() for c in axis.components}
     points = axis.numbering.data_ro if axis.numbering is not None else range(npoints)
@@ -539,8 +540,7 @@ def _tabulate_count_array_tree(
         if axis.sf is not None:
             is_owned = new_pt < axis.sf.nowned
 
-        selected_component_id = point_to_component_id[old_pt]
-        selected_component = axis.components[selected_component_id]
+        selected_component, _ = component_number_from_offsets(axis, old_pt, offsets)
 
         new_strata_pt = next(counters[selected_component])
 
