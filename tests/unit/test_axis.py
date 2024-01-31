@@ -4,7 +4,7 @@ import pytest
 from pyrsistent import freeze, pmap
 
 import pyop3 as op3
-from pyop3.utils import UniqueNameGenerator, flatten, just_one, single_valued
+from pyop3.utils import UniqueNameGenerator, flatten, just_one, single_valued, steps
 
 
 class RenameMapper(pym.mapper.IdentityMapper):
@@ -428,6 +428,6 @@ def test_tabulate_nested_ragged_indexed_layouts():
     p = axis0.index()
     indexed_axes = just_one(axes[p].context_map.values())
 
-    # this fails
-    layouts = indexed_axes.layouts
-    breakpoint()
+    layout = indexed_axes.subst_layouts[indexed_axes.path(*indexed_axes.leaf)]
+    array0 = just_one(collect_multi_arrays(layout))
+    assert (array0.data_ro == steps(nnz_data, drop_last=True)).all()

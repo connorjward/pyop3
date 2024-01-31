@@ -204,9 +204,10 @@ def popwhen(predicate, iterable):
     raise KeyError("Predicate does not hold for any items in iterable")
 
 
-def steps(sizes):
+def steps(sizes, drop_last=False):
     sizes = tuple(sizes)
-    return (0,) + tuple(np.cumsum(sizes, dtype=int))
+    steps_ = (0,) + tuple(np.cumsum(sizes, dtype=int))
+    return steps_[:-1] if drop_last else steps_
 
 
 def pairwise(iterable):
