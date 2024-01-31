@@ -476,6 +476,7 @@ def _compute_layouts(
             return layouts, ctree, index_exprs, steps
 
         # must therefore be affine
+        # FIXME next, for ragged maps this should not be hit, perhaps check for external loops?
         else:
             assert all(sub is None for sub in csubtrees)
             ctree = None
@@ -689,26 +690,47 @@ def axis_tree_size(axes: AxisTree) -> int:
     """
     from pyop3.array import HierarchicalArray
 
-    if axes.is_empty:
-        return 1
+    outer_loops = collect_external_loops(axes, axes.index_exprs)
+    # external_axes = collect_externally_indexed_axes(axes)
+    # if len(external_axes) == 0:
+    if len(outer_loops) == 0:
+        return _axis_size(axes, axes.root) if not axes.is_empty else 1
 
-    external_axes = collect_externally_indexed_axes(axes)
-    if len(external_axes) == 0:
-        return _axis_size(axes, axes.root)
+    # breakpoint()
+    # not sure they need to be ordered
+    outer_loops_ord = collect_external_loops(axes, axes.index_exprs, linear=True)
 
     # axis size is now an array
-    if len(external_axes) > 1:
-        raise NotImplementedError("TODO")
 
-    size_axis = just_one(external_axes).index.iterset
-    sizes = HierarchicalArray(size_axis, dtype=IntType, prefix="size")
-    outer_loops = tuple(ax.index.iterset.iter() for ax in external_axes)
-    for idxs in itertools.product(*outer_loops):
+    outer_loops_ord = tuple(sorted(outer_loops, key=lambda loop: loop.index.id))
+
+    # size_axes = AxisTree.from_iterable(ol.index.iterset for ol in outer_loops_ord)
+    size_axes = AxisTree()
+
+    # target_paths = {(ax.id, clabel): {ax.label: clabel} for ax, clabel in size_axes.path_with_nodes(*size_axes.leaf).items()}
+    target_paths = {
+        None: {ol.index.iterset.root.label: ol.index.iterset.root.component.label}
+        for ol in outer_loops_ord
+    }
+
+    # this is dreadful, what if the outer loop has depth > 1
+    index_exprs = {None: {ol.index.iterset.root.label: ol} for ol in outer_loops_ord}
+
+    # should this have index_exprs? yes.
+    sizes = HierarchicalArray(
+        size_axes,
+        target_paths=target_paths,
+        index_exprs=index_exprs,
+        dtype=IntType,
+        prefix="size",
+    )
+
+    outer_loops_iter = tuple(l.index.iter() for l in outer_loops)
+    for idxs in itertools.product(*outer_loops_iter):
         indices = merge_dicts(idx.source_exprs for idx in idxs)
-        path = merge_dicts(idx.source_path for idx in idxs)
-        index_exprs = {ax: AxisVariable(ax) for ax in path.keys()}
         size = _axis_size(axes, axes.root, indices)
-        sizes.set_value(indices, size, path)
+        sizes.set_value(indices, size)
+    breakpoint()
     return sizes
 
 

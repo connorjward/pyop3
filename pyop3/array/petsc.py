@@ -164,22 +164,32 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
                 indexed_caxes, indexed_caxes.index_exprs, linear=True
             )
 
-            rmap_axes = AxisTree.from_iterable(
-                [*(l.index.iterset for l in router_loops), indexed_raxes]
-            )
-            cmap_axes = AxisTree.from_iterable(
-                [*(l.index.iterset for l in couter_loops), indexed_caxes]
-            )
+            # rmap_axes = AxisTree.from_iterable(
+            #     [*(l.index.iterset for l in router_loops), indexed_raxes]
+            # )
+            # cmap_axes = AxisTree.from_iterable(
+            #     [*(l.index.iterset for l in couter_loops), indexed_caxes]
+            # )
+
+            import pyop3.axtree.layout
+
+            pyop3.axtree.layout.STOP = True
 
             rmap = HierarchicalArray(
-                rmap_axes,
+                indexed_raxes,
+                target_paths=indexed_raxes.target_paths,
+                index_exprs=indexed_raxes.index_exprs,
                 dtype=IntType,
             )
             cmap = HierarchicalArray(
-                cmap_axes,
+                indexed_caxes,
+                target_paths=indexed_caxes.target_paths,
+                index_exprs=indexed_caxes.index_exprs,
                 dtype=IntType,
             )
 
+            breakpoint()
+            # TODO loop over outer loops
             for p in rmap_axes.iter():
                 offset = self.raxes.offset(p.target_exprs, p.target_path)
                 rmap.set_value(p.source_exprs, offset, p.source_path)
