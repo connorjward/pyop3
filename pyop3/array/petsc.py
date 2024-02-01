@@ -154,51 +154,46 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
             indexed_raxes = _index_axes(rtree, ctx, self.raxes)
             indexed_caxes = _index_axes(ctree, ctx, self.caxes)
 
-            if indexed_raxes.size == 0 or indexed_caxes.size == 0:
+            if indexed_raxes.alloc_size() == 0 or indexed_caxes.alloc_size() == 0:
                 continue
-
-            # router_loops = collect_external_loops(
-            #     indexed_raxes, indexed_raxes.index_exprs, linear=True
-            # )
-            # couter_loops = collect_external_loops(
-            #     indexed_caxes, indexed_caxes.index_exprs, linear=True
-            # )
             router_loops = indexed_raxes.outer_loops
             couter_loops = indexed_caxes.outer_loops
 
-            # rmap_axes = AxisTree.from_iterable(
-            #     [*(l.index.iterset for l in router_loops), indexed_raxes]
-            # )
-            # cmap_axes = AxisTree.from_iterable(
-            #     [*(l.index.iterset for l in couter_loops), indexed_caxes]
-            # )
-
-            import pyop3.axtree.layout
-
-            pyop3.axtree.layout.STOP = True
+            router_loops_ord = tuple(
+                sorted(router_loops, key=lambda loop: loop.index.id)
+            )
+            couter_loops_ord = tuple(
+                sorted(couter_loops, key=lambda loop: loop.index.id)
+            )
 
             rmap = HierarchicalArray(
                 indexed_raxes,
                 target_paths=indexed_raxes.target_paths,
                 index_exprs=indexed_raxes.index_exprs,
+                outer_loops=indexed_raxes.outer_loops,
                 dtype=IntType,
             )
             cmap = HierarchicalArray(
                 indexed_caxes,
                 target_paths=indexed_caxes.target_paths,
                 index_exprs=indexed_caxes.index_exprs,
+                outer_loops=indexed_caxes.outer_loops,
                 dtype=IntType,
             )
 
-            breakpoint()
-            # TODO loop over outer loops
-            for p in rmap_axes.iter():
-                offset = self.raxes.offset(p.target_exprs, p.target_path)
-                rmap.set_value(p.source_exprs, offset, p.source_path)
+            from pyop3.axtree.layout import my_product
 
-            for p in cmap_axes.iter():
-                offset = self.caxes.offset(p.target_exprs, p.target_path)
-                cmap.set_value(p.source_exprs, offset, p.source_path)
+            for idxs in my_product(router_loops_ord):
+                indices = merge_dicts(idx.source_exprs for idx in idxs)
+                for p in rmap.axes.iter(idxs):
+                    offset = self.raxes.offset(p.target_exprs, p.target_path)
+                    rmap.set_value(p.source_exprs, offset, p.source_path)
+
+            for idxs in my_product(couter_loops_ord):
+                indices = merge_dicts(idx.source_exprs for idx in idxs)
+                for p in cmap.axes.iter(idxs):
+                    offset = self.caxes.offset(p.target_exprs, p.target_path)
+                    cmap.set_value(p.source_exprs, offset, p.source_path)
 
             shape = (indexed_raxes.size, indexed_caxes.size)
             packed = PackedPetscMat(self, rmap, cmap, shape)
@@ -215,6 +210,7 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
                 data=packed,
                 target_paths=indexed_axes.target_paths,
                 index_exprs=indexed_axes.index_exprs,
+                outer_loops=router_loops | couter_loops,
                 name=self.name,
             )
         return ContextSensitiveMultiArray(arrays)

@@ -661,21 +661,6 @@ def parse_assignment(
 
 @_compile.register(PetscMatInstruction)
 def _(assignment, loop_indices, codegen_context):
-    # FIXME, need to track loop indices properly. I think that it should be
-    # possible to index a matrix like
-    #
-    #     loop(p, loop(q, mat[[p, q], [p, q]].assign(666)))
-    #
-    # but the current class design does not keep track of loop indices. For
-    # now we assume there is only a single outer loop and that this is used
-    # to index the row and column maps.
-    if len(loop_indices) != 1:
-        raise NotImplementedError(
-            "For simplicity we currently assume a single outer loop"
-        )
-    iname_replace_map, _ = just_one(loop_indices.values())
-    iname = just_one(iname_replace_map.values())
-
     # now emit the right line of code, this should properly be a lp.ScalarCallable
     # https://petsc.org/release/manualpages/Mat/MatGetValuesLocal/
 
@@ -684,7 +669,6 @@ def _(assignment, loop_indices, codegen_context):
     rmap = assignment.mat_arg.buffer.rmap
     cmap = assignment.mat_arg.buffer.cmap
 
-    # TODO cleanup
     codegen_context.add_argument(assignment.mat_arg)
     codegen_context.add_argument(array)
     codegen_context.add_argument(rmap)
@@ -698,44 +682,46 @@ def _(assignment, loop_indices, codegen_context):
     # these sizes can be expressions that need evaluating
     rsize, csize = assignment.mat_arg.buffer.shape
 
-    # my_replace_map = {}
-    # for mappings in loop_indices.values():
-    #     global_map, _ = mappings
-    #     for (_, k), v in global_map.items():
-    #         my_replace_map[k] = v
-    my_replace_map = loop_indices
-
     if not isinstance(rsize, numbers.Integral):
-        rindex_exprs = merge_dicts(
-            rsize.index_exprs.get((ax.id, clabel), {})
-            for ax, clabel in rsize.axes.path_with_nodes(*rsize.axes.leaf).items()
-        )
+        # rindex_exprs = merge_dicts(
+        #     rsize.index_exprs.get((ax.id, clabel), {})
+        #     for ax, clabel in rsize.axes.path_with_nodes(*rsize.axes.leaf).items()
+        # )
         rsize_var = register_extent(
-            rsize, rindex_exprs, my_replace_map, codegen_context
+            # rsize, rindex_exprs, my_replace_map, codegen_context
+            rsize,
+            loop_indices,
+            codegen_context,
         )
     else:
         rsize_var = rsize
 
     if not isinstance(csize, numbers.Integral):
-        cindex_exprs = merge_dicts(
-            csize.index_exprs.get((ax.id, clabel), {})
-            for ax, clabel in csize.axes.path_with_nodes(*csize.axes.leaf).items()
-        )
+        # cindex_exprs = merge_dicts(
+        #     csize.index_exprs.get((ax.id, clabel), {})
+        #     for ax, clabel in csize.axes.path_with_nodes(*csize.axes.leaf).items()
+        # )
         csize_var = register_extent(
-            csize, cindex_exprs, my_replace_map, codegen_context
+            # csize, cindex_exprs, my_replace_map, codegen_context
+            csize,
+            loop_indices,
+            codegen_context,
         )
     else:
         csize_var = csize
 
-    rlayouts = rmap.layouts[
-        freeze({rmap.axes.root.label: rmap.axes.root.component.label})
-    ]
-    roffset = JnameSubstitutor(my_replace_map, codegen_context)(rlayouts)
+    # rlayouts = rmap.layouts[
+    #     freeze({rmap.axes.root.label: rmap.axes.root.component.label})
+    # ]
+    rlayouts = rmap.layouts[pmap()]
+    breakpoint()
+    roffset = JnameSubstitutor(loop_indices, codegen_context)(rlayouts)
 
-    clayouts = cmap.layouts[
-        freeze({cmap.axes.root.label: cmap.axes.root.component.label})
-    ]
-    coffset = JnameSubstitutor(my_replace_map, codegen_context)(clayouts)
+    # clayouts = cmap.layouts[
+    #     freeze({cmap.axes.root.label: cmap.axes.root.component.label})
+    # ]
+    clayouts = cmap.layouts[pmap()]
+    coffset = JnameSubstitutor(loop_indices, codegen_context)(clayouts)
 
     irow = f"{rmap_name}[{roffset}]"
     icol = f"{cmap_name}[{coffset}]"

@@ -309,12 +309,25 @@ def has_constant_step(axes: AxisTree, axis, cpt):
 
 def _compute_layouts(
     axes: AxisTree,
+    outer_loops,
     axis=None,
     path=pmap(),
 ):
     from pyop3.array.harray import MultiArrayVariable
 
-    axis = axis or axes.root
+    if len(outer_loops) > 1:
+        outer_loop, *outer_loops_ = outer_loops
+        axis, axis_var = outer_loop
+    else:
+        outer_loops_ = ()
+
+        if axis is None:
+            if axes.is_empty:
+                return pmap({pmap(): 0}), "not used", {}, "not used"
+            else:
+                axis = axes.root
+        axis_var = AxisVariable(axis.label)
+
     layouts = {}
     steps = {}
 
@@ -324,18 +337,27 @@ def _compute_layouts(
     subindex_exprs = []
     sublayoutss = []
     for cpt in axis.components:
-        if subaxis := axes.component_child(axis, cpt):
+        if len(outer_loops_) == 0:
+            if subaxis := axes.child(axis, cpt):
+                sublayouts, csubtree, subindex_exprs_, substeps = _compute_layouts(
+                    axes, outer_loops_, subaxis, path | {axis.label: cpt.label}
+                )
+                sublayoutss.append(sublayouts)
+                subindex_exprs.append(subindex_exprs_)
+                csubtrees.append(csubtree)
+                steps.update(substeps)
+            else:
+                csubtrees.append(None)
+                subindex_exprs.append(None)
+                sublayoutss.append(defaultdict(list))
+        else:
             sublayouts, csubtree, subindex_exprs_, substeps = _compute_layouts(
-                axes, subaxis, path | {axis.label: cpt.label}
+                axes, outer_loops_, None, path | {axis.label: cpt.label}
             )
             sublayoutss.append(sublayouts)
             subindex_exprs.append(subindex_exprs_)
             csubtrees.append(csubtree)
             steps.update(substeps)
-        else:
-            csubtrees.append(None)
-            subindex_exprs.append(None)
-            sublayoutss.append(defaultdict(list))
 
     """
     There are two conditions that we need to worry about:
@@ -367,7 +389,7 @@ def _compute_layouts(
     # 1. do we need to pass further up? i.e. are we variable size?
     # also if we have halo data then we need to pass to the top
     if (not all(has_fixed_size(axes, axis, cpt) for cpt in axis.components)) or (
-        has_halo(axes, axis) and axis != axes.root
+        has_halo(axes, axis) and len(path) > 0
     ):
         if has_halo(axes, axis) or not all(
             has_constant_step(axes, axis, c) for c in axis.components
@@ -401,9 +423,7 @@ def _compute_layouts(
                 )
             for c in axis.components:
                 step = step_size(axes, axis, c)
-                layouts.update(
-                    {path | {axis.label: c.label}: AxisVariable(axis.label) * step}
-                )
+                layouts.update({path | {axis.label: c.label}: axis_var * step})
 
         # layouts and steps are just propagated from below
         layouts.update(merge_dicts(sublayoutss))
@@ -417,7 +437,7 @@ def _compute_layouts(
             interleaved
             or not all(has_constant_step(axes, axis, c) for c in axis.components)
             or has_halo(axes, axis)
-            and axis == axes.root
+            and len(path) == 0  # at the top
         ):
             ctree = PartialAxisTree(axis.copy(numbering=None))
             # this doesn't follow the normal pattern because we are accumulating
@@ -436,8 +456,7 @@ def _compute_layouts(
                     ctree = ctree.add_subtree(subtree, axis, component)
                     index_exprs.update(subiexprs)
 
-            # external_loops = collect_external_loops(ctree, index_exprs)
-            fulltree = _create_count_array_tree(ctree, index_exprs, axes.outer_loops)
+            fulltree = _create_count_array_tree(ctree, index_exprs)
 
             # now populate fulltree
             offset = IntRef(0)
@@ -481,10 +500,8 @@ def _compute_layouts(
             return layouts, ctree, index_exprs, steps
 
         # must therefore be affine
-        # FIXME next, for ragged maps this should not be hit, perhaps check for external loops?
         else:
             assert all(sub is None for sub in csubtrees)
-            ctree = None
             layouts = {}
             steps = [step_size(axes, axis, c) for c in axis.components]
             start = 0
@@ -492,7 +509,8 @@ def _compute_layouts(
                 mycomponent = axis.components[cidx]
                 sublayouts = sublayoutss[cidx].copy()
 
-                new_layout = AxisVariable(axis.label) * step + start
+                new_layout = axis_var * step + start
+
                 sublayouts[path | {axis.label: mycomponent.label}] = new_layout
                 start += _axis_component_size(axes, axis, mycomponent)
 
@@ -504,7 +522,6 @@ def _compute_layouts(
 def _create_count_array_tree(
     ctree,
     index_exprs,
-    outer_loops,
     axis=None,
     axes_acc=None,
     index_exprs_acc=None,
@@ -535,7 +552,6 @@ def _create_count_array_tree(
                 _create_count_array_tree(
                     ctree,
                     index_exprs,
-                    outer_loops,
                     subaxis,
                     axes_acc_,
                     index_exprs_acc_,
@@ -550,17 +566,18 @@ def _create_count_array_tree(
             # external_loops = collect_external_loops(
             #     axtree, index_exprs_acc_, linear=True
             # )
-            external_loops = outer_loops
-            if len(external_loops) > 0:
-                external_axes = PartialAxisTree.from_iterable(
-                    [l.index.iterset for l in external_loops]
-                )
-                myaxes = external_axes.add_subtree(axtree, *external_axes.leaf)
-            else:
-                myaxes = axtree
+            # external_loops = outer_loops
+            # if len(external_loops) > 0:
+            #     external_axes = PartialAxisTree.from_iterable(
+            #         [l.index.iterset for l in external_loops]
+            #     )
+            #     myaxes = external_axes.add_subtree(axtree, *external_axes.leaf)
+            # else:
+            #     myaxes = axtree
+            myaxes = axtree
 
+            # TODO some of these should be LoopIndexVariable...
             target_paths = {}
-            my_index_exprs = {}
             layout_exprs = {}
             for ax, clabel in myaxes.path_with_nodes(*myaxes.leaf).items():
                 target_paths[ax.id, clabel] = {ax.label: clabel}
@@ -716,33 +733,43 @@ def axis_tree_size(axes: AxisTree) -> int:
 
     # axis size is now an array
 
-    # not sure they need to be ordered
+    # the outer loops must be ordered since the inner loops may depend on the
+    # outer ones. Thought is needed for how to track this order. Here we do a
+    # hack and assume that they are in order of (arbitrary) ID.
     outer_loops_ord = tuple(sorted(outer_loops, key=lambda loop: loop.index.id))
 
     # size_axes = AxisTree.from_iterable(ol.index.iterset for ol in outer_loops_ord)
-    size_axes = AxisTree()
 
     # target_paths = {(ax.id, clabel): {ax.label: clabel} for ax, clabel in size_axes.path_with_nodes(*size_axes.leaf).items()}
-    target_paths = {
-        None: {ol.index.iterset.root.label: ol.index.iterset.root.component.label}
-        for ol in outer_loops_ord
-    }
+    # target_paths = {
+    #     None: {ol.index.iterset.root.label: ol.index.iterset.root.component.label}
+    #     for ol in outer_loops_ord
+    # }
+    target_paths = {}
 
     # this is dreadful, what if the outer loop has depth > 1
-    index_exprs = {None: {ol.index.iterset.root.label: ol} for ol in outer_loops_ord}
+    # index_exprs = {None: {ol.index.iterset.root.label: ol} for ol in outer_loops_ord}
+    index_exprs = {}
+
+    size_axes = AxisTree(
+        target_paths=target_paths,
+        index_exprs=index_exprs,
+        outer_loops=frozenset(),
+        layout_exprs={},
+    )
 
     # should this have index_exprs? yes.
     sizes = HierarchicalArray(
         size_axes,
-        target_paths=target_paths,
-        index_exprs=index_exprs,
+        target_paths=size_axes.target_paths,
+        index_exprs=size_axes.index_exprs,
         outer_loops=axes.outer_loops,
         dtype=IntType,
         prefix="size",
     )
 
-    outer_loops_iter = tuple(l.index.iter() for l in outer_loops)
-    for idxs in itertools.product(*outer_loops_iter):
+    # for idxs in itertools.product(*outer_loops_iter):
+    for idxs in my_product(outer_loops_ord):
         indices = merge_dicts(idx.source_exprs for idx in idxs)
 
         # this is a hack
@@ -752,6 +779,19 @@ def axis_tree_size(axes: AxisTree) -> int:
             size = _axis_size(axes, axes.root, indices)
         sizes.set_value(indices, size)
     return sizes
+
+
+def my_product(loops, indices=(), context=frozenset()):
+    loop, *inner_loops = loops
+
+    if inner_loops:
+        for index in loop.index.iter(context):
+            indices_ = indices + (index,)
+            context_ = context | {index}
+            yield from my_product(inner_loops, indices_, context_)
+    else:
+        for index in loop.index.iter(context):
+            yield indices + (index,)
 
 
 def _axis_size(

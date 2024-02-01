@@ -145,7 +145,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
                 data = np.asarray(data, dtype=dtype)
                 shape = data.shape
             else:
-                shape = axes.size
+                shape = axes.global_size
 
             data = DistributedBuffer(
                 shape,

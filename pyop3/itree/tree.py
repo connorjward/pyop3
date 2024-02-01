@@ -81,6 +81,13 @@ class IndexExpressionReplacer(pym.mapper.IdentityMapper):
 
 
 class IndexTree(LabelledTree):
+    fields = LabelledTree.fields | {"outer_loops"}
+
+    # TODO rename to node_map
+    def __init__(self, parent_to_children, outer_loops=frozenset()):
+        super().__init__(parent_to_children)
+        self.outer_loops = outer_loops
+
     @classmethod
     def from_nest(cls, nest):
         root, node_map = cls._from_nest(nest)
@@ -330,11 +337,18 @@ class ContextFreeLoopIndex(ContextFreeIndex):
     def target_paths(self):
         return freeze({None: self.path})
 
+    # should now be ignored
     @property
     def index_exprs(self):
         return freeze(
             {None: {axis: LoopIndexVariable(self, axis) for axis in self.path.keys()}}
         )
+
+    @property
+    def loops(self):
+        return self.iterset.outer_loops | {
+            LoopIndexVariable(self, axis) for axis in self.path.keys()
+        }
 
     @property
     def layout_exprs(self):
@@ -687,6 +701,10 @@ def as_index_forest(forest: Any, *, axes=None, **kwargs):
     # print(forest)
     if axes is not None:
         forest = _validated_index_forest(forest, axes=axes, **kwargs)
+        forest_ = {}
+        for ctx, index_tree in forest.items():
+            forest_[ctx] = index_tree.copy(outer_loops=axes.outer_loops)
+        forest = forest_
     return forest
 
 
@@ -991,9 +1009,7 @@ def _(loop_index: ContextFreeLoopIndex, indices, *, include_loop_index_shape, **
         target_paths,
         index_exprs,
         loop_index.layout_exprs,
-        frozenset(
-            index_exprs[None].values()
-        ),  # hack since we previously did outer loops in index_exprs
+        loop_index.loops,
     )
 
 
@@ -1309,8 +1325,13 @@ def _index_axes(
         prev_axes=axes,
         include_loop_index_shape=include_loop_index_shape,
     )
+
+    # index trees should track outer loops
+    outer_loops |= indices.outer_loops
+
     # check that slices etc have not been missed
-    if axes is not None and not include_loop_index_shape:
+    assert not include_loop_index_shape, "old option"
+    if axes is not None:
         for leaf_iaxis, leaf_icpt in indexed_axes.leaves:
             target_path = dict(tpaths.get(None, {}))
             for iaxis, icpt in indexed_axes.path_with_nodes(
