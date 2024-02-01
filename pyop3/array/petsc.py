@@ -157,12 +157,14 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
             if indexed_raxes.size == 0 or indexed_caxes.size == 0:
                 continue
 
-            router_loops = collect_external_loops(
-                indexed_raxes, indexed_raxes.index_exprs, linear=True
-            )
-            couter_loops = collect_external_loops(
-                indexed_caxes, indexed_caxes.index_exprs, linear=True
-            )
+            # router_loops = collect_external_loops(
+            #     indexed_raxes, indexed_raxes.index_exprs, linear=True
+            # )
+            # couter_loops = collect_external_loops(
+            #     indexed_caxes, indexed_caxes.index_exprs, linear=True
+            # )
+            router_loops = indexed_raxes.outer_loops
+            couter_loops = indexed_caxes.outer_loops
 
             # rmap_axes = AxisTree.from_iterable(
             #     [*(l.index.iterset for l in router_loops), indexed_raxes]

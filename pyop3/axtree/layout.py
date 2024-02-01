@@ -179,6 +179,7 @@ def size_requires_external_index(axes, axis, component, path=pmap()):
 # check for loop indices in any index_exprs
 # No, we need this because loop indices do not necessarily mean we need extra shape.
 def collect_externally_indexed_axes(axes, axis=None, component=None, path=pmap()):
+    assert False, "old code"
     from pyop3.array import HierarchicalArray
 
     if axes.is_empty:
@@ -274,6 +275,7 @@ class LoopIndexCollector(pym.mapper.CombineMapper):
 
 
 def collect_external_loops(axes, index_exprs, linear=False):
+    assert False, "old code"
     collector = LoopIndexCollector(linear)
     keys = [None]
     if not axes.is_empty:
@@ -435,7 +437,7 @@ def _compute_layouts(
                     index_exprs.update(subiexprs)
 
             # external_loops = collect_external_loops(ctree, index_exprs)
-            fulltree = _create_count_array_tree(ctree, index_exprs)
+            fulltree = _create_count_array_tree(ctree, index_exprs, axes.outer_loops)
 
             # now populate fulltree
             offset = IntRef(0)
@@ -500,7 +502,13 @@ def _compute_layouts(
 
 
 def _create_count_array_tree(
-    ctree, index_exprs, axis=None, axes_acc=None, index_exprs_acc=None, path=pmap()
+    ctree,
+    index_exprs,
+    outer_loops,
+    axis=None,
+    axes_acc=None,
+    index_exprs_acc=None,
+    path=pmap(),
 ):
     from pyop3.array import HierarchicalArray
 
@@ -527,6 +535,7 @@ def _create_count_array_tree(
                 _create_count_array_tree(
                     ctree,
                     index_exprs,
+                    outer_loops,
                     subaxis,
                     axes_acc_,
                     index_exprs_acc_,
@@ -538,9 +547,10 @@ def _create_count_array_tree(
 
             # do we have any external axes from loop indices?
             axtree = AxisTree.from_iterable(axes_acc_)
-            external_loops = collect_external_loops(
-                axtree, index_exprs_acc_, linear=True
-            )
+            # external_loops = collect_external_loops(
+            #     axtree, index_exprs_acc_, linear=True
+            # )
+            external_loops = outer_loops
             if len(external_loops) > 0:
                 external_axes = PartialAxisTree.from_iterable(
                     [l.index.iterset for l in external_loops]
@@ -593,19 +603,21 @@ def _tabulate_count_array_tree(
 
     if outermost:
         # unordered
-        external_loops = {}  # ordered set
-        for component in axis.components:
-            key = path | {axis.label: component.label}
-            if key in count_arrays:
-                external_loops.update(
-                    {
-                        l: None
-                        for l in collect_external_loops(
-                            count_arrays[key].axes, count_arrays[key].index_exprs
-                        )
-                    }
-                )
-        external_loops = tuple(external_loops.keys())
+        # external_loops = {}  # ordered set
+        # for component in axis.components:
+        #     key = path | {axis.label: component.label}
+        #     if key in count_arrays:
+        #         external_loops.update(
+        #             {
+        #                 l: None
+        #                 # for l in collect_external_loops(
+        #                 #     count_arrays[key].axes, count_arrays[key].index_exprs
+        #                 # )
+        #                 for l in count_arrays[key].outer_loops
+        #             }
+        #         )
+        # external_loops = tuple(external_loops.keys())
+        external_loops = axes.outer_loops
 
         if len(external_loops) > 0:
             outer_iter = itertools.product(*[l.index.iter() for l in external_loops])
@@ -695,18 +707,16 @@ def axis_tree_size(axes: AxisTree) -> int:
     """
     from pyop3.array import HierarchicalArray
 
-    outer_loops = collect_external_loops(axes, axes.index_exprs)
+    # outer_loops = collect_external_loops(axes, axes.index_exprs)
+    outer_loops = axes.outer_loops
     # external_axes = collect_externally_indexed_axes(axes)
     # if len(external_axes) == 0:
     if len(outer_loops) == 0:
         return _axis_size(axes, axes.root) if not axes.is_empty else 1
 
-    # breakpoint()
-    # not sure they need to be ordered
-    outer_loops_ord = collect_external_loops(axes, axes.index_exprs, linear=True)
-
     # axis size is now an array
 
+    # not sure they need to be ordered
     outer_loops_ord = tuple(sorted(outer_loops, key=lambda loop: loop.index.id))
 
     # size_axes = AxisTree.from_iterable(ol.index.iterset for ol in outer_loops_ord)
