@@ -58,6 +58,7 @@ def maxis(comm, msf):
 
 
 @pytest.mark.parallel(nprocs=2)
+@pytest.mark.timeout(5)
 def test_halo_data_stored_at_end_of_array(comm, paxis):
     if comm.rank == 0:
         reordered = [3, 2, 4, 5, 0, 1]
@@ -69,6 +70,7 @@ def test_halo_data_stored_at_end_of_array(comm, paxis):
 
 
 @pytest.mark.parallel(nprocs=2)
+@pytest.mark.timeout(5)
 def test_multi_component_halo_data_stored_at_end(comm, maxis):
     if comm.rank == 0:
         # unchanged as halo data already at the end
@@ -80,6 +82,7 @@ def test_multi_component_halo_data_stored_at_end(comm, maxis):
 
 
 @pytest.mark.parallel(nprocs=2)
+@pytest.mark.timeout(5)
 def test_distributed_subaxes_partition_halo_data(paxis):
     # Check that
     #
@@ -131,6 +134,7 @@ def test_distributed_subaxes_partition_halo_data(paxis):
 
 
 @pytest.mark.parallel(nprocs=2)
+@pytest.mark.timeout(5)
 def test_nested_parallel_axes_produce_correct_sf(comm, paxis):
     # Check that
     #
@@ -166,6 +170,7 @@ def test_nested_parallel_axes_produce_correct_sf(comm, paxis):
 
 @pytest.mark.parallel(nprocs=2)
 @pytest.mark.parametrize("with_ghosts", [False, True])
+@pytest.mark.timeout(5)
 def test_partition_iterset_scalar(comm, paxis, with_ghosts):
     array = op3.HierarchicalArray(paxis, dtype=op3.ScalarType)
 
@@ -193,6 +198,7 @@ def test_partition_iterset_scalar(comm, paxis, with_ghosts):
 
 @pytest.mark.parallel(nprocs=2)
 @pytest.mark.parametrize("with_ghosts", [False, True])
+@pytest.mark.timeout(5)
 def test_partition_iterset_with_map(comm, paxis, with_ghosts):
     axis_label = paxis.label
     component_label = just_one(paxis.components).label
@@ -248,6 +254,7 @@ def test_partition_iterset_with_map(comm, paxis, with_ghosts):
 
 @pytest.mark.parallel(nprocs=2)
 @pytest.mark.parametrize("intent", [op3.WRITE, op3.INC])
+@pytest.mark.timeout(5)
 def test_shared_array(comm, intent):
     sf = op3.sf.single_star(comm, 3)
     axes = op3.AxisTree.from_nest({op3.Axis(3, sf=sf): op3.Axis(2)})

@@ -991,6 +991,9 @@ def _(loop_index: ContextFreeLoopIndex, indices, *, include_loop_index_shape, **
         target_paths,
         index_exprs,
         loop_index.layout_exprs,
+        frozenset(
+            index_exprs[None].values()
+        ),  # hack since we previously did outer loops in index_exprs
     )
 
 
@@ -1101,6 +1104,7 @@ def _(slice_: Slice, indices, *, prev_axes, **kwargs):
         target_path_per_component,
         index_exprs_per_component,
         layout_exprs_per_component,
+        frozenset(),  # no outer loops
     )
 
 
@@ -1118,6 +1122,7 @@ def _(
         prior_target_path_per_cpt,
         prior_index_exprs_per_cpt,
         _,
+        outer_loops,
     ) = collect_shape_index_callback(
         called_map.index,
         indices,
@@ -1189,6 +1194,7 @@ def _(
         freeze(target_path_per_cpt),
         freeze(index_exprs_per_cpt),
         freeze(layout_exprs_per_cpt),
+        outer_loops,
     )
 
 
@@ -1294,6 +1300,7 @@ def _index_axes(
         tpaths,
         index_expr_per_target,
         layout_expr_per_target,
+        outer_loops,
     ) = _index_axes_rec(
         indices,
         (),
@@ -1318,6 +1325,7 @@ def _index_axes(
         target_paths=tpaths,
         index_exprs=index_expr_per_target,
         layout_exprs=layout_expr_per_target,
+        outer_loops=outer_loops,
     )
 
 
@@ -1329,7 +1337,7 @@ def _index_axes_rec(
     **kwargs,
 ):
     index_data = collect_shape_index_callback(current_index, indices_acc, **kwargs)
-    axes_per_index, *rest = index_data
+    axes_per_index, *rest, outer_loops = index_data
 
     (
         target_path_per_cpt_per_index,
@@ -1375,6 +1383,8 @@ def _index_axes_rec(
                     index_exprs_per_cpt_per_index.update({key: retval[2][key]})
                     layout_exprs_per_cpt_per_index.update({key: retval[3][key]})
 
+            outer_loops |= retval[4]
+
     target_path_per_component = freeze(target_path_per_cpt_per_index)
     index_exprs_per_component = freeze(index_exprs_per_cpt_per_index)
     layout_exprs_per_component = freeze(layout_exprs_per_cpt_per_index)
@@ -1392,6 +1402,7 @@ def _index_axes_rec(
         target_path_per_component,
         index_exprs_per_component,
         layout_exprs_per_component,
+        outer_loops,
     )
 
 

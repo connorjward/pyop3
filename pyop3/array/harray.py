@@ -115,6 +115,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         layouts=None,
         target_paths=None,
         index_exprs=None,
+        outer_loops=None,
         name=None,
         prefix=None,
         _shape=None,
@@ -158,11 +159,14 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         self._axes = axes
         self.max_value = max_value
 
-        if some_but_not_all(x is None for x in [target_paths, index_exprs]):
+        if some_but_not_all(
+            x is None for x in [target_paths, index_exprs, outer_loops]
+        ):
             raise ValueError
 
         self._target_paths = target_paths or axes._default_target_paths()
         self._index_exprs = index_exprs or axes._default_index_exprs()
+        self._outer_loops = outer_loops or frozenset()
 
         self._layouts = layouts if layouts is not None else axes.layouts
 
@@ -197,6 +201,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
                 max_value=self.max_value,
                 target_paths=target_paths,
                 index_exprs=index_exprs,
+                outer_loops=indexed_axes.outer_loops,
                 layouts=self.layouts,
                 name=self.name,
             )
@@ -226,6 +231,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
                 layouts=self.layouts,
                 target_paths=target_paths,
                 index_exprs=index_exprs,
+                outer_loops=indexed_axes.outer_loops,
                 name=self.name,
                 max_value=self.max_value,
             )
@@ -279,6 +285,10 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
     @property
     def index_exprs(self):
         return self._index_exprs
+
+    @property
+    def outer_loops(self):
+        return self._outer_loops
 
     @property
     def layouts(self):
@@ -506,6 +516,7 @@ class ContextSensitiveMultiArray(Array, ContextSensitive):
                 max_value=self.max_value,
                 target_paths=target_paths,
                 index_exprs=index_exprs,
+                outer_loops=indexed_axes.outer_loops,
                 layouts=self.layouts,
                 name=self.name,
             )

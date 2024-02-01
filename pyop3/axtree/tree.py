@@ -75,6 +75,11 @@ class Indexed(abc.ABC):
 
     @property
     @abc.abstractmethod
+    def outer_loops(self):
+        pass
+
+    @property
+    @abc.abstractmethod
     def layouts(self):
         pass
 
@@ -716,6 +721,17 @@ class PartialAxisTree(LabelledTree):
 
         return axis_tree_size(self)
 
+    @cached_property
+    def global_size(self):
+        from pyop3.array import HierarchicalArray
+
+        if isinstance(self.size, HierarchicalArray):
+            return np.sum(self.size.data_ro)
+        else:
+            assert isinstance(self.size, numbers.Integral)
+            return self.size
+
+    # rename to local_size?
     def alloc_size(self, axis=None):
         axis = axis or self.root
         return sum(cpt.alloc_size(self, axis) for cpt in axis.components)
@@ -726,6 +742,7 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
     fields = PartialAxisTree.fields | {
         "target_paths",
         "index_exprs",
+        "outer_loops",
         "layout_exprs",
     }
 
@@ -734,17 +751,23 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         parent_to_children=pmap(),
         target_paths=None,
         index_exprs=None,
+        outer_loops=None,
         layout_exprs=None,
     ):
         if some_but_not_all(
-            arg is None for arg in [target_paths, index_exprs, layout_exprs]
+            arg is None
+            for arg in [target_paths, index_exprs, outer_loops, layout_exprs]
         ):
             raise ValueError
+
+        if outer_loops is None:
+            outer_loops = frozenset()
 
         super().__init__(parent_to_children)
         self._target_paths = target_paths or self._default_target_paths()
         self._index_exprs = index_exprs or self._default_index_exprs()
         self.layout_exprs = layout_exprs or self._default_layout_exprs()
+        self._outer_loops = frozenset(outer_loops)
 
     def __getitem__(self, indices):
         from pyop3.itree.tree import _compose_bits, _index_axes, as_index_forest
@@ -771,7 +794,8 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
                 indexed_axes.parent_to_children,
                 target_paths,
                 index_exprs,
-                layout_exprs,
+                outer_loops=indexed_axes.outer_loops,
+                layout_exprs=layout_exprs,
             )
             axis_trees[context] = axis_tree
 
@@ -808,11 +832,13 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         target_paths = cls._default_target_paths(tree)
         index_exprs = cls._default_index_exprs(tree)
         layout_exprs = index_exprs
+        outer_loops = frozenset()
         return cls(
             tree.parent_to_children,
             target_paths,
             index_exprs,
-            layout_exprs,
+            outer_loops=outer_loops,
+            layout_exprs=layout_exprs,
         )
 
     def index(self):
@@ -843,6 +869,10 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
     @property
     def index_exprs(self):
         return self._index_exprs
+
+    @property
+    def outer_loops(self):
+        return self._outer_loops
 
     @cached_property
     def layouts(self):

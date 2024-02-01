@@ -242,6 +242,9 @@ class LoopIndexCollector(pym.mapper.CombineMapper):
     def map_algebraic_leaf(self, expr):
         return () if self._linear else frozenset()
 
+    def map_constant(self, expr):
+        return () if self._linear else frozenset()
+
     def map_loop_index(self, index):
         rec = collect_external_loops(
             index.index.iterset, index.index.iterset.index_exprs, linear=self._linear
@@ -267,7 +270,7 @@ class LoopIndexCollector(pym.mapper.CombineMapper):
             for index_expr in index.input_index_exprs.values()
             for idx in self.rec(index_expr)
         )
-        return tuple(*result) if self._linear else frozenset(result)
+        return tuple(result) if self._linear else frozenset(result)
 
 
 def collect_external_loops(axes, index_exprs, linear=False):
@@ -559,13 +562,15 @@ def _create_count_array_tree(
                 target_paths=target_paths,
                 index_exprs=index_exprs_acc_,
                 layout_exprs=layout_exprs,
+                outer_loops=axtree.outer_loops,
             )
 
             countarray = HierarchicalArray(
                 axtree,
                 target_paths=axtree._default_target_paths(),
                 index_exprs=index_exprs_acc_,
-                data=np.full(axis_tree_size(axtree), -1, dtype=IntType),
+                outer_loops=axtree.outer_loops,
+                data=np.full(axtree.global_size, -1, dtype=IntType),
                 # layouts=axtree.subst_layouts,
             )
             arrays[path_] = countarray
@@ -721,6 +726,7 @@ def axis_tree_size(axes: AxisTree) -> int:
         size_axes,
         target_paths=target_paths,
         index_exprs=index_exprs,
+        outer_loops=axes.outer_loops,
         dtype=IntType,
         prefix="size",
     )
@@ -728,9 +734,13 @@ def axis_tree_size(axes: AxisTree) -> int:
     outer_loops_iter = tuple(l.index.iter() for l in outer_loops)
     for idxs in itertools.product(*outer_loops_iter):
         indices = merge_dicts(idx.source_exprs for idx in idxs)
-        size = _axis_size(axes, axes.root, indices)
+
+        # this is a hack
+        if axes.is_empty:
+            size = 1
+        else:
+            size = _axis_size(axes, axes.root, indices)
         sizes.set_value(indices, size)
-    breakpoint()
     return sizes
 
 
