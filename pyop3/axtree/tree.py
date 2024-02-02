@@ -884,16 +884,29 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         )
         from pyop3.itree.tree import IndexExpressionReplacer
 
-        if self.outer_loops:
-            breakpoint()
-        flat_outer_loops = []
+        axes_iter = []
+        index_exprs = {}
+        loop_vars = {}
+        for ol in self.outer_loops:
+            iterset = ol.index.iterset
+            for axis in iterset.path_with_nodes(*iterset.leaf):
+                # FIXME relabelling here means that paths are not propagated properly
+                # when we tabulate.
+                # axis_ = axis.copy(id=Axis.unique_id(), label=Axis.unique_label())
+                axis_ = axis
+                axes_iter.append(axis_)
+                index_exprs[axis_.id, axis_.component.label] = {axis.label: ol}
+                loop_vars[axis_, axis.component] = ol
+        layout_axes = PartialAxisTree.from_iterable([*axes_iter, self])
 
-        layouts, _, _, _ = _compute_layouts(self, flat_outer_loops)
+        if layout_axes.is_empty:
+            return freeze({pmap(): 0})
 
-        if self.is_empty:
-            return freeze(layouts)
+        layouts, _, _, _, _ = _compute_layouts(
+            layout_axes, self.index_exprs | index_exprs, loop_vars
+        )
 
-        layoutsnew = _collect_at_leaves(self, layouts)
+        layoutsnew = _collect_at_leaves(self, layout_axes, layouts)
         layouts = freeze(dict(layoutsnew))
 
         layouts_ = {pmap(): 0}

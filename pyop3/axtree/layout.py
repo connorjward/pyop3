@@ -110,23 +110,24 @@ def has_constant_start(
     return isinstance(component.count, numbers.Integral) or outer_axes_are_all_indexed
 
 
-def has_fixed_size(axes, axis, component):
-    return not size_requires_external_index(axes, axis, component)
+def has_fixed_size(axes, axis, component, outer_loops):
+    return not size_requires_external_index(axes, axis, component, outer_loops)
 
 
 def step_size(
     axes: AxisTree,
     axis: Axis,
     component: AxisComponent,
+    inner_outer_loops,
     indices=PrettyTuple(),
 ):
     """Return the size of step required to stride over a multi-axis component.
 
     Non-constant strides will raise an exception.
     """
-    if not has_constant_step(axes, axis, component) and not indices:
+    if not has_constant_step(axes, axis, component, inner_outer_loops) and not indices:
         raise ValueError
-    if subaxis := axes.component_child(axis, component):
+    if subaxis := axes.child(axis, component):
         return _axis_size(axes, subaxis, indices)
     else:
         return 1
@@ -153,25 +154,28 @@ def requires_external_index(axtree, axis, component_index):
     )  # or numbering_requires_external_index(axtree, axis, component_index)
 
 
-def size_requires_external_index(axes, axis, component, path=pmap()):
+def size_requires_external_index(axes, axis, component, outer_loops, path=pmap()):
+    from pyop3.array import HierarchicalArray
+
     count = component.count
-    if not component.has_integer_count:
+    if isinstance(count, HierarchicalArray):
+        if set(count.outer_loops) > set(outer_loops):
+            return True
         # is the path sufficient? i.e. do we have enough externally provided indices
         # to correctly index the axis?
-        if count.axes.is_empty:
-            return False
-        for axlabel, clabel in count.axes.path(*count.axes.leaf).items():
-            if axlabel in path:
-                assert path[axlabel] == clabel
-            else:
-                return True
-    else:
-        if subaxis := axes.component_child(axis, component):
-            for c in subaxis.components:
-                # path_ = path | {subaxis.label: c.label}
-                path_ = path | {axis.label: component.label}
-                if size_requires_external_index(axes, subaxis, c, path_):
+        if not count.axes.is_empty:
+            for axlabel, clabel in count.axes.path(*count.axes.leaf).items():
+                if axlabel in path:
+                    assert path[axlabel] == clabel
+                else:
                     return True
+
+    if subaxis := axes.child(axis, component):
+        for c in subaxis.components:
+            # path_ = path | {subaxis.label: c.label}
+            path_ = path | {axis.label: component.label}
+            if size_requires_external_index(axes, subaxis, c, outer_loops, path_):
+                return True
     return False
 
 
@@ -294,39 +298,48 @@ def collect_external_loops(axes, index_exprs, linear=False):
     return tuple(result) if linear else frozenset(result)
 
 
-def has_constant_step(axes: AxisTree, axis, cpt):
+def has_constant_step(axes: AxisTree, axis, cpt, inner_outer_loops):
     # we have a constant step if none of the internal dimensions need to index themselves
     # with the current index (numbering doesn't matter here)
     if subaxis := axes.child(axis, cpt):
         return all(
             # not size_requires_external_index(axes, subaxis, c, freeze({subaxis.label: c.label}))
-            not size_requires_external_index(axes, subaxis, c)
+            not size_requires_external_index(axes, subaxis, c, inner_outer_loops)
             for c in subaxis.components
         )
     else:
         return True
 
 
+def collect_outer_loops(axes, axis, index_exprs):
+    assert False, "old code"
+    from pyop3.itree.tree import LoopIndexVariable
+
+    outer_loops = []
+    while axis is not None:
+        if len(axis.components) > 1:
+            # outer loops can only be linear
+            break
+        # for expr in index_exprs.get((axis.id, axis.component.label), {}):
+        expr = index_exprs.get((axis.id, axis.component.label), None)
+        if isinstance(expr, LoopIndexVariable):
+            outer_loops.append(expr)
+        axis = axes.child(axis, axis.component)
+    return tuple(outer_loops)
+
+
 def _compute_layouts(
     axes: AxisTree,
-    outer_loops,
+    index_exprs,  # needed any more?
+    loop_vars,
     axis=None,
     path=pmap(),
 ):
     from pyop3.array.harray import MultiArrayVariable
 
-    if len(outer_loops) > 1:
-        outer_loop, *outer_loops_ = outer_loops
-        axis, axis_var = outer_loop
-    else:
-        outer_loops_ = ()
-
-        if axis is None:
-            if axes.is_empty:
-                return pmap({pmap(): 0}), "not used", {}, "not used"
-            else:
-                axis = axes.root
-        axis_var = AxisVariable(axis.label)
+    if axis is None:
+        assert not axes.is_empty
+        axis = axes.root
 
     layouts = {}
     steps = {}
@@ -334,30 +347,33 @@ def _compute_layouts(
     # Post-order traversal
     csubtrees = []
     # think I can avoid target path for now
-    subindex_exprs = []
+    subindex_exprs = []  # is this needed?
     sublayoutss = []
+    subloops = []
     for cpt in axis.components:
-        if len(outer_loops_) == 0:
-            if subaxis := axes.child(axis, cpt):
-                sublayouts, csubtree, subindex_exprs_, substeps = _compute_layouts(
-                    axes, outer_loops_, subaxis, path | {axis.label: cpt.label}
-                )
-                sublayoutss.append(sublayouts)
-                subindex_exprs.append(subindex_exprs_)
-                csubtrees.append(csubtree)
-                steps.update(substeps)
-            else:
-                csubtrees.append(None)
-                subindex_exprs.append(None)
-                sublayoutss.append(defaultdict(list))
+        if (axis, cpt) not in loop_vars:
+            path_ = path | {axis.label: cpt.label}
         else:
-            sublayouts, csubtree, subindex_exprs_, substeps = _compute_layouts(
-                axes, outer_loops_, None, path | {axis.label: cpt.label}
-            )
+            path_ = path
+
+        if subaxis := axes.child(axis, cpt):
+            (
+                sublayouts,
+                csubtree,
+                subindex_exprs_,
+                substeps,
+                subloops_,
+            ) = _compute_layouts(axes, index_exprs, loop_vars, subaxis, path_)
             sublayoutss.append(sublayouts)
             subindex_exprs.append(subindex_exprs_)
             csubtrees.append(csubtree)
             steps.update(substeps)
+            subloops.append(subloops_)
+        else:
+            csubtrees.append(None)
+            subindex_exprs.append(None)
+            sublayoutss.append(defaultdict(list))
+            subloops.append(frozenset())
 
     """
     There are two conditions that we need to worry about:
@@ -386,21 +402,36 @@ def _compute_layouts(
     a fixed size even for the non-ragged components.
     """
 
+    outer_loops_per_component = {}
+    for i, cpt in enumerate(axis.components):
+        if (axis, cpt) in loop_vars:
+            my_loops = frozenset({loop_vars[axis, cpt]}) | subloops[i]
+        else:
+            my_loops = subloops[i]
+        outer_loops_per_component[cpt] = my_loops
+
+    # if noouter_loops:
+    # breakpoint()
+
     # 1. do we need to pass further up? i.e. are we variable size?
     # also if we have halo data then we need to pass to the top
-    if (not all(has_fixed_size(axes, axis, cpt) for cpt in axis.components)) or (
-        has_halo(axes, axis) and len(path) > 0
-    ):
+    if (
+        not all(
+            has_fixed_size(axes, axis, cpt, outer_loops_per_component[cpt])
+            for cpt in axis.components
+        )
+    ) or (has_halo(axes, axis) and len(path) > 0):
         if has_halo(axes, axis) or not all(
-            has_constant_step(axes, axis, c) for c in axis.components
+            has_constant_step(axes, axis, c, subloops[i])
+            for i, c in enumerate(axis.components)
         ):
             ctree = PartialAxisTree(axis.copy(numbering=None))
 
             # this doesn't follow the normal pattern because we are accumulating
             # *upwards*
-            index_exprs = {}
+            myindex_exprs = {}
             for c in axis.components:
-                index_exprs[axis.id, c.label] = axes.index_exprs.get(
+                myindex_exprs[axis.id, c.label] = index_exprs.get(
                     (axis.id, c.label), pmap()
                 )
             # we enforce here that all subaxes must be tabulated, is this always
@@ -410,24 +441,31 @@ def _compute_layouts(
                     axis.components, csubtrees, subindex_exprs
                 ):
                     ctree = ctree.add_subtree(subtree, axis, component)
-                    index_exprs.update(subindex_exprs_)
+                    myindex_exprs.update(subindex_exprs_)
         else:
             # we must be at the bottom of a ragged patch - therefore don't
             # add to shape of things
             # in theory if we are ragged and permuted then we do want to include this level
             ctree = None
-            index_exprs = {}
+            myindex_exprs = {}
             for c in axis.components:
-                index_exprs[axis.id, c.label] = axes.index_exprs.get(
+                myindex_exprs[axis.id, c.label] = index_exprs.get(
                     (axis.id, c.label), pmap()
                 )
             for c in axis.components:
-                step = step_size(axes, axis, c)
+                step = step_size(axes, axis, c, index_exprs)
+                axis_var = index_exprs[axis.id, c.label][axis.label]
                 layouts.update({path | {axis.label: c.label}: axis_var * step})
 
         # layouts and steps are just propagated from below
         layouts.update(merge_dicts(sublayoutss))
-        return layouts, ctree, index_exprs, steps
+        return (
+            layouts,
+            ctree,
+            myindex_exprs,
+            steps,
+            frozenset(x for v in outer_loops_per_component.values() for x in v),
+        )
 
     # 2. add layouts here
     else:
@@ -435,16 +473,19 @@ def _compute_layouts(
         interleaved = len(axis.components) > 1 and axis.numbering is not None
         if (
             interleaved
-            or not all(has_constant_step(axes, axis, c) for c in axis.components)
+            or not all(
+                has_constant_step(axes, axis, c, subloops[i])
+                for i, c in enumerate(axis.components)
+            )
             or has_halo(axes, axis)
             and len(path) == 0  # at the top
         ):
             ctree = PartialAxisTree(axis.copy(numbering=None))
             # this doesn't follow the normal pattern because we are accumulating
             # *upwards*
-            index_exprs = {}
+            myindex_exprs = {}
             for c in axis.components:
-                index_exprs[axis.id, c.label] = axes.index_exprs.get(
+                myindex_exprs[axis.id, c.label] = index_exprs.get(
                     (axis.id, c.label), pmap()
                 )
             # we enforce here that all subaxes must be tabulated, is this always
@@ -454,16 +495,20 @@ def _compute_layouts(
                     axis.components, csubtrees, subindex_exprs
                 ):
                     ctree = ctree.add_subtree(subtree, axis, component)
-                    index_exprs.update(subiexprs)
+                    myindex_exprs.update(subiexprs)
 
-            fulltree = _create_count_array_tree(ctree, index_exprs)
+            fulltree = _create_count_array_tree(ctree, myindex_exprs)
 
             # now populate fulltree
             offset = IntRef(0)
-            _tabulate_count_array_tree(axes, axis, fulltree, offset, setting_halo=False)
+            _tabulate_count_array_tree(
+                axes, axis, myindex_exprs, fulltree, offset, setting_halo=False
+            )
 
             # apply ghost offset stuff, the offset from the previous pass is used
-            _tabulate_count_array_tree(axes, axis, fulltree, offset, setting_halo=True)
+            _tabulate_count_array_tree(
+                axes, axis, myindex_exprs, fulltree, offset, setting_halo=True
+            )
 
             for subpath, offset_data in fulltree.items():
                 # TODO avoid copy paste stuff, this is the same as in itree/tree.py
@@ -497,18 +542,28 @@ def _compute_layouts(
                 steps = {path: _axis_size(axes, axis)}
 
             layouts.update(merge_dicts(sublayoutss))
-            return layouts, ctree, index_exprs, steps
+            return (
+                layouts,
+                ctree,
+                myindex_exprs,
+                steps,
+                frozenset(x for v in outer_loops_per_component.values() for x in v),
+            )
 
         # must therefore be affine
         else:
             assert all(sub is None for sub in csubtrees)
             layouts = {}
-            steps = [step_size(axes, axis, c) for c in axis.components]
+            steps = [
+                step_size(axes, axis, c, subloops[i])
+                for i, c in enumerate(axis.components)
+            ]
             start = 0
             for cidx, step in enumerate(steps):
                 mycomponent = axis.components[cidx]
                 sublayouts = sublayoutss[cidx].copy()
 
+                axis_var = index_exprs[axis.id, mycomponent.label][axis.label]
                 new_layout = axis_var * step + start
 
                 sublayouts[path | {axis.label: mycomponent.label}] = new_layout
@@ -516,7 +571,13 @@ def _compute_layouts(
 
                 layouts.update(sublayouts)
             steps = {path: _axis_size(axes, axis)}
-            return layouts, None, None, steps
+            return (
+                layouts,
+                None,
+                None,
+                steps,
+                frozenset(x for v in outer_loops_per_component.values() for x in v),
+            )
 
 
 def _create_count_array_tree(
@@ -574,31 +635,26 @@ def _create_count_array_tree(
             #     myaxes = external_axes.add_subtree(axtree, *external_axes.leaf)
             # else:
             #     myaxes = axtree
-            myaxes = axtree
 
             # TODO some of these should be LoopIndexVariable...
-            target_paths = {}
-            layout_exprs = {}
-            for ax, clabel in myaxes.path_with_nodes(*myaxes.leaf).items():
-                target_paths[ax.id, clabel] = {ax.label: clabel}
-                # my_index_exprs[ax.id, cpt.label] = index_exprs.get()
-                layout_exprs[ax.id, clabel] = {ax.label: AxisVariable(ax.label)}
+            # target_paths = {}
+            # layout_exprs = {}
+            # for ax, clabel in myaxes.path_with_nodes(*myaxes.leaf).items():
+            #     target_paths[ax.id, clabel] = {ax.label: clabel}
+            #     # my_index_exprs[ax.id, cpt.label] = index_exprs.get()
+            #     layout_exprs[ax.id, clabel] = {ax.label: AxisVariable(ax.label)}
 
-            axtree = AxisTree(
-                myaxes.parent_to_children,
-                target_paths=target_paths,
-                index_exprs=index_exprs_acc_,
-                layout_exprs=layout_exprs,
-                outer_loops=axtree.outer_loops,
-            )
+            # breakpoint()
+            # new_index_exprs = dict(axtree.index_exprs)
+            # new_index_exprs[???] = ...
 
             countarray = HierarchicalArray(
                 axtree,
                 target_paths=axtree._default_target_paths(),
                 index_exprs=index_exprs_acc_,
-                outer_loops=axtree.outer_loops,
+                outer_loops=frozenset(),
                 data=np.full(axtree.global_size, -1, dtype=IntType),
-                # layouts=axtree.subst_layouts,
+                # use default layout, just tweak index_exprs
             )
             arrays[path_] = countarray
 
@@ -608,110 +664,92 @@ def _create_count_array_tree(
 def _tabulate_count_array_tree(
     axes,
     axis,
+    index_exprs,
     count_arrays,
     offset,
     path=pmap(),  # might not be needed
-    indices=None,
+    indices=pmap(),
     is_owned=True,
     setting_halo=False,
     outermost=True,
 ):
     npoints = sum(_as_int(c.count, indices) for c in axis.components)
 
-    if outermost:
-        # unordered
-        # external_loops = {}  # ordered set
-        # for component in axis.components:
-        #     key = path | {axis.label: component.label}
-        #     if key in count_arrays:
-        #         external_loops.update(
-        #             {
-        #                 l: None
-        #                 # for l in collect_external_loops(
-        #                 #     count_arrays[key].axes, count_arrays[key].index_exprs
-        #                 # )
-        #                 for l in count_arrays[key].outer_loops
-        #             }
-        #         )
-        # external_loops = tuple(external_loops.keys())
-        external_loops = axes.outer_loops
+    offsets = component_offsets(axis, indices)
+    points = axis.numbering.data_ro if axis.numbering is not None else range(npoints)
 
-        if len(external_loops) > 0:
-            outer_iter = itertools.product(*[l.index.iter() for l in external_loops])
-        else:
-            outer_iter = [[]]
-    else:
-        outer_iter = [[]]
+    counters = {c: itertools.count() for c in axis.components}
+    for new_pt, old_pt in enumerate(points):
+        if axis.sf is not None:
+            is_owned = new_pt < axis.sf.nowned
 
-    for outer_idxs in outer_iter:
-        context = merge_dicts(idx.source_exprs for idx in outer_idxs)
+        component, _ = component_number_from_offsets(axis, old_pt, offsets)
 
-        if outermost:
-            indices = context
+        new_strata_pt = next(counters[component])
 
-        offsets = component_offsets(axis, indices)
-        points = (
-            axis.numbering.data_ro if axis.numbering is not None else range(npoints)
-        )
-
-        counters = {c: itertools.count() for c in axis.components}
-        for new_pt, old_pt in enumerate(points):
-            if axis.sf is not None:
-                is_owned = new_pt < axis.sf.nowned
-
-            component, _ = component_number_from_offsets(axis, old_pt, offsets)
-
-            new_strata_pt = next(counters[component])
-
-            path_ = path | {axis.label: component.label}
-            indices_ = indices | {axis.label: new_strata_pt}
-            if path_ in count_arrays:
-                if is_owned and not setting_halo or not is_owned and setting_halo:
-                    count_arrays[path_].set_value(
-                        indices_,
-                        offset.value,
-                    )
-                    offset += step_size(
-                        axes,
-                        axis,
-                        component,
-                        indices_,
-                    )
-            else:
-                subaxis = axes.component_child(axis, component)
-                assert subaxis
-                _tabulate_count_array_tree(
-                    axes,
-                    subaxis,
-                    count_arrays,
-                    offset,
-                    path_,
+        path_ = path | {axis.label: component.label}
+        indices_ = indices | {axis.label: new_strata_pt}
+        if path_ in count_arrays:
+            if is_owned and not setting_halo or not is_owned and setting_halo:
+                count_arrays[path_].set_value(
                     indices_,
-                    is_owned=is_owned,
-                    setting_halo=setting_halo,
-                    outermost=False,
+                    offset.value,
                 )
+                offset += step_size(
+                    axes,
+                    axis,
+                    component,
+                    index_exprs,
+                    indices_,
+                )
+        else:
+            subaxis = axes.component_child(axis, component)
+            assert subaxis
+            _tabulate_count_array_tree(
+                axes,
+                subaxis,
+                index_exprs,
+                count_arrays,
+                offset,
+                path_,
+                indices_,
+                is_owned=is_owned,
+                setting_halo=setting_halo,
+                outermost=False,
+            )
 
 
 # TODO this whole function sucks, should accumulate earlier
 def _collect_at_leaves(
     axes,
+    layout_axes,
     values,
     axis: Optional[Axis] = None,
     path=pmap(),
+    layout_path=pmap(),
     prior=0,
 ):
     acc = {}
     if axis is None:
-        axis = axes.root
+        axis = layout_axes.root
         acc[pmap()] = 0
 
-    for cpt in axis.components:
-        path_ = path | {axis.label: cpt.label}
-        prior_ = prior + values.get(path_, 0)
-        acc[path_] = prior_
-        if subaxis := axes.component_child(axis, cpt):
-            acc.update(_collect_at_leaves(axes, values, subaxis, path_, prior_))
+    for component in axis.components:
+        layout_path_ = layout_path | {axis.label: component.label}
+        prior_ = prior + values.get(layout_path_, 0)
+
+        if axis in axes.nodes:
+            path_ = path | {axis.label: component.label}
+            acc[path_] = prior_
+        else:
+            path_ = path
+
+        if subaxis := layout_axes.child(axis, component):
+            acc.update(
+                _collect_at_leaves(
+                    axes, layout_axes, values, subaxis, path_, layout_path_, prior_
+                )
+            )
     return acc
 
 
@@ -738,32 +776,22 @@ def axis_tree_size(axes: AxisTree) -> int:
     # hack and assume that they are in order of (arbitrary) ID.
     outer_loops_ord = tuple(sorted(outer_loops, key=lambda loop: loop.index.id))
 
-    # size_axes = AxisTree.from_iterable(ol.index.iterset for ol in outer_loops_ord)
-
-    # target_paths = {(ax.id, clabel): {ax.label: clabel} for ax, clabel in size_axes.path_with_nodes(*size_axes.leaf).items()}
-    # target_paths = {
-    #     None: {ol.index.iterset.root.label: ol.index.iterset.root.component.label}
-    #     for ol in outer_loops_ord
-    # }
-    target_paths = {}
-
-    # this is dreadful, what if the outer loop has depth > 1
-    # index_exprs = {None: {ol.index.iterset.root.label: ol} for ol in outer_loops_ord}
+    axes_iter = []
     index_exprs = {}
+    for ol in outer_loops_ord:
+        iterset = ol.index.iterset
+        for axis in iterset.path_with_nodes(*iterset.leaf):
+            axis_ = axis.copy(id=Axis.unique_id(), label=Axis.unique_label())
+            axes_iter.append(axis_)
+            index_exprs[axis_.id, axis_.component.label] = ol
+    size_axes = AxisTree.from_iterable(axes_iter)
+    target_paths = size_axes._default_target_paths()
 
-    size_axes = AxisTree(
-        target_paths=target_paths,
-        index_exprs=index_exprs,
-        outer_loops=frozenset(),
-        layout_exprs={},
-    )
-
-    # should this have index_exprs? yes.
     sizes = HierarchicalArray(
         size_axes,
-        target_paths=size_axes.target_paths,
-        index_exprs=size_axes.index_exprs,
-        outer_loops=axes.outer_loops,
+        target_paths=target_paths,
+        index_exprs=index_exprs,
+        outer_loops=frozenset(),  # only temporaries need this
         dtype=IntType,
         prefix="size",
     )
