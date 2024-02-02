@@ -149,7 +149,8 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
 
             data = DistributedBuffer(
                 shape,
-                axes.sf or axes.comm,
+                # axes.sf or axes.comm,
+                axes.comm,  # FIXME, layout mumbo jumbo
                 dtype,
                 name=self.name,
                 data=data,

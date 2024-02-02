@@ -362,6 +362,9 @@ class LabelledTree(AbstractTree):
         if not parent:
             raise NotImplementedError("TODO")
 
+        if subtree.is_empty:
+            return self
+
         assert isinstance(parent, MultiComponentLabelledNode)
         clabel = as_component_label(component)
         cidx = parent.component_labels.index(clabel)

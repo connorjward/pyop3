@@ -418,10 +418,11 @@ def test_independent_ragged_axes():
 def test_tabulate_nested_ragged_indexed_layouts():
     axis0 = op3.Axis(3)
     axis1 = op3.Axis(2)
+    axis2 = op3.Axis(2)
     nnz_data = np.asarray([[1, 0], [3, 2], [1, 1]], dtype=op3.IntType).flatten()
     nnz_axes = op3.AxisTree.from_iterable([axis0, axis1])
     nnz = op3.HierarchicalArray(nnz_axes, data=nnz_data)
-    axes = op3.AxisTree.from_iterable([axis0, axis1, op3.Axis(nnz)])
+    axes = op3.AxisTree.from_iterable([axis0, axis1, op3.Axis(nnz), axis2])
     # axes = op3.AxisTree.from_iterable([axis0, op3.Axis(nnz), op3.Axis(2)])
     # axes = op3.AxisTree.from_iterable([axis0, op3.Axis(nnz)])
 
@@ -429,5 +430,6 @@ def test_tabulate_nested_ragged_indexed_layouts():
     indexed_axes = just_one(axes[p].context_map.values())
 
     layout = indexed_axes.subst_layouts[indexed_axes.path(*indexed_axes.leaf)]
+    breakpoint()
     array0 = just_one(collect_multi_arrays(layout))
     assert (array0.data_ro == steps(nnz_data, drop_last=True)).all()

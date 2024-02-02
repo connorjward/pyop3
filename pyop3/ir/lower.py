@@ -714,7 +714,7 @@ def _(assignment, loop_indices, codegen_context):
     #     freeze({rmap.axes.root.label: rmap.axes.root.component.label})
     # ]
     rlayouts = rmap.layouts[pmap()]
-    breakpoint()
+    # breakpoint()
     roffset = JnameSubstitutor(loop_indices, codegen_context)(rlayouts)
 
     # clayouts = cmap.layouts[

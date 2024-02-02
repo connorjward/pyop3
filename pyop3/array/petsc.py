@@ -152,12 +152,16 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
         arrays = {}
         for ctx, (rtree, ctree) in rcforest.items():
             indexed_raxes = _index_axes(rtree, ctx, self.raxes)
+            # breakpoint()
             indexed_caxes = _index_axes(ctree, ctx, self.caxes)
 
             if indexed_raxes.alloc_size() == 0 or indexed_caxes.alloc_size() == 0:
                 continue
             router_loops = indexed_raxes.outer_loops
             couter_loops = indexed_caxes.outer_loops
+
+            rloop_map = {l.index.id: l for l in router_loops}
+            cloop_map = {l.index.id: l for l in couter_loops}
 
             router_loops_ord = tuple(
                 sorted(router_loops, key=lambda loop: loop.index.id)
@@ -170,30 +174,37 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
                 indexed_raxes,
                 target_paths=indexed_raxes.target_paths,
                 index_exprs=indexed_raxes.index_exprs,
-                outer_loops=indexed_raxes.outer_loops,
+                outer_loops=frozenset(),
                 dtype=IntType,
             )
             cmap = HierarchicalArray(
                 indexed_caxes,
                 target_paths=indexed_caxes.target_paths,
                 index_exprs=indexed_caxes.index_exprs,
-                outer_loops=indexed_caxes.outer_loops,
+                outer_loops=frozenset(),
                 dtype=IntType,
             )
 
             from pyop3.axtree.layout import my_product
 
             for idxs in my_product(router_loops_ord):
-                indices = merge_dicts(idx.source_exprs for idx in idxs)
-                for p in rmap.axes.iter(idxs):
+                indices = {}
+                for idx in idxs:
+                    loop_var = rloop_map[idx.index.id]
+                    indices[loop_var.index.id] = (idx.source_exprs, idx.target_exprs)
+                # for p in rmap.axes.iter(idxs):
+                for p in indexed_raxes.iter(idxs):
                     offset = self.raxes.offset(p.target_exprs, p.target_path)
-                    rmap.set_value(p.source_exprs, offset, p.source_path)
+                    rmap.set_value(p.source_exprs | indices, offset, p.source_path)
 
             for idxs in my_product(couter_loops_ord):
-                indices = merge_dicts(idx.source_exprs for idx in idxs)
-                for p in cmap.axes.iter(idxs):
+                indices = {}
+                for idx in idxs:
+                    loop_var = cloop_map[idx.index.id]
+                    indices[loop_var.index.id] = (idx.source_exprs, idx.target_exprs)
+                for p in indexed_caxes.iter(idxs):
                     offset = self.caxes.offset(p.target_exprs, p.target_path)
-                    cmap.set_value(p.source_exprs, offset, p.source_path)
+                    cmap.set_value(p.source_exprs | indices, offset, p.source_path)
 
             shape = (indexed_raxes.size, indexed_caxes.size)
             packed = PackedPetscMat(self, rmap, cmap, shape)

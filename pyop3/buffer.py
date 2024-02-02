@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import abc
 import contextlib
+import numbers
 from functools import cached_property
 
 import numpy as np
@@ -102,6 +103,10 @@ class DistributedBuffer(Buffer):
         data=None,
     ):
         shape = as_tuple(shape)
+
+        if not all(isinstance(s, numbers.Integral) for s in shape):
+            raise TypeError
+
         if dtype is None:
             dtype = self.DEFAULT_DTYPE
 

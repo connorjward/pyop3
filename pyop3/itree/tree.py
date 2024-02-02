@@ -341,13 +341,27 @@ class ContextFreeLoopIndex(ContextFreeIndex):
     @property
     def index_exprs(self):
         return freeze(
-            {None: {axis: LoopIndexVariable(self, axis) for axis in self.path.keys()}}
+            {
+                None: merge_dicts(
+                    [
+                        {
+                            axis: LoopIndexVariable(self, axis)
+                            for axis in self.path.keys()
+                        },
+                        {
+                            axis: LocalLoopIndexVariable(self, axis)
+                            for axis in self.iterset.path(*self.iterset.leaf).keys()
+                        },
+                    ]
+                )
+            }
         )
 
     @property
     def loops(self):
         return self.iterset.outer_loops | {
-            LoopIndexVariable(self, axis) for axis in self.path.keys()
+            LocalLoopIndexVariable(self, axis)
+            for axis in self.iterset.path(*self.iterset.leaf).keys()
         }
 
     @property
@@ -671,6 +685,13 @@ class LoopIndexVariable(pym.primitives.Variable):
         self.index = index
         self.axis = axis
 
+        if (
+            type(self) is LoopIndexVariable
+            and self.index.id.endswith("1")
+            and "CalledMap" in axis
+        ):
+            breakpoint()
+
     def __getinitargs__(self):
         # FIXME The following is wrong, but it gives us the repr we want
         # return (self.index, self.axis)
@@ -973,36 +994,26 @@ def collect_shape_index_callback(index, *args, **kwargs):
 
 
 @collect_shape_index_callback.register
-def _(loop_index: ContextFreeLoopIndex, indices, *, include_loop_index_shape, **kwargs):
+def _(
+    loop_index: ContextFreeLoopIndex,
+    indices,
+    *,
+    include_loop_index_shape,
+    debug=False,
+    **kwargs,
+):
     if include_loop_index_shape:
         assert False, "old code"
-        slices = []
-        iterset = loop_index.iterset
-        breakpoint()
-        axis = iterset.root
-        while axis is not None:
-            cpt = loop_index.source_path[axis.label]
-            slices.append(Slice(axis.label, AffineSliceComponent(cpt)))
-            axis = iterset.child(axis, cpt)
-
-        axes = loop_index.iterset[slices]
-        leaf_axis, leaf_cpt = axes.leaf
-
-        # target_paths = freeze(
-        #     {(leaf_axis.id, leaf_cpt): {axis: cpt for axis,cpt in loop_index.path.items()}}
-        # )
-        target_paths = loop_index.target_paths
-        index_exprs = freeze(
-            {
-                (leaf_axis.id, leaf_cpt.label): {
-                    axis: AxisVariable(axis) for axis in loop_index.path.keys()
-                }
-            }
-        )
     else:
+        # if debug:
+        #     breakpoint()
         axes = loop_index.axes
         target_paths = loop_index.target_paths
+
         index_exprs = loop_index.index_exprs
+        # index_exprs = {axis: LocalLoopIndexVariable(loop_index, axis) for axis in loop_index.iterset.path(*loop_index.iterset.leaf)}
+        #
+        # index_exprs = {None: index_exprs}
 
     return (
         axes,
@@ -1131,8 +1142,11 @@ def _(
     *,
     include_loop_index_shape,
     prev_axes,
+    debug=False,
     **kwargs,
 ):
+    if debug:
+        breakpoint()
     (
         prior_axes,
         prior_target_path_per_cpt,
@@ -1309,8 +1323,14 @@ def _make_leaf_axis_from_called_map(
 
 
 def _index_axes(
-    indices: IndexTree, loop_context, axes=None, include_loop_index_shape=False
+    indices: IndexTree,
+    loop_context,
+    axes=None,
+    include_loop_index_shape=False,
+    debug=False,
 ):
+    # if debug:
+    #     breakpoint()
     (
         indexed_axes,
         tpaths,
@@ -1324,9 +1344,10 @@ def _index_axes(
         loop_indices=loop_context,
         prev_axes=axes,
         include_loop_index_shape=include_loop_index_shape,
+        debug=debug,
     )
 
-    # index trees should track outer loops
+    # index trees should track outer loops, I think?
     outer_loops |= indices.outer_loops
 
     # check that slices etc have not been missed
@@ -1355,9 +1376,12 @@ def _index_axes_rec(
     indices_acc,
     *,
     current_index,
+    debug=False,
     **kwargs,
 ):
-    index_data = collect_shape_index_callback(current_index, indices_acc, **kwargs)
+    index_data = collect_shape_index_callback(
+        current_index, indices_acc, debug=debug, **kwargs
+    )
     axes_per_index, *rest, outer_loops = index_data
 
     (
@@ -1384,6 +1408,7 @@ def _index_axes_rec(
                 indices,
                 indices_acc_,
                 current_index=subindex,
+                debug=debug,
                 **kwargs,
             )
             subaxes[leafkey] = retval[0]
@@ -1599,7 +1624,12 @@ class IndexIteratorEntry:
     @property
     def target_replace_map(self):
         return freeze(
-            {self.index.id: {ax: expr for ax, expr in self.target_exprs.items()}}
+            {
+                self.index.id: (
+                    {ax: expr for ax, expr in self.source_exprs.items()},
+                    {ax: expr for ax, expr in self.target_exprs.items()},
+                )
+            }
         )
 
 
