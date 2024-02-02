@@ -232,6 +232,7 @@ class ImplicitPackUnpackExpander(Transformer):
                     scatters.insert(0, PetscMatStore(arg, new_arg))
                 else:
                     assert intent == INC
+                    gathers.append(ReplaceAssignment(new_arg, 0))
                     scatters.insert(0, PetscMatAdd(arg, new_arg))
 
                 # the rest of the packing code is now dealing with the result of this
