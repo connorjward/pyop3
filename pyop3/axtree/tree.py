@@ -949,16 +949,14 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         layouts, _, _, _, _ = _compute_layouts(
             layout_axes, self.index_exprs | index_exprs, loop_vars
         )
-        # breakpoint()
 
         layoutsnew = _collect_at_leaves(self, layout_axes, layouts)
-        # if self.root.numbering is not None:
-        # breakpoint()
         layouts = freeze(dict(layoutsnew))
 
-        return layouts
+        # Have not considered how to do sparse things with external loops
+        if layout_axes.depth > self.depth:
+            return layouts
 
-        # for now, skip this. need to consider how layout_axes and self differ
         layouts_ = {pmap(): 0}
         for axis in self.nodes:
             for component in axis.components:
