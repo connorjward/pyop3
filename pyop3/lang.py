@@ -531,7 +531,7 @@ def _has_nontrivial_stencil(array):
     from pyop3.array import ContextSensitiveMultiArray, HierarchicalArray
 
     if isinstance(array, HierarchicalArray):
-        return array.axes.global_size > 1
+        return array.axes.size > 1
     elif isinstance(array, ContextSensitiveMultiArray):
         return any(_has_nontrivial_stencil(d) for d in array.context_map.values())
     else:
