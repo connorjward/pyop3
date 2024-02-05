@@ -39,6 +39,7 @@ class Transformer(abc.ABC):
 
 
 class LoopContextExpander(Transformer):
+    # TODO prefer __call__ instead
     def apply(self, expr: Instruction):
         return self._apply(expr, context=pmap())
 

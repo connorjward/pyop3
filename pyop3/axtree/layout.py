@@ -159,7 +159,7 @@ def size_requires_external_index(axes, axis, component, outer_loops, path=pmap()
 
     count = component.count
     if isinstance(count, HierarchicalArray):
-        if not count.outer_loops.issubset(outer_loops):
+        if not set(count.outer_loops).issubset(outer_loops):
             return True
         # is the path sufficient? i.e. do we have enough externally provided indices
         # to correctly index the axis?
@@ -424,7 +424,7 @@ def _compute_layouts(
             has_fixed_size(axes, axis, cpt, outer_loops_per_component[cpt])
             for cpt in axis.components
         )
-    ) or (has_halo(axes, axis) and axis == axes.root):
+    ) or (has_halo(axes, axis) and axis != axes.root):
         if has_halo(axes, axis) or not all(
             has_constant_step(axes, axis, c, subloops[i])
             for i, c in enumerate(axis.components)
@@ -663,7 +663,7 @@ def _create_count_array_tree(
                 axtree,
                 target_paths=axtree._default_target_paths(),
                 index_exprs=index_exprs_acc_,
-                outer_loops=frozenset(),
+                outer_loops=(),
                 data=np.full(axtree.global_size, -1, dtype=IntType),
                 # use default layout, just tweak index_exprs
             )
@@ -792,11 +792,6 @@ def axis_tree_size(axes: AxisTree) -> int:
 
     # axis size is now an array
 
-    # the outer loops must be ordered since the inner loops may depend on the
-    # outer ones. Thought is needed for how to track this order. Here we do a
-    # hack and assume that they are in order of (arbitrary) ID.
-    outer_loops_ord = tuple(sorted(outer_loops, key=lambda loop: loop.index.id))
-
     # axes_iter = []
     # index_exprs = {}
     # outer_loop_map = {}
@@ -833,7 +828,7 @@ def axis_tree_size(axes: AxisTree) -> int:
     sizes = []
 
     # for idxs in itertools.product(*outer_loops_iter):
-    for idxs in my_product(outer_loops_ord):
+    for idxs in my_product(outer_loops):
         print(idxs)
         # for idx in size_axes.iter():
         # idxs = [idx]
@@ -870,12 +865,12 @@ def my_product(loops, indices=(), context=frozenset()):
     loop, *inner_loops = loops
 
     if inner_loops:
-        for index in loop.index.iter(context):
+        for index in loop.iter(context):
             indices_ = indices + (index,)
             context_ = context | {index}
             yield from my_product(inner_loops, indices_, context_)
     else:
-        for index in loop.index.iter(context):
+        for index in loop.iter(context):
             yield indices + (index,)
 
 

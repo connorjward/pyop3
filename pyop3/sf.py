@@ -25,6 +25,8 @@ class StarForest:
 
     @classmethod
     def from_graph(cls, size: int, nroots: int, ilocal, iremote, comm):
+        # from pyop3.extras.debug import print_with_rank
+        # print_with_rank(nroots, ilocal, iremote)
         sf = PETSc.SF().create(comm)
         sf.setGraph(nroots, ilocal, iremote)
         return cls(sf, size)
@@ -140,3 +142,10 @@ def single_star(comm, size=1, root=0):
         ilocal = np.arange(size, dtype=np.int32)
         iremote = [(root, i) for i in ilocal]
     return StarForest.from_graph(size, nroots, ilocal, iremote, comm)
+
+
+def serial_forest(size: int) -> StarForest:
+    nroots = 0
+    ilocal = []
+    iremote = []
+    return StarForest.from_graph(size, nroots, ilocal, iremote, MPI.COMM_SELF)

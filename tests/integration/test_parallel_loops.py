@@ -123,6 +123,7 @@ def cone_map(comm, mesh_axis):
 @pytest.mark.parallel(nprocs=2)
 # @pytest.mark.parametrize("intent", [op3.INC, op3.MIN, op3.MAX])
 @pytest.mark.parametrize(["intent", "fill_value"], [(op3.WRITE, 0), (op3.INC, 0)])
+# @pytest.mark.timeout(5)  for now
 def test_parallel_loop(comm, paxis, intent, fill_value):
     assert comm.size == 2
 
@@ -146,6 +147,7 @@ def test_parallel_loop(comm, paxis, intent, fill_value):
 
 # can try with P1 and P2
 @pytest.mark.parallel(nprocs=2)
+@pytest.mark.timeout(5)
 def test_parallel_loop_with_map(comm, mesh_axis, cone_map, scalar_copy_kernel):
     assert comm.size == 2
     rank = comm.rank
@@ -238,10 +240,12 @@ def test_parallel_loop_with_map(comm, mesh_axis, cone_map, scalar_copy_kernel):
 
 
 @pytest.mark.parallel(nprocs=2)
+@pytest.mark.timeout(5)
 def test_same_reductions_commute():
     ...
 
 
 @pytest.mark.parallel(nprocs=2)
+@pytest.mark.timeout(5)
 def test_different_reductions_do_not_commute():
     ...

@@ -149,8 +149,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
 
             data = DistributedBuffer(
                 shape,
-                # axes.sf or axes.comm,
-                axes.comm,  # FIXME, layout mumbo jumbo
+                axes.sf or axes.comm,
                 dtype,
                 name=self.name,
                 data=data,
@@ -167,7 +166,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
 
         self._target_paths = target_paths or axes._default_target_paths()
         self._index_exprs = index_exprs or axes._default_index_exprs()
-        self._outer_loops = outer_loops or frozenset()
+        self._outer_loops = outer_loops or ()
 
         self._layouts = layouts if layouts is not None else axes.layouts
 

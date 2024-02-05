@@ -26,7 +26,7 @@ from pyrsistent import freeze, pmap
 
 from pyop3 import utils
 from pyop3.dtypes import IntType, PointerType, get_mpi_dtype
-from pyop3.sf import StarForest
+from pyop3.sf import StarForest, serial_forest
 from pyop3.tree import (
     LabelledNodeComponent,
     LabelledTree,
@@ -736,10 +736,7 @@ class PartialAxisTree(LabelledTree):
             return self.size
 
         mysize = 0
-        outer_loops_ord = tuple(
-            sorted(self.outer_loops, key=lambda loop: loop.index.id)
-        )
-        for idxs in my_product(outer_loops_ord):
+        for idxs in my_product(self.outer_loops):
             target_indices = merge_dicts(idx.target_exprs for idx in idxs)
             # this is a hack
             if self.is_empty:
@@ -787,13 +784,15 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         #     raise ValueError
 
         if outer_loops is None:
-            outer_loops = frozenset()
+            outer_loops = ()
+        else:
+            assert isinstance(outer_loops, tuple)
 
         super().__init__(parent_to_children)
         self._target_paths = target_paths or self._default_target_paths()
         self._index_exprs = index_exprs or self._default_index_exprs()
         self.layout_exprs = layout_exprs or self._default_layout_exprs()
-        self._outer_loops = frozenset(outer_loops)
+        self._outer_loops = tuple(outer_loops)
 
     def __getitem__(self, indices):
         from pyop3.itree.tree import _compose_bits, _index_axes, as_index_forest
@@ -858,7 +857,7 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         target_paths = cls._default_target_paths(tree)
         index_exprs = cls._default_index_exprs(tree)
         layout_exprs = index_exprs
-        outer_loops = frozenset()
+        outer_loops = ()
         return cls(
             tree.parent_to_children,
             target_paths,
@@ -872,7 +871,7 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
 
         return LoopIndex(self.owned)
 
-    def iter(self, outer_loops=frozenset(), loop_index=None):
+    def iter(self, outer_loops=(), loop_index=None):
         from pyop3.itree.tree import iter_axis_tree
 
         return iter_axis_tree(
@@ -902,14 +901,15 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
 
     @cached_property
     def layout_axes(self):
+        # TODO same loop as in AxisTree.layouts
         axes_iter = []
-        for ol in sorted(self.outer_loops, key=lambda ol: ol.index.id):
-            axis = just_one(ax for ax in ol.index.iterset.nodes if ax.label == ol.axis)
-            # FIXME relabelling here means that paths are not propagated properly
-            # when we tabulate.
-            # axis_ = axis.copy(id=Axis.unique_id(), label=Axis.unique_label())
-            axis_ = axis
-            axes_iter.append(axis_)
+        for ol in self.outer_loops:
+            for axis in ol.iterset.nodes:
+                # FIXME relabelling here means that paths are not propagated properly
+                # when we tabulate.
+                # axis_ = axis.copy(id=Axis.unique_id(), label=Axis.unique_label())
+                axis_ = axis
+                axes_iter.append(axis_)
         return AxisTree.from_iterable([*axes_iter, self])
 
     @cached_property
@@ -920,18 +920,20 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
             _compute_layouts,
             collect_externally_indexed_axes,
         )
-        from pyop3.itree.tree import IndexExpressionReplacer
+        from pyop3.itree.tree import IndexExpressionReplacer, LocalLoopIndexVariable
 
         index_exprs = {}
         loop_vars = {}
-        for ol in sorted(self.outer_loops, key=lambda ol: ol.index.id):
-            axis = just_one(ax for ax in ol.index.iterset.nodes if ax.label == ol.axis)
-            # FIXME relabelling here means that paths are not propagated properly
-            # when we tabulate.
-            # axis_ = axis.copy(id=Axis.unique_id(), label=Axis.unique_label())
-            axis_ = axis
-            index_exprs[axis_.id, axis_.component.label] = {axis.label: ol}
-            loop_vars[axis_, axis.component] = ol
+        for ol in self.outer_loops:
+            for axis in ol.iterset.nodes:
+                # FIXME relabelling here means that paths are not propagated properly
+                # when we tabulate.
+                # axis_ = axis.copy(id=Axis.unique_id(), label=Axis.unique_label())
+                axis_ = axis
+                index_exprs[axis_.id, axis_.component.label] = {
+                    axis.label: LocalLoopIndexVariable(ol, axis_.label)
+                }
+                loop_vars[axis_, axis.component] = ol
 
         for axis in self.nodes:
             for component in axis.components:
@@ -950,6 +952,8 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         # breakpoint()
 
         layoutsnew = _collect_at_leaves(self, layout_axes, layouts)
+        # if self.root.numbering is not None:
+        # breakpoint()
         layouts = freeze(dict(layoutsnew))
 
         return layouts
@@ -1086,7 +1090,8 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         from pyop3.axtree.parallel import collect_sf_graphs
 
         if self.is_empty:
-            return None
+            # no, this is probably not right. Could have a global
+            return serial_forest(self.size)
 
         graphs = collect_sf_graphs(self)
         if len(graphs) == 0:

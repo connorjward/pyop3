@@ -73,6 +73,7 @@ def collect_sf_graphs(axes, axis=None, path=pmap(), indices=pmap()):
 
 
 # perhaps I can defer renumbering the SF to here?
+# PETSc provides a similar function that composes an SF with a Section, can I use that?
 def grow_dof_sf(axes, axis, path, indices):
     point_sf = axis.sf
     # TODO, use convenience methods
@@ -126,8 +127,8 @@ def grow_dof_sf(axes, axis, path, indices):
             axes,
             axis,
             selected_component,
+            (),
             indices | {axis.label: component_num},
-            # path | {axis.label: selected_component.label},
         )
 
     point_sf.broadcast(root_offsets, MPI.REPLACE)
@@ -151,12 +152,13 @@ def grow_dof_sf(axes, axis, path, indices):
         assert selected_component is not None
         assert component_num is not None
 
+        # this is wrong?
         offset = axes.offset(
             indices | {axis.label: component_num},
             path | {axis.label: selected_component.label},
         )
         local_leaf_offsets[myindex] = offset
-        leaf_ndofs[myindex] = step_size(axes, axis, selected_component)
+        leaf_ndofs[myindex] = step_size(axes, axis, selected_component, ())
 
     # construct a new SF with these offsets
     ndofs = sum(leaf_ndofs)

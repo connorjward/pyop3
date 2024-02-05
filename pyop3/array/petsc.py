@@ -160,48 +160,39 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
             router_loops = indexed_raxes.outer_loops
             couter_loops = indexed_caxes.outer_loops
 
-            rloop_map = {l.index.id: l for l in router_loops}
-            cloop_map = {l.index.id: l for l in couter_loops}
-
-            router_loops_ord = tuple(
-                sorted(router_loops, key=lambda loop: loop.index.id)
-            )
-            couter_loops_ord = tuple(
-                sorted(couter_loops, key=lambda loop: loop.index.id)
-            )
+            # rloop_map = {l.index.id: l for l in router_loops}
+            # cloop_map = {l.index.id: l for l in couter_loops}
 
             rmap = HierarchicalArray(
                 indexed_raxes,
                 target_paths=indexed_raxes.target_paths,
                 index_exprs=indexed_raxes.index_exprs,
-                outer_loops=frozenset(),
+                # is this right?
+                outer_loops=(),
                 dtype=IntType,
             )
             cmap = HierarchicalArray(
                 indexed_caxes,
                 target_paths=indexed_caxes.target_paths,
                 index_exprs=indexed_caxes.index_exprs,
-                outer_loops=frozenset(),
+                outer_loops=(),
                 dtype=IntType,
             )
 
             from pyop3.axtree.layout import my_product
 
-            for idxs in my_product(router_loops_ord):
-                indices = {}
-                for idx in idxs:
-                    loop_var = rloop_map[idx.index.id]
-                    indices[loop_var.index.id] = (idx.source_exprs, idx.target_exprs)
-                # for p in rmap.axes.iter(idxs):
+            for idxs in my_product(router_loops):
+                indices = {
+                    idx.index.id: (idx.source_exprs, idx.target_exprs) for idx in idxs
+                }
                 for p in indexed_raxes.iter(idxs):
                     offset = self.raxes.offset(p.target_exprs, p.target_path)
                     rmap.set_value(p.source_exprs | indices, offset, p.source_path)
 
-            for idxs in my_product(couter_loops_ord):
-                indices = {}
-                for idx in idxs:
-                    loop_var = cloop_map[idx.index.id]
-                    indices[loop_var.index.id] = (idx.source_exprs, idx.target_exprs)
+            for idxs in my_product(couter_loops):
+                indices = {
+                    idx.index.id: (idx.source_exprs, idx.target_exprs) for idx in idxs
+                }
                 for p in indexed_caxes.iter(idxs):
                     offset = self.caxes.offset(p.target_exprs, p.target_path)
                     cmap.set_value(p.source_exprs | indices, offset, p.source_path)
@@ -221,7 +212,9 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
                 data=packed,
                 target_paths=indexed_axes.target_paths,
                 index_exprs=indexed_axes.index_exprs,
-                outer_loops=router_loops | couter_loops,
+                # TODO ordered set?
+                outer_loops=router_loops
+                + tuple(filter(lambda l: l not in router_loops, couter_loops)),
                 name=self.name,
             )
         return ContextSensitiveMultiArray(arrays)

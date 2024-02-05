@@ -84,8 +84,9 @@ class IndexTree(LabelledTree):
     fields = LabelledTree.fields | {"outer_loops"}
 
     # TODO rename to node_map
-    def __init__(self, parent_to_children, outer_loops=frozenset()):
+    def __init__(self, parent_to_children, outer_loops=()):
         super().__init__(parent_to_children)
+        assert isinstance(outer_loops, tuple)
         self.outer_loops = outer_loops
 
     @classmethod
@@ -342,27 +343,19 @@ class ContextFreeLoopIndex(ContextFreeIndex):
     def index_exprs(self):
         return freeze(
             {
-                None: merge_dicts(
-                    [
-                        {
-                            axis: LoopIndexVariable(self, axis)
-                            for axis in self.path.keys()
-                        },
-                        {
-                            axis: LocalLoopIndexVariable(self, axis)
-                            for axis in self.iterset.path(*self.iterset.leaf).keys()
-                        },
-                    ]
-                )
+                None: {
+                    axis: LoopIndexVariable(self, axis) for axis in self.path.keys()
+                },
             }
         )
 
     @property
     def loops(self):
-        return self.iterset.outer_loops | {
-            LocalLoopIndexVariable(self, axis)
-            for axis in self.iterset.path(*self.iterset.leaf).keys()
-        }
+        # return self.iterset.outer_loops | {
+        #     LocalLoopIndexVariable(self, axis)
+        #     for axis in self.iterset.path(*self.iterset.leaf).keys()
+        # }
+        return self.iterset.outer_loops + (self,)
 
     @property
     def layout_exprs(self):
@@ -550,7 +543,7 @@ class CalledMap(Identified, LoopIterable):
         context_sensitive_axes = ContextSensitiveAxisTree(context_map)
         return LoopIndex(context_sensitive_axes)
 
-    def iter(self, outer_loops=frozenset()):
+    def iter(self, outer_loops=()):
         loop_context = merge_dicts(
             iter_entry.loop_context for iter_entry in outer_loops
         )
@@ -684,13 +677,6 @@ class LoopIndexVariable(pym.primitives.Variable):
         super().__init__(index.id)
         self.index = index
         self.axis = axis
-
-        if (
-            type(self) is LoopIndexVariable
-            and self.index.id.endswith("1")
-            and "CalledMap" in axis
-        ):
-            breakpoint()
 
     def __getinitargs__(self):
         # FIXME The following is wrong, but it gives us the repr we want
@@ -1011,6 +997,7 @@ def _(
         target_paths = loop_index.target_paths
 
         index_exprs = loop_index.index_exprs
+        # breakpoint()
         # index_exprs = {axis: LocalLoopIndexVariable(loop_index, axis) for axis in loop_index.iterset.path(*loop_index.iterset.leaf)}
         #
         # index_exprs = {None: index_exprs}
@@ -1131,7 +1118,7 @@ def _(slice_: Slice, indices, *, prev_axes, **kwargs):
         target_path_per_component,
         index_exprs_per_component,
         layout_exprs_per_component,
-        frozenset(),  # no outer loops
+        (),  # no outer loops
     )
 
 
@@ -1348,7 +1335,7 @@ def _index_axes(
     )
 
     # index trees should track outer loops, I think?
-    outer_loops |= indices.outer_loops
+    outer_loops += indices.outer_loops
 
     # check that slices etc have not been missed
     assert not include_loop_index_shape, "old option"
@@ -1429,7 +1416,7 @@ def _index_axes_rec(
                     index_exprs_per_cpt_per_index.update({key: retval[2][key]})
                     layout_exprs_per_cpt_per_index.update({key: retval[3][key]})
 
-            outer_loops |= retval[4]
+            outer_loops += retval[4]
 
     target_path_per_component = freeze(target_path_per_cpt_per_index)
     index_exprs_per_component = freeze(index_exprs_per_cpt_per_index)
@@ -1638,7 +1625,7 @@ def iter_axis_tree(
     axes: AxisTree,
     target_paths,
     index_exprs,
-    outer_loops=frozenset(),
+    outer_loops=(),
     axis=None,
     path=pmap(),
     indices=pmap(),

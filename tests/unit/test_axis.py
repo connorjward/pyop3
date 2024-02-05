@@ -429,7 +429,7 @@ def test_tabulate_nested_ragged_indexed_layouts():
     p = axis0.index()
     indexed_axes = just_one(axes[p].context_map.values())
 
-    layout = indexed_axes.subst_layouts[indexed_axes.path(*indexed_axes.leaf)]
-    breakpoint()
+    layout = indexed_axes.layouts[indexed_axes.path(*indexed_axes.leaf)]
     array0 = just_one(collect_multi_arrays(layout))
-    assert (array0.data_ro == steps(nnz_data, drop_last=True)).all()
+    expected = np.asarray(steps(nnz_data, drop_last=True), dtype=op3.IntType) * 2
+    assert (array0.data_ro == expected).all()
