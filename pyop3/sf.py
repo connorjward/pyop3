@@ -21,7 +21,7 @@ class StarForest:
         self.size = size
 
         # don't like this pattern
-        self._comm = internal_comm(sf.comm)
+        self._comm = internal_comm(sf.comm, self)
 
     @classmethod
     def from_graph(cls, size: int, nroots: int, ilocal, iremote, comm):
