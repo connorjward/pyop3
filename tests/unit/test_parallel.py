@@ -278,3 +278,44 @@ def test_shared_array(comm, intent):
     else:
         assert intent == op3.INC
         assert (shared.data_ro == 3).all()
+
+
+@pytest.mark.parallel(nprocs=2)
+def test_lgmaps(comm):
+    # Create a star forest for the following distribution
+    #
+    #                g  g
+    # rank 0:       [0, 1, * 2, 3, 4, 5]
+    #                |  |  * |  |
+    # rank 1: [0, 1, 2, 3, * 4, 5]
+    #                        g  g
+    if comm.rank == 0:
+        size = 6
+        nroots = 4
+        ilocal = [0, 1]
+        iremote = [(1, 2), (1, 3)]
+    else:
+        assert comm.rank == 1
+        size = 6
+        nroots = 4
+        ilocal = [4, 5]
+        iremote = [(0, 2), (0, 3)]
+    sf = op3.StarForest.from_graph(size, nroots, ilocal, iremote, comm)
+
+    axis0 = op3.Axis(size, sf=sf)
+    axes = op3.AxisTree.from_iterable((axis0, 2))
+
+    # self.sf.sf.view()
+    sf.sf.view()
+    # lgmap = PETSc.LGMap().createSF(axes.sf.sf, PETSc.DECIDE)
+    lgmap = PETSc.LGMap().createSF(sf.sf, PETSc.DECIDE)
+    lgmap.setType(PETSc.LGMap.Type.BASIC)
+    # self._lazy_lgmap = lgmap
+    lgmap.view()
+    print_with_rank(lgmap.indices)
+
+    raise NotImplementedError
+
+    lgmap = axes.lgmap
+    print_with_rank(lgmap.indices)
+    assert False

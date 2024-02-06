@@ -987,6 +987,19 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
     def sf(self):
         return self._default_sf()
 
+    # @property
+    # def lgmap(self):
+    #     if not hasattr(self, "_lazy_lgmap"):
+    #         # if self.sf.nleaves == 0 then some assumptions are broken in
+    #         # ISLocalToGlobalMappingCreateSF, but we need to be careful things are done
+    #         # collectively
+    #         self.sf.sf.view()
+    #         lgmap = PETSc.LGMap().createSF(self.sf.sf, PETSc.DECIDE)
+    #         lgmap.setType(PETSc.LGMap.Type.BASIC)
+    #         self._lazy_lgmap = lgmap
+    #         lgmap.view()
+    #     return self._lazy_lgmap
+
     @property
     def comm(self):
         paraxes = [axis for axis in self.nodes if axis.sf is not None]
@@ -1089,11 +1102,11 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
 
         if self.is_empty:
             # no, this is probably not right. Could have a global
-            return serial_forest(self.size)
+            return serial_forest(self.global_size)
 
         graphs = collect_sf_graphs(self)
         if len(graphs) == 0:
-            return None
+            return serial_forest(self.global_size)
         else:
             # merge the graphs
             nroots = 0
