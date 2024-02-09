@@ -702,7 +702,16 @@ class ContextSensitiveCalledMap(ContextSensitiveLoopIterable):
 
 # TODO make kwargs explicit
 def as_index_forest(forest: Any, *, axes=None, **kwargs):
-    # breakpoint()
+    if forest is Ellipsis:
+        # full slice of all components
+        assert axes is not None
+        if axes.is_empty:
+            raise NotImplementedError("TODO, think about this")
+        forest = Slice(
+            axes.root.label,
+            [AffineSliceComponent(c.label) for c in axes.root.components],
+        )
+
     forest = _as_index_forest(forest, axes=axes, **kwargs)
     assert isinstance(forest, dict), "must be ordered"
     # print(forest)

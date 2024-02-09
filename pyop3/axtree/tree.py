@@ -298,10 +298,6 @@ class AxisComponent(LabelledNodeComponent):
         super().__init__(label=label)
         self.count = count
 
-    @property
-    def has_integer_count(self):
-        return isinstance(self.count, numbers.Integral)
-
     # TODO this is just a traversal - clean up
     def alloc_size(self, axtree, axis):
         from pyop3.array import HierarchicalArray
@@ -497,7 +493,8 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
         return self._default_to_applied_numbering[cidx][number]
 
     def applied_to_default_component_number(self, component, number):
-        raise NotImplementedError
+        cidx = self.component_index(component)
+        return self._applied_to_default_numbering[cidx][number]
 
     def axis_to_component_number(self, number):
         # return axis_to_component_number(self, number)
@@ -533,11 +530,13 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
 
     @cached_property
     def _default_to_applied_permutation(self):
-        return tuple(invert(num) for num in self._default_to_applied_numbering)
+        # is this right?
+        return self._applied_to_default_numbering
 
+    # same as the permutation...
     @cached_property
     def _applied_to_default_numbering(self):
-        raise NotImplementedError
+        return tuple(invert(num) for num in self._default_to_applied_numbering)
 
     def _axis_number_to_component_index(self, number):
         off = self._component_offsets

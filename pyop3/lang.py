@@ -19,7 +19,7 @@ import numpy as np
 import pytools
 from pyrsistent import freeze
 
-from pyop3.axtree import as_axis_tree
+from pyop3.axtree import Axis, as_axis_tree
 from pyop3.axtree.tree import ContextFree, ContextSensitive, MultiArrayCollector
 from pyop3.config import config
 from pyop3.dtypes import IntType, dtype_limits
@@ -672,6 +672,9 @@ class Assignment(Terminal, abc.ABC):
         super().__init__(**kwargs)
         self.assignee = assignee
         self.expression = expression
+
+    def __call__(self):
+        do_loop(Axis(1).index(), self)
 
     @property
     def arguments(self):

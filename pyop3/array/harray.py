@@ -36,7 +36,7 @@ from pyop3.axtree.tree import (
 )
 from pyop3.buffer import Buffer, DistributedBuffer
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
-from pyop3.lang import KernelArgument
+from pyop3.lang import KernelArgument, ReplaceAssignment
 from pyop3.sf import single_star
 from pyop3.utils import (
     PrettyTuple,
@@ -436,10 +436,12 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         # validity. Here we do the simple but hopefully correct thing.
         other.data_wo[...] = self.data_ro
 
-    def zero(self):
-        # FIXME: This does not work for the case when the array here is indexed in some
-        # way. E.g. dat[::2] since the full buffer is returned.
-        self.data_wo[...] = 0
+    # symbolic
+    def zero(self, *, subset=Ellipsis):
+        return ReplaceAssignment(self[subset], 0)
+
+    def eager_zero(self, *, subset=Ellipsis):
+        self.zero(subset=subset)()
 
     @property
     @deprecated(".vec_rw")
