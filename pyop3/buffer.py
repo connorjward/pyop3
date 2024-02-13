@@ -201,7 +201,7 @@ class DistributedBuffer(Buffer):
 
     @property
     def is_distributed(self) -> bool:
-        return self.sf is not None
+        return self.comm.size > 1
 
     @property
     def leaves_valid(self) -> bool:

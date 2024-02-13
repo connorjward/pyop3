@@ -1,15 +1,10 @@
 from __future__ import annotations
 
 import abc
-import collections
 import contextlib
-import copy
-import dataclasses
 import enum
 import functools
-import itertools
 import numbers
-import operator
 import textwrap
 from functools import cached_property
 from typing import Any, Dict, FrozenSet, Optional, Sequence, Tuple, Union
@@ -18,17 +13,14 @@ import loopy as lp
 import loopy.symbolic
 import numpy as np
 import pymbolic as pym
-import pytools
-from petsc4py import PETSc
 from pyrsistent import freeze, pmap
 
-from pyop3.array import HierarchicalArray, PetscMatAIJ
+from pyop3.array import HierarchicalArray
 from pyop3.array.harray import CalledMapVariable, ContextSensitiveMultiArray
-from pyop3.array.petsc import PetscMat, PetscObject
+from pyop3.array.petsc import PetscMat
 from pyop3.axtree import Axis, AxisComponent, AxisTree, AxisVariable, ContextFree
-from pyop3.axtree.tree import ContextSensitiveAxisTree
 from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
-from pyop3.dtypes import IntType, PointerType
+from pyop3.dtypes import IntType
 from pyop3.itree import (
     AffineSliceComponent,
     CalledMap,
@@ -54,6 +46,7 @@ from pyop3.lang import (
     MAX_WRITE,
     MIN_RW,
     MIN_WRITE,
+    NA,
     READ,
     RW,
     WRITE,
@@ -61,6 +54,7 @@ from pyop3.lang import (
     Assignment,
     CalledFunction,
     ContextAwareLoop,
+    DummyKernelArgument,
     Loop,
     PetscMatAdd,
     PetscMatInstruction,
@@ -127,6 +121,9 @@ class LoopyCodegenContext(CodegenContext):
         self._last_insn_id = None
 
         self._name_generator = UniqueNameGenerator()
+
+        # TODO remove
+        self._dummy_names = {}
 
     @property
     def domains(self):
@@ -198,6 +195,14 @@ class LoopyCodegenContext(CodegenContext):
             depends_on_is_final=True,
         )
         self._add_instruction(insn)
+
+    # TODO wrap into add_argument
+    def add_dummy_argument(self, arg, dtype):
+        if arg in self._dummy_names:
+            name = self._dummy_names[arg]
+        else:
+            name = self._dummy_names.setdefault(arg, self._name_generator("dummy"))
+        self._args.append(lp.ValueArg(name, dtype=dtype))
 
     def add_argument(self, array):
         if isinstance(array.buffer, NullBuffer):
@@ -432,7 +437,7 @@ def compile(expr: Instruction, name="mykernel"):
     # add callables
     tu = lp.register_callable(tu, "bsearch", BinarySearchCallable())
 
-    tu = tu.with_entrypoints("mykernel")
+    tu = tu.with_entrypoints(name)
 
     # done by attaching "shape" to HierarchicalArray
     # tu = match_caller_callee_dimensions(tu)
@@ -578,34 +583,39 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
         temporary = arg
         indexed_temp = arg
 
-        if loopy_arg.shape is None:
-            shape = (temporary.alloc_size,)
+        if isinstance(arg, DummyKernelArgument):
+            ctx.add_dummy_argument(arg, loopy_arg.dtype)
+            name = ctx._dummy_names[arg]
+            subarrayrefs[arg] = pym.var(name)
         else:
-            if np.prod(loopy_arg.shape, dtype=int) != temporary.alloc_size:
-                raise RuntimeError("Shape mismatch between inner and outer kernels")
-            shape = loopy_arg.shape
+            if loopy_arg.shape is None:
+                shape = (temporary.alloc_size,)
+            else:
+                if np.prod(loopy_arg.shape, dtype=int) != temporary.alloc_size:
+                    raise RuntimeError("Shape mismatch between inner and outer kernels")
+                shape = loopy_arg.shape
 
-        temporaries.append((arg, indexed_temp, spec.access, shape))
+            temporaries.append((arg, indexed_temp, spec.access, shape))
 
-        # Register data
-        # TODO This might be bad for temporaries
-        if isinstance(arg, (HierarchicalArray, ContextSensitiveMultiArray)):
-            ctx.add_argument(arg)
+            # Register data
+            # TODO This might be bad for temporaries
+            if isinstance(arg, (HierarchicalArray, ContextSensitiveMultiArray)):
+                ctx.add_argument(arg)
 
-        # this should already be done in an assignment
-        # ctx.add_temporary(temporary.name, temporary.dtype, shape)
+            # this should already be done in an assignment
+            # ctx.add_temporary(temporary.name, temporary.dtype, shape)
 
-        # subarrayref nonsense/magic
-        indices = []
-        for s in shape:
-            iname = ctx.unique_name("i")
-            ctx.add_domain(iname, s)
-            indices.append(pym.var(iname))
-        indices = tuple(indices)
+            # subarrayref nonsense/magic
+            indices = []
+            for s in shape:
+                iname = ctx.unique_name("i")
+                ctx.add_domain(iname, s)
+                indices.append(pym.var(iname))
+            indices = tuple(indices)
 
-        subarrayrefs[arg] = lp.symbolic.SubArrayRef(
-            indices, pym.subscript(pym.var(temporary.name), indices)
-        )
+            subarrayrefs[arg] = lp.symbolic.SubArrayRef(
+                indices, pym.subscript(pym.var(temporary.name), indices)
+            )
 
         # we need to pass sizes through if they are only known at runtime (ragged)
         # NOTE: If we register an extent to pass through loopy will complain
@@ -628,6 +638,7 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
     assignees = tuple(
         subarrayrefs[arg]
         for arg, spec in checked_zip(call.arguments, call.argspec)
+        # if spec.access in {WRITE, RW, INC, MIN_RW, MIN_WRITE, MAX_RW, MAX_WRITE, NA}
         if spec.access in {WRITE, RW, INC, MIN_RW, MIN_WRITE, MAX_RW, MAX_WRITE}
     )
     expression = pym.primitives.Call(
@@ -635,7 +646,7 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
         tuple(
             subarrayrefs[arg]
             for arg, spec in checked_zip(call.arguments, call.argspec)
-            if spec.access in {READ, RW, INC, MIN_RW, MAX_RW}
+            if spec.access in {READ, RW, INC, MIN_RW, MAX_RW, NA}
         )
         + tuple(extents.values()),
     )

@@ -15,6 +15,7 @@ from functools import cached_property, partial
 from typing import Iterable, Sequence, Tuple
 from weakref import WeakValueDictionary
 
+import loopy as lp
 import numpy as np
 import pytools
 from pyrsistent import freeze
@@ -26,6 +27,7 @@ from pyop3.dtypes import IntType, dtype_limits
 from pyop3.utils import (
     UniqueRecord,
     as_tuple,
+    auto,
     checked_zip,
     just_one,
     merge_dicts,
@@ -47,6 +49,7 @@ class Intent(enum.Enum):
     MIN_RW = "min_rw"
     MAX_WRITE = "max_write"
     MAX_RW = "max_rw"
+    NA = "na"
 
 
 # old alias
@@ -61,6 +64,7 @@ MIN_RW = Intent.MIN_RW
 MIN_WRITE = Intent.MIN_WRITE
 MAX_RW = Intent.MAX_RW
 MAX_WRITE = Intent.MAX_WRITE
+NA = Intent.NA
 
 
 class IntentMismatchError(Exception):
@@ -69,6 +73,11 @@ class IntentMismatchError(Exception):
 
 class KernelArgument(abc.ABC):
     """Class representing objects that may be passed as arguments to kernels."""
+
+    @property
+    @abc.abstractmethod
+    def kernel_dtype(self):
+        pass
 
 
 class Instruction(UniqueRecord, abc.ABC):
@@ -211,7 +220,7 @@ class Loop(Instruction):
             if (
                 not isinstance(arg, HierarchicalArray)
                 or not isinstance(arg.buffer, DistributedBuffer)
-                or arg.buffer.sf is None
+                or not arg.buffer.is_distributed
             ):
                 continue
 
@@ -610,20 +619,22 @@ class Function:
                 f"but received {len(args)}"
             )
         if any(
-            spec.dtype.numpy_dtype != arg.dtype
+            spec.dtype.numpy_dtype != arg.kernel_dtype
             for spec, arg in checked_zip(self.argspec, args)
+            if arg.kernel_dtype is not auto
         ):
             raise ValueError("Arguments to the kernel have the wrong dtype")
         return CalledFunction(self, args)
 
     @property
     def argspec(self):
-        return tuple(
-            ArgumentSpec(access, arg.dtype, arg.shape)
-            for access, arg in zip(
-                self._access_descrs, self.code.default_entrypoint.args
-            )
-        )
+        spec = []
+        for access, arg in checked_zip(
+            self._access_descrs, self.code.default_entrypoint.args
+        ):
+            shape = arg.shape if not isinstance(arg, lp.ValueArg) else ()
+            spec.append(ArgumentSpec(access, arg.dtype, shape))
+        return tuple(spec)
 
     @property
     def name(self):
@@ -659,7 +670,10 @@ class CalledFunction(Terminal):
 
     @property
     def argument_shapes(self):
-        return tuple(arg.shape for arg in self.function.code.default_entrypoint.args)
+        return tuple(
+            arg.shape if not isinstance(arg, lp.ValueArg) else ()
+            for arg in self.function.code.default_entrypoint.args
+        )
 
     def with_arguments(self, arguments):
         return self.copy(arguments=arguments)
@@ -758,6 +772,26 @@ class PetscMatAdd(PetscMatInstruction):
     ...
 
 
+class OpaqueKernelArgument(KernelArgument, ContextFree):
+    def __init__(self, dtype=auto):
+        self._dtype = dtype
+
+    @property
+    def kernel_dtype(self):
+        return self._dtype
+
+
+class DummyKernelArgument(OpaqueKernelArgument):
+    """Placeholder kernel argument.
+
+    This class is useful when one simply wants to generate code from a loop
+    expression and not execute it.
+
+    ### dtypes not required here as sniffed from local kernel/context?
+
+    """
+
+
 def loop(*args, **kwargs):
     return Loop(*args, **kwargs)
 
@@ -781,8 +815,8 @@ def fix_intents(tunit, accesses):
     kernel = tunit.default_entrypoint
     new_args = []
     for arg, access in checked_zip(kernel.args, accesses):
-        assert access in {READ, WRITE, RW, INC, MIN_RW, MIN_WRITE, MAX_RW, MAX_WRITE}
-        is_input = access in {READ, RW, INC, MIN_RW, MAX_RW}
+        assert isinstance(access, Intent)
+        is_input = access in {READ, RW, INC, MIN_RW, MAX_RW, NA}
         is_output = access in {WRITE, RW, INC, MIN_RW, MIN_WRITE, MAX_WRITE, MAX_RW}
         new_args.append(arg.copy(is_input=is_input, is_output=is_output))
     return tunit.with_kernel(kernel.copy(args=new_args))

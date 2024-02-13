@@ -20,6 +20,7 @@ from pyop3.lang import (
     Assignment,
     CalledFunction,
     ContextAwareLoop,
+    DummyKernelArgument,
     Instruction,
     Loop,
     PetscMatAdd,
@@ -207,6 +208,10 @@ class ImplicitPackUnpackExpander(Transformer):
             assert isinstance(
                 arg, ContextFree
             ), "Loop contexts should already be expanded"
+
+            if isinstance(arg, DummyKernelArgument):
+                arguments.append(arg)
+                continue
 
             # emit function calls for PetscMat
             # this is a separate stage to the assignment operations because one

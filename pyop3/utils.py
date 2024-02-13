@@ -28,6 +28,10 @@ def unique_name(prefix: str) -> str:
     return _unique_name_generator(prefix)
 
 
+class auto:
+    pass
+
+
 # type aliases
 Id = Hashable
 Label = Hashable
