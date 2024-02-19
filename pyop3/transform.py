@@ -39,6 +39,17 @@ class Transformer(abc.ABC):
         pass
 
 
+"""
+TODO
+We sometimes want to pass loop indices to functions even without an external loop.
+This is particularly useful when we only want to generate code. We should (?) unpick
+this so that there is an outer set of loop contexts that applies at the highest level.
+
+Alternatively, we enforce that this loop exists. But I don't think that that's feasible
+right now.
+"""
+
+
 class LoopContextExpander(Transformer):
     # TODO prefer __call__ instead
     def apply(self, expr: Instruction):
@@ -50,46 +61,117 @@ class LoopContextExpander(Transformer):
 
     @_apply.register
     def _(self, loop: Loop, *, context):
-        cf_iterset = loop.index.iterset.with_context(context)
-        source_paths = cf_iterset.leaf_paths
-        target_paths = cf_iterset.leaf_target_paths
-        assert len(source_paths) == len(target_paths)
+        # this is very similar to what happens in PetscMat.__getitem__
+        outer_context = collections.defaultdict(dict)  # ordered set per index
+        if isinstance(loop.index.iterset, ContextSensitive):
+            for ctx in loop.index.iterset.context_map.keys():
+                for index, paths in ctx.items():
+                    if index in context:
+                        # assert paths == context[index]
+                        continue
+                    else:
+                        outer_context[index][paths] = None
+        # convert ordered set to a list
+        outer_context = {k: tuple(v.keys()) for k, v in outer_context.items()}
 
-        if len(source_paths) == 1:
-            # single component iterset, no branching required
-            source_path = just_one(source_paths)
-            target_path = just_one(target_paths)
+        # convert to a product-like structure of [{index: paths, ...}, {index: paths}, ...]
+        outer_context_ = tuple(context_product(outer_context.items()))
 
-            context_ = context | {loop.index.id: (source_path, target_path)}
-            statements = {
-                source_path: tuple(
-                    self._apply(stmt, context=context_) for stmt in loop.statements
-                )
-            }
-        else:
-            assert len(source_paths) > 1
-            statements = {}
-            for source_path, target_path in checked_zip(source_paths, target_paths):
+        if not outer_context_:
+            outer_context_ = (pmap(),)
+
+        loops = []
+        for octx in outer_context_:
+            cf_iterset = loop.index.iterset.with_context(context | octx)
+            source_paths = cf_iterset.leaf_paths
+            target_paths = cf_iterset.leaf_target_paths
+            assert len(source_paths) == len(target_paths)
+
+            if len(source_paths) == 1:
+                # single component iterset, no branching required
+                source_path = just_one(source_paths)
+                target_path = just_one(target_paths)
+
                 context_ = context | {loop.index.id: (source_path, target_path)}
-                statements[source_path] = tuple(
-                    filter(
-                        None,
-                        (
-                            self._apply(stmt, context=context_)
-                            for stmt in loop.statements
-                        ),
-                    )
-                )
 
-        return ContextAwareLoop(
-            loop.index.copy(iterset=cf_iterset),
-            statements,
-        )
+                statements = collections.defaultdict(list)
+                for stmt in loop.statements:
+                    for myctx, mystmt in self._apply(stmt, context=context_ | octx):
+                        if myctx:
+                            raise NotImplementedError(
+                                "need to think about how to wrap inner instructions "
+                                "that need outer loops"
+                            )
+                        statements[source_path].append(mystmt)
+                assert len(statements) == len(
+                    loop.statements
+                ), "see not implemented error"
+            else:
+                assert len(source_paths) > 1
+                statements = {}
+                for source_path, target_path in checked_zip(source_paths, target_paths):
+                    context_ = context | {loop.index.id: (source_path, target_path)}
+
+                    statements[source_path] = []
+
+                    for stmt in loop.statements:
+                        for myctx, mystmt in self._apply(stmt, context=context_ | octx):
+                            if myctx:
+                                raise NotImplementedError(
+                                    "need to think about how to wrap inner instructions "
+                                    "that need outer loops"
+                                )
+                            if mystmt is None:
+                                continue
+                            statements[source_path].append(mystmt)
+
+            # FIXME this does not propagate inner outer contexts
+            loop = ContextAwareLoop(
+                loop.index.copy(iterset=cf_iterset),
+                statements,
+            )
+            loops.append((octx, loop))
+        return tuple(loops)
 
     @_apply.register
     def _(self, terminal: CalledFunction, *, context):
-        cf_args = [a.with_context(context) for a in terminal.arguments]
-        return terminal.with_arguments(cf_args)
+        # this is very similar to what happens in PetscMat.__getitem__
+        outer_context = collections.defaultdict(dict)  # ordered set per index
+        for arg in terminal.arguments:
+            if not isinstance(arg, ContextSensitive):
+                continue
+
+            for ctx in arg.context_map.keys():
+                for index, paths in ctx.items():
+                    if index in context:
+                        assert paths == context[index]
+                    else:
+                        outer_context[index][paths] = None
+        # convert ordered set to a list
+        outer_context = {k: tuple(v.keys()) for k, v in outer_context.items()}
+
+        # convert to a product-like structure of [{index: paths, ...}, {index: paths}, ...]
+        outer_context_ = tuple(context_product(outer_context.items()))
+
+        if not outer_context_:
+            outer_context_ = (pmap(),)
+
+        for arg in terminal.arguments:
+            if isinstance(arg, ContextSensitive):
+                outer_context.update(
+                    {
+                        index: paths
+                        for ctx in arg.context_map.keys()
+                        for index, paths in ctx.items()
+                        if index not in context
+                    }
+                )
+
+        retval = []
+        for octx in outer_context_:
+            cf_args = [a.with_context(octx | context) for a in terminal.arguments]
+            retval.append((octx, terminal.with_arguments(cf_args)))
+        return retval
 
     @_apply.register
     def _(self, terminal: Assignment, *, context):
@@ -108,13 +190,29 @@ class LoopContextExpander(Transformer):
                 break
             cf_args.append(cf_arg)
         if valid:
-            return terminal.with_arguments(cf_args)
+            return ((pmap(), terminal.with_arguments(cf_args)),)
         else:
-            return None
+            return ((pmap(), None),)
 
 
 def expand_loop_contexts(expr: Instruction):
     return LoopContextExpander().apply(expr)
+
+
+def context_product(contexts, acc=pmap()):
+    contexts = tuple(contexts)
+
+    if not contexts:
+        return acc
+
+    ctx, *subctxs = contexts
+    index, pathss = ctx
+    for paths in pathss:
+        acc_ = acc | {index: paths}
+        if subctxs:
+            yield from context_product(subctxs, acc_)
+        else:
+            yield acc_
 
 
 class ImplicitPackUnpackExpander(Transformer):

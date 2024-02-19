@@ -3,7 +3,10 @@
 # tracebacks for @property methods so we remove it here.
 import pytools
 
-del pytools.RecordWithoutPickling.__getattr__
+try:
+    del pytools.RecordWithoutPickling.__getattr__
+except AttributeError:
+    pass
 del pytools
 
 

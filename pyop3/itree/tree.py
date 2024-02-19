@@ -259,6 +259,10 @@ class AbstractLoopIndex(
         pytools.ImmutableRecord.__init__(self)
         Identified.__init__(self, id)
 
+    @property
+    def kernel_dtype(self):
+        return self.dtype
+
 
 # Is this really an index? I dont think it's valid in an index tree
 class LoopIndex(AbstractLoopIndex):

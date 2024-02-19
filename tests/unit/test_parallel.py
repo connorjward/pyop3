@@ -302,7 +302,13 @@ def test_lgmaps(comm):
         iremote = [(0, 2), (0, 3)]
     sf = op3.StarForest.from_graph(size, nroots, ilocal, iremote, comm)
 
-    axis0 = op3.Axis(size, sf=sf)
+    serial_axis = op3.Axis(size)
+    axis0 = op3.Axis.from_serial(serial_axis, sf=sf)
+
+    lgmap = axis0.global_numbering()
+    print_with_rank(lgmap)
+
+    raise NotImplementedError
     axes = op3.AxisTree.from_iterable((axis0, 2))
 
     # self.sf.sf.view()

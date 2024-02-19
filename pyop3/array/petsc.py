@@ -152,30 +152,30 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
         arrays = {}
         for ctx, (rtree, ctree) in rcforest.items():
             indexed_raxes = _index_axes(rtree, ctx, self.raxes)
-            # breakpoint()
             indexed_caxes = _index_axes(ctree, ctx, self.caxes)
+
+            # breakpoint()
 
             if indexed_raxes.alloc_size() == 0 or indexed_caxes.alloc_size() == 0:
                 continue
             router_loops = indexed_raxes.outer_loops
             couter_loops = indexed_caxes.outer_loops
 
-            # rloop_map = {l.index.id: l for l in router_loops}
-            # cloop_map = {l.index.id: l for l in couter_loops}
-
             rmap = HierarchicalArray(
                 indexed_raxes,
                 target_paths=indexed_raxes.target_paths,
                 index_exprs=indexed_raxes.index_exprs,
                 # is this right?
-                outer_loops=(),
+                # outer_loops=(),
+                outer_loops=router_loops,
                 dtype=IntType,
             )
             cmap = HierarchicalArray(
                 indexed_caxes,
                 target_paths=indexed_caxes.target_paths,
                 index_exprs=indexed_caxes.index_exprs,
-                outer_loops=(),
+                # outer_loops=(),
+                outer_loops=couter_loops,
                 dtype=IntType,
             )
 
@@ -198,6 +198,7 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
                     cmap.set_value(p.source_exprs | indices, offset, p.source_path)
 
             shape = (indexed_raxes.size, indexed_caxes.size)
+            # breakpoint()
             packed = PackedPetscMat(self, rmap, cmap, shape)
 
             indexed_axes = PartialAxisTree(indexed_raxes.parent_to_children)
@@ -222,6 +223,10 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
     @cached_property
     def datamap(self):
         return freeze({self.name: self})
+
+    @property
+    def kernel_dtype(self):
+        raise NotImplementedError("opaque type?")
 
 
 # is this required?
@@ -299,7 +304,21 @@ class PetscMatPreallocator(MonolithicPetscMat):
         comm = single_valued([raxes.comm, caxes.comm])
         mat = PETSc.Mat().create(comm)
         mat.setType(PETSc.Mat.Type.PREALLOCATOR)
-        mat.setSizes((raxes.size, caxes.size))
+        # None is for the global size, PETSc will determine it
+        mat.setSizes(((raxes.size, None), (caxes.size, None)))
+
+        # ah, is the problem here???
+        if comm.size > 1:
+            raise NotImplementedError
+
+        # rlgmap = PETSc.LGMap().create(raxes.root.global_numbering(), comm=comm)
+        # clgmap = PETSc.LGMap().create(caxes.root.global_numbering(), comm=comm)
+        rlgmap = np.arange(raxes.size, dtype=IntType)
+        clgmap = np.arange(raxes.size, dtype=IntType)
+        rlgmap = PETSc.LGMap().create(rlgmap, comm=comm)
+        clgmap = PETSc.LGMap().create(clgmap, comm=comm)
+        mat.setLGMap(rlgmap, clgmap)
+
         mat.setUp()
 
         super().__init__(raxes, caxes, name=name)
@@ -358,26 +377,32 @@ def _alloc_template_mat(points, adjacency, raxes, caxes, bsize=None):
             prealloc_mat[p, q].assign(666),
         ),
     )
-
-    # for p in points.iter():
-    #     for q in adjacency(p.index).iter({p}):
-    #         for p_ in raxes[p.index].with_context(p.loop_context).iter({p}):
-    #             for q_ in (
-    #                 caxes[q.index]
-    #                 .with_context(p.loop_context | q.loop_context)
-    #                 .iter({q})
-    #             ):
-    #                 # NOTE: It is more efficient (but less readable) to
-    #                 # compute this higher up in the loop nest
-    #                 row = raxes.offset(p_.target_path, p_.target_exprs)
-    #                 col = caxes.offset(q_.target_path, q_.target_exprs)
-    #                 prealloc_mat.setValue(row, col, 666)
     prealloc_mat.assemble()
 
     # Now build the matrix from this preallocator
-    sizes = (raxes.size, caxes.size)
+
+    # None is for the global size, PETSc will determine it
+    # sizes = ((raxes.owned.size, None), (caxes.owned.size, None))
+    sizes = ((raxes.size, None), (caxes.size, None))
+    # breakpoint()
     comm = single_valued([raxes.comm, caxes.comm])
     mat = PETSc.Mat().createAIJ(sizes, comm=comm)
     mat.preallocateWithMatPreallocator(prealloc_mat.mat)
+
+    if comm.size > 1:
+        raise NotImplementedError
+    rlgmap = np.arange(raxes.size, dtype=IntType)
+    clgmap = np.arange(raxes.size, dtype=IntType)
+    # rlgmap = PETSc.LGMap().create(raxes.root.global_numbering(), comm=comm)
+    # clgmap = PETSc.LGMap().create(caxes.root.global_numbering(), comm=comm)
+    rlgmap = PETSc.LGMap().create(rlgmap, comm=comm)
+    clgmap = PETSc.LGMap().create(clgmap, comm=comm)
+
+    mat.setLGMap(rlgmap, clgmap)
     mat.assemble()
+
+    # from PyOP2
+    mat.setOption(mat.Option.NEW_NONZERO_LOCATION_ERR, True)
+    mat.setOption(mat.Option.IGNORE_ZERO_ENTRIES, True)
+
     return mat

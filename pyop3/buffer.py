@@ -55,6 +55,10 @@ class Buffer(KernelArgument, abc.ABC):
     def datamap(self):
         pass
 
+    @property
+    def kernel_dtype(self):
+        return self.dtype
+
 
 class NullBuffer(Buffer):
     """A buffer that does not carry data.
@@ -364,3 +368,7 @@ class PackedBuffer(Buffer):
     @property
     def dtype(self):
         return self.array.dtype
+
+    @property
+    def is_distributed(self) -> bool:
+        return False

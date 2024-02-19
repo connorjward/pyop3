@@ -26,6 +26,7 @@ from pyrsistent import freeze, pmap
 
 from pyop3 import utils
 from pyop3.dtypes import IntType, PointerType, get_mpi_dtype
+from pyop3.extras.debug import print_with_rank
 from pyop3.sf import StarForest, serial_forest
 from pyop3.tree import (
     LabelledNodeComponent,
@@ -39,6 +40,7 @@ from pyop3.utils import (
     PrettyTuple,
     as_tuple,
     checked_zip,
+    debug_assert,
     deprecated,
     flatten,
     frozen_record,
@@ -435,6 +437,46 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
         return freeze(
             {cpt: count for cpt, count in checked_zip(self.components, counts)}
         )
+
+    # should be a cached property?
+    def global_numbering(self):
+        if self.comm.size == 1:
+            return np.arange(self.size, dtype=IntType)
+
+        numbering = np.full(self.size, -1, dtype=IntType)
+
+        start = self.sf.comm.tompi4py().exscan(self.owned.size, MPI.SUM)
+        if start is None:
+            start = 0
+        # numbering[:self.owned.size] = np.arange(start, start+self.owned.size, dtype=IntType)
+        numbering[self.numbering.data_ro[: self.owned.size]] = np.arange(
+            start, start + self.owned.size, dtype=IntType
+        )
+
+        # print_with_rank("before", numbering)
+
+        self.sf.broadcast(numbering, MPI.REPLACE)
+
+        # print_with_rank("after", numbering)
+        debug_assert(lambda: (numbering >= 0).all())
+        return numbering
+
+    @cached_property
+    def owned(self):
+        from pyop3.itree import AffineSliceComponent, Slice
+
+        if self.comm.size == 1:
+            return self
+
+        slices = [
+            AffineSliceComponent(
+                c.label,
+                stop=self.owned_count_per_component[c],
+            )
+            for c in self.components
+        ]
+        slice_ = Slice(self.label, slices)
+        return self[slice_].root
 
     def index(self):
         return self._tree.index()

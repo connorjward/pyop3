@@ -279,7 +279,6 @@ class LoopIndexCollector(pym.mapper.CombineMapper):
 
 
 def collect_external_loops(axes, index_exprs, linear=False):
-    assert False, "old code"
     collector = LoopIndexCollector(linear)
     keys = [None]
     if not axes.is_empty:

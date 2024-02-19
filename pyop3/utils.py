@@ -1,14 +1,14 @@
 import abc
 import collections
-import functools
 import itertools
-import operator
 import warnings
 from typing import Any, Collection, Hashable, Optional
 
 import numpy as np
 import pytools
 from pyrsistent import pmap
+
+from pyop3.config import config
 
 
 class UniqueNameGenerator(pytools.UniqueNameGenerator):
@@ -320,3 +320,11 @@ def frozen_record(cls):
         raise TypeError("frozen_record is only valid for subclasses of pytools.Record")
     cls.copy = _disabled_record_copy
     return cls
+
+
+def debug_assert(predicate, msg=None):
+    if config["debug"]:
+        if msg:
+            assert predicate(), msg
+        else:
+            assert predicate()

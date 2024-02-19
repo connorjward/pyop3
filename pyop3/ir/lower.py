@@ -383,14 +383,31 @@ def compile(expr: Instruction, name="mykernel"):
     # preprocess expr before lowering
     from pyop3.transform import expand_implicit_pack_unpack, expand_loop_contexts
 
-    expr = expand_loop_contexts(expr)
-    expr = expand_implicit_pack_unpack(expr)
-
+    cs_expr = expand_loop_contexts(expr)
     ctx = LoopyCodegenContext()
+    for context, expr in cs_expr:
+        expr = expand_implicit_pack_unpack(expr)
 
-    # expr can be a tuple if we don't start with a loop
-    for e in as_tuple(expr):
-        _compile(e, pmap(), ctx)
+        # add external loop indices as kernel arguments
+        loop_indices = {}
+        for index, (path, _) in context.items():
+            if len(path) > 1:
+                raise NotImplementedError("needs to be sorted")
+
+            # dummy = HierarchicalArray(index.iterset, data=NullBuffer(IntType))
+            dummy = HierarchicalArray(Axis(1), dtype=IntType)
+            # this is dreadful, pass an integer array instead
+            ctx.add_argument(dummy)
+            myname = ctx.actual_to_kernel_rename_map[dummy.name]
+            replace_map = {
+                axis: pym.subscript(pym.var(myname), (i,))
+                for i, axis in enumerate(path.keys())
+            }
+            # FIXME currently assume that source and target exprs are the same, they are not!
+            loop_indices[index] = (replace_map, replace_map)
+
+        for e in as_tuple(expr):
+            _compile(e, loop_indices, ctx)
 
     # add a no-op instruction touching all of the kernel arguments so they are
     # not silently dropped
@@ -539,18 +556,6 @@ def parse_loop_properly_this_time(
                 for axis_label, index_expr in index_exprs_.items():
                     target_replace_map[axis_label] = replacer(index_expr)
 
-                # index_replace_map = pmap(
-                #     {
-                #         (loop.index.id, ax): iexpr
-                #         for ax, iexpr in target_replace_map.items()
-                #     }
-                # )
-                # local_index_replace_map = freeze(
-                #     {
-                #         (loop.index.id, ax): iexpr
-                #         for ax, iexpr in iname_replace_map_.items()
-                #     }
-                # )
                 index_replace_map = target_replace_map
                 local_index_replace_map = iname_replace_map_
                 for stmt in loop.statements[source_path_]:
@@ -748,20 +753,19 @@ def _petsc_mat_insn(assignment, *args):
     raise TypeError(f"{assignment} not recognised")
 
 
-# can only use GetValuesLocal when lgmaps are set (which I don't yet do)
 @_petsc_mat_insn.register
 def _(assignment: PetscMatLoad, mat_name, array_name, nrow, ncol, irow, icol):
-    return f"MatGetValues({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]));"
+    return f"MatGetValuesLocal({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]));"
 
 
 @_petsc_mat_insn.register
 def _(assignment: PetscMatStore, mat_name, array_name, nrow, ncol, irow, icol):
-    return f"MatSetValues({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]), INSERT_VALUES);"
+    return f"MatSetValuesLocal({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]), INSERT_VALUES);"
 
 
 @_petsc_mat_insn.register
 def _(assignment: PetscMatAdd, mat_name, array_name, nrow, ncol, irow, icol):
-    return f"MatSetValues({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]), ADD_VALUES);"
+    return f"MatSetValuesLocal({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]), ADD_VALUES);"
 
 
 # TODO now I attach a lot of info to the context-free array, do I need to pass axes around?

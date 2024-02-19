@@ -251,6 +251,12 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         return self.array.dtype
 
     @property
+    def kernel_dtype(self):
+        # TODO Think about the fact that the dtype refers to either to dtype of the
+        # array entries (e.g. double), or the dtype of the whole thing (double*)
+        return self.dtype
+
+    @property
     @deprecated(".data_rw")
     def data(self):
         return self.data_rw
@@ -536,6 +542,12 @@ class ContextSensitiveMultiArray(Array, ContextSensitive):
     @property
     def dtype(self):
         return self._shared_attr("dtype")
+
+    @property
+    def kernel_dtype(self):
+        # TODO Think about the fact that the dtype refers to either to dtype of the
+        # array entries (e.g. double), or the dtype of the whole thing (double*)
+        return self.dtype
 
     @property
     def max_value(self):
