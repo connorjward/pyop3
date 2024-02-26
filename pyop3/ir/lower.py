@@ -21,6 +21,7 @@ from pyop3.array.petsc import PetscMat
 from pyop3.axtree import Axis, AxisComponent, AxisTree, AxisVariable, ContextFree
 from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
 from pyop3.dtypes import IntType
+from pyop3.ir.transform import match_temporary_shapes
 from pyop3.itree import (
     AffineSliceComponent,
     CalledMap,
@@ -211,10 +212,10 @@ class LoopyCodegenContext(CodegenContext):
 
             # Temporaries can have variable size, hence we allocate space for the
             # largest possible array
-            shape = array._shape if array._shape is not None else (array.alloc_size,)
+            # shape = (array.alloc_size,)
+            shape = self._temporary_shapes[array.name]
 
             # could rename array like the rest
-            # TODO do i need to be clever about shapes?
             temp = lp.TemporaryVariable(array.name, dtype=array.dtype, shape=shape)
             self._args.append(temp)
 
@@ -223,9 +224,6 @@ class LoopyCodegenContext(CodegenContext):
                 array.name, array.name
             )
             return
-        else:
-            # we only set this property for temporaries
-            assert array._shape is None
 
         if array.name in self.actual_to_kernel_rename_map:
             return
@@ -302,6 +300,10 @@ class LoopyCodegenContext(CodegenContext):
     def _add_instruction(self, insn):
         self._insns.append(insn)
         self._last_insn_id = insn.id
+
+    # FIXME, bad API
+    def set_temporary_shapes(self, shapes):
+        self._temporary_shapes = shapes
 
 
 class CodegenResult:
@@ -407,6 +409,8 @@ def compile(expr: Instruction, name="mykernel"):
             loop_indices[index] = (replace_map, replace_map)
 
         for e in as_tuple(expr):
+            # context manager?
+            ctx.set_temporary_shapes(_collect_temporary_shapes(e))
             _compile(e, loop_indices, ctx)
 
     # add a no-op instruction touching all of the kernel arguments so they are
@@ -456,11 +460,45 @@ def compile(expr: Instruction, name="mykernel"):
 
     tu = tu.with_entrypoints(name)
 
-    # done by attaching "shape" to HierarchicalArray
-    # tu = match_caller_callee_dimensions(tu)
-
     # breakpoint()
     return CodegenResult(expr, tu, ctx.kernel_to_actual_rename_map)
+
+
+# put into a class in transform.py?
+@functools.singledispatch
+def _collect_temporary_shapes(expr):
+    raise TypeError(f"No handler defined for {type(expr).__name__}")
+
+
+@_collect_temporary_shapes.register
+def _(expr: ContextAwareLoop):
+    shapes = {}
+    for stmts in expr.statements.values():
+        for stmt in stmts:
+            for temp, shape in _collect_temporary_shapes(stmt).items():
+                if temp in shapes:
+                    assert shapes[temp] == shape
+                else:
+                    shapes[temp] = shape
+    return shapes
+
+
+@_collect_temporary_shapes.register
+def _(expr: Assignment):
+    return pmap()
+
+
+@_collect_temporary_shapes.register
+def _(call: CalledFunction):
+    return freeze(
+        {
+            arg.name: lp_arg.shape
+            for lp_arg, arg in checked_zip(
+                call.function.code.default_entrypoint.args, call.arguments
+            )
+            if lp_arg.shape is not None
+        }
+    )
 
 
 @functools.singledispatch
@@ -514,16 +552,20 @@ def parse_loop_properly_this_time(
         axis_index_exprs = axes.index_exprs.get((axis.id, component.label), {})
         index_exprs_ = index_exprs | axis_index_exprs
 
-        iname = codegen_context.unique_name("i")
-        # breakpoint()
-        extent_var = register_extent(
-            component.count,
-            iname_replace_map | loop_indices,
-            codegen_context,
-        )
-        codegen_context.add_domain(iname, extent_var)
-
-        axis_replace_map = {axis.label: pym.var(iname)}
+        if component.count != 1:
+            iname = codegen_context.unique_name("i")
+            # breakpoint()
+            extent_var = register_extent(
+                component.count,
+                iname_replace_map | loop_indices,
+                codegen_context,
+            )
+            codegen_context.add_domain(iname, extent_var)
+            axis_replace_map = {axis.label: pym.var(iname)}
+            within_inames = {iname}
+        else:
+            axis_replace_map = {axis.label: 0}
+            within_inames = set()
 
         source_path_ = source_path | {axis.label: component.label}
         iname_replace_map_ = iname_replace_map | axis_replace_map
@@ -532,7 +574,7 @@ def parse_loop_properly_this_time(
             (axis.id, component.label), {}
         )
 
-        with codegen_context.within_inames({iname}):
+        with codegen_context.within_inames(within_inames):
             subaxis = axes.child(axis, component)
             if subaxis:
                 parse_loop_properly_this_time(
@@ -799,19 +841,24 @@ def parse_assignment_properly_this_time(
         return
 
     for component in axis.components:
-        iname = codegen_context.unique_name("i")
+        if component.count != 1:
+            iname = codegen_context.unique_name("i")
 
-        extent_var = register_extent(
-            component.count,
-            iname_replace_map | loop_indices,
-            codegen_context,
-        )
-        codegen_context.add_domain(iname, extent_var)
+            extent_var = register_extent(
+                component.count,
+                iname_replace_map | loop_indices,
+                codegen_context,
+            )
+            codegen_context.add_domain(iname, extent_var)
+            new_iname_replace_map = iname_replace_map | {axis.label: pym.var(iname)}
+            within_inames = {iname}
+        else:
+            new_iname_replace_map = iname_replace_map | {axis.label: 0}
+            within_inames = set()
 
         path_ = path | {axis.label: component.label}
-        new_iname_replace_map = iname_replace_map | {axis.label: pym.var(iname)}
 
-        with codegen_context.within_inames({iname}):
+        with codegen_context.within_inames(within_inames):
             if subaxis := axes.child(axis, component):
                 parse_assignment_properly_this_time(
                     assignment,
@@ -848,7 +895,6 @@ def add_leaf_assignment(
             path,
             iname_replace_map,
             codegen_context,
-            rarr._shape,
         )
     else:
         assert isinstance(rarr, numbers.Number)
@@ -859,7 +905,6 @@ def add_leaf_assignment(
         path,
         iname_replace_map,
         codegen_context,
-        larr._shape,
     )
 
     if isinstance(assignment, AddAssignment):
@@ -870,16 +915,21 @@ def add_leaf_assignment(
     codegen_context.add_assignment(lexpr, rexpr)
 
 
-def make_array_expr(array, path, inames, ctx, shape):
+def make_array_expr(array, path, inames, ctx):
     array_offset = make_offset_expr(
         array.subst_layouts[path],
         inames,
         ctx,
     )
+
     # hack to handle the fact that temporaries can have shape but we want to
     # linearly index it here
-    if shape is not None:
-        extra_indices = (0,) * (len(shape) - 1)
+    if array.name in ctx._temporary_shapes:
+        shape = ctx._temporary_shapes[array.name]
+        assert shape is not None
+        rank = len(shape)
+        extra_indices = (0,) * (rank - 1)
+
         # also has to be a scalar, not an expression
         temp_offset_name = ctx.unique_name("j")
         temp_offset_var = pym.var(temp_offset_name)

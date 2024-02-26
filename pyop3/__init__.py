@@ -13,8 +13,11 @@ del pytools
 import pyop3.ir
 import pyop3.transform
 from pyop3.array import Array, HierarchicalArray, MultiArray, PetscMat
+
+# TODO where should these live?
+from pyop3.array.harray import AxisVariable, MultiArrayVariable
 from pyop3.axtree import Axis, AxisComponent, AxisTree, PartialAxisTree  # noqa: F401
-from pyop3.buffer import DistributedBuffer  # noqa: F401
+from pyop3.buffer import DistributedBuffer, NullBuffer  # noqa: F401
 from pyop3.dtypes import IntType, ScalarType  # noqa: F401
 from pyop3.itree import (  # noqa: F401
     AffineSliceComponent,
@@ -37,10 +40,12 @@ from pyop3.lang import (  # noqa: F401
     READ,
     RW,
     WRITE,
+    AddAssignment,
     DummyKernelArgument,
     Function,
     Loop,
     OpaqueKernelArgument,
+    ReplaceAssignment,
     do_loop,
     loop,
 )

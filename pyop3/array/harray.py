@@ -118,7 +118,6 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         outer_loops=None,
         name=None,
         prefix=None,
-        _shape=None,
     ):
         super().__init__(name=name, prefix=prefix)
 
@@ -169,9 +168,6 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         self._outer_loops = outer_loops or ()
 
         self._layouts = layouts if layouts is not None else axes.layouts
-
-        # bit of a hack to get shapes matching when we can inner kernels
-        self._shape = _shape
 
     def __str__(self):
         return self.name

@@ -13,6 +13,7 @@ from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
 from pyop3.itree import Map, TabulatedMapComponent
 from pyop3.lang import (
     INC,
+    NA,
     READ,
     RW,
     WRITE,
@@ -103,9 +104,6 @@ class LoopContextExpander(Transformer):
                                 "that need outer loops"
                             )
                         statements[source_path].append(mystmt)
-                assert len(statements) == len(
-                    loop.statements
-                ), "see not implemented error"
             else:
                 assert len(source_paths) > 1
                 statements = {}
@@ -175,6 +173,10 @@ class LoopContextExpander(Transformer):
 
     @_apply.register
     def _(self, terminal: Assignment, *, context):
+        # FIXME for now we assume an outer context of {}. In other words anything
+        # context sensitive in the assignment is completely handled by the existing
+        # outer loops.
+
         valid = True
         cf_args = []
         for arg in terminal.arguments:
@@ -184,11 +186,13 @@ class LoopContextExpander(Transformer):
                     if isinstance(arg, ContextSensitive)
                     else arg
                 )
+            # FIXME We will hit issues here when we are missing outer context I think
             except KeyError:
                 # assignment is not valid in this context, do nothing
                 valid = False
                 break
             cf_args.append(cf_arg)
+
         if valid:
             return ((pmap(), terminal.with_arguments(cf_args)),)
         else:
@@ -344,14 +348,12 @@ class ImplicitPackUnpackExpander(Transformer):
                 arg = new_arg
 
             # unpick pack/unpack instructions
-            if _requires_pack_unpack(arg):
-                # this is a nasty hack - shouldn't reuse layouts from arg.axes
+            if intent != NA and _requires_pack_unpack(arg):
                 axes = AxisTree(arg.axes.parent_to_children)
                 temporary = HierarchicalArray(
                     axes,
                     data=NullBuffer(arg.dtype),  # does this need a size?
                     name=self._name_generator("t"),
-                    _shape=shape,
                 )
 
                 if intent == READ:

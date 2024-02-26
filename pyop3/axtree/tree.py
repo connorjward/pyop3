@@ -99,7 +99,7 @@ class Indexed(abc.ABC):
             index_exprs = self.index_exprs.get(None, pmap())
 
             replacer = IndexExpressionReplacer(index_exprs)
-            layouts[path] = replacer(self.layouts[target_path])
+            layouts[path] = replacer(self.layouts.get(target_path, 0))
 
             if not self.axes.is_empty:
                 layouts.update(
@@ -116,7 +116,7 @@ class Indexed(abc.ABC):
                 )
 
                 replacer = IndexExpressionReplacer(index_exprs_)
-                layouts[path_] = replacer(self.layouts[target_path_])
+                layouts[path_] = replacer(self.layouts.get(target_path_, 0))
 
                 if subaxis := self.axes.child(axis, component):
                     layouts.update(

@@ -91,7 +91,7 @@ class PetscMat(PetscObject, abc.ABC):
     def assign(self, other):
         return PetscMatStore(self, other)
 
-    def zero(self):
+    def eager_zero(self):
         self.mat.zeroEntries()
 
 

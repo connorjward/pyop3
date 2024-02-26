@@ -49,7 +49,7 @@ class Intent(enum.Enum):
     MIN_RW = "min_rw"
     MAX_WRITE = "max_write"
     MAX_RW = "max_rw"
-    NA = "na"
+    NA = "na"  # TODO prefer NONE
 
 
 # old alias
@@ -200,10 +200,14 @@ class Loop(Instruction):
                 if arg not in args:
                     args[arg] = intent
                 else:
-                    if args[arg] != intent:
-                        raise NotImplementedError(
-                            "Kernel argument used with differing intents"
-                        )
+                    # FIXME, I have disabled this check because currently we
+                    # do something special for temporaries in Firedrake and the
+                    # clash is of those.
+                    pass
+                    # if args[arg] != intent:
+                    #     raise NotImplementedError(
+                    #         "Kernel argument used with differing intents"
+                    #     )
         return tuple((arg, intent) for arg, intent in args.items())
 
     @cached_property

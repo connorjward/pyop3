@@ -170,19 +170,22 @@ class MapComponent(pytools.ImmutableRecord, Labelled, abc.ABC):
 
 # TODO: Implement AffineMapComponent
 class TabulatedMapComponent(MapComponent):
-    fields = MapComponent.fields | {"array"}
+    fields = MapComponent.fields | {"array", "arity"}
 
-    def __init__(self, target_axis, target_component, array, *, label=None):
+    def __init__(self, target_axis, target_component, array, *, arity=None, label=None):
+        # determine the arity from the provided array
+        if arity is None:
+            leaf_axis, leaf_clabel = array.axes.leaf
+            leaf_cidx = leaf_axis.component_index(leaf_clabel)
+            arity = leaf_axis.components[leaf_cidx].count
+
         super().__init__(target_axis, target_component, label=label)
         self.array = array
+        self._arity = arity
 
     @property
     def arity(self):
-        # TODO clean this up in AxisTree
-        axes = self.array.axes
-        leaf_axis, leaf_clabel = axes.leaf
-        leaf_cidx = leaf_axis.component_index(leaf_clabel)
-        return leaf_axis.components[leaf_cidx].count
+        return self._arity
 
     # old alias
     @property
@@ -434,13 +437,13 @@ class Slice(ContextFreeIndex):
 
     """
 
-    fields = Index.fields | {"axis", "slices"} - {"label"}
+    fields = Index.fields | {"axis", "slices", "numbering"} - {"label"}
 
-    def __init__(self, axis, slices, *, id=None):
-        # super().__init__(label=axis, id=id, component_labels=[s.label for s in slices])
+    def __init__(self, axis, slices, *, numbering=None, id=None):
         super().__init__(label=axis, id=id)
         self.axis = axis
         self.slices = as_tuple(slices)
+        self.numbering = numbering
 
     @property
     def components(self):
@@ -466,11 +469,17 @@ class Map(pytools.ImmutableRecord):
     `CalledMap` which can be formed from a `Map` using call syntax.
     """
 
-    fields = {"connectivity", "name"}
+    fields = {"connectivity", "name", "numbering"}
 
-    def __init__(self, connectivity, name=None, **kwargs) -> None:
-        super().__init__(**kwargs)
+    def __init__(self, connectivity, name=None, *, numbering=None) -> None:
+        # FIXME It is not appropriate to attach the numbering here because the
+        # numbering may differ depending on the loop context.
+        if numbering is not None and len(connectivity.keys()) != 1:
+            raise NotImplementedError
+
+        super().__init__()
         self.connectivity = connectivity
+        self.numbering = numbering
 
         # TODO delete entirely
         # self.name = name
@@ -1112,7 +1121,7 @@ def _(slice_: Slice, indices, *, prev_axes, **kwargs):
                 pmap({slice_.label: bsearch(subset_var, layout_var)})
             )
 
-    axis = Axis(components, label=axis_label)
+    axis = Axis(components, label=axis_label, numbering=slice_.numbering)
     axes = PartialAxisTree(axis)
     target_path_per_component = {}
     index_exprs_per_component = {}
@@ -1312,7 +1321,9 @@ def _make_leaf_axis_from_called_map(
     if all_skipped:
         raise RuntimeError("map does not target any relevant axes")
 
-    axis = Axis(components, label=called_map.id, id=axis_id)
+    axis = Axis(
+        components, label=called_map.id, id=axis_id, numbering=called_map.map.numbering
+    )
 
     return (
         axis,
@@ -1570,7 +1581,13 @@ def _compose_bits(
                     new_layout_expr = IndexExpressionReplacer(layout_expr_replace_map)(
                         myvalue
                     )
-                    layout_exprs[ikey][mykey] = new_layout_expr
+
+                    # this is a trick to get things working in Firedrake, needs more
+                    # thought to understand what is going on
+                    if ikey in layout_exprs and mykey in layout_exprs[ikey]:
+                        assert layout_exprs[ikey][mykey] == new_layout_expr
+                    else:
+                        layout_exprs[ikey][mykey] = new_layout_expr
 
         isubaxis = indexed_axes.child(iaxis, icpt)
         if isubaxis:
