@@ -31,6 +31,7 @@ from pyop3.utils import (
     checked_zip,
     just_one,
     merge_dicts,
+    single_valued,
     unique,
 )
 
@@ -78,6 +79,21 @@ class KernelArgument(abc.ABC):
     @abc.abstractmethod
     def kernel_dtype(self):
         pass
+
+
+# this is an expression, like passing an array through to a kernel
+# but it is transformed first.
+class Pack(KernelArgument, ContextFree):
+    def __init__(self, big, small):
+        self.big = big
+        self.small = small
+
+    @property
+    def kernel_dtype(self):
+        try:
+            return single_valued([self.big.dtype, self.small.dtype])
+        except ValueError:
+            raise ValueError("dtypes must match")
 
 
 class Instruction(UniqueRecord, abc.ABC):

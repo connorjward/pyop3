@@ -105,6 +105,13 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
         self.raxes = raxes
         self.caxes = caxes
 
+        axes = PartialAxisTree(raxes.parent_to_children)
+        for leaf_axis, leaf_cpt in raxes.leaves:
+            # do *not* uniquify, it makes indexing very complicated. Instead assert
+            # that external indices and axes must be sufficiently unique.
+            axes = axes.add_subtree(caxes, leaf_axis, leaf_cpt, uniquify_ids=True)
+        self.axes = AxisTree(axes.parent_to_children)
+
     def __getitem__(self, indices):
         # TODO also support context-free (see MultiArray.__getitem__)
         if len(indices) != 2:
@@ -151,6 +158,11 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
 
         arrays = {}
         for ctx, (rtree, ctree) in rcforest.items():
+            tree = rtree
+            for rleaf, clabel in rtree.leaves:
+                tree = tree.add_subtree(ctree, rleaf, clabel, uniquify_ids=True)
+            indexed_axes = _index_axes(tree, ctx, self.axes)
+
             indexed_raxes = _index_axes(rtree, ctx, self.raxes)
             indexed_caxes = _index_axes(ctree, ctx, self.caxes)
 
@@ -201,12 +213,33 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
             # breakpoint()
             packed = PackedPetscMat(self, rmap, cmap, shape)
 
-            indexed_axes = PartialAxisTree(indexed_raxes.parent_to_children)
-            for leaf_axis, leaf_cpt in indexed_raxes.leaves:
-                indexed_axes = indexed_axes.add_subtree(
-                    indexed_caxes, leaf_axis, leaf_cpt, uniquify=True
-                )
-            indexed_axes = indexed_axes.set_up()
+            # indexed_axes = PartialAxisTree(indexed_raxes.parent_to_children)
+            # for leaf_axis, leaf_cpt in indexed_raxes.leaves:
+            #     indexed_axes = indexed_axes.add_subtree(
+            #         indexed_caxes, leaf_axis, leaf_cpt, uniquify=True
+            #     )
+            # indexed_axes = indexed_axes.set_up()
+            # node_map = dict(indexed_raxes.parent_to_children)
+            # target_paths = dict(indexed_raxes.target_paths)
+            # index_exprs = dict(indexed_raxes.index_exprs)
+            # for leaf_axis, leaf_cpt in indexed_raxes.leaves:
+            #     for caxis in indexed_caxes.nodes:
+            #         if caxis.id not in indexed_raxes.parent_to_children:
+            #             cid = caxis.id
+            #         else:
+            #             cid = XXX
+            #
+            #         for ccpt in caxis.components:
+            #             node_map.update(...)
+            # indexed_axes = AxisTree(node_map, target_paths=???, index_exprs=???)
+            # can I make indexed_axes simply???
+            # breakpoint()
+
+            outer_loops = list(router_loops)
+            all_ids = [l.id for l in router_loops]
+            for ol in couter_loops:
+                if ol.id not in all_ids:
+                    outer_loops.append(ol)
 
             arrays[ctx] = HierarchicalArray(
                 indexed_axes,
@@ -214,8 +247,7 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
                 target_paths=indexed_axes.target_paths,
                 index_exprs=indexed_axes.index_exprs,
                 # TODO ordered set?
-                outer_loops=router_loops
-                + tuple(filter(lambda l: l not in router_loops, couter_loops)),
+                outer_loops=outer_loops,
                 name=self.name,
             )
         return ContextSensitiveMultiArray(arrays)

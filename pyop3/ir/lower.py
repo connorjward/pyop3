@@ -213,7 +213,7 @@ class LoopyCodegenContext(CodegenContext):
             # Temporaries can have variable size, hence we allocate space for the
             # largest possible array
             # shape = (array.alloc_size,)
-            shape = self._temporary_shapes[array.name]
+            shape = self._temporary_shapes.get(array.name, (array.alloc_size,))
 
             # could rename array like the rest
             temp = lp.TemporaryVariable(array.name, dtype=array.dtype, shape=shape)
@@ -489,6 +489,11 @@ def _(expr: Assignment):
 
 
 @_collect_temporary_shapes.register
+def _(expr: PetscMatInstruction):
+    return pmap()
+
+
+@_collect_temporary_shapes.register
 def _(call: CalledFunction):
     return freeze(
         {
@@ -496,7 +501,6 @@ def _(call: CalledFunction):
             for lp_arg, arg in checked_zip(
                 call.function.code.default_entrypoint.args, call.arguments
             )
-            if lp_arg.shape is not None
         }
     )
 

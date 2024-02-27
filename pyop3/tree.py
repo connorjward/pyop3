@@ -270,12 +270,12 @@ class LabelledTree(AbstractTree):
     def _collect_leaves(self, node):
         assert not self.is_empty
         leaves = []
-        for component in node.components:
-            subnode = self.child(node, component)
+        for clabel in node.component_labels:
+            subnode = self.child(node, clabel)
             if subnode:
                 leaves.extend(self._collect_leaves(subnode))
             else:
-                leaves.append((node, component))
+                leaves.append((node, clabel))
         return tuple(leaves)
 
     def add_node(
@@ -341,6 +341,7 @@ class LabelledTree(AbstractTree):
         parent=None,
         component=None,
         uniquify: bool = False,
+        uniquify_ids=False,
     ):
         """
         Parameters
@@ -354,6 +355,15 @@ class LabelledTree(AbstractTree):
             Also fixes node labels.
 
         """
+        # FIXME bad API, uniquify implies uniquify labels only
+        # There are cases where the labels should be distinct but IDs may clash
+        # e.g. adding subaxes for a matrix
+        if uniquify_ids:
+            assert not uniquify
+
+        if uniquify:
+            uniquify_ids = True
+
         if some_but_not_all([parent, component]):
             raise ValueError(
                 "Either both or neither of parent and component must be defined"
@@ -371,7 +381,7 @@ class LabelledTree(AbstractTree):
         parent_to_children = {p: list(ch) for p, ch in self.parent_to_children.items()}
 
         sub_p2c = {p: list(ch) for p, ch in subtree.parent_to_children.items()}
-        if uniquify:
+        if uniquify_ids:
             self._uniquify_node_ids(sub_p2c, set(parent_to_children.keys()))
             assert (
                 len(set(sub_p2c.keys()) & set(parent_to_children.keys()) - {None}) == 0

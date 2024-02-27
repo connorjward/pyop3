@@ -324,10 +324,13 @@ class LoopIndex(AbstractLoopIndex):
 # FIXME class hierarchy is very confusing
 class ContextFreeLoopIndex(ContextFreeIndex):
     def __init__(self, iterset: AxisTree, source_path, path, *, id=None):
-        super().__init__(id=id)
+        super().__init__(id=id, label=id, component_labels=("XXX",))
         self.iterset = iterset
         self.source_path = freeze(source_path)
         self.path = freeze(path)
+
+        # if self.label == "_label_ContextFreeLoopIndex_15":
+        #     breakpoint()
 
     def with_context(self, context, *args):
         return self
@@ -437,7 +440,8 @@ class Slice(ContextFreeIndex):
 
     """
 
-    fields = Index.fields | {"axis", "slices", "numbering"} - {"label"}
+    # fields = Index.fields | {"axis", "slices", "numbering"} - {"label", "component_labels"}
+    fields = {"axis", "slices", "numbering"}
 
     def __init__(self, axis, slices, *, numbering=None, id=None):
         super().__init__(label=axis, id=id)
@@ -496,9 +500,10 @@ class Map(pytools.ImmutableRecord):
         return pmap(data)
 
 
-class CalledMap(Identified, LoopIterable):
-    def __init__(self, map, from_index, *, id=None):
+class CalledMap(Identified, Labelled, LoopIterable):
+    def __init__(self, map, from_index, *, id=None, label=None):
         Identified.__init__(self, id=id)
+        Labelled.__init__(self, label=label)
         self.map = map
         self.from_index = from_index
 
@@ -596,7 +601,9 @@ class CalledMap(Identified, LoopIterable):
         )
         if len(leaf_target_paths) == 0:
             raise RuntimeError
-        return ContextFreeCalledMap(self.map, cf_index, leaf_target_paths, id=self.id)
+        return ContextFreeCalledMap(
+            self.map, cf_index, leaf_target_paths, id=self.id, label=self.label
+        )
 
     @property
     def name(self):
@@ -609,8 +616,12 @@ class CalledMap(Identified, LoopIterable):
 
 # class ContextFreeCalledMap(Index, ContextFree):
 class ContextFreeCalledMap(Index):
-    def __init__(self, map, index, leaf_target_paths, *, id=None):
-        super().__init__(id=id)
+    # FIXME this is clumsy
+    # fields = Index.fields | {"map", "index", "leaf_target_paths"} - {"label", "component_labels"}
+    fields = {"map", "index", "leaf_target_paths", "label", "id"}
+
+    def __init__(self, map, index, leaf_target_paths, *, id=None, label=None):
+        super().__init__(id=id, label=label)
         self.map = map
         # better to call it "input_index"?
         self.index = index
@@ -1274,7 +1285,7 @@ def _make_leaf_axis_from_called_map(
             {map_cpt.target_axis: map_cpt.target_component}
         )
 
-        axisvar = AxisVariable(called_map.id)
+        axisvar = AxisVariable(called_map.label)
 
         if not isinstance(map_cpt, TabulatedMapComponent):
             raise NotImplementedError("Currently we assume only arrays here")
@@ -1297,7 +1308,7 @@ def _make_leaf_axis_from_called_map(
         # a replacement
         map_leaf_axis, map_leaf_component = map_axes.leaf
         old_inner_index_expr = map_array.index_exprs[
-            map_leaf_axis.id, map_leaf_component.label
+            map_leaf_axis.id, map_leaf_component
         ]
 
         my_index_exprs = {}
@@ -1322,7 +1333,10 @@ def _make_leaf_axis_from_called_map(
         raise RuntimeError("map does not target any relevant axes")
 
     axis = Axis(
-        components, label=called_map.id, id=axis_id, numbering=called_map.map.numbering
+        components,
+        label=called_map.label,
+        id=axis_id,
+        numbering=called_map.map.numbering,
     )
 
     return (
@@ -1358,8 +1372,17 @@ def _index_axes(
         debug=debug,
     )
 
-    # index trees should track outer loops, I think?
     outer_loops += indices.outer_loops
+
+    # drop duplicates
+    outer_loops_ = []
+    allids = set()
+    for ol in outer_loops:
+        if ol.id in allids:
+            continue
+        outer_loops_.append(ol)
+        allids.add(ol.id)
+    outer_loops = tuple(outer_loops_)
 
     # check that slices etc have not been missed
     assert not include_loop_index_shape, "old option"

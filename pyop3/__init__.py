@@ -45,6 +45,7 @@ from pyop3.lang import (  # noqa: F401
     Function,
     Loop,
     OpaqueKernelArgument,
+    Pack,
     ReplaceAssignment,
     do_loop,
     loop,

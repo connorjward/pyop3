@@ -24,6 +24,7 @@ from pyop3.lang import (
     DummyKernelArgument,
     Instruction,
     Loop,
+    Pack,
     PetscMatAdd,
     PetscMatLoad,
     PetscMatStore,
@@ -276,7 +277,6 @@ class ImplicitPackUnpackExpander(Transformer):
                 axes = AxisTree(arg.axes.parent_to_children)
                 new_arg = HierarchicalArray(
                     axes,
-                    layouts=arg.layouts,
                     data=NullBuffer(arg.dtype),  # does this need a size?
                     name=self._name_generator("t"),
                 )
@@ -319,29 +319,39 @@ class ImplicitPackUnpackExpander(Transformer):
             # this is a separate stage to the assignment operations because one
             # can index a packed mat. E.g. mat[p, q][::2] would decompose into
             # two calls, one to pack t0 <- mat[p, q] and another to pack t1 <- t0[::2]
-            if isinstance(arg.buffer, PackedBuffer):
+            if (
+                isinstance(arg, Pack)
+                and isinstance(arg.big.buffer, PackedBuffer)
+                or not isinstance(arg, Pack)
+                and isinstance(arg.buffer, PackedBuffer)
+            ):
+                if isinstance(arg, Pack):
+                    myarg = arg.big
+                else:
+                    myarg = arg
+
                 # TODO add PackedPetscMat as a subclass of buffer?
-                if not isinstance(arg.buffer.array, PetscMat):
+                if not isinstance(myarg.buffer.array, PetscMat):
                     raise NotImplementedError("Only handle Mat at the moment")
 
-                axes = AxisTree(arg.axes.parent_to_children)
+                axes = AxisTree(myarg.axes.parent_to_children)
                 new_arg = HierarchicalArray(
                     axes,
-                    data=NullBuffer(arg.dtype),  # does this need a size?
+                    data=NullBuffer(myarg.dtype),  # does this need a size?
                     name=self._name_generator("t"),
                 )
 
                 if intent == READ:
-                    gathers.append(PetscMatLoad(arg, new_arg))
+                    gathers.append(PetscMatLoad(myarg, new_arg))
                 elif intent == WRITE:
-                    scatters.insert(0, PetscMatStore(arg, new_arg))
+                    scatters.insert(0, PetscMatStore(myarg, new_arg))
                 elif intent == RW:
-                    gathers.append(PetscMatLoad(arg, new_arg))
-                    scatters.insert(0, PetscMatStore(arg, new_arg))
+                    gathers.append(PetscMatLoad(myarg, new_arg))
+                    scatters.insert(0, PetscMatStore(myarg, new_arg))
                 else:
                     assert intent == INC
                     gathers.append(ReplaceAssignment(new_arg, 0))
-                    scatters.insert(0, PetscMatAdd(arg, new_arg))
+                    scatters.insert(0, PetscMatAdd(myarg, new_arg))
 
                 # the rest of the packing code is now dealing with the result of this
                 # function call
@@ -349,12 +359,16 @@ class ImplicitPackUnpackExpander(Transformer):
 
             # unpick pack/unpack instructions
             if intent != NA and _requires_pack_unpack(arg):
-                axes = AxisTree(arg.axes.parent_to_children)
-                temporary = HierarchicalArray(
-                    axes,
-                    data=NullBuffer(arg.dtype),  # does this need a size?
-                    name=self._name_generator("t"),
-                )
+                if isinstance(arg, Pack):
+                    temporary = arg.small
+                    arg = arg.big
+                else:
+                    axes = AxisTree(arg.axes.parent_to_children)
+                    temporary = HierarchicalArray(
+                        axes,
+                        data=NullBuffer(arg.dtype),  # does this need a size?
+                        name=self._name_generator("t"),
+                    )
 
                 if intent == READ:
                     gathers.append(ReplaceAssignment(temporary, arg))
@@ -426,7 +440,7 @@ def _requires_pack_unpack(arg):
     # however, it is overly restrictive since we could pass something like dat[i0, :] directly
     # to a local kernel
     # return isinstance(arg, HierarchicalArray) and arg.subst_layouts != arg.layouts
-    return isinstance(arg, HierarchicalArray)
+    return isinstance(arg, HierarchicalArray) or isinstance(arg, Pack)
 
 
 # *below is old untested code*
