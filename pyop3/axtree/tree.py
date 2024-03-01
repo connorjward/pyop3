@@ -438,29 +438,6 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
             {cpt: count for cpt, count in checked_zip(self.components, counts)}
         )
 
-    # should be a cached property?
-    def global_numbering(self):
-        if self.comm.size == 1:
-            return np.arange(self.size, dtype=IntType)
-
-        numbering = np.full(self.size, -1, dtype=IntType)
-
-        start = self.sf.comm.tompi4py().exscan(self.owned.size, MPI.SUM)
-        if start is None:
-            start = 0
-        # numbering[:self.owned.size] = np.arange(start, start+self.owned.size, dtype=IntType)
-        numbering[self.numbering.data_ro[: self.owned.size]] = np.arange(
-            start, start + self.owned.size, dtype=IntType
-        )
-
-        # print_with_rank("before", numbering)
-
-        self.sf.broadcast(numbering, MPI.REPLACE)
-
-        # print_with_rank("after", numbering)
-        debug_assert(lambda: (numbering >= 0).all())
-        return numbering
-
     @cached_property
     def owned(self):
         from pyop3.itree import AffineSliceComponent, Slice
@@ -1161,6 +1138,34 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
             ilocal = np.concatenate(ilocals)
             iremote = np.concatenate(iremotes)
             return StarForest.from_graph(self.size, nroots, ilocal, iremote, self.comm)
+
+    # should be a cached property?
+    def global_numbering(self):
+        if self.comm.size == 1:
+            return np.arange(self.size, dtype=IntType)
+
+        numbering = np.full(self.size, -1, dtype=IntType)
+
+        start = self.sf.comm.tompi4py().exscan(self.owned.size, MPI.SUM)
+        if start is None:
+            start = 0
+
+        # TODO do I need to account for numbering/layouts? The SF should probably
+        # manage this.
+        numbering[: self.owned.size] = np.arange(
+            start, start + self.owned.size, dtype=IntType
+        )
+        # numbering[self.numbering.data_ro[: self.owned.size]] = np.arange(
+        #     start, start + self.owned.size, dtype=IntType
+        # )
+
+        # print_with_rank("before", numbering)
+
+        self.sf.broadcast(numbering, MPI.REPLACE)
+
+        # print_with_rank("after", numbering)
+        debug_assert(lambda: (numbering >= 0).all())
+        return numbering
 
 
 class ContextSensitiveAxisTree(ContextSensitiveLoopIterable):

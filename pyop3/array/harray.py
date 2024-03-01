@@ -158,9 +158,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         self._axes = axes
         self.max_value = max_value
 
-        if some_but_not_all(
-            x is None for x in [target_paths, index_exprs, outer_loops]
-        ):
+        if some_but_not_all(x is None for x in [target_paths, index_exprs]):
             raise ValueError
 
         self._target_paths = target_paths or axes._default_target_paths()

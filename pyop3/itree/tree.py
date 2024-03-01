@@ -475,6 +475,8 @@ class Map(pytools.ImmutableRecord):
 
     fields = {"connectivity", "name", "numbering"}
 
+    counter = 0
+
     def __init__(self, connectivity, name=None, *, numbering=None) -> None:
         # FIXME It is not appropriate to attach the numbering here because the
         # numbering may differ depending on the loop context.
@@ -486,7 +488,11 @@ class Map(pytools.ImmutableRecord):
         self.numbering = numbering
 
         # TODO delete entirely
-        # self.name = name
+        if name is None:
+            # lazy unique name
+            name = f"_Map_{self.counter}"
+            self.counter += 1
+        self.name = name
 
     def __call__(self, index):
         return CalledMap(self, index)
@@ -892,7 +898,6 @@ def _(called_map, *, axes, **kwargs):
     input_forest = _as_index_forest(called_map.from_index, axes=axes, **kwargs)
     for context in input_forest.keys():
         cf_called_map = called_map.with_context(context, axes)
-        # breakpoint()
         forest[context] = IndexTree(cf_called_map)
     return forest
 
@@ -1024,13 +1029,10 @@ def _(
     if include_loop_index_shape:
         assert False, "old code"
     else:
-        # if debug:
-        #     breakpoint()
         axes = loop_index.axes
         target_paths = loop_index.target_paths
 
         index_exprs = loop_index.index_exprs
-        # breakpoint()
         # index_exprs = {axis: LocalLoopIndexVariable(loop_index, axis) for axis in loop_index.iterset.path(*loop_index.iterset.leaf)}
         #
         # index_exprs = {None: index_exprs}
@@ -1045,7 +1047,7 @@ def _(
 
 
 @collect_shape_index_callback.register
-def _(slice_: Slice, indices, *, prev_axes, **kwargs):
+def _(slice_: Slice, indices, *, target_path_acc, prev_axes, **kwargs):
     from pyop3.array.harray import MultiArrayVariable
 
     components = []
@@ -1056,10 +1058,28 @@ def _(slice_: Slice, indices, *, prev_axes, **kwargs):
     axis_label = slice_.label
 
     for subslice in slice_.slices:
-        # we are assuming that axes with the same label *must* be identical. They are
-        # only allowed to differ in that they have different IDs.
-        target_axis, target_cpt = prev_axes.find_component(
-            slice_.axis, subslice.component, also_node=True
+        if not prev_axes.is_valid_path(target_path_acc, complete=False):
+            raise NotImplementedError(
+                "If we swap axes around then we must check "
+                "that we don't get clashes."
+            )
+
+            # previous code:
+            # we are assuming that axes with the same label *must* be identical. They are
+            # only allowed to differ in that they have different IDs.
+            # target_axis, target_cpt = prev_axes.find_component(
+            #     slice_.axis, subslice.component, also_node=True
+            # )
+
+        if not target_path_acc:
+            target_axis = prev_axes.root
+        else:
+            parent = prev_axes._node_from_path(target_path_acc)
+            target_axis = prev_axes.child(*parent)
+
+        assert target_axis.label == slice_.axis
+        target_cpt = just_one(
+            c for c in target_axis.components if c.label == subslice.component
         )
 
         if isinstance(subslice, AffineSliceComponent):
@@ -1285,7 +1305,7 @@ def _make_leaf_axis_from_called_map(
             {map_cpt.target_axis: map_cpt.target_component}
         )
 
-        axisvar = AxisVariable(called_map.label)
+        axisvar = AxisVariable(called_map.map.name)
 
         if not isinstance(map_cpt, TabulatedMapComponent):
             raise NotImplementedError("Currently we assume only arrays here")
@@ -1334,7 +1354,7 @@ def _make_leaf_axis_from_called_map(
 
     axis = Axis(
         components,
-        label=called_map.label,
+        label=called_map.map.name,
         id=axis_id,
         numbering=called_map.map.numbering,
     )
@@ -1365,6 +1385,7 @@ def _index_axes(
     ) = _index_axes_rec(
         indices,
         (),
+        pmap(),  # target_path
         current_index=indices.root,
         loop_indices=loop_context,
         prev_axes=axes,
@@ -1408,13 +1429,18 @@ def _index_axes(
 def _index_axes_rec(
     indices,
     indices_acc,
+    target_path_acc,
     *,
     current_index,
     debug=False,
     **kwargs,
 ):
     index_data = collect_shape_index_callback(
-        current_index, indices_acc, debug=debug, **kwargs
+        current_index,
+        indices_acc,
+        debug=debug,
+        target_path_acc=target_path_acc,
+        **kwargs,
     )
     axes_per_index, *rest, outer_loops = index_data
 
@@ -1438,9 +1464,15 @@ def _index_axes_rec(
                 continue
             indices_acc_ = indices_acc + (current_index,)
 
+            target_path_acc_ = dict(target_path_acc)
+            for _ax, _cpt in axes_per_index.path_with_nodes(*leafkey).items():
+                target_path_acc_.update(target_path_per_cpt_per_index[_ax.id, _cpt])
+            target_path_acc_ = freeze(target_path_acc_)
+
             retval = _index_axes_rec(
                 indices,
                 indices_acc_,
+                target_path_acc_,
                 current_index=subindex,
                 debug=debug,
                 **kwargs,

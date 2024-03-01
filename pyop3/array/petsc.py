@@ -337,18 +337,14 @@ class PetscMatPreallocator(MonolithicPetscMat):
         mat = PETSc.Mat().create(comm)
         mat.setType(PETSc.Mat.Type.PREALLOCATOR)
         # None is for the global size, PETSc will determine it
-        mat.setSizes(((raxes.size, None), (caxes.size, None)))
+        mat.setSizes(((raxes.owned.size, None), (caxes.owned.size, None)))
 
-        # ah, is the problem here???
-        if comm.size > 1:
-            raise NotImplementedError
-
-        # rlgmap = PETSc.LGMap().create(raxes.root.global_numbering(), comm=comm)
-        # clgmap = PETSc.LGMap().create(caxes.root.global_numbering(), comm=comm)
-        rlgmap = np.arange(raxes.size, dtype=IntType)
-        clgmap = np.arange(raxes.size, dtype=IntType)
-        rlgmap = PETSc.LGMap().create(rlgmap, comm=comm)
-        clgmap = PETSc.LGMap().create(clgmap, comm=comm)
+        rlgmap = PETSc.LGMap().create(raxes.global_numbering(), comm=comm)
+        clgmap = PETSc.LGMap().create(caxes.global_numbering(), comm=comm)
+        # rlgmap = np.arange(raxes.size, dtype=IntType)
+        # clgmap = np.arange(raxes.size, dtype=IntType)
+        # rlgmap = PETSc.LGMap().create(rlgmap, comm=comm)
+        # clgmap = PETSc.LGMap().create(clgmap, comm=comm)
         mat.setLGMap(rlgmap, clgmap)
 
         mat.setUp()
@@ -415,20 +411,18 @@ def _alloc_template_mat(points, adjacency, raxes, caxes, bsize=None):
 
     # None is for the global size, PETSc will determine it
     # sizes = ((raxes.owned.size, None), (caxes.owned.size, None))
-    sizes = ((raxes.size, None), (caxes.size, None))
+    sizes = ((raxes.owned.size, None), (caxes.owned.size, None))
     # breakpoint()
     comm = single_valued([raxes.comm, caxes.comm])
     mat = PETSc.Mat().createAIJ(sizes, comm=comm)
     mat.preallocateWithMatPreallocator(prealloc_mat.mat)
 
-    if comm.size > 1:
-        raise NotImplementedError
-    rlgmap = np.arange(raxes.size, dtype=IntType)
-    clgmap = np.arange(raxes.size, dtype=IntType)
-    # rlgmap = PETSc.LGMap().create(raxes.root.global_numbering(), comm=comm)
-    # clgmap = PETSc.LGMap().create(caxes.root.global_numbering(), comm=comm)
-    rlgmap = PETSc.LGMap().create(rlgmap, comm=comm)
-    clgmap = PETSc.LGMap().create(clgmap, comm=comm)
+    rlgmap = PETSc.LGMap().create(raxes.global_numbering(), comm=comm)
+    clgmap = PETSc.LGMap().create(caxes.global_numbering(), comm=comm)
+    # rlgmap = np.arange(raxes.size, dtype=IntType)
+    # clgmap = np.arange(raxes.size, dtype=IntType)
+    # rlgmap = PETSc.LGMap().create(rlgmap, comm=comm)
+    # clgmap = PETSc.LGMap().create(clgmap, comm=comm)
 
     mat.setLGMap(rlgmap, clgmap)
     mat.assemble()
