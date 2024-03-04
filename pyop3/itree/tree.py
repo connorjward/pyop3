@@ -1465,8 +1465,10 @@ def _index_axes_rec(
             indices_acc_ = indices_acc + (current_index,)
 
             target_path_acc_ = dict(target_path_acc)
-            for _ax, _cpt in axes_per_index.path_with_nodes(*leafkey).items():
-                target_path_acc_.update(target_path_per_cpt_per_index[_ax.id, _cpt])
+            target_path_acc_.update(target_path_per_cpt_per_index.get(None, {}))
+            if not axes_per_index.is_empty:
+                for _ax, _cpt in axes_per_index.path_with_nodes(*leafkey).items():
+                    target_path_acc_.update(target_path_per_cpt_per_index[_ax.id, _cpt])
             target_path_acc_ = freeze(target_path_acc_)
 
             retval = _index_axes_rec(
