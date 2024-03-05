@@ -126,6 +126,8 @@ class LoopyCodegenContext(CodegenContext):
         # TODO remove
         self._dummy_names = {}
 
+        self._seen_arrays = set()
+
     @property
     def domains(self):
         return tuple(self._domains)
@@ -160,9 +162,15 @@ class LoopyCodegenContext(CodegenContext):
         self._domains.append(domain_str)
 
     def add_assignment(self, assignee, expression, prefix="insn"):
-        renamer = Renamer(self.actual_to_kernel_rename_map)
-        assignee = renamer(assignee)
-        expression = renamer(expression)
+        # TODO recover this functionality, in other words we should produce
+        # non-renamed expressions. This means that the Renamer can also register
+        # arguments so we only use the ones we actually need!
+
+        # renamer = Renamer(self.actual_to_kernel_rename_map)
+        # assignee = renamer(assignee)
+        # expression = renamer(expression)
+
+        # breakpoint()
 
         insn = lp.Assignment(
             assignee,
@@ -205,41 +213,35 @@ class LoopyCodegenContext(CodegenContext):
             name = self._dummy_names.setdefault(arg, self._name_generator("dummy"))
         self._args.append(lp.ValueArg(name, dtype=dtype))
 
+    # deprecated
     def add_argument(self, array):
+        return self.add_array(array)
+
+    # TODO we pass a lot more data here than we need I think, need to use unique *buffers*
+    def add_array(self, array: HierarchicalArray) -> None:
+        if array.name in self._seen_arrays:
+            return
+        self._seen_arrays.add(array.name)
+
+        # TODO Can directly inject data as temporaries if constant and small
+        # injected = array.constant and array.size < config["max_static_array_size"]:
+        # if isinstance(array.buffer, NullBuffer) or injected:
         if isinstance(array.buffer, NullBuffer):
-            if array.name in self.actual_to_kernel_rename_map:
-                return
-
-            # Temporaries can have variable size, hence we allocate space for the
-            # largest possible array
-            # shape = (array.alloc_size,)
+            name = self.unique_name("t")
             shape = self._temporary_shapes.get(array.name, (array.alloc_size,))
-
-            # could rename array like the rest
-            temp = lp.TemporaryVariable(array.name, dtype=array.dtype, shape=shape)
-            self._args.append(temp)
-
-            # hasty no-op, refactor
-            arg_name = self.actual_to_kernel_rename_map.setdefault(
-                array.name, array.name
-            )
-            return
-
-        if array.name in self.actual_to_kernel_rename_map:
-            return
-
-        arg_name = self.actual_to_kernel_rename_map.setdefault(
-            array.name, self.unique_name("arg")
-        )
-
-        if isinstance(array.buffer, PackedBuffer):
-            arg = lp.ValueArg(arg_name, dtype=self._dtype(array))
+            arg = lp.TemporaryVariable(name, dtype=array.dtype, shape=shape)
+        elif isinstance(array.buffer, PackedBuffer):
+            name = self.unique_name("packed")
+            arg = lp.ValueArg(name, dtype=self._dtype(array))
         else:
+            name = self.unique_name("array")
             assert isinstance(array.buffer, DistributedBuffer)
-            arg = lp.GlobalArg(arg_name, dtype=self._dtype(array), shape=None)
+            arg = lp.GlobalArg(name, dtype=self._dtype(array), shape=None)
+
+        self.actual_to_kernel_rename_map[array.name] = name
         self._args.append(arg)
 
-    # can this now go?
+    # can this now go? no, not all things are arrays
     def add_temporary(self, name, dtype=IntType, shape=()):
         temp = lp.TemporaryVariable(name, dtype=dtype, shape=shape)
         self._args.append(temp)
@@ -321,10 +323,9 @@ class CodegenResult:
 
         data_args = []
         for kernel_arg in self.ir.default_entrypoint.args:
-            actual_arg_name = self.arg_replace_map.get(kernel_arg.name, kernel_arg.name)
+            actual_arg_name = self.arg_replace_map[kernel_arg.name]
             array = kwargs.get(actual_arg_name, self.datamap[actual_arg_name])
-            data_arg = _as_pointer(array)
-            data_args.append(data_arg)
+            data_args.append(_as_pointer(array))
         compile_loopy(self.ir)(*data_args)
 
     def target_code(self, target):
@@ -460,7 +461,6 @@ def compile(expr: Instruction, name="mykernel"):
 
     tu = tu.with_entrypoints(name)
 
-    # breakpoint()
     return CodegenResult(expr, tu, ctx.kernel_to_actual_rename_map)
 
 
@@ -558,7 +558,6 @@ def parse_loop_properly_this_time(
 
         if component.count != 1:
             iname = codegen_context.unique_name("i")
-            # breakpoint()
             extent_var = register_extent(
                 component.count,
                 iname_replace_map | loop_indices,
@@ -650,7 +649,7 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
 
             # Register data
             # TODO This might be bad for temporaries
-            if isinstance(arg, (HierarchicalArray, ContextSensitiveMultiArray)):
+            if isinstance(arg, HierarchicalArray):
                 ctx.add_argument(arg)
 
             # this should already be done in an assignment
@@ -664,25 +663,10 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
                 indices.append(pym.var(iname))
             indices = tuple(indices)
 
+            temp_name = ctx.actual_to_kernel_rename_map[temporary.name]
             subarrayrefs[arg] = lp.symbolic.SubArrayRef(
-                indices, pym.subscript(pym.var(temporary.name), indices)
+                indices, pym.subscript(pym.var(temp_name), indices)
             )
-
-        # we need to pass sizes through if they are only known at runtime (ragged)
-        # NOTE: If we register an extent to pass through loopy will complain
-        # unless we register it as an assumption of the local kernel (e.g. "n <= 3")
-
-        # FIXME ragged is broken since I commented this out! determining shape of
-        # ragged things requires thought!
-        # for cidx in range(indexed_temp.index.root.degree):
-        #     extents |= self.collect_extents(
-        #         indexed_temp.index,
-        #         indexed_temp.index.root,
-        #         cidx,
-        #         within_indices,
-        #         within_inames,
-        #         depends_on,
-        #     )
 
     # TODO this is pretty much the same as what I do in fix_intents in loopexpr.py
     # probably best to combine them - could add a sensible check there too.
@@ -776,7 +760,6 @@ def _(assignment, loop_indices, codegen_context):
     #     freeze({rmap.axes.root.label: rmap.axes.root.component.label})
     # ]
     rlayouts = rmap.layouts[pmap()]
-    # breakpoint()
     roffset = JnameSubstitutor(loop_indices, codegen_context)(rlayouts)
 
     # clayouts = cmap.layouts[
@@ -943,7 +926,8 @@ def make_array_expr(array, path, inames, ctx):
     else:
         indices = (array_offset,)
 
-    return pym.subscript(pym.var(array.name), indices)
+    name = ctx.actual_to_kernel_rename_map[array.name]
+    return pym.subscript(pym.var(name), indices)
 
 
 class JnameSubstitutor(pym.mapper.IdentityMapper):
@@ -958,8 +942,6 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
     # rather than register assignments for things.
     def map_multi_array(self, expr):
         # Register data
-        # if STOP:
-        #     breakpoint()
         self._codegen_context.add_argument(expr.array)
         new_name = self._codegen_context.actual_to_kernel_rename_map[expr.array.name]
 
@@ -1188,7 +1170,8 @@ def _scalar_assignment(
         jname_replace_map,
         ctx,
     )
-    rexpr = pym.subscript(pym.var(array.name), offset_expr)
+    name = ctx.actual_to_kernel_rename_map[array.name]
+    rexpr = pym.subscript(pym.var(name), offset_expr)
     return rexpr
 
 

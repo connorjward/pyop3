@@ -77,6 +77,23 @@ class MultiArrayVariable(pym.primitives.Expression):
     #     return f"MultiArrayVariable({self.array!r}, {self.indices!r})"
 
 
+from pymbolic.mapper.stringifier import PREC_CALL, PREC_NONE, StringifyMapper
+
+
+# This was adapted from pymbolic's map_subscript
+def stringify_array(self, array, enclosing_prec, *args, **kwargs):
+    index_str = self.join_rec(
+        ", ", array.index_exprs.values(), PREC_NONE, *args, **kwargs
+    )
+
+    return self.parenthesize_if_needed(
+        self.format("%s[%s]", array.name, index_str), enclosing_prec, PREC_CALL
+    )
+
+
+pym.mapper.stringifier.StringifyMapper.map_multi_array = stringify_array
+
+
 # does not belong here!
 class CalledMapVariable(MultiArrayVariable):
     mapper_method = sys.intern("map_called_map_variable")
@@ -104,6 +121,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
     """
 
     DEFAULT_DTYPE = Buffer.DEFAULT_DTYPE
+    DEFAULT_KERNEL_PREFIX = "array"
 
     def __init__(
         self,
@@ -118,6 +136,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         outer_loops=None,
         name=None,
         prefix=None,
+        kernel_prefix=None,
     ):
         super().__init__(name=name, prefix=prefix)
 
@@ -154,9 +173,16 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
                 data=data,
             )
 
+        # think this is a bad idea, makes the generated code less general
+        # if kernel_prefix is None:
+        #     kernel_prefix = prefix if prefix is not None else self.DEFAULT_KERNEL_PREFIX
+        kernel_prefix = "DONOTUSE"
+
         self.buffer = data
         self._axes = axes
         self.max_value = max_value
+
+        self.kernel_prefix = kernel_prefix
 
         if some_but_not_all(x is None for x in [target_paths, index_exprs]):
             raise ValueError

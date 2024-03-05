@@ -278,7 +278,7 @@ class ImplicitPackUnpackExpander(Transformer):
                 new_arg = HierarchicalArray(
                     axes,
                     data=NullBuffer(arg.dtype),  # does this need a size?
-                    name=self._name_generator("t"),
+                    prefix="t",
                 )
 
                 if intent == READ:
@@ -338,7 +338,7 @@ class ImplicitPackUnpackExpander(Transformer):
                 new_arg = HierarchicalArray(
                     axes,
                     data=NullBuffer(myarg.dtype),  # does this need a size?
-                    name=self._name_generator("t"),
+                    prefix="t",
                 )
 
                 if intent == READ:
@@ -367,7 +367,7 @@ class ImplicitPackUnpackExpander(Transformer):
                     temporary = HierarchicalArray(
                         axes,
                         data=NullBuffer(arg.dtype),  # does this need a size?
-                        name=self._name_generator("t"),
+                        prefix="t",
                     )
 
                 if intent == READ:
