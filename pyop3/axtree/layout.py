@@ -735,7 +735,7 @@ def _collect_at_leaves(
     layout_axes,
     values,
     axis: Optional[Axis] = None,
-    path=pmap(),  # not used anymore since we use IDs instead
+    path=pmap(),
     layout_path=pmap(),
     prior=0,
 ):
@@ -744,7 +744,7 @@ def _collect_at_leaves(
         axis = layout_axes.root
 
     if axis == axes.root:
-        acc[None] = prior
+        acc[pmap()] = prior
 
     for component in axis.components:
         layout_path_ = layout_path | {axis.label: component.label}
@@ -752,7 +752,7 @@ def _collect_at_leaves(
 
         if axis in axes.nodes:
             path_ = path | {axis.label: component.label}
-            acc[axis.id, component.label] = prior_
+            acc[path_] = prior_
         else:
             path_ = path
 
@@ -942,22 +942,22 @@ def _collect_sizes_rec(axes, axis) -> pmap:
     return pmap(sizes)
 
 
-def eval_offset(axes, layout, indices, index_exprs=None):
+def eval_offset(axes, layouts, indices, target_path=None, index_exprs=None):
     indices = freeze(indices)
-    # if target_path is not None:
-    #     target_path = freeze(target_path)
+    if target_path is not None:
+        target_path = freeze(target_path)
     if index_exprs is not None:
         index_exprs = freeze(index_exprs)
 
-    # if target_path is None:
-    #     # if a path is not specified we assume that the axes/array are
-    #     # unindexed and single component
-    #     target_path = {}
-    #     target_path.update(axes.target_paths.get(None, {}))
-    #     if not axes.is_empty:
-    #         for ax, clabel in axes.path_with_nodes(*axes.leaf).items():
-    #             target_path.update(axes.target_paths.get((ax.id, clabel), {}))
-    #     target_path = freeze(target_path)
+    if target_path is None:
+        # if a path is not specified we assume that the axes/array are
+        # unindexed and single component
+        target_path = {}
+        target_path.update(axes.target_paths.get(None, {}))
+        if not axes.is_empty:
+            for ax, clabel in axes.path_with_nodes(*axes.leaf).items():
+                target_path.update(axes.target_paths.get((ax.id, clabel), {}))
+        target_path = freeze(target_path)
 
     # if the provided indices are not a dict then we assume that they apply in order
     # as we go down the selected path of the tree
@@ -982,5 +982,5 @@ def eval_offset(axes, layout, indices, index_exprs=None):
     else:
         indices_ = indices
 
-    offset = pym.evaluate(layout, indices_, ExpressionEvaluator)
+    offset = pym.evaluate(layouts[target_path], indices_, ExpressionEvaluator)
     return strict_int(offset)
