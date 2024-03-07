@@ -141,8 +141,8 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         super().__init__(name=name, prefix=prefix)
 
         # debug
-        # if self.name == "t_0":
-        #     breakpoint()
+        if self.name == "array_21":
+            breakpoint()
 
         axes = as_axis_tree(axes)
 

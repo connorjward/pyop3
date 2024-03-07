@@ -118,39 +118,42 @@ def collect_datamap_from_expression(expr: pym.primitives.Expr) -> dict:
 
 
 class SliceComponent(LabelledNodeComponent, abc.ABC):
-    def __init__(self, component):
-        super().__init__(component)
-
-    @property
-    def component(self):
-        return self.label
+    def __init__(self, component, *, label=None):
+        super().__init__(label)
+        self.component = component
 
 
 class AffineSliceComponent(SliceComponent):
     fields = SliceComponent.fields | {"start", "stop", "step"}
 
-    def __init__(self, component, start=None, stop=None, step=None):
-        super().__init__(component)
-        # use None for the default args here since that agrees with Python slices
+    # use None for the default args here since that agrees with Python slices
+    def __init__(self, component, start=None, stop=None, step=None, **kwargs):
+        super().__init__(component, **kwargs)
+        # could be None here
         self.start = start if start is not None else 0
         self.stop = stop
+        # could be None here
         self.step = step if step is not None else 1
 
     @property
-    def datamap(self):
+    def datamap(self) -> PMap:
         return pmap()
 
 
-class Subset(SliceComponent):
+class SubsetSliceComponent(SliceComponent):
     fields = SliceComponent.fields | {"array"}
 
-    def __init__(self, component, array: MultiArray):
-        super().__init__(component)
+    def __init__(self, component, array, **kwargs):
+        super().__init__(component, **kwargs)
         self.array = array
 
     @property
-    def datamap(self):
+    def datamap(self) -> PMap:
         return self.array.datamap
+
+
+# alternative name, better or worse?
+Subset = SubsetSliceComponent
 
 
 class MapComponent(pytools.ImmutableRecord, Labelled, abc.ABC):
@@ -599,11 +602,12 @@ class CalledMap(Identified, Labelled, LoopIterable):
             freeze({mcpt.target_axis: mcpt.target_component})
             for path in cf_index.leaf_target_paths
             for mcpt in self.connectivity[path]
-            # if axes is None we are *building* the axes from this map
-            if axes is None
-            or axes.is_valid_path(
-                {mcpt.target_axis: mcpt.target_component}, complete=False
-            )
+            # do not do this check here, it breaks map composition since this
+            # particular map may not be targetting axes
+            # if axes is None
+            # or axes.is_valid_path(
+            #     {mcpt.target_axis: mcpt.target_component}, complete=False
+            # )
         )
         if len(leaf_target_paths) == 0:
             raise RuntimeError
@@ -1104,7 +1108,7 @@ def _(slice_: Slice, indices, *, target_path_acc, prev_axes, **kwargs):
         else:
             assert isinstance(subslice, Subset)
             size = subslice.array.axes.leaf_component.count
-        cpt = AxisComponent(size, label=subslice.component)
+        cpt = AxisComponent(size, label=subslice.label)
         components.append(cpt)
 
         target_path_per_subslice.append(pmap({slice_.axis: subslice.component}))
@@ -1468,7 +1472,9 @@ def _index_axes_rec(
             target_path_acc_.update(target_path_per_cpt_per_index.get(None, {}))
             if not axes_per_index.is_empty:
                 for _ax, _cpt in axes_per_index.path_with_nodes(*leafkey).items():
-                    target_path_acc_.update(target_path_per_cpt_per_index[_ax.id, _cpt])
+                    target_path_acc_.update(
+                        target_path_per_cpt_per_index.get((_ax.id, _cpt), {})
+                    )
             target_path_acc_ = freeze(target_path_acc_)
 
             retval = _index_axes_rec(

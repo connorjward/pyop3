@@ -68,6 +68,8 @@ class PetscMat(PetscObject, abc.ABC):
     prefix = "mat"
 
     def __new__(cls, *args, **kwargs):
+        # If the user called PetscMat(...), as opposed to PetscMatAIJ(...) etc
+        # then inspect mat_type and return the right object.
         if cls is PetscMat:
             mat_type_str = kwargs.pop("mat_type", cls.DEFAULT_MAT_TYPE)
             mat_type = MatType(mat_type_str)
@@ -85,6 +87,16 @@ class PetscMat(PetscObject, abc.ABC):
     def array(self):
         return self.petscmat
 
+    @property
+    def values(self):
+        if self.raxes.size * self.caxes.size > 1e6:
+            raise ValueError(
+                "Printing a dense matrix with more than 1 million entries is not allowed"
+            )
+
+        self.assemble()
+        return self.mat[:, :]
+
     def assemble(self):
         self.mat.assemble()
 
@@ -96,21 +108,28 @@ class PetscMat(PetscObject, abc.ABC):
 
 
 class MonolithicPetscMat(PetscMat, abc.ABC):
+    _row_suffix = "_row"
+    _col_suffix = "_col"
+
     def __init__(self, raxes, caxes, *, name=None):
         raxes = as_axis_tree(raxes)
         caxes = as_axis_tree(caxes)
 
-        super().__init__(name)
+        # Since axes require unique labels, relabel the row and column axis trees
+        # with different suffixes. This allows us to create a combined axis tree
+        # without clashes.
+        # raxes_relabel = _relabel_axes(raxes, self._row_suffix)
+        # caxes_relabel = _relabel_axes(caxes, self._col_suffix)
+        #
+        # axes = PartialAxisTree(raxes_relabel.parent_to_children)
+        # for leaf in raxes_relabel.leaves:
+        #     axes = axes.add_subtree(caxes_relabel, *leaf, uniquify_ids=True)
+        # axes = axes.set_up()
 
+        super().__init__(name)
         self.raxes = raxes
         self.caxes = caxes
-
-        axes = PartialAxisTree(raxes.parent_to_children)
-        for leaf_axis, leaf_cpt in raxes.leaves:
-            # do *not* uniquify, it makes indexing very complicated. Instead assert
-            # that external indices and axes must be sufficiently unique.
-            axes = axes.add_subtree(caxes, leaf_axis, leaf_cpt, uniquify_ids=True)
-        self.axes = AxisTree(axes.parent_to_children)
+        # self.axes = axes
 
     def __getitem__(self, indices):
         # TODO also support context-free (see MultiArray.__getitem__)
@@ -156,17 +175,20 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
                     continue
                 rcforest[rctx | cctx] = (rtree, ctree)
 
+        # TODO
+        # I have to relabel the index tree targets to work for the new set of axes.
+        # Also the resulting axes will have some odd (suffixed) labels, which is likely
+        # fine.
+
         arrays = {}
         for ctx, (rtree, ctree) in rcforest.items():
-            tree = rtree
-            for rleaf, clabel in rtree.leaves:
-                tree = tree.add_subtree(ctree, rleaf, clabel, uniquify_ids=True)
-            indexed_axes = _index_axes(tree, ctx, self.axes)
+            # tree = rtree
+            # for rleaf, clabel in rtree.leaves:
+            #     tree = tree.add_subtree(ctree, rleaf, clabel, uniquify_ids=True)
+            # indexed_axes = _index_axes(tree, ctx, self.axes)
 
             indexed_raxes = _index_axes(rtree, ctx, self.raxes)
             indexed_caxes = _index_axes(ctree, ctx, self.caxes)
-
-            # breakpoint()
 
             if indexed_raxes.alloc_size() == 0 or indexed_caxes.alloc_size() == 0:
                 continue
@@ -213,27 +235,16 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
             # breakpoint()
             packed = PackedPetscMat(self, rmap, cmap, shape)
 
-            # indexed_axes = PartialAxisTree(indexed_raxes.parent_to_children)
-            # for leaf_axis, leaf_cpt in indexed_raxes.leaves:
-            #     indexed_axes = indexed_axes.add_subtree(
-            #         indexed_caxes, leaf_axis, leaf_cpt, uniquify=True
-            #     )
-            # indexed_axes = indexed_axes.set_up()
-            # node_map = dict(indexed_raxes.parent_to_children)
-            # target_paths = dict(indexed_raxes.target_paths)
-            # index_exprs = dict(indexed_raxes.index_exprs)
-            # for leaf_axis, leaf_cpt in indexed_raxes.leaves:
-            #     for caxis in indexed_caxes.nodes:
-            #         if caxis.id not in indexed_raxes.parent_to_children:
-            #             cid = caxis.id
-            #         else:
-            #             cid = XXX
-            #
-            #         for ccpt in caxis.components:
-            #             node_map.update(...)
-            # indexed_axes = AxisTree(node_map, target_paths=???, index_exprs=???)
-            # can I make indexed_axes simply???
-            # breakpoint()
+            # Since axes require unique labels, relabel the row and column axis trees
+            # with different suffixes. This allows us to create a combined axis tree
+            # without clashes.
+            raxes_relabel = _relabel_axes(indexed_raxes, self._row_suffix)
+            caxes_relabel = _relabel_axes(indexed_caxes, self._col_suffix)
+
+            axes = PartialAxisTree(raxes_relabel.parent_to_children)
+            for leaf in raxes_relabel.leaves:
+                axes = axes.add_subtree(caxes_relabel, *leaf, uniquify_ids=True)
+            axes = axes.set_up()
 
             outer_loops = list(router_loops)
             all_ids = [l.id for l in router_loops]
@@ -241,11 +252,14 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
                 if ol.id not in all_ids:
                     outer_loops.append(ol)
 
+            my_target_paths = indexed_raxes.target_paths | indexed_caxes.target_paths
+            my_index_exprs = indexed_raxes.index_exprs | indexed_caxes.index_exprs
+
             arrays[ctx] = HierarchicalArray(
-                indexed_axes,
+                axes,
                 data=packed,
-                target_paths=indexed_axes.target_paths,
-                index_exprs=indexed_axes.index_exprs,
+                target_paths=my_target_paths,
+                index_exprs=my_index_exprs,
                 # TODO ordered set?
                 outer_loops=outer_loops,
                 name=self.name,
@@ -432,3 +446,18 @@ def _alloc_template_mat(points, adjacency, raxes, caxes, bsize=None):
     mat.setOption(mat.Option.IGNORE_ZERO_ENTRIES, True)
 
     return mat
+
+
+def _relabel_axes(axes: AxisTree, suffix: str) -> AxisTree:
+    # comprehension?
+    parent_to_children = {}
+    for parent_id, children in axes.parent_to_children.items():
+        children_ = []
+        for axis in children:
+            if axis is not None:
+                axis_ = axis.copy(label=axis.label + suffix)
+            else:
+                axis_ = None
+            children_.append(axis_)
+        parent_to_children[parent_id] = children_
+    return AxisTree(parent_to_children)

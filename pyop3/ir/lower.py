@@ -20,8 +20,8 @@ from pyop3.array.harray import CalledMapVariable, ContextSensitiveMultiArray
 from pyop3.array.petsc import PetscMat
 from pyop3.axtree import Axis, AxisComponent, AxisTree, AxisVariable, ContextFree
 from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
+from pyop3.config import config
 from pyop3.dtypes import IntType
-from pyop3.ir.transform import match_temporary_shapes
 from pyop3.itree import (
     AffineSliceComponent,
     CalledMap,
@@ -223,18 +223,20 @@ class LoopyCodegenContext(CodegenContext):
             return
         self._seen_arrays.add(array.name)
 
+        debug = bool(config["debug"])
+
         # TODO Can directly inject data as temporaries if constant and small
         # injected = array.constant and array.size < config["max_static_array_size"]:
         # if isinstance(array.buffer, NullBuffer) or injected:
         if isinstance(array.buffer, NullBuffer):
-            name = self.unique_name("t")
+            name = self.unique_name("t") if not debug else array.name
             shape = self._temporary_shapes.get(array.name, (array.alloc_size,))
             arg = lp.TemporaryVariable(name, dtype=array.dtype, shape=shape)
         elif isinstance(array.buffer, PackedBuffer):
-            name = self.unique_name("packed")
+            name = self.unique_name("packed") if not debug else array.name
             arg = lp.ValueArg(name, dtype=self._dtype(array))
         else:
-            name = self.unique_name("array")
+            name = self.unique_name("array") if not debug else array.name
             assert isinstance(array.buffer, DistributedBuffer)
             arg = lp.GlobalArg(name, dtype=self._dtype(array), shape=None)
 
@@ -770,6 +772,16 @@ def _(assignment, loop_indices, codegen_context):
 
     irow = f"{rmap_name}[{roffset}]"
     icol = f"{cmap_name}[{coffset}]"
+
+    # debug
+    # if rsize == 2:
+    #     codegen_context.add_cinstruction(r"""
+    # printf("%d, %d, %d, %d\n", t_0[0], t_0[1], t_0[2], t_0[3]);
+    # printf("%d, %d, %d, %d\n", t_1[0], t_1[1], t_1[2], t_1[3]);
+    # printf("%d, %d, %d, %d, %d, %d, %d, %d\n", t_2[0], t_2[1], t_2[2], t_2[3], t_2[4], t_2[5], t_2[6], t_2[7]);
+    # printf("%d, %d\n", t_3[0], t_3[1]);
+    # printf("%d, %d\n", array_11[0], array_11[1]);
+    # printf("%d, %d\n", array_12[0], array_12[1]);""")
 
     call_str = _petsc_mat_insn(
         assignment, mat_name, array_name, rsize_var, csize_var, irow, icol
