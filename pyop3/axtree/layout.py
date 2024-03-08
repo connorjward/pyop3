@@ -128,6 +128,45 @@ def has_fixed_size(axes, axis, component, outer_loops):
     return not size_requires_external_index(axes, axis, component, outer_loops)
 
 
+def requires_external_index(axtree, axis, component_index):
+    """Return ``True`` if more indices are required to index the multi-axis layouts
+    than exist in the given subaxis.
+    """
+    return size_requires_external_index(
+        axtree, axis, component_index
+    )  # or numbering_requires_external_index(axtree, axis, component_index)
+
+
+def size_requires_external_index(axes, axis, component, outer_loops, path=pmap()):
+    from pyop3.array import HierarchicalArray
+
+    if axis.id == "_id_Axis_68":
+        breakpoint()
+
+    count = component.count
+    if isinstance(count, HierarchicalArray):
+        # if count.name == "size_8" and count.axes.is_empty:
+        #     breakpoint()
+        if not set(count.outer_loops).issubset(outer_loops):
+            return True
+        # is the path sufficient? i.e. do we have enough externally provided indices
+        # to correctly index the axis?
+        if not count.axes.is_empty:
+            for axlabel, clabel in count.axes.path(*count.axes.leaf).items():
+                if axlabel in path:
+                    assert path[axlabel] == clabel
+                else:
+                    return True
+
+    if subaxis := axes.child(axis, component):
+        for c in subaxis.components:
+            # path_ = path | {subaxis.label: c.label}
+            path_ = path | {axis.label: component.label}
+            if size_requires_external_index(axes, subaxis, c, outer_loops, path_):
+                return True
+    return False
+
+
 def step_size(
     axes: AxisTree,
     axis: Axis,
@@ -159,42 +198,6 @@ def has_halo(axes, axis):
                 return True
         return False
     return axis.sf is not None or has_halo(axes, subaxis)
-
-
-def requires_external_index(axtree, axis, component_index):
-    """Return ``True`` if more indices are required to index the multi-axis layouts
-    than exist in the given subaxis.
-    """
-    return size_requires_external_index(
-        axtree, axis, component_index
-    )  # or numbering_requires_external_index(axtree, axis, component_index)
-
-
-def size_requires_external_index(axes, axis, component, outer_loops, path=pmap()):
-    from pyop3.array import HierarchicalArray
-
-    count = component.count
-    if isinstance(count, HierarchicalArray):
-        # if count.name == "size_8" and count.axes.is_empty:
-        #     breakpoint()
-        if not set(count.outer_loops).issubset(outer_loops):
-            return True
-        # is the path sufficient? i.e. do we have enough externally provided indices
-        # to correctly index the axis?
-        if not count.axes.is_empty:
-            for axlabel, clabel in count.axes.path(*count.axes.leaf).items():
-                if axlabel in path:
-                    assert path[axlabel] == clabel
-                else:
-                    return True
-
-    if subaxis := axes.child(axis, component):
-        for c in subaxis.components:
-            # path_ = path | {subaxis.label: c.label}
-            path_ = path | {axis.label: component.label}
-            if size_requires_external_index(axes, subaxis, c, outer_loops, path_):
-                return True
-    return False
 
 
 # NOTE: I am not sure that this is really required any more. We just want to
@@ -945,7 +948,7 @@ def _axis_component_size(
 
 
 @functools.singledispatch
-def _as_int(arg: Any, indices, path=None, index_exprs=None, *, loop_exprs=pmap()):
+def _as_int(arg: Any, indices, path=None, *, loop_exprs=pmap()):
     from pyop3.array import HierarchicalArray
 
     if isinstance(arg, HierarchicalArray):
@@ -958,7 +961,7 @@ def _as_int(arg: Any, indices, path=None, index_exprs=None, *, loop_exprs=pmap()
         # I will need to map the "source" axis (e.g. slice_label0) back
         # to the "target" axis
         # return arg.get_value(indices, target_path, index_exprs)
-        return arg.get_value(indices, path, index_exprs, loop_exprs=loop_exprs)
+        return arg.get_value(indices, path, loop_exprs=loop_exprs)
     else:
         raise TypeError
 
@@ -981,26 +984,24 @@ class LoopExpressionReplacer(pym.mapper.IdentityMapper):
 
 
 def eval_offset(
-    axes, layouts, indices, path=None, index_exprs=None, *, loop_exprs=pmap()
+    axes, layouts, indices, target_paths, index_exprs, path=None, *, loop_exprs=pmap()
 ):
-    from pyop3.itree.tree import IndexExpressionReplacer, LoopIndexVariable
+    from pyop3.itree.tree import IndexExpressionReplacer
 
-    if axes.is_empty:
-        source_path_node = {}
-    else:
-        # if a path is not specified we assume that the axes/array are
-        # unindexed and single component
+    # now select target paths and index exprs from the full collection
+    target_path = target_paths.get(None, {})
+    index_exprs_ = index_exprs.get(None, {})
+
+    if not axes.is_empty:
         if path is None:
-            leaf = axes.leaf
-        else:
-            leaf = axes._node_from_path(path)
-        source_path_node = axes.path_with_nodes(*leaf)
-
-    target_path = {}
-    target_path.update(axes.target_paths.get(None, {}))
-    for ax, clabel in source_path_node.items():
-        target_path.update(axes.target_paths.get((ax.id, clabel), {}))
-    target_path = freeze(target_path)
+            path = just_one(axes.leaf_paths)
+        node_path = axes.path_with_nodes(*axes._node_from_path(path))
+        for axis, component in node_path.items():
+            key = axis.id, component
+            if key in target_paths:
+                target_path.update(target_paths[key])
+            if key in index_exprs:
+                index_exprs_.update(index_exprs[key])
 
     # if the provided indices are not a dict then we assume that they apply in order
     # as we go down the selected path of the tree
@@ -1012,7 +1013,7 @@ def eval_offset(
         axis = axes.root
         for idx in indices:
             indices_[axis.label] = idx
-            cpt_label = path[axis.label]
+            cpt_label = target_path[axis.label]
             axis = axes.child(axis, cpt_label)
         indices = indices_
 
@@ -1047,10 +1048,6 @@ def eval_offset(
     # Substitute indices into index exprs
     # if index_exprs:
 
-    # TODO change default?
-    if index_exprs is None:
-        index_exprs = {}
-
     # Replace any loop index variables in index_exprs
     # index_exprs_ = {}
     # replacer = LoopExpressionReplacer(loop_exprs)  # different class?
@@ -1067,8 +1064,8 @@ def eval_offset(
     #     indices_ = index_exprs_
 
     # replacer = IndexExpressionReplacer(index_exprs_, loop_exprs)
-    replacer = IndexExpressionReplacer(index_exprs, loop_exprs)
-    layout_orig = layouts[target_path]
+    replacer = IndexExpressionReplacer(index_exprs_, loop_exprs)
+    layout_orig = layouts[freeze(target_path)]
     layout_subst = replacer(layout_orig)
 
     # if loop_exprs:

@@ -240,8 +240,8 @@ class ExpressionEvaluator(pym.mapper.evaluator.EvaluationMapper):
         # indices = {ax: self.rec(idx) for ax, idx in array_var.index_exprs.items()}
         return array_var.array.get_value(
             self.context,
-            array_var.target_path,
-            index_exprs=array_var.index_exprs,
+            array_var.target_path,  # should be source path
+            # index_exprs=array_var.index_exprs,
             loop_exprs=self._loop_exprs,
         )
 
@@ -1102,11 +1102,17 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
     def as_tree(self):
         return self
 
-    def offset(self, indices, path=None, index_exprs=None, *, loop_exprs=pmap()):
+    def offset(self, indices, path=None, *, loop_exprs=pmap()):
         from pyop3.axtree.layout import eval_offset
 
         return eval_offset(
-            self, self.layouts, indices, path, index_exprs, loop_exprs=loop_exprs
+            self,
+            self.layouts,
+            indices,
+            self.target_paths,
+            self.index_exprs,
+            path,
+            loop_exprs=loop_exprs,
         )
 
     @cached_property

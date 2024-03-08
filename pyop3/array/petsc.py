@@ -189,6 +189,8 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
                 indexed_raxes,
                 target_paths=indexed_raxes.target_paths,
                 index_exprs=indexed_raxes.index_exprs,
+                # target_paths=indexed_raxes.layout_axes._default_target_paths(),
+                # index_exprs=indexed_raxes.layout_axes._default_index_exprs(),
                 outer_loops=router_loops,
                 dtype=IntType,
             )
@@ -196,6 +198,8 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
                 indexed_caxes,
                 target_paths=indexed_caxes.target_paths,
                 index_exprs=indexed_caxes.index_exprs,
+                # target_paths=indexed_caxes.layout_axes._default_target_paths(),
+                # index_exprs=indexed_caxes.layout_axes._default_index_exprs(),
                 outer_loops=couter_loops,
                 dtype=IntType,
             )
@@ -205,7 +209,8 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
             for idxs in my_product(router_loops):
                 indices = {
                     # idx.index.id: (idx.source_exprs, idx.target_exprs) for idx in idxs
-                    idx.index.id: idx.target_exprs
+                    # idx.index.id: idx.target_exprs
+                    idx.index.id: idx.source_exprs
                     for idx in idxs
                 }
                 for p in indexed_raxes.iter(idxs):
@@ -215,7 +220,8 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
             for idxs in my_product(couter_loops):
                 indices = {
                     # idx.index.id: (idx.source_exprs, idx.target_exprs) for idx in idxs
-                    idx.index.id: idx.target_exprs
+                    # idx.index.id: idx.target_exprs
+                    idx.index.id: idx.source_exprs
                     for idx in idxs
                 }
                 for p in indexed_caxes.iter(idxs):

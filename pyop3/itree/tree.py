@@ -358,10 +358,15 @@ class ContextFreeLoopIndex(ContextFreeIndex):
     # should now be ignored
     @property
     def index_exprs(self):
+        if self.source_path != self.path and len(self.path) != 1:
+            raise NotImplementedError("no idea what to do here")
+
+        target = just_one(self.path.keys())
         return freeze(
             {
                 None: {
-                    axis: LoopIndexVariable(self, axis) for axis in self.path.keys()
+                    target: LoopIndexVariable(self, axis)
+                    for axis in self.source_path.keys()
                 },
             }
         )
@@ -701,9 +706,7 @@ class ContextFreeCalledMap(Index):
     # TODO This is bad design, unroll the traversal and store as properties
     @cached_property
     def _axes_info(self):
-        return collect_shape_index_callback(
-            self, (), include_loop_index_shape=False, prev_axes=None
-        )
+        return collect_shape_index_callback(self, (), prev_axes=None)
 
 
 class LoopIndexVariable(pym.primitives.Variable):
@@ -1029,21 +1032,15 @@ def collect_shape_index_callback(index, *args, **kwargs):
 def _(
     loop_index: ContextFreeLoopIndex,
     indices,
-    *,
-    include_loop_index_shape,
-    debug=False,
     **kwargs,
 ):
-    if include_loop_index_shape:
-        assert False, "old code"
-    else:
-        axes = loop_index.axes
-        target_paths = loop_index.target_paths
+    axes = loop_index.axes
+    target_paths = loop_index.target_paths
 
-        index_exprs = loop_index.index_exprs
-        # index_exprs = {axis: LocalLoopIndexVariable(loop_index, axis) for axis in loop_index.iterset.path(*loop_index.iterset.leaf)}
-        #
-        # index_exprs = {None: index_exprs}
+    index_exprs = loop_index.index_exprs
+    # index_exprs = {axis: LocalLoopIndexVariable(loop_index, axis) for axis in loop_index.iterset.path(*loop_index.iterset.leaf)}
+    #
+    # index_exprs = {None: index_exprs}
 
     return (
         axes,
@@ -1256,13 +1253,9 @@ def _(
     called_map: ContextFreeCalledMap,
     indices,
     *,
-    include_loop_index_shape,
     prev_axes,
-    debug=False,
     **kwargs,
 ):
-    if debug:
-        breakpoint()
     (
         prior_axes,
         prior_target_path_per_cpt,
@@ -1272,7 +1265,6 @@ def _(
     ) = collect_shape_index_callback(
         called_map.index,
         indices,
-        include_loop_index_shape=include_loop_index_shape,
         prev_axes=prev_axes,
         **kwargs,
     )
@@ -1289,7 +1281,6 @@ def _(
             called_map,
             prior_target_path,
             prior_index_exprs,
-            include_loop_index_shape,
             prev_axes,
         )
         axes = PartialAxisTree(axis)
@@ -1322,7 +1313,6 @@ def _(
                 called_map,
                 prior_target_path,
                 prior_index_exprs,
-                include_loop_index_shape,
                 prev_axes,
             )
 
@@ -1348,7 +1338,6 @@ def _make_leaf_axis_from_called_map(
     called_map,
     prior_target_path,
     prior_index_exprs,
-    include_loop_index_shape,
     prev_axes,
 ):
     from pyop3.array.harray import CalledMapVariable
@@ -1367,10 +1356,7 @@ def _make_leaf_axis_from_called_map(
             continue
 
         all_skipped = False
-        if (
-            isinstance(map_cpt.arity, HierarchicalArray)
-            and not include_loop_index_shape
-        ):
+        if isinstance(map_cpt.arity, HierarchicalArray):
             arity = map_cpt.arity[called_map.index]
         else:
             arity = map_cpt.arity
@@ -1447,11 +1433,7 @@ def _index_axes(
     indices: IndexTree,
     loop_context,
     axes=None,
-    include_loop_index_shape=False,
-    debug=False,
 ):
-    # if debug:
-    #     breakpoint()
     (
         indexed_axes,
         tpaths,
@@ -1465,7 +1447,6 @@ def _index_axes(
         current_index=indices.root,
         loop_indices=loop_context,
         prev_axes=axes,
-        include_loop_index_shape=include_loop_index_shape,
     )
 
     outer_loops += indices.outer_loops
@@ -1481,7 +1462,6 @@ def _index_axes(
     outer_loops = tuple(outer_loops_)
 
     # check that slices etc have not been missed
-    assert not include_loop_index_shape, "old option"
     if axes is not None:
         for leaf_iaxis, leaf_icpt in indexed_axes.leaves:
             target_path = dict(tpaths.get(None, {}))
@@ -1507,7 +1487,6 @@ def _index_axes_rec(
     target_path_acc,
     *,
     current_index,
-    debug=False,
     **kwargs,
 ):
     index_data = collect_shape_index_callback(
@@ -1785,6 +1764,14 @@ class IndexIteratorEntry:
             }
         )
 
+    @property
+    def source_replace_map(self):
+        return freeze(
+            {
+                self.index.id: {ax: expr for ax, expr in self.source_exprs.items()},
+            }
+        )
+
 
 def iter_axis_tree(
     loop_index: LoopIndex,
@@ -1799,7 +1786,9 @@ def iter_axis_tree(
     index_exprs_acc=None,
 ):
     outer_replace_map = merge_dicts(
-        iter_entry.target_replace_map for iter_entry in outer_loops
+        # iter_entry.target_replace_map for iter_entry in outer_loops
+        iter_entry.source_replace_map
+        for iter_entry in outer_loops
     )
     if target_path is None:
         assert index_exprs_acc is None
@@ -1855,8 +1844,8 @@ def iter_axis_tree(
             _as_int(
                 component.count,
                 replace_map,
-                mypath,
-                myindices,
+                # mypath,  #
+                # myindices,
                 loop_exprs=outer_replace_map,
             )
         ):
