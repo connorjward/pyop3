@@ -36,6 +36,7 @@ from pyop3.axtree.tree import (
     ContextSensitiveLoopIterable,
     ExpressionEvaluator,
     PartialAxisTree,
+    UnrecognisedAxisException,
 )
 from pyop3.dtypes import IntType, get_mpi_dtype
 from pyop3.lang import KernelArgument
@@ -59,8 +60,9 @@ bsearch = pym.var("mybsearch")
 
 
 class IndexExpressionReplacer(pym.mapper.IdentityMapper):
-    def __init__(self, replace_map):
+    def __init__(self, replace_map, loop_exprs=pmap()):
         self._replace_map = replace_map
+        self._loop_exprs = loop_exprs
 
     def map_axis_variable(self, expr):
         return self._replace_map.get(expr.axis_label, expr)
@@ -71,13 +73,11 @@ class IndexExpressionReplacer(pym.mapper.IdentityMapper):
         index_exprs = {ax: self.rec(iexpr) for ax, iexpr in expr.index_exprs.items()}
         return MultiArrayVariable(expr.array, expr.target_path, index_exprs)
 
-    def map_loop_index(self, expr):
-        # For test_map_composition to pass this needs to be able to have a fallback
-        # TODO: Figure out a better, less silent, fix
-        if expr.id in self._replace_map:
-            return self._replace_map[expr.id][expr.axis]
+    def map_loop_index(self, index):
+        if index.id in self._loop_exprs:
+            return self._loop_exprs[index.id][index.axis]
         else:
-            return expr
+            return index
 
 
 class IndexTree(LabelledTree):
@@ -138,6 +138,10 @@ class AffineSliceComponent(SliceComponent):
     @property
     def datamap(self) -> PMap:
         return pmap()
+
+    @property
+    def is_full(self):
+        return self.start == 0 and self.stop is None and self.step == 1
 
 
 class SubsetSliceComponent(SliceComponent):
@@ -444,10 +448,10 @@ class Slice(ContextFreeIndex):
     """
 
     # fields = Index.fields | {"axis", "slices", "numbering"} - {"label", "component_labels"}
-    fields = {"axis", "slices", "numbering"}
+    fields = {"axis", "slices", "numbering", "label"}
 
-    def __init__(self, axis, slices, *, numbering=None, id=None):
-        super().__init__(label=axis, id=id)
+    def __init__(self, axis, slices, *, numbering=None, id=None, label=None):
+        super().__init__(label=label, id=id)
         self.axis = axis
         self.slices = as_tuple(slices)
         self.numbering = numbering
@@ -1054,12 +1058,49 @@ def _(
 def _(slice_: Slice, indices, *, target_path_acc, prev_axes, **kwargs):
     from pyop3.array.harray import MultiArrayVariable
 
+    # If we are just taking a component from a multi-component array,
+    # e.g. mesh.points["cells"], then relabelling the axes just leads to
+    # needless confusion. For instance if we had
+    #
+    #     myslice0 = Slice("mesh", AffineSliceComponent("cells", step=2))
+    #
+    # then mesh.points[myslice0] would work but mesh.points["cells"][myslice0]
+    # would fail.
+    # As a counter example, if we have non-trivial subsets then this sort of
+    # relabelling is essential for things to make sense. If we have two subsets:
+    #
+    #     subset0 = Slice("mesh", Subset("cells", [1, 2, 3]))
+    #
+    # and
+    #
+    #     subset1 = Slice("mesh", Subset("cells", [4, 5, 6]))
+    #
+    # then mesh.points[subset0][subset1] is confusing, should subset1 be
+    # assumed to work on the already sliced axis? This can be a major source of
+    # confusion for things like interior facets in Firedrake where the first slice
+    # happens in one function and the other happens elsewhere. We hit situations like
+    #
+    #     mesh.interior_facets[interior_facets_I_want]
+    #
+    # conflicts with
+    #
+    #     mesh.interior_facets[facets_I_want]
+    #
+    # where one subset is given with facet numbering and the other with interior
+    # facet numbering. The labels are the same so identifying this is really difficult.
+    #
+    # We fix this here by requiring that non-full slices perform a relabelling and
+    # full slices do not.
+    is_full_slice = all(
+        isinstance(s, AffineSliceComponent) and s.is_full for s in slice_.slices
+    )
+
+    axis_label = slice_.axis if is_full_slice else slice_.label
+
     components = []
     target_path_per_subslice = []
     index_exprs_per_subslice = []
     layout_exprs_per_subslice = []
-
-    axis_label = slice_.label
 
     for subslice in slice_.slices:
         if not prev_axes.is_valid_path(target_path_acc, complete=False):
@@ -1108,7 +1149,8 @@ def _(slice_: Slice, indices, *, target_path_acc, prev_axes, **kwargs):
         else:
             assert isinstance(subslice, Subset)
             size = subslice.array.axes.leaf_component.count
-        cpt = AxisComponent(size, label=subslice.label)
+        mylabel = subslice.component if is_full_slice else subslice.label
+        cpt = AxisComponent(size, label=mylabel)
         components.append(cpt)
 
         target_path_per_subslice.append(pmap({slice_.axis: subslice.component}))
@@ -1116,9 +1158,23 @@ def _(slice_: Slice, indices, *, target_path_acc, prev_axes, **kwargs):
         newvar = AxisVariable(axis_label)
         layout_var = AxisVariable(slice_.axis)
         if isinstance(subslice, AffineSliceComponent):
-            index_exprs_per_subslice.append(
-                pmap({slice_.axis: newvar * subslice.step + subslice.start})
-            )
+            if is_full_slice:
+                index_exprs_per_subslice.append(
+                    freeze(
+                        {
+                            slice_.axis: newvar * subslice.step + subslice.start,
+                        }
+                    )
+                )
+            else:
+                index_exprs_per_subslice.append(
+                    freeze(
+                        {
+                            slice_.axis: newvar * subslice.step + subslice.start,
+                            slice_.label: AxisVariable(slice_.label),
+                        }
+                    )
+                )
             layout_exprs_per_subslice.append(
                 pmap({slice_.label: (layout_var - subslice.start) // subslice.step})
             )
@@ -1151,7 +1207,23 @@ def _(slice_: Slice, indices, *, target_path_acc, prev_axes, **kwargs):
                 subslice.array, my_target_path, my_index_exprs
             )
 
-            index_exprs_per_subslice.append(pmap({slice_.axis: subset_var}))
+            if is_full_slice:
+                index_exprs_per_subslice.append(
+                    freeze(
+                        {
+                            slice_.axis: subset_var,
+                        }
+                    )
+                )
+            else:
+                index_exprs_per_subslice.append(
+                    freeze(
+                        {
+                            slice_.axis: subset_var,
+                            slice_.label: AxisVariable(slice_.label),
+                        }
+                    )
+                )
             layout_exprs_per_subslice.append(
                 pmap({slice_.label: bsearch(subset_var, layout_var)})
             )
@@ -1394,7 +1466,6 @@ def _index_axes(
         loop_indices=loop_context,
         prev_axes=axes,
         include_loop_index_shape=include_loop_index_shape,
-        debug=debug,
     )
 
     outer_loops += indices.outer_loops
@@ -1442,7 +1513,6 @@ def _index_axes_rec(
     index_data = collect_shape_index_callback(
         current_index,
         indices_acc,
-        debug=debug,
         target_path_acc=target_path_acc,
         **kwargs,
     )
@@ -1482,7 +1552,6 @@ def _index_axes_rec(
                 indices_acc_,
                 target_path_acc_,
                 current_index=subindex,
-                debug=debug,
                 **kwargs,
             )
             subaxes[leafkey] = retval[0]
@@ -1599,6 +1668,9 @@ def _compose_bits(
                             myaxlabel
                         ] = mycptlabel
 
+                # testing, make sure we don't miss any new index_exprs
+                index_exprs[iaxis.id, icpt.label] |= iindex_exprs[iaxis.id, icpt.label]
+
                 # do a replacement for index exprs
                 # compose index expressions, this does an *inside* substitution
                 # so the final replace map is target -> f(src)
@@ -1705,10 +1777,11 @@ class IndexIteratorEntry:
     def target_replace_map(self):
         return freeze(
             {
-                self.index.id: (
-                    {ax: expr for ax, expr in self.source_exprs.items()},
-                    {ax: expr for ax, expr in self.target_exprs.items()},
-                )
+                self.index.id: {ax: expr for ax, expr in self.target_exprs.items()},
+                # self.index.id: (
+                #     # {ax: expr for ax, expr in self.source_exprs.items()},
+                #     {ax: expr for ax, expr in self.target_exprs.items()},
+                # )
             }
         )
 
@@ -1733,7 +1806,7 @@ def iter_axis_tree(
         target_path = target_paths.get(None, pmap())
 
         myindex_exprs = index_exprs.get(None, pmap())
-        evaluator = ExpressionEvaluator(outer_replace_map)
+        evaluator = ExpressionEvaluator(indices, outer_replace_map)
         new_exprs = {}
         for axlabel, index_expr in myindex_exprs.items():
             new_index = evaluator(index_expr)
@@ -1756,7 +1829,8 @@ def iter_axis_tree(
         myindex_exprs = index_exprs.get((axis.id, component.label), pmap())
         subaxis = axes.child(axis, component)
 
-        # bit of a hack
+        # bit of a hack, I reckon this can go as we can just get it from component.count
+        # inside as_int
         if isinstance(component.count, HierarchicalArray):
             mypath = component.count.target_paths.get(None, {})
             myindices = component.count.index_exprs.get(None, {})
@@ -1771,20 +1845,32 @@ def iter_axis_tree(
 
             mypath = freeze(mypath)
             myindices = freeze(myindices)
-            replace_map = outer_replace_map | indices
+            replace_map = indices
         else:
             mypath = pmap()
             myindices = pmap()
             replace_map = None
 
-        for pt in range(_as_int(component.count, replace_map, mypath, myindices)):
+        for pt in range(
+            _as_int(
+                component.count,
+                replace_map,
+                mypath,
+                myindices,
+                loop_exprs=outer_replace_map,
+            )
+        ):
             new_exprs = {}
+            evaluator = ExpressionEvaluator(
+                indices | {axis.label: pt}, outer_replace_map
+            )
             for axlabel, index_expr in myindex_exprs.items():
-                new_index = ExpressionEvaluator(
-                    outer_replace_map | indices | {axis.label: pt}
-                )(index_expr)
-                assert new_index != index_expr
-                new_exprs[axlabel] = new_index
+                try:
+                    new_index = evaluator(index_expr)
+                    assert new_index != index_expr
+                    new_exprs[axlabel] = new_index
+                except UnrecognisedAxisException:
+                    pass
             # breakpoint()
             index_exprs_ = index_exprs_acc | new_exprs
             indices_ = indices | {axis.label: pt}

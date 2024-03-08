@@ -372,8 +372,10 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         axes = AxisTree(parent_to_children)
         return type(self)(axes, dtype=self.dtype)
 
-    def offset(self, indices, target_path=None, index_exprs=None):
-        return eval_offset(self.axes, self.layouts, indices, target_path, index_exprs)
+    def offset(self, indices, path=None, index_exprs=None, *, loop_exprs=pmap()):
+        return eval_offset(
+            self.axes, self.layouts, indices, path, index_exprs, loop_exprs=loop_exprs
+        )
 
     def iter_indices(self, outer_map):
         from pyop3.itree.tree import iter_axis_tree
@@ -439,11 +441,15 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
                 count.append(y)
             return flattened, count
 
-    def get_value(self, indices, target_path=None, index_exprs=None):
-        return self.data[self.offset(indices, target_path, index_exprs)]
+    def get_value(self, indices, path=None, index_exprs=None, *, loop_exprs=pmap()):
+        return self.data[self.offset(indices, path, index_exprs, loop_exprs=loop_exprs)]
 
-    def set_value(self, indices, value, target_path=None, index_exprs=None):
-        self.data[self.offset(indices, target_path, index_exprs)] = value
+    def set_value(
+        self, indices, value, path=None, index_exprs=None, *, loop_exprs=pmap()
+    ):
+        self.data[
+            self.offset(indices, path, index_exprs, loop_exprs=loop_exprs)
+        ] = value
 
     def select_axes(self, indices):
         selected = []

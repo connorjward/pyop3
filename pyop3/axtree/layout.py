@@ -19,6 +19,7 @@ from pyop3.axtree.tree import (
     AxisTree,
     ExpressionEvaluator,
     PartialAxisTree,
+    UnrecognisedAxisException,
     component_number_from_offsets,
     component_offsets,
 )
@@ -110,6 +111,19 @@ def has_constant_start(
     return isinstance(component.count, numbers.Integral) or outer_axes_are_all_indexed
 
 
+def has_constant_step(axes: AxisTree, axis, cpt, outer_loops, path=pmap()):
+    # we have a constant step if none of the internal dimensions need to index themselves
+    # with the current index (numbering doesn't matter here)
+    if subaxis := axes.child(axis, cpt):
+        return all(
+            # not size_requires_external_index(axes, subaxis, c, path | {axis.label: cpt.label})
+            not size_requires_external_index(axes, subaxis, c, outer_loops, path)
+            for c in subaxis.components
+        )
+    else:
+        return True
+
+
 def has_fixed_size(axes, axis, component, outer_loops):
     return not size_requires_external_index(axes, axis, component, outer_loops)
 
@@ -118,17 +132,19 @@ def step_size(
     axes: AxisTree,
     axis: Axis,
     component: AxisComponent,
-    inner_outer_loops,
+    outer_loops,
     indices=PrettyTuple(),
+    *,
+    loop_exprs=pmap(),
 ):
     """Return the size of step required to stride over a multi-axis component.
 
     Non-constant strides will raise an exception.
     """
-    if not has_constant_step(axes, axis, component, inner_outer_loops) and not indices:
+    if not has_constant_step(axes, axis, component, outer_loops) and not indices:
         raise ValueError
     if subaxis := axes.child(axis, component):
-        return _axis_size(axes, subaxis, indices)
+        return _axis_size(axes, subaxis, indices, loop_exprs=loop_exprs)
     else:
         return 1
 
@@ -159,6 +175,8 @@ def size_requires_external_index(axes, axis, component, outer_loops, path=pmap()
 
     count = component.count
     if isinstance(count, HierarchicalArray):
+        # if count.name == "size_8" and count.axes.is_empty:
+        #     breakpoint()
         if not set(count.outer_loops).issubset(outer_loops):
             return True
         # is the path sufficient? i.e. do we have enough externally provided indices
@@ -297,19 +315,6 @@ def collect_external_loops(axes, index_exprs, linear=False):
     return tuple(result) if linear else frozenset(result)
 
 
-def has_constant_step(axes: AxisTree, axis, cpt, inner_outer_loops):
-    # we have a constant step if none of the internal dimensions need to index themselves
-    # with the current index (numbering doesn't matter here)
-    if subaxis := axes.child(axis, cpt):
-        return all(
-            # not size_requires_external_index(axes, subaxis, c, freeze({subaxis.label: c.label}))
-            not size_requires_external_index(axes, subaxis, c, inner_outer_loops)
-            for c in subaxis.components
-        )
-    else:
-        return True
-
-
 def collect_outer_loops(axes, axis, index_exprs):
     assert False, "old code"
     from pyop3.itree.tree import LoopIndexVariable
@@ -329,17 +334,17 @@ def collect_outer_loops(axes, axis, index_exprs):
 
 def _compute_layouts(
     axes: AxisTree,
-    index_exprs,  # needed any more?
-    loop_vars,
+    loop_exprs,
     axis=None,
-    path=pmap(),
     layout_path=pmap(),
+    index_exprs_acc=pmap(),
 ):
     from pyop3.array.harray import MultiArrayVariable
 
     if axis is None:
         assert not axes.is_empty
         axis = axes.root
+        index_exprs_acc |= axes.index_exprs.get(None, {})
 
     layouts = {}
     steps = {}
@@ -351,10 +356,10 @@ def _compute_layouts(
     sublayoutss = []
     subloops = []
     for cpt in axis.components:
-        if (axis, cpt) not in loop_vars:
-            path_ = path | {axis.label: cpt.label}
-        else:
-            path_ = path
+        index_exprs_acc_ = index_exprs_acc | axes.index_exprs.get(
+            (axis.id, cpt.label), {}
+        )
+
         layout_path_ = layout_path | {axis.label: cpt.label}
 
         if subaxis := axes.child(axis, cpt):
@@ -365,7 +370,7 @@ def _compute_layouts(
                 substeps,
                 subloops_,
             ) = _compute_layouts(
-                axes, index_exprs, loop_vars, subaxis, path_, layout_path_
+                axes, loop_exprs, subaxis, layout_path_, index_exprs_acc_
             )
             sublayoutss.append(sublayouts)
             subindex_exprs.append(subindex_exprs_)
@@ -407,10 +412,11 @@ def _compute_layouts(
 
     outer_loops_per_component = {}
     for i, cpt in enumerate(axis.components):
-        if (axis, cpt) in loop_vars:
-            my_loops = frozenset({loop_vars[axis, cpt]}) | subloops[i]
-        else:
-            my_loops = subloops[i]
+        # if (axis, cpt) in loop_vars:
+        #     my_loops = frozenset({loop_vars[axis, cpt]}) | subloops[i]
+        # else:
+        #     my_loops = subloops[i]
+        my_loops = subloops[i]
         outer_loops_per_component[cpt] = my_loops
 
     # if noouter_loops:
@@ -421,6 +427,7 @@ def _compute_layouts(
     if (
         not all(
             has_fixed_size(axes, axis, cpt, outer_loops_per_component[cpt])
+            # has_fixed_size(axes, axis, cpt)
             for cpt in axis.components
         )
     ) or (has_halo(axes, axis) and axis != axes.root):
@@ -434,7 +441,7 @@ def _compute_layouts(
             # *upwards*
             myindex_exprs = {}
             for c in axis.components:
-                myindex_exprs[axis.id, c.label] = index_exprs.get(
+                myindex_exprs[axis.id, c.label] = axes.index_exprs.get(
                     (axis.id, c.label), pmap()
                 )
             # we enforce here that all subaxes must be tabulated, is this always
@@ -444,7 +451,7 @@ def _compute_layouts(
                     axis.components, csubtrees, subindex_exprs
                 ):
                     ctree = ctree.add_subtree(subtree, axis, component)
-                    myindex_exprs.update(subindex_exprs_)
+                    # myindex_exprs.update(subindex_exprs_)
         else:
             # we must be at the bottom of a ragged patch - therefore don't
             # add to shape of things
@@ -452,12 +459,14 @@ def _compute_layouts(
             ctree = None
             myindex_exprs = {}
             for c in axis.components:
-                myindex_exprs[axis.id, c.label] = index_exprs.get(
+                myindex_exprs[axis.id, c.label] = axes.index_exprs.get(
                     (axis.id, c.label), pmap()
                 )
             for i, c in enumerate(axis.components):
-                step = step_size(axes, axis, c, subloops[i])
-                axis_var = index_exprs[axis.id, c.label][axis.label]
+                step = step_size(axes, axis, c, subloops[i], loop_exprs=loop_exprs)
+                # step = step_size(axes, axis, c, index_exprs)
+                # step = step_size(axes, axis, c)
+                axis_var = axes.index_exprs[axis.id, c.label][axis.label]
                 layouts.update({layout_path | {axis.label: c.label}: axis_var * step})
 
         # layouts and steps are just propagated from below
@@ -486,9 +495,11 @@ def _compute_layouts(
             ctree = PartialAxisTree(axis.copy(numbering=None))
             # this doesn't follow the normal pattern because we are accumulating
             # *upwards*
+            # we need to keep track of this information because it will tell us, I
+            # think, if we have hit all the right loop indices
             myindex_exprs = {}
             for c in axis.components:
-                myindex_exprs[axis.id, c.label] = index_exprs.get(
+                myindex_exprs[axis.id, c.label] = axes.index_exprs.get(
                     (axis.id, c.label), pmap()
                 )
             # we enforce here that all subaxes must be tabulated, is this always
@@ -500,29 +511,42 @@ def _compute_layouts(
                     ctree = ctree.add_subtree(subtree, axis, component)
                     myindex_exprs.update(subiexprs)
 
-            fulltree = _create_count_array_tree(ctree, myindex_exprs)
+            # myindex_exprs = index_exprs_acc
+
+            fulltree = _create_count_array_tree(ctree, axes.index_exprs, loop_exprs)
 
             # now populate fulltree
             offset = IntRef(0)
             _tabulate_count_array_tree(
-                axes, axis, myindex_exprs, fulltree, offset, setting_halo=False
+                axes,
+                axis,
+                loop_exprs,
+                index_exprs_acc_,
+                fulltree,
+                offset,
+                setting_halo=False,
             )
 
             # apply ghost offset stuff, the offset from the previous pass is used
             _tabulate_count_array_tree(
-                axes, axis, myindex_exprs, fulltree, offset, setting_halo=True
+                axes,
+                axis,
+                loop_exprs,
+                index_exprs_acc_,
+                fulltree,
+                offset,
+                setting_halo=True,
             )
 
+            # TODO think about substituting with loop_exprs
+            if loop_exprs:
+                breakpoint()
             for subpath, offset_data in fulltree.items():
-                # TODO avoid copy paste stuff, this is the same as in itree/tree.py
-
-                offset_axes = offset_data.axes
-
-                # must be single component
-                source_path = offset_axes.path(*offset_axes.leaf)
+                # offset_data must be linear so we can unroll the target paths and
+                # index exprs
+                source_path = offset_data.axes.path_with_nodes(*offset_data.axes.leaf)
                 index_keys = [None] + [
-                    (axis.id, cpt.label)
-                    for axis, cpt in offset_axes.detailed_path(source_path).items()
+                    (axis.id, cpt) for axis, cpt in source_path.items()
                 ]
                 my_target_path = merge_dicts(
                     offset_data.target_paths.get(key, {}) for key in index_keys
@@ -530,7 +554,6 @@ def _compute_layouts(
                 my_index_exprs = merge_dicts(
                     offset_data.index_exprs.get(key, {}) for key in index_keys
                 )
-
                 offset_var = MultiArrayVariable(
                     offset_data, my_target_path, my_index_exprs
                 )
@@ -558,18 +581,19 @@ def _compute_layouts(
             assert all(sub is None for sub in csubtrees)
             layouts = {}
             steps = [
+                # step_size(axes, axis, c, index_exprs_acc_)
+                # step_size(axes, axis, c)
                 step_size(axes, axis, c, subloops[i])
                 for i, c in enumerate(axis.components)
             ]
-            # if len(loop_vars) > 0:
-            #     breakpoint()
             start = 0
             for cidx, step in enumerate(steps):
                 mycomponent = axis.components[cidx]
                 sublayouts = sublayoutss[cidx].copy()
 
                 key = (axis.id, mycomponent.label)
-                axis_var = index_exprs[key][axis.label]
+                # axis_var = index_exprs[key][axis.label]
+                axis_var = axes.index_exprs[key][axis.label]
                 # if key in index_exprs:
                 #     axis_var = index_exprs[key][axis.label]
                 # else:
@@ -577,7 +601,9 @@ def _compute_layouts(
                 new_layout = axis_var * step + start
 
                 sublayouts[layout_path | {axis.label: mycomponent.label}] = new_layout
-                start += _axis_component_size(axes, axis, mycomponent)
+                start += _axis_component_size(
+                    axes, axis, mycomponent, loop_exprs=loop_exprs
+                )
 
                 layouts.update(sublayouts)
             steps = {layout_path: _axis_size(axes, axis)}
@@ -593,6 +619,7 @@ def _compute_layouts(
 def _create_count_array_tree(
     ctree,
     index_exprs,
+    loop_exprs,
     axis=None,
     axes_acc=None,
     index_exprs_acc=None,
@@ -623,6 +650,7 @@ def _create_count_array_tree(
                 _create_count_array_tree(
                     ctree,
                     index_exprs,
+                    loop_exprs,
                     subaxis,
                     axes_acc_,
                     index_exprs_acc_,
@@ -665,6 +693,7 @@ def _create_count_array_tree(
                 outer_loops=(),
                 data=np.full(axtree.global_size, -1, dtype=IntType),
                 # use default layout, just tweak index_exprs
+                prefix="offset",
             )
             arrays[path_] = countarray
 
@@ -674,7 +703,8 @@ def _create_count_array_tree(
 def _tabulate_count_array_tree(
     axes,
     axis,
-    index_exprs,
+    loop_exprs,
+    layout_index_exprs,
     count_arrays,
     offset,
     path=pmap(),  # might not be needed
@@ -709,8 +739,10 @@ def _tabulate_count_array_tree(
                     axes,
                     axis,
                     component,
-                    index_exprs,
-                    indices_,
+                    outer_loops="???",
+                    # index_exprs=index_exprs,
+                    indices=indices_,
+                    loop_exprs=loop_exprs,
                 )
         else:
             subaxis = axes.component_child(axis, component)
@@ -718,7 +750,8 @@ def _tabulate_count_array_tree(
             _tabulate_count_array_tree(
                 axes,
                 subaxis,
-                index_exprs,
+                loop_exprs,
+                layout_index_exprs,
                 count_arrays,
                 offset,
                 path_,
@@ -743,14 +776,16 @@ def _collect_at_leaves(
     if axis is None:
         axis = layout_axes.root
 
-    if axis == axes.root:
+    # if axis == axes.root:
+    if axis == layout_axes.root:
         acc[pmap()] = prior
 
     for component in axis.components:
         layout_path_ = layout_path | {axis.label: component.label}
         prior_ = prior + values.get(layout_path_, 0)
 
-        if axis in axes.nodes:
+        # if axis in axes.nodes:
+        if True:
             path_ = path | {axis.label: component.label}
             acc[path_] = prior_
         else:
@@ -877,9 +912,12 @@ def _axis_size(
     axes: AxisTree,
     axis: Axis,
     indices=pmap(),
+    *,
+    loop_exprs=pmap(),
 ):
     return sum(
-        _axis_component_size(axes, axis, cpt, indices) for cpt in axis.components
+        _axis_component_size(axes, axis, cpt, indices, loop_exprs=loop_exprs)
+        for cpt in axis.components
     )
 
 
@@ -888,14 +926,17 @@ def _axis_component_size(
     axis: Axis,
     component: AxisComponent,
     indices=pmap(),
+    *,
+    loop_exprs=pmap(),
 ):
-    count = _as_int(component.count, indices)
+    count = _as_int(component.count, indices, loop_exprs=loop_exprs)
     if subaxis := axes.component_child(axis, component):
         return sum(
             _axis_size(
                 axes,
                 subaxis,
                 indices | {axis.label: i},
+                loop_exprs=loop_exprs,
             )
             for i in range(count)
         )
@@ -904,60 +945,62 @@ def _axis_component_size(
 
 
 @functools.singledispatch
-def _as_int(arg: Any, indices, target_path=None, index_exprs=None):
+def _as_int(arg: Any, indices, path=None, index_exprs=None, *, loop_exprs=pmap()):
     from pyop3.array import HierarchicalArray
 
     if isinstance(arg, HierarchicalArray):
+        # this shouldn't be here, but it will break things the least to do so
+        # at the moment
+        # if index_exprs is None:
+        #     index_exprs = merge_dicts(arg.index_exprs.values())
+
         # TODO this might break if we have something like [:, subset]
         # I will need to map the "source" axis (e.g. slice_label0) back
         # to the "target" axis
-        return arg.get_value(indices, target_path, index_exprs)
+        # return arg.get_value(indices, target_path, index_exprs)
+        return arg.get_value(indices, path, index_exprs, loop_exprs=loop_exprs)
     else:
         raise TypeError
 
 
 @_as_int.register
-def _(arg: numbers.Real, *args):
+def _(arg: numbers.Real, *args, **kwargs):
     return strict_int(arg)
 
 
-def collect_sizes(axes: AxisTree) -> pmap:  # TODO value-type of returned pmap?
-    return _collect_sizes_rec(axes, axes.root)
+class LoopExpressionReplacer(pym.mapper.IdentityMapper):
+    def __init__(self, loop_exprs):
+        self._loop_exprs = loop_exprs
+
+    def map_multi_array(self, array):
+        index_exprs = {ax: self.rec(expr) for ax, expr in array.index_exprs.items()}
+        return type(array)(array.array, array.target_path, index_exprs)
+
+    def map_loop_index(self, index):
+        return self._loop_exprs[index.id][index.axis]
 
 
-def _collect_sizes_rec(axes, axis) -> pmap:
-    sizes = {}
-    for cpt in axis.components:
-        sizes[axis.label, cpt.label] = cpt.count
+def eval_offset(
+    axes, layouts, indices, path=None, index_exprs=None, *, loop_exprs=pmap()
+):
+    from pyop3.itree.tree import IndexExpressionReplacer, LoopIndexVariable
 
-        if subaxis := axes.component_child(axis, cpt):
-            subsizes = _collect_sizes_rec(axes, subaxis)
-            for loc, size in subsizes.items():
-                # make sure that sizes always match for duplicates
-                if loc not in sizes:
-                    sizes[loc] = size
-                else:
-                    if sizes[loc] != size:
-                        raise RuntimeError
-    return pmap(sizes)
-
-
-def eval_offset(axes, layouts, indices, target_path=None, index_exprs=None):
-    indices = freeze(indices)
-    if target_path is not None:
-        target_path = freeze(target_path)
-    if index_exprs is not None:
-        index_exprs = freeze(index_exprs)
-
-    if target_path is None:
+    if axes.is_empty:
+        source_path_node = {}
+    else:
         # if a path is not specified we assume that the axes/array are
         # unindexed and single component
-        target_path = {}
-        target_path.update(axes.target_paths.get(None, {}))
-        if not axes.is_empty:
-            for ax, clabel in axes.path_with_nodes(*axes.leaf).items():
-                target_path.update(axes.target_paths.get((ax.id, clabel), {}))
-        target_path = freeze(target_path)
+        if path is None:
+            leaf = axes.leaf
+        else:
+            leaf = axes._node_from_path(path)
+        source_path_node = axes.path_with_nodes(*leaf)
+
+    target_path = {}
+    target_path.update(axes.target_paths.get(None, {}))
+    for ax, clabel in source_path_node.items():
+        target_path.update(axes.target_paths.get((ax.id, clabel), {}))
+    target_path = freeze(target_path)
 
     # if the provided indices are not a dict then we assume that they apply in order
     # as we go down the selected path of the tree
@@ -969,18 +1012,68 @@ def eval_offset(axes, layouts, indices, target_path=None, index_exprs=None):
         axis = axes.root
         for idx in indices:
             indices_[axis.label] = idx
-            cpt_label = target_path[axis.label]
+            cpt_label = path[axis.label]
             axis = axes.child(axis, cpt_label)
         indices = indices_
 
-    if index_exprs is not None:
-        replace_map_new = {}
-        replacer = ExpressionEvaluator(indices)
-        for axis, index_expr in index_exprs.items():
-            replace_map_new[axis] = replacer(index_expr)
-        indices_ = replace_map_new
-    else:
-        indices_ = indices
+    # # then any provided
+    # if index_exprs is not None:
+    #     replace_map_new = {}
+    #     replacer = ExpressionEvaluator(indices)
+    #     for axis, index_expr in index_exprs.items():
+    #         try:
+    #             replace_map_new[axis] = replacer(index_expr)
+    #         except UnrecognisedAxisException:
+    #             pass
+    #     indices2 = replace_map_new
+    # else:
+    #     indices2 = indices
+    #
+    # replace_map_new = {}
+    # replacer = ExpressionEvaluator(indices2)
+    # for axlabel, index_expr in axes.index_exprs.get(None, {}).items():
+    #     try:
+    #         replace_map_new[axlabel] = replacer(index_expr)
+    #     except UnrecognisedAxisException:
+    #         pass
+    # for axis, component in source_path_node.items():
+    #     for axlabel, index_expr in axes.index_exprs.get((axis.id, component), {}).items():
+    #         try:
+    #             replace_map_new[axlabel] = replacer(index_expr)
+    #         except UnrecognisedAxisException:
+    #             pass
+    # indices1 = replace_map_new
 
-    offset = pym.evaluate(layouts[target_path], indices_, ExpressionEvaluator)
+    # Substitute indices into index exprs
+    # if index_exprs:
+
+    # TODO change default?
+    if index_exprs is None:
+        index_exprs = {}
+
+    # Replace any loop index variables in index_exprs
+    # index_exprs_ = {}
+    # replacer = LoopExpressionReplacer(loop_exprs)  # different class?
+    # for ax, expr in index_exprs.items():
+    #     # if isinstance(expr, LoopIndexVariable):
+    #     #     index_exprs_[ax] = loop_exprs[expr.id][ax]
+    #     # else:
+    #     index_exprs_[ax] = replacer(expr)
+
+    # # Substitute something TODO with indices
+    # if indices:
+    #     breakpoint()
+    # else:
+    #     indices_ = index_exprs_
+
+    # replacer = IndexExpressionReplacer(index_exprs_, loop_exprs)
+    replacer = IndexExpressionReplacer(index_exprs, loop_exprs)
+    layout_orig = layouts[target_path]
+    layout_subst = replacer(layout_orig)
+
+    # if loop_exprs:
+    #     breakpoint()
+
+    # offset = pym.evaluate(layouts[target_path], indices_, ExpressionEvaluator)
+    offset = ExpressionEvaluator(indices, loop_exprs)(layout_subst)
     return strict_int(offset)

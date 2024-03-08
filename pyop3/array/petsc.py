@@ -175,18 +175,8 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
                     continue
                 rcforest[rctx | cctx] = (rtree, ctree)
 
-        # TODO
-        # I have to relabel the index tree targets to work for the new set of axes.
-        # Also the resulting axes will have some odd (suffixed) labels, which is likely
-        # fine.
-
         arrays = {}
         for ctx, (rtree, ctree) in rcforest.items():
-            # tree = rtree
-            # for rleaf, clabel in rtree.leaves:
-            #     tree = tree.add_subtree(ctree, rleaf, clabel, uniquify_ids=True)
-            # indexed_axes = _index_axes(tree, ctx, self.axes)
-
             indexed_raxes = _index_axes(rtree, ctx, self.raxes)
             indexed_caxes = _index_axes(ctree, ctx, self.caxes)
 
@@ -199,8 +189,6 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
                 indexed_raxes,
                 target_paths=indexed_raxes.target_paths,
                 index_exprs=indexed_raxes.index_exprs,
-                # is this right?
-                # outer_loops=(),
                 outer_loops=router_loops,
                 dtype=IntType,
             )
@@ -208,7 +196,6 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
                 indexed_caxes,
                 target_paths=indexed_caxes.target_paths,
                 index_exprs=indexed_caxes.index_exprs,
-                # outer_loops=(),
                 outer_loops=couter_loops,
                 dtype=IntType,
             )
@@ -217,19 +204,23 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
 
             for idxs in my_product(router_loops):
                 indices = {
-                    idx.index.id: (idx.source_exprs, idx.target_exprs) for idx in idxs
+                    # idx.index.id: (idx.source_exprs, idx.target_exprs) for idx in idxs
+                    idx.index.id: idx.target_exprs
+                    for idx in idxs
                 }
                 for p in indexed_raxes.iter(idxs):
                     offset = self.raxes.offset(p.target_exprs, p.target_path)
-                    rmap.set_value(p.source_exprs | indices, offset, p.source_path)
+                    rmap.set_value(p.source_exprs, offset, loop_exprs=indices)
 
             for idxs in my_product(couter_loops):
                 indices = {
-                    idx.index.id: (idx.source_exprs, idx.target_exprs) for idx in idxs
+                    # idx.index.id: (idx.source_exprs, idx.target_exprs) for idx in idxs
+                    idx.index.id: idx.target_exprs
+                    for idx in idxs
                 }
                 for p in indexed_caxes.iter(idxs):
                     offset = self.caxes.offset(p.target_exprs, p.target_path)
-                    cmap.set_value(p.source_exprs | indices, offset, p.source_path)
+                    cmap.set_value(p.source_exprs, offset, loop_exprs=indices)
 
             shape = (indexed_raxes.size, indexed_caxes.size)
             # breakpoint()
