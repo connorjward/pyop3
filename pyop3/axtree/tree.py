@@ -237,13 +237,35 @@ class ExpressionEvaluator(pym.mapper.evaluator.EvaluationMapper):
             raise UnrecognisedAxisException from e
 
     def map_multi_array(self, array_var):
-        # indices = {ax: self.rec(idx) for ax, idx in array_var.index_exprs.items()}
-        return array_var.array.get_value(
-            self.context,
-            array_var.target_path,  # should be source path
-            # index_exprs=array_var.index_exprs,
-            loop_exprs=self._loop_exprs,
-        )
+        from pyop3.itree.tree import ExpressionEvaluator, IndexExpressionReplacer
+
+        array = array_var.array
+
+        indices = {ax: self.rec(idx) for ax, idx in array_var.index_exprs.items()}
+        # breakpoint()
+        # offset = eval_offset(
+        #     array.axes,
+        #     array.layouts,
+        #     indices,
+        #     array.target_path,
+
+        # replacer = IndexExpressionReplacer(array_var.index_exprs, self._loop_exprs)
+        replacer = IndexExpressionReplacer(indices, self._loop_exprs)
+        layout_orig = array.layouts[freeze(array_var.target_path)]
+        layout_subst = replacer(layout_orig)
+
+        # offset = ExpressionEvaluator(indices, self._loop_exprs)(layout_subst)
+        # offset = ExpressionEvaluator(self.context | indices, self._loop_exprs)(layout_subst)
+        offset = ExpressionEvaluator(indices, self._loop_exprs)(layout_subst)
+        offset = strict_int(offset)
+
+        # return array_var.array.get_value(
+        #     self.context,
+        #     array_var.target_path,  # should be source path
+        #     # index_exprs=array_var.index_exprs,
+        #     loop_exprs=self._loop_exprs,
+        # )
+        return array.data[offset]
 
     def map_loop_index(self, expr):
         return self._loop_exprs[expr.id][expr.axis]
@@ -358,6 +380,9 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
         self.components = components
         self.numbering = numbering
         self.sf = sf
+
+        if self.id.endswith("_184"):
+            breakpoint()
 
     def __getitem__(self, indices):
         # NOTE: This *must* return an axis tree because that is where we attach
@@ -767,12 +792,13 @@ class PartialAxisTree(LabelledTree):
 
         mysize = 0
         for idxs in my_product(self.outer_loops):
-            target_indices = merge_dicts(idx.target_exprs for idx in idxs)
+            loop_exprs = {idx.index.id: idx.source_exprs for idx in idxs}
+            # target_indices = merge_dicts(idx.target_exprs for idx in idxs)
             # this is a hack
             if self.is_empty:
                 mysize += 1
             else:
-                mysize += _axis_size(self, self.root, target_indices)
+                mysize += _axis_size(self, self.root, loop_exprs=loop_exprs)
         return mysize
 
         if isinstance(self.size, HierarchicalArray):

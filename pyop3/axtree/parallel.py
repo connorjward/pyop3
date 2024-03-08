@@ -50,16 +50,21 @@ def partition_ghost_points(axis, sf):
 
 
 def collect_sf_graphs(axes, axis=None, path=pmap(), indices=pmap()):
+    # it does not make sense for temporary-like objects to have SFs
+    if axes.outer_loops:
+        return ()
+
     # NOTE: This function does not check for nested SFs (which should error)
-    axis = axis or axes.root
+    if axis is None:
+        axis = axes.root
 
     if axis.sf is not None:
         return (grow_dof_sf(axes, axis, path, indices),)
     else:
         graphs = []
         for component in axis.components:
-            subaxis = axes.child(axis, component)
-            if subaxis is not None:
+            if subaxis := axes.child(axis, component):
+                # think path is not needed
                 for pt in range(_as_int(component.count, indices, path)):
                     graphs.extend(
                         collect_sf_graphs(

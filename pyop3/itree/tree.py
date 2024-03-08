@@ -17,7 +17,7 @@ import pymbolic as pym
 import pyrsistent
 import pytools
 from mpi4py import MPI
-from pyrsistent import PMap, freeze, pmap
+from pyrsistent import PMap, freeze, pmap, thaw
 
 from pyop3.array import HierarchicalArray
 from pyop3.axtree import (
@@ -1048,6 +1048,7 @@ def _(
         index_exprs,
         loop_index.layout_exprs,
         loop_index.loops,
+        {},
     )
 
 
@@ -1242,9 +1243,10 @@ def _(slice_: Slice, indices, *, target_path_acc, prev_axes, **kwargs):
     return (
         axes,
         target_path_per_component,
-        index_exprs_per_component,
+        freeze(index_exprs_per_component),
         layout_exprs_per_component,
         (),  # no outer loops
+        {},
     )
 
 
@@ -1262,12 +1264,15 @@ def _(
         prior_index_exprs_per_cpt,
         _,
         outer_loops,
+        prior_extra_index_exprs,
     ) = collect_shape_index_callback(
         called_map.index,
         indices,
         prev_axes=prev_axes,
         **kwargs,
     )
+
+    extra_index_exprs = dict(prior_extra_index_exprs)
 
     if not prior_axes:
         prior_target_path = prior_target_path_per_cpt[None]
@@ -1277,6 +1282,7 @@ def _(
             target_path_per_cpt,
             index_exprs_per_cpt,
             layout_exprs_per_cpt,
+            more_extra_index_exprs,
         ) = _make_leaf_axis_from_called_map(
             called_map,
             prior_target_path,
@@ -1284,6 +1290,8 @@ def _(
             prev_axes,
         )
         axes = PartialAxisTree(axis)
+
+        extra_index_exprs.update(more_extra_index_exprs)
 
     else:
         axes = PartialAxisTree(prior_axes.parent_to_children)
@@ -1309,6 +1317,7 @@ def _(
                 subtarget_paths,
                 subindex_exprs,
                 sublayout_exprs,
+                subextra_index_exprs,
             ) = _make_leaf_axis_from_called_map(
                 called_map,
                 prior_target_path,
@@ -1324,6 +1333,7 @@ def _(
             target_path_per_cpt.update(subtarget_paths)
             index_exprs_per_cpt.update(subindex_exprs)
             layout_exprs_per_cpt.update(sublayout_exprs)
+            extra_index_exprs.update(subextra_index_exprs)
 
     return (
         axes,
@@ -1331,6 +1341,7 @@ def _(
         freeze(index_exprs_per_cpt),
         freeze(layout_exprs_per_cpt),
         outer_loops,
+        freeze(extra_index_exprs),
     )
 
 
@@ -1347,6 +1358,7 @@ def _make_leaf_axis_from_called_map(
     target_path_per_cpt = {}
     index_exprs_per_cpt = {}
     layout_exprs_per_cpt = {}
+    extra_index_exprs = {}
 
     all_skipped = True
     for map_cpt in called_map.map.connectivity[prior_target_path]:
@@ -1404,7 +1416,14 @@ def _make_leaf_axis_from_called_map(
             map_cpt.array, my_target_path, prior_index_exprs, new_inner_index_expr
         )
 
-        index_exprs_per_cpt[axis_id, cpt.label] = {map_cpt.target_axis: map_var}
+        index_exprs_per_cpt[axis_id, cpt.label] = {
+            map_cpt.target_axis: map_var,
+        }
+
+        # also one for the new axis
+        extra_index_exprs[axis_id, cpt.label] = {
+            axisvar.axis: axisvar,
+        }
 
         # don't think that this is possible for maps
         layout_exprs_per_cpt[axis_id, cpt.label] = {
@@ -1426,6 +1445,7 @@ def _make_leaf_axis_from_called_map(
         target_path_per_cpt,
         index_exprs_per_cpt,
         layout_exprs_per_cpt,
+        extra_index_exprs,
     )
 
 
@@ -1495,13 +1515,19 @@ def _index_axes_rec(
         target_path_acc=target_path_acc,
         **kwargs,
     )
-    axes_per_index, *rest, outer_loops = index_data
+    axes_per_index, *rest, outer_loops, extra_index_exprs = index_data
 
     (
         target_path_per_cpt_per_index,
         index_exprs_per_cpt_per_index,
         layout_exprs_per_cpt_per_index,
     ) = tuple(map(dict, rest))
+
+    # if ("_id_Axis_132", "XXX") in index_exprs_per_cpt_per_index:
+    #     breakpoint()
+
+    # if extra_index_exprs:
+    #     breakpoint()
 
     if axes_per_index:
         leafkeys = axes_per_index.leaves
@@ -1554,7 +1580,15 @@ def _index_axes_rec(
             outer_loops += retval[4]
 
     target_path_per_component = freeze(target_path_per_cpt_per_index)
-    index_exprs_per_component = freeze(index_exprs_per_cpt_per_index)
+    index_exprs_per_component = thaw(index_exprs_per_cpt_per_index)
+    for key, inner in extra_index_exprs.items():
+        if key in index_exprs_per_component:
+            for ax, expr in inner.items():
+                assert ax not in index_exprs_per_component[key]
+                index_exprs_per_component[key][ax] = expr
+        else:
+            index_exprs_per_component[key] = inner
+    index_exprs_per_component = freeze(index_exprs_per_component)
     layout_exprs_per_component = freeze(layout_exprs_per_cpt_per_index)
 
     axes = PartialAxisTree(axes_per_index.parent_to_children)
@@ -1794,10 +1828,18 @@ def iter_axis_tree(
         assert index_exprs_acc is None
         target_path = target_paths.get(None, pmap())
 
+        # Substitute the index exprs, which map target to source, into
+        # indices, giving target index exprs
         myindex_exprs = index_exprs.get(None, pmap())
         evaluator = ExpressionEvaluator(indices, outer_replace_map)
         new_exprs = {}
         for axlabel, index_expr in myindex_exprs.items():
+            # try:
+            #     new_index = evaluator(index_expr)
+            #     assert new_index != index_expr
+            #     new_exprs[axlabel] = new_index
+            # except UnrecognisedAxisException:
+            #     pass
             new_index = evaluator(index_expr)
             assert new_index != index_expr
             new_exprs[axlabel] = new_index
@@ -1854,12 +1896,9 @@ def iter_axis_tree(
                 indices | {axis.label: pt}, outer_replace_map
             )
             for axlabel, index_expr in myindex_exprs.items():
-                try:
-                    new_index = evaluator(index_expr)
-                    assert new_index != index_expr
-                    new_exprs[axlabel] = new_index
-                except UnrecognisedAxisException:
-                    pass
+                new_index = evaluator(index_expr)
+                assert new_index != index_expr
+                new_exprs[axlabel] = new_index
             # breakpoint()
             index_exprs_ = index_exprs_acc | new_exprs
             indices_ = indices | {axis.label: pt}

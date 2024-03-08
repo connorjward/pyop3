@@ -215,7 +215,9 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
                 }
                 for p in indexed_raxes.iter(idxs):
                     offset = self.raxes.offset(p.target_exprs, p.target_path)
-                    rmap.set_value(p.source_exprs, offset, loop_exprs=indices)
+                    rmap.set_value(
+                        p.source_exprs, offset, p.source_path, loop_exprs=indices
+                    )
 
             for idxs in my_product(couter_loops):
                 indices = {
@@ -226,7 +228,9 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
                 }
                 for p in indexed_caxes.iter(idxs):
                     offset = self.caxes.offset(p.target_exprs, p.target_path)
-                    cmap.set_value(p.source_exprs, offset, loop_exprs=indices)
+                    cmap.set_value(
+                        p.source_exprs, offset, p.source_path, loop_exprs=indices
+                    )
 
             shape = (indexed_raxes.size, indexed_caxes.size)
             # breakpoint()
