@@ -558,7 +558,8 @@ def parse_loop_properly_this_time(
         axis_index_exprs = axes.index_exprs.get((axis.id, component.label), {})
         index_exprs_ = index_exprs | axis_index_exprs
 
-        if component.count != 1:
+        # if component.count != 1:
+        if True:
             iname = codegen_context.unique_name("i")
             extent_var = register_extent(
                 component.count,
@@ -840,7 +841,8 @@ def parse_assignment_properly_this_time(
         return
 
     for component in axis.components:
-        if component.count != 1:
+        # if component.count != 1:
+        if True:
             iname = codegen_context.unique_name("i")
 
             extent_var = register_extent(
@@ -905,6 +907,9 @@ def add_leaf_assignment(
         iname_replace_map,
         codegen_context,
     )
+
+    # if larr.name == "t_4":
+    #     breakpoint()
 
     if isinstance(assignment, AddAssignment):
         rexpr = lexpr + rexpr

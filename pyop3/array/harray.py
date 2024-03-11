@@ -140,9 +140,8 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
     ):
         super().__init__(name=name, prefix=prefix)
 
-        # debug
-        if self.name == "array_21":
-            breakpoint()
+        # if self.name == "array_5":
+        #     breakpoint()
 
         axes = as_axis_tree(axes)
 
@@ -187,8 +186,13 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         if some_but_not_all(x is None for x in [target_paths, index_exprs]):
             raise ValueError
 
-        self._target_paths = target_paths or axes._default_target_paths()
-        self._index_exprs = index_exprs or axes._default_index_exprs()
+        if target_paths is None:
+            target_paths = axes._default_target_paths()
+        if index_exprs is None:
+            index_exprs = axes._default_index_exprs()
+
+        self._target_paths = freeze(target_paths)
+        self._index_exprs = freeze(index_exprs)
         self._outer_loops = outer_loops or ()
 
         self._layouts = layouts if layouts is not None else axes.layouts
@@ -443,12 +447,19 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         self.data[self.offset(indices, path, loop_exprs=loop_exprs)] = value
 
     def offset(self, indices, path=None, *, loop_exprs=pmap()):
+        # return eval_offset(
+        #     self.axes,
+        #     self.layouts,
+        #     indices,
+        #     self.target_paths,
+        #     self.index_exprs,
+        #     path,
+        #     loop_exprs=loop_exprs,
+        # )
         return eval_offset(
             self.axes,
-            self.layouts,
+            self.subst_layouts,
             indices,
-            self.target_paths,
-            self.index_exprs,
             path,
             loop_exprs=loop_exprs,
         )

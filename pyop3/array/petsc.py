@@ -185,21 +185,51 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
             router_loops = indexed_raxes.outer_loops
             couter_loops = indexed_caxes.outer_loops
 
+            # rmap_axes = AxisTree(indexed_raxes.layout_axes.parent_to_children)
+            # cmap_axes = AxisTree(indexed_caxes.layout_axes.parent_to_children)
+
+            """
+            
+            KEY POINTS
+            ----------
+
+            * These maps require new layouts. Typically when we index something
+              we want to use the prior layout, here we want to materialise them.
+              This is basically what we always want for temporaries but this time
+              we actually want to materialise data.
+            * We then have to use the default target paths and index exprs. If these
+              are the "indexed" ones then they don't work. For instance the target
+              paths target non-existent layouts since we are using new layouts.
+
+            """
+
             rmap = HierarchicalArray(
                 indexed_raxes,
-                target_paths=indexed_raxes.target_paths,
-                index_exprs=indexed_raxes.index_exprs,
-                # target_paths=indexed_raxes.layout_axes._default_target_paths(),
-                # index_exprs=indexed_raxes.layout_axes._default_index_exprs(),
+                # indexed_raxes.layout_axes,
+                # rmap_axes,
+                # target_paths=indexed_raxes.target_paths,
+                # index_exprs=indexed_raxes.index_exprs,
+                target_paths=indexed_raxes._default_target_paths(),
+                index_exprs=indexed_raxes._default_index_exprs(),
+                layouts=indexed_raxes.layouts,
+                # target_paths=indexed_raxes.layout_axes.target_paths,
+                # index_exprs=indexed_raxes.layout_axes.index_exprs,
+                # layouts=indexed_raxes.layout_axes.layouts,
                 outer_loops=router_loops,
                 dtype=IntType,
             )
             cmap = HierarchicalArray(
                 indexed_caxes,
-                target_paths=indexed_caxes.target_paths,
-                index_exprs=indexed_caxes.index_exprs,
-                # target_paths=indexed_caxes.layout_axes._default_target_paths(),
-                # index_exprs=indexed_caxes.layout_axes._default_index_exprs(),
+                # indexed_caxes.layout_axes,
+                # cmap_axes,
+                # target_paths=indexed_caxes.target_paths,
+                # index_exprs=indexed_caxes.index_exprs,
+                target_paths=indexed_caxes._default_target_paths(),
+                index_exprs=indexed_caxes._default_index_exprs(),
+                layouts=indexed_caxes.layouts,
+                # target_paths=indexed_caxes.layout_axes.target_paths,
+                # index_exprs=indexed_caxes.layout_axes.index_exprs,
+                # layouts=indexed_caxes.layout_axes.layouts,
                 outer_loops=couter_loops,
                 dtype=IntType,
             )
@@ -207,33 +237,28 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
             from pyop3.axtree.layout import my_product
 
             for idxs in my_product(router_loops):
-                indices = {
-                    # idx.index.id: (idx.source_exprs, idx.target_exprs) for idx in idxs
-                    # idx.index.id: idx.target_exprs
-                    idx.index.id: idx.source_exprs
-                    for idx in idxs
-                }
+                source_indices = {idx.index.id: idx.source_exprs for idx in idxs}
+                target_indices = {idx.index.id: idx.target_exprs for idx in idxs}
                 for p in indexed_raxes.iter(idxs):
-                    offset = self.raxes.offset(p.target_exprs, p.target_path)
+                    offset = self.raxes.offset(
+                        p.target_exprs, p.target_path, loop_exprs=target_indices
+                    )
                     rmap.set_value(
-                        p.source_exprs, offset, p.source_path, loop_exprs=indices
+                        p.source_exprs, offset, p.source_path, loop_exprs=source_indices
                     )
 
             for idxs in my_product(couter_loops):
-                indices = {
-                    # idx.index.id: (idx.source_exprs, idx.target_exprs) for idx in idxs
-                    # idx.index.id: idx.target_exprs
-                    idx.index.id: idx.source_exprs
-                    for idx in idxs
-                }
+                source_indices = {idx.index.id: idx.source_exprs for idx in idxs}
+                target_indices = {idx.index.id: idx.target_exprs for idx in idxs}
                 for p in indexed_caxes.iter(idxs):
-                    offset = self.caxes.offset(p.target_exprs, p.target_path)
+                    offset = self.caxes.offset(
+                        p.target_exprs, p.target_path, loop_exprs=target_indices
+                    )
                     cmap.set_value(
-                        p.source_exprs, offset, p.source_path, loop_exprs=indices
+                        p.source_exprs, offset, p.source_path, loop_exprs=source_indices
                     )
 
             shape = (indexed_raxes.size, indexed_caxes.size)
-            # breakpoint()
             packed = PackedPetscMat(self, rmap, cmap, shape)
 
             # Since axes require unique labels, relabel the row and column axis trees
@@ -441,6 +466,8 @@ def _alloc_template_mat(points, adjacency, raxes, caxes, bsize=None):
 
     mat.setLGMap(rlgmap, clgmap)
     mat.assemble()
+
+    # breakpoint()
 
     # from PyOP2
     mat.setOption(mat.Option.NEW_NONZERO_LOCATION_ERR, True)

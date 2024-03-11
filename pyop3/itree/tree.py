@@ -358,6 +358,7 @@ class ContextFreeLoopIndex(ContextFreeIndex):
     # should now be ignored
     @property
     def index_exprs(self):
+        # assert False, "used?"  # yes
         if self.source_path != self.path and len(self.path) != 1:
             raise NotImplementedError("no idea what to do here")
 
@@ -366,7 +367,8 @@ class ContextFreeLoopIndex(ContextFreeIndex):
             {
                 None: {
                     target: LoopIndexVariable(self, axis)
-                    for axis in self.source_path.keys()
+                    # for axis in self.source_path.keys()
+                    for axis in self.path.keys()
                 },
             }
         )
@@ -1169,7 +1171,7 @@ def _(slice_: Slice, indices, *, target_path_acc, prev_axes, **kwargs):
                     freeze(
                         {
                             slice_.axis: newvar * subslice.step + subslice.start,
-                            slice_.label: AxisVariable(slice_.label),
+                            # slice_.label: AxisVariable(slice_.label),
                         }
                     )
                 )
@@ -1218,7 +1220,7 @@ def _(slice_: Slice, indices, *, target_path_acc, prev_axes, **kwargs):
                     freeze(
                         {
                             slice_.axis: subset_var,
-                            slice_.label: AxisVariable(slice_.label),
+                            # slice_.label: AxisVariable(slice_.label),
                         }
                     )
                 )
@@ -1813,6 +1815,7 @@ def iter_axis_tree(
     target_paths,
     index_exprs,
     outer_loops=(),
+    include_loops=False,
     axis=None,
     path=pmap(),
     indices=pmap(),
@@ -1821,7 +1824,8 @@ def iter_axis_tree(
 ):
     outer_replace_map = merge_dicts(
         # iter_entry.target_replace_map for iter_entry in outer_loops
-        iter_entry.source_replace_map
+        # iter_entry.source_replace_map
+        iter_entry.target_replace_map
         for iter_entry in outer_loops
     )
     if target_path is None:
@@ -1846,8 +1850,14 @@ def iter_axis_tree(
         index_exprs_acc = freeze(new_exprs)
 
     if axes.is_empty:
+        if include_loops:
+            # source_path =
+            breakpoint()
+        else:
+            source_path = pmap()
+            source_exprs = pmap()
         yield IndexIteratorEntry(
-            loop_index, pmap(), target_path, pmap(), index_exprs_acc
+            loop_index, source_path, target_path, source_exprs, index_exprs_acc
         )
         return
 
@@ -1909,6 +1919,7 @@ def iter_axis_tree(
                     target_paths,
                     index_exprs,
                     outer_loops,
+                    include_loops,
                     subaxis,
                     path_,
                     indices_,
@@ -1916,8 +1927,18 @@ def iter_axis_tree(
                     index_exprs_,
                 )
             else:
+                if include_loops:
+                    source_path = path_ | merge_dicts(
+                        ol.source_path for ol in outer_loops
+                    )
+                    source_exprs = indices_ | merge_dicts(
+                        ol.source_exprs for ol in outer_loops
+                    )
+                else:
+                    source_path = path_
+                    source_exprs = indices_
                 yield IndexIteratorEntry(
-                    loop_index, path_, target_path_, indices_, index_exprs_
+                    loop_index, source_path, target_path_, source_exprs, index_exprs_
                 )
 
 

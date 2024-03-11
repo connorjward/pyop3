@@ -87,18 +87,34 @@ class Indexed(abc.ABC):
 
     @cached_property
     def subst_layouts(self):
-        return self._subst_layouts()
+        retval = self._subst_layouts()
+        return retval
 
     def _subst_layouts(self, axis=None, path=None, target_path=None, index_exprs=None):
         from pyop3.itree.tree import IndexExpressionReplacer
 
+        # TODO Don't do this every time this function is called
+        loop_exprs = {}
+        # for outer_loop in self.outer_loops:
+        #     loop_exprs[outer_loop.id] = {}
+        #     for ax in outer_loop.iterset.nodes:
+        #         key = (ax.id, ax.component.label)
+        #         for ax_, expr in outer_loop.iterset.index_exprs.get(key, {}).items():
+        #             loop_exprs[outer_loop.id][ax_] = expr
+
+        # from pyop3 import HierarchicalArray
+        # if isinstance(self, HierarchicalArray) and self.name == "array_8":
+        #     breakpoint()
+
         layouts = {}
         if strictly_all(x is None for x in [axis, path, target_path, index_exprs]):
-            path = pmap()  # or None?
-            target_path = self.target_paths.get(None, pmap())
-            index_exprs = self.index_exprs.get(None, pmap())
+            path = pmap()
+            # target_path = self.target_paths.get(None, pmap())
+            # index_exprs = self.index_exprs.get(None, pmap())
+            target_path = pmap()
+            index_exprs = pmap()
 
-            replacer = IndexExpressionReplacer(index_exprs)
+            replacer = IndexExpressionReplacer(index_exprs, loop_exprs=loop_exprs)
             layouts[path] = replacer(self.layouts.get(target_path, 0))
 
             if not self.axes.is_empty:
@@ -242,14 +258,6 @@ class ExpressionEvaluator(pym.mapper.evaluator.EvaluationMapper):
         array = array_var.array
 
         indices = {ax: self.rec(idx) for ax, idx in array_var.index_exprs.items()}
-        # breakpoint()
-        # offset = eval_offset(
-        #     array.axes,
-        #     array.layouts,
-        #     indices,
-        #     array.target_path,
-
-        # replacer = IndexExpressionReplacer(array_var.index_exprs, self._loop_exprs)
         replacer = IndexExpressionReplacer(indices, self._loop_exprs)
         layout_orig = array.layouts[freeze(array_var.target_path)]
         layout_subst = replacer(layout_orig)
@@ -380,9 +388,6 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
         self.components = components
         self.numbering = numbering
         self.sf = sf
-
-        if self.id.endswith("_184"):
-            breakpoint()
 
     def __getitem__(self, indices):
         # NOTE: This *must* return an axis tree because that is where we attach
@@ -927,7 +932,7 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
 
         return LoopIndex(self.owned)
 
-    def iter(self, outer_loops=(), loop_index=None):
+    def iter(self, outer_loops=(), loop_index=None, include=False):
         from pyop3.itree.tree import iter_axis_tree
 
         return iter_axis_tree(
@@ -937,6 +942,7 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
             self.target_paths,
             self.index_exprs,
             outer_loops,
+            include,
         )
 
     @property
@@ -991,7 +997,11 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         axes = PartialAxisTree.from_iterable([*axes_iter, self])
 
         return AxisTree(
-            axes.parent_to_children, target_paths=target_paths, index_exprs=index_exprs
+            axes.parent_to_children,
+            target_paths=target_paths,
+            index_exprs=index_exprs,
+            outer_loops=self.outer_loops
+            # axes.parent_to_children, target_paths=target_paths, index_exprs=index_exprs,
         )
 
     @cached_property
@@ -1024,8 +1034,6 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
 
         layouts, _, _, _, _ = _compute_layouts(self.layout_axes, loop_exprs)
 
-        # if loop_exprs:
-        #     breakpoint()
         layoutsnew = _collect_at_leaves(self, self.layout_axes, layouts)
         layouts = freeze(dict(layoutsnew))
 
@@ -1131,12 +1139,19 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
     def offset(self, indices, path=None, *, loop_exprs=pmap()):
         from pyop3.axtree.layout import eval_offset
 
+        # return eval_offset(
+        #     self,
+        #     self.layouts,
+        #     indices,
+        #     self.target_paths,
+        #     self.index_exprs,
+        #     path,
+        #     loop_exprs=loop_exprs,
+        # )
         return eval_offset(
             self,
-            self.layouts,
+            self.subst_layouts,
             indices,
-            self.target_paths,
-            self.index_exprs,
             path,
             loop_exprs=loop_exprs,
         )

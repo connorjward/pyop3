@@ -140,13 +140,8 @@ def requires_external_index(axtree, axis, component_index):
 def size_requires_external_index(axes, axis, component, outer_loops, path=pmap()):
     from pyop3.array import HierarchicalArray
 
-    if axis.id == "_id_Axis_68":
-        breakpoint()
-
     count = component.count
     if isinstance(count, HierarchicalArray):
-        # if count.name == "size_8" and count.axes.is_empty:
-        #     breakpoint()
         if not set(count.outer_loops).issubset(outer_loops):
             return True
         # is the path sufficient? i.e. do we have enough externally provided indices
@@ -422,9 +417,6 @@ def _compute_layouts(
         my_loops = subloops[i]
         outer_loops_per_component[cpt] = my_loops
 
-    # if noouter_loops:
-    # breakpoint()
-
     # 1. do we need to pass further up? i.e. are we variable size?
     # also if we have halo data then we need to pass to the top
     if (
@@ -541,9 +533,6 @@ def _compute_layouts(
                 setting_halo=True,
             )
 
-            # TODO think about substituting with loop_exprs
-            if loop_exprs:
-                breakpoint()
             for subpath, offset_data in fulltree.items():
                 # offset_data must be linear so we can unroll the target paths and
                 # index exprs
@@ -685,7 +674,6 @@ def _create_count_array_tree(
             #     # my_index_exprs[ax.id, cpt.label] = index_exprs.get()
             #     layout_exprs[ax.id, clabel] = {ax.label: AxisVariable(ax.label)}
 
-            # breakpoint()
             # new_index_exprs = dict(axtree.index_exprs)
             # new_index_exprs[???] = ...
 
@@ -779,16 +767,16 @@ def _collect_at_leaves(
     if axis is None:
         axis = layout_axes.root
 
-    # if axis == axes.root:
-    if axis == layout_axes.root:
-        acc[pmap()] = prior
+    if axis == axes.root:
+        # if axis == layout_axes.root:
+        acc[pmap()] = values.get(layout_path, 0)
 
     for component in axis.components:
         layout_path_ = layout_path | {axis.label: component.label}
         prior_ = prior + values.get(layout_path_, 0)
 
-        # if axis in axes.nodes:
-        if True:
+        if axis in axes.nodes:
+            # if True:
             path_ = path | {axis.label: component.label}
             acc[path_] = prior_
         else:
@@ -800,8 +788,6 @@ def _collect_at_leaves(
                     axes, layout_axes, values, subaxis, path_, layout_path_, prior_
                 )
             )
-    # if layout_axes.depth != axes.depth and len(layout_path) == 0:
-    #     breakpoint()
     return acc
 
 
@@ -812,10 +798,19 @@ def axis_tree_size(axes: AxisTree) -> int:
     example, an array with shape ``(10, 3)`` will have a size of 30.
 
     """
-    from pyop3.array import HierarchicalArray
-
     # outer_loops = collect_external_loops(axes, axes.index_exprs)
     outer_loops = axes.outer_loops
+
+    # loop_exprs = {}
+    # for ol in outer_loops:
+    #     assert not ol.iterset.index_exprs.get(None, {}), "not sure what to do here"
+    #
+    #     loop_exprs[ol.id] = {}
+    #     for axis in ol.iterset.nodes:
+    #         key = (axis.id, axis.component.label)
+    #         for ax, expr in ol.iterset.index_exprs.get(key, {}).items():
+    #             loop_exprs[ol.id][ax] = expr
+
     # external_axes = collect_externally_indexed_axes(axes)
     # if len(external_axes) == 0:
     if axes.is_empty:
@@ -825,6 +820,8 @@ def axis_tree_size(axes: AxisTree) -> int:
         has_fixed_size(axes, axes.root, cpt, outer_loops)
         for cpt in axes.root.components
     ):
+        # if not outer_loops:
+        # return _axis_size(axes, axes.root, loop_exprs=loop_exprs)
         return _axis_size(axes, axes.root)
 
     # axis size is now an array
@@ -859,7 +856,6 @@ def axis_tree_size(axes: AxisTree) -> int:
     #     prefix="size",
     # )
     # sizes = HierarchicalArray(AxisTree(), target_paths={}, index_exprs={}, outer_loops=outer_loops_ord[:-1])
-    # breakpoint()
     # sizes = HierarchicalArray(AxisTree(outer_loops=outer_loops_ord), target_paths={}, index_exprs={}, outer_loops=outer_loops_ord)
     # sizes = HierarchicalArray(axes)
     sizes = []
@@ -893,7 +889,6 @@ def axis_tree_size(axes: AxisTree) -> int:
             size = _axis_size(axes, axes.root, target_indices)
         # sizes.set_value(source_indices, size)
         sizes.append(size)
-    # breakpoint()
     # return sizes
     return np.asarray(sizes, dtype=IntType)
 
@@ -984,24 +979,36 @@ class LoopExpressionReplacer(pym.mapper.IdentityMapper):
 
 
 def eval_offset(
-    axes, layouts, indices, target_paths, index_exprs, path=None, *, loop_exprs=pmap()
+    # axes, layouts, indices, target_paths, index_exprs, path=None, *, loop_exprs=pmap()
+    axes,
+    layouts,
+    indices,
+    path=None,
+    *,
+    loop_exprs=pmap(),
 ):
     from pyop3.itree.tree import IndexExpressionReplacer
 
-    # now select target paths and index exprs from the full collection
-    target_path = target_paths.get(None, {})
-    index_exprs_ = index_exprs.get(None, {})
+    # layout_axes = axes.layout_axes
+    layout_axes = axes
 
-    if not axes.is_empty:
-        if path is None:
-            path = just_one(axes.leaf_paths)
-        node_path = axes.path_with_nodes(*axes._node_from_path(path))
-        for axis, component in node_path.items():
-            key = axis.id, component
-            if key in target_paths:
-                target_path.update(target_paths[key])
-            if key in index_exprs:
-                index_exprs_.update(index_exprs[key])
+    # now select target paths and index exprs from the full collection
+    # target_path = target_paths.get(None, {})
+    # index_exprs_ = index_exprs.get(None, {})
+
+    # if not layout_axes.is_empty:
+    #     if path is None:
+    #         path = just_one(layout_axes.leaf_paths)
+    #     node_path = layout_axes.path_with_nodes(*layout_axes._node_from_path(path))
+    #     for axis, component in node_path.items():
+    #         key = axis.id, component
+    #         if key in target_paths:
+    #             target_path.update(target_paths[key])
+    #         if key in index_exprs:
+    #             index_exprs_.update(index_exprs[key])
+
+    if path is None:
+        path = pmap() if axes.is_empty else just_one(axes.leaf_paths)
 
     # if the provided indices are not a dict then we assume that they apply in order
     # as we go down the selected path of the tree
@@ -1010,11 +1017,10 @@ def eval_offset(
         indices = as_tuple(indices)
 
         indices_ = {}
-        axis = axes.root
-        for idx in indices:
-            indices_[axis.label] = idx
-            cpt_label = target_path[axis.label]
-            axis = axes.child(axis, cpt_label)
+        ordered_path = iter(just_one(axes.ordered_leaf_paths))
+        for index in indices:
+            axis_label, _ = next(ordered_path)
+            indices_[axis_label] = index
         indices = indices_
 
     # # then any provided
@@ -1057,19 +1063,11 @@ def eval_offset(
     #     # else:
     #     index_exprs_[ax] = replacer(expr)
 
-    # # Substitute something TODO with indices
-    # if indices:
-    #     breakpoint()
-    # else:
-    #     indices_ = index_exprs_
-
     # replacer = IndexExpressionReplacer(index_exprs_, loop_exprs)
-    replacer = IndexExpressionReplacer(index_exprs_, loop_exprs)
-    layout_orig = layouts[freeze(target_path)]
-    layout_subst = replacer(layout_orig)
+    # layout_orig = layouts[freeze(target_path)]
+    # layout_subst = replacer(layout_orig)
 
-    # if loop_exprs:
-    #     breakpoint()
+    layout_subst = layouts[freeze(path)]
 
     # offset = pym.evaluate(layouts[target_path], indices_, ExpressionEvaluator)
     offset = ExpressionEvaluator(indices, loop_exprs)(layout_subst)
