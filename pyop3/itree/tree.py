@@ -379,7 +379,8 @@ class ContextFreeLoopIndex(ContextFreeIndex):
         #     LocalLoopIndexVariable(self, axis)
         #     for axis in self.iterset.path(*self.iterset.leaf).keys()
         # }
-        return self.iterset.outer_loops + (self,)
+        # return self.iterset.outer_loops + (self,)
+        return (self,)
 
     @property
     def layout_exprs(self):
@@ -391,8 +392,6 @@ class ContextFreeLoopIndex(ContextFreeIndex):
         return self.iterset.datamap
 
     def iter(self, stuff=pmap()):
-        if not isinstance(self.iterset, AxisTree):
-            raise NotImplementedError
         return iter_axis_tree(
             self,
             self.iterset,
@@ -400,6 +399,10 @@ class ContextFreeLoopIndex(ContextFreeIndex):
             self.iterset.index_exprs,
             stuff,
         )
+        # return iter_loop(
+        #     self,
+        #     # stuff,
+        # )
 
 
 # TODO This is properly awful, needs a big cleanup
@@ -1423,8 +1426,9 @@ def _make_leaf_axis_from_called_map(
         }
 
         # also one for the new axis
+        # Nooooo, bad idea
         extra_index_exprs[axis_id, cpt.label] = {
-            axisvar.axis: axisvar,
+            # axisvar.axis: axisvar,
         }
 
         # don't think that this is possible for maps
@@ -1809,6 +1813,71 @@ class IndexIteratorEntry:
         )
 
 
+def iter_loop(loop):
+    if len(loop.target_paths) != 1:
+        raise NotImplementedError
+
+    if loop.iterset.outer_loops:
+        outer_loop = just_one(loop.iterset.outer_loops)
+        for indices in outer_loop.iter():
+            for i, index in enumerate(loop.iterset.iter(indices)):
+                # hack needed because we mix up our source and target exprs
+                axis_label = just_one(
+                    just_one(loop.iterset.target_paths.values()).keys()
+                )
+
+                # source_path = {}
+                source_expr = {loop.id: {axis_label: i}}
+
+                target_expr_sym = merge_dicts(loop.iterset.index_exprs.values())[
+                    axis_label
+                ]
+                replace_map = {axis_label: i}
+                loop_exprs = merge_dicts(idx.target_replace_map for idx in indices)
+                target_expr = ExpressionEvaluator(replace_map, loop_exprs)(
+                    target_expr_sym
+                )
+                target_expr = {axis_label: target_expr}
+
+                # new_exprs = {}
+                # evaluator = ExpressionEvaluator(
+                #     indices | {axis.label: pt}, outer_replace_map
+                # )
+                # for axlabel, index_expr in myindex_exprs.items():
+                #     new_index = evaluator(index_expr)
+                #     assert new_index != index_expr
+                #     new_exprs[axlabel] = new_index
+
+                index = IndexIteratorEntry(
+                    loop, source_path, target_path, source_expr, target_expr
+                )
+
+                yield indices + (index,)
+    else:
+        for i, index in enumerate(loop.iterset.iter()):
+            # hack needed because we mix up our source and target exprs
+            axis_label = just_one(just_one(loop.iterset.target_paths.values()).keys())
+
+            source_path = "NA"
+            target_path = "NA"
+
+            source_expr = {axis_label: i}
+
+            target_expr_sym = merge_dicts(loop.iterset.index_exprs.values())[axis_label]
+            replace_map = {axis_label: i}
+            target_expr = ExpressionEvaluator(replace_map, {})(target_expr_sym)
+            target_expr = {axis_label: target_expr}
+
+            iter_entry = IndexIteratorEntry(
+                loop,
+                source_path,
+                target_path,
+                freeze(source_expr),
+                freeze(target_expr),
+            )
+            yield (iter_entry,)
+
+
 def iter_axis_tree(
     loop_index: LoopIndex,
     axes: AxisTree,
@@ -1928,6 +1997,7 @@ def iter_axis_tree(
                 )
             else:
                 if include_loops:
+                    assert False, "old code"
                     source_path = path_ | merge_dicts(
                         ol.source_path for ol in outer_loops
                     )

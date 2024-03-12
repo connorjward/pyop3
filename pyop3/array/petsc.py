@@ -236,6 +236,9 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
 
             from pyop3.axtree.layout import my_product
 
+            # so these are now failing BADLY because I have no real idea what
+            # I'm doing here...
+
             for idxs in my_product(router_loops):
                 source_indices = {idx.index.id: idx.source_exprs for idx in idxs}
                 target_indices = {idx.index.id: idx.target_exprs for idx in idxs}
@@ -246,6 +249,8 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
                     rmap.set_value(
                         p.source_exprs, offset, p.source_path, loop_exprs=source_indices
                     )
+
+            breakpoint()
 
             for idxs in my_product(couter_loops):
                 source_indices = {idx.index.id: idx.source_exprs for idx in idxs}
@@ -467,7 +472,7 @@ def _alloc_template_mat(points, adjacency, raxes, caxes, bsize=None):
     mat.setLGMap(rlgmap, clgmap)
     mat.assemble()
 
-    # breakpoint()
+    breakpoint()
 
     # from PyOP2
     mat.setOption(mat.Option.NEW_NONZERO_LOCATION_ERR, True)

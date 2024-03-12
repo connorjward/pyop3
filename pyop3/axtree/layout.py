@@ -332,7 +332,7 @@ def collect_outer_loops(axes, axis, index_exprs):
 
 def _compute_layouts(
     axes: AxisTree,
-    loop_exprs,
+    loop_vars,
     axis=None,
     layout_path=pmap(),
     index_exprs_acc=pmap(),
@@ -368,7 +368,7 @@ def _compute_layouts(
                 substeps,
                 subloops_,
             ) = _compute_layouts(
-                axes, loop_exprs, subaxis, layout_path_, index_exprs_acc_
+                axes, loop_vars, subaxis, layout_path_, index_exprs_acc_
             )
             sublayoutss.append(sublayouts)
             subindex_exprs.append(subindex_exprs_)
@@ -435,10 +435,10 @@ def _compute_layouts(
             # this doesn't follow the normal pattern because we are accumulating
             # *upwards*
             myindex_exprs = {}
-            for c in axis.components:
-                myindex_exprs[axis.id, c.label] = axes.index_exprs.get(
-                    (axis.id, c.label), pmap()
-                )
+            # for c in axis.components:
+            #     myindex_exprs[axis.id, c.label] = axes.index_exprs.get(
+            #         (axis.id, c.label), pmap()
+            #     )
             # we enforce here that all subaxes must be tabulated, is this always
             # needed?
             if strictly_all(sub is not None for sub in csubtrees):
@@ -452,16 +452,19 @@ def _compute_layouts(
             # add to shape of things
             # in theory if we are ragged and permuted then we do want to include this level
             ctree = None
-            myindex_exprs = {}
-            for c in axis.components:
-                myindex_exprs[axis.id, c.label] = axes.index_exprs.get(
-                    (axis.id, c.label), pmap()
-                )
+            # myindex_exprs = {}
+            # for c in axis.components:
+            #     myindex_exprs[axis.id, c.label] = axes.index_exprs.get(
+            #         (axis.id, c.label), pmap()
+            #     )
             for i, c in enumerate(axis.components):
-                step = step_size(axes, axis, c, subloops[i], loop_exprs=loop_exprs)
+                step = step_size(axes, axis, c, subloops[i], loop_exprs=loop_vars)
                 # step = step_size(axes, axis, c, index_exprs)
                 # step = step_size(axes, axis, c)
-                axis_var = axes.index_exprs[axis.id, c.label][axis.label]
+                if (axis.id, c.label) in loop_vars:
+                    axis_var = loop_vars[axis.id, c.label][axis.label]
+                else:
+                    axis_var = AxisVariable(axis.label)
                 layouts.update({layout_path | {axis.label: c.label}: axis_var * step})
 
         # layouts and steps are just propagated from below
@@ -469,7 +472,8 @@ def _compute_layouts(
         return (
             layouts,
             ctree,
-            myindex_exprs,
+            {},
+            # myindex_exprs,
             steps,
             frozenset(x for v in outer_loops_per_component.values() for x in v),
         )
@@ -508,14 +512,14 @@ def _compute_layouts(
 
             # myindex_exprs = index_exprs_acc
 
-            fulltree = _create_count_array_tree(ctree, axes.index_exprs, loop_exprs)
+            fulltree = _create_count_array_tree(ctree, axes.index_exprs, loop_vars)
 
             # now populate fulltree
             offset = IntRef(0)
             _tabulate_count_array_tree(
                 axes,
                 axis,
-                loop_exprs,
+                loop_vars,
                 index_exprs_acc_,
                 fulltree,
                 offset,
@@ -526,7 +530,7 @@ def _compute_layouts(
             _tabulate_count_array_tree(
                 axes,
                 axis,
-                loop_exprs,
+                loop_vars,
                 index_exprs_acc_,
                 fulltree,
                 offset,
@@ -594,7 +598,7 @@ def _compute_layouts(
 
                 sublayouts[layout_path | {axis.label: mycomponent.label}] = new_layout
                 start += _axis_component_size(
-                    axes, axis, mycomponent, loop_exprs=loop_exprs
+                    axes, axis, mycomponent, loop_exprs=loop_vars
                 )
 
                 layouts.update(sublayouts)
@@ -893,17 +897,24 @@ def axis_tree_size(axes: AxisTree) -> int:
     return np.asarray(sizes, dtype=IntType)
 
 
-def my_product(loops, indices=(), context=frozenset()):
-    loop, *inner_loops = loops
+def my_product(loops):
+    if len(loops) > 1:
+        raise NotImplementedError(
+            "Now we are nesting loops so having multiple is a "
+            "headache I haven't yet tackled"
+        )
+    # loop, *inner_loops = loops
+    (loop,) = loops
 
-    if inner_loops:
-        for index in loop.iter(context):
-            indices_ = indices + (index,)
-            context_ = context | {index}
-            yield from my_product(inner_loops, indices_, context_)
+    if loop.iterset.outer_loops:
+        for indices in my_product(loop.iterset.outer_loops):
+            context = frozenset(indices)
+            for index in loop.iter(context):
+                indices_ = indices + (index,)
+                yield indices_
     else:
-        for index in loop.iter(context):
-            yield indices + (index,)
+        for index in loop.iter():
+            yield (index,)
 
 
 def _axis_size(

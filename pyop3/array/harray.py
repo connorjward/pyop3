@@ -140,7 +140,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
     ):
         super().__init__(name=name, prefix=prefix)
 
-        # if self.name == "array_5":
+        # if self.name in ["offset_1", "closure_6"]:
         #     breakpoint()
 
         axes = as_axis_tree(axes)

@@ -323,6 +323,7 @@ class CodegenResult:
     def __call__(self, **kwargs):
         from pyop3.target import compile_loopy
 
+        # breakpoint()
         data_args = []
         for kernel_arg in self.ir.default_entrypoint.args:
             actual_arg_name = self.arg_replace_map[kernel_arg.name]
@@ -775,14 +776,20 @@ def _(assignment, loop_indices, codegen_context):
     icol = f"{cmap_name}[{coffset}]"
 
     # debug
-    # if rsize == 2:
-    #     codegen_context.add_cinstruction(r"""
-    # printf("%d, %d, %d, %d\n", t_0[0], t_0[1], t_0[2], t_0[3]);
-    # printf("%d, %d, %d, %d\n", t_1[0], t_1[1], t_1[2], t_1[3]);
-    # printf("%d, %d, %d, %d, %d, %d, %d, %d\n", t_2[0], t_2[1], t_2[2], t_2[3], t_2[4], t_2[5], t_2[6], t_2[7]);
-    # printf("%d, %d\n", t_3[0], t_3[1]);
-    # printf("%d, %d\n", array_11[0], array_11[1]);
-    # printf("%d, %d\n", array_12[0], array_12[1]);""")
+    # MatSetValuesLocal(array_4, 1, &(array_5[i_0]), 1, &(array_6[i_0]), &(t_1[0]), ADD_VALUES);
+    # if rmap.name == "array_5":
+    #     codegen_context.add_cinstruction(
+    #         r"""
+    #     printf("%d\n", i_0);
+    #     printf("%d\n", array_5[i_0]);
+    #     printf("%d\n", array_6[i_0]);
+    #     printf("t_1: %f\n", t_1[0]);
+    #     //printf("t_3: %f, %f, %f, %f, %f, %f\n", t_3[0], t_3[1], t_3[2], t_3[3], t_3[4], t_3[5]);
+    #     //printf("closure_6: %d, %d, %d, %d\n", closure_6[0],  closure_6[1], closure_6[2], closure_6[3]);
+    #     //printf("offset_1: %d, %d, %d, %d\n", offset_1[0],  offset_1[1], offset_1[2], offset_1[3]);
+    #     //printf("coords: %f, %f, %f, %f\n", firedrake_default_coordinates[0],  firedrake_default_coordinates[1], firedrake_default_coordinates[2], firedrake_default_coordinates[3]);
+    #
+    #     """)
 
     call_str = _petsc_mat_insn(
         assignment, mat_name, array_name, rsize_var, csize_var, irow, icol
@@ -807,7 +814,7 @@ def _(assignment: PetscMatStore, mat_name, array_name, nrow, ncol, irow, icol):
 
 @_petsc_mat_insn.register
 def _(assignment: PetscMatAdd, mat_name, array_name, nrow, ncol, irow, icol):
-    return f"MatSetValuesLocal({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]), ADD_VALUES);"
+    return f"PetscCall(MatSetValuesLocal({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]), ADD_VALUES));"
 
 
 # TODO now I attach a lot of info to the context-free array, do I need to pass axes around?
@@ -1015,6 +1022,8 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         return jname_expr
 
     def map_loop_index(self, expr):
+        # if expr.id.endswith("1"):
+        #     breakpoint()
         # FIXME pretty sure I have broken local loop index stuff
         if isinstance(expr, LocalLoopIndexVariable):
             return self._replace_map[expr.id][0][expr.axis]
