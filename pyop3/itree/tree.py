@@ -67,11 +67,9 @@ class IndexExpressionReplacer(pym.mapper.IdentityMapper):
     def map_axis_variable(self, expr):
         return self._replace_map.get(expr.axis_label, expr)
 
-    def map_multi_array(self, expr):
-        from pyop3.array.harray import MultiArrayVariable
-
-        index_exprs = {ax: self.rec(iexpr) for ax, iexpr in expr.index_exprs.items()}
-        return MultiArrayVariable(expr.array, expr.target_path, index_exprs)
+    def map_array(self, array_var):
+        indices = {ax: self.rec(expr) for ax, expr in array_var.indices.items()}
+        return type(array_var)(array_var.array, indices, array_var.path)
 
     def map_loop_index(self, index):
         if index.id in self._loop_exprs:
@@ -328,6 +326,20 @@ class LoopIndex(AbstractLoopIndex):
         return self.iterset.datamap
 
 
+class LoopIndexReplacer(pym.mapper.IdentityMapper):
+    def __init__(self, index):
+        super().__init__()
+        self._index = index
+
+    def map_axis_variable(self, axis_var):
+        # this is unconditional, key error should not occur here
+        return LocalLoopIndexVariable(self._index, axis_var.axis)
+
+    def map_array(self, array_var):
+        indices = {ax: self.rec(expr) for ax, expr in array_var.indices.items()}
+        return type(array_var)(array_var.array, indices, array_var.path)
+
+
 # FIXME class hierarchy is very confusing
 class ContextFreeLoopIndex(ContextFreeIndex):
     def __init__(self, iterset: AxisTree, source_path, path, *, id=None):
@@ -358,20 +370,30 @@ class ContextFreeLoopIndex(ContextFreeIndex):
     # should now be ignored
     @property
     def index_exprs(self):
-        # assert False, "used?"  # yes
         if self.source_path != self.path and len(self.path) != 1:
             raise NotImplementedError("no idea what to do here")
 
-        target = just_one(self.path.keys())
-        return freeze(
-            {
-                None: {
-                    target: LoopIndexVariable(self, axis)
-                    # for axis in self.source_path.keys()
-                    for axis in self.path.keys()
-                },
-            }
-        )
+        # Need to replace the index_exprs with LocalLoopIndexVariable equivs
+        flat_index_exprs = {}
+        replacer = LoopIndexReplacer(self)
+        for axis in self.iterset.nodes:
+            key = axis.id, axis.component.label
+            for axis_label, orig_expr in self.iterset.index_exprs[key].items():
+                new_expr = replacer(orig_expr)
+                flat_index_exprs[axis_label] = new_expr
+
+        return freeze({None: flat_index_exprs})
+
+        # target = just_one(self.path.keys())
+        # return freeze(
+        #     {
+        #         None: {
+        #             target: LoopIndexVariable(self, axis)
+        #             # for axis in self.source_path.keys()
+        #             for axis in self.path.keys()
+        #         },
+        #     }
+        # )
 
     @property
     def loops(self):
@@ -738,6 +760,48 @@ class LoopIndexVariable(pym.primitives.Variable):
         return self.index.datamap
 
 
+class LoopIndexEnumerateIndexVariable(pym.primitives.Leaf):
+    """Variable representing the index of an enumerated index.
+
+    The variable is equivalent to the index ``i`` in the expression
+
+        for i, x in enumerate(X):
+            ...
+
+    Here, if ``X`` were composed of multiple axes, this class would
+    be implemented like
+
+        i = 0
+        for x0 in X[0]:
+            for x1 in X[1]:
+                x = f(x0, x1)
+                ...
+                i += 1
+
+    This class is very important because it allows us to express layouts
+    when we materialise indexed things. An example is the maps that are
+    required for indexing PETSc matrices.
+
+    """
+
+    init_arg_names = ("index",)
+
+    mapper_method = sys.intern("map_enumerate")
+
+    # This could perhaps support a target_axis argument in future were we
+    # to have loop indices targeting multiple output axes.
+    def __init__(self, index):
+        super().__init__()
+        self.index = index
+
+    def __getinitargs__(self) -> tuple:
+        return (self.index,)
+
+    @property
+    def datamap(self) -> PMap:
+        return self.index.datamap
+
+
 class LocalLoopIndexVariable(LoopIndexVariable):
     pass
 
@@ -1059,7 +1123,7 @@ def _(
 
 @collect_shape_index_callback.register
 def _(slice_: Slice, indices, *, target_path_acc, prev_axes, **kwargs):
-    from pyop3.array.harray import MultiArrayVariable
+    from pyop3.array.harray import ArrayVar
 
     # If we are just taking a component from a multi-component array,
     # e.g. mesh.points["cells"], then relabelling the axes just leads to
@@ -1194,9 +1258,6 @@ def _(slice_: Slice, indices, *, target_path_acc, prev_axes, **kwargs):
                 (axis.id, cpt.label)
                 for axis, cpt in subset_axes.detailed_path(source_path).items()
             ]
-            my_target_path = merge_dicts(
-                subset_array.target_paths.get(key, {}) for key in index_keys
-            )
             old_index_exprs = merge_dicts(
                 subset_array.index_exprs.get(key, {}) for key in index_keys
             )
@@ -1206,9 +1267,7 @@ def _(slice_: Slice, indices, *, target_path_acc, prev_axes, **kwargs):
             replacer = IndexExpressionReplacer(index_expr_replace_map)
             for axlabel, index_expr in old_index_exprs.items():
                 my_index_exprs[axlabel] = replacer(index_expr)
-            subset_var = MultiArrayVariable(
-                subslice.array, my_target_path, my_index_exprs
-            )
+            subset_var = ArrayVar(subslice.array, my_index_exprs)
 
             if is_full_slice:
                 index_exprs_per_subslice.append(
@@ -1418,7 +1477,7 @@ def _make_leaf_axis_from_called_map(
         new_inner_index_expr = my_index_exprs
 
         map_var = CalledMapVariable(
-            map_cpt.array, my_target_path, prior_index_exprs, new_inner_index_expr
+            map_cpt.array, merge_dicts([prior_index_exprs, new_inner_index_expr])
         )
 
         index_exprs_per_cpt[axis_id, cpt.label] = {
@@ -1967,7 +2026,7 @@ def iter_axis_tree(
                 replace_map,
                 # mypath,  #
                 # myindices,
-                loop_exprs=outer_replace_map,
+                loop_indices=outer_replace_map,
             )
         ):
             new_exprs = {}

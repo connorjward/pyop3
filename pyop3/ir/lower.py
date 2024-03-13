@@ -559,6 +559,7 @@ def parse_loop_properly_this_time(
         axis_index_exprs = axes.index_exprs.get((axis.id, component.label), {})
         index_exprs_ = index_exprs | axis_index_exprs
 
+        # FIXME: This is not the cause of my problems
         # if component.count != 1:
         if True:
             iname = codegen_context.unique_name("i")
@@ -964,18 +965,16 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
 
     # this is cleaner if I do it as a single line expression
     # rather than register assignments for things.
-    def map_multi_array(self, expr):
+    def map_array(self, expr):
         # Register data
         self._codegen_context.add_argument(expr.array)
         new_name = self._codegen_context.actual_to_kernel_rename_map[expr.array.name]
 
-        target_path = expr.target_path
-        index_exprs = expr.index_exprs
-
-        replace_map = {ax: self.rec(expr_) for ax, expr_ in index_exprs.items()}
+        replace_map = {ax: self.rec(expr_) for ax, expr_ in expr.indices.items()}
+        replace_map.update(self._replace_map)
 
         offset_expr = make_offset_expr(
-            expr.array.layouts[target_path],
+            expr.array.subst_layouts[expr.path],
             replace_map,
             self._codegen_context,
         )

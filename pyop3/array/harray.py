@@ -58,17 +58,23 @@ class IncompatibleShapeError(Exception):
     """TODO, also bad name"""
 
 
-class MultiArrayVariable(pym.primitives.Expression):
-    mapper_method = sys.intern("map_multi_array")
+class ArrayVar(pym.primitives.AlgebraicLeaf):
+    mapper_method = sys.intern("map_array")
 
-    def __init__(self, array, target_path, index_exprs):
+    def __init__(self, array, indices, path=None):
+        if path is None:
+            if array.axes.is_empty:
+                path = pmap()
+            else:
+                path = just_one(array.axes.leaf_paths)
+
         super().__init__()
         self.array = array
-        self.target_path = freeze(target_path)
-        self.index_exprs = freeze(index_exprs)
+        self.indices = freeze(indices)
+        self.path = freeze(path)
 
     def __getinitargs__(self):
-        return (self.array, self.target_path, self.index_exprs)
+        return (self.array, self.indices, self.path)
 
     # def __str__(self) -> str:
     #     return f"{self.array.name}[{{{', '.join(f'{i[0]}: {i[1]}' for i in self.indices.items())}}}]"
@@ -91,25 +97,28 @@ def stringify_array(self, array, enclosing_prec, *args, **kwargs):
     )
 
 
-pym.mapper.stringifier.StringifyMapper.map_multi_array = stringify_array
+pym.mapper.stringifier.StringifyMapper.map_array = stringify_array
+
+
+CalledMapVariable = ArrayVar
 
 
 # does not belong here!
-class CalledMapVariable(MultiArrayVariable):
-    mapper_method = sys.intern("map_called_map_variable")
-
-    def __init__(self, array, target_path, input_index_exprs, shape_index_exprs):
-        super().__init__(array, target_path, {**input_index_exprs, **shape_index_exprs})
-        self.input_index_exprs = freeze(input_index_exprs)
-        self.shape_index_exprs = freeze(shape_index_exprs)
-
-    def __getinitargs__(self):
-        return (
-            self.array,
-            self.target_path,
-            self.input_index_exprs,
-            self.shape_index_exprs,
-        )
+# class CalledMapVariable(ArrayVar):
+#     mapper_method = sys.intern("map_called_map_variable")
+#
+#     def __init__(self, array, path, input_index_exprs, shape_index_exprs):
+#         super().__init__(array, {**input_index_exprs, **shape_index_exprs}, path)
+#         self.input_index_exprs = freeze(input_index_exprs)
+#         self.shape_index_exprs = freeze(shape_index_exprs)
+#
+#     def __getinitargs__(self):
+#         return (
+#             self.array,
+#             self.target_path,
+#             self.input_index_exprs,
+#             self.shape_index_exprs,
+#         )
 
 
 class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):

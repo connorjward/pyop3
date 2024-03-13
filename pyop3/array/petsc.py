@@ -21,6 +21,7 @@ from pyop3.axtree.tree import (
     ContextSensitive,
     PartialAxisTree,
     as_axis_tree,
+    relabel_axes,
 )
 from pyop3.buffer import PackedBuffer
 from pyop3.cache import cached
@@ -208,9 +209,9 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
                 # indexed_raxes.layout_axes,
                 # rmap_axes,
                 # target_paths=indexed_raxes.target_paths,
-                # index_exprs=indexed_raxes.index_exprs,
+                index_exprs=indexed_raxes.index_exprs,
                 target_paths=indexed_raxes._default_target_paths(),
-                index_exprs=indexed_raxes._default_index_exprs(),
+                # index_exprs=indexed_raxes._default_index_exprs(),
                 layouts=indexed_raxes.layouts,
                 # target_paths=indexed_raxes.layout_axes.target_paths,
                 # index_exprs=indexed_raxes.layout_axes.index_exprs,
@@ -223,9 +224,9 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
                 # indexed_caxes.layout_axes,
                 # cmap_axes,
                 # target_paths=indexed_caxes.target_paths,
-                # index_exprs=indexed_caxes.index_exprs,
+                index_exprs=indexed_caxes.index_exprs,
                 target_paths=indexed_caxes._default_target_paths(),
-                index_exprs=indexed_caxes._default_index_exprs(),
+                # index_exprs=indexed_caxes._default_index_exprs(),
                 layouts=indexed_caxes.layouts,
                 # target_paths=indexed_caxes.layout_axes.target_paths,
                 # index_exprs=indexed_caxes.layout_axes.index_exprs,
@@ -238,8 +239,13 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
 
             # so these are now failing BADLY because I have no real idea what
             # I'm doing here...
+            # So the issue is that cmap is having values set in the wrong place
+            # when we are building a sparsity.
 
             for idxs in my_product(router_loops):
+                # I don't think that source_indices is currently required because
+                # we express layouts in terms of the LoopIndexVariable instead of
+                # LocalLoopIndexVariable (which we should fix).
                 source_indices = {idx.index.id: idx.source_exprs for idx in idxs}
                 target_indices = {idx.index.id: idx.target_exprs for idx in idxs}
                 for p in indexed_raxes.iter(idxs):
@@ -247,10 +253,12 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
                         p.target_exprs, p.target_path, loop_exprs=target_indices
                     )
                     rmap.set_value(
-                        p.source_exprs, offset, p.source_path, loop_exprs=source_indices
+                        # p.source_exprs, offset, p.source_path, loop_exprs=source_indices
+                        p.source_exprs,
+                        offset,
+                        p.source_path,
+                        loop_exprs=target_indices,
                     )
-
-            breakpoint()
 
             for idxs in my_product(couter_loops):
                 source_indices = {idx.index.id: idx.source_exprs for idx in idxs}
@@ -260,7 +268,11 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
                         p.target_exprs, p.target_path, loop_exprs=target_indices
                     )
                     cmap.set_value(
-                        p.source_exprs, offset, p.source_path, loop_exprs=source_indices
+                        # p.source_exprs, offset, p.source_path, loop_exprs=source_indices
+                        p.source_exprs,
+                        offset,
+                        p.source_path,
+                        loop_exprs=target_indices,
                     )
 
             shape = (indexed_raxes.size, indexed_caxes.size)
@@ -269,8 +281,8 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
             # Since axes require unique labels, relabel the row and column axis trees
             # with different suffixes. This allows us to create a combined axis tree
             # without clashes.
-            raxes_relabel = _relabel_axes(indexed_raxes, self._row_suffix)
-            caxes_relabel = _relabel_axes(indexed_caxes, self._col_suffix)
+            raxes_relabel = relabel_axes(indexed_raxes, self._row_suffix)
+            caxes_relabel = relabel_axes(indexed_caxes, self._col_suffix)
 
             axes = PartialAxisTree(raxes_relabel.parent_to_children)
             for leaf in raxes_relabel.leaves:
@@ -455,42 +467,19 @@ def _alloc_template_mat(points, adjacency, raxes, caxes, bsize=None):
     # Now build the matrix from this preallocator
 
     # None is for the global size, PETSc will determine it
-    # sizes = ((raxes.owned.size, None), (caxes.owned.size, None))
     sizes = ((raxes.owned.size, None), (caxes.owned.size, None))
-    # breakpoint()
     comm = single_valued([raxes.comm, caxes.comm])
     mat = PETSc.Mat().createAIJ(sizes, comm=comm)
     mat.preallocateWithMatPreallocator(prealloc_mat.mat)
 
     rlgmap = PETSc.LGMap().create(raxes.global_numbering(), comm=comm)
     clgmap = PETSc.LGMap().create(caxes.global_numbering(), comm=comm)
-    # rlgmap = np.arange(raxes.size, dtype=IntType)
-    # clgmap = np.arange(raxes.size, dtype=IntType)
-    # rlgmap = PETSc.LGMap().create(rlgmap, comm=comm)
-    # clgmap = PETSc.LGMap().create(clgmap, comm=comm)
 
     mat.setLGMap(rlgmap, clgmap)
     mat.assemble()
-
-    breakpoint()
 
     # from PyOP2
     mat.setOption(mat.Option.NEW_NONZERO_LOCATION_ERR, True)
     mat.setOption(mat.Option.IGNORE_ZERO_ENTRIES, True)
 
     return mat
-
-
-def _relabel_axes(axes: AxisTree, suffix: str) -> AxisTree:
-    # comprehension?
-    parent_to_children = {}
-    for parent_id, children in axes.parent_to_children.items():
-        children_ = []
-        for axis in children:
-            if axis is not None:
-                axis_ = axis.copy(label=axis.label + suffix)
-            else:
-                axis_ = None
-            children_.append(axis_)
-        parent_to_children[parent_id] = children_
-    return AxisTree(parent_to_children)

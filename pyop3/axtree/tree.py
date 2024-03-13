@@ -87,10 +87,10 @@ class Indexed(abc.ABC):
 
     @cached_property
     def subst_layouts(self):
-        retval = self._subst_layouts()
-        return retval
+        return self._subst_layouts()
 
     def _subst_layouts(self, axis=None, path=None, target_path=None, index_exprs=None):
+        from pyop3 import HierarchicalArray
         from pyop3.itree.tree import IndexExpressionReplacer
 
         # TODO Don't do this every time this function is called
@@ -102,17 +102,13 @@ class Indexed(abc.ABC):
         #         for ax_, expr in outer_loop.iterset.index_exprs.get(key, {}).items():
         #             loop_exprs[outer_loop.id][ax_] = expr
 
-        # from pyop3 import HierarchicalArray
-        # if isinstance(self, HierarchicalArray) and self.name == "array_8":
-        #     breakpoint()
-
         layouts = {}
         if strictly_all(x is None for x in [axis, path, target_path, index_exprs]):
             path = pmap()
-            # target_path = self.target_paths.get(None, pmap())
-            # index_exprs = self.index_exprs.get(None, pmap())
-            target_path = pmap()
-            index_exprs = pmap()
+            target_path = self.target_paths.get(None, pmap())
+            index_exprs = self.index_exprs.get(None, pmap())
+            # target_path = pmap()
+            # index_exprs = pmap()
 
             replacer = IndexExpressionReplacer(index_exprs, loop_exprs=loop_exprs)
             layouts[path] = replacer(self.layouts.get(target_path, 0))
@@ -252,15 +248,16 @@ class ExpressionEvaluator(pym.mapper.evaluator.EvaluationMapper):
         except KeyError as e:
             raise UnrecognisedAxisException from e
 
-    def map_multi_array(self, array_var):
+    def map_array(self, array_var):
         from pyop3.itree.tree import ExpressionEvaluator, IndexExpressionReplacer
 
         array = array_var.array
 
-        indices = {ax: self.rec(idx) for ax, idx in array_var.index_exprs.items()}
-        replacer = IndexExpressionReplacer(indices, self._loop_exprs)
-        layout_orig = array.layouts[freeze(array_var.target_path)]
-        layout_subst = replacer(layout_orig)
+        indices = {ax: self.rec(idx) for ax, idx in array_var.indices.items()}
+        # replacer = IndexExpressionReplacer(indices, self._loop_exprs)
+        # layout_orig = array.layouts[freeze(array_var.target_path)]
+        # layout_subst = replacer(layout_orig)
+        layout_subst = array.subst_layouts[array_var.path]
 
         # offset = ExpressionEvaluator(indices, self._loop_exprs)(layout_subst)
         # offset = ExpressionEvaluator(self.context | indices, self._loop_exprs)(layout_subst)
@@ -659,10 +656,10 @@ def component_offsets(axis, context):
 
 
 class MultiArrayCollector(pym.mapper.Collector):
-    def map_multi_array(self, array_var):
-        return {array_var.array} | {
-            arr for iexpr in array_var.index_exprs.values() for arr in self.rec(iexpr)
-        }
+    def map_array(self, array_var):
+        return {array_var.array}.union(
+            *(self.rec(expr) for expr in array_var.indices.values())
+        )
 
     def map_nan(self, nan):
         return set()
@@ -803,7 +800,7 @@ class PartialAxisTree(LabelledTree):
             if self.is_empty:
                 mysize += 1
             else:
-                mysize += _axis_size(self, self.root, loop_exprs=loop_exprs)
+                mysize += _axis_size(self, self.root, loop_indices=loop_exprs)
         return mysize
 
         if isinstance(self.size, HierarchicalArray):
@@ -831,6 +828,10 @@ class LoopIndexReplacer(pym.mapper.IdentityMapper):
             return self._replace_map[var.axis]
         except KeyError:
             return var
+
+    def map_array(self, array_var):
+        indices = {ax: self(expr) for ax, expr in array_var.indices.items()}
+        return type(array_var)(array_var.array, indices, array_var.path)
 
 
 @frozen_record
@@ -973,70 +974,149 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
     def outer_loops(self):
         return self._outer_loops
 
+    # This could easily be two functions
     @cached_property
     def outer_loop_bits(self):
-        # TODO expunge the non-local LoopIndexVariable, it should just be expressed
-        # as an expression involving local ones.
         from pyop3.itree.tree import LocalLoopIndexVariable
 
         if len(self.outer_loops) > 1:
-            raise NotImplementedError
-        outer_loop = just_one(self.outer_loops)
+            # We do not yet support something like dat[p, q] if p and q
+            # are independent (i.e. q != f(p) ).
+            raise NotImplementedError(
+                "Multiple independent outer loops are not supported."
+            )
+        loop = just_one(self.outer_loops)
 
-        axes_iter = []
-        loop_vars = {}
-        for axis in outer_loop.iterset.nodes:
-            component = axis.component
+        # TODO: Don't think this is needed
+        # Since loop itersets must be linear, we can unpack target_paths
+        # and index_exprs from
+        #
+        #     {(axis_id, component_label): {axis_label: expr}}
+        #
+        # to simply
+        #
+        #     {axis_label: expr}
+        flat_target_paths = {}
+        flat_index_exprs = {}
+        for axis in loop.iterset.nodes:
+            key = (axis.id, axis.component.label)
+            flat_target_paths.update(loop.iterset.target_paths.get(key, {}))
+            flat_index_exprs.update(loop.iterset.index_exprs.get(key, {}))
 
-            # TODO could give axis a unique label
-            axes_iter.append(axis)
+        # Make sure that the layout axes are uniquely labelled.
+        suffix = f"_{loop.id}"
+        loop_axes = relabel_axes(loop.iterset, suffix)
 
-            loop_vars[axis.id, component.label] = {
-                axis.label: LocalLoopIndexVariable(outer_loop, axis.label)
-            }
-        axes_iter = tuple(axes_iter)
+        # Nasty hack: loop_axes need to be a PartialAxisTree so we can add to it.
+        loop_axes = PartialAxisTree(loop_axes.parent_to_children)
 
-        # fetch things recursively here, the idea is that we accumulate
-        # index exprs to eagerly put into the layout exprs. Such expressions
-        # cannot be indexed further so this is safe.
-        if outer_loop.iterset.outer_loops:
-            ax_rec, lv_rec = outer_loop.iterset.outer_loop_bits
-            axes_iter = ax_rec + axes_iter
+        # When we tabulate the layout, the layout expressions will contain
+        # axis variables that we actually want to be loop index variables. Here
+        # we construct the right replacement map.
+        loop_vars = {
+            axis.label + suffix: LocalLoopIndexVariable(loop, axis.label)
+            for axis in loop.iterset.nodes
+        }
+
+        # Recursively fetch other outer loops and make them the root of
+        # the current axes.
+        if loop.iterset.outer_loops:
+            ax_rec, lv_rec = loop.iterset.outer_loop_bits
+            loop_axes = ax_rec.add_subtree(loop_axes, *ax_rec.leaf)
             loop_vars.update(lv_rec)
 
-        return tuple(axes_iter), freeze(loop_vars)
+        return loop_axes, freeze(loop_vars)
+
+        ###
+
+        # # NOTE: Using iterset.size feels a bit wrong here, but it is indexed
+        # # correctly so I think that it's the right thing. Care will need to be
+        # # taken if outer loops with multiple output axes are supported (e.g.
+        # # loops over extruded cells).
+        # loop_axis = Axis(outer_loop.iterset.size, outer_loop.id)
+        # loop_axis_key = (loop_axis.id, loop_axis.component.label)
+        # axes_iter = (loop_axis,)
+        #
+        # # This is valid because we can only target one axis currently.
+        # target_axis_label = just_one(flat_target_paths.keys())
+        # target_paths = {loop_axis_key: flat_target_paths}
+        #
+        # # Once we have tabulated a layout with these axes, replace the axis
+        # # variables in the layouts with the right index expressions that
+        # # are composed of source loop index variables.
+        # # Usually substituting index_exprs into layouts is not a safe thing
+        # # to do eagerly because axes may be indexed again which would then
+        # # not work. It *is* safe to do for loop indices though because those
+        # # axes get eliminated and cannot be further indexed.
+        # # TODO: Provide an example.
+        # # NOTE: Ideally index_exprs should only know about target expressions.
+        # # The source expressions here muddy things.
+        # orig_expr = flat_index_exprs[target_axis_label]
+        # # NOTE: The replace map actually contains non-local loop index
+        # # variables. In a refactor this should be dropped in favour of
+        # # the actual loop index expression containing local indices.
+        # replace_map = {
+        #     target_axis_label: LoopIndexVariable(outer_loop, target_axis_label)
+        # }
+        # new_expr = LoopIndexReplacer(replace_map)(orig_expr)
+        #
+        # # Try returning a flat thing instead, this isn't quite the same as
+        # # "normal" index_exprs
+        # # index_exprs = {loop_axis_key: {target_axis_label: new_expr}}
+        # # index_exprs = {outer_loop.id: new_expr}
+        # index_exprs = {outer_loop.id: LoopIndexVariable(outer_loop, target_axis_label)}
+        #
+        # # Recursively fetch other outer loops and make them the root of
+        # # the current axes.
+        # if outer_loop.iterset.outer_loops:
+        #     ax_rec, tp_rec, ie_rec = outer_loop.iterset.outer_loop_bits
+        #     axes_iter = ax_rec + axes_iter
+        #     target_paths.update(tp_rec)
+        #     index_exprs.update(ie_rec)
+        #
+        # return axes_iter, freeze(target_paths), freeze(index_exprs)
+
+    @cached_property
+    def layout_axes(self):
+        if not self.outer_loops:
+            return self
+        loop_axes, _ = self.outer_loop_bits
+        return loop_axes.add_subtree(self, *loop_axes.leaf).set_up()
 
     @cached_property
     def layouts(self):
         """Initialise the multi-axis by computing the layout functions."""
-        from pyop3.axtree.layout import _collect_at_leaves, _compute_layouts
+        from pyop3.axtree.layout import (
+            _collect_at_leaves,
+            _compute_layouts,
+            collect_externally_indexed_axes,
+        )
         from pyop3.itree.tree import IndexExpressionReplacer, LoopIndexVariable
 
-        if self.outer_loops:
-            loop_axes, loop_vars = self.outer_loop_bits
-            layout_axes = AxisTree.from_iterable(loop_axes + (self,))
-        else:
-            layout_axes = self
-            loop_vars = {}
-
-        if layout_axes.is_empty:
+        if self.layout_axes.is_empty:
             return freeze({pmap(): 0})
 
-        layouts, _, _, _, _ = _compute_layouts(layout_axes, loop_vars)
+        loop_vars = self.outer_loop_bits[1] if self.outer_loops else {}
+        layouts, check_none, _ = _compute_layouts(self.layout_axes, loop_vars)
 
-        layoutsnew = _collect_at_leaves(self, layout_axes, layouts)
+        assert check_none is None
+
+        layoutsnew = _collect_at_leaves(self, self.layout_axes, layouts)
         layouts = freeze(dict(layoutsnew))
 
         if self.outer_loops:
-            _, myexprs = self.outer_loop_bits
-            replace_map = merge_dicts(myexprs.values())
+            _, loop_vars = self.outer_loop_bits
+
             layouts_ = {}
             for k, layout in layouts.items():
-                layouts_[k] = LoopIndexReplacer(replace_map)(layout)
+                layouts_[k] = IndexExpressionReplacer(loop_vars)(layout)
             layouts = freeze(layouts_)
 
+        # for now
+        return freeze(layouts)
+
         # Have not considered how to do sparse things with external loops
-        if layout_axes.depth > self.depth:
+        if self.layout_axes.depth > self.depth:
             return layouts
 
         layouts_ = {pmap(): 0}
@@ -1051,7 +1131,7 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
                 new_path = freeze(new_path)
 
                 orig_layout = layouts[orig_path]
-                new_layout = IndexExpressionReplacer(replace_map, loop_vars)(
+                new_layout = IndexExpressionReplacer(replace_map, loop_exprs)(
                     orig_layout
                 )
                 layouts_[new_path] = new_layout
@@ -1357,3 +1437,18 @@ def _as_axis_component_label(arg: Any):
 @_as_axis_component_label.register
 def _(component: AxisComponent):
     return component.label
+
+
+def relabel_axes(axes: AxisTree, suffix: str) -> AxisTree:
+    # comprehension?
+    parent_to_children = {}
+    for parent_id, children in axes.parent_to_children.items():
+        children_ = []
+        for axis in children:
+            if axis is not None:
+                axis_ = axis.copy(label=axis.label + suffix)
+            else:
+                axis_ = None
+            children_.append(axis_)
+        parent_to_children[parent_id] = children_
+    return AxisTree(parent_to_children)
