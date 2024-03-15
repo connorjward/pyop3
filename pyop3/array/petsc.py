@@ -57,14 +57,8 @@ class PetscVecNest(PetscVec):
     ...
 
 
-class MatType(enum.Enum):
-    AIJ = "aij"
-    BAIJ = "baij"
-    PREALLOCATOR = "preallocator"
-
-
 class PetscMat(PetscObject, abc.ABC):
-    DEFAULT_MAT_TYPE = MatType.AIJ
+    DEFAULT_MAT_TYPE = PETSc.Mat.Type.AIJ
 
     prefix = "mat"
 
@@ -72,12 +66,11 @@ class PetscMat(PetscObject, abc.ABC):
         # If the user called PetscMat(...), as opposed to PetscMatAIJ(...) etc
         # then inspect mat_type and return the right object.
         if cls is PetscMat:
-            mat_type_str = kwargs.pop("mat_type", cls.DEFAULT_MAT_TYPE)
-            mat_type = MatType(mat_type_str)
-            if mat_type == MatType.AIJ:
+            mat_type = kwargs.pop("mat_type", cls.DEFAULT_MAT_TYPE)
+            if mat_type == PETSc.Mat.Type.AIJ:
                 return object.__new__(PetscMatAIJ)
-            elif mat_type == MatType.BAIJ:
-                return object.__new__(PetscMatBAIJ)
+            # elif mat_type == PETSc.Mat.Type.BAIJ:
+            #     return object.__new__(PetscMatBAIJ)
             else:
                 raise AssertionError
         else:
@@ -86,13 +79,14 @@ class PetscMat(PetscObject, abc.ABC):
     # like Dat, bad name? handle?
     @property
     def array(self):
-        return self.petscmat
+        return self.mat
 
     @property
     def values(self):
         if self.raxes.size * self.caxes.size > 1e6:
             raise ValueError(
-                "Printing a dense matrix with more than 1 million entries is not allowed"
+                "Printing a dense matrix with more than 1 million "
+                "entries is not allowed"
             )
 
         self.assemble()
@@ -112,25 +106,19 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
     _row_suffix = "_row"
     _col_suffix = "_col"
 
-    def __init__(self, raxes, caxes, *, name=None):
+    def __init__(self, raxes, caxes, sparsity=None, *, name=None):
         raxes = as_axis_tree(raxes)
         caxes = as_axis_tree(caxes)
 
-        # Since axes require unique labels, relabel the row and column axis trees
-        # with different suffixes. This allows us to create a combined axis tree
-        # without clashes.
-        # raxes_relabel = _relabel_axes(raxes, self._row_suffix)
-        # caxes_relabel = _relabel_axes(caxes, self._col_suffix)
-        #
-        # axes = PartialAxisTree(raxes_relabel.parent_to_children)
-        # for leaf in raxes_relabel.leaves:
-        #     axes = axes.add_subtree(caxes_relabel, *leaf, uniquify_ids=True)
-        # axes = axes.set_up()
+        if sparsity is not None:
+            mat = sparsity.materialize(self.mat_type)
+        else:
+            mat = self._make_mat(raxes, caxes, self.mat_type)
 
         super().__init__(name)
         self.raxes = raxes
         self.caxes = caxes
-        # self.axes = axes
+        self.mat = mat
 
     def __getitem__(self, indices):
         # TODO also support context-free (see MultiArray.__getitem__)
@@ -309,6 +297,26 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
             )
         return ContextSensitiveMultiArray(arrays)
 
+    @property
+    @abc.abstractmethod
+    def mat_type(self) -> str:
+        pass
+
+    @staticmethod
+    def _make_mat(raxes, caxes, mat_type):
+        # TODO: Internal comm?
+        comm = single_valued([raxes.comm, caxes.comm])
+        mat = PETSc.Mat().create(comm)
+        mat.setType(mat_type)
+        # None is for the global size, PETSc will determine it
+        mat.setSizes(((raxes.owned.size, None), (caxes.owned.size, None)))
+
+        rlgmap = PETSc.LGMap().create(raxes.global_numbering(), comm=comm)
+        clgmap = PETSc.LGMap().create(caxes.global_numbering(), comm=comm)
+        mat.setLGMap(rlgmap, clgmap)
+
+        return mat
+
     @cached_property
     def datamap(self):
         return freeze({self.name: self})
@@ -318,9 +326,52 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
         raise NotImplementedError("opaque type?")
 
 
-# is this required?
-class ContextSensitiveIndexedPetscMat(ContextSensitive):
-    pass
+class PetscMatAIJ(MonolithicPetscMat):
+    def __init__(self, raxes, caxes, sparsity=None, *, name: str = None):
+        super().__init__(raxes, caxes, sparsity, name=name)
+
+    @property
+    def mat_type(self) -> str:
+        return PETSc.Mat.Type.AIJ
+
+
+# class PetscMatBAIJ(MonolithicPetscMat):
+#     ...
+
+
+class PetscMatPreallocator(MonolithicPetscMat):
+    def __init__(self, raxes, caxes, *, name: str = None):
+        super().__init__(raxes, caxes, name=name)
+        self._lazy_template = None
+
+    @property
+    def mat_type(self) -> str:
+        return PETSc.Mat.Type.PREALLOCATOR
+
+    def materialize(self, mat_type: str) -> PETSc.Mat:
+        if self._lazy_template is None:
+            self.assemble()
+
+            template = self._make_mat(self.raxes, self.caxes, mat_type)
+            template.preallocateWithMatPreallocator(self.mat)
+            # We can safely set these options since by using a sparsity we
+            # are asserting that we know where the non-zeros are going.
+            template.setOption(PETSc.Mat.Option.NEW_NONZERO_LOCATION_ERR, True)
+            template.setOption(PETSc.Mat.Option.IGNORE_ZERO_ENTRIES, True)
+            self._lazy_template = template
+        return self._lazy_template.copy()
+
+
+# class PetscMatDense(MonolithicPetscMat):
+#     ...
+
+
+# class PetscMatNest(PetscMat):
+#     ...
+
+
+# class PetscMatPython(PetscMat):
+#     ...
 
 
 class PackedPetscMat(PackedBuffer):
@@ -341,145 +392,3 @@ class PackedPetscMat(PackedBuffer):
             if isinstance(s, HierarchicalArray):
                 datamap_ |= s.datamap
         return datamap_
-
-
-class PetscMatAIJ(MonolithicPetscMat):
-    def __init__(self, points, adjacency, raxes, caxes, *, name: str = None):
-        raxes = as_axis_tree(raxes)
-        caxes = as_axis_tree(caxes)
-        mat = _alloc_mat(points, adjacency, raxes, caxes)
-
-        super().__init__(raxes, caxes, name=name)
-        self.mat = mat
-
-    @property
-    # @deprecated("mat") ???
-    def petscmat(self):
-        return self.mat
-
-
-class PetscMatBAIJ(MonolithicPetscMat):
-    def __init__(self, raxes, caxes, sparsity, bsize, *, name: str = None):
-        raise NotImplementedError
-        raxes = as_axis_tree(raxes)
-        caxes = as_axis_tree(caxes)
-
-        if isinstance(bsize, numbers.Integral):
-            bsize = (bsize, bsize)
-
-        super().__init__(name)
-        if any(axes.depth > 1 for axes in [raxes, caxes]):
-            # TODO, good exceptions
-            # raise InvalidDimensionException("Cannot instantiate PetscMats with nested axis trees")
-            raise RuntimeError
-        if any(len(axes.root.components) > 1 for axes in [raxes, caxes]):
-            # TODO, good exceptions
-            raise RuntimeError
-
-        self.petscmat = _alloc_mat(raxes, caxes, sparsity, bsize)
-
-        self.raxis = raxes.root
-        self.caxis = caxes.root
-        self.sparsity = sparsity
-        self.bsize = bsize
-
-        # TODO include bsize here?
-        self.axes = AxisTree.from_nest({self.raxis: self.caxis})
-
-
-class PetscMatPreallocator(MonolithicPetscMat):
-    def __init__(self, points, adjacency, raxes, caxes, *, name: str = None):
-        # TODO internal comm?
-        comm = single_valued([raxes.comm, caxes.comm])
-        mat = PETSc.Mat().create(comm)
-        mat.setType(PETSc.Mat.Type.PREALLOCATOR)
-        # None is for the global size, PETSc will determine it
-        mat.setSizes(((raxes.owned.size, None), (caxes.owned.size, None)))
-
-        rlgmap = PETSc.LGMap().create(raxes.global_numbering(), comm=comm)
-        clgmap = PETSc.LGMap().create(caxes.global_numbering(), comm=comm)
-        # rlgmap = np.arange(raxes.size, dtype=IntType)
-        # clgmap = np.arange(raxes.size, dtype=IntType)
-        # rlgmap = PETSc.LGMap().create(rlgmap, comm=comm)
-        # clgmap = PETSc.LGMap().create(clgmap, comm=comm)
-        mat.setLGMap(rlgmap, clgmap)
-
-        mat.setUp()
-
-        super().__init__(raxes, caxes, name=name)
-        self.mat = mat
-
-
-class PetscMatNest(PetscMat):
-    ...
-
-
-class PetscMatDense(PetscMat):
-    ...
-
-
-class PetscMatPython(PetscMat):
-    ...
-
-
-# TODO is there a better name? It does a bit more than allocate
-
-# TODO Perhaps tie this cache to the mesh with a context manager?
-
-
-def _alloc_mat(points, adjacency, raxes, caxes, bsize=None):
-    template_mat = _alloc_template_mat(points, adjacency, raxes, caxes, bsize)
-    return template_mat.copy()
-
-
-_sparsity_cache = {}
-
-
-def _alloc_template_mat_cache_key(points, adjacency, raxes, caxes, bsize=None):
-    # TODO include comm in cache key, requires adding internal comm stuff
-    # comm = single_valued([raxes._comm, caxes._comm])
-    # return (hash_comm(comm), points, adjacency, raxes, caxes, bsize)
-    return (points, adjacency, raxes, caxes, bsize)
-
-
-@cached(_sparsity_cache, key=_alloc_template_mat_cache_key)
-def _alloc_template_mat(points, adjacency, raxes, caxes, bsize=None):
-    if bsize is not None:
-        raise NotImplementedError
-
-    # Determine the nonzero pattern by filling a preallocator matrix
-    prealloc_mat = PetscMatPreallocator(points, adjacency, raxes, caxes)
-
-    # this one is tough because the temporary can have wacky shape
-    # do_loop(
-    #     p := points.index(),
-    #     prealloc_mat[p, adjacency(p)].assign(666),
-    # )
-    do_loop(
-        p := points.index(),
-        loop(
-            q := adjacency(p).index(),
-            prealloc_mat[p, q].assign(666),
-        ),
-    )
-    prealloc_mat.assemble()
-
-    # Now build the matrix from this preallocator
-
-    # None is for the global size, PETSc will determine it
-    sizes = ((raxes.owned.size, None), (caxes.owned.size, None))
-    comm = single_valued([raxes.comm, caxes.comm])
-    mat = PETSc.Mat().createAIJ(sizes, comm=comm)
-    mat.preallocateWithMatPreallocator(prealloc_mat.mat)
-
-    rlgmap = PETSc.LGMap().create(raxes.global_numbering(), comm=comm)
-    clgmap = PETSc.LGMap().create(caxes.global_numbering(), comm=comm)
-
-    mat.setLGMap(rlgmap, clgmap)
-    mat.assemble()
-
-    # from PyOP2
-    mat.setOption(mat.Option.NEW_NONZERO_LOCATION_ERR, True)
-    mat.setOption(mat.Option.IGNORE_ZERO_ENTRIES, True)
-
-    return mat
