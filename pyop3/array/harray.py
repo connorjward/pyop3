@@ -36,12 +36,13 @@ from pyop3.axtree.tree import (
 )
 from pyop3.buffer import Buffer, DistributedBuffer
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
-from pyop3.lang import KernelArgument, ReplaceAssignment
+from pyop3.lang import KernelArgument, ReplaceAssignment, do_loop
 from pyop3.sf import single_star
 from pyop3.utils import (
     PrettyTuple,
     UniqueNameGenerator,
     as_tuple,
+    debug_assert,
     deprecated,
     is_single_valued,
     just_one,
@@ -209,10 +210,13 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
     def __str__(self):
         return self.name
 
-    def __getitem__(self, indices) -> Union[MultiArray, ContextSensitiveMultiArray]:
+    def __getitem__(self, indices):
+        return self.getitem(indices, strict=False)
+
+    def getitem(self, indices, *, strict=False):
         from pyop3.itree.tree import _compose_bits, _index_axes, as_index_forest
 
-        index_forest = as_index_forest(indices, axes=self.axes)
+        index_forest = as_index_forest(indices, axes=self.axes, strict=strict)
         if len(index_forest) == 1 and pmap() in index_forest:
             index_tree = just_one(index_forest.values())
             indexed_axes = _index_axes(index_tree, pmap(), self.axes)
@@ -296,22 +300,42 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
 
     @property
     def data_rw(self):
-        return self.array.data_rw
+        return self.buffer.data_rw[self._buffer_indices]
+        # return self.buffer.data_rw
 
     @property
     def data_ro(self):
-        return self.array.data_ro
+        return self.buffer.data_ro[self._buffer_indices]
+        # return self.buffer.data_ro
 
     @property
     def data_wo(self):
         """
-        Have to be careful. If not setting all values (i.e. subsets) should call
-        `reduce_leaves_to_roots` first.
+        Have to be careful. If not setting all values (i.e. subsets) should
+        call `reduce_leaves_to_roots` first.
 
         When this is called we set roots_valid, claiming that any (lazy) 'in-flight' writes
         can be dropped.
         """
-        return self.array.data_wo
+        return self.buffer.data_wo[self._buffer_indices]
+        # return self.buffer.data_wo
+
+    @property
+    def _buffer_indices(self):
+        # TODO: If we can avoid tabulating (i.e. an affine slice) then return a slice.
+        # TODO: Emit a warning (with the logger) if a copy would be caused.
+        return self._buffer_indices_cached
+
+    @cached_property
+    def _buffer_indices_cached(self):
+        indices = np.full(self.axes.size, -1, dtype=IntType)
+        # TODO: Handle any outer loops.
+        # TODO: Generate code for this.
+        for i, p in enumerate(self.axes.iter()):
+            # indices[i] = self.offset(p.target_exprs, p.target_path)
+            indices[i] = self.offset(p.source_exprs, p.source_path)
+        debug_assert(lambda: (indices >= 0).all())
+        return indices
 
     @property
     def axes(self):
@@ -450,21 +474,14 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
             return flattened, count
 
     def get_value(self, indices, path=None, *, loop_exprs=pmap()):
-        return self.data[self.offset(indices, path, loop_exprs=loop_exprs)]
+        offset = self.offset(indices, path, loop_exprs=loop_exprs)
+        return self.buffer.data_ro[offset]
 
     def set_value(self, indices, value, path=None, *, loop_exprs=pmap()):
-        self.data[self.offset(indices, path, loop_exprs=loop_exprs)] = value
+        offset = self.offset(indices, path, loop_exprs=loop_exprs)
+        self.buffer.data_wo[offset] = value
 
     def offset(self, indices, path=None, *, loop_exprs=pmap()):
-        # return eval_offset(
-        #     self.axes,
-        #     self.layouts,
-        #     indices,
-        #     self.target_paths,
-        #     self.index_exprs,
-        #     path,
-        #     loop_exprs=loop_exprs,
-        # )
         return eval_offset(
             self.axes,
             self.subst_layouts,

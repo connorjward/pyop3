@@ -82,7 +82,7 @@ class IndexTree(LabelledTree):
     fields = LabelledTree.fields | {"outer_loops"}
 
     # TODO rename to node_map
-    def __init__(self, parent_to_children, outer_loops=()):
+    def __init__(self, parent_to_children=pmap(), outer_loops=()):
         super().__init__(parent_to_children)
         assert isinstance(outer_loops, tuple)
         self.outer_loops = outer_loops
@@ -91,6 +91,17 @@ class IndexTree(LabelledTree):
     def from_nest(cls, nest):
         root, node_map = cls._from_nest(nest)
         node_map.update({None: [root]})
+        return cls(node_map)
+
+    @classmethod
+    def from_iterable(cls, iterable):
+        # All iterable entries must be indices for now as we do no parsing
+        root, *rest = iterable
+        node_map = {None: (root,)}
+        parent = root
+        for index in rest:
+            node_map.update({parent.id: (index,)})
+            parent = index
         return cls(node_map)
 
 
@@ -342,6 +353,8 @@ class LoopIndexReplacer(pym.mapper.IdentityMapper):
 
 # FIXME class hierarchy is very confusing
 class ContextFreeLoopIndex(ContextFreeIndex):
+    fields = {"iterset", "source_path", "path", "id"}
+
     def __init__(self, iterset: AxisTree, source_path, path, *, id=None):
         super().__init__(id=id, label=id, component_labels=("XXX",))
         self.iterset = iterset
@@ -468,6 +481,20 @@ class LocalLoopIndex:
         return self.loop_index.datamap
 
 
+class ScalarIndex(ContextFreeIndex):
+    fields = {"axis", "component", "value", "id"}
+
+    def __init__(self, axis, component, value, *, id=None):
+        super().__init__(axis, component_labels=["XXX"], id=id)
+        self.axis = axis
+        self.component = component
+        self.value = value
+
+    @property
+    def leaf_target_paths(self):
+        return (freeze({self.axis: self.component}),)
+
+
 # TODO I want a Slice to have "bits" like a Map/CalledMap does
 class Slice(ContextFreeIndex):
     """
@@ -523,7 +550,7 @@ class Map(pytools.ImmutableRecord):
             raise NotImplementedError
 
         super().__init__()
-        self.connectivity = connectivity
+        self.connectivity = freeze(connectivity)
         self.numbering = numbering
 
         # TODO delete entirely
@@ -534,7 +561,15 @@ class Map(pytools.ImmutableRecord):
         self.name = name
 
     def __call__(self, index):
-        return CalledMap(self, index)
+        if isinstance(index, ContextFreeIndex):
+            leaf_target_paths = tuple(
+                freeze({mcpt.target_axis: mcpt.target_component})
+                for path in index.leaf_target_paths
+                for mcpt in self.connectivity[path]
+            )
+            return ContextFreeCalledMap(self, index, leaf_target_paths)
+        else:
+            return CalledMap(self, index)
 
     @cached_property
     def datamap(self):
@@ -638,12 +673,6 @@ class CalledMap(Identified, Labelled, LoopIterable):
             freeze({mcpt.target_axis: mcpt.target_component})
             for path in cf_index.leaf_target_paths
             for mcpt in self.connectivity[path]
-            # do not do this check here, it breaks map composition since this
-            # particular map may not be targetting axes
-            # if axes is None
-            # or axes.is_valid_path(
-            #     {mcpt.target_axis: mcpt.target_component}, complete=False
-            # )
         )
         if len(leaf_target_paths) == 0:
             raise RuntimeError
@@ -661,6 +690,7 @@ class CalledMap(Identified, Labelled, LoopIterable):
 
 
 # class ContextFreeCalledMap(Index, ContextFree):
+# TODO: ContextFreeIndex
 class ContextFreeCalledMap(Index):
     # FIXME this is clumsy
     # fields = Index.fields | {"map", "index", "leaf_target_paths"} - {"label", "component_labels"}
@@ -811,7 +841,9 @@ class ContextSensitiveCalledMap(ContextSensitiveLoopIterable):
 
 
 # TODO make kwargs explicit
-def as_index_forest(forest: Any, *, axes=None, **kwargs):
+def as_index_forest(forest: Any, *, axes=None, strict=False, **kwargs):
+    # TODO: I think that this is the wrong place for this to exist. Also
+    # the implementation only seems to work for flat axes.
     if forest is Ellipsis:
         # full slice of all components
         assert axes is not None
@@ -824,9 +856,20 @@ def as_index_forest(forest: Any, *, axes=None, **kwargs):
 
     forest = _as_index_forest(forest, axes=axes, **kwargs)
     assert isinstance(forest, dict), "must be ordered"
-    # print(forest)
+
+    # If axes are provided then check that the index tree is compatible
+    # and add extra slices if required.
     if axes is not None:
-        forest = _validated_index_forest(forest, axes=axes, **kwargs)
+        forest_ = {}
+        for ctx, tree in forest.items():
+            if not strict:
+                tree = _complete_index_tree(tree, axes)
+            if not _index_tree_is_complete(tree, axes):
+                raise ValueError("Index tree does not completely index axes")
+            forest_[ctx] = tree
+        forest = forest_
+
+        # TODO: Clean this up, and explain why it's here.
         forest_ = {}
         for ctx, index_tree in forest.items():
             forest_[ctx] = index_tree.copy(outer_loops=axes.outer_loops)
@@ -912,11 +955,6 @@ def _(index_tree: IndexTree, **kwargs):
 @_as_index_forest.register
 def _(index: ContextFreeIndex, **kwargs):
     return {pmap(): IndexTree(index)}
-
-
-# @_as_index_forest.register
-# def _(index: ContextFreeCalledMap, **kwargs):
-#     return {pmap(): IndexTree(index)}
 
 
 # TODO This function can definitely be refactored
@@ -1022,74 +1060,83 @@ def _(label: str, *, axes, **kwargs):
     return _as_index_forest(slice_, axes=axes, **kwargs)
 
 
-def _validated_index_forest(forest, *, axes):
+def _complete_index_tree(
+    tree: IndexTree, axes: AxisTree, index=None, axis_path=pmap()
+) -> IndexTree:
+    """Add extra slices to the index tree to match the axes.
+
+    Notes
+    -----
+    This function is currently only capable of adding additional slices if
+    they are "innermost".
+
     """
-    Insert slices and check things work OK.
-    """
-    assert axes is not None, "Cannot validate if axes are unknown"
-
-    return {ctx: _validated_index_tree(tree, axes=axes) for ctx, tree in forest.items()}
-
-
-def _validated_index_tree(tree, index=None, *, axes, path=pmap()):
     if index is None:
         index = tree.root
 
-    new_tree = IndexTree(index)
-
-    all_leaves_skipped = True
-    for clabel, path_ in checked_zip(index.component_labels, index.leaf_target_paths):
-        # can I get rid of this check? The index tree should be correct
-        if not axes.is_valid_path(path | path_, complete=False):
-            continue
-
-        all_leaves_skipped = False
-
-        if subindex := tree.child(index, clabel):
-            subtree = _validated_index_tree(
+    tree_ = IndexTree(index)
+    for component_label, path in checked_zip(
+        index.component_labels, index.leaf_target_paths
+    ):
+        axis_path_ = axis_path | path
+        if subindex := tree.child(index, component_label):
+            subtree = _complete_index_tree(
                 tree,
+                axes,
                 subindex,
-                axes=axes,
-                path=path | path_,
+                axis_path_,
             )
         else:
-            subtree = _collect_extra_slices(axes, path | path_)
+            # At the bottom of the index tree, add any extra slices if needed.
+            subtree = _complete_index_tree_slices(axes, axis_path_)
 
-        if subtree:
-            new_tree = new_tree.add_subtree(
-                subtree,
-                index,
-                clabel,
-            )
-
-    # TODO make this nicer
-    assert not all_leaves_skipped, "this means leaf_target_paths missed everything"
-    return new_tree
+        tree_ = tree_.add_subtree(subtree, index, component_label)
+    return tree_
 
 
-def _collect_extra_slices(axes, path, *, axis=None):
+def _complete_index_tree_slices(axes: AxisTree, path: PMap, axis=None) -> IndexTree:
     if axis is None:
         axis = axes.root
 
     if axis.label in path:
         if subaxis := axes.child(axis, path[axis.label]):
-            return _collect_extra_slices(axes, path, axis=subaxis)
+            return _complete_index_tree_slices(axes, path, subaxis)
         else:
-            return None
+            return IndexTree()
     else:
-        index_tree = IndexTree(
-            Slice(axis.label, [AffineSliceComponent(c.label) for c in axis.components])
+        # Axis is missing from the index tree, use a full slice.
+        slice_ = Slice(
+            axis.label, [AffineSliceComponent(c.label) for c in axis.components]
         )
-        for cpt, clabel in checked_zip(
-            axis.components, index_tree.root.component_labels
+        tree = IndexTree(slice_)
+
+        for axis_component, index_component in checked_zip(
+            axis.components, slice_.component_labels
         ):
-            if subaxis := axes.child(axis, cpt):
-                subtree = _collect_extra_slices(axes, path, axis=subaxis)
-                if subtree:
-                    index_tree = index_tree.add_subtree(
-                        subtree, index_tree.root, clabel
-                    )
-        return index_tree
+            if subaxis := axes.child(axis, axis_component):
+                subtree = _complete_index_tree_slices(axes, path, subaxis)
+                tree = tree.add_subtree(subtree, slice_, index_component)
+        return tree
+
+
+def _index_tree_is_complete(indices: IndexTree, axes: AxisTree):
+    """Return whether the index tree completely indexes the axis tree."""
+    # For each leaf in the index tree, collect the resulting axis path
+    # and check that this is a leaf of the axis tree.
+    for index_leaf_path in indices.ordered_leaf_paths_with_nodes:
+        axis_path = {}
+        for index, index_cpt_label in index_leaf_path:
+            index_cpt_index = index.component_labels.index(index_cpt_label)
+            for axis, axis_cpt in index.leaf_target_paths[index_cpt_index].items():
+                assert axis not in axis_path, "Paths should not clash"
+                axis_path[axis] = axis_cpt
+        axis_path = freeze(axis_path)
+
+        if axis_path not in axes.leaf_paths:
+            return False
+
+    # All leaves of the tree are complete
+    return True
 
 
 @functools.singledispatch
@@ -1105,11 +1152,7 @@ def _(
 ):
     axes = loop_index.axes
     target_paths = loop_index.target_paths
-
     index_exprs = loop_index.index_exprs
-    # index_exprs = {axis: LocalLoopIndexVariable(loop_index, axis) for axis in loop_index.iterset.path(*loop_index.iterset.leaf)}
-    #
-    # index_exprs = {None: index_exprs}
 
     return (
         axes,
@@ -1117,6 +1160,21 @@ def _(
         index_exprs,
         loop_index.layout_exprs,
         loop_index.loops,
+        {},
+    )
+
+
+@collect_shape_index_callback.register
+def _(index: ScalarIndex, indices, **kwargs):
+    target_path = freeze({None: just_one(index.leaf_target_paths)})
+    index_exprs = freeze({None: {index.axis: index.value}})
+    layout_exprs = freeze({None: 0})
+    return (
+        AxisTree(),
+        target_path,
+        index_exprs,
+        layout_exprs,
+        (),
         {},
     )
 
@@ -1973,7 +2031,7 @@ def iter_axis_tree(
             # except UnrecognisedAxisException:
             #     pass
             new_index = evaluator(index_expr)
-            assert new_index != index_expr
+            # assert new_index != index_expr
             new_exprs[axlabel] = new_index
         index_exprs_acc = freeze(new_exprs)
 

@@ -941,9 +941,16 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         )
 
     def index(self):
-        from pyop3.itree import LoopIndex
+        from pyop3.itree.tree import ContextFreeLoopIndex, LoopIndex
 
-        return LoopIndex(self.owned)
+        iterset = self.owned
+        # If the iterset is linear (single-component for every axis) then we
+        # can consider the loop to be "context-free".
+        if len(iterset.leaves) == 1:
+            path = iterset.path(*iterset.leaf)
+            return ContextFreeLoopIndex(iterset, path, path)
+        else:
+            return LoopIndex(iterset)
 
     def iter(self, outer_loops=(), loop_index=None, include=False):
         from pyop3.itree.tree import iter_axis_tree

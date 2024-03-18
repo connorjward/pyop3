@@ -1019,6 +1019,5 @@ def eval_offset(
 
     layout_subst = layouts[freeze(path)]
 
-    # offset = pym.evaluate(layouts[target_path], indices_, ExpressionEvaluator)
     offset = ExpressionEvaluator(indices, loop_exprs)(layout_subst)
     return strict_int(offset)
