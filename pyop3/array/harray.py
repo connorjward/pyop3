@@ -37,6 +37,7 @@ from pyop3.axtree.tree import (
 from pyop3.buffer import Buffer, DistributedBuffer
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
 from pyop3.lang import KernelArgument, ReplaceAssignment, do_loop
+from pyop3.log import warning
 from pyop3.sf import single_star
 from pyop3.utils import (
     PrettyTuple,
@@ -120,6 +121,10 @@ CalledMapVariable = ArrayVar
 #             self.input_index_exprs,
 #             self.shape_index_exprs,
 #         )
+
+
+class FancyIndexWriteException(Exception):
+    pass
 
 
 class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
@@ -300,13 +305,17 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
 
     @property
     def data_rw(self):
+        self._check_no_copy_access()
         return self.buffer.data_rw[self._buffer_indices]
-        # return self.buffer.data_rw
 
     @property
     def data_ro(self):
+        if not isinstance(self._buffer_indices, slice):
+            warning(
+                "Read-only access to the array is provided with a copy, "
+                "consider avoiding if possible."
+            )
         return self.buffer.data_ro[self._buffer_indices]
-        # return self.buffer.data_ro
 
     @property
     def data_wo(self):
@@ -317,25 +326,42 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         When this is called we set roots_valid, claiming that any (lazy) 'in-flight' writes
         can be dropped.
         """
+        self._check_no_copy_access()
         return self.buffer.data_wo[self._buffer_indices]
-        # return self.buffer.data_wo
-
-    @property
-    def _buffer_indices(self):
-        # TODO: If we can avoid tabulating (i.e. an affine slice) then return a slice.
-        # TODO: Emit a warning (with the logger) if a copy would be caused.
-        return self._buffer_indices_cached
 
     @cached_property
-    def _buffer_indices_cached(self):
-        indices = np.full(self.axes.size, -1, dtype=IntType)
+    def _buffer_indices(self):
+        assert self.size > 0
+
+        indices = np.full(self.axes.owned.size, -1, dtype=IntType)
         # TODO: Handle any outer loops.
         # TODO: Generate code for this.
         for i, p in enumerate(self.axes.iter()):
-            # indices[i] = self.offset(p.target_exprs, p.target_path)
             indices[i] = self.offset(p.source_exprs, p.source_path)
         debug_assert(lambda: (indices >= 0).all())
-        return indices
+
+        # The packed indices are collected component-by-component so, for
+        # numbered multi-component axes, they are not in ascending order.
+        # We sort them so we can test for "affine-ness".
+        indices.sort()
+
+        # See if we can represent these indices as a slice. This is important
+        # because slices enable no-copy access to the array.
+        steps = np.unique(indices[1:] - indices[:-1])
+        if len(steps) == 1:
+            start = indices[0]
+            stop = indices[-1] + 1
+            (step,) = steps
+            return slice(start, stop, step)
+        else:
+            return indices
+
+    def _check_no_copy_access(self):
+        if not isinstance(self._buffer_indices, slice):
+            raise FancyIndexWriteException(
+                "Writing to the array directly is not supported for "
+                "non-trivially indexed (i.e. sliced) arrays."
+            )
 
     @property
     def axes(self):

@@ -940,10 +940,10 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
             layout_exprs=layout_exprs,
         )
 
-    def index(self):
+    def index(self, ghost=False):
         from pyop3.itree.tree import ContextFreeLoopIndex, LoopIndex
 
-        iterset = self.owned
+        iterset = self if ghost else self.owned
         # If the iterset is linear (single-component for every axis) then we
         # can consider the loop to be "context-free".
         if len(iterset.leaves) == 1:
@@ -952,13 +952,15 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         else:
             return LoopIndex(iterset)
 
-    def iter(self, outer_loops=(), loop_index=None, include=False):
+    def iter(self, outer_loops=(), loop_index=None, include=False, ghost=False):
         from pyop3.itree.tree import iter_axis_tree
+
+        iterset = self if ghost else self.owned
 
         return iter_axis_tree(
             # hack because sometimes we know the right loop index to use
             loop_index or self.index(),
-            self,
+            iterset,
             self.target_paths,
             self.index_exprs,
             outer_loops,
@@ -1198,6 +1200,9 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         """Return the owned portion of the axis tree."""
         from pyop3.itree import AffineSliceComponent, Slice
 
+        if self.comm.size == 1:
+            return self
+
         paraxes = [axis for axis in self.nodes if axis.sf is not None]
         if len(paraxes) == 0:
             return self
@@ -1209,10 +1214,13 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
             AffineSliceComponent(
                 c.label,
                 stop=paraxis.owned_count_per_component[c],
+                # this feels like a hack, generally don't want this ambiguity
+                label=c.label,
             )
             for c in paraxis.components
         ]
-        slice_ = Slice(paraxis.label, slices)
+        # this feels like a hack, generally don't want this ambiguity
+        slice_ = Slice(paraxis.label, slices, label=paraxis.label)
         return self[slice_]
 
     def freeze(self):
