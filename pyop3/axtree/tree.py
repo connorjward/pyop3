@@ -22,15 +22,17 @@ import pyrsistent
 import pytools
 from mpi4py import MPI
 from petsc4py import PETSc
-from pyrsistent import freeze, pmap
+from pyrsistent import freeze, pmap, thaw
 
 from pyop3 import utils
 from pyop3.dtypes import IntType, PointerType, get_mpi_dtype
-from pyop3.sf import StarForest
+from pyop3.extras.debug import print_with_rank
+from pyop3.sf import StarForest, serial_forest
 from pyop3.tree import (
     LabelledNodeComponent,
     LabelledTree,
     MultiComponentLabelledNode,
+    as_component_label,
     postvisit,
     previsit,
 )
@@ -38,15 +40,19 @@ from pyop3.utils import (
     PrettyTuple,
     as_tuple,
     checked_zip,
+    debug_assert,
     deprecated,
     flatten,
     frozen_record,
     has_unique_entries,
+    invert,
     is_single_valued,
     just_one,
     merge_dicts,
+    pairwise,
     single_valued,
     some_but_not_all,
+    steps,
     strict_int,
     strictly_all,
     unique,
@@ -56,6 +62,11 @@ from pyop3.utils import (
 class Indexed(abc.ABC):
     @property
     @abc.abstractmethod
+    def axes(self):
+        pass
+
+    @property
+    @abc.abstractmethod
     def target_paths(self):
         pass
 
@@ -63,6 +74,67 @@ class Indexed(abc.ABC):
     @abc.abstractmethod
     def index_exprs(self):
         pass
+
+    @property
+    @abc.abstractmethod
+    def outer_loops(self):
+        pass
+
+    @property
+    @abc.abstractmethod
+    def layouts(self):
+        pass
+
+    @cached_property
+    def subst_layouts(self):
+        return self._subst_layouts()
+
+    def _subst_layouts(self, axis=None, path=None, target_path=None, index_exprs=None):
+        from pyop3 import HierarchicalArray
+        from pyop3.itree.tree import IndexExpressionReplacer
+
+        # TODO Don't do this every time this function is called
+        loop_exprs = {}
+        # for outer_loop in self.outer_loops:
+        #     loop_exprs[outer_loop.id] = {}
+        #     for ax in outer_loop.iterset.nodes:
+        #         key = (ax.id, ax.component.label)
+        #         for ax_, expr in outer_loop.iterset.index_exprs.get(key, {}).items():
+        #             loop_exprs[outer_loop.id][ax_] = expr
+
+        layouts = {}
+        if strictly_all(x is None for x in [axis, path, target_path, index_exprs]):
+            path = pmap()
+            target_path = self.target_paths.get(None, pmap())
+            index_exprs = self.index_exprs.get(None, pmap())
+            # target_path = pmap()
+            # index_exprs = pmap()
+
+            replacer = IndexExpressionReplacer(index_exprs, loop_exprs=loop_exprs)
+            layouts[path] = replacer(self.layouts.get(target_path, 0))
+
+            if not self.axes.is_empty:
+                layouts.update(
+                    self._subst_layouts(self.axes.root, path, target_path, index_exprs)
+                )
+        else:
+            for component in axis.components:
+                path_ = path | {axis.label: component.label}
+                target_path_ = target_path | self.target_paths.get(
+                    (axis.id, component.label), {}
+                )
+                index_exprs_ = index_exprs | self.index_exprs.get(
+                    (axis.id, component.label), {}
+                )
+
+                replacer = IndexExpressionReplacer(index_exprs_)
+                layouts[path_] = replacer(self.layouts.get(target_path_, 0))
+
+                if subaxis := self.axes.child(axis, component):
+                    layouts.update(
+                        self._subst_layouts(subaxis, path_, target_path_, index_exprs_)
+                    )
+        return freeze(layouts)
 
 
 class ContextAware(abc.ABC):
@@ -92,8 +164,10 @@ class ContextSensitive(ContextAware, abc.ABC):
     #
     #     """
     #
-    def __init__(self, context_map: pmap[pmap[LoopIndex, pmap[str, str]], ContextFree]):
-        self.context_map = pmap(context_map)
+    def __init__(self, context_map):
+        if isinstance(context_map, pyrsistent.PMap):
+            raise TypeError("context_map must be deterministically ordered")
+        self.context_map = context_map
 
     @cached_property
     def keys(self):
@@ -111,8 +185,8 @@ class ContextSensitive(ContextAware, abc.ABC):
         key = {}
         for loop_index, path in context.items():
             if loop_index in self.keys:
-                key.update({loop_index: path})
-        return pmap(key)
+                key.update({loop_index: freeze(path)})
+        return freeze(key)
 
 
 # this is basically just syntactic sugar, might not be needed
@@ -159,37 +233,47 @@ class ContextSensitiveLoopIterable(LoopIterable, ContextSensitive, abc.ABC):
     pass
 
 
-class ExpressionEvaluator(pym.mapper.evaluator.EvaluationMapper):
-    def map_axis_variable(self, expr):
-        return self.context[expr.axis_label]
+class UnrecognisedAxisException(ValueError):
+    pass
 
-    def map_multi_array(self, expr):
-        # path = _trim_path(array.axes, self.context[0])
-        # not multi-component for now, is that useful to add?
-        path = expr.array.axes.path(*expr.array.axes.leaf)
-        # context = []
-        # for keyval in self.context.items():
-        #     context.append(keyval)
-        # return expr.array.get_value(path, self.context[1])
-        replace_map = {axis: self.rec(idx) for axis, idx in expr.indices.items()}
-        return expr.array.get_value(path, replace_map)
+
+class ExpressionEvaluator(pym.mapper.evaluator.EvaluationMapper):
+    def __init__(self, context, loop_exprs):
+        super().__init__(context)
+        self._loop_exprs = loop_exprs
+
+    def map_axis_variable(self, expr):
+        try:
+            return self.context[expr.axis_label]
+        except KeyError as e:
+            raise UnrecognisedAxisException from e
+
+    def map_array(self, array_var):
+        from pyop3.itree.tree import ExpressionEvaluator, IndexExpressionReplacer
+
+        array = array_var.array
+
+        indices = {ax: self.rec(idx) for ax, idx in array_var.indices.items()}
+        # replacer = IndexExpressionReplacer(indices, self._loop_exprs)
+        # layout_orig = array.layouts[freeze(array_var.target_path)]
+        # layout_subst = replacer(layout_orig)
+        layout_subst = array.subst_layouts[array_var.path]
+
+        # offset = ExpressionEvaluator(indices, self._loop_exprs)(layout_subst)
+        # offset = ExpressionEvaluator(self.context | indices, self._loop_exprs)(layout_subst)
+        offset = ExpressionEvaluator(indices, self._loop_exprs)(layout_subst)
+        offset = strict_int(offset)
+
+        # return array_var.array.get_value(
+        #     self.context,
+        #     array_var.target_path,  # should be source path
+        #     # index_exprs=array_var.index_exprs,
+        #     loop_exprs=self._loop_exprs,
+        # )
+        return array.data_ro[offset]
 
     def map_loop_index(self, expr):
-        return self.context[expr.name, expr.axis]
-
-    def map_called_map(self, expr):
-        array = expr.function.map_component.array
-        indices = {axis: self.rec(idx) for axis, idx in expr.parameters.items()}
-
-        path = array.axes.path(*array.axes.leaf)
-
-        # the inner_expr tells us the right mapping for the temporary, however,
-        # for maps that are arrays the innermost axis label does not always match
-        # the label used by the temporary. Therefore we need to do a swap here.
-        inner_axis = array.axes.leaf_axis
-        indices[inner_axis.label] = indices.pop(expr.function.full_map.name)
-
-        return array.get_value(path, indices)
+        return self._loop_exprs[expr.id][expr.axis]
 
 
 def _collect_datamap(axis, *subdatamaps, axes):
@@ -243,12 +327,13 @@ class AxisComponent(LabelledNodeComponent):
         indexed=False,
         lgmap=None,
     ):
+        from pyop3.array import HierarchicalArray
+
+        if not isinstance(count, (numbers.Integral, HierarchicalArray)):
+            raise TypeError("Invalid count type")
+
         super().__init__(label=label)
         self.count = count
-
-    @property
-    def has_integer_count(self):
-        return isinstance(self.count, numbers.Integral)
 
     # TODO this is just a traversal - clean up
     def alloc_size(self, axtree, axis):
@@ -295,8 +380,9 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
             if sum(c.count for c in components) != numbering.size:
                 raise ValueError
 
-        super().__init__(components, label=label, id=id)
+        super().__init__(label=label, id=id)
 
+        self.components = components
         self.numbering = numbering
         self.sf = sf
 
@@ -304,7 +390,11 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
         # NOTE: This *must* return an axis tree because that is where we attach
         # index expression information. Just returning as_axis_tree(self).root
         # here will break things.
+        # Actually this is not the case for "identity" slices since index_exprs
+        # and labels are unchanged
+        # TODO return a flat axis in these cases
         return as_axis_tree(self)[indices]
+        # if indexed.depth == 1:
 
     def __call__(self, *args):
         return as_axis_tree(self)(*args)
@@ -329,6 +419,22 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
         # renumber the serial axis to store ghost entries at the end of the vector
         numbering = partition_ghost_points(serial, sf)
         return cls(serial.components, serial.label, numbering=numbering, sf=sf)
+
+    @property
+    def component_labels(self):
+        return tuple(c.label for c in self.components)
+
+    @property
+    def component(self):
+        return just_one(self.components)
+
+    def component_index(self, component) -> int:
+        clabel = as_component_label(component)
+        return self.component_labels.index(clabel)
+
+    @property
+    def comm(self):
+        return self.sf.comm if self.sf else MPI.COMM_SELF
 
     @property
     def size(self):
@@ -366,13 +472,33 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
     def ghost_count_per_component(self):
         counts = np.zeros_like(self.components, dtype=int)
         for leaf_index in self.sf.ileaf:
-            counts[self._component_index_from_axis_number(leaf_index)] += 1
+            counts[self._axis_number_to_component_index(leaf_index)] += 1
         return freeze(
             {cpt: count for cpt, count in checked_zip(self.components, counts)}
         )
 
+    @cached_property
+    def owned(self):
+        from pyop3.itree import AffineSliceComponent, Slice
+
+        if self.comm.size == 1:
+            return self
+
+        slices = [
+            AffineSliceComponent(
+                c.label,
+                stop=self.owned_count_per_component[c],
+            )
+            for c in self.components
+        ]
+        slice_ = Slice(self.label, slices)
+        return self[slice_].root
+
     def index(self):
         return self._tree.index()
+
+    def iter(self):
+        return self._tree.iter()
 
     @property
     def target_path_per_component(self):
@@ -411,56 +537,71 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
         """
         return self._tree
 
-    # Note: these functions assume that the numbering follows the plex convention
-    # of numbering each strata contiguously. I think (?) that I effectively also do this.
-    # actually this might well be wrong. we have a renumbering after all - this gives us
-    # the original numbering only
-    def component_number_to_axis_number(self, component, num):
-        component_index = self.components.index(component)
-        canonical = self._component_numbering_offsets[component_index] + num
-        return self._to_renumbered(canonical)
+    # Ideally I want to cythonize a lot of these methods
+    def component_numbering(self, component):
+        cidx = self.component_index(component)
+        return self._default_to_applied_numbering[cidx]
 
-    def axis_number_to_component(self, num):
-        # guess, is this the right map (from new numbering to original)?
-        # I don't think so because we have a funky point SF. can we get rid?
-        # num = self.numbering[num]
-        component_index = self._component_index_from_axis_number(num)
-        component_num = num - self._component_numbering_offsets[component_index]
-        # return self.components[component_index], component_num
-        return self.components[component_index], component_num
+    def component_permutation(self, component):
+        cidx = self.component_index(component)
+        return self._default_to_applied_permutation[cidx]
 
-    def _component_index_from_axis_number(self, num):
-        offsets = self._component_numbering_offsets
-        for i, (min_, max_) in enumerate(zip(offsets, offsets[1:])):
-            if min_ <= num < max_:
-                return i
-        raise ValueError(f"Axis number {num} not found.")
+    def default_to_applied_component_number(self, component, number):
+        cidx = self.component_index(component)
+        return self._default_to_applied_numbering[cidx][number]
 
-    @cached_property
-    def _component_numbering_offsets(self):
-        return (0,) + tuple(np.cumsum([c.count for c in self.components], dtype=int))
+    def applied_to_default_component_number(self, component, number):
+        cidx = self.component_index(component)
+        return self._applied_to_default_numbering[cidx][number]
 
-    # FIXME bad name
-    def _to_renumbered(self, num):
-        """Convert a flat/canonical/unpermuted axis number to its renumbered equivalent."""
-        if self.numbering is None:
-            return num
-        else:
-            return self._inverse_numbering[num]
+    def axis_to_component_number(self, number):
+        # return axis_to_component_number(self, number)
+        cidx = self._axis_number_to_component_index(number)
+        return self.components[cidx], number - self._component_offsets[cidx]
 
-    @cached_property
-    def _inverse_numbering(self):
-        # put in utils.py
-        from pyop3.axtree.parallel import invert
+    def component_to_axis_number(self, component, number):
+        cidx = self.component_index(component)
+        return self._component_offsets[cidx] + number
 
-        if self.numbering is None:
-            return np.arange(self.count, dtype=IntType)
-        else:
-            return invert(self.numbering.data_ro)
+    def renumber_point(self, component, point):
+        renumbering = self.component_numbering(component)
+        return renumbering[point]
 
     @cached_property
     def _tree(self):
         return AxisTree(self)
+
+    @cached_property
+    def _component_offsets(self):
+        return (0,) + tuple(np.cumsum([c.count for c in self.components], dtype=int))
+
+    @cached_property
+    def _default_to_applied_numbering(self):
+        renumbering = [np.empty(c.count, dtype=IntType) for c in self.components]
+        counters = [itertools.count() for _ in range(self.degree)]
+        for pt in self.numbering.data_ro:
+            cidx = self._axis_number_to_component_index(pt)
+            old_cpt_pt = pt - self._component_offsets[cidx]
+            renumbering[cidx][old_cpt_pt] = next(counters[cidx])
+        assert all(next(counters[i]) == c.count for i, c in enumerate(self.components))
+        return tuple(renumbering)
+
+    @cached_property
+    def _default_to_applied_permutation(self):
+        # is this right?
+        return self._applied_to_default_numbering
+
+    # same as the permutation...
+    @cached_property
+    def _applied_to_default_numbering(self):
+        return tuple(invert(num) for num in self._default_to_applied_numbering)
+
+    def _axis_number_to_component_index(self, number):
+        off = self._component_offsets
+        for i, (min_, max_) in enumerate(zip(off, off[1:])):
+            if min_ <= number < max_:
+                return i
+        raise ValueError(f"{number} not found")
 
     @staticmethod
     def _parse_components(components):
@@ -489,19 +630,38 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
             )
 
 
+# Do I ever want this? component_offsets is expensive so we don't want to
+# do it every time
+def axis_to_component_number(axis, number, context=pmap()):
+    offsets = component_offsets(axis, context)
+    return component_number_from_offsets(axis, number, offsets)
+
+
+# TODO move into layout.py
+def component_number_from_offsets(axis, number, offsets):
+    cidx = None
+    for i, (min_, max_) in enumerate(pairwise(offsets)):
+        if min_ <= number < max_:
+            cidx = i
+            break
+    assert cidx is not None
+    return axis.components[cidx], number - offsets[cidx]
+
+
+# TODO move into layout.py
+def component_offsets(axis, context):
+    from pyop3.axtree.layout import _as_int
+
+    return steps([_as_int(c.count, context) for c in axis.components])
+
+
 class MultiArrayCollector(pym.mapper.Collector):
-    def map_called_map(self, expr):
-        return self.rec(expr.function) | set.union(
-            *(self.rec(idx) for idx in expr.parameters.values())
+    def map_array(self, array_var):
+        return {array_var.array}.union(
+            *(self.rec(expr) for expr in array_var.indices.values())
         )
 
-    def map_map_variable(self, expr):
-        return {expr.map_component.array}
-
-    def map_multi_array(self, expr):
-        return {expr}
-
-    def map_nan(self, expr):
+    def map_nan(self, nan):
         return set()
 
 
@@ -538,8 +698,40 @@ class PartialAxisTree(LabelledTree):
     ):
         super().__init__(parent_to_children)
 
+        # TODO Move check to generic LabelledTree
+        self._check_node_labels_unique_in_paths(self.parent_to_children)
+
         # makea  cached property, then delete this method
         self._layout_exprs = AxisTree._default_index_exprs(self)
+
+    @classmethod
+    def from_iterable(cls, iterable):
+        # NOTE: This currently only works for linear trees
+        item, *iterable = iterable
+        tree = PartialAxisTree(as_axis_tree(item).parent_to_children)
+        for item in iterable:
+            tree = tree.add_subtree(as_axis_tree(item), *tree.leaf)
+        return tree
+
+    @classmethod
+    def _check_node_labels_unique_in_paths(
+        cls, node_map, node=None, seen_labels=frozenset()
+    ):
+        from pyop3.tree import InvalidTreeException
+
+        if not node_map:
+            return
+
+        if node is None:
+            node = just_one(node_map[None])
+
+        if node.label in seen_labels:
+            raise InvalidTreeException("Duplicate labels found along a path")
+
+        for subnode in filter(None, node_map.get(node.id, [])):
+            cls._check_node_labels_unique_in_paths(
+                node_map, subnode, seen_labels | {node.label}
+            )
 
     def set_up(self):
         return AxisTree.from_partial_tree(self)
@@ -582,7 +774,9 @@ class PartialAxisTree(LabelledTree):
 
     @property
     def leaf_component(self):
-        return self.leaf[1]
+        leaf_axis, leaf_clabel = self.leaf
+        leaf_cidx = leaf_axis.component_index(leaf_clabel)
+        return leaf_axis.components[leaf_cidx]
 
     @cached_property
     def size(self):
@@ -590,9 +784,54 @@ class PartialAxisTree(LabelledTree):
 
         return axis_tree_size(self)
 
+    @cached_property
+    def global_size(self):
+        from pyop3.array import HierarchicalArray
+        from pyop3.axtree.layout import _axis_size, my_product
+
+        if not self.outer_loops:
+            return self.size
+
+        mysize = 0
+        for idxs in my_product(self.outer_loops):
+            loop_exprs = {idx.index.id: idx.source_exprs for idx in idxs}
+            # target_indices = merge_dicts(idx.target_exprs for idx in idxs)
+            # this is a hack
+            if self.is_empty:
+                mysize += 1
+            else:
+                mysize += _axis_size(self, self.root, loop_indices=loop_exprs)
+        return mysize
+
+        if isinstance(self.size, HierarchicalArray):
+            # does this happen any more?
+            return np.sum(self.size.data_ro, dtype=IntType)
+        if isinstance(self.size, np.ndarray):
+            return np.sum(self.size, dtype=IntType)
+        else:
+            assert isinstance(self.size, numbers.Integral)
+            return self.size
+
+    # rename to local_size?
     def alloc_size(self, axis=None):
         axis = axis or self.root
         return sum(cpt.alloc_size(self, axis) for cpt in axis.components)
+
+
+class LoopIndexReplacer(pym.mapper.IdentityMapper):
+    def __init__(self, replace_map):
+        super().__init__()
+        self._replace_map = replace_map
+
+    def map_axis_variable(self, var):
+        try:
+            return self._replace_map[var.axis]
+        except KeyError:
+            return var
+
+    def map_array(self, array_var):
+        indices = {ax: self(expr) for ax, expr in array_var.indices.items()}
+        return type(array_var)(array_var.array, indices, array_var.path)
 
 
 @frozen_record
@@ -600,6 +839,7 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
     fields = PartialAxisTree.fields | {
         "target_paths",
         "index_exprs",
+        "outer_loops",
         "layout_exprs",
     }
 
@@ -608,38 +848,78 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         parent_to_children=pmap(),
         target_paths=None,
         index_exprs=None,
+        outer_loops=None,
         layout_exprs=None,
     ):
-        if some_but_not_all(
-            arg is None for arg in [target_paths, index_exprs, layout_exprs]
-        ):
-            raise ValueError
+        # if some_but_not_all(
+        #     arg is None
+        #     for arg in [target_paths, index_exprs, outer_loops, layout_exprs]
+        # ):
+        #     raise ValueError
+
+        if outer_loops is None:
+            outer_loops = ()
+        else:
+            assert isinstance(outer_loops, tuple)
 
         super().__init__(parent_to_children)
         self._target_paths = target_paths or self._default_target_paths()
         self._index_exprs = index_exprs or self._default_index_exprs()
         self.layout_exprs = layout_exprs or self._default_layout_exprs()
+        self._outer_loops = tuple(outer_loops)
 
     def __getitem__(self, indices):
-        from pyop3.itree.tree import as_index_forest, collect_loop_contexts, index_axes
+        from pyop3.itree.tree import _compose_bits, _index_axes, as_index_forest
 
         if indices is Ellipsis:
+            raise NotImplementedError("TODO")
             indices = index_tree_from_ellipsis(self)
 
-        if not collect_loop_contexts(indices):
-            index_tree = just_one(as_index_forest(indices, axes=self))
-            return index_axes(self, index_tree)
-
         axis_trees = {}
-        for index_tree in as_index_forest(indices, axes=self):
-            axis_trees[index_tree.loop_context] = index_axes(self, index_tree)
-        return ContextSensitiveAxisTree(axis_trees)
+        for context, index_tree in as_index_forest(indices, axes=self).items():
+            indexed_axes = _index_axes(index_tree, context, self)
+
+            target_paths, index_exprs, layout_exprs = _compose_bits(
+                self,
+                self.target_paths,
+                self.index_exprs,
+                self.layout_exprs,
+                indexed_axes,
+                indexed_axes.target_paths,
+                indexed_axes.index_exprs,
+                indexed_axes.layout_exprs,
+            )
+            axis_tree = AxisTree(
+                indexed_axes.parent_to_children,
+                target_paths,
+                index_exprs,
+                outer_loops=indexed_axes.outer_loops,
+                layout_exprs=layout_exprs,
+            )
+            axis_trees[context] = axis_tree
+
+        if len(axis_trees) == 1 and just_one(axis_trees.keys()) == pmap():
+            return axis_trees[pmap()]
+        else:
+            return ContextSensitiveAxisTree(axis_trees)
 
     @classmethod
     def from_nest(cls, nest) -> AxisTree:
         root, node_map = cls._from_nest(nest)
         node_map.update({None: [root]})
         return cls.from_node_map(node_map)
+
+    @classmethod
+    def from_iterable(
+        cls, iterable, *, target_paths=None, index_exprs=None, layout_exprs=None
+    ) -> AxisTree:
+        tree = PartialAxisTree.from_iterable(iterable)
+        return AxisTree(
+            tree.parent_to_children,
+            target_paths=target_paths,
+            index_exprs=index_exprs,
+            layout_exprs=layout_exprs,
+        )
 
     @classmethod
     def from_node_map(cls, node_map):
@@ -651,17 +931,48 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         target_paths = cls._default_target_paths(tree)
         index_exprs = cls._default_index_exprs(tree)
         layout_exprs = index_exprs
+        outer_loops = ()
         return cls(
             tree.parent_to_children,
             target_paths,
             index_exprs,
-            layout_exprs,
+            outer_loops=outer_loops,
+            layout_exprs=layout_exprs,
         )
 
-    def index(self):
-        from pyop3.itree import LoopIndex
+    def index(self, ghost=False):
+        from pyop3.itree.tree import ContextFreeLoopIndex, LoopIndex
 
-        return LoopIndex(self.owned)
+        iterset = self if ghost else self.owned
+        # If the iterset is linear (single-component for every axis) then we
+        # can consider the loop to be "context-free".
+        if len(iterset.leaves) == 1:
+            path = iterset.path(*iterset.leaf)
+            target_path = {}
+            for ax, cpt in iterset.path_with_nodes(*iterset.leaf).items():
+                target_path.update(iterset.target_paths.get((ax.id, cpt), {}))
+            return ContextFreeLoopIndex(iterset, path, target_path)
+        else:
+            return LoopIndex(iterset)
+
+    def iter(self, outer_loops=(), loop_index=None, include=False, ghost=False):
+        from pyop3.itree.tree import iter_axis_tree
+
+        iterset = self if ghost else self.owned
+
+        return iter_axis_tree(
+            # hack because sometimes we know the right loop index to use
+            loop_index or self.index(),
+            iterset,
+            self.target_paths,
+            self.index_exprs,
+            outer_loops,
+            include,
+        )
+
+    @property
+    def axes(self):
+        return self
 
     @property
     def target_paths(self):
@@ -671,38 +982,207 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
     def index_exprs(self):
         return self._index_exprs
 
+    @property
+    def outer_loops(self):
+        return self._outer_loops
+
+    # This could easily be two functions
+    @cached_property
+    def outer_loop_bits(self):
+        from pyop3.itree.tree import LocalLoopIndexVariable
+
+        if len(self.outer_loops) > 1:
+            # We do not yet support something like dat[p, q] if p and q
+            # are independent (i.e. q != f(p) ).
+            raise NotImplementedError(
+                "Multiple independent outer loops are not supported."
+            )
+        loop = just_one(self.outer_loops)
+
+        # TODO: Don't think this is needed
+        # Since loop itersets must be linear, we can unpack target_paths
+        # and index_exprs from
+        #
+        #     {(axis_id, component_label): {axis_label: expr}}
+        #
+        # to simply
+        #
+        #     {axis_label: expr}
+        flat_target_paths = {}
+        flat_index_exprs = {}
+        for axis in loop.iterset.nodes:
+            key = (axis.id, axis.component.label)
+            flat_target_paths.update(loop.iterset.target_paths.get(key, {}))
+            flat_index_exprs.update(loop.iterset.index_exprs.get(key, {}))
+
+        # Make sure that the layout axes are uniquely labelled.
+        suffix = f"_{loop.id}"
+        loop_axes = relabel_axes(loop.iterset, suffix)
+
+        # Nasty hack: loop_axes need to be a PartialAxisTree so we can add to it.
+        loop_axes = PartialAxisTree(loop_axes.parent_to_children)
+
+        # When we tabulate the layout, the layout expressions will contain
+        # axis variables that we actually want to be loop index variables. Here
+        # we construct the right replacement map.
+        loop_vars = {
+            axis.label + suffix: LocalLoopIndexVariable(loop, axis.label)
+            for axis in loop.iterset.nodes
+        }
+
+        # Recursively fetch other outer loops and make them the root of
+        # the current axes.
+        if loop.iterset.outer_loops:
+            ax_rec, lv_rec = loop.iterset.outer_loop_bits
+            loop_axes = ax_rec.add_subtree(loop_axes, *ax_rec.leaf)
+            loop_vars.update(lv_rec)
+
+        return loop_axes, freeze(loop_vars)
+
+        ###
+
+        # # NOTE: Using iterset.size feels a bit wrong here, but it is indexed
+        # # correctly so I think that it's the right thing. Care will need to be
+        # # taken if outer loops with multiple output axes are supported (e.g.
+        # # loops over extruded cells).
+        # loop_axis = Axis(outer_loop.iterset.size, outer_loop.id)
+        # loop_axis_key = (loop_axis.id, loop_axis.component.label)
+        # axes_iter = (loop_axis,)
+        #
+        # # This is valid because we can only target one axis currently.
+        # target_axis_label = just_one(flat_target_paths.keys())
+        # target_paths = {loop_axis_key: flat_target_paths}
+        #
+        # # Once we have tabulated a layout with these axes, replace the axis
+        # # variables in the layouts with the right index expressions that
+        # # are composed of source loop index variables.
+        # # Usually substituting index_exprs into layouts is not a safe thing
+        # # to do eagerly because axes may be indexed again which would then
+        # # not work. It *is* safe to do for loop indices though because those
+        # # axes get eliminated and cannot be further indexed.
+        # # TODO: Provide an example.
+        # # NOTE: Ideally index_exprs should only know about target expressions.
+        # # The source expressions here muddy things.
+        # orig_expr = flat_index_exprs[target_axis_label]
+        # # NOTE: The replace map actually contains non-local loop index
+        # # variables. In a refactor this should be dropped in favour of
+        # # the actual loop index expression containing local indices.
+        # replace_map = {
+        #     target_axis_label: LoopIndexVariable(outer_loop, target_axis_label)
+        # }
+        # new_expr = LoopIndexReplacer(replace_map)(orig_expr)
+        #
+        # # Try returning a flat thing instead, this isn't quite the same as
+        # # "normal" index_exprs
+        # # index_exprs = {loop_axis_key: {target_axis_label: new_expr}}
+        # # index_exprs = {outer_loop.id: new_expr}
+        # index_exprs = {outer_loop.id: LoopIndexVariable(outer_loop, target_axis_label)}
+        #
+        # # Recursively fetch other outer loops and make them the root of
+        # # the current axes.
+        # if outer_loop.iterset.outer_loops:
+        #     ax_rec, tp_rec, ie_rec = outer_loop.iterset.outer_loop_bits
+        #     axes_iter = ax_rec + axes_iter
+        #     target_paths.update(tp_rec)
+        #     index_exprs.update(ie_rec)
+        #
+        # return axes_iter, freeze(target_paths), freeze(index_exprs)
+
+    @cached_property
+    def layout_axes(self):
+        if not self.outer_loops:
+            return self
+        loop_axes, _ = self.outer_loop_bits
+        return loop_axes.add_subtree(self, *loop_axes.leaf).set_up()
+
     @cached_property
     def layouts(self):
         """Initialise the multi-axis by computing the layout functions."""
-        from pyop3.axtree.layout import _collect_at_leaves, _compute_layouts
-        from pyop3.itree.tree import IndexExpressionReplacer
+        from pyop3.axtree.layout import (
+            _collect_at_leaves,
+            _compute_layouts,
+            collect_externally_indexed_axes,
+        )
+        from pyop3.itree.tree import IndexExpressionReplacer, LoopIndexVariable
 
-        if self.is_empty:
-            return pmap({pmap(): 0})
+        if self.layout_axes.is_empty:
+            return freeze({pmap(): 0})
 
-        layouts, _, _, _ = _compute_layouts(self, self.root)
-        layoutsnew = _collect_at_leaves(self, layouts)
+        loop_vars = self.outer_loop_bits[1] if self.outer_loops else {}
+        layouts, check_none, _ = _compute_layouts(self.layout_axes, loop_vars)
+
+        assert check_none is None
+
+        layoutsnew = _collect_at_leaves(self, self.layout_axes, layouts)
         layouts = freeze(dict(layoutsnew))
 
-        layouts_ = {}
-        for leaf in self.leaves:
-            orig_path = self.path(*leaf)
-            new_path = {}
-            replace_map = {}
-            for axis, cpt in self.path_with_nodes(*leaf).items():
-                new_path.update(self.target_paths[axis.id, cpt])
-                replace_map.update(self.layout_exprs[axis.id, cpt])
-            new_path = freeze(new_path)
+        if self.outer_loops:
+            _, loop_vars = self.outer_loop_bits
 
-            orig_layout = layouts[orig_path]
-            new_layout = IndexExpressionReplacer(replace_map)(orig_layout)
-            # assert new_layout != orig_layout
-            layouts_[new_path] = new_layout
+            layouts_ = {}
+            for k, layout in layouts.items():
+                layouts_[k] = IndexExpressionReplacer(loop_vars)(layout)
+            layouts = freeze(layouts_)
+
+        # for now
+        return freeze(layouts)
+
+        # Have not considered how to do sparse things with external loops
+        if self.layout_axes.depth > self.depth:
+            return layouts
+
+        layouts_ = {pmap(): 0}
+        for axis in self.nodes:
+            for component in axis.components:
+                orig_path = self.path(axis, component)
+                new_path = {}
+                replace_map = {}
+                for ax, cpt in self.path_with_nodes(axis, component).items():
+                    new_path.update(self.target_paths.get((ax.id, cpt), {}))
+                    replace_map.update(self.layout_exprs.get((ax.id, cpt), {}))
+                new_path = freeze(new_path)
+
+                orig_layout = layouts[orig_path]
+                new_layout = IndexExpressionReplacer(replace_map, loop_exprs)(
+                    orig_layout
+                )
+                layouts_[new_path] = new_layout
         return freeze(layouts_)
+
+    @cached_property
+    def leaf_target_paths(self):
+        return tuple(
+            merge_dicts(
+                self.target_paths.get((ax.id, clabel), {})
+                for ax, clabel in self.path_with_nodes(*leaf, ordered=True)
+            )
+            for leaf in self.leaves
+        )
 
     @cached_property
     def sf(self):
         return self._default_sf()
+
+    # @property
+    # def lgmap(self):
+    #     if not hasattr(self, "_lazy_lgmap"):
+    #         # if self.sf.nleaves == 0 then some assumptions are broken in
+    #         # ISLocalToGlobalMappingCreateSF, but we need to be careful things are done
+    #         # collectively
+    #         self.sf.sf.view()
+    #         lgmap = PETSc.LGMap().createSF(self.sf.sf, PETSc.DECIDE)
+    #         lgmap.setType(PETSc.LGMap.Type.BASIC)
+    #         self._lazy_lgmap = lgmap
+    #         lgmap.view()
+    #     return self._lazy_lgmap
+
+    @property
+    def comm(self):
+        paraxes = [axis for axis in self.nodes if axis.sf is not None]
+        if not paraxes:
+            return MPI.COMM_SELF
+        else:
+            return single_valued(ax.comm for ax in paraxes)
 
     @cached_property
     def datamap(self):
@@ -716,15 +1196,15 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
                 for expr in exprs.values():
                     for array in MultiArrayCollector()(expr):
                         dmap.update(array.datamap)
-        for layout_expr in self.layouts.values():
-            for array in MultiArrayCollector()(layout_expr):
-                dmap.update(array.datamap)
         return pmap(dmap)
 
     @cached_property
     def owned(self):
         """Return the owned portion of the axis tree."""
         from pyop3.itree import AffineSliceComponent, Slice
+
+        if self.comm.size == 1:
+            return self
 
         paraxes = [axis for axis in self.nodes if axis.sf is not None]
         if len(paraxes) == 0:
@@ -737,46 +1217,40 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
             AffineSliceComponent(
                 c.label,
                 stop=paraxis.owned_count_per_component[c],
+                # this feels like a hack, generally don't want this ambiguity
+                label=c.label,
             )
             for c in paraxis.components
         ]
-        slice_ = Slice(paraxis.label, slices)
+        # this feels like a hack, generally don't want this ambiguity
+        slice_ = Slice(paraxis.label, slices, label=paraxis.label)
         return self[slice_]
 
     def freeze(self):
         return self
 
-    # needed here? or just for the HierarchicalArray? perhaps a free function?
-    def offset(self, *args, allow_unused=False, insert_zeros=False):
-        nargs = len(args)
-        if nargs == 2:
-            path, indices = args[0], args[1]
-        else:
-            assert nargs == 1
-            path, indices = _path_and_indices_from_index_tuple(self, args[0])
+    def as_tree(self):
+        return self
 
-        if allow_unused:
-            path = _trim_path(self, path)
+    def offset(self, indices, path=None, *, loop_exprs=pmap()):
+        from pyop3.axtree.layout import eval_offset
 
-        if insert_zeros:
-            # extend the path by choosing the zero offset option every time
-            # this is needed if we don't have all the internal bits available
-            while path not in self.layouts:
-                axis, clabel = self._node_from_path(path)
-                subaxis = self.component_child(axis, clabel)
-                # choose the component that is first in the renumbering
-                if subaxis.numbering:
-                    cidx = subaxis._component_index_from_axis_number(
-                        subaxis.numbering.data_ro[0]
-                    )
-                else:
-                    cidx = 0
-                subcpt = subaxis.components[cidx]
-                path |= {subaxis.label: subcpt.label}
-                indices |= {subaxis.label: 0}
-
-        offset = pym.evaluate(self.layouts[path], indices, ExpressionEvaluator)
-        return strict_int(offset)
+        # return eval_offset(
+        #     self,
+        #     self.layouts,
+        #     indices,
+        #     self.target_paths,
+        #     self.index_exprs,
+        #     path,
+        #     loop_exprs=loop_exprs,
+        # )
+        return eval_offset(
+            self,
+            self.subst_layouts,
+            indices,
+            path,
+            loop_exprs=loop_exprs,
+        )
 
     @cached_property
     def owned_size(self):
@@ -824,11 +1298,12 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         from pyop3.axtree.parallel import collect_sf_graphs
 
         if self.is_empty:
-            return None
+            # no, this is probably not right. Could have a global
+            return serial_forest(self.global_size)
 
         graphs = collect_sf_graphs(self)
         if len(graphs) == 0:
-            return None
+            return serial_forest(self.global_size)
         else:
             # merge the graphs
             nroots = 0
@@ -841,8 +1316,35 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
                 iremotes.append(iremote)
             ilocal = np.concatenate(ilocals)
             iremote = np.concatenate(iremotes)
-            # fixme, get the right comm (and ensure consistency)
-            return StarForest.from_graph(self.size, nroots, ilocal, iremote)
+            return StarForest.from_graph(self.size, nroots, ilocal, iremote, self.comm)
+
+    # should be a cached property?
+    def global_numbering(self):
+        if self.comm.size == 1:
+            return np.arange(self.size, dtype=IntType)
+
+        numbering = np.full(self.size, -1, dtype=IntType)
+
+        start = self.sf.comm.tompi4py().exscan(self.owned.size, MPI.SUM)
+        if start is None:
+            start = 0
+
+        # TODO do I need to account for numbering/layouts? The SF should probably
+        # manage this.
+        numbering[: self.owned.size] = np.arange(
+            start, start + self.owned.size, dtype=IntType
+        )
+        # numbering[self.numbering.data_ro[: self.owned.size]] = np.arange(
+        #     start, start + self.owned.size, dtype=IntType
+        # )
+
+        # print_with_rank("before", numbering)
+
+        self.sf.broadcast(numbering, MPI.REPLACE)
+
+        # print_with_rank("after", numbering)
+        debug_assert(lambda: (numbering >= 0).all())
+        return numbering
 
 
 class ContextSensitiveAxisTree(ContextSensitiveLoopIterable):
@@ -943,8 +1445,8 @@ def _(arg: tuple) -> AxisComponent:
 
 
 @functools.singledispatch
-def _as_axis_component_label(arg: Any) -> ComponentLabel:
-    if isinstance(arg, ComponentLabel):
+def _as_axis_component_label(arg: Any):
+    if isinstance(arg, str):
         return arg
     else:
         raise TypeError(f"No handler registered for {type(arg).__name__}")
@@ -955,50 +1457,16 @@ def _(component: AxisComponent):
     return component.label
 
 
-def _path_and_indices_from_index_tuple(axes, index_tuple):
-    from pyop3.axtree.layout import _as_int
-
-    path = pmap()
-    indices = pmap()
-    axis = axes.root
-    for index in index_tuple:
-        if axis is None:
-            raise IndexError("Too many indices provided")
-        if isinstance(index, numbers.Integral):
-            if axis.degree > 1:
-                raise IndexError(
-                    "Cannot index multi-component array with integers, a "
-                    "2-tuple of (component index, index value) is needed"
-                )
-            cpt_label = axis.components[0].label
-        else:
-            cpt_label, index = index
-
-        cpt_index = axis.component_labels.index(cpt_label)
-
-        if index < 0:
-            # In theory we could still get this to work...
-            raise IndexError("Cannot use negative indices")
-        # TODO need to pass indices here for ragged things
-        if index >= _as_int(axis.components[cpt_index].count, path, indices):
-            raise IndexError("Index is too large")
-
-        indices |= {axis.label: index}
-        path |= {axis.label: cpt_label}
-        axis = axes.component_child(axis, cpt_label)
-
-    if axis is not None:
-        raise IndexError("Insufficient number of indices given")
-
-    return path, indices
-
-
-def _trim_path(axes: AxisTree, path) -> pmap:
-    """Drop unused axes from the axis path."""
-    new_path = {}
-    axis = axes.root
-    while axis:
-        cpt_label = path[axis.label]
-        new_path[axis.label] = cpt_label
-        axis = axes.component_child(axis, cpt_label)
-    return pmap(new_path)
+def relabel_axes(axes: AxisTree, suffix: str) -> AxisTree:
+    # comprehension?
+    parent_to_children = {}
+    for parent_id, children in axes.parent_to_children.items():
+        children_ = []
+        for axis in children:
+            if axis is not None:
+                axis_ = axis.copy(label=axis.label + suffix)
+            else:
+                axis_ = None
+            children_.append(axis_)
+        parent_to_children[parent_id] = children_
+    return AxisTree(parent_to_children)

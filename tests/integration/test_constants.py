@@ -5,7 +5,6 @@ import pyop3 as op3
 from pyop3.ir import LOOPY_LANG_VERSION, LOOPY_TARGET
 
 
-# spelling?
 def test_loop_over_parametrised_length(scalar_copy_kernel):
     length = op3.HierarchicalArray(op3.AxisTree(), dtype=int)
     iter_axes = op3.Axis([op3.AxisComponent(length, "pt0")], "ax0")

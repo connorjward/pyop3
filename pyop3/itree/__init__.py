@@ -6,12 +6,9 @@ from .tree import (
     LocalLoopIndex,
     LoopIndex,
     Map,
-    MapVariable,
     Slice,
     SliceComponent,
     Subset,
     TabulatedMapComponent,
     as_index_forest,
-    collect_loop_contexts,
-    index_axes,
 )

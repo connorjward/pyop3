@@ -1,3 +1,6 @@
+import numbers
+
+import loopy as lp
 import pytest
 from mpi4py import MPI
 from petsc4py import PETSc
@@ -62,3 +65,54 @@ def paxis(comm, sf):
         numbering = [0, 4, 1, 2, 5, 3]
     serial = op3.Axis(6, numbering=numbering)
     return op3.Axis.from_serial(serial, sf)
+
+
+class Helper:
+    @classmethod
+    def copy_kernel(cls, shape, dtype=op3.ScalarType):
+        inames = cls._inames_from_shape(shape)
+        inames_str = ",".join(inames)
+        insn = f"y[{inames_str}] = x[{inames_str}]"
+
+        lpy_kernel = cls._loopy_kernel(shape, insn, dtype)
+        return op3.Function(lpy_kernel, [op3.READ, op3.WRITE])
+
+    @classmethod
+    def inc_kernel(cls, shape, dtype=op3.ScalarType):
+        inames = cls._inames_from_shape(shape)
+        inames_str = ",".join(inames)
+        insn = f"y[{inames_str}] = y[{inames_str}] + x[{inames_str}]"
+
+        lpy_kernel = cls._loopy_kernel(shape, insn, dtype)
+        return op3.Function(lpy_kernel, [op3.READ, op3.INC])
+
+    @classmethod
+    def _inames_from_shape(cls, shape):
+        if isinstance(shape, numbers.Number):
+            shape = (shape,)
+        return tuple(f"i_{i}" for i, _ in enumerate(shape))
+
+    @classmethod
+    def _loopy_kernel(cls, shape, insns, dtype):
+        if isinstance(shape, numbers.Number):
+            shape = (shape,)
+
+        inames = cls._inames_from_shape(shape)
+        domains = tuple(
+            f"{{ [{iname}]: 0 <= {iname} < {s} }}" for iname, s in zip(inames, shape)
+        )
+        return lp.make_kernel(
+            domains,
+            insns,
+            [
+                lp.GlobalArg("x", shape=shape, dtype=dtype),
+                lp.GlobalArg("y", shape=shape, dtype=dtype),
+            ],
+            target=op3.ir.LOOPY_TARGET,
+            lang_version=op3.ir.LOOPY_LANG_VERSION,
+        )
+
+
+@pytest.fixture(scope="session")
+def factory():
+    return Helper()

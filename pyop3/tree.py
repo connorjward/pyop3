@@ -3,6 +3,8 @@ from __future__ import annotations
 import abc
 import collections
 import functools
+import operator
+from collections import defaultdict
 from collections.abc import Hashable, Sequence
 from functools import cached_property
 from itertools import chain
@@ -17,6 +19,7 @@ from pyop3.utils import (
     Identified,
     Label,
     Labelled,
+    UniqueNameGenerator,
     apply_at,
     as_tuple,
     checked_zip,
@@ -39,6 +42,10 @@ class EmptyTreeException(Exception):
     pass
 
 
+class InvalidTreeException(ValueError):
+    pass
+
+
 class Node(pytools.ImmutableRecord, Identified):
     fields = {"id"}
 
@@ -47,6 +54,7 @@ class Node(pytools.ImmutableRecord, Identified):
         Identified.__init__(self, id)
 
 
+# TODO delete this class, no longer different tree types
 class AbstractTree(pytools.ImmutableRecord, abc.ABC):
     fields = {"parent_to_children"}
 
@@ -100,15 +108,19 @@ class AbstractTree(pytools.ImmutableRecord, abc.ABC):
 
     @cached_property
     def nodes(self):
+        # NOTE: Keep this sorted! Else strange results occur
         if self.is_empty:
-            return frozenset()
-        return frozenset(
-            {
-                node
-                for node in chain.from_iterable(self.parent_to_children.values())
-                if node is not None
-            }
-        )
+            return ()
+        return self._collect_nodes(self.root)
+
+    def _collect_nodes(self, node):
+        assert not self.is_empty
+        nodes = [node]
+        for subnode in self.children(node):
+            if subnode is None:
+                continue
+            nodes.extend(self._collect_nodes(subnode))
+        return tuple(nodes)
 
     @property
     @abc.abstractmethod
@@ -205,71 +217,6 @@ class AbstractTree(pytools.ImmutableRecord, abc.ABC):
         return node.id if isinstance(node, Node) else node
 
 
-class Tree(AbstractTree):
-    @cached_property
-    def leaves(self):
-        return tuple(
-            node
-            for node in self.nodes
-            if all(c is None for c in self.parent_to_children.get(node.id, ()))
-        )
-
-    def add_node(
-        self,
-        node,
-        parent=None,
-        uniquify=False,
-    ):
-        if parent is None:
-            if not self.is_empty:
-                raise ValueError("Cannot add multiple roots")
-            return self.copy(parent_to_children={None: (node,)})
-        else:
-            parent = self._as_node(parent)
-            if node in self:
-                if uniquify:
-                    node = node.copy(id=node.unique_id())
-                else:
-                    raise ValueError("Cannot insert a node with the same ID")
-
-            parent_to_children = {
-                k: list(v) for k, v in self.parent_to_children.items()
-            }
-            parent_to_children[parent.id].append(node)
-            # missing root, not used I think
-            raise NotImplementedError
-            return self.copy(parent_to_children=parent_to_children)
-
-    @classmethod
-    def _from_nest(cls, nest):
-        # TODO add appropriate exception classes
-        if isinstance(nest, collections.abc.Mapping):
-            assert len(nest) == 1
-            node, subnodes = just_one(nest.items())
-            node = cls._parse_node(node)
-
-            if isinstance(subnodes, collections.abc.Mapping):
-                if len(subnodes) == 1 and isinstance(just_one(subnodes.keys()), Node):
-                    # just one subnode
-                    subnodes = [subnodes]
-                else:
-                    raise ValueError
-            elif not isinstance(subnodes, collections.abc.Sequence):
-                subnodes = [subnodes]
-
-            children = []
-            parent_to_children = {}
-            for subnode in subnodes:
-                subnode_, sub_p2c = cls._from_nest(subnode)
-                children.append(subnode_)
-                parent_to_children.update(sub_p2c)
-            parent_to_children[node.id] = children
-            return node, parent_to_children
-        else:
-            node = cls._parse_node(nest)
-            return node, {}
-
-
 class LabelledNodeComponent(pytools.ImmutableRecord, Labelled):
     fields = {"label"}
 
@@ -279,24 +226,24 @@ class LabelledNodeComponent(pytools.ImmutableRecord, Labelled):
 
 
 class MultiComponentLabelledNode(Node, Labelled):
-    fields = Node.fields | {"components", "label"}
+    fields = Node.fields | {"label"}
 
-    def __init__(self, components, label=None, *, id=None):
+    def __init__(self, label=None, *, id=None):
         Node.__init__(self, id)
         Labelled.__init__(self, label)
-        self.components = as_tuple(components)
 
     @property
     def degree(self) -> int:
-        return len(self.components)
+        return len(self.component_labels)
 
     @property
+    @abc.abstractmethod
     def component_labels(self):
-        return tuple(c.label for c in self.components)
+        pass
 
     @property
-    def component(self):
-        return just_one(self.components)
+    def component_label(self):
+        return just_one(self.component_labels)
 
 
 class LabelledTree(AbstractTree):
@@ -305,7 +252,7 @@ class LabelledTree(AbstractTree):
         return self.child(parent, component)
 
     def child(self, parent, component):
-        clabel = self._as_component_label(component)
+        clabel = as_component_label(component)
         cidx = parent.component_labels.index(clabel)
         try:
             return self.parent_to_children[parent.id][cidx]
@@ -314,12 +261,22 @@ class LabelledTree(AbstractTree):
 
     @cached_property
     def leaves(self):
-        return tuple(
-            (node, cpt)
-            for node in self.nodes
-            for cidx, cpt in enumerate(node.components)
-            if self.parent_to_children.get(node.id, [None] * node.degree)[cidx] is None
-        )
+        # NOTE: ordered!!
+        if self.is_empty:
+            return ()
+        else:
+            return self._collect_leaves(self.root)
+
+    def _collect_leaves(self, node):
+        assert not self.is_empty
+        leaves = []
+        for clabel in node.component_labels:
+            subnode = self.child(node, clabel)
+            if subnode:
+                leaves.extend(self._collect_leaves(subnode))
+            else:
+                leaves.append((node, clabel))
+        return tuple(leaves)
 
     def add_node(
         self,
@@ -342,7 +299,7 @@ class LabelledTree(AbstractTree):
                         "Must specify a component for parents with multiple components"
                     )
             else:
-                parent_cpt_label = parent_component
+                parent_cpt_label = as_component_label(parent_component)
 
             cpt_index = parent.component_labels.index(parent_cpt_label)
 
@@ -378,13 +335,13 @@ class LabelledTree(AbstractTree):
             node, node.with_modified_component(component, **kwargs)
         )
 
-    # invalid for frozen trees
     def add_subtree(
         self,
         subtree,
         parent=None,
         component=None,
         uniquify: bool = False,
+        uniquify_ids=False,
     ):
         """
         Parameters
@@ -395,16 +352,17 @@ class LabelledTree(AbstractTree):
             If ``False``, duplicate ``ids`` between the tree and subtree
             will raise an exception. If ``True``, the ``ids`` will be changed
             to avoid the clash.
+            Also fixes node labels.
 
-        Notes
-        -----
-        This function returns a parent-to-children mapping instead of a new tree
-        because it is non-trivial to unpick the impact of adding new nodes to the
-        tree. For example a new star forest may need to be computed. It, for now,
-        is preferable to make trees as "immutable as possible".
         """
+        # FIXME bad API, uniquify implies uniquify labels only
+        # There are cases where the labels should be distinct but IDs may clash
+        # e.g. adding subaxes for a matrix
+        if uniquify_ids:
+            assert not uniquify
+
         if uniquify:
-            raise NotImplementedError("TODO")
+            uniquify_ids = True
 
         if some_but_not_all([parent, component]):
             raise ValueError(
@@ -414,15 +372,65 @@ class LabelledTree(AbstractTree):
         if not parent:
             raise NotImplementedError("TODO")
 
+        if subtree.is_empty:
+            return self
+
         assert isinstance(parent, MultiComponentLabelledNode)
-        cidx = parent.component_labels.index(component.label)
+        clabel = as_component_label(component)
+        cidx = parent.component_labels.index(clabel)
         parent_to_children = {p: list(ch) for p, ch in self.parent_to_children.items()}
 
-        sub_p2c = dict(subtree.parent_to_children)
+        sub_p2c = {p: list(ch) for p, ch in subtree.parent_to_children.items()}
+        if uniquify_ids:
+            self._uniquify_node_ids(sub_p2c, set(parent_to_children.keys()))
+            assert (
+                len(set(sub_p2c.keys()) & set(parent_to_children.keys()) - {None}) == 0
+            )
+
         subroot = just_one(sub_p2c.pop(None))
         parent_to_children[parent.id][cidx] = subroot
         parent_to_children.update(sub_p2c)
+
+        if uniquify:
+            self._uniquify_node_labels(parent_to_children)
+
         return self.copy(parent_to_children=parent_to_children)
+
+    def _uniquify_node_labels(self, node_map, node=None, seen_labels=None):
+        if not node_map:
+            return
+
+        if node is None:
+            node = just_one(node_map[None])
+            seen_labels = frozenset({node.label})
+
+        for i, subnode in enumerate(node_map.get(node.id, [])):
+            if subnode is None:
+                continue
+            if subnode.label in seen_labels:
+                new_label = UniqueNameGenerator(set(seen_labels))(subnode.label)
+                assert new_label not in seen_labels
+                subnode = subnode.copy(label=new_label)
+                node_map[node.id][i] = subnode
+            self._uniquify_node_labels(node_map, subnode, seen_labels | {subnode.label})
+
+    # do as a traversal since there is an ordering constraint in how we replace IDs
+    def _uniquify_node_ids(self, node_map, existing_ids, node=None):
+        if not node_map:
+            return
+
+        node_id = node.id if node is not None else None
+        for i, subnode in enumerate(node_map.get(node_id, [])):
+            if subnode is None:
+                continue
+            if subnode.id in existing_ids:
+                new_id = subnode.unique_id()
+                assert new_id not in existing_ids
+                existing_ids.add(new_id)
+                new_subnode = subnode.copy(id=new_id)
+                node_map[node_id][i] = new_subnode
+                node_map[new_id] = node_map.pop(subnode.id)
+                self._uniquify_node_ids(node_map, existing_ids, new_subnode)
 
     @cached_property
     def _paths(self):
@@ -463,7 +471,7 @@ class LabelledTree(AbstractTree):
         )
 
     def path(self, node, component, ordered=False):
-        clabel = self._as_component_label(component)
+        clabel = as_component_label(component)
         node_id = self._as_node_id(node)
         path_ = self._paths[node_id, clabel]
         if ordered:
@@ -474,7 +482,7 @@ class LabelledTree(AbstractTree):
     def path_with_nodes(
         self, node, component_label, ordered=False, and_components=False
     ):
-        component_label = self._as_component_label(component_label)
+        component_label = as_component_label(component_label)
         node_id = self._as_node_id(node)
         path_ = self._paths_with_nodes[node_id, component_label]
         if and_components:
@@ -486,6 +494,18 @@ class LabelledTree(AbstractTree):
             return path_
         else:
             return pmap(path_)
+
+    @cached_property
+    def leaf_paths(self):
+        return tuple(self.path(*leaf) for leaf in self.leaves)
+
+    @cached_property
+    def ordered_leaf_paths(self):
+        return tuple(self.path(*leaf, ordered=True) for leaf in self.leaves)
+
+    @cached_property
+    def ordered_leaf_paths_with_nodes(self):
+        return tuple(self.path_with_nodes(*leaf, ordered=True) for leaf in self.leaves)
 
     def _node_from_path(self, path):
         if not path:
@@ -515,13 +535,24 @@ class LabelledTree(AbstractTree):
         else:
             return self.path_with_nodes(*node, and_components=True)
 
-    # this method is crap, if it fails I don't get any useful feedback!
-    def is_valid_path(self, path):
-        try:
-            self._node_from_path(path)
-            return True
-        except:
-            return False
+    def is_valid_path(self, path, complete=True, leaf=False):
+        if leaf:
+            all_paths = [set(self.path(node, cpt).items()) for node, cpt in self.leaves]
+        else:
+            all_paths = [
+                set(self.path(node, cpt).items())
+                for node in self.nodes
+                for cpt in node.components
+            ]
+
+        path_set = set(path.items())
+
+        compare = operator.eq if complete else operator.le
+
+        for path_ in all_paths:
+            if compare(path_set, path_):
+                return True
+        return False
 
     def find_component(self, node_label, cpt_label, also_node=False):
         """Return the first component in the tree matching the given labels.
@@ -626,12 +657,12 @@ class LabelledTree(AbstractTree):
         else:
             raise TypeError(f"No handler defined for {type(node).__name__}")
 
-    @staticmethod
-    def _as_component_label(component):
-        if isinstance(component, LabelledNodeComponent):
-            return component.label
-        else:
-            return component
+
+def as_component_label(component):
+    if isinstance(component, LabelledNodeComponent):
+        return component.label
+    else:
+        return component
 
 
 def previsit(

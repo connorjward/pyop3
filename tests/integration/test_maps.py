@@ -1,7 +1,7 @@
 import loopy as lp
 import numpy as np
 import pytest
-from pyrsistent import pmap
+from pyrsistent import freeze, pmap
 
 import pyop3 as op3
 from pyop3.ir import LOOPY_LANG_VERSION, LOOPY_TARGET
@@ -15,6 +15,23 @@ def vector_inc_kernel():
         "y[0] = y[0] + x[i]",
         [
             lp.GlobalArg("x", op3.ScalarType, (3,), is_input=True, is_output=False),
+            lp.GlobalArg("y", op3.ScalarType, (1,), is_input=True, is_output=True),
+        ],
+        name="vector_inc",
+        target=LOOPY_TARGET,
+        lang_version=LOOPY_LANG_VERSION,
+    )
+    return op3.Function(lpy_kernel, [op3.READ, op3.INC])
+
+
+# TODO make a function not a fixture
+@pytest.fixture
+def vector2_inc_kernel():
+    lpy_kernel = lp.make_kernel(
+        "{ [i]: 0 <= i < 2 }",
+        "y[0] = y[0] + x[i]",
+        [
+            lp.GlobalArg("x", op3.ScalarType, (2,), is_input=True, is_output=False),
             lp.GlobalArg("y", op3.ScalarType, (1,), is_input=True, is_output=True),
         ],
         name="vector_inc",
@@ -73,7 +90,10 @@ def vec12_inc_kernel():
 
 
 @pytest.mark.parametrize("nested", [True, False])
-def test_inc_from_tabulated_map(scalar_inc_kernel, vector_inc_kernel, nested):
+@pytest.mark.parametrize("indexed", [None, "slice", "subset"])
+def test_inc_from_tabulated_map(
+    scalar_inc_kernel, vector_inc_kernel, vector2_inc_kernel, nested, indexed
+):
     m, n = 4, 3
     map_data = np.asarray([[1, 2, 0], [2, 0, 1], [3, 2, 3], [2, 0, 1]])
 
@@ -83,13 +103,29 @@ def test_inc_from_tabulated_map(scalar_inc_kernel, vector_inc_kernel, nested):
     )
     dat1 = op3.HierarchicalArray(axis, name="dat1", dtype=dat0.dtype)
 
-    map_axes = op3.AxisTree.from_nest({axis: op3.Axis(n)})
+    map_axes = op3.AxisTree.from_nest({axis: op3.Axis({"pt0": n}, "ax1")})
     map_dat = op3.HierarchicalArray(
         map_axes,
         name="map0",
         data=map_data.flatten(),
         dtype=op3.IntType,
     )
+
+    if indexed == "slice":
+        map_dat = map_dat[:, 1:3]
+        kernel = vector2_inc_kernel
+    elif indexed == "subset":
+        subset_ = op3.HierarchicalArray(
+            op3.Axis({"pt0": 2}, "ax1"),
+            name="subset",
+            data=np.asarray([1, 2]),
+            dtype=op3.IntType,
+        )
+        map_dat = map_dat[:, subset_]
+        kernel = vector2_inc_kernel
+    else:
+        kernel = vector_inc_kernel
+
     map0 = op3.Map(
         {
             pmap({"ax0": "pt0"}): [
@@ -100,17 +136,26 @@ def test_inc_from_tabulated_map(scalar_inc_kernel, vector_inc_kernel, nested):
     )
 
     if nested:
-        op3.do_loop(
+        # op3.do_loop(
+        loop = op3.loop(
             p := axis.index(),
             op3.loop(q := map0(p).index(), scalar_inc_kernel(dat0[q], dat1[p])),
         )
+        loop()
     else:
-        op3.do_loop(p := axis.index(), vector_inc_kernel(dat0[map0(p)], dat1[p]))
+        op3.do_loop(p := axis.index(), kernel(dat0[map0(p)], dat1[p]))
 
     expected = np.zeros_like(dat1.data_ro)
     for i in range(m):
-        for j in range(n):
-            expected[i] += dat0.data_ro[map_data[i, j]]
+        if indexed == "slice":
+            for j in range(1, 3):
+                expected[i] += dat0.data_ro[map_data[i, j]]
+        elif indexed == "subset":
+            for j in [1, 2]:
+                expected[i] += dat0.data_ro[map_data[i, j]]
+        else:
+            for j in range(n):
+                expected[i] += dat0.data_ro[map_data[i, j]]
     assert np.allclose(dat1.data_ro, expected)
 
 
@@ -175,8 +220,8 @@ def test_inc_with_multiple_maps(vector_inc_kernel):
     )
     dat1 = op3.HierarchicalArray(axis, name="dat1", dtype=dat0.dtype)
 
-    map_axes0 = op3.AxisTree.from_nest({axis: op3.Axis(arity0)})
-    map_axes1 = op3.AxisTree.from_nest({axis: op3.Axis(arity1)})
+    map_axes0 = op3.AxisTree.from_nest({axis: op3.Axis(arity0, "ax1")})
+    map_axes1 = op3.AxisTree.from_nest({axis: op3.Axis(arity1, "ax1")})
 
     map_dat0 = op3.HierarchicalArray(
         map_axes0,
@@ -198,7 +243,9 @@ def test_inc_with_multiple_maps(vector_inc_kernel):
                 op3.TabulatedMapComponent("ax0", "pt0", map_dat1),
             ],
         },
-        "map0",
+        # FIXME
+        # "map0",
+        "ax1",
     )
 
     op3.do_loop(p := axis.index(), vector_inc_kernel(dat0[map0(p)], dat1[p]))
@@ -338,34 +385,238 @@ def test_vector_inc_with_map_composition(vec2_inc_kernel, vec12_inc_kernel, nest
     assert np.allclose(dat1.data_ro, expected)
 
 
-@pytest.mark.skip(
-    reason="Passing ragged arguments through to the local is not yet supported"
-)
-def test_inc_with_variable_arity_map(ragged_inc_kernel):
+def test_partial_map_connectivity(vector2_inc_kernel):
+    axis = op3.Axis({"pt0": 3}, "ax0")
+    dat0 = op3.HierarchicalArray(axis, data=np.arange(3, dtype=op3.ScalarType))
+    dat1 = op3.HierarchicalArray(axis, dtype=dat0.dtype)
+
+    map_axes = op3.AxisTree.from_nest({axis: op3.Axis(2)})
+    map_data = [[0, 1], [2, 0], [2, 2]]
+    map_array = np.asarray(flatten(map_data), dtype=op3.IntType)
+    map_dat = op3.HierarchicalArray(map_axes, data=map_array)
+
+    # Some elements of map_ are not present in axis, so should be ignored
+    map_ = op3.Map(
+        {
+            freeze({"ax0": "pt0"}): [
+                op3.TabulatedMapComponent("ax0", "pt0", map_dat),
+                op3.TabulatedMapComponent("not_ax0", "not_pt0", map_dat),
+            ]
+        },
+    )
+
+    op3.do_loop(p := axis.index(), vector2_inc_kernel(dat0[map_(p)], dat1[p]))
+
+    expected = np.zeros_like(dat1.data_ro)
+    for i in range(3):
+        for j in range(2):
+            expected[i] += dat0.data_ro[map_data[i][j]]
+    assert np.allclose(dat1.data_ro, expected)
+
+
+def test_inc_with_variable_arity_map(scalar_inc_kernel):
     m = 3
-    nnzdata = np.asarray([3, 2, 1], dtype=IntType)
-    mapdata = [[2, 1, 0], [2, 1], [2]]
+    axis = op3.Axis({"pt0": m}, "ax0")
+    dat0 = op3.HierarchicalArray(
+        axis, name="dat0", data=np.arange(axis.size, dtype=op3.ScalarType)
+    )
+    dat1 = op3.HierarchicalArray(axis, name="dat1", dtype=dat0.dtype)
 
-    axes = AxisTree(Axis(m, "ax0"))
-    dat0 = MultiArray(axes, name="dat0", data=np.arange(m, dtype=ScalarType))
-    dat1 = MultiArray(axes, name="dat1", data=np.zeros(m, dtype=ScalarType))
+    nnz_data = np.asarray([3, 2, 1], dtype=op3.IntType)
+    nnz = op3.HierarchicalArray(axis, name="nnz", data=nnz_data, max_value=3)
 
-    nnz = MultiArray(axes, name="nnz", data=nnzdata, max_value=3)
-
-    maxes = axes.add_subaxis(Axis(nnz, "ax1"), axes.leaf)
-    map0 = MultiArray(
-        maxes, name="map0", data=np.asarray(flatten(mapdata), dtype=IntType)
+    map_axes = op3.AxisTree.from_nest({axis: op3.Axis(nnz)})
+    map_data = [[2, 1, 0], [2, 1], [2]]
+    map_array = np.asarray(flatten(map_data), dtype=op3.IntType)
+    map_dat = op3.HierarchicalArray(map_axes, name="map0", data=map_array)
+    map0 = op3.Map(
+        {freeze({"ax0": "pt0"}): [op3.TabulatedMapComponent("ax0", "pt0", map_dat)]},
+        name="map0",
     )
 
-    p = IndexTree(Index(Range("ax0", m)))
-    q = p.put_node(
-        Index(TabulatedMap([("ax0", 0)], [("ax0", 0)], arity=nnz[p], data=map0[p])),
-        p.leaf,
+    op3.do_loop(
+        p := axis.index(),
+        op3.loop(q := map0(p).index(), scalar_inc_kernel(dat0[q], dat1[p])),
     )
 
-    do_loop(p, ragged_inc_kernel(dat0[q], dat1[p]))
+    expected = np.zeros_like(dat1.data_ro)
+    for i in range(m):
+        for j in map_data[i]:
+            expected[i] += dat0.data_ro[j]
+    assert np.allclose(dat1.data_ro, expected)
 
-    assert np.allclose(dat1.data, [sum(xs) for xs in mapdata])
+
+@pytest.mark.parametrize("method", ["codegen", "python"])
+def test_loop_over_multiple_ragged_maps(factory, method):
+    m = 5
+    axis = op3.Axis({"pt0": m}, "ax0")
+    dat0 = op3.HierarchicalArray(
+        axis, name="dat0", data=np.arange(axis.size, dtype=op3.IntType)
+    )
+    dat1 = op3.HierarchicalArray(axis, name="dat1", dtype=dat0.dtype)
+
+    # map0
+    nnz0_data = np.asarray([3, 2, 1, 0, 3], dtype=op3.IntType)
+    nnz0 = op3.HierarchicalArray(axis, name="nnz0", data=nnz0_data)
+
+    map0_axes = op3.AxisTree.from_nest({axis: op3.Axis(nnz0)})
+    map0_data = [[2, 4, 0], [3, 3], [1], [], [4, 2, 1]]
+    map0_array = np.asarray(op3.utils.flatten(map0_data), dtype=op3.IntType)
+    map0_dat = op3.HierarchicalArray(map0_axes, name="map0", data=map0_array)
+    map0 = op3.Map(
+        {freeze({"ax0": "pt0"}): [op3.TabulatedMapComponent("ax0", "pt0", map0_dat)]},
+        name="map0",
+    )
+
+    # map1
+    nnz1_data = np.asarray([2, 0, 3, 1, 2], dtype=op3.IntType)
+    nnz1 = op3.HierarchicalArray(axis, name="nnz1", data=nnz1_data)
+
+    map1_axes = op3.AxisTree.from_nest({axis: op3.Axis(nnz1)})
+    map1_data = [[4, 0], [], [1, 0, 0], [3], [2, 3]]
+    map1_array = np.asarray(op3.utils.flatten(map1_data), dtype=op3.IntType)
+    map1_dat = op3.HierarchicalArray(map1_axes, name="map1", data=map1_array)
+    map1 = op3.Map(
+        {freeze({"ax0": "pt0"}): [op3.TabulatedMapComponent("ax0", "pt0", map1_dat)]},
+        name="map1",
+    )
+
+    inc = factory.inc_kernel(1, op3.IntType)
+
+    if method == "codegen":
+        op3.do_loop(
+            p := axis.index(),
+            op3.loop(
+                q := map1(map0(p)).index(),
+                inc(dat0[q], dat1[p]),
+            ),
+        )
+    else:
+        assert method == "python"
+        for p in axis.iter():
+            for q in map1(map0(p.index)).iter({p}):
+                prev_val = dat1.get_value(p.target_exprs, p.target_path)
+                inc = dat0.get_value(q.target_exprs, q.target_path)
+                dat1.set_value(p.target_exprs, prev_val + inc, p.target_path)
+
+    expected = np.zeros_like(dat1.data_ro)
+    for i in range(m):
+        for j in map0_data[i]:
+            for k in map1_data[j]:
+                expected[i] += dat0.data_ro[k]
+    assert (dat1.data_ro == expected).all()
+
+
+@pytest.mark.parametrize("method", ["codegen", "python"])
+def test_loop_over_multiple_multi_component_ragged_maps(factory, method):
+    m, n = 5, 6
+    axis = op3.Axis({"pt0": m, "pt1": n}, "ax0")
+    dat0 = op3.HierarchicalArray(
+        axis, name="dat0", data=np.arange(axis.size, dtype=op3.IntType)
+    )
+    dat1 = op3.HierarchicalArray(axis, name="dat1", dtype=dat0.dtype)
+
+    # pt0 -> pt0
+    nnz00_data = np.asarray([3, 2, 1, 0, 3], dtype=op3.IntType)
+    nnz00 = op3.HierarchicalArray(axis["pt0"], name="nnz00", data=nnz00_data)
+    map0_axes0 = op3.AxisTree.from_nest({axis["pt0"].root: op3.Axis(nnz00)})
+    map0_data0 = [[2, 4, 0], [3, 3], [1], [], [4, 2, 1]]
+    map0_array0 = np.asarray(op3.utils.flatten(map0_data0), dtype=op3.IntType)
+    map0_dat0 = op3.HierarchicalArray(map0_axes0, name="map00", data=map0_array0)
+
+    # pt0 -> pt1
+    nnz01_data = np.asarray([1, 2, 1, 0, 4], dtype=op3.IntType)
+    nnz01 = op3.HierarchicalArray(axis["pt0"], name="nnz01", data=nnz01_data)
+    map0_axes1 = op3.AxisTree.from_nest({axis["pt0"].root: op3.Axis(nnz01)})
+    map0_data1 = [[2], [1, 0], [2], [], [1, 4, 2, 1]]
+    map0_array1 = np.asarray(op3.utils.flatten(map0_data1), dtype=op3.IntType)
+    map0_dat1 = op3.HierarchicalArray(map0_axes1, name="map01", data=map0_array1)
+
+    # pt1 -> pt1 (pt1 -> pt0 not implemented)
+    nnz1_data = np.asarray([2, 2, 1, 3, 0, 2], dtype=op3.IntType)
+    nnz1 = op3.HierarchicalArray(axis["pt1"], name="nnz1", data=nnz1_data)
+    map1_axes = op3.AxisTree.from_nest({axis["pt1"].root: op3.Axis(nnz1)})
+    map1_data = [[2, 5], [0, 1], [3], [5, 5, 5], [], [2, 1]]
+    map1_array = np.asarray(op3.utils.flatten(map1_data), dtype=op3.IntType)
+    map1_dat = op3.HierarchicalArray(map1_axes, name="map1", data=map1_array)
+
+    map_ = op3.Map(
+        {
+            freeze({"ax0": "pt0"}): [
+                op3.TabulatedMapComponent("ax0", "pt0", map0_dat0),
+                op3.TabulatedMapComponent("ax0", "pt1", map0_dat1),
+            ],
+            freeze({"ax0": "pt1"}): [
+                op3.TabulatedMapComponent("ax0", "pt1", map1_dat),
+            ],
+        },
+        name="map_",
+    )
+
+    inc = factory.inc_kernel(1, op3.IntType)
+
+    if method == "codegen":
+        op3.do_loop(
+            p := axis["pt0"].index(),
+            op3.loop(
+                q := map_(map_(p)).index(),
+                inc(dat0[q], dat1[p]),
+            ),
+        )
+    else:
+        assert method == "python"
+        for p in axis["pt0"].iter():
+            for q in map_(map_(p.index)).iter({p}):
+                prev_val = dat1.get_value(p.target_exprs, p.target_path)
+                inc = dat0.get_value(q.target_exprs, q.target_path)
+                dat1.set_value(p.target_exprs, prev_val + inc, p.target_path)
+
+    # To see what is going on we can determine the expected result in two
+    # ways: one pythonically and one equivalent to the generated code.
+    # We leave both here for reference as they aid in understanding what
+    # the code is doing.
+    expected_pythonic = np.zeros_like(dat1.data_ro)
+    for i in range(m):
+        # pt0 -> pt0 -> pt0
+        for j in map0_data0[i]:
+            for k in map0_data0[j]:
+                expected_pythonic[i] += dat0.data_ro[k]
+        # pt0 -> pt0 -> pt1
+        for j in map0_data0[i]:
+            for k in map0_data1[j]:
+                # add m since we are targeting pt1
+                expected_pythonic[i] += dat0.data_ro[k + m]
+        # pt0 -> pt1 -> pt1
+        for j in map0_data1[i]:
+            for k in map1_data[j]:
+                # add m since we are targeting pt1
+                expected_pythonic[i] += dat0.data_ro[k + m]
+
+    expected_codegen = np.zeros_like(dat1.data_ro)
+    for i in range(m):
+        # pt0 -> pt0 -> pt0
+        for j in range(nnz00_data[i]):
+            map_idx = map0_data0[i][j]
+            for k in range(nnz00_data[map_idx]):
+                ptr = map0_data0[map_idx][k]
+                expected_codegen[i] += dat0.data_ro[ptr]
+        # pt0 -> pt0 -> pt1
+        for j in range(nnz00_data[i]):
+            map_idx = map0_data0[i][j]
+            for k in range(nnz01_data[map_idx]):
+                # add m since we are targeting pt1
+                ptr = map0_data1[map_idx][k] + m
+                expected_codegen[i] += dat0.data_ro[ptr]
+        # pt0 -> pt1 -> pt1
+        for j in range(nnz01_data[i]):
+            map_idx = map0_data1[i][j]
+            for k in range(nnz1_data[map_idx]):
+                # add m since we are targeting pt1
+                ptr = map1_data[map_idx][k] + m
+                expected_codegen[i] += dat0.data_ro[ptr]
+
+    assert (expected_pythonic == expected_codegen).all()
+    assert (dat1.data_ro == expected_pythonic).all()
 
 
 def test_map_composition(vec2_inc_kernel):
@@ -374,6 +625,10 @@ def test_map_composition(vec2_inc_kernel):
     iterset = op3.Axis({"pt0": 2}, "ax0")
     dat_axis0 = op3.Axis(10)
     dat_axis1 = op3.Axis(arity1)
+    dat0 = op3.HierarchicalArray(
+        dat_axis0, name="dat0", data=np.arange(dat_axis0.size, dtype=op3.ScalarType)
+    )
+    dat1 = op3.HierarchicalArray(dat_axis1, name="dat1", dtype=dat0.dtype)
 
     map_axes0 = op3.AxisTree.from_nest({iterset: op3.Axis(arity0)})
     map_data0 = np.asarray([[2, 4, 0], [6, 7, 1]])
@@ -388,8 +643,20 @@ def test_map_composition(vec2_inc_kernel):
                 ),
             ],
         },
-        "map0",
     )
+
+    # The labelling for intermediate maps is quite opaque, we use the ID of the
+    # ContextFreeCalledMap nodes in the index tree. This is so we do not hit any
+    # conflicts when we compose the same map multiple times. I am unsure how to
+    # expose this to the user nicely, and this is a use case I do not imagine
+    # anyone actually wanting, so I am unpicking the right label from the
+    # intermediate indexed object.
+    p = iterset.index()
+    indexed_dat0 = dat0[map0(p)]
+    cf_indexed_dat0 = indexed_dat0.with_context(
+        {p.id: ({"ax0": "pt0"}, {"ax0": "pt0"})}
+    )
+    called_map_node = op3.utils.just_one(cf_indexed_dat0.axes.nodes)
 
     # this map targets the entries in map0 so it can only contain 0s, 1s and 2s
     map_axes1 = op3.AxisTree.from_nest({iterset: op3.Axis(arity1)})
@@ -400,18 +667,14 @@ def test_map_composition(vec2_inc_kernel):
     map1 = op3.Map(
         {
             pmap({"ax0": "pt0"}): [
-                op3.TabulatedMapComponent("map0", "a", map_dat1),
+                op3.TabulatedMapComponent(
+                    called_map_node.label, called_map_node.component.label, map_dat1
+                ),
             ],
         },
-        "map1",
     )
 
-    dat0 = op3.HierarchicalArray(
-        dat_axis0, name="dat0", data=np.arange(dat_axis0.size), dtype=op3.ScalarType
-    )
-    dat1 = op3.HierarchicalArray(dat_axis1, name="dat1", dtype=dat0.dtype)
-
-    op3.do_loop(p := iterset.index(), vec2_inc_kernel(dat0[map0(p)][map1(p)], dat1))
+    op3.do_loop(p, vec2_inc_kernel(indexed_dat0[map1(p)], dat1))
 
     expected = np.zeros_like(dat1.data_ro)
     for i in range(iterset.size):
@@ -423,7 +686,8 @@ def test_map_composition(vec2_inc_kernel):
     assert np.allclose(dat1.data_ro, expected)
 
 
-def test_recursive_multi_component_maps():
+@pytest.mark.parametrize("method", ["codegen", "python"])
+def test_recursive_multi_component_maps(method):
     m, n = 5, 6
     arity0_0, arity0_1, arity1 = 3, 2, 1
 
@@ -502,9 +766,17 @@ def test_recursive_multi_component_maps():
         target=LOOPY_TARGET,
         lang_version=LOOPY_LANG_VERSION,
     )
-    sum_kernel = op3.Function(lpy_kernel, [op3.READ, op3.WRITE])
+    sum_kernel = op3.Function(lpy_kernel, [op3.READ, op3.INC])
 
-    op3.do_loop(p := axis["pt0"].index(), sum_kernel(dat0[map1(map0(p))], dat1[p]))
+    if method == "codegen":
+        op3.do_loop(p := axis["pt0"].index(), sum_kernel(dat0[map1(map0(p))], dat1[p]))
+    else:
+        assert method == "python"
+        for p in axis["pt0"].iter():
+            for q in map1(map0(p.index)).iter({p}):
+                prev_val = dat1.get_value(p.target_exprs, p.target_path)
+                inc = dat0.get_value(q.target_exprs, q.target_path)
+                dat1.set_value(p.target_exprs, prev_val + inc, p.target_path)
 
     expected = np.zeros_like(dat1.data_ro)
     for i in range(m):

@@ -34,12 +34,14 @@ def test_nested_multi_component_loops(scalar_copy_kernel):
     axes = op3.AxisTree.from_nest({axis0: [axis1, axis1_dup]})
 
     dat0 = op3.HierarchicalArray(
-        axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType
+        axes, name="dat0", data=np.arange(axes.size, dtype=op3.ScalarType)
     )
     dat1 = op3.HierarchicalArray(axes, name="dat1", dtype=dat0.dtype)
 
-    op3.do_loop(
+    # op3.do_loop(
+    loop = op3.loop(
         p := axis0.index(),
         op3.loop(q := axis1.index(), scalar_copy_kernel(dat0[p, q], dat1[p, q])),
     )
+    loop()
     assert np.allclose(dat1.data_ro, dat0.data_ro)

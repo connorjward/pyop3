@@ -1,14 +1,9 @@
-import ctypes
-
 import loopy as lp
 import numpy as np
-import pymbolic as pym
 import pytest
-from pyrsistent import pmap
 
 import pyop3 as op3
 from pyop3.ir.lower import LOOPY_LANG_VERSION, LOOPY_TARGET
-from pyop3.utils import flatten
 
 
 @pytest.fixture
@@ -117,10 +112,14 @@ def test_vector_copy_with_permuted_multi_component_axes(vector_copy_kernel):
     a, b = 2, 3
     numbering = [4, 2, 0, 3, 1]
 
-    root = op3.Axis({"a": m, "b": n})
+    root = op3.Axis({"a": m, "b": n}, "ax0")
     proot = root.copy(numbering=numbering)
-    axes = op3.AxisTree.from_nest({root: [op3.Axis(a), op3.Axis(b)]})
-    paxes = op3.AxisTree.from_nest({proot: [op3.Axis(a), op3.Axis(b)]})
+    axes = op3.AxisTree.from_nest(
+        {root: [op3.Axis({"pt0": a}, "ax1"), op3.Axis({"pt0": b}, "ax2")]}
+    )
+    paxes = op3.AxisTree.from_nest(
+        {proot: [op3.Axis({"pt0": a}, "ax1"), op3.Axis({"pt0": b}, "ax2")]}
+    )
 
     dat0 = op3.HierarchicalArray(
         axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType
@@ -136,22 +135,25 @@ def test_vector_copy_with_permuted_multi_component_axes(vector_copy_kernel):
     assert not np.allclose(dat1.data_ro, dat0.data_ro)
 
     izero = [
-        [("a", 0), 0],
-        [("a", 0), 1],
-        [("a", 1), 0],
-        [("a", 1), 1],
-        [("a", 2), 0],
-        [("a", 2), 1],
+        {"ax0": 0, "ax1": 0},
+        {"ax0": 0, "ax1": 1},
+        {"ax0": 1, "ax1": 0},
+        {"ax0": 1, "ax1": 1},
+        {"ax0": 2, "ax1": 0},
+        {"ax0": 2, "ax1": 1},
     ]
-    icopied = [
-        [("b", 0), 0],
-        [("b", 0), 1],
-        [("b", 0), 2],
-        [("b", 1), 0],
-        [("b", 1), 1],
-        [("b", 1), 2],
-    ]
+    path = {"ax0": "a", "ax1": "pt0"}
     for ix in izero:
-        assert np.allclose(dat1.get_value(ix), 0.0)
+        assert np.allclose(dat1.get_value(ix, path), 0.0)
+
+    icopied = [
+        {"ax0": 0, "ax2": 0},
+        {"ax0": 0, "ax2": 1},
+        {"ax0": 0, "ax2": 2},
+        {"ax0": 1, "ax2": 0},
+        {"ax0": 1, "ax2": 1},
+        {"ax0": 1, "ax2": 2},
+    ]
+    path = {"ax0": "b", "ax2": "pt0"}
     for ix in icopied:
-        assert np.allclose(dat1.get_value(ix), dat0.get_value(ix))
+        assert np.allclose(dat1.get_value(ix, path), dat0.get_value(ix, path))

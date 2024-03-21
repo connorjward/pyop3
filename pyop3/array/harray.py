@@ -26,23 +26,24 @@ from pyop3.axtree import (
     ContextSensitive,
     as_axis_tree,
 )
+from pyop3.axtree.layout import eval_offset
 from pyop3.axtree.tree import (
     AxisVariable,
     ExpressionEvaluator,
     Indexed,
     MultiArrayCollector,
-    _path_and_indices_from_index_tuple,
-    _trim_path,
+    PartialAxisTree,
 )
 from pyop3.buffer import Buffer, DistributedBuffer
 from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
-from pyop3.itree import IndexTree, as_index_forest, index_axes
-from pyop3.itree.tree import CalledMapVariable, collect_loop_indices, iter_axis_tree
-from pyop3.lang import KernelArgument
+from pyop3.lang import KernelArgument, ReplaceAssignment, do_loop
+from pyop3.log import warning
+from pyop3.sf import single_star
 from pyop3.utils import (
     PrettyTuple,
     UniqueNameGenerator,
     as_tuple,
+    debug_assert,
     deprecated,
     is_single_valued,
     just_one,
@@ -59,25 +60,71 @@ class IncompatibleShapeError(Exception):
     """TODO, also bad name"""
 
 
-class MultiArrayVariable(pym.primitives.Variable):
-    mapper_method = sys.intern("map_multi_array")
+class ArrayVar(pym.primitives.AlgebraicLeaf):
+    mapper_method = sys.intern("map_array")
 
-    def __init__(self, array, indices):
-        super().__init__(array.name)
+    def __init__(self, array, indices, path=None):
+        if path is None:
+            if array.axes.is_empty:
+                path = pmap()
+            else:
+                path = just_one(array.axes.leaf_paths)
+
+        super().__init__()
         self.array = array
         self.indices = freeze(indices)
-
-    def __repr__(self) -> str:
-        return f"MultiArrayVariable({self.array!r}, {self.indices!r})"
+        self.path = freeze(path)
 
     def __getinitargs__(self):
-        return self.array, self.indices
+        return (self.array, self.indices, self.path)
 
-    @property
-    def datamap(self):
-        return self.array.datamap | merge_dicts(
-            idx.datamap for idx in self.indices.values()
-        )
+    # def __str__(self) -> str:
+    #     return f"{self.array.name}[{{{', '.join(f'{i[0]}: {i[1]}' for i in self.indices.items())}}}]"
+    #
+    # def __repr__(self) -> str:
+    #     return f"MultiArrayVariable({self.array!r}, {self.indices!r})"
+
+
+from pymbolic.mapper.stringifier import PREC_CALL, PREC_NONE, StringifyMapper
+
+
+# This was adapted from pymbolic's map_subscript
+def stringify_array(self, array, enclosing_prec, *args, **kwargs):
+    index_str = self.join_rec(
+        ", ", array.index_exprs.values(), PREC_NONE, *args, **kwargs
+    )
+
+    return self.parenthesize_if_needed(
+        self.format("%s[%s]", array.name, index_str), enclosing_prec, PREC_CALL
+    )
+
+
+pym.mapper.stringifier.StringifyMapper.map_array = stringify_array
+
+
+CalledMapVariable = ArrayVar
+
+
+# does not belong here!
+# class CalledMapVariable(ArrayVar):
+#     mapper_method = sys.intern("map_called_map_variable")
+#
+#     def __init__(self, array, path, input_index_exprs, shape_index_exprs):
+#         super().__init__(array, {**input_index_exprs, **shape_index_exprs}, path)
+#         self.input_index_exprs = freeze(input_index_exprs)
+#         self.shape_index_exprs = freeze(shape_index_exprs)
+#
+#     def __getinitargs__(self):
+#         return (
+#             self.array,
+#             self.target_path,
+#             self.input_index_exprs,
+#             self.shape_index_exprs,
+#         )
+
+
+class FancyIndexWriteException(Exception):
+    pass
 
 
 class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
@@ -97,11 +144,13 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         *,
         data=None,
         max_value=None,
+        layouts=None,
         target_paths=None,
         index_exprs=None,
-        layouts=None,
+        outer_loops=None,
         name=None,
         prefix=None,
+        constant=False,
     ):
         super().__init__(name=name, prefix=prefix)
 
@@ -124,56 +173,60 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
                 data = np.asarray(data, dtype=dtype)
                 shape = data.shape
             else:
-                shape = axes.size
+                shape = axes.global_size
+
             data = DistributedBuffer(
-                shape, dtype, name=self.name, data=data, sf=axes.sf
+                shape,
+                axes.sf or axes.comm,
+                dtype,
+                name=self.name,
+                data=data,
             )
 
         self.buffer = data
-
-        # instead implement "materialize"
-        self.axes = axes
-
+        self._axes = axes
         self.max_value = max_value
+
+        # TODO This attr really belongs to the buffer not the array
+        self.constant = constant
 
         if some_but_not_all(x is None for x in [target_paths, index_exprs]):
             raise ValueError
 
-        self._target_paths = target_paths or axes._default_target_paths()
-        self._index_exprs = index_exprs or axes._default_index_exprs()
+        if target_paths is None:
+            target_paths = axes._default_target_paths()
+        if index_exprs is None:
+            index_exprs = axes._default_index_exprs()
 
-        self.layouts = layouts or axes.layouts
+        self._target_paths = freeze(target_paths)
+        self._index_exprs = freeze(index_exprs)
+        self._outer_loops = outer_loops or ()
+
+        self._layouts = layouts if layouts is not None else axes.layouts
 
     def __str__(self):
         return self.name
 
-    def __getitem__(self, indices) -> Union[MultiArray, ContextSensitiveMultiArray]:
-        from pyop3.itree.tree import (
-            _compose_bits,
-            _index_axes,
-            as_index_tree,
-            collect_loop_contexts,
-            index_axes,
-        )
+    def __getitem__(self, indices):
+        return self.getitem(indices, strict=False)
 
-        loop_contexts = collect_loop_contexts(indices)
-        if not loop_contexts:
-            index_tree = just_one(as_index_forest(indices, axes=self.axes))
-            (
-                indexed_axes,
-                target_path_per_indexed_cpt,
-                index_exprs_per_indexed_cpt,
-                layout_exprs_per_indexed_cpt,
-            ) = _index_axes(self.axes, index_tree, pmap())
+    def getitem(self, indices, *, strict=False):
+        from pyop3.itree.tree import _compose_bits, _index_axes, as_index_forest
+
+        index_forest = as_index_forest(indices, axes=self.axes, strict=strict)
+        if len(index_forest) == 1 and pmap() in index_forest:
+            index_tree = just_one(index_forest.values())
+            indexed_axes = _index_axes(index_tree, pmap(), self.axes)
+
             target_paths, index_exprs, layout_exprs = _compose_bits(
                 self.axes,
                 self.target_paths,
                 self.index_exprs,
                 None,
                 indexed_axes,
-                target_path_per_indexed_cpt,
-                index_exprs_per_indexed_cpt,
-                layout_exprs_per_indexed_cpt,
+                indexed_axes.target_paths,
+                indexed_axes.index_exprs,
+                indexed_axes.layout_exprs,
             )
 
             return HierarchicalArray(
@@ -182,19 +235,14 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
                 max_value=self.max_value,
                 target_paths=target_paths,
                 index_exprs=index_exprs,
+                outer_loops=indexed_axes.outer_loops,
                 layouts=self.layouts,
                 name=self.name,
             )
 
         array_per_context = {}
-        for index_tree in as_index_forest(indices, axes=self.axes):
-            loop_context = index_tree.loop_context
-            (
-                indexed_axes,
-                target_path_per_indexed_cpt,
-                index_exprs_per_indexed_cpt,
-                layout_exprs_per_indexed_cpt,
-            ) = _index_axes(self.axes, index_tree, loop_context)
+        for loop_context, index_tree in index_forest.items():
+            indexed_axes = _index_axes(index_tree, loop_context, self.axes)
 
             (
                 target_paths,
@@ -206,29 +254,26 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
                 self.index_exprs,
                 None,
                 indexed_axes,
-                target_path_per_indexed_cpt,
-                index_exprs_per_indexed_cpt,
-                layout_exprs_per_indexed_cpt,
+                indexed_axes.target_paths,
+                indexed_axes.index_exprs,
+                indexed_axes.layout_exprs,
             )
 
             array_per_context[loop_context] = HierarchicalArray(
                 indexed_axes,
                 data=self.array,
-                max_value=self.max_value,
+                layouts=self.layouts,
                 target_paths=target_paths,
                 index_exprs=index_exprs,
-                layouts=self.layouts,
+                outer_loops=indexed_axes.outer_loops,
                 name=self.name,
+                max_value=self.max_value,
             )
         return ContextSensitiveMultiArray(array_per_context)
 
     # Since __getitem__ is implemented, this class is implicitly considered
     # to be iterable (which it's not). This avoids some confusing behaviour.
     __iter__ = None
-
-    @property
-    def valid_ranks(self):
-        return frozenset(range(self.axes.depth + 1))
 
     @property
     @deprecated("buffer")
@@ -240,28 +285,81 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         return self.array.dtype
 
     @property
+    def kernel_dtype(self):
+        # TODO Think about the fact that the dtype refers to either to dtype of the
+        # array entries (e.g. double), or the dtype of the whole thing (double*)
+        return self.dtype
+
+    @property
     @deprecated(".data_rw")
     def data(self):
         return self.data_rw
 
     @property
     def data_rw(self):
-        return self.array.data_rw
+        self._check_no_copy_access()
+        return self.buffer.data_rw[self._buffer_indices]
 
     @property
     def data_ro(self):
-        return self.array.data_ro
+        if not isinstance(self._buffer_indices, slice):
+            warning(
+                "Read-only access to the array is provided with a copy, "
+                "consider avoiding if possible."
+            )
+        return self.buffer.data_ro[self._buffer_indices]
 
     @property
     def data_wo(self):
         """
-        Have to be careful. If not setting all values (i.e. subsets) should call
-        `reduce_leaves_to_roots` first.
+        Have to be careful. If not setting all values (i.e. subsets) should
+        call `reduce_leaves_to_roots` first.
 
         When this is called we set roots_valid, claiming that any (lazy) 'in-flight' writes
         can be dropped.
         """
-        return self.array.data_wo
+        self._check_no_copy_access()
+        return self.buffer.data_wo[self._buffer_indices]
+
+    # TODO: This should be more widely cached, don't want to tabulate more often
+    # than required.
+    @cached_property
+    def _buffer_indices(self):
+        assert self.size > 0
+
+        indices = np.full(self.axes.owned.size, -1, dtype=IntType)
+        # TODO: Handle any outer loops.
+        # TODO: Generate code for this.
+        for i, p in enumerate(self.axes.iter()):
+            indices[i] = self.offset(p.source_exprs, p.source_path)
+        debug_assert(lambda: (indices >= 0).all())
+
+        # The packed indices are collected component-by-component so, for
+        # numbered multi-component axes, they are not in ascending order.
+        # We sort them so we can test for "affine-ness".
+        indices.sort()
+
+        # See if we can represent these indices as a slice. This is important
+        # because slices enable no-copy access to the array.
+        steps = np.unique(indices[1:] - indices[:-1])
+        if len(steps) == 1:
+            start = indices[0]
+            stop = indices[-1] + 1
+            (step,) = steps
+            return slice(start, stop, step)
+        else:
+            return indices
+
+    def _check_no_copy_access(self):
+        if not isinstance(self._buffer_indices, slice):
+            raise FancyIndexWriteException(
+                "Writing to the array directly is not supported for "
+                "non-trivially indexed (i.e. sliced) arrays."
+            )
+
+    @property
+    def axes(self):
+        return self._axes
 
     @property
     def target_paths(self):
@@ -272,12 +370,25 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         return self._index_exprs
 
     @property
+    def outer_loops(self):
+        return self._outer_loops
+
+    @property
+    def layouts(self):
+        return self._layouts
+
+    @property
     def sf(self):
         return self.array.sf
 
+    @property
+    def comm(self):
+        return self.buffer.comm
+
     @cached_property
     def datamap(self):
-        datamap_ = {self.name: self}
+        datamap_ = {}
+        datamap_.update(self.buffer.datamap)
         datamap_.update(self.axes.datamap)
         for index_exprs in self.index_exprs.values():
             for expr in index_exprs.values():
@@ -289,6 +400,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         return freeze(datamap_)
 
     # TODO update docstring
+    # TODO is this a property of the buffer?
     def assemble(self, update_leaves=False):
         """Ensure that stored values are up-to-date.
 
@@ -306,46 +418,27 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
     def materialize(self) -> HierarchicalArray:
         """Return a new "unindexed" array with the same shape."""
         # "unindexed" axis tree
-        axes = AxisTree(self.axes.parent_to_children)
+        # strip parallel semantics (in a bad way)
+        parent_to_children = collections.defaultdict(list)
+        for p, cs in self.axes.parent_to_children.items():
+            for c in cs:
+                if c is not None and c.sf is not None:
+                    c = c.copy(sf=None)
+                parent_to_children[p].append(c)
+
+        axes = AxisTree(parent_to_children)
         return type(self)(axes, dtype=self.dtype)
 
-    def offset(self, *args, allow_unused=False, insert_zeros=False):
-        nargs = len(args)
-        if nargs == 2:
-            path, indices = args[0], args[1]
-        else:
-            assert nargs == 1
-            path, indices = _path_and_indices_from_index_tuple(self.axes, args[0])
-
-        if allow_unused:
-            path = _trim_path(self.axes, path)
-
-        if insert_zeros:
-            # extend the path by choosing the zero offset option every time
-            # this is needed if we don't have all the internal bits available
-            while path not in self.layouts:
-                axis, clabel = self.axes._node_from_path(path)
-                subaxis = self.axes.child(axis, clabel)
-                # choose the component that is first in the renumbering
-                if subaxis.numbering:
-                    cidx = subaxis._component_index_from_axis_number(
-                        subaxis.numbering.data_ro[0]
-                    )
-                else:
-                    cidx = 0
-                subcpt = subaxis.components[cidx]
-                path |= {subaxis.label: subcpt.label}
-                indices |= {subaxis.label: 0}
-
-        offset = pym.evaluate(self.layouts[path], indices, ExpressionEvaluator)
-        return strict_int(offset)
-
-    def simple_offset(self, path, indices):
-        offset = pym.evaluate(self.layouts[path], indices, ExpressionEvaluator)
-        return strict_int(offset)
-
     def iter_indices(self, outer_map):
-        return iter_axis_tree(self.axes, self.target_paths, self.index_exprs, outer_map)
+        from pyop3.itree.tree import iter_axis_tree
+
+        return iter_axis_tree(
+            self.axes.index(),
+            self.axes,
+            self.target_paths,
+            self.index_exprs,
+            outer_map,
+        )
 
     def _with_axes(self, axes):
         """Return a new `Dat` with new axes pointing to the same data."""
@@ -356,16 +449,6 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
             max_value=self.max_value,
             name=self.name,
         )
-
-    def as_var(self):
-        # must not be branched...
-        indices = freeze(
-            {
-                axis: AxisVariable(axis)
-                for axis, _ in self.axes.path(*self.axes.leaf).items()
-            }
-        )
-        return MultiArrayVariable(self, indices)
 
     @property
     def alloc_size(self):
@@ -410,11 +493,22 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
                 count.append(y)
             return flattened, count
 
-    def get_value(self, *args, **kwargs):
-        return self.data[self.offset(*args, **kwargs)]
+    def get_value(self, indices, path=None, *, loop_exprs=pmap()):
+        offset = self.offset(indices, path, loop_exprs=loop_exprs)
+        return self.buffer.data_ro[offset]
 
-    def set_value(self, path, indices, value):
-        self.data[self.simple_offset(path, indices)] = value
+    def set_value(self, indices, value, path=None, *, loop_exprs=pmap()):
+        offset = self.offset(indices, path, loop_exprs=loop_exprs)
+        self.buffer.data_wo[offset] = value
+
+    def offset(self, indices, path=None, *, loop_exprs=pmap()):
+        return eval_offset(
+            self.axes,
+            self.subst_layouts,
+            indices,
+            path,
+            loop_exprs=loop_exprs,
+        )
 
     def select_axes(self, indices):
         selected = []
@@ -423,6 +517,45 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
             selected.append(current_axis)
             current_axis = current_axis.get_part(idx.npart).subaxis
         return tuple(selected)
+
+    def copy(self, other):
+        """Copy the contents of the array into another."""
+        # NOTE: Is copy_to/copy_into a clearer name for this?
+        # TODO: Check that self and other are compatible, should have same axes and dtype
+        # for sure
+        # TODO: We can optimise here and copy the private data attribute and set halo
+        # validity. Here we do the simple but hopefully correct thing.
+        other.data_wo[...] = self.data_ro
+
+    # symbolic
+    def zero(self, *, subset=Ellipsis):
+        return ReplaceAssignment(self[subset], 0)
+
+    def eager_zero(self, *, subset=Ellipsis):
+        self.zero(subset=subset)()
+
+    @property
+    @deprecated(".vec_rw")
+    def vec(self):
+        return self.vec_rw
+
+    @property
+    def vec_rw(self):
+        # FIXME: This does not work for the case when the array here is indexed in some
+        # way. E.g. dat[::2] since the full buffer is returned.
+        return self.buffer.vec_rw
+
+    @property
+    def vec_ro(self):
+        # FIXME: This does not work for the case when the array here is indexed in some
+        # way. E.g. dat[::2] since the full buffer is returned.
+        return self.buffer.vec_ro
+
+    @property
+    def vec_wo(self):
+        # FIXME: This does not work for the case when the array here is indexed in some
+        # way. E.g. dat[::2] since the full buffer is returned.
+        return self.buffer.vec_wo
 
 
 # Needs to be subclass for isinstance checks to work
@@ -434,32 +567,27 @@ class MultiArray(HierarchicalArray):
 
 
 # Now ContextSensitiveDat
-class ContextSensitiveMultiArray(ContextSensitive, KernelArgument):
-    def __getitem__(self, indices) -> ContextSensitiveMultiArray:
-        from pyop3.itree.tree import (
-            _compose_bits,
-            _index_axes,
-            as_index_tree,
-            collect_loop_contexts,
-            index_axes,
-        )
+class ContextSensitiveMultiArray(Array, ContextSensitive):
+    def __init__(self, arrays):
+        name = single_valued(a.name for a in arrays.values())
 
-        loop_contexts = collect_loop_contexts(indices)
-        if not loop_contexts:
-            raise NotImplementedError("code path untested")
+        Array.__init__(self, name)
+        ContextSensitive.__init__(self, arrays)
+
+    def __getitem__(self, indices) -> ContextSensitiveMultiArray:
+        from pyop3.itree.tree import _compose_bits, _index_axes, as_index_forest
 
         # FIXME for now assume that there is only one context
         context, array = just_one(self.context_map.items())
 
+        index_forest = as_index_forest(indices, axes=array.axes)
+
+        if len(index_forest) == 1 and pmap() in index_forest:
+            raise NotImplementedError("code path untested")
+
         array_per_context = {}
-        for index_tree in as_index_forest(indices, axes=array.axes):
-            loop_context = index_tree.loop_context
-            (
-                indexed_axes,
-                target_path_per_indexed_cpt,
-                index_exprs_per_indexed_cpt,
-                layout_exprs_per_indexed_cpt,
-            ) = _index_axes(array.axes, index_tree, loop_context)
+        for loop_context, index_tree in index_forest.items():
+            indexed_axes = _index_axes(index_tree, loop_context, array.axes)
 
             (
                 target_paths,
@@ -471,9 +599,9 @@ class ContextSensitiveMultiArray(ContextSensitive, KernelArgument):
                 array.index_exprs,
                 None,
                 indexed_axes,
-                target_path_per_indexed_cpt,
-                index_exprs_per_indexed_cpt,
-                layout_exprs_per_indexed_cpt,
+                indexed_axes.target_paths,
+                indexed_axes.index_exprs,
+                indexed_axes.layout_exprs,
             )
             array_per_context[loop_context] = HierarchicalArray(
                 indexed_axes,
@@ -481,6 +609,7 @@ class ContextSensitiveMultiArray(ContextSensitive, KernelArgument):
                 max_value=self.max_value,
                 target_paths=target_paths,
                 index_exprs=index_exprs,
+                outer_loops=indexed_axes.outer_loops,
                 layouts=self.layouts,
                 name=self.name,
             )
@@ -500,12 +629,14 @@ class ContextSensitiveMultiArray(ContextSensitive, KernelArgument):
         return self._shared_attr("dtype")
 
     @property
-    def max_value(self):
-        return self._shared_attr("max_value")
+    def kernel_dtype(self):
+        # TODO Think about the fact that the dtype refers to either to dtype of the
+        # array entries (e.g. double), or the dtype of the whole thing (double*)
+        return self.dtype
 
     @property
-    def name(self):
-        return self._shared_attr("name")
+    def max_value(self):
+        return self._shared_attr("max_value")
 
     @property
     def layouts(self):

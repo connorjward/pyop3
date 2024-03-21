@@ -1,3 +1,5 @@
+# TODO Rename this file insn.py - the pyop3 language is everything, not just this
+
 from __future__ import annotations
 
 import abc
@@ -6,6 +8,7 @@ import contextlib
 import dataclasses
 import enum
 import functools
+import numbers
 import operator
 from collections import defaultdict
 from functools import cached_property, partial
@@ -14,15 +17,23 @@ from weakref import WeakValueDictionary
 
 import loopy as lp
 import numpy as np
-import pymbolic as pym
 import pytools
-from pyrsistent import freeze, pmap
+from pyrsistent import freeze
 
-from pyop3.axtree import as_axis_tree
+from pyop3.axtree import Axis, as_axis_tree
 from pyop3.axtree.tree import ContextFree, ContextSensitive, MultiArrayCollector
 from pyop3.config import config
 from pyop3.dtypes import IntType, dtype_limits
-from pyop3.utils import as_tuple, checked_zip, just_one, merge_dicts, unique
+from pyop3.utils import (
+    UniqueRecord,
+    as_tuple,
+    auto,
+    checked_zip,
+    just_one,
+    merge_dicts,
+    single_valued,
+    unique,
+)
 
 
 # TODO I don't think that this belongs in this file, it belongs to the function?
@@ -39,20 +50,22 @@ class Intent(enum.Enum):
     MIN_RW = "min_rw"
     MAX_WRITE = "max_write"
     MAX_RW = "max_rw"
+    NA = "na"  # TODO prefer NONE
 
 
 # old alias
 Access = Intent
 
 
-READ = Access.READ
-WRITE = Access.WRITE
-RW = Access.RW
-INC = Access.INC
-MIN_RW = Access.MIN_RW
-MIN_WRITE = Access.MIN_WRITE
-MAX_RW = Access.MAX_RW
-MAX_WRITE = Access.MAX_WRITE
+READ = Intent.READ
+WRITE = Intent.WRITE
+RW = Intent.RW
+INC = Intent.INC
+MIN_RW = Intent.MIN_RW
+MIN_WRITE = Intent.MIN_WRITE
+MAX_RW = Intent.MAX_RW
+MAX_WRITE = Intent.MAX_WRITE
+NA = Intent.NA
 
 
 class IntentMismatchError(Exception):
@@ -62,75 +75,80 @@ class IntentMismatchError(Exception):
 class KernelArgument(abc.ABC):
     """Class representing objects that may be passed as arguments to kernels."""
 
+    @property
+    @abc.abstractmethod
+    def kernel_dtype(self):
+        pass
 
-class LoopExpr(pytools.ImmutableRecord, abc.ABC):
-    fields = set()
 
+# this is an expression, like passing an array through to a kernel
+# but it is transformed first.
+class Pack(KernelArgument, ContextFree):
+    def __init__(self, big, small):
+        self.big = big
+        self.small = small
+
+    @property
+    def kernel_dtype(self):
+        try:
+            return single_valued([self.big.dtype, self.small.dtype])
+        except ValueError:
+            raise ValueError("dtypes must match")
+
+
+class Instruction(UniqueRecord, abc.ABC):
+    pass
+
+
+class ContextAwareInstruction(Instruction):
     @property
     @abc.abstractmethod
     def datamap(self):
-        """Map from names to arrays.
+        """Map from names to arrays."""
 
-        weakref since we don't want to hold a reference to these things?
+    # TODO I think this can be combined with datamap
+    @property
+    @abc.abstractmethod
+    def kernel_arguments(self):
+        """Kernel arguments and their intents.
+
+        The arguments are ordered according to when they first appear in
+        the expression.
+
+        Notes
+        -----
+        At the moment arguments are not allowed to appear in the expression
+        multiple times with different intents. This would required thought into
+        how to resolve read-after-write and similar dependencies.
+
         """
-        pass
-
-    # nice for drawing diagrams
-    # @property
-    # @abc.abstractmethod
-    # def operands(self) -> tuple["LoopExpr"]:
-    #     pass
 
 
-class Loop(LoopExpr):
-    fields = LoopExpr.fields | {"index", "statements", "id", "depends_on"}
+class Loop(Instruction):
+    fields = Instruction.fields | {"index", "statements"}
 
     # doubt that I need an ID here
     id_generator = pytools.UniqueNameGenerator()
 
     def __init__(
         self,
-        index: IndexTree,
-        statements: Sequence[LoopExpr],
-        id=None,
-        depends_on=frozenset(),
+        index: LoopIndex,
+        statements: Iterable[Instruction],
+        **kwargs,
     ):
-        # FIXME
-        # assert isinstance(index, pyop3.tensors.Indexed)
-        if not id:
-            id = self.id_generator("loop")
-
-        super().__init__()
-
+        super().__init__(**kwargs)
         self.index = index
         self.statements = as_tuple(statements)
-        self.id = id
-        # I think this can go if I generate code properly
-        self.depends_on = depends_on
-
-    # maybe these should not exist? backwards compat
-    @property
-    def axes(self):
-        return self.index.axes
-
-    @property
-    def indices(self):
-        return self.index.indices
-
-    @cached_property
-    def datamap(self):
-        return self.index.datamap | merge_dicts(
-            stmt.datamap for stmt in self.statements
-        )
 
     def __call__(self, **kwargs):
+        # TODO just parse into ContextAwareLoop and call that
         from pyop3.ir.lower import compile
         from pyop3.itree.tree import partition_iterset
 
         if self.is_parallel:
             # interleave computation and communication
             new_index, (icore, iroot, ileaf) = partition_iterset(
-                self.index, [a for a, _ in self.all_function_arguments]
+                self.index, [a for a, _ in self.kernel_arguments]
             )
 
             assert self.index.id == new_index.id
@@ -175,7 +193,7 @@ class Loop(LoopExpr):
             )
             code(**leaf_kwargs)
 
-            # also may need to eagerly assemble Mats, or be clever?
+            # also may need to eagerly assemble Mats, or be clever and spike the accessors?
         else:
             compile(self)(**kwargs)
 
@@ -190,25 +208,241 @@ class Loop(LoopExpr):
         return len(self._distarray_args) > 0
 
     @cached_property
-    def all_function_arguments(self):
-        # TODO overly verbose
-        func_args = {}
+    def kernel_arguments(self):
+        args = {}
         for stmt in self.statements:
-            for arg, intent in stmt.all_function_arguments:
-                if arg not in func_args:
-                    func_args[arg] = intent
+            for arg, intent in stmt.kernel_arguments:
+                assert isinstance(arg, KernelArgument)
+                if arg not in args:
+                    args[arg] = intent
+                else:
+                    # FIXME, I have disabled this check because currently we
+                    # do something special for temporaries in Firedrake and the
+                    # clash is of those.
+                    pass
+                    # if args[arg] != intent:
+                    #     raise NotImplementedError(
+                    #         "Kernel argument used with differing intents"
+                    #     )
+        return tuple((arg, intent) for arg, intent in args.items())
+
+    @cached_property
+    def _distarray_args(self):
+        from pyop3.array import ContextSensitiveMultiArray, HierarchicalArray
+        from pyop3.buffer import DistributedBuffer
+
+        arrays = {}
+        for arg, intent in self.kernel_arguments:
+            if isinstance(arg, ContextSensitiveMultiArray):
+                # take first
+                arg, *_ = arg.context_map.values()
+
+            if (
+                not isinstance(arg, HierarchicalArray)
+                or not isinstance(arg.buffer, DistributedBuffer)
+                or not arg.buffer.is_distributed
+            ):
+                continue
+
+            if arg.array not in arrays:
+                arrays[arg.array] = (intent, _has_nontrivial_stencil(arg))
+            else:
+                if arrays[arg.array][0] != intent:
+                    # I think that it does not make sense to access arrays with
+                    # different intents in the same kernel but that it is
+                    # always OK if the same intent is used.
+                    raise IntentMismatchError
+
+                # We need to know if *any* uses of a particular array touch ghost points
+                if not arrays[arg.array][1] and _has_nontrivial_stencil(arg):
+                    arrays[arg.array] = (intent, True)
+
         # now sort
         return tuple(
-            (arg, func_args[arg])
-            for arg in sorted(func_args.keys(), key=lambda a: a.name)
+            (arr, *arrays[arr]) for arr in sorted(arrays.keys(), key=lambda a: a.name)
         )
+
+    def _array_updates(self):
+        """Collect appropriate callables for updating shared values in the right order.
+
+        Returns
+        -------
+        (initializers, (finalizers0, finalizers1))
+            Collections of callables to be executed at the right times.
+
+        """
+        initializers = []
+        finalizerss = ([], [])
+        for array, intent, touches_ghost_points in self._distarray_args:
+            if intent in {READ, RW}:
+                if touches_ghost_points:
+                    if not array._roots_valid:
+                        initializers.append(array._reduce_leaves_to_roots_begin)
+                        finalizerss[0].extend(
+                            [
+                                array._reduce_leaves_to_roots_end,
+                                array._broadcast_roots_to_leaves_begin,
+                            ]
+                        )
+                        finalizerss[1].append(array._broadcast_roots_to_leaves_end)
+                    else:
+                        initializers.append(array._broadcast_roots_to_leaves_begin)
+                        finalizerss[1].append(array._broadcast_roots_to_leaves_end)
+                else:
+                    if not array._roots_valid:
+                        initializers.append(array._reduce_leaves_to_roots_begin)
+                        finalizerss[0].append(array._reduce_leaves_to_roots_end)
+
+            elif intent == WRITE:
+                # Assumes that all points are written to (i.e. not a subset). If
+                # this is not the case then a manual reduction is needed.
+                array._leaves_valid = False
+                array._pending_reduction = None
+
+            elif intent in {INC, MIN_WRITE, MIN_RW, MAX_WRITE, MAX_RW}:  # reductions
+                # We don't need to update roots if performing the same reduction
+                # again. For example we can increment into an array as many times
+                # as we want. The reduction only needs to be done when the
+                # data is read.
+                if array._roots_valid or intent == array._pending_reduction:
+                    pass
+                else:
+                    # We assume that all points are visited, and therefore that
+                    # WRITE accesses do not need to update roots. If only a subset
+                    # of entities are written to then a manual reduction is required.
+                    # This is the same assumption that we make for data_wo and is
+                    # explained in the documentation.
+                    if intent in {INC, MIN_RW, MAX_RW}:
+                        assert array._pending_reduction is not None
+                        initializers.append(array._reduce_leaves_to_roots_begin)
+                        finalizerss[0].append(array._reduce_leaves_to_roots_end)
+
+                # We are modifying owned values so the leaves must now be wrong
+                array._leaves_valid = False
+
+                # If ghost points are not modified then no future reduction is required
+                if not touches_ghost_points:
+                    array._pending_reduction = None
+                else:
+                    array._pending_reduction = intent
+
+                    # set leaves to appropriate nil value
+                    if intent == INC:
+                        array._data[array.sf.ileaf] = 0
+                    elif intent in {MIN_WRITE, MIN_RW}:
+                        array._data[array.sf.ileaf] = dtype_limits(array.dtype).max
+                    elif intent in {MAX_WRITE, MAX_RW}:
+                        array._data[array.sf.ileaf] = dtype_limits(array.dtype).min
+                    else:
+                        raise AssertionError
+
+            else:
+                raise AssertionError
+
+        return initializers, finalizerss
+
+
+class ContextAwareLoop(ContextAwareInstruction):
+    fields = Instruction.fields | {"index", "statements"}
+
+    def __init__(self, index, statements, **kwargs):
+        super().__init__(**kwargs)
+        self.index = index
+        self.statements = statements
+
+    @cached_property
+    def datamap(self):
+        return self.index.datamap | merge_dicts(
+            stmt.datamap for stmts in self.statements.values() for stmt in stmts
+        )
+
+    def __call__(self, **kwargs):
+        from pyop3.ir.lower import compile
+        from pyop3.itree.tree import partition_iterset
+
+        if self.is_parallel:
+            # interleave computation and communication
+            new_index, (icore, iroot, ileaf) = partition_iterset(
+                self.index, [a for a, _ in self.kernel_arguments]
+            )
+
+            assert self.index.id == new_index.id
+
+            # substitute subsets into loopexpr, should maybe be done in partition_iterset
+            parallel_loop = self.copy(index=new_index)
+            code = compile(parallel_loop)
+
+            # interleave communication and computation
+            initializers, finalizerss = self._array_updates()
+
+            for init in initializers:
+                init()
+
+            # replace the parallel axis subset with one for the specific indices here
+            extent = just_one(icore.axes.root.components).count
+            core_kwargs = merge_dicts(
+                [kwargs, {icore.name: icore, extent.name: extent}]
+            )
+            code(**core_kwargs)
+
+            # await reductions
+            for fin in finalizerss[0]:
+                fin()
+
+            # roots
+            # replace the parallel axis subset with one for the specific indices here
+            root_extent = just_one(iroot.axes.root.components).count
+            root_kwargs = merge_dicts(
+                [kwargs, {icore.name: iroot, extent.name: root_extent}]
+            )
+            code(**root_kwargs)
+
+            # await broadcasts
+            for fin in finalizerss[1]:
+                fin()
+
+            # leaves
+            leaf_extent = just_one(ileaf.axes.root.components).count
+            leaf_kwargs = merge_dicts(
+                [kwargs, {icore.name: ileaf, extent.name: leaf_extent}]
+            )
+            code(**leaf_kwargs)
+
+            # also may need to eagerly assemble Mats, or be clever and spike the accessors?
+        else:
+            compile(self)(**kwargs)
+
+    @cached_property
+    def loopy_code(self):
+        from pyop3.ir.lower import compile
+
+        return compile(self)
+
+    @cached_property
+    def is_parallel(self):
+        return len(self._distarray_args) > 0
+
+    @cached_property
+    def kernel_arguments(self):
+        args = {}
+        for stmt in self.statements:
+            for arg, intent in stmt.kernel_arguments:
+                assert isinstance(arg, KernelArgument)
+                if arg not in args:
+                    args[arg] = intent
+                else:
+                    if args[arg] != intent:
+                        raise NotImplementedError(
+                            "Kernel argument used with differing intents"
+                        )
+        return tuple((arg, intent) for arg, intent in args.items())
 
     @cached_property
     def _distarray_args(self):
         from pyop3.buffer import DistributedBuffer
 
         arrays = {}
-        for arg, intent in self.all_function_arguments:
+        for arg, intent in self.kernel_arguments:
             if (
                 not isinstance(arg.array, DistributedBuffer)
                 or not arg.array.is_distributed
@@ -313,6 +547,7 @@ class Loop(LoopExpr):
 
 
 # TODO singledispatch
+# TODO perhaps this is simply "has non unit stride"?
 def _has_nontrivial_stencil(array):
     """
 
@@ -330,6 +565,21 @@ def _has_nontrivial_stencil(array):
         return any(_has_nontrivial_stencil(d) for d in array.context_map.values())
     else:
         raise TypeError
+
+
+class Terminal(Instruction, abc.ABC):
+    @cached_property
+    def datamap(self):
+        return merge_dicts(a.datamap for a, _ in self.kernel_arguments)
+
+    @property
+    @abc.abstractmethod
+    def argument_shapes(self):
+        pass
+
+    @abc.abstractmethod
+    def with_arguments(self, arguments: Iterable[KernelArgument]):
+        pass
 
 
 @dataclasses.dataclass(frozen=True)
@@ -389,34 +639,37 @@ class Function:
                 f"but received {len(args)}"
             )
         if any(
-            spec.dtype.numpy_dtype != arg.dtype
+            spec.dtype.numpy_dtype != arg.kernel_dtype
             for spec, arg in checked_zip(self.argspec, args)
+            if arg.kernel_dtype is not auto
         ):
             raise ValueError("Arguments to the kernel have the wrong dtype")
         return CalledFunction(self, args)
 
     @property
     def argspec(self):
-        return tuple(
-            ArgumentSpec(access, arg.dtype, arg.shape)
-            for access, arg in zip(
-                self._access_descrs, self.code.default_entrypoint.args
-            )
-        )
+        spec = []
+        for access, arg in checked_zip(
+            self._access_descrs, self.code.default_entrypoint.args
+        ):
+            shape = arg.shape if not isinstance(arg, lp.ValueArg) else ()
+            spec.append(ArgumentSpec(access, arg.dtype, shape))
+        return tuple(spec)
 
     @property
     def name(self):
         return self.code.default_entrypoint.name
 
 
-class CalledFunction(LoopExpr):
-    def __init__(self, function, arguments):
+class CalledFunction(Terminal):
+    fields = Terminal.fields | {"function", "arguments"}
+
+    def __init__(
+        self, function: Function, arguments: Iterable[KernelArgument], **kwargs
+    ) -> None:
+        super().__init__(**kwargs)
         self.function = function
         self.arguments = arguments
-
-    @functools.cached_property
-    def datamap(self):
-        return merge_dicts([arg.datamap for arg in self.arguments])
 
     @property
     def name(self):
@@ -426,81 +679,137 @@ class CalledFunction(LoopExpr):
     def argspec(self):
         return self.function.argspec
 
-    # FIXME NEXT: Expand ContextSensitive things here
     @property
-    def all_function_arguments(self):
+    def kernel_arguments(self):
         return tuple(
-            sorted(
-                [
-                    (arg, intent)
-                    for arg, intent in checked_zip(
-                        self.arguments, self.function._access_descrs
-                    )
-                ],
-                key=lambda a: a[0].name,
-            )
+            (arg, intent)
+            for arg, intent in checked_zip(self.arguments, self.function._access_descrs)
+            # this isn't right, loop indices do not count here
+            if isinstance(arg, KernelArgument)
         )
 
+    @property
+    def argument_shapes(self):
+        return tuple(
+            arg.shape if not isinstance(arg, lp.ValueArg) else ()
+            for arg in self.function.code.default_entrypoint.args
+        )
 
-class Instruction(pytools.ImmutableRecord):
-    fields = set()
+    def with_arguments(self, arguments):
+        return self.copy(arguments=arguments)
 
 
-class Assignment(Instruction):
-    fields = Instruction.fields | {"tensor", "temporary", "shape"}
+class Assignment(Terminal, abc.ABC):
+    fields = Terminal.fields | {"assignee", "expression"}
 
-    def __init__(self, tensor, temporary, shape, **kwargs):
-        self.tensor = tensor
-        self.temporary = temporary
-        self.shape = shape
+    def __init__(self, assignee, expression, **kwargs):
         super().__init__(**kwargs)
+        self.assignee = assignee
+        self.expression = expression
 
-    # better name
-    @property
-    def array(self):
-        return self.tensor
-
-
-class Read(Assignment):
-    @property
-    def lhs(self):
-        return self.temporary
+    def __call__(self):
+        do_loop(Axis(1).index(), self)
 
     @property
-    def rhs(self):
-        return self.tensor
-
-
-class Write(Assignment):
-    @property
-    def lhs(self):
-        return self.tensor
+    def arguments(self):
+        # FIXME Not sure this is right for complicated expressions
+        return (self.assignee, self.expression)
 
     @property
-    def rhs(self):
-        return self.temporary
+    def arrays(self):
+        from pyop3.array import HierarchicalArray
 
+        arrays_ = [self.assignee]
+        if isinstance(self.expression, HierarchicalArray):
+            arrays_.append(self.expression)
+        else:
+            if not isinstance(self.expression, numbers.Number):
+                raise NotImplementedError
+        return tuple(arrays_)
+        # collector = MultiArrayCollector()
+        # return collector(self.assignee) | collector(self.expression)
 
-class Increment(Assignment):
     @property
-    def lhs(self):
-        return self.tensor
+    def argument_shapes(self):
+        return (None,) * len(self.kernel_arguments)
+
+    def with_arguments(self, arguments):
+        if len(arguments) != 2:
+            raise ValueError("Must provide 2 arguments")
+
+        assignee, expression = arguments
+        return self.copy(assignee=assignee, expression=expression)
 
     @property
-    def rhs(self):
-        return self.temporary
+    def _expression_kernel_arguments(self):
+        from pyop3.array import HierarchicalArray
+
+        if isinstance(self.expression, HierarchicalArray):
+            return ((self.expression, READ),)
+        elif isinstance(self.expression, numbers.Number):
+            return ()
+        else:
+            raise NotImplementedError("Complicated rvalues not yet supported")
 
 
-class Zero(Assignment):
+class ReplaceAssignment(Assignment):
+    """Like PETSC_INSERT_VALUES."""
+
+    @cached_property
+    def kernel_arguments(self):
+        return ((self.assignee, WRITE),) + self._expression_kernel_arguments
+
+
+class AddAssignment(Assignment):
+    """Like PETSC_ADD_VALUES."""
+
+    @cached_property
+    def kernel_arguments(self):
+        return ((self.assignee, INC),) + self._expression_kernel_arguments
+
+
+# inherit from Assignment?
+class PetscMatInstruction(Instruction):
+    def __init__(self, mat_arg, array_arg):
+        self.mat_arg = mat_arg
+        self.array_arg = array_arg
+
     @property
-    def lhs(self):
-        return self.temporary
+    def datamap(self):
+        return self.mat_arg.datamap | self.array_arg.datamap
 
-    # FIXME
+
+class PetscMatLoad(PetscMatInstruction):
+    ...
+
+
+class PetscMatStore(PetscMatInstruction):
+    ...
+
+
+# potentially confusing name
+class PetscMatAdd(PetscMatInstruction):
+    ...
+
+
+class OpaqueKernelArgument(KernelArgument, ContextFree):
+    def __init__(self, dtype=auto):
+        self._dtype = dtype
+
     @property
-    def rhs(self):
-        # return 0
-        return self.tensor
+    def kernel_dtype(self):
+        return self._dtype
+
+
+class DummyKernelArgument(OpaqueKernelArgument):
+    """Placeholder kernel argument.
+
+    This class is useful when one simply wants to generate code from a loop
+    expression and not execute it.
+
+    ### dtypes not required here as sniffed from local kernel/context?
+
+    """
 
 
 def loop(*args, **kwargs):
@@ -526,8 +835,8 @@ def fix_intents(tunit, accesses):
     kernel = tunit.default_entrypoint
     new_args = []
     for arg, access in checked_zip(kernel.args, accesses):
-        assert access in {READ, WRITE, RW, INC, MIN_RW, MIN_WRITE, MAX_RW, MAX_WRITE}
-        is_input = access in {READ, RW, INC, MIN_RW, MAX_RW}
+        assert isinstance(access, Intent)
+        is_input = access in {READ, RW, INC, MIN_RW, MAX_RW, NA}
         is_output = access in {WRITE, RW, INC, MIN_RW, MIN_WRITE, MAX_WRITE, MAX_RW}
         new_args.append(arg.copy(is_input=is_input, is_output=is_output))
     return tunit.with_kernel(kernel.copy(args=new_args))

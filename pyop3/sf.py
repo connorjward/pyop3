@@ -5,6 +5,7 @@ from mpi4py import MPI
 from petsc4py import PETSc
 
 from pyop3.dtypes import get_mpi_dtype
+from pyop3.mpi import internal_comm
 from pyop3.utils import just_one
 
 
@@ -19,11 +20,20 @@ class StarForest:
         self.sf = sf
         self.size = size
 
+        # don't like this pattern
+        self._comm = internal_comm(sf.comm, self)
+
     @classmethod
-    def from_graph(cls, size: int, nroots: int, ilocal, iremote, comm=None):
-        sf = PETSc.SF().create(comm or PETSc.Sys.getDefaultComm())
+    def from_graph(cls, size: int, nroots: int, ilocal, iremote, comm):
+        # from pyop3.extras.debug import print_with_rank
+        # print_with_rank(nroots, ilocal, iremote)
+        sf = PETSc.SF().create(comm)
         sf.setGraph(nroots, ilocal, iremote)
         return cls(sf, size)
+
+    @property
+    def comm(self):
+        return self.sf.comm
 
     @cached_property
     def iroot(self):
@@ -52,6 +62,10 @@ class StarForest:
     @property
     def nroots(self):
         return self._graph[0]
+
+    @property
+    def nowned(self):
+        return self.size - self.nleaves
 
     @property
     def nleaves(self):
@@ -108,3 +122,30 @@ class StarForest:
         # what about cdim?
         dtype, _ = get_mpi_dtype(from_buffer.dtype)
         return (dtype, from_buffer, to_buffer, op)
+
+
+def single_star(comm, size=1, root=0):
+    """Construct a star forest containing a single star.
+
+    The single star has leaves on all ranks apart from the "root" rank that
+    point to the same shared data. This is useful for describing globally
+    consistent data structures.
+
+    """
+    if comm.rank == root:
+        # there are no leaves on the root process
+        nroots = size
+        ilocal = []
+        iremote = []
+    else:
+        nroots = 0
+        ilocal = np.arange(size, dtype=np.int32)
+        iremote = [(root, i) for i in ilocal]
+    return StarForest.from_graph(size, nroots, ilocal, iremote, comm)
+
+
+def serial_forest(size: int) -> StarForest:
+    nroots = 0
+    ilocal = []
+    iremote = []
+    return StarForest.from_graph(size, nroots, ilocal, iremote, MPI.COMM_SELF)

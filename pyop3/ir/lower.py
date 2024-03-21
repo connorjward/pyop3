@@ -1,34 +1,27 @@
 from __future__ import annotations
 
 import abc
-import collections
 import contextlib
-import copy
-import dataclasses
 import enum
 import functools
-import itertools
 import numbers
-import operator
 import textwrap
+from functools import cached_property
 from typing import Any, Dict, FrozenSet, Optional, Sequence, Tuple, Union
 
 import loopy as lp
 import loopy.symbolic
 import numpy as np
 import pymbolic as pym
-import pytools
-from petsc4py import PETSc
 from pyrsistent import freeze, pmap
 
-from pyop3 import utils
-from pyop3.array import HierarchicalArray, PackedPetscMatAIJ, PetscMatAIJ
-from pyop3.array.harray import ContextSensitiveMultiArray
-from pyop3.array.petsc import PetscMat, PetscObject
-from pyop3.axtree import Axis, AxisComponent, AxisTree, AxisVariable
-from pyop3.axtree.tree import ContextSensitiveAxisTree
-from pyop3.buffer import DistributedBuffer, PackedBuffer
-from pyop3.dtypes import IntType, PointerType
+from pyop3.array import HierarchicalArray
+from pyop3.array.harray import CalledMapVariable, ContextSensitiveMultiArray
+from pyop3.array.petsc import PetscMat
+from pyop3.axtree import Axis, AxisComponent, AxisTree, AxisVariable, ContextFree
+from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
+from pyop3.config import config
+from pyop3.dtypes import IntType
 from pyop3.itree import (
     AffineSliceComponent,
     CalledMap,
@@ -37,15 +30,16 @@ from pyop3.itree import (
     LocalLoopIndex,
     LoopIndex,
     Map,
-    MapVariable,
     Slice,
     Subset,
     TabulatedMapComponent,
 )
 from pyop3.itree.tree import (
-    CalledMapVariable,
+    ContextFreeLoopIndex,
     IndexExpressionReplacer,
+    LocalLoopIndexVariable,
     LoopIndexVariable,
+    collect_shape_index_callback,
 )
 from pyop3.lang import (
     INC,
@@ -53,17 +47,27 @@ from pyop3.lang import (
     MAX_WRITE,
     MIN_RW,
     MIN_WRITE,
+    NA,
     READ,
     RW,
     WRITE,
+    AddAssignment,
     Assignment,
     CalledFunction,
+    ContextAwareLoop,
+    DummyKernelArgument,
     Loop,
+    PetscMatAdd,
+    PetscMatInstruction,
+    PetscMatLoad,
+    PetscMatStore,
+    ReplaceAssignment,
 )
 from pyop3.log import logger
-from pyop3.tensor import Dat, Tensor
 from pyop3.utils import (
     PrettyTuple,
+    UniqueNameGenerator,
+    as_tuple,
     checked_zip,
     just_one,
     merge_dicts,
@@ -89,6 +93,18 @@ class AssignmentType(enum.Enum):
     ZERO = enum.auto()
 
 
+class Renamer(pym.mapper.IdentityMapper):
+    def __init__(self, replace_map):
+        super().__init__()
+        self._replace_map = replace_map
+
+    def map_variable(self, var):
+        try:
+            return pym.var(self._replace_map[var.name])
+        except KeyError:
+            return var
+
+
 class CodegenContext(abc.ABC):
     pass
 
@@ -100,10 +116,17 @@ class LoopyCodegenContext(CodegenContext):
         self._args = []
         self._subkernels = []
 
+        self.actual_to_kernel_rename_map = {}
+
         self._within_inames = frozenset()
         self._last_insn_id = None
 
-        self._name_generator = pytools.UniqueNameGenerator()
+        self._name_generator = UniqueNameGenerator()
+
+        # TODO remove
+        self._dummy_names = {}
+
+        self._seen_arrays = set()
 
     @property
     def domains(self):
@@ -115,12 +138,18 @@ class LoopyCodegenContext(CodegenContext):
 
     @property
     def arguments(self):
-        # TODO should renumber things here
         return tuple(self._args)
 
     @property
     def subkernels(self):
         return tuple(self._subkernels)
+
+    @property
+    def kernel_to_actual_rename_map(self):
+        return {
+            kernel: actual
+            for actual, kernel in self.actual_to_kernel_rename_map.items()
+        }
 
     def add_domain(self, iname, *args):
         nargs = len(args)
@@ -133,6 +162,16 @@ class LoopyCodegenContext(CodegenContext):
         self._domains.append(domain_str)
 
     def add_assignment(self, assignee, expression, prefix="insn"):
+        # TODO recover this functionality, in other words we should produce
+        # non-renamed expressions. This means that the Renamer can also register
+        # arguments so we only use the ones we actually need!
+
+        # renamer = Renamer(self.actual_to_kernel_rename_map)
+        # assignee = renamer(assignee)
+        # expression = renamer(expression)
+
+        # breakpoint()
+
         insn = lp.Assignment(
             assignee,
             expression,
@@ -166,22 +205,46 @@ class LoopyCodegenContext(CodegenContext):
         )
         self._add_instruction(insn)
 
-    def add_argument(self, array):
-        # FIXME if self._args is a set then we can add duplicates here provided
-        # that we canonically renumber at a later point
-        if array.name in [a.name for a in self._args]:
-            logger.debug(
-                f"Skipping adding {array.name} to the codegen context as it is already present"
-            )
-            return
-
-        if isinstance(array.buffer, PackedPetscMatAIJ):
-            arg = lp.ValueArg(array.name, dtype=self._dtype(array))
+    # TODO wrap into add_argument
+    def add_dummy_argument(self, arg, dtype):
+        if arg in self._dummy_names:
+            name = self._dummy_names[arg]
         else:
+            name = self._dummy_names.setdefault(arg, self._name_generator("dummy"))
+        self._args.append(lp.ValueArg(name, dtype=dtype))
+
+    # deprecated
+    def add_argument(self, array):
+        return self.add_array(array)
+
+    # TODO we pass a lot more data here than we need I think, need to use unique *buffers*
+    def add_array(self, array: HierarchicalArray) -> None:
+        if array.name in self._seen_arrays:
+            return
+        self._seen_arrays.add(array.name)
+
+        debug = bool(config["debug"])
+
+        injected = array.constant and array.size < config["max_static_array_size"]
+        if isinstance(array.buffer, NullBuffer) or injected:
+            name = self.unique_name("t") if not debug else array.name
+            shape = self._temporary_shapes.get(array.name, (array.alloc_size,))
+            initializer = array.buffer.data_ro if injected else None
+            arg = lp.TemporaryVariable(
+                name, dtype=array.dtype, shape=shape, initializer=initializer
+            )
+        elif isinstance(array.buffer, PackedBuffer):
+            name = self.unique_name("packed") if not debug else array.name
+            arg = lp.ValueArg(name, dtype=self._dtype(array))
+        else:
+            name = self.unique_name("array") if not debug else array.name
             assert isinstance(array.buffer, DistributedBuffer)
-            arg = lp.GlobalArg(array.name, dtype=self._dtype(array), shape=None)
+            arg = lp.GlobalArg(name, dtype=self._dtype(array), shape=None)
+
+        self.actual_to_kernel_rename_map[array.name] = name
         self._args.append(arg)
 
+    # can this now go? no, not all things are arrays
     def add_temporary(self, name, dtype=IntType, shape=()):
         temp = lp.TemporaryVariable(name, dtype=dtype, shape=shape)
         self._args.append(temp)
@@ -191,9 +254,6 @@ class LoopyCodegenContext(CodegenContext):
 
     # I am not sure that this belongs here, I generate names separately from adding domains etc
     def unique_name(self, prefix):
-        # add prefix to the generator so names are generated starting with
-        # "prefix_0" instead of "prefix"
-        self._name_generator.add_name(prefix, conflicting_ok=True)
         return self._name_generator(prefix)
 
     @contextlib.contextmanager
@@ -235,8 +295,8 @@ class LoopyCodegenContext(CodegenContext):
         return array.dtype
 
     @_dtype.register
-    def _(self, array: PackedPetscMatAIJ):
-        return OpaqueType("Mat")
+    def _(self, array: PackedBuffer):
+        return self._dtype(array.array)
 
     @_dtype.register
     def _(self, array: PetscMat):
@@ -246,21 +306,31 @@ class LoopyCodegenContext(CodegenContext):
         self._insns.append(insn)
         self._last_insn_id = insn.id
 
+    # FIXME, bad API
+    def set_temporary_shapes(self, shapes):
+        self._temporary_shapes = shapes
+
 
 class CodegenResult:
-    # TODO also accept a map from input arrays to the renumbered ones, helpful for replacement
-    def __init__(self, expr, ir):
-        self.expr = expr
+    def __init__(self, expr, ir, arg_replace_map):
+        self.expr = as_tuple(expr)
         self.ir = ir
+        self.arg_replace_map = arg_replace_map
+
+    @cached_property
+    def datamap(self):
+        return merge_dicts(e.datamap for e in self.expr)
 
     def __call__(self, **kwargs):
         from pyop3.target import compile_loopy
 
-        args = [
-            _as_pointer(kwargs.get(arg.name, self.expr.datamap[arg.name]))
-            for arg in self.ir.default_entrypoint.args
-        ]
-        compile_loopy(self.ir)(*args)
+        # breakpoint()
+        data_args = []
+        for kernel_arg in self.ir.default_entrypoint.args:
+            actual_arg_name = self.arg_replace_map[kernel_arg.name]
+            array = kwargs.get(actual_arg_name, self.datamap[actual_arg_name])
+            data_args.append(_as_pointer(array))
+        compile_loopy(self.ir)(*data_args)
 
     def target_code(self, target):
         raise NotImplementedError("TODO")
@@ -316,9 +386,37 @@ class BinarySearchCallable(lp.ScalarCallable):
 
 
 # prefer generate_code?
-def compile(expr: LoopExpr, name="mykernel"):
+def compile(expr: Instruction, name="mykernel"):
+    # preprocess expr before lowering
+    from pyop3.transform import expand_implicit_pack_unpack, expand_loop_contexts
+
+    cs_expr = expand_loop_contexts(expr)
     ctx = LoopyCodegenContext()
-    _compile(expr, pmap(), ctx)
+    for context, expr in cs_expr:
+        expr = expand_implicit_pack_unpack(expr)
+
+        # add external loop indices as kernel arguments
+        loop_indices = {}
+        for index, (path, _) in context.items():
+            if len(path) > 1:
+                raise NotImplementedError("needs to be sorted")
+
+            # dummy = HierarchicalArray(index.iterset, data=NullBuffer(IntType))
+            dummy = HierarchicalArray(Axis(1), dtype=IntType)
+            # this is dreadful, pass an integer array instead
+            ctx.add_argument(dummy)
+            myname = ctx.actual_to_kernel_rename_map[dummy.name]
+            replace_map = {
+                axis: pym.subscript(pym.var(myname), (i,))
+                for i, axis in enumerate(path.keys())
+            }
+            # FIXME currently assume that source and target exprs are the same, they are not!
+            loop_indices[index] = (replace_map, replace_map)
+
+        for e in as_tuple(expr):
+            # context manager?
+            ctx.set_temporary_shapes(_collect_temporary_shapes(e))
+            _compile(e, loop_indices, ctx)
 
     # add a no-op instruction touching all of the kernel arguments so they are
     # not silently dropped
@@ -365,34 +463,66 @@ def compile(expr: LoopExpr, name="mykernel"):
     # add callables
     tu = lp.register_callable(tu, "bsearch", BinarySearchCallable())
 
-    tu = tu.with_entrypoints("mykernel")
+    tu = tu.with_entrypoints(name)
 
-    # breakpoint()
-    return CodegenResult(expr, tu)
+    return CodegenResult(expr, tu, ctx.kernel_to_actual_rename_map)
+
+
+# put into a class in transform.py?
+@functools.singledispatch
+def _collect_temporary_shapes(expr):
+    raise TypeError(f"No handler defined for {type(expr).__name__}")
+
+
+@_collect_temporary_shapes.register
+def _(expr: ContextAwareLoop):
+    shapes = {}
+    for stmts in expr.statements.values():
+        for stmt in stmts:
+            for temp, shape in _collect_temporary_shapes(stmt).items():
+                if temp in shapes:
+                    assert shapes[temp] == shape
+                else:
+                    shapes[temp] = shape
+    return shapes
+
+
+@_collect_temporary_shapes.register
+def _(expr: Assignment):
+    return pmap()
+
+
+@_collect_temporary_shapes.register
+def _(expr: PetscMatInstruction):
+    return pmap()
+
+
+@_collect_temporary_shapes.register
+def _(call: CalledFunction):
+    return freeze(
+        {
+            arg.name: lp_arg.shape
+            for lp_arg, arg in checked_zip(
+                call.function.code.default_entrypoint.args, call.arguments
+            )
+        }
+    )
 
 
 @functools.singledispatch
-def _compile(expr: Any, ctx: LoopyCodegenContext) -> None:
-    raise TypeError
+def _compile(expr: Any, loop_indices, ctx: LoopyCodegenContext) -> None:
+    raise TypeError(f"No handler defined for {type(expr).__name__}")
 
 
 @_compile.register
 def _(
-    loop: Loop,
+    loop: ContextAwareLoop,
     loop_indices,
     codegen_context: LoopyCodegenContext,
 ) -> None:
-    loop_context = context_from_indices(loop_indices)
-    iterset = loop.index.iterset.with_context(loop_context)
-
-    loop_index_replace_map = {}
-    for _, replace_map in loop_indices.values():
-        loop_index_replace_map.update(replace_map)
-    loop_index_replace_map = pmap(loop_index_replace_map)
-
     parse_loop_properly_this_time(
         loop,
-        iterset,
+        loop.index.iterset,
         loop_indices,
         codegen_context,
     )
@@ -406,90 +536,87 @@ def parse_loop_properly_this_time(
     *,
     axis=None,
     source_path=pmap(),
-    target_path=pmap(),
     iname_replace_map=pmap(),
-    jname_replace_map=pmap(),
+    target_path=None,
+    index_exprs=None,
 ):
-    outer_replace_map = {}
-    for _, replace_map in loop_indices.values():
-        outer_replace_map.update(replace_map)
-    outer_replace_map = freeze(outer_replace_map)
-
     if axes.is_empty:
         raise NotImplementedError("does this even make sense?")
 
-    axis = axis or axes.root
+    if axis is None:
+        target_path = freeze(axes.target_paths.get(None, {}))
 
-    domain_insns = []
-    leaf_data = []
+        # again, repeated this pattern all over the place
+        # target_replace_map = {}
+        index_exprs = freeze(axes.index_exprs.get(None, {}))
+        # replacer = JnameSubstitutor(outer_replace_map, codegen_context)
+        # for axis_label, index_expr in index_exprs.items():
+        #     target_replace_map[axis_label] = replacer(index_expr)
+        # target_replace_map = freeze(target_replace_map)
+
+        axis = axes.root
 
     for component in axis.components:
-        iname = codegen_context.unique_name("i")
-        extent_var = register_extent(
-            component.count,
-            iname_replace_map | jname_replace_map | outer_replace_map,
-            codegen_context,
-        )
-        codegen_context.add_domain(iname, extent_var)
+        axis_index_exprs = axes.index_exprs.get((axis.id, component.label), {})
+        index_exprs_ = index_exprs | axis_index_exprs
 
-        new_source_path = source_path | {axis.label: component.label}
-        new_target_path = target_path | axes.target_paths.get(
+        # FIXME: This is not the cause of my problems
+        # if component.count != 1:
+        if True:
+            iname = codegen_context.unique_name("i")
+            extent_var = register_extent(
+                component.count,
+                iname_replace_map | loop_indices,
+                codegen_context,
+            )
+            codegen_context.add_domain(iname, extent_var)
+            axis_replace_map = {axis.label: pym.var(iname)}
+            within_inames = {iname}
+        else:
+            axis_replace_map = {axis.label: 0}
+            within_inames = set()
+
+        source_path_ = source_path | {axis.label: component.label}
+        iname_replace_map_ = iname_replace_map | axis_replace_map
+
+        target_path_ = target_path | axes.target_paths.get(
             (axis.id, component.label), {}
         )
-        new_iname_replace_map = iname_replace_map | {axis.label: pym.var(iname)}
 
-        # these aren't jnames!
-        my_index_exprs = axes.index_exprs.get((axis.id, component.label), {})
-
-        jname_extras = {}
-        for axis_label, index_expr in my_index_exprs.items():
-            jname_expr = JnameSubstitutor(
-                new_iname_replace_map | jname_replace_map | outer_replace_map,
-                codegen_context,
-            )(index_expr)
-            # jname_extras[axis_label] = jname_expr
-            jname_extras[axis_label] = jname_expr
-
-        new_jname_replace_map = jname_replace_map | jname_extras
-
-        with codegen_context.within_inames({iname}):
-            if subaxis := axes.child(axis, component):
+        with codegen_context.within_inames(within_inames):
+            subaxis = axes.child(axis, component)
+            if subaxis:
                 parse_loop_properly_this_time(
                     loop,
                     axes,
                     loop_indices,
                     codegen_context,
                     axis=subaxis,
-                    source_path=new_source_path,
-                    target_path=new_target_path,
-                    iname_replace_map=new_iname_replace_map,
-                    jname_replace_map=new_jname_replace_map,
+                    source_path=source_path_,
+                    iname_replace_map=iname_replace_map_,
+                    target_path=target_path_,
+                    index_exprs=index_exprs_,
                 )
             else:
-                new_iname_replace_map = pmap(
-                    {
-                        (loop.index.local_index.id, myaxislabel): jname_expr
-                        for myaxislabel, jname_expr in new_iname_replace_map.items()
-                    }
+                target_replace_map = {}
+                replacer = JnameSubstitutor(
+                    # outer_replace_map | iname_replace_map_, codegen_context
+                    iname_replace_map_ | loop_indices,
+                    codegen_context,
                 )
-                new_jname_replace_map = pmap(
-                    {
-                        (loop.index.id, myaxislabel): jname_expr
-                        for myaxislabel, jname_expr in new_jname_replace_map.items()
-                    }
-                )
-                for stmt in loop.statements:
+                for axis_label, index_expr in index_exprs_.items():
+                    target_replace_map[axis_label] = replacer(index_expr)
+
+                index_replace_map = target_replace_map
+                local_index_replace_map = iname_replace_map_
+                for stmt in loop.statements[source_path_]:
                     _compile(
                         stmt,
                         loop_indices
                         | {
-                            loop.index: (
-                                new_target_path,
-                                new_jname_replace_map,
-                            ),
-                            loop.index.local_index: (
-                                new_source_path,
-                                new_iname_replace_map,
+                            loop.index.id: (
+                                local_index_replace_map,
+                                index_replace_map,
                             ),
                         },
                         codegen_context,
@@ -498,11 +625,6 @@ def parse_loop_properly_this_time(
 
 @_compile.register
 def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
-    """
-    Turn an exprs.FunctionCall into a series of assignment instructions etc.
-    Handles packing/accessor logic.
-    """
-
     temporaries = []
     subarrayrefs = {}
     extents = {}
@@ -510,425 +632,355 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
     # loopy args can contain ragged params too
     loopy_args = call.function.code.default_entrypoint.args[: len(call.arguments)]
     for loopy_arg, arg, spec in checked_zip(loopy_args, call.arguments, call.argspec):
-        loop_context = context_from_indices(loop_indices)
+        # this check fails because we currently assume that all arrays require packing
+        # from pyop3.transform import _requires_pack_unpack
+        # assert not _requires_pack_unpack(arg)
+        # old names
+        temporary = arg
+        indexed_temp = arg
 
-        assert isinstance(arg, (HierarchicalArray, ContextSensitiveMultiArray))
-        # FIXME materialize is a bad name here, it implies actually packing the values
-        # into the temporary.
-        temporary = arg.with_context(loop_context).materialize()
-        indexed_temp = temporary
-
-        if loopy_arg.shape is None:
-            shape = (temporary.alloc_size,)
+        if isinstance(arg, DummyKernelArgument):
+            ctx.add_dummy_argument(arg, loopy_arg.dtype)
+            name = ctx._dummy_names[arg]
+            subarrayrefs[arg] = pym.var(name)
         else:
-            if np.prod(loopy_arg.shape, dtype=int) != temporary.alloc_size:
-                raise RuntimeError("Shape mismatch between inner and outer kernels")
-            shape = loopy_arg.shape
+            if loopy_arg.shape is None:
+                shape = (temporary.alloc_size,)
+            else:
+                if np.prod(loopy_arg.shape, dtype=int) != temporary.alloc_size:
+                    raise RuntimeError("Shape mismatch between inner and outer kernels")
+                shape = loopy_arg.shape
 
-        temporaries.append((arg, indexed_temp, spec.access, shape))
+            temporaries.append((arg, indexed_temp, spec.access, shape))
 
-        # Register data
-        ctx.add_argument(arg)
+            # Register data
+            # TODO This might be bad for temporaries
+            if isinstance(arg, HierarchicalArray):
+                ctx.add_argument(arg)
 
-        ctx.add_temporary(temporary.name, temporary.dtype, shape)
+            # this should already be done in an assignment
+            # ctx.add_temporary(temporary.name, temporary.dtype, shape)
 
-        # subarrayref nonsense/magic
-        indices = []
-        for s in shape:
-            iname = ctx.unique_name("i")
-            ctx.add_domain(iname, s)
-            indices.append(pym.var(iname))
-        indices = tuple(indices)
+            # subarrayref nonsense/magic
+            indices = []
+            for s in shape:
+                iname = ctx.unique_name("i")
+                ctx.add_domain(iname, s)
+                indices.append(pym.var(iname))
+            indices = tuple(indices)
 
-        subarrayrefs[arg.name] = lp.symbolic.SubArrayRef(
-            indices, pym.subscript(pym.var(temporary.name), indices)
-        )
-
-        # we need to pass sizes through if they are only known at runtime (ragged)
-        # NOTE: If we register an extent to pass through loopy will complain
-        # unless we register it as an assumption of the local kernel (e.g. "n <= 3")
-
-        # FIXME ragged is broken since I commented this out! determining shape of
-        # ragged things requires thought!
-        # for cidx in range(indexed_temp.index.root.degree):
-        #     extents |= self.collect_extents(
-        #         indexed_temp.index,
-        #         indexed_temp.index.root,
-        #         cidx,
-        #         within_indices,
-        #         within_inames,
-        #         depends_on,
-        #     )
+            temp_name = ctx.actual_to_kernel_rename_map[temporary.name]
+            subarrayrefs[arg] = lp.symbolic.SubArrayRef(
+                indices, pym.subscript(pym.var(temp_name), indices)
+            )
 
     # TODO this is pretty much the same as what I do in fix_intents in loopexpr.py
     # probably best to combine them - could add a sensible check there too.
     assignees = tuple(
-        subarrayrefs[arg.name]
+        subarrayrefs[arg]
         for arg, spec in checked_zip(call.arguments, call.argspec)
+        # if spec.access in {WRITE, RW, INC, MIN_RW, MIN_WRITE, MAX_RW, MAX_WRITE, NA}
         if spec.access in {WRITE, RW, INC, MIN_RW, MIN_WRITE, MAX_RW, MAX_WRITE}
     )
     expression = pym.primitives.Call(
         pym.var(call.function.code.default_entrypoint.name),
         tuple(
-            subarrayrefs[arg.name]
+            subarrayrefs[arg]
             for arg, spec in checked_zip(call.arguments, call.argspec)
-            if spec.access in {READ, RW, INC, MIN_RW, MAX_RW}
+            if spec.access in {READ, RW, INC, MIN_RW, MAX_RW, NA}
         )
         + tuple(extents.values()),
     )
 
-    # gathers
-    for arg, temp, access, shape in temporaries:
-        if access in {READ, RW, MIN_RW, MAX_RW}:
-            op = AssignmentType.READ
-        else:
-            assert access in {WRITE, INC, MIN_WRITE, MAX_WRITE}
-            op = AssignmentType.ZERO
-        parse_assignment(arg, temp, shape, op, loop_indices, ctx)
-
     ctx.add_function_call(assignees, expression)
     ctx.add_subkernel(call.function.code)
 
-    # scatters
-    for arg, temp, access, shape in temporaries:
-        if access == READ:
-            continue
-        elif access in {WRITE, RW, MIN_RW, MIN_WRITE, MAX_RW, MAX_WRITE}:
-            op = AssignmentType.WRITE
-        else:
-            assert access == INC
-            op = AssignmentType.INC
-        parse_assignment(arg, temp, shape, op, loop_indices, ctx)
-
 
 # FIXME this is practically identical to what we do in build_loop
+@_compile.register(Assignment)
 def parse_assignment(
-    array,
-    temp,
-    shape,
-    op,
+    assignment,
     loop_indices,
     codegen_ctx,
 ):
-    # TODO singledispatch
-    loop_context = context_from_indices(loop_indices)
-
-    if isinstance(array.with_context(loop_context).buffer, PackedBuffer):
-        if not isinstance(array.with_context(loop_context).buffer, PackedPetscMatAIJ):
-            raise NotImplementedError("TODO")
-        parse_assignment_petscmat(
-            array.with_context(loop_context), temp, shape, op, loop_indices, codegen_ctx
-        )
-        return
-    else:
-        assert isinstance(array.with_context(loop_context).buffer, DistributedBuffer)
-
-    # get the right index tree given the loop context
-
-    axes = array.with_context(loop_context).axes
-    minimal_context = array.filter_context(loop_context)
-
-    target_path = {}
-    # for _, jnames in new_indices.values():
-    for loop_index, (path, iname_expr) in loop_indices.items():
-        if loop_index in minimal_context:
-            # assert all(k not in jname_replace_map for k in iname_expr)
-            # jname_replace_map.update(iname_expr)
-            target_path.update(path)
-    # jname_replace_map = freeze(jname_replace_map)
-    target_path = freeze(target_path)
-
-    jname_replace_map = merge_dicts(mymap for _, mymap in loop_indices.values())
-
+    # this seems wrong
     parse_assignment_properly_this_time(
-        array,
-        temp,
-        shape,
-        op,
-        axes,
+        assignment,
         loop_indices,
         codegen_ctx,
-        iname_replace_map=jname_replace_map,
-        jname_replace_map=jname_replace_map,
-        target_path=target_path,
     )
 
 
-def parse_assignment_petscmat(array, temp, shape, op, loop_indices, codegen_context):
-    ctx = codegen_context
-
-    (iraxis, ircpt), (icaxis, iccpt) = array.axes.path_with_nodes(
-        *array.axes.leaf, ordered=True
-    )
-    rkey = (iraxis.id, ircpt)
-    ckey = (icaxis.id, iccpt)
-
-    rexpr = array.index_exprs[rkey][just_one(array.target_paths[rkey])]
-    cexpr = array.index_exprs[ckey][just_one(array.target_paths[ckey])]
-
-    mat = array.buffer.array
-
-    # need to generate code like map0[i0] instead of the usual map0[i0, i1]
-    # this is because we are passing the full map through to the function call
-
-    # similarly we also need to be careful to interrupt this function early
-    # we don't want to emit loops for things!
-
-    # I believe that this is probably the right place to be flattening the map
-    # expressions. We want to have already done any clever substitution for arity 1
-    # objects.
-
-    # rexpr = self._flatten(rexpr)
-    # cexpr = self._flatten(cexpr)
-
-    iname_expr_replace_map = {}
-    for _, replace_map in loop_indices.values():
-        iname_expr_replace_map.update(replace_map)
-
-    # for now assume that we pass exactly the right map through, do no composition
-    if not isinstance(rexpr, CalledMapVariable) or len(rexpr.parameters) != 2:
-        raise NotImplementedError
-
-    rinner_axis_label = rexpr.function.full_map.name
-
-    # substitute a zero for the inner axis, we want to avoid this inner loop
-    new_rexpr = JnameSubstitutor(
-        iname_expr_replace_map | {rinner_axis_label: 0}, codegen_context
-    )(rexpr)
-
-    if not isinstance(cexpr, CalledMapVariable) or len(cexpr.parameters) != 2:
-        raise NotImplementedError
-    cinner_axis_label = cexpr.function.full_map.name
-    # substitute a zero for the inner axis, we want to avoid this inner loop
-    new_cexpr = JnameSubstitutor(
-        iname_expr_replace_map | {cinner_axis_label: 0}, codegen_context
-    )(cexpr)
-
+@_compile.register(PetscMatInstruction)
+def _(assignment, loop_indices, codegen_context):
     # now emit the right line of code, this should properly be a lp.ScalarCallable
     # https://petsc.org/release/manualpages/Mat/MatGetValuesLocal/
-    # PetscErrorCode MatGetValuesLocal(Mat mat, PetscInt nrow, const PetscInt irow[], PetscInt ncol, const PetscInt icol[], PetscScalar y[])
-    nrow = rexpr.function.map_component.arity
-    irow = new_rexpr
-    ncol = cexpr.function.map_component.arity
-    icol = new_cexpr
 
-    # can only use GetValuesLocal when lgmaps are set (which I don't yet do)
-    call_str = (
-        # f"MatGetValuesLocal({mat.name}, {nrow}, &({irow}), {ncol}, &({icol}), &({temp.name}[0]));"
-        f"MatGetValues({mat.name}, {nrow}, &({irow}), {ncol}, &({icol}), &({temp.name}[0]));"
+    mat = assignment.mat_arg.buffer.mat
+    array = assignment.array_arg
+    rmap = assignment.mat_arg.buffer.rmap
+    cmap = assignment.mat_arg.buffer.cmap
+
+    codegen_context.add_argument(assignment.mat_arg)
+    codegen_context.add_argument(array)
+    codegen_context.add_argument(rmap)
+    codegen_context.add_argument(cmap)
+
+    mat_name = codegen_context.actual_to_kernel_rename_map[mat.name]
+    array_name = codegen_context.actual_to_kernel_rename_map[array.name]
+    rmap_name = codegen_context.actual_to_kernel_rename_map[rmap.name]
+    cmap_name = codegen_context.actual_to_kernel_rename_map[cmap.name]
+
+    # these sizes can be expressions that need evaluating
+    rsize, csize = assignment.mat_arg.buffer.shape
+
+    if not isinstance(rsize, numbers.Integral):
+        # rindex_exprs = merge_dicts(
+        #     rsize.index_exprs.get((ax.id, clabel), {})
+        #     for ax, clabel in rsize.axes.path_with_nodes(*rsize.axes.leaf).items()
+        # )
+        rsize_var = register_extent(
+            # rsize, rindex_exprs, my_replace_map, codegen_context
+            rsize,
+            loop_indices,
+            codegen_context,
+        )
+    else:
+        rsize_var = rsize
+
+    if not isinstance(csize, numbers.Integral):
+        # cindex_exprs = merge_dicts(
+        #     csize.index_exprs.get((ax.id, clabel), {})
+        #     for ax, clabel in csize.axes.path_with_nodes(*csize.axes.leaf).items()
+        # )
+        csize_var = register_extent(
+            # csize, cindex_exprs, my_replace_map, codegen_context
+            csize,
+            loop_indices,
+            codegen_context,
+        )
+    else:
+        csize_var = csize
+
+    # rlayouts = rmap.layouts[
+    #     freeze({rmap.axes.root.label: rmap.axes.root.component.label})
+    # ]
+    rlayouts = rmap.layouts[pmap()]
+    roffset = JnameSubstitutor(loop_indices, codegen_context)(rlayouts)
+
+    # clayouts = cmap.layouts[
+    #     freeze({cmap.axes.root.label: cmap.axes.root.component.label})
+    # ]
+    clayouts = cmap.layouts[pmap()]
+    coffset = JnameSubstitutor(loop_indices, codegen_context)(clayouts)
+
+    irow = f"{rmap_name}[{roffset}]"
+    icol = f"{cmap_name}[{coffset}]"
+
+    # debug
+    # MatSetValuesLocal(array_4, 1, &(array_5[i_0]), 1, &(array_6[i_0]), &(t_1[0]), ADD_VALUES);
+    # if rmap.name == "array_5":
+    #     codegen_context.add_cinstruction(
+    #         r"""
+    #     printf("%d\n", i_0);
+    #     printf("%d\n", array_5[i_0]);
+    #     printf("%d\n", array_6[i_0]);
+    #     printf("t_1: %f\n", t_1[0]);
+    #     //printf("t_3: %f, %f, %f, %f, %f, %f\n", t_3[0], t_3[1], t_3[2], t_3[3], t_3[4], t_3[5]);
+    #     //printf("closure_6: %d, %d, %d, %d\n", closure_6[0],  closure_6[1], closure_6[2], closure_6[3]);
+    #     //printf("offset_1: %d, %d, %d, %d\n", offset_1[0],  offset_1[1], offset_1[2], offset_1[3]);
+    #     //printf("coords: %f, %f, %f, %f\n", firedrake_default_coordinates[0],  firedrake_default_coordinates[1], firedrake_default_coordinates[2], firedrake_default_coordinates[3]);
+    #
+    #     """)
+
+    call_str = _petsc_mat_insn(
+        assignment, mat_name, array_name, rsize_var, csize_var, irow, icol
     )
     codegen_context.add_cinstruction(call_str)
 
 
+@functools.singledispatch
+def _petsc_mat_insn(assignment, *args):
+    raise TypeError(f"{assignment} not recognised")
+
+
+@_petsc_mat_insn.register
+def _(assignment: PetscMatLoad, mat_name, array_name, nrow, ncol, irow, icol):
+    return f"MatGetValuesLocal({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]));"
+
+
+@_petsc_mat_insn.register
+def _(assignment: PetscMatStore, mat_name, array_name, nrow, ncol, irow, icol):
+    return f"MatSetValuesLocal({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]), INSERT_VALUES);"
+
+
+@_petsc_mat_insn.register
+def _(assignment: PetscMatAdd, mat_name, array_name, nrow, ncol, irow, icol):
+    return f"PetscCall(MatSetValuesLocal({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]), ADD_VALUES));"
+
+
 # TODO now I attach a lot of info to the context-free array, do I need to pass axes around?
 def parse_assignment_properly_this_time(
-    array,
-    temp,
-    shape,
-    op,
-    axes,
+    assignment,
     loop_indices,
     codegen_context,
     *,
-    iname_replace_map,
-    jname_replace_map,
-    target_path,
+    iname_replace_map=pmap(),
+    # TODO document these under "Other Parameters"
     axis=None,
-    source_path=pmap(),
+    path=None,
 ):
-    context = context_from_indices(loop_indices)
-    ctx_free_array = array.with_context(context)
+    axes = assignment.assignee.axes
 
-    if axis is None:
+    if strictly_all(x is None for x in [axis, path]):
+        for array in assignment.arrays:
+            codegen_context.add_argument(array)
+
         axis = axes.root
-        target_path = target_path | ctx_free_array.target_paths.get(None, pmap())
-        my_index_exprs = ctx_free_array.index_exprs.get(None, pmap())
-        jname_extras = {}
-        for axis_label, index_expr in my_index_exprs.items():
-            jname_expr = JnameSubstitutor(
-                iname_replace_map | jname_replace_map, codegen_context
-            )(index_expr)
-            jname_extras[axis_label] = jname_expr
-        jname_replace_map = jname_replace_map | jname_extras
+        path = pmap()
 
     if axes.is_empty:
         add_leaf_assignment(
-            array,
-            temp,
-            shape,
-            op,
-            axes,
-            source_path,
-            target_path,
-            iname_replace_map,
-            jname_replace_map,
+            assignment,
+            path,
+            iname_replace_map | loop_indices,
             codegen_context,
             loop_indices,
         )
         return
 
     for component in axis.components:
-        iname = codegen_context.unique_name("i")
-        extent_var = register_extent(
-            component.count, iname_replace_map | jname_replace_map, codegen_context
-        )
-        codegen_context.add_domain(iname, extent_var)
+        # if component.count != 1:
+        if True:
+            iname = codegen_context.unique_name("i")
 
-        new_source_path = source_path | {axis.label: component.label}  # not used
-        new_target_path = target_path | ctx_free_array.target_paths.get(
-            (axis.id, component.label), {}
-        )
+            extent_var = register_extent(
+                component.count,
+                iname_replace_map | loop_indices,
+                codegen_context,
+            )
+            codegen_context.add_domain(iname, extent_var)
+            new_iname_replace_map = iname_replace_map | {axis.label: pym.var(iname)}
+            within_inames = {iname}
+        else:
+            new_iname_replace_map = iname_replace_map | {axis.label: 0}
+            within_inames = set()
 
-        new_iname_replace_map = iname_replace_map | {axis.label: pym.var(iname)}
+        path_ = path | {axis.label: component.label}
 
-        # I don't like that I need to do this here and also when I emit the layout
-        # instructions.
-        # Do I need the jnames on the way down? Think so for things like ragged...
-        my_index_exprs = ctx_free_array.index_exprs.get((axis.id, component.label), {})
-        jname_extras = {}
-        for axis_label, index_expr in my_index_exprs.items():
-            jname_expr = JnameSubstitutor(
-                new_iname_replace_map | jname_replace_map, codegen_context
-            )(index_expr)
-            jname_extras[axis_label] = jname_expr
-        new_jname_replace_map = jname_replace_map | jname_extras
-        # new_jname_replace_map = new_iname_replace_map
-
-        with codegen_context.within_inames({iname}):
+        with codegen_context.within_inames(within_inames):
             if subaxis := axes.child(axis, component):
                 parse_assignment_properly_this_time(
-                    array,
-                    temp,
-                    shape,
-                    op,
-                    axes,
+                    assignment,
                     loop_indices,
                     codegen_context,
-                    axis=subaxis,
-                    source_path=new_source_path,
-                    target_path=new_target_path,
                     iname_replace_map=new_iname_replace_map,
-                    jname_replace_map=new_jname_replace_map,
+                    axis=subaxis,
+                    path=path_,
                 )
 
             else:
                 add_leaf_assignment(
-                    array,
-                    temp,
-                    shape,
-                    op,
-                    axes,
-                    new_source_path,
-                    new_target_path,
-                    new_iname_replace_map,
-                    new_jname_replace_map,
+                    assignment,
+                    path_,
+                    new_iname_replace_map | loop_indices,
                     codegen_context,
                     loop_indices,
                 )
 
 
 def add_leaf_assignment(
-    array,
-    temporary,
-    shape,
-    op,
-    axes,
-    source_path,
-    target_path,
+    assignment,
+    path,
     iname_replace_map,
-    jname_replace_map,
     codegen_context,
     loop_indices,
 ):
-    context = context_from_indices(loop_indices)
+    larr = assignment.assignee
+    rarr = assignment.expression
 
-    assert isinstance(array, (HierarchicalArray, ContextSensitiveMultiArray))
-
-    def array_expr():
-        array_ = array.with_context(context)
-        return make_array_expr(
-            array,
-            array_.layouts[target_path],
-            target_path,
-            iname_replace_map | jname_replace_map,
+    if isinstance(rarr, HierarchicalArray):
+        rexpr = make_array_expr(
+            rarr,
+            path,
+            iname_replace_map,
             codegen_context,
         )
+    else:
+        assert isinstance(rarr, numbers.Number)
+        rexpr = rarr
 
-    temp_expr = functools.partial(
-        make_temp_expr,
-        temporary,
-        shape,
-        source_path,
+    lexpr = make_array_expr(
+        larr,
+        path,
         iname_replace_map,
         codegen_context,
     )
 
-    if op == AssignmentType.READ:
-        lexpr = temp_expr()
-        rexpr = array_expr()
-    elif op == AssignmentType.WRITE:
-        lexpr = array_expr()
-        rexpr = temp_expr()
-    elif op == AssignmentType.INC:
-        lexpr = array_expr()
-        rexpr = lexpr + temp_expr()
-    elif op == AssignmentType.ZERO:
-        lexpr = temp_expr()
-        rexpr = 0
+    # if larr.name == "t_4":
+    #     breakpoint()
+
+    if isinstance(assignment, AddAssignment):
+        rexpr = lexpr + rexpr
     else:
-        raise AssertionError("Invalid assignment type")
+        assert isinstance(assignment, ReplaceAssignment)
 
     codegen_context.add_assignment(lexpr, rexpr)
 
 
-def make_array_expr(array, layouts, path, jnames, ctx):
+def make_array_expr(array, path, inames, ctx):
     array_offset = make_offset_expr(
-        layouts,
-        jnames,
-        ctx,
-    )
-    return pym.subscript(pym.var(array.name), array_offset)
-
-
-def make_temp_expr(temporary, shape, path, jnames, ctx):
-    layout = temporary.axes.layouts[path]
-    temp_offset = make_offset_expr(
-        layout,
-        jnames,
+        array.subst_layouts[path],
+        inames,
         ctx,
     )
 
     # hack to handle the fact that temporaries can have shape but we want to
     # linearly index it here
-    extra_indices = (0,) * (len(shape) - 1)
-    # also has to be a scalar, not an expression
-    temp_offset_var = ctx.unique_name("off")
-    ctx.add_temporary(temp_offset_var)
-    ctx.add_assignment(temp_offset_var, temp_offset)
-    temp_offset_var = pym.var(temp_offset_var)
-    return pym.subscript(pym.var(temporary.name), extra_indices + (temp_offset_var,))
+    if array.name in ctx._temporary_shapes:
+        shape = ctx._temporary_shapes[array.name]
+        assert shape is not None
+        rank = len(shape)
+        extra_indices = (0,) * (rank - 1)
+
+        # also has to be a scalar, not an expression
+        temp_offset_name = ctx.unique_name("j")
+        temp_offset_var = pym.var(temp_offset_name)
+        ctx.add_temporary(temp_offset_name)
+        ctx.add_assignment(temp_offset_var, array_offset)
+        indices = extra_indices + (temp_offset_var,)
+    else:
+        indices = (array_offset,)
+
+    name = ctx.actual_to_kernel_rename_map[array.name]
+    return pym.subscript(pym.var(name), indices)
 
 
 class JnameSubstitutor(pym.mapper.IdentityMapper):
     def __init__(self, replace_map, codegen_context):
-        self._labels_to_jnames = replace_map
+        self._replace_map = replace_map
         self._codegen_context = codegen_context
 
     def map_axis_variable(self, expr):
-        return self._labels_to_jnames[expr.axis_label]
+        return self._replace_map[expr.axis_label]
 
     # this is cleaner if I do it as a single line expression
     # rather than register assignments for things.
-    def map_multi_array(self, expr):
-        path = expr.array.axes.path(*expr.array.axes.leaf)
-        replace_map = {axis: self.rec(index) for axis, index in expr.indices.items()}
-        varname = _scalar_assignment(
-            expr.array,
-            path,
+    def map_array(self, expr):
+        # Register data
+        self._codegen_context.add_argument(expr.array)
+        new_name = self._codegen_context.actual_to_kernel_rename_map[expr.array.name]
+
+        replace_map = {ax: self.rec(expr_) for ax, expr_ in expr.indices.items()}
+        replace_map.update(self._replace_map)
+
+        offset_expr = make_offset_expr(
+            expr.array.subst_layouts[expr.path],
             replace_map,
             self._codegen_context,
         )
-        return varname
+        rexpr = pym.subscript(pym.var(new_name), offset_expr)
+        return rexpr
 
     def map_called_map(self, expr):
         if not isinstance(expr.function.map_component.array, HierarchicalArray):
@@ -940,7 +992,7 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
 
         # handle [map0(p)][map1(p)] where map0 does not have an associated loop
         try:
-            jname = self._labels_to_jnames[expr.function.full_map.name]
+            jname = self._replace_map[expr.function.full_map.name]
         except KeyError:
             jname = self._codegen_context.unique_name("j")
             self._codegen_context.add_temporary(jname)
@@ -970,7 +1022,14 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         return jname_expr
 
     def map_loop_index(self, expr):
-        return self._labels_to_jnames[expr.name, expr.axis]
+        # if expr.id.endswith("1"):
+        #     breakpoint()
+        # FIXME pretty sure I have broken local loop index stuff
+        if isinstance(expr, LocalLoopIndexVariable):
+            return self._replace_map[expr.id][0][expr.axis]
+        else:
+            assert isinstance(expr, LoopIndexVariable)
+            return self._replace_map[expr.id][1][expr.axis]
 
     def map_call(self, expr):
         if expr.function.name == "mybsearch":
@@ -978,14 +1037,12 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         else:
             raise NotImplementedError("hmm")
 
-    # def _flatten(self, expr):
-    #     for
-
     def _map_bsearch(self, expr):
         indices_var, axis_var = expr.parameters
         indices = indices_var.array
 
-        leaf_axis, leaf_component = indices.axes.leaf
+        leaf_axis = indices.axes.leaf_axis
+        leaf_component = indices.axes.leaf_component
         ctx = self._codegen_context
 
         # should do elsewhere?
@@ -1009,32 +1066,42 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         ctx.add_assignment(key_var, key_expr)
 
         # base
+        # replace loop indices with axis variables - this feels very hacky
         replace_map = {}
-        for key, replace_expr in self._labels_to_jnames.items():
-            # for (LoopIndex_id0, axis0)
-            if isinstance(key, tuple):
-                replace_map[key[1]] = replace_expr
+        for key, replace_expr in self._replace_map.items():
+            # loop indices
+            if isinstance(replace_expr, tuple):
+                # use target exprs
+                replace_expr = replace_expr[1]
+                for ax, rep_expr in replace_expr.items():
+                    replace_map[ax] = rep_expr
             else:
-                assert isinstance(key, str)
                 replace_map[key] = replace_expr
         # and set start to zero
         start_replace_map = replace_map.copy()
         start_replace_map[leaf_axis.label] = 0
 
         start_expr = make_offset_expr(
-            indices.layouts[indices.axes.path(leaf_axis, leaf_component)],
+            indices.subst_layouts[indices.axes.path(leaf_axis, leaf_component)],
             start_replace_map,
             self._codegen_context,
         )
         base_varname = ctx.unique_name("base")
+
+        # rename things
+        indices_name = ctx.actual_to_kernel_rename_map[indices.name]
+        renamer = Renamer(ctx.actual_to_kernel_rename_map)
+        start_expr = renamer(start_expr)
+
         # breaks if unsigned
         ctx.add_cinstruction(
-            f"int32_t* {base_varname} = {indices.name} + {start_expr};", {indices.name}
+            f"int32_t* {base_varname} = {indices_name} + {start_expr};", {indices_name}
         )
 
         # nitems
         nitems_varname = ctx.unique_name("nitems")
         ctx.add_temporary(nitems_varname)
+
         nitems_expr = register_extent(leaf_component.count, replace_map, ctx)
 
         # result
@@ -1066,7 +1133,7 @@ def make_offset_expr(
     return JnameSubstitutor(jname_replace_map, codegen_context)(layouts)
 
 
-def register_extent(extent, jnames, ctx):
+def register_extent(extent, iname_replace_map, ctx):
     if isinstance(extent, numbers.Integral):
         return extent
 
@@ -1078,17 +1145,19 @@ def register_extent(extent, jnames, ctx):
         path = extent.axes.path(*extent.axes.leaf)
     else:
         path = pmap()
-    expr = _scalar_assignment(extent, path, jnames, ctx)
+
+    index_exprs = extent.index_exprs.get(None, {})
+    # extent must be linear
+    if not extent.axes.is_empty:
+        for axis, cpt in extent.axes.path_with_nodes(*extent.axes.leaf).items():
+            index_exprs.update(extent.index_exprs[axis.id, cpt])
+
+    expr = _scalar_assignment(extent, path, index_exprs, iname_replace_map, ctx)
 
     varname = ctx.unique_name("p")
     ctx.add_temporary(varname)
     ctx.add_assignment(pym.var(varname), expr)
     return varname
-
-
-class MultiArrayCollector(pym.mapper.Collector):
-    def map_multi_array(self, expr):
-        return {expr}
 
 
 class VariableReplacer(pym.mapper.IdentityMapper):
@@ -1101,27 +1170,35 @@ class VariableReplacer(pym.mapper.IdentityMapper):
 
 def _scalar_assignment(
     array,
-    path,
-    array_labels_to_jnames,
+    source_path,
+    index_exprs,
+    iname_replace_map,
     ctx,
 ):
     # Register data
     ctx.add_argument(array)
 
+    # can this all go?
+    index_keys = [None] + [
+        (axis.id, cpt.label)
+        for axis, cpt in array.axes.detailed_path(source_path).items()
+    ]
+    target_path = merge_dicts(array.target_paths.get(key, {}) for key in index_keys)
+    # index_exprs = merge_dicts(array.index_exprs.get(key, {}) for key in index_keys)
+
+    jname_replace_map = {}
+    replacer = JnameSubstitutor(iname_replace_map, ctx)
+    for axlabel, index_expr in index_exprs.items():
+        jname_replace_map[axlabel] = replacer(index_expr)
+
     offset_expr = make_offset_expr(
-        array.layouts[path],
-        array_labels_to_jnames,
+        array.layouts[target_path],
+        jname_replace_map,
         ctx,
     )
-    rexpr = pym.subscript(pym.var(array.name), offset_expr)
+    name = ctx.actual_to_kernel_rename_map[array.name]
+    rexpr = pym.subscript(pym.var(name), offset_expr)
     return rexpr
-
-
-def context_from_indices(loop_indices):
-    loop_context = {}
-    for loop_index, (path, _) in loop_indices.items():
-        loop_context[loop_index.id] = path
-    return freeze(loop_context)
 
 
 # lives here??
@@ -1161,9 +1238,4 @@ def _(arg: PackedBuffer):
 
 @_as_pointer.register
 def _(array: PetscMat):
-    return array.petscmat.handle
-
-
-@_as_pointer.register
-def _(arg: Tensor):
-    return _as_pointer(arg.data)
+    return array.mat.handle

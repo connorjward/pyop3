@@ -1,14 +1,14 @@
 import abc
 import collections
-import functools
 import itertools
-import operator
 import warnings
 from typing import Any, Collection, Hashable, Optional
 
 import numpy as np
 import pytools
 from pyrsistent import pmap
+
+from pyop3.config import config
 
 
 class UniqueNameGenerator(pytools.UniqueNameGenerator):
@@ -26,6 +26,10 @@ _unique_name_generator = UniqueNameGenerator()
 
 def unique_name(prefix: str) -> str:
     return _unique_name_generator(prefix)
+
+
+class auto:
+    pass
 
 
 # type aliases
@@ -49,6 +53,15 @@ class Labelled(abc.ABC):
     @classmethod
     def unique_label(cls) -> str:
         return unique_name(f"_label_{cls.__name__}")
+
+
+# TODO is Identified really useful?
+class UniqueRecord(pytools.ImmutableRecord, Identified):
+    fields = {"id"}
+
+    def __init__(self, id=None):
+        pytools.ImmutableRecord.__init__(self)
+        Identified.__init__(self, id)
 
 
 def as_tuple(item):
@@ -195,6 +208,28 @@ def popwhen(predicate, iterable):
     raise KeyError("Predicate does not hold for any items in iterable")
 
 
+def steps(sizes, drop_last=False):
+    sizes = tuple(sizes)
+    steps_ = (0,) + tuple(np.cumsum(sizes, dtype=int))
+    return steps_[:-1] if drop_last else steps_
+
+
+def pairwise(iterable):
+    return zip(iterable, iterable[1:])
+
+
+# stolen from stackoverflow
+# https://stackoverflow.com/questions/11649577/how-to-invert-a-permutation-array-in-numpy
+def invert(p):
+    """Return an array s with which np.array_equal(arr[p][s], arr) is True.
+    The array_like argument p must be some permutation of 0, 1, ..., len(p)-1.
+    """
+    p = np.asanyarray(p)  # in case p is a tuple, etc.
+    s = np.empty_like(p)
+    s[p] = np.arange(p.size)
+    return s
+
+
 def strict_cast(obj, cast):
     new_obj = cast(obj)
     if new_obj != obj:
@@ -285,3 +320,11 @@ def frozen_record(cls):
         raise TypeError("frozen_record is only valid for subclasses of pytools.Record")
     cls.copy = _disabled_record_copy
     return cls
+
+
+def debug_assert(predicate, msg=None):
+    if config["debug"]:
+        if msg:
+            assert predicate(), msg
+        else:
+            assert predicate()

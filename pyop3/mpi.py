@@ -39,6 +39,7 @@ import gc
 import glob
 import os
 import tempfile
+import weakref
 from itertools import count
 
 from mpi4py import MPI  # noqa
@@ -77,6 +78,8 @@ _COMM_CIDX = count()
 _DUPED_COMM_DICT = {}
 # Flag to indicate whether we are in cleanup (at exit)
 PYOP2_FINALIZED = False
+# Flag for outputting information at the end of testing (do not abuse!)
+_running_on_ci = bool(os.environ.get("PYOP2_CI_TESTS"))
 
 
 class PyOP2CommError(ValueError):
@@ -180,32 +183,48 @@ def delcomm_outer(comm, keyval, icomm):
     :arg icomm: The inner communicator, should have a reference to
         ``comm``.
     """
-    # This will raise errors at cleanup time as some objects are already
-    # deleted, so we just skip
-    if not PYOP2_FINALIZED:
-        if keyval not in (innercomm_keyval, compilationcomm_keyval):
-            raise PyOP2CommError("Unexpected keyval")
-        ocomm = icomm.Get_attr(outercomm_keyval)
-        if ocomm is None:
-            raise PyOP2CommError(
-                "Inner comm does not have expected reference to outer comm"
-            )
+    # Use debug printer that is safe to use at exit time
+    debug = finalize_safe_debug()
+    if keyval not in (innercomm_keyval, compilationcomm_keyval):
+        raise PyOP2CommError("Unexpected keyval")
 
-        if ocomm != comm:
-            raise PyOP2CommError("Inner comm has reference to non-matching outer comm")
-        icomm.Delete_attr(outercomm_keyval)
+    if keyval == innercomm_keyval:
+        debug(f"Deleting innercomm keyval on {comm.name}")
+    if keyval == compilationcomm_keyval:
+        debug(f"Deleting compilationcomm keyval on {comm.name}")
 
-        # Once we have removed the ref to the inner/compilation comm we can free it
-        cidx = icomm.Get_attr(cidx_keyval)
-        cidx = cidx[0]
-        del _DUPED_COMM_DICT[cidx]
-        gc.collect()
-        refcount = icomm.Get_attr(refcount_keyval)
-        if refcount[0] > 1:
-            raise PyOP2CommError(
-                "References to comm still held, this will cause deadlock"
-            )
-        icomm.Free()
+    ocomm = icomm.Get_attr(outercomm_keyval)
+    if ocomm is None:
+        raise PyOP2CommError(
+            "Inner comm does not have expected reference to outer comm"
+        )
+
+    if ocomm != comm:
+        raise PyOP2CommError("Inner comm has reference to non-matching outer comm")
+    icomm.Delete_attr(outercomm_keyval)
+
+    # An inner comm may or may not hold a reference to a compilation comm
+    comp_comm = icomm.Get_attr(compilationcomm_keyval)
+    if comp_comm is not None:
+        debug("Removing compilation comm on inner comm")
+        decref(comp_comm)
+    icomm.Delete_attr(compilationcomm_keyval)
+
+    # Once we have removed the reference to the inner/compilation comm we can free it
+    cidx = icomm.Get_attr(cidx_keyval)
+    cidx = cidx[0]
+    del _DUPED_COMM_DICT[cidx]
+    gc.collect()
+    refcount = icomm.Get_attr(refcount_keyval)
+    if refcount[0] > 1:
+        # In the case where `comm` is a custom user communicator there may be references
+        # to the inner comm still held and this is not an issue, but there is not an
+        # easy way to distinguish this case, so we just log the event.
+        debug(
+            f"There are still {refcount[0]} references to {comm.name}, "
+            "this will cause deadlock if the communicator has been incorrectly freed"
+        )
+    icomm.Free()
 
 
 # Reference count, creation index, inner/outer/compilation communicator
@@ -224,26 +243,23 @@ def is_pyop2_comm(comm):
 
     :arg comm: Communicator to query
     """
-    global PYOP2_FINALIZED
     if isinstance(comm, PETSc.Comm):
         ispyop2comm = False
     elif comm == MPI.COMM_NULL:
-        if not PYOP2_FINALIZED:
-            raise PyOP2CommError("Communicator passed to is_pyop2_comm() is COMM_NULL")
-        else:
-            ispyop2comm = True
+        raise PyOP2CommError("Communicator passed to is_pyop2_comm() is COMM_NULL")
     elif isinstance(comm, MPI.Comm):
         ispyop2comm = bool(comm.Get_attr(refcount_keyval))
     else:
         raise PyOP2CommError(
-            f"Argument passed to is_pyop2_comm() is a {type(comm)}, which is not a "
-            "recognised comm type"
+            f"Argument passed to is_pyop2_comm() is a {type(comm)}, which is not a recognised comm type"
         )
     return ispyop2comm
 
 
 def pyop2_comm_status():
-    """Prints the reference counts for all comms PyOP2 has duplicated"""
+    """Return string containing a table of the reference counts for all
+    communicators  PyOP2 has duplicated.
+    """
     status_string = "PYOP2 Communicator reference counts:\n"
     status_string += "| Communicator name                      | Count |\n"
     status_string += "==================================================\n"
@@ -267,10 +283,7 @@ class temp_internal_comm:
 
     def __init__(self, comm):
         self.user_comm = comm
-        self.internal_comm = internal_comm(self.user_comm)
-
-    def __del__(self):
-        decref(self.internal_comm)
+        self.internal_comm = internal_comm(self.user_comm, self)
 
     def __enter__(self):
         """Returns an internal comm that will be safely decref'd
@@ -284,10 +297,12 @@ class temp_internal_comm:
         pass
 
 
-def internal_comm(comm):
+def internal_comm(comm, obj):
     """Creates an internal comm from the user comm.
     If comm is None, create an internal communicator from COMM_WORLD
     :arg comm: A communicator or None
+    :arg obj: The object which the comm is an attribute of
+    (usually `self`)
 
     :returns pyop2_comm: A PyOP2 internal communicator
     """
@@ -310,6 +325,7 @@ def internal_comm(comm):
         pyop2_comm = comm
     else:
         pyop2_comm = dup_comm(comm)
+    weakref.finalize(obj, decref, pyop2_comm)
     return pyop2_comm
 
 
@@ -322,20 +338,19 @@ def incref(comm):
 
 def decref(comm):
     """Decrement communicator reference count"""
-    if not PYOP2_FINALIZED:
+    if comm == MPI.COMM_NULL:
+        # This case occurs if the the outer communicator has already been freed by
+        # the user
+        debug("Cannot decref an already freed communicator")
+    else:
         assert is_pyop2_comm(comm)
         refcount = comm.Get_attr(refcount_keyval)
         refcount[0] -= 1
-        if refcount[0] == 1:
-            # Freeing the comm is handled by the destruction of the user comm
-            pass
-        elif refcount[0] < 1:
+        # Freeing the internal comm is handled by the destruction of the user comm
+        if refcount[0] < 1:
             raise PyOP2CommError(
                 "Reference count is less than 1, decref called too many times"
             )
-
-    elif comm != MPI.COMM_NULL:
-        comm.Free()
 
 
 def dup_comm(comm_in):
@@ -388,10 +403,10 @@ def create_split_comm(comm):
     else:
         debug("Creating compilation communicator using MPI_Split + filesystem")
         if comm.rank == 0:
-            if not os.path.exists(config["cache_dir"]):
-                os.makedirs(config["cache_dir"], exist_ok=True)
+            if not os.path.exists(configuration["cache_dir"]):
+                os.makedirs(configuration["cache_dir"], exist_ok=True)
             tmpname = tempfile.mkdtemp(
-                prefix="rank-determination-", dir=config["cache_dir"]
+                prefix="rank-determination-", dir=configuration["cache_dir"]
             )
         else:
             tmpname = None
@@ -438,7 +453,7 @@ def set_compilation_comm(comm, comp_comm):
 
     if not is_pyop2_comm(comp_comm):
         raise PyOP2CommError(
-            "Communicator used for compilation must be a PyOP2 communicator.\n"
+            "Communicator used for compilation communicator must be a PyOP2 communicator.\n"
             "Use pyop2.mpi.dup_comm() to create a PyOP2 comm from an existing comm."
         )
     else:
@@ -446,8 +461,7 @@ def set_compilation_comm(comm, comp_comm):
             # Clean up old_comp_comm before setting new one
             if not is_pyop2_comm(old_comp_comm):
                 raise PyOP2CommError(
-                    "Compilation communicator is not a PyOP2 comm, something is "
-                    "very broken!"
+                    "Compilation communicator is not a PyOP2 comm, something is very broken!"
                 )
             gc.collect()
             decref(old_comp_comm)
@@ -458,10 +472,13 @@ def set_compilation_comm(comm, comp_comm):
 
 
 @collective
-def compilation_comm(comm):
+def compilation_comm(comm, obj):
     """Get a communicator for compilation.
 
     :arg comm: The input communicator, must be a PyOP2 comm.
+    :arg obj: The object which the comm is an attribute of
+    (usually `self`)
+
     :returns: A communicator used for compilation (may be smaller)
     """
     if not is_pyop2_comm(comm):
@@ -483,7 +500,27 @@ def compilation_comm(comm):
     else:
         comp_comm = comm
     incref(comp_comm)
+    weakref.finalize(obj, decref, comp_comm)
     return comp_comm
+
+
+def finalize_safe_debug():
+    """Return function for debug output.
+
+    When Python is finalizing the logging module may be finalized before we have
+    finished writing debug information. In this case we fall back to using the
+    Python `print` function to output debugging information.
+
+    Furthermore, we always want to see this finalization information when
+    running the CI tests.
+    """
+    global debug
+    if PYOP2_FINALIZED:
+        if logger.level > DEBUG and not _running_on_ci:
+            debug = lambda string: None
+        else:
+            debug = lambda string: print(string)
+    return debug
 
 
 @atexit.register
@@ -491,27 +528,31 @@ def _free_comms():
     """Free all outstanding communicators."""
     global PYOP2_FINALIZED
     PYOP2_FINALIZED = True
-    if logger.level > DEBUG:
-        debug = lambda string: None
-    else:
-        debug = lambda string: print(string)
+    debug = finalize_safe_debug()
     debug("PyOP2 Finalizing")
     # Collect garbage as it may hold on to communicator references
+
     debug("Calling gc.collect()")
     gc.collect()
+    debug("STATE0")
+    debug(pyop2_comm_status())
+
     debug("Freeing PYOP2_COMM_WORLD")
     COMM_WORLD.Free()
+    debug("STATE1")
+    debug(pyop2_comm_status())
+
     debug("Freeing PYOP2_COMM_SELF")
     COMM_SELF.Free()
+    debug("STATE2")
     debug(pyop2_comm_status())
     debug(f"Freeing comms in list (length {len(_DUPED_COMM_DICT)})")
-    for key in sorted(_DUPED_COMM_DICT.keys()):
+    for key in sorted(_DUPED_COMM_DICT.keys(), reverse=True):
         comm = _DUPED_COMM_DICT[key]
         if comm != MPI.COMM_NULL:
             refcount = comm.Get_attr(refcount_keyval)
             debug(
-                f"Freeing {comm.name}, with index {key}, which has "
-                f"refcount {refcount[0]}"
+                f"Freeing {comm.name}, with index {key}, which has refcount {refcount[0]}"
             )
             comm.Free()
         del _DUPED_COMM_DICT[key]

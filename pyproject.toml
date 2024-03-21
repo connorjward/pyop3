@@ -19,9 +19,8 @@ dependencies = [
 dev = [
   "black",
   "isort",
-]
-test = [
   "pytest",
+  "pytest-timeout",
   "pytest-mpi @ git+https://github.com/firedrakeproject/pytest-mpi",
 ]
 
@@ -32,3 +31,4 @@ profile = "black"
 testpaths = [
     "tests",
 ]
+timeout = "300"

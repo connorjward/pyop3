@@ -58,6 +58,7 @@ def maxis(comm, msf):
 
 
 @pytest.mark.parallel(nprocs=2)
+@pytest.mark.timeout(5)
 def test_halo_data_stored_at_end_of_array(comm, paxis):
     if comm.rank == 0:
         reordered = [3, 2, 4, 5, 0, 1]
@@ -69,6 +70,7 @@ def test_halo_data_stored_at_end_of_array(comm, paxis):
 
 
 @pytest.mark.parallel(nprocs=2)
+@pytest.mark.timeout(5)
 def test_multi_component_halo_data_stored_at_end(comm, maxis):
     if comm.rank == 0:
         # unchanged as halo data already at the end
@@ -80,6 +82,7 @@ def test_multi_component_halo_data_stored_at_end(comm, maxis):
 
 
 @pytest.mark.parallel(nprocs=2)
+@pytest.mark.timeout(5)
 def test_distributed_subaxes_partition_halo_data(paxis):
     # Check that
     #
@@ -131,6 +134,7 @@ def test_distributed_subaxes_partition_halo_data(paxis):
 
 
 @pytest.mark.parallel(nprocs=2)
+@pytest.mark.timeout(5)
 def test_nested_parallel_axes_produce_correct_sf(comm, paxis):
     # Check that
     #
@@ -151,7 +155,7 @@ def test_nested_parallel_axes_produce_correct_sf(comm, paxis):
     rank = comm.rank
     other_rank = (rank + 1) % 2
 
-    array = op3.DistributedBuffer(axes.size, sf=axes.sf)
+    array = op3.DistributedBuffer(axes.size, axes.sf)
     array._data[...] = rank
     array._leaves_valid = False
 
@@ -166,6 +170,7 @@ def test_nested_parallel_axes_produce_correct_sf(comm, paxis):
 
 @pytest.mark.parallel(nprocs=2)
 @pytest.mark.parametrize("with_ghosts", [False, True])
+@pytest.mark.timeout(5)
 def test_partition_iterset_scalar(comm, paxis, with_ghosts):
     array = op3.HierarchicalArray(paxis, dtype=op3.ScalarType)
 
@@ -193,6 +198,7 @@ def test_partition_iterset_scalar(comm, paxis, with_ghosts):
 
 @pytest.mark.parallel(nprocs=2)
 @pytest.mark.parametrize("with_ghosts", [False, True])
+@pytest.mark.timeout(5)
 def test_partition_iterset_with_map(comm, paxis, with_ghosts):
     axis_label = paxis.label
     component_label = just_one(paxis.components).label
@@ -244,3 +250,78 @@ def test_partition_iterset_with_map(comm, paxis, with_ghosts):
     assert np.equal(icore.data_ro, expected_icore).all()
     assert np.equal(iroot.data_ro, expected_iroot).all()
     assert np.equal(ileaf.data_ro, expected_ileaf).all()
+
+
+@pytest.mark.parallel(nprocs=2)
+@pytest.mark.parametrize("intent", [op3.WRITE, op3.INC])
+@pytest.mark.timeout(5)
+def test_shared_array(comm, intent):
+    sf = op3.sf.single_star(comm, 3)
+    axes = op3.AxisTree.from_nest({op3.Axis(3, sf=sf): op3.Axis(2)})
+    shared = op3.HierarchicalArray(axes)
+
+    assert (shared.data_ro == 0).all()
+
+    if comm.rank == 0:
+        shared.buffer._data[...] = 1
+    else:
+        assert comm.rank == 1
+        shared.buffer._data[...] = 2
+    shared.buffer._leaves_valid = False
+    shared.buffer._pending_reduction = intent
+
+    shared.assemble()
+
+    if intent == op3.WRITE:
+        # we reduce from leaves (which store a 2) to roots (which store a 1)
+        assert (shared.data_ro == 2).all()
+    else:
+        assert intent == op3.INC
+        assert (shared.data_ro == 3).all()
+
+
+@pytest.mark.parallel(nprocs=2)
+def test_lgmaps(comm):
+    # Create a star forest for the following distribution
+    #
+    #                g  g
+    # rank 0:       [0, 1, * 2, 3, 4, 5]
+    #                |  |  * |  |
+    # rank 1: [0, 1, 2, 3, * 4, 5]
+    #                        g  g
+    if comm.rank == 0:
+        size = 6
+        nroots = 4
+        ilocal = [0, 1]
+        iremote = [(1, 2), (1, 3)]
+    else:
+        assert comm.rank == 1
+        size = 6
+        nroots = 4
+        ilocal = [4, 5]
+        iremote = [(0, 2), (0, 3)]
+    sf = op3.StarForest.from_graph(size, nroots, ilocal, iremote, comm)
+
+    serial_axis = op3.Axis(size)
+    axis0 = op3.Axis.from_serial(serial_axis, sf=sf)
+
+    lgmap = axis0.global_numbering()
+    print_with_rank(lgmap)
+
+    raise NotImplementedError
+    axes = op3.AxisTree.from_iterable((axis0, 2))
+
+    # self.sf.sf.view()
+    sf.sf.view()
+    # lgmap = PETSc.LGMap().createSF(axes.sf.sf, PETSc.DECIDE)
+    lgmap = PETSc.LGMap().createSF(sf.sf, PETSc.DECIDE)
+    lgmap.setType(PETSc.LGMap.Type.BASIC)
+    # self._lazy_lgmap = lgmap
+    lgmap.view()
+    print_with_rank(lgmap.indices)
+
+    raise NotImplementedError
+
+    lgmap = axes.lgmap
+    print_with_rank(lgmap.indices)
+    assert False

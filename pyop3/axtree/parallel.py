@@ -49,30 +49,23 @@ def partition_ghost_points(axis, sf):
     return numbering
 
 
-# stolen from stackoverflow
-# https://stackoverflow.com/questions/11649577/how-to-invert-a-permutation-array-in-numpy
-def invert(p):
-    """Return an array s with which np.array_equal(arr[p][s], arr) is True.
-    The array_like argument p must be some permutation of 0, 1, ..., len(p)-1.
-    """
-    p = np.asanyarray(p)  # in case p is a tuple, etc.
-    s = np.empty_like(p)
-    s[p] = np.arange(p.size)
-    return s
-
-
 def collect_sf_graphs(axes, axis=None, path=pmap(), indices=pmap()):
+    # it does not make sense for temporary-like objects to have SFs
+    if axes.outer_loops:
+        return ()
+
     # NOTE: This function does not check for nested SFs (which should error)
-    axis = axis or axes.root
+    if axis is None:
+        axis = axes.root
 
     if axis.sf is not None:
         return (grow_dof_sf(axes, axis, path, indices),)
     else:
         graphs = []
         for component in axis.components:
-            subaxis = axes.child(axis, component)
-            if subaxis is not None:
-                for pt in range(_as_int(component.count, path, indices)):
+            if subaxis := axes.child(axis, component):
+                # think path is not needed
+                for pt in range(_as_int(component.count, indices, path)):
                     graphs.extend(
                         collect_sf_graphs(
                             axes,
@@ -85,6 +78,7 @@ def collect_sf_graphs(axes, axis=None, path=pmap(), indices=pmap()):
 
 
 # perhaps I can defer renumbering the SF to here?
+# PETSc provides a similar function that composes an SF with a Section, can I use that?
 def grow_dof_sf(axes, axis, path, indices):
     point_sf = axis.sf
     # TODO, use convenience methods
@@ -95,19 +89,25 @@ def grow_dof_sf(axes, axis, path, indices):
     npoints = component_offsets[-1]
 
     # renumbering per component, can skip if no renumbering present
-    renumbering = [np.empty(c.count, dtype=int) for c in axis.components]
-    counters = [0] * len(axis.components)
-    for new_pt, old_pt in enumerate(axis.numbering.data_ro):
-        for cidx, (min_, max_) in enumerate(
-            zip(component_offsets, component_offsets[1:])
-        ):
-            if min_ <= old_pt < max_:
-                renumbering[cidx][old_pt - min_] = counters[cidx]
-                counters[cidx] += 1
-                break
-    assert all(count == c.count for count, c in checked_zip(counters, axis.components))
+    if axis.numbering is not None:
+        renumbering = [np.empty(c.count, dtype=int) for c in axis.components]
+        counters = [0] * len(axis.components)
+        for new_pt, old_pt in enumerate(axis.numbering.data_ro):
+            for cidx, (min_, max_) in enumerate(
+                zip(component_offsets, component_offsets[1:])
+            ):
+                if min_ <= old_pt < max_:
+                    renumbering[cidx][old_pt - min_] = counters[cidx]
+                    counters[cidx] += 1
+                    break
+        assert all(
+            count == c.count for count, c in checked_zip(counters, axis.components)
+        )
+    else:
+        renumbering = [np.arange(c.count, dtype=int) for c in axis.components]
 
     # effectively build the section
+    new_nroots = 0
     root_offsets = np.full(npoints, -1, IntType)
     for pt in point_sf.iroot:
         # convert to a component-wise numbering
@@ -124,11 +124,17 @@ def grow_dof_sf(axes, axis, path, indices):
         assert component_num is not None
 
         offset = axes.offset(
-            path | {axis.label: selected_component.label},
             indices | {axis.label: component_num},
-            insert_zeros=True,
+            path | {axis.label: selected_component.label},
         )
         root_offsets[pt] = offset
+        new_nroots += step_size(
+            axes,
+            axis,
+            selected_component,
+            (),
+            indices | {axis.label: component_num},
+        )
 
     point_sf.broadcast(root_offsets, MPI.REPLACE)
 
@@ -151,13 +157,13 @@ def grow_dof_sf(axes, axis, path, indices):
         assert selected_component is not None
         assert component_num is not None
 
+        # this is wrong?
         offset = axes.offset(
-            path | {axis.label: selected_component.label},
             indices | {axis.label: component_num},
-            insert_zeros=True,
+            path | {axis.label: selected_component.label},
         )
         local_leaf_offsets[myindex] = offset
-        leaf_ndofs[myindex] = step_size(axes, axis, selected_component)
+        leaf_ndofs[myindex] = step_size(axes, axis, selected_component, ())
 
     # construct a new SF with these offsets
     ndofs = sum(leaf_ndofs)
@@ -172,4 +178,4 @@ def grow_dof_sf(axes, axis, path, indices):
             remote_leaf_dof_offsets[counter] = [rank, root_offsets[pos] + d]
             counter += 1
 
-    return (nroots, local_leaf_dof_offsets, remote_leaf_dof_offsets)
+    return (new_nroots, local_leaf_dof_offsets, remote_leaf_dof_offsets)
