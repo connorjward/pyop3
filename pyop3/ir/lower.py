@@ -225,13 +225,14 @@ class LoopyCodegenContext(CodegenContext):
 
         debug = bool(config["debug"])
 
-        # TODO Can directly inject data as temporaries if constant and small
-        # injected = array.constant and array.size < config["max_static_array_size"]:
-        # if isinstance(array.buffer, NullBuffer) or injected:
-        if isinstance(array.buffer, NullBuffer):
+        injected = array.constant and array.size < config["max_static_array_size"]
+        if isinstance(array.buffer, NullBuffer) or injected:
             name = self.unique_name("t") if not debug else array.name
             shape = self._temporary_shapes.get(array.name, (array.alloc_size,))
-            arg = lp.TemporaryVariable(name, dtype=array.dtype, shape=shape)
+            initializer = array.buffer.data_ro if injected else None
+            arg = lp.TemporaryVariable(
+                name, dtype=array.dtype, shape=shape, initializer=initializer
+            )
         elif isinstance(array.buffer, PackedBuffer):
             name = self.unique_name("packed") if not debug else array.name
             arg = lp.ValueArg(name, dtype=self._dtype(array))

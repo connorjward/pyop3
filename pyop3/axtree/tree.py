@@ -270,7 +270,7 @@ class ExpressionEvaluator(pym.mapper.evaluator.EvaluationMapper):
         #     # index_exprs=array_var.index_exprs,
         #     loop_exprs=self._loop_exprs,
         # )
-        return array.data[offset]
+        return array.data_ro[offset]
 
     def map_loop_index(self, expr):
         return self._loop_exprs[expr.id][expr.axis]
@@ -948,7 +948,10 @@ class AxisTree(PartialAxisTree, Indexed, ContextFreeLoopIterable):
         # can consider the loop to be "context-free".
         if len(iterset.leaves) == 1:
             path = iterset.path(*iterset.leaf)
-            return ContextFreeLoopIndex(iterset, path, path)
+            target_path = {}
+            for ax, cpt in iterset.path_with_nodes(*iterset.leaf).items():
+                target_path.update(iterset.target_paths.get((ax.id, cpt), {}))
+            return ContextFreeLoopIndex(iterset, path, target_path)
         else:
             return LoopIndex(iterset)
 

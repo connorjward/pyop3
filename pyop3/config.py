@@ -64,6 +64,7 @@ class Configuration(dict):
         "print_cache_size": ("PYOP3_PRINT_CACHE_SIZE", bool, False),
         "matnest": ("PYOP3_MATNEST", bool, True),
         "block_sparsity": ("PYOP3_BLOCK_SPARSITY", bool, True),
+        "max_static_array_size": ("PYOP3_MAX_STATIC_ARRAY_SIZE", int, 100),
     }
     """Default values for PyOP2 configuration parameters"""
 

@@ -561,7 +561,7 @@ class Map(pytools.ImmutableRecord):
         self.name = name
 
     def __call__(self, index):
-        if isinstance(index, ContextFreeIndex):
+        if isinstance(index, (ContextFreeIndex, ContextFreeCalledMap)):
             leaf_target_paths = tuple(
                 freeze({mcpt.target_axis: mcpt.target_component})
                 for path in index.leaf_target_paths

@@ -424,7 +424,7 @@ class LabelledTree(AbstractTree):
             if subnode is None:
                 continue
             if subnode.id in existing_ids:
-                new_id = UniqueNameGenerator(existing_ids)(subnode.id)
+                new_id = subnode.unique_id()
                 assert new_id not in existing_ids
                 existing_ids.add(new_id)
                 new_subnode = subnode.copy(id=new_id)

@@ -121,6 +121,13 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
         self.mat = mat
 
     def __getitem__(self, indices):
+        return self.getitem(indices, strict=False)
+
+    # Since __getitem__ is implemented, this class is implicitly considered
+    # to be iterable (which it's not). This avoids some confusing behaviour.
+    __iter__ = None
+
+    def getitem(self, indices, *, strict=False):
         # TODO also support context-free (see MultiArray.__getitem__)
         if len(indices) != 2:
             raise ValueError
@@ -154,8 +161,8 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
         #     {p: "b", q: "y"}: [rtree1, ctree1],
         #   }
 
-        rtrees = as_index_forest(indices[0], axes=self.raxes)
-        ctrees = as_index_forest(indices[1], axes=self.caxes)
+        rtrees = as_index_forest(indices[0], axes=self.raxes, strict=strict)
+        ctrees = as_index_forest(indices[1], axes=self.caxes, strict=strict)
         rcforest = {}
         for rctx, rtree in rtrees.items():
             for cctx, ctree in ctrees.items():

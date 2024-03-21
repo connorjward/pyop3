@@ -136,7 +136,6 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
     """
 
     DEFAULT_DTYPE = Buffer.DEFAULT_DTYPE
-    DEFAULT_KERNEL_PREFIX = "array"
 
     def __init__(
         self,
@@ -151,12 +150,9 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         outer_loops=None,
         name=None,
         prefix=None,
-        kernel_prefix=None,
+        constant=False,
     ):
         super().__init__(name=name, prefix=prefix)
-
-        # if self.name in ["offset_1", "closure_6"]:
-        #     breakpoint()
 
         axes = as_axis_tree(axes)
 
@@ -187,16 +183,12 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
                 data=data,
             )
 
-        # think this is a bad idea, makes the generated code less general
-        # if kernel_prefix is None:
-        #     kernel_prefix = prefix if prefix is not None else self.DEFAULT_KERNEL_PREFIX
-        kernel_prefix = "DONOTUSE"
-
         self.buffer = data
         self._axes = axes
         self.max_value = max_value
 
-        self.kernel_prefix = kernel_prefix
+        # TODO This attr really belongs to the buffer not the array
+        self.constant = constant
 
         if some_but_not_all(x is None for x in [target_paths, index_exprs]):
             raise ValueError
@@ -329,6 +321,8 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         self._check_no_copy_access()
         return self.buffer.data_wo[self._buffer_indices]
 
+    # TODO: This should be more widely cached, don't want to tabulate more often
+    # than required.
     @cached_property
     def _buffer_indices(self):
         assert self.size > 0
