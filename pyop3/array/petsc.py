@@ -57,10 +57,13 @@ class PetscVecNest(PetscVec):
     ...
 
 
-class PetscMat(PetscObject, abc.ABC):
+class PetscMat(PetscObject, ContextFree, abc.ABC):
     DEFAULT_MAT_TYPE = PETSc.Mat.Type.AIJ
 
     prefix = "mat"
+
+    # make abstract property of some parent class?
+    constant = False
 
     def __new__(cls, *args, **kwargs):
         # If the user called PetscMat(...), as opposed to PetscMatAIJ(...) etc
@@ -106,19 +109,63 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
     _row_suffix = "_row"
     _col_suffix = "_col"
 
-    def __init__(self, raxes, caxes, sparsity=None, *, name=None):
+    # def __init__(self, raxes, caxes, mat=None, *, name=None):
+    # TODO: target paths and index exprs should be part of raxes, caxes
+    def __init__(
+        self,
+        raxes,
+        caxes,
+        mat=None,
+        *,
+        name=None,
+        rtarget_paths=None,
+        rindex_exprs=None,
+        orig_raxes=None,
+        router_loops=None,
+        ctarget_paths=None,
+        cindex_exprs=None,
+        orig_caxes=None,
+        couter_loops=None,
+    ):
+        # TODO: Remove
+        if strictly_all(
+            x is None
+            for x in [rtarget_paths, rindex_exprs, ctarget_paths, cindex_exprs]
+        ):
+            rtarget_paths = raxes._default_target_paths()
+            rindex_exprs = raxes._default_index_exprs()
+            orig_raxes = raxes
+            router_loops = ()
+            ctarget_paths = caxes._default_target_paths()
+            cindex_exprs = caxes._default_index_exprs()
+            orig_caxes = caxes
+            couter_loops = ()
+
         raxes = as_axis_tree(raxes)
         caxes = as_axis_tree(caxes)
 
-        if sparsity is not None:
-            mat = sparsity.materialize(self.mat_type)
-        else:
+        if mat is None:
             mat = self._make_mat(raxes, caxes, self.mat_type)
 
         super().__init__(name)
         self.raxes = raxes
         self.caxes = caxes
         self.mat = mat
+
+        # TODO: delete
+        self.rtarget_paths = rtarget_paths
+        self.rindex_exprs = rindex_exprs
+        self.orig_raxes = orig_raxes
+        self.router_loops = router_loops
+        self.ctarget_paths = ctarget_paths
+        self.cindex_exprs = cindex_exprs
+        self.orig_caxes = orig_caxes
+        self.couter_loops = couter_loops
+
+    @classmethod
+    def from_sparsity(cls, raxes, caxes, sparsity, *, name=None):
+        mat = sparsity.materialize(cls.mat_type)
+        return cls(raxes, caxes, mat, name=name)
 
     def __getitem__(self, indices):
         return self.getitem(indices, strict=False)
@@ -128,6 +175,8 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
     __iter__ = None
 
     def getitem(self, indices, *, strict=False):
+        from pyop3.itree.tree import _compose_bits, _index_axes, as_index_forest
+
         # TODO also support context-free (see MultiArray.__getitem__)
         if len(indices) != 2:
             raise ValueError
@@ -181,133 +230,151 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
             router_loops = indexed_raxes.outer_loops
             couter_loops = indexed_caxes.outer_loops
 
-            # rmap_axes = AxisTree(indexed_raxes.layout_axes.parent_to_children)
-            # cmap_axes = AxisTree(indexed_caxes.layout_axes.parent_to_children)
-
-            """
-            
-            KEY POINTS
-            ----------
-
-            * These maps require new layouts. Typically when we index something
-              we want to use the prior layout, here we want to materialise them.
-              This is basically what we always want for temporaries but this time
-              we actually want to materialise data.
-            * We then have to use the default target paths and index exprs. If these
-              are the "indexed" ones then they don't work. For instance the target
-              paths target non-existent layouts since we are using new layouts.
-
-            """
-
-            rmap = HierarchicalArray(
-                indexed_raxes,
-                # indexed_raxes.layout_axes,
-                # rmap_axes,
-                # target_paths=indexed_raxes.target_paths,
-                index_exprs=indexed_raxes.index_exprs,
-                target_paths=indexed_raxes._default_target_paths(),
-                # index_exprs=indexed_raxes._default_index_exprs(),
-                layouts=indexed_raxes.layouts,
-                # target_paths=indexed_raxes.layout_axes.target_paths,
-                # index_exprs=indexed_raxes.layout_axes.index_exprs,
-                # layouts=indexed_raxes.layout_axes.layouts,
-                outer_loops=router_loops,
-                dtype=IntType,
-            )
-            cmap = HierarchicalArray(
-                indexed_caxes,
-                # indexed_caxes.layout_axes,
-                # cmap_axes,
-                # target_paths=indexed_caxes.target_paths,
-                index_exprs=indexed_caxes.index_exprs,
-                target_paths=indexed_caxes._default_target_paths(),
-                # index_exprs=indexed_caxes._default_index_exprs(),
-                layouts=indexed_caxes.layouts,
-                # target_paths=indexed_caxes.layout_axes.target_paths,
-                # index_exprs=indexed_caxes.layout_axes.index_exprs,
-                # layouts=indexed_caxes.layout_axes.layouts,
-                outer_loops=couter_loops,
-                dtype=IntType,
-            )
-
-            from pyop3.axtree.layout import my_product
-
-            # so these are now failing BADLY because I have no real idea what
-            # I'm doing here...
-            # So the issue is that cmap is having values set in the wrong place
-            # when we are building a sparsity.
-
-            for idxs in my_product(router_loops):
-                # I don't think that source_indices is currently required because
-                # we express layouts in terms of the LoopIndexVariable instead of
-                # LocalLoopIndexVariable (which we should fix).
-                source_indices = {idx.index.id: idx.source_exprs for idx in idxs}
-                target_indices = {idx.index.id: idx.target_exprs for idx in idxs}
-                for p in indexed_raxes.iter(idxs):
-                    offset = self.raxes.offset(
-                        p.target_exprs, p.target_path, loop_exprs=target_indices
-                    )
-                    rmap.set_value(
-                        # p.source_exprs, offset, p.source_path, loop_exprs=source_indices
-                        p.source_exprs,
-                        offset,
-                        p.source_path,
-                        loop_exprs=target_indices,
-                    )
-
-            for idxs in my_product(couter_loops):
-                source_indices = {idx.index.id: idx.source_exprs for idx in idxs}
-                target_indices = {idx.index.id: idx.target_exprs for idx in idxs}
-                for p in indexed_caxes.iter(idxs):
-                    offset = self.caxes.offset(
-                        p.target_exprs, p.target_path, loop_exprs=target_indices
-                    )
-                    cmap.set_value(
-                        # p.source_exprs, offset, p.source_path, loop_exprs=source_indices
-                        p.source_exprs,
-                        offset,
-                        p.source_path,
-                        loop_exprs=target_indices,
-                    )
-
-            shape = (indexed_raxes.size, indexed_caxes.size)
-            packed = PackedPetscMat(self, rmap, cmap, shape)
-
-            # Since axes require unique labels, relabel the row and column axis trees
-            # with different suffixes. This allows us to create a combined axis tree
-            # without clashes.
-            raxes_relabel = relabel_axes(indexed_raxes, self._row_suffix)
-            caxes_relabel = relabel_axes(indexed_caxes, self._col_suffix)
-
-            axes = PartialAxisTree(raxes_relabel.parent_to_children)
-            for leaf in raxes_relabel.leaves:
-                axes = axes.add_subtree(caxes_relabel, *leaf, uniquify_ids=True)
-            axes = axes.set_up()
-
             outer_loops = list(router_loops)
             all_ids = [l.id for l in router_loops]
             for ol in couter_loops:
                 if ol.id not in all_ids:
                     outer_loops.append(ol)
 
-            my_target_paths = indexed_raxes.target_paths | indexed_caxes.target_paths
-            my_index_exprs = indexed_raxes.index_exprs | indexed_caxes.index_exprs
+            # my_target_paths = indexed_raxes.target_paths | indexed_caxes.target_paths
+            # my_index_exprs = indexed_raxes.index_exprs | indexed_caxes.index_exprs
 
-            arrays[ctx] = HierarchicalArray(
-                axes,
-                data=packed,
-                target_paths=my_target_paths,
-                index_exprs=my_index_exprs,
-                # TODO ordered set?
-                outer_loops=outer_loops,
+            # arrays[ctx] = HierarchicalArray(
+            #     axes,
+            #     data=packed,
+            #     target_paths=my_target_paths,
+            #     index_exprs=my_index_exprs,
+            #     # TODO ordered set?
+            #     outer_loops=outer_loops,
+            #     name=self.name,
+            # )
+            rtarget_paths, rindex_exprs, _ = _compose_bits(
+                self.raxes,
+                self.rtarget_paths,
+                self.rindex_exprs,
+                None,
+                indexed_raxes,
+                indexed_raxes.target_paths,
+                indexed_raxes.index_exprs,
+                {},
+            )
+            ctarget_paths, cindex_exprs, _ = _compose_bits(
+                self.caxes,
+                self.ctarget_paths,
+                self.cindex_exprs,
+                None,
+                indexed_caxes,
+                indexed_caxes.target_paths,
+                indexed_caxes.index_exprs,
+                {},
+            )
+
+            arrays[ctx] = type(self)(
+                indexed_raxes,
+                indexed_caxes,
+                self.mat,
                 name=self.name,
+                # delete below
+                rtarget_paths=rtarget_paths,
+                rindex_exprs=rindex_exprs,
+                orig_raxes=self.orig_raxes,
+                router_loops=router_loops,
+                ctarget_paths=ctarget_paths,
+                cindex_exprs=cindex_exprs,
+                orig_caxes=self.orig_caxes,
+                couter_loops=couter_loops,
             )
         return ContextSensitiveMultiArray(arrays)
 
+    @cached_property
+    def maps(self):
+        from pyop3.axtree.layout import my_product
+
+        """
+        KEY POINTS
+        ----------
+
+        * These maps require new layouts. Typically when we index something
+          we want to use the prior layout, here we want to materialise them.
+          This is basically what we always want for temporaries but this time
+          we actually want to materialise data.
+        """
+
+        rmap = HierarchicalArray(
+            self.raxes,
+            index_exprs=self.raxes.index_exprs,
+            target_paths=self.raxes._default_target_paths(),
+            layouts=self.raxes.layouts,
+            outer_loops=self.router_loops,
+            dtype=IntType,
+        )
+        cmap = HierarchicalArray(
+            self.caxes,
+            index_exprs=self.caxes.index_exprs,
+            target_paths=self.caxes._default_target_paths(),
+            layouts=self.caxes.layouts,
+            outer_loops=self.couter_loops,
+            dtype=IntType,
+        )
+
+        for idxs in my_product(self.router_loops):
+            target_indices = {idx.index.id: idx.target_exprs for idx in idxs}
+            for p in self.raxes.iter(idxs):
+                offset = self.orig_raxes.offset(
+                    p.target_exprs, p.target_path, loop_exprs=target_indices
+                )
+                rmap.set_value(
+                    p.source_exprs,
+                    offset,
+                    p.source_path,
+                    loop_exprs=target_indices,
+                )
+
+        for idxs in my_product(self.couter_loops):
+            target_indices = {idx.index.id: idx.target_exprs for idx in idxs}
+            for p in self.caxes.iter(idxs):
+                offset = self.orig_caxes.offset(
+                    p.target_exprs, p.target_path, loop_exprs=target_indices
+                )
+                cmap.set_value(
+                    p.source_exprs,
+                    offset,
+                    p.source_path,
+                    loop_exprs=target_indices,
+                )
+
+        return rmap, cmap
+
     @property
-    @abc.abstractmethod
-    def mat_type(self) -> str:
-        pass
+    def rmap(self):
+        return self.maps[0]
+
+    @property
+    def cmap(self):
+        return self.maps[1]
+
+    @property
+    def shape(self):
+        return (self.raxes.size, self.caxes.size)
+
+    @cached_property
+    def axes(self):
+        # Since axes require unique labels, relabel the row and column axis trees
+        # with different suffixes. This allows us to create a combined axis tree
+        # without clashes.
+        raxes_relabel = relabel_axes(self.raxes, self._row_suffix)
+        caxes_relabel = relabel_axes(self.caxes, self._col_suffix)
+
+        axes = PartialAxisTree(raxes_relabel.parent_to_children)
+        for leaf in raxes_relabel.leaves:
+            axes = axes.add_subtree(caxes_relabel, *leaf, uniquify_ids=True)
+        axes = axes.set_up()
+        return axes
+
+    # @property
+    # @abc.abstractmethod
+    # def mat_type(self) -> str:
+    #     pass
 
     @staticmethod
     def _make_mat(raxes, caxes, mat_type):
@@ -326,7 +393,7 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
 
     @cached_property
     def datamap(self):
-        return freeze({self.name: self})
+        return freeze({self.name: self}) | self.rmap.datamap | self.cmap.datamap
 
     @property
     def kernel_dtype(self):
@@ -334,12 +401,13 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
 
 
 class PetscMatAIJ(MonolithicPetscMat):
-    def __init__(self, raxes, caxes, sparsity=None, *, name: str = None):
-        super().__init__(raxes, caxes, sparsity, name=name)
+    def __init__(self, raxes, caxes, mat=None, *, name: str = None, **kwargs):
+        super().__init__(raxes, caxes, mat, name=name, **kwargs)
 
-    @property
-    def mat_type(self) -> str:
-        return PETSc.Mat.Type.AIJ
+    # @property
+    # def mat_type(self) -> str:
+    #     return PETSc.Mat.Type.AIJ
+    mat_type = PETSc.Mat.Type.AIJ
 
 
 # class PetscMatBAIJ(MonolithicPetscMat):
@@ -347,13 +415,16 @@ class PetscMatAIJ(MonolithicPetscMat):
 
 
 class PetscMatPreallocator(MonolithicPetscMat):
-    def __init__(self, raxes, caxes, *, name: str = None):
-        super().__init__(raxes, caxes, name=name)
+    # TODO: Delete kwargs, not required when raxes, caxes are IndexedAxisTree
+    # def __init__(self, raxes, caxes, *, name: str = None):
+    def __init__(self, raxes, caxes, mat=None, *, name: str = None, **kwargs):
+        super().__init__(raxes, caxes, mat, name=name, **kwargs)
         self._lazy_template = None
 
-    @property
-    def mat_type(self) -> str:
-        return PETSc.Mat.Type.PREALLOCATOR
+    # @property
+    # def mat_type(self) -> str:
+    #     return PETSc.Mat.Type.PREALLOCATOR
+    mat_type = PETSc.Mat.Type.PREALLOCATOR
 
     def materialize(self, mat_type: str) -> PETSc.Mat:
         if self._lazy_template is None:

@@ -68,6 +68,9 @@ class IndexExpressionReplacer(pym.mapper.IdentityMapper):
         return self._replace_map.get(expr.axis_label, expr)
 
     def map_array(self, array_var):
+        # somehow replacing closure with x + 8
+        # if array_var.array.name == "ornt_2":
+        #     breakpoint()
         indices = {ax: self.rec(expr) for ax, expr in array_var.indices.items()}
         return type(array_var)(array_var.array, indices, array_var.path)
 
@@ -1316,6 +1319,9 @@ def _(slice_: Slice, indices, *, target_path_acc, prev_axes, **kwargs):
                 (axis.id, cpt.label)
                 for axis, cpt in subset_axes.detailed_path(source_path).items()
             ]
+            my_target_path = merge_dicts(
+                subset_array.target_paths.get(key, {}) for key in index_keys
+            )
             old_index_exprs = merge_dicts(
                 subset_array.index_exprs.get(key, {}) for key in index_keys
             )
@@ -1325,7 +1331,7 @@ def _(slice_: Slice, indices, *, target_path_acc, prev_axes, **kwargs):
             replacer = IndexExpressionReplacer(index_expr_replace_map)
             for axlabel, index_expr in old_index_exprs.items():
                 my_index_exprs[axlabel] = replacer(index_expr)
-            subset_var = ArrayVar(subslice.array, my_index_exprs)
+            subset_var = ArrayVar(subslice.array, my_index_exprs, my_target_path)
 
             if is_full_slice:
                 index_exprs_per_subslice.append(
@@ -1535,7 +1541,9 @@ def _make_leaf_axis_from_called_map(
         new_inner_index_expr = my_index_exprs
 
         map_var = CalledMapVariable(
-            map_cpt.array, merge_dicts([prior_index_exprs, new_inner_index_expr])
+            map_cpt.array,
+            merge_dicts([prior_index_exprs, new_inner_index_expr]),
+            my_target_path,
         )
 
         index_exprs_per_cpt[axis_id, cpt.label] = {
@@ -1746,7 +1754,7 @@ def _compose_bits(
     partial_index_exprs=pmap(),
     partial_layout_exprs=pmap(),
     visited_target_axes=frozenset(),
-    target_path_acc=pmap(),
+    target_path_acc=pmap(),  # not used
     index_exprs_acc=pmap(),
     layout_exprs_acc=pmap(),
 ):
@@ -1815,10 +1823,13 @@ def _compose_bits(
                 orig_index_exprs = prev_index_exprs.get(
                     (target_axis.id, target_cpt.label), pmap()
                 )
+
+                # if "closure" in new_partial_index_exprs:
+                #     breakpoint()
+
+                replacer = IndexExpressionReplacer(new_partial_index_exprs)
                 for axis_label, index_expr in orig_index_exprs.items():
-                    new_index_expr = IndexExpressionReplacer(new_partial_index_exprs)(
-                        index_expr
-                    )
+                    new_index_expr = replacer(index_expr)
                     if not skip:
                         index_exprs[iaxis.id, icpt.label][
                             axis_label  # this axis label is the *final* target, unlike the intermediate target called target_axis here

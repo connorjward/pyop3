@@ -266,14 +266,7 @@ class ImplicitPackUnpackExpander(Transformer):
                 continue
 
             # emit function calls for PetscMat
-            # this is a separate stage to the assignment operations because one
-            # can index a packed mat. E.g. mat[p, q][::2] would decompose into
-            # two calls, one to pack t0 <- mat[p, q] and another to pack t1 <- t0[::2]
-            if isinstance(arg.buffer, PackedBuffer):
-                # TODO add PackedPetscMat as a subclass of buffer?
-                if not isinstance(arg.buffer.array, PetscMat):
-                    raise NotImplementedError("Only handle Mat at the moment")
-
+            if isinstance(arg, PetscMat):
                 axes = AxisTree(arg.axes.parent_to_children)
                 new_arg = HierarchicalArray(
                     axes,
@@ -315,73 +308,84 @@ class ImplicitPackUnpackExpander(Transformer):
                 arguments.append(arg)
                 continue
 
+            # TODO: old code, delete
             # emit function calls for PetscMat
             # this is a separate stage to the assignment operations because one
             # can index a packed mat. E.g. mat[p, q][::2] would decompose into
             # two calls, one to pack t0 <- mat[p, q] and another to pack t1 <- t0[::2]
-            if (
-                isinstance(arg, Pack)
-                and isinstance(arg.big.buffer, PackedBuffer)
-                or not isinstance(arg, Pack)
-                and isinstance(arg.buffer, PackedBuffer)
-            ):
-                if isinstance(arg, Pack):
-                    myarg = arg.big
-                else:
-                    myarg = arg
+            # if (
+            #     isinstance(arg, Pack)
+            #     and isinstance(arg.big.buffer, PackedBuffer)
+            #     or not isinstance(arg, Pack)
+            #     and isinstance(arg.buffer, PackedBuffer)
+            # ):
+            #     if isinstance(arg, Pack):
+            #         myarg = arg.big
+            #     else:
+            #         myarg = arg
+            #
+            #     # TODO add PackedPetscMat as a subclass of buffer?
+            #     if not isinstance(myarg.buffer.array, PetscMat):
+            #         raise NotImplementedError("Only handle Mat at the moment")
+            #
+            #     axes = AxisTree(myarg.axes.parent_to_children)
+            #     new_arg = HierarchicalArray(
+            #         axes,
+            #         data=NullBuffer(myarg.dtype),  # does this need a size?
+            #         prefix="t",
+            #     )
+            #
+            #     if intent == READ:
+            #         gathers.append(PetscMatLoad(myarg, new_arg))
+            #     elif intent == WRITE:
+            #         scatters.insert(0, PetscMatStore(myarg, new_arg))
+            #     elif intent == RW:
+            #         gathers.append(PetscMatLoad(myarg, new_arg))
+            #         scatters.insert(0, PetscMatStore(myarg, new_arg))
+            #     else:
+            #         assert intent == INC
+            #         gathers.append(ReplaceAssignment(new_arg, 0))
+            #         scatters.insert(0, PetscMatAdd(myarg, new_arg))
+            #
+            #     # the rest of the packing code is now dealing with the result of this
+            #     # function call
+            #     arg = new_arg
 
-                # TODO add PackedPetscMat as a subclass of buffer?
-                if not isinstance(myarg.buffer.array, PetscMat):
-                    raise NotImplementedError("Only handle Mat at the moment")
+            # unpick pack/unpack instructions
+            if intent != NA and _requires_pack_unpack(arg):
+                is_petsc_mat = isinstance(arg, PetscMat)
 
-                axes = AxisTree(myarg.axes.parent_to_children)
-                new_arg = HierarchicalArray(
+                axes = AxisTree(arg.axes.parent_to_children)
+                temporary = HierarchicalArray(
                     axes,
-                    data=NullBuffer(myarg.dtype),  # does this need a size?
+                    data=NullBuffer(arg.dtype),  # does this need a size?
                     prefix="t",
                 )
 
                 if intent == READ:
-                    gathers.append(PetscMatLoad(myarg, new_arg))
+                    if is_petsc_mat:
+                        gathers.append(PetscMatLoad(arg, temporary))
+                    else:
+                        gathers.append(ReplaceAssignment(temporary, arg))
                 elif intent == WRITE:
-                    scatters.insert(0, PetscMatStore(myarg, new_arg))
+                    if is_petsc_mat:
+                        scatters.insert(0, PetscMatStore(arg, temporary))
+                    else:
+                        scatters.insert(0, ReplaceAssignment(arg, temporary))
                 elif intent == RW:
-                    gathers.append(PetscMatLoad(myarg, new_arg))
-                    scatters.insert(0, PetscMatStore(myarg, new_arg))
-                else:
-                    assert intent == INC
-                    gathers.append(ReplaceAssignment(new_arg, 0))
-                    scatters.insert(0, PetscMatAdd(myarg, new_arg))
-
-                # the rest of the packing code is now dealing with the result of this
-                # function call
-                arg = new_arg
-
-            # unpick pack/unpack instructions
-            if intent != NA and _requires_pack_unpack(arg):
-                if isinstance(arg, Pack):
-                    temporary = arg.small
-                    arg = arg.big
-                else:
-                    axes = AxisTree(arg.axes.parent_to_children)
-                    temporary = HierarchicalArray(
-                        axes,
-                        data=NullBuffer(arg.dtype),  # does this need a size?
-                        prefix="t",
-                    )
-
-                if intent == READ:
-                    gathers.append(ReplaceAssignment(temporary, arg))
-                elif intent == WRITE:
-                    gathers.append(ReplaceAssignment(temporary, 0))
-                    scatters.insert(0, ReplaceAssignment(arg, temporary))
-                elif intent == RW:
-                    gathers.append(ReplaceAssignment(temporary, arg))
-                    scatters.insert(0, ReplaceAssignment(arg, temporary))
+                    if is_petsc_mat:
+                        gathers.append(PetscMatLoad(arg, temporary))
+                        scatters.insert(0, PetscMatStore(arg, temporary))
+                    else:
+                        gathers.append(ReplaceAssignment(temporary, arg))
+                        scatters.insert(0, ReplaceAssignment(arg, temporary))
                 else:
                     assert intent == INC
                     gathers.append(ReplaceAssignment(temporary, 0))
-                    scatters.insert(0, AddAssignment(arg, temporary))
+                    if is_petsc_mat:
+                        scatters.insert(0, PetscMatAdd(arg, temporary))
+                    else:
+                        scatters.insert(0, AddAssignment(arg, temporary))
 
                 arguments.append(temporary)
 
@@ -440,7 +444,7 @@ def _requires_pack_unpack(arg):
     # however, it is overly restrictive since we could pass something like dat[i0, :] directly
     # to a local kernel
     # return isinstance(arg, HierarchicalArray) and arg.subst_layouts != arg.layouts
-    return isinstance(arg, HierarchicalArray) or isinstance(arg, Pack)
+    return isinstance(arg, (HierarchicalArray, PetscMat))
 
 
 # *below is old untested code*

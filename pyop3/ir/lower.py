@@ -19,6 +19,7 @@ from pyop3.array import HierarchicalArray
 from pyop3.array.harray import CalledMapVariable, ContextSensitiveMultiArray
 from pyop3.array.petsc import PetscMat
 from pyop3.axtree import Axis, AxisComponent, AxisTree, AxisVariable, ContextFree
+from pyop3.axtree.tree import subst_layouts
 from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
 from pyop3.config import config
 from pyop3.dtypes import IntType
@@ -226,16 +227,16 @@ class LoopyCodegenContext(CodegenContext):
         debug = bool(config["debug"])
 
         injected = array.constant and array.size < config["max_static_array_size"]
-        if isinstance(array.buffer, NullBuffer) or injected:
+        if isinstance(array, PetscMat):
+            name = self.unique_name("mat") if not debug else array.name
+            arg = lp.ValueArg(name, dtype=self._dtype(array))
+        elif isinstance(array.buffer, NullBuffer) or injected:
             name = self.unique_name("t") if not debug else array.name
             shape = self._temporary_shapes.get(array.name, (array.alloc_size,))
             initializer = array.buffer.data_ro if injected else None
             arg = lp.TemporaryVariable(
                 name, dtype=array.dtype, shape=shape, initializer=initializer
             )
-        elif isinstance(array.buffer, PackedBuffer):
-            name = self.unique_name("packed") if not debug else array.name
-            arg = lp.ValueArg(name, dtype=self._dtype(array))
         else:
             name = self.unique_name("array") if not debug else array.name
             assert isinstance(array.buffer, DistributedBuffer)
@@ -464,6 +465,8 @@ def compile(expr: Instruction, name="mykernel"):
     tu = lp.register_callable(tu, "bsearch", BinarySearchCallable())
 
     tu = tu.with_entrypoints(name)
+
+    # breakpoint()
 
     return CodegenResult(expr, tu, ctx.kernel_to_actual_rename_map)
 
@@ -716,10 +719,10 @@ def _(assignment, loop_indices, codegen_context):
     # now emit the right line of code, this should properly be a lp.ScalarCallable
     # https://petsc.org/release/manualpages/Mat/MatGetValuesLocal/
 
-    mat = assignment.mat_arg.buffer.mat
+    mat = assignment.mat_arg
     array = assignment.array_arg
-    rmap = assignment.mat_arg.buffer.rmap
-    cmap = assignment.mat_arg.buffer.cmap
+    rmap = assignment.mat_arg.rmap
+    cmap = assignment.mat_arg.cmap
 
     codegen_context.add_argument(assignment.mat_arg)
     codegen_context.add_argument(array)
@@ -732,15 +735,10 @@ def _(assignment, loop_indices, codegen_context):
     cmap_name = codegen_context.actual_to_kernel_rename_map[cmap.name]
 
     # these sizes can be expressions that need evaluating
-    rsize, csize = assignment.mat_arg.buffer.shape
+    rsize, csize = assignment.mat_arg.shape
 
     if not isinstance(rsize, numbers.Integral):
-        # rindex_exprs = merge_dicts(
-        #     rsize.index_exprs.get((ax.id, clabel), {})
-        #     for ax, clabel in rsize.axes.path_with_nodes(*rsize.axes.leaf).items()
-        # )
         rsize_var = register_extent(
-            # rsize, rindex_exprs, my_replace_map, codegen_context
             rsize,
             loop_indices,
             codegen_context,
@@ -749,12 +747,7 @@ def _(assignment, loop_indices, codegen_context):
         rsize_var = rsize
 
     if not isinstance(csize, numbers.Integral):
-        # cindex_exprs = merge_dicts(
-        #     csize.index_exprs.get((ax.id, clabel), {})
-        #     for ax, clabel in csize.axes.path_with_nodes(*csize.axes.leaf).items()
-        # )
         csize_var = register_extent(
-            # csize, cindex_exprs, my_replace_map, codegen_context
             csize,
             loop_indices,
             codegen_context,
@@ -762,36 +755,14 @@ def _(assignment, loop_indices, codegen_context):
     else:
         csize_var = csize
 
-    # rlayouts = rmap.layouts[
-    #     freeze({rmap.axes.root.label: rmap.axes.root.component.label})
-    # ]
     rlayouts = rmap.layouts[pmap()]
     roffset = JnameSubstitutor(loop_indices, codegen_context)(rlayouts)
 
-    # clayouts = cmap.layouts[
-    #     freeze({cmap.axes.root.label: cmap.axes.root.component.label})
-    # ]
     clayouts = cmap.layouts[pmap()]
     coffset = JnameSubstitutor(loop_indices, codegen_context)(clayouts)
 
     irow = f"{rmap_name}[{roffset}]"
     icol = f"{cmap_name}[{coffset}]"
-
-    # debug
-    # MatSetValuesLocal(array_4, 1, &(array_5[i_0]), 1, &(array_6[i_0]), &(t_1[0]), ADD_VALUES);
-    # if rmap.name == "array_5":
-    #     codegen_context.add_cinstruction(
-    #         r"""
-    #     printf("%d\n", i_0);
-    #     printf("%d\n", array_5[i_0]);
-    #     printf("%d\n", array_6[i_0]);
-    #     printf("t_1: %f\n", t_1[0]);
-    #     //printf("t_3: %f, %f, %f, %f, %f, %f\n", t_3[0], t_3[1], t_3[2], t_3[3], t_3[4], t_3[5]);
-    #     //printf("closure_6: %d, %d, %d, %d\n", closure_6[0],  closure_6[1], closure_6[2], closure_6[3]);
-    #     //printf("offset_1: %d, %d, %d, %d\n", offset_1[0],  offset_1[1], offset_1[2], offset_1[3]);
-    #     //printf("coords: %f, %f, %f, %f\n", firedrake_default_coordinates[0],  firedrake_default_coordinates[1], firedrake_default_coordinates[2], firedrake_default_coordinates[3]);
-    #
-    #     """)
 
     call_str = _petsc_mat_insn(
         assignment, mat_name, array_name, rsize_var, csize_var, irow, icol
@@ -974,11 +945,22 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         replace_map = {ax: self.rec(expr_) for ax, expr_ in expr.indices.items()}
         replace_map.update(self._replace_map)
 
+        # doing this is putting zeros where I don't want them!
+        # my_layouts = subst_layouts(expr.array, expr.path, expr.indices, expr.array.layouts)[expr.path]
+        # layout = my_layouts[expr.path]
+
+        # We need to substitute expr.indices into expr.layouts
+        layout = expr.array.layouts[expr.path]
+        # mylayout = expr.array.subst_layouts[expr.path]
+        # layout = IndexExpressionReplacer(expr.indices)(mylayout)
+
         offset_expr = make_offset_expr(
-            expr.array.subst_layouts[expr.path],
+            # expr.array.subst_layouts[expr.path],
+            layout,
             replace_map,
             self._codegen_context,
         )
+
         rexpr = pym.subscript(pym.var(new_name), offset_expr)
         return rexpr
 

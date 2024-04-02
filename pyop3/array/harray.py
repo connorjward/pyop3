@@ -64,6 +64,7 @@ class ArrayVar(pym.primitives.AlgebraicLeaf):
     mapper_method = sys.intern("map_array")
 
     def __init__(self, array, indices, path=None):
+        assert path is not None
         if path is None:
             if array.axes.is_empty:
                 path = pmap()
@@ -325,7 +326,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
     # than required.
     @cached_property
     def _buffer_indices(self):
-        assert self.size > 0
+        assert self.axes.owned.size > 0
 
         indices = np.full(self.axes.owned.size, -1, dtype=IntType)
         # TODO: Handle any outer loops.
@@ -342,7 +343,10 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         # See if we can represent these indices as a slice. This is important
         # because slices enable no-copy access to the array.
         steps = np.unique(indices[1:] - indices[:-1])
-        if len(steps) == 1:
+        if len(steps) == 0:
+            start = just_one(indices)
+            return slice(start, start + 1, 1)
+        elif len(steps) == 1:
             start = indices[0]
             stop = indices[-1] + 1
             (step,) = steps

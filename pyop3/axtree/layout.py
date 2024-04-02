@@ -514,10 +514,13 @@ def _compute_layouts(
                 index_keys = [None] + [
                     (axis.id, cpt) for axis, cpt in source_path.items()
                 ]
+                mytargetpath = merge_dicts(
+                    offset_data.target_paths.get(key, {}) for key in index_keys
+                )
                 myindices = merge_dicts(
                     offset_data.index_exprs.get(key, {}) for key in index_keys
                 )
-                offset_var = ArrayVar(offset_data, myindices)
+                offset_var = ArrayVar(offset_data, myindices, mytargetpath)
 
                 layouts[layout_path | subpath] = offset_var
             ctree = None

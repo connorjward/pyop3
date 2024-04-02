@@ -89,8 +89,9 @@ class Indexed(abc.ABC):
     def subst_layouts(self):
         return self._subst_layouts()
 
+    # TODO delete this function
     def _subst_layouts(self, axis=None, path=None, target_path=None, index_exprs=None):
-        from pyop3 import HierarchicalArray
+        return subst_layouts(self, self.target_paths, self.index_exprs, self.layouts)
         from pyop3.itree.tree import IndexExpressionReplacer
 
         # TODO Don't do this every time this function is called
@@ -107,8 +108,6 @@ class Indexed(abc.ABC):
             path = pmap()
             target_path = self.target_paths.get(None, pmap())
             index_exprs = self.index_exprs.get(None, pmap())
-            # target_path = pmap()
-            # index_exprs = pmap()
 
             replacer = IndexExpressionReplacer(index_exprs, loop_exprs=loop_exprs)
             layouts[path] = replacer(self.layouts.get(target_path, 0))
@@ -1470,3 +1469,80 @@ def relabel_axes(axes: AxisTree, suffix: str) -> AxisTree:
             children_.append(axis_)
         parent_to_children[parent_id] = children_
     return AxisTree(parent_to_children)
+
+
+def subst_layouts(
+    axes,
+    target_paths,
+    index_exprs,
+    layouts,
+    axis=None,
+    path=None,
+    target_path_acc=None,
+    index_exprs_acc=None,
+):
+    from pyop3 import HierarchicalArray
+    from pyop3.itree.tree import IndexExpressionReplacer
+
+    if isinstance(axes, HierarchicalArray):
+        assert axis is None
+        axes = axes.axes
+
+    # TODO Don't do this every time this function is called
+    loop_exprs = {}
+    # for outer_loop in self.outer_loops:
+    #     loop_exprs[outer_loop.id] = {}
+    #     for ax in outer_loop.iterset.nodes:
+    #         key = (ax.id, ax.component.label)
+    #         for ax_, expr in outer_loop.iterset.index_exprs.get(key, {}).items():
+    #             loop_exprs[outer_loop.id][ax_] = expr
+
+    layouts_subst = {}
+    if strictly_all(x is None for x in [axis, path, target_path_acc, index_exprs_acc]):
+        path = pmap()
+        target_path_acc = target_paths.get(None, pmap())
+        index_exprs_acc = index_exprs.get(None, pmap())
+
+        replacer = IndexExpressionReplacer(index_exprs_acc, loop_exprs=loop_exprs)
+        layouts_subst[path] = replacer(layouts.get(target_path_acc, 0))
+
+        if not axes.is_empty:
+            layouts_subst.update(
+                subst_layouts(
+                    axes,
+                    target_paths,
+                    index_exprs,
+                    layouts,
+                    axes.root,
+                    path,
+                    target_path_acc,
+                    index_exprs_acc,
+                )
+            )
+    else:
+        for component in axis.components:
+            path_ = path | {axis.label: component.label}
+            target_path_acc_ = target_path_acc | target_paths.get(
+                (axis.id, component.label), {}
+            )
+            index_exprs_acc_ = index_exprs_acc | index_exprs.get(
+                (axis.id, component.label), {}
+            )
+
+            replacer = IndexExpressionReplacer(index_exprs_acc_)
+            layouts_subst[path_] = replacer(layouts.get(target_path_acc_, 0))
+
+            if subaxis := axes.child(axis, component):
+                layouts_subst.update(
+                    subst_layouts(
+                        axes,
+                        target_paths,
+                        index_exprs,
+                        layouts,
+                        subaxis,
+                        path_,
+                        target_path_acc_,
+                        index_exprs_acc_,
+                    )
+                )
+    return freeze(layouts_subst)

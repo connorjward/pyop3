@@ -638,12 +638,12 @@ class Function:
                 f"Wrong number of arguments provided, expected {len(self.argspec)} "
                 f"but received {len(args)}"
             )
-        if any(
-            spec.dtype.numpy_dtype != arg.kernel_dtype
-            for spec, arg in checked_zip(self.argspec, args)
-            if arg.kernel_dtype is not auto
-        ):
-            raise ValueError("Arguments to the kernel have the wrong dtype")
+        # if any(
+        #     spec.dtype.numpy_dtype != arg.kernel_dtype
+        #     for spec, arg in checked_zip(self.argspec, args)
+        #     if arg.kernel_dtype is not auto
+        # ):
+        #     raise ValueError("Arguments to the kernel have the wrong dtype")
         return CalledFunction(self, args)
 
     @property
