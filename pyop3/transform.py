@@ -368,6 +368,9 @@ class ImplicitPackUnpackExpander(Transformer):
                     else:
                         gathers.append(ReplaceAssignment(temporary, arg))
                 elif intent == WRITE:
+                    # This is currently necessary because some local kernels
+                    # (interpolation) actually increment values instead of setting
+                    # them directly. This should ideally be addressed.
                     gathers.append(ReplaceAssignment(temporary, 0))
                     if is_petsc_mat:
                         scatters.insert(0, PetscMatStore(arg, temporary))
