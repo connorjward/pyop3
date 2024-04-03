@@ -368,6 +368,7 @@ class ImplicitPackUnpackExpander(Transformer):
                     else:
                         gathers.append(ReplaceAssignment(temporary, arg))
                 elif intent == WRITE:
+                    gathers.append(ReplaceAssignment(temporary, 0))
                     if is_petsc_mat:
                         scatters.insert(0, PetscMatStore(arg, temporary))
                     else:
