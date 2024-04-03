@@ -1813,7 +1813,7 @@ def _compose_bits(
                         ] = mycptlabel
 
                 # testing, make sure we don't miss any new index_exprs
-                index_exprs[iaxis.id, icpt.label] |= iindex_exprs[iaxis.id, icpt.label]
+                # index_exprs[iaxis.id, icpt.label] |= iindex_exprs[iaxis.id, icpt.label]
 
                 # do a replacement for index exprs
                 # compose index expressions, this does an *inside* substitution
