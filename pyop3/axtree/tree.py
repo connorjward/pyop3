@@ -558,6 +558,10 @@ class Axis(MultiComponentLabelledNode, LoopIterable):
         cidx = self._axis_number_to_component_index(number)
         return self.components[cidx], number - self._component_offsets[cidx]
 
+    def component_offset(self, component):
+        cidx = self.component_index(component)
+        return self._component_offsets[cidx]
+
     def component_to_axis_number(self, component, number):
         cidx = self.component_index(component)
         return self._component_offsets[cidx] + number
