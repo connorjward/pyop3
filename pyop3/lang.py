@@ -780,16 +780,22 @@ class PetscMatInstruction(Instruction):
 
 
 class PetscMatLoad(PetscMatInstruction):
-    ...
+    @cached_property
+    def kernel_arguments(self):
+        return ((self.mat_arg, READ), (self.array_arg, WRITE))
 
 
 class PetscMatStore(PetscMatInstruction):
-    ...
+    @cached_property
+    def kernel_arguments(self):
+        return ((self.mat_arg, WRITE), (self.array_arg, READ))
 
 
 # potentially confusing name
 class PetscMatAdd(PetscMatInstruction):
-    ...
+    @cached_property
+    def kernel_arguments(self):
+        return ((self.mat_arg, INC), (self.array_arg, READ))
 
 
 class OpaqueKernelArgument(KernelArgument, ContextFree):

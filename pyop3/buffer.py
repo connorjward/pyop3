@@ -151,8 +151,6 @@ class DistributedBuffer(Buffer):
         self._pending_reduction = None
         self._finalizer = None
 
-        self._lazy_vec = None
-
     # @classmethod
     # def from_array(cls, array: np.ndarray, **kwargs):
     #     return cls(array.shape, array.dtype, data=array, **kwargs)
@@ -214,38 +212,6 @@ class DistributedBuffer(Buffer):
     @property
     def datamap(self):
         return freeze({self.name: self})
-
-    @contextlib.contextmanager
-    def vec_context(self, intent):
-        """Wrap the buffer in a PETSc Vec.
-
-        TODO implement intent parameter
-
-        """
-        yield self._vec
-        # if access is not Access.READ:
-        #     self.halo_valid = False
-
-    @property
-    @deprecated(".vec_rw")
-    def vec(self):
-        return self.vec_rw
-
-    @property
-    def vec_rw(self):
-        # TODO I don't think that intent is the right thing here. We really only have
-        # READ, WRITE or RW
-        return self.vec_context(RW)
-
-    @property
-    def vec_ro(self):
-        # TODO I don't think that intent is the right thing here. We really only have
-        # READ, WRITE or RW
-        return self.vec_context(READ)
-
-    @property
-    def vec_wo(self):
-        return self.vec_context(WRITE)
 
     @property
     def _data(self):
@@ -338,19 +304,6 @@ class DistributedBuffer(Buffer):
     def _reduce_then_broadcast(self):
         self._reduce_leaves_to_roots()
         self._broadcast_roots_to_leaves()
-
-    @property
-    def _vec(self):
-        if self.dtype != PETSc.ScalarType:
-            raise RuntimeError(
-                f"Cannot create a Vec with data type {self.dtype}, "
-                "must be {PETSc.ScalarType}"
-            )
-
-        if self._lazy_vec is None:
-            vec = PETSc.Vec().createWithArray(self._owned_data, comm=self.comm)
-            self._lazy_vec = vec
-        return self._lazy_vec
 
 
 class PackedBuffer(Buffer):

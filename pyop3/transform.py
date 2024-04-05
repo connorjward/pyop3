@@ -26,6 +26,7 @@ from pyop3.lang import (
     Loop,
     Pack,
     PetscMatAdd,
+    PetscMatInstruction,
     PetscMatLoad,
     PetscMatStore,
     ReplaceAssignment,
@@ -199,6 +200,17 @@ class LoopContextExpander(Transformer):
         else:
             return ((pmap(), None),)
 
+    # TODO: this is just an assignment, fix inheritance
+    @_apply.register
+    def _(self, terminal: PetscMatInstruction, *, context):
+        if any(
+            isinstance(a, ContextSensitive)
+            for a in {terminal.mat_arg, terminal.array_arg}
+        ):
+            raise NotImplementedError
+
+        return ((pmap(), terminal),)
+
 
 def expand_loop_contexts(expr: Instruction):
     return LoopContextExpander().apply(expr)
@@ -242,6 +254,13 @@ class ImplicitPackUnpackExpander(Transformer):
                 }
             ),
         )
+
+    # TODO: Should be the same as Assignment
+    @_apply.register
+    def _(self, assignment: PetscMatInstruction):
+        # FIXME: Probably will not work for things like mat[x, y].assign(dat[z])
+        # where the expression is indexed.
+        return (assignment,)
 
     @_apply.register
     def _(self, assignment: Assignment):

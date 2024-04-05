@@ -364,7 +364,7 @@ class LabelledTree(AbstractTree):
         if uniquify:
             uniquify_ids = True
 
-        if some_but_not_all([parent, component]):
+        if some_but_not_all(x is None for x in {parent, component}):
             raise ValueError(
                 "Either both or neither of parent and component must be defined"
             )

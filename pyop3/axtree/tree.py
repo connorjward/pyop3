@@ -313,9 +313,7 @@ class AxisComponent(LabelledNodeComponent):
 
     """
 
-    fields = LabelledNodeComponent.fields | {
-        "count",
-    }
+    fields = LabelledNodeComponent.fields | {"count", "unit"}
 
     def __init__(
         self,
@@ -325,14 +323,20 @@ class AxisComponent(LabelledNodeComponent):
         indices=None,
         indexed=False,
         lgmap=None,
+        unit=False,
     ):
         from pyop3.array import HierarchicalArray
 
         if not isinstance(count, (numbers.Integral, HierarchicalArray)):
             raise TypeError("Invalid count type")
+        if unit and count != 1:
+            raise ValueError(
+                "Components may only be marked as 'unit' if they have length 1"
+            )
 
         super().__init__(label=label)
         self.count = count
+        self.unit = unit
 
     # TODO this is just a traversal - clean up
     def alloc_size(self, axtree, axis):
@@ -347,9 +351,13 @@ class AxisComponent(LabelledNodeComponent):
         assert npoints is not None
 
         if subaxis := axtree.component_child(axis, self):
-            return npoints * axtree.alloc_size(subaxis)
+            size = npoints * axtree.alloc_size(subaxis)
         else:
-            return npoints
+            size = npoints
+
+        # TODO: May be excessive
+        # Cast to an int as numpy integers cause loopy to break
+        return strict_int(size)
 
 
 class Axis(MultiComponentLabelledNode, LoopIterable):

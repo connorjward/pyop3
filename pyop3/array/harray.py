@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import collections
+import contextlib
 import functools
 import itertools
 import numbers
@@ -322,10 +323,14 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         self._check_no_copy_access()
         return self.buffer.data_wo[self._buffer_indices]
 
-    # TODO: This should be more widely cached, don't want to tabulate more often
-    # than required.
     @cached_property
     def _buffer_indices(self):
+        # TODO: This method is inefficient as for affine things we still tabulate
+        # everything first. It would be best to inspect index_exprs to determine
+        # if a slice is sufficient, but this is hard.
+        # TODO: This should be more widely cached, don't want to tabulate more often
+        # than required.
+
         assert self.axes.owned.size > 0
 
         indices = np.full(self.axes.owned.size, -1, dtype=IntType)
@@ -359,6 +364,40 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
             raise FancyIndexWriteException(
                 "Writing to the array directly is not supported for "
                 "non-trivially indexed (i.e. sliced) arrays."
+            )
+
+    # TODO: It is inefficient (I think) to create a new vec every time, even
+    # if we are reusing the underlying array. Care must be taken though because
+    # sometimes we cannot create write-able vectors and use a copy (when fancy
+    # indexing is required).
+    @property
+    @contextlib.contextmanager
+    def vec_rw(self):
+        self._check_vec_dtype()
+        yield PETSc.Vec().createWithArray(self.data_rw, comm=self.comm)
+
+    @property
+    @contextlib.contextmanager
+    def vec_ro(self):
+        self._check_vec_dtype()
+        yield PETSc.Vec().createWithArray(self.data_ro, comm=self.comm)
+
+    @property
+    @contextlib.contextmanager
+    def vec_wo(self):
+        self._check_vec_dtype()
+        yield PETSc.Vec().createWithArray(self.data_wo, comm=self.comm)
+
+    @property
+    @deprecated(".vec_rw")
+    def vec(self):
+        return self.vec_rw
+
+    def _check_vec_dtype(self):
+        if self.dtype != PETSc.ScalarType:
+            raise RuntimeError(
+                f"Cannot create a Vec with data type {self.dtype}, "
+                f"must be {PETSc.ScalarType}"
             )
 
     @property
@@ -537,29 +576,6 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
 
     def eager_zero(self, *, subset=Ellipsis):
         self.zero(subset=subset)()
-
-    @property
-    @deprecated(".vec_rw")
-    def vec(self):
-        return self.vec_rw
-
-    @property
-    def vec_rw(self):
-        # FIXME: This does not work for the case when the array here is indexed in some
-        # way. E.g. dat[::2] since the full buffer is returned.
-        return self.buffer.vec_rw
-
-    @property
-    def vec_ro(self):
-        # FIXME: This does not work for the case when the array here is indexed in some
-        # way. E.g. dat[::2] since the full buffer is returned.
-        return self.buffer.vec_ro
-
-    @property
-    def vec_wo(self):
-        # FIXME: This does not work for the case when the array here is indexed in some
-        # way. E.g. dat[::2] since the full buffer is returned.
-        return self.buffer.vec_wo
 
 
 # Needs to be subclass for isinstance checks to work

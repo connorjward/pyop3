@@ -1024,8 +1024,24 @@ def _(called_map, *, axes, **kwargs):
 
 
 @_as_index_forest.register
-def _(index: numbers.Integral, **kwargs):
-    return _as_index_forest(slice(index, index + 1), **kwargs)
+def _(index: numbers.Integral, *, axes, **kwargs):
+    # If we are dealing with a multi-component axis (e.g. a mixed thing), then
+    # indexing the axis with an integer will take a full slice of a particular
+    # component, if no component exists with that label then an error is raised.
+    # If instead we are dealing with a single-component axis, then the normal
+    # numpy-style indexing will be used where a particular index from the
+    # axis will be selected for.
+    root = axes.root
+    if len(root.components) > 1:
+        component = just_one(c for c in root.components if c.label == index)
+        if component.unit:
+            index_ = ScalarIndex(root.label, component.label, 0)
+        else:
+            index_ = Slice(root.label, [AffineSliceComponent(component.label)])
+    else:
+        component = just_one(root.components)
+        index_ = ScalarIndex(root.label, component.label, index)
+    return _as_index_forest(index_, axes=axes, **kwargs)
 
 
 @_as_index_forest.register
@@ -1059,7 +1075,13 @@ def _(label: str, *, axes, **kwargs):
     # top level axis
     axis = axes.root
     component = just_one(c for c in axis.components if c.label == label)
-    slice_ = Slice(axis.label, [AffineSliceComponent(component.label)])
+
+    # If the component is marked as "unit" then indexing in this way will
+    # fully consume the axis.
+    if component.unit:
+        slice_ = ScalarIndex(axis.label, component.label, 0)
+    else:
+        slice_ = Slice(axis.label, [AffineSliceComponent(component.label)])
     return _as_index_forest(slice_, axes=axes, **kwargs)
 
 
@@ -2104,7 +2126,6 @@ def iter_axis_tree(
             )
             for axlabel, index_expr in myindex_exprs.items():
                 new_index = evaluator(index_expr)
-                assert new_index != index_expr
                 new_exprs[axlabel] = new_index
             # breakpoint()
             index_exprs_ = index_exprs_acc | new_exprs

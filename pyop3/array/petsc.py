@@ -10,7 +10,7 @@ from functools import cached_property
 import numpy as np
 import pymbolic as pym
 from petsc4py import PETSc
-from pyrsistent import freeze
+from pyrsistent import freeze, pmap
 
 from pyop3.array.base import Array
 from pyop3.array.harray import ContextSensitiveMultiArray, HierarchicalArray
@@ -26,7 +26,13 @@ from pyop3.axtree.tree import (
 from pyop3.buffer import PackedBuffer
 from pyop3.cache import cached
 from pyop3.dtypes import IntType, ScalarType
-from pyop3.itree.tree import CalledMap, LoopIndex, _index_axes, as_index_forest
+from pyop3.itree.tree import (
+    CalledMap,
+    LoopIndex,
+    _index_axes,
+    as_index_forest,
+    iter_axis_tree,
+)
 from pyop3.lang import PetscMatStore, do_loop, loop
 from pyop3.mpi import hash_comm
 from pyop3.utils import deprecated, just_one, merge_dicts, single_valued, strictly_all
@@ -99,7 +105,18 @@ class PetscMat(PetscObject, ContextFree, abc.ABC):
         self.mat.assemble()
 
     def assign(self, other):
-        return PetscMatStore(self, other)
+        if isinstance(other, HierarchicalArray):
+            # TODO: Check axes match between self and other
+            return PetscMatStore(self, other)
+        elif isinstance(other, numbers.Number):
+            static = HierarchicalArray(
+                self.axes,
+                data=np.full(self.axes.size, other, dtype=self.dtype),
+                constant=True,
+            )
+            return PetscMatStore(self, static)
+        else:
+            raise NotImplementedError
 
     def eager_zero(self):
         self.mat.zeroEntries()
@@ -220,6 +237,51 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
                     continue
                 rcforest[rctx | cctx] = (rtree, ctree)
 
+        # If there are no outer loops then we can return a context-free array.
+        if rcforest.keys() == {pmap()}:
+            rtree, ctree = rcforest[pmap()]
+
+            indexed_raxes = _index_axes(rtree, pmap(), self.raxes)
+            indexed_caxes = _index_axes(ctree, pmap(), self.caxes)
+
+            rtarget_paths, rindex_exprs, _ = _compose_bits(
+                self.raxes,
+                self.rtarget_paths,
+                self.rindex_exprs,
+                None,
+                indexed_raxes,
+                indexed_raxes.target_paths,
+                indexed_raxes.index_exprs,
+                {},
+            )
+            ctarget_paths, cindex_exprs, _ = _compose_bits(
+                self.caxes,
+                self.ctarget_paths,
+                self.cindex_exprs,
+                None,
+                indexed_caxes,
+                indexed_caxes.target_paths,
+                indexed_caxes.index_exprs,
+                {},
+            )
+
+            return type(self)(
+                indexed_raxes,
+                indexed_caxes,
+                self.mat,
+                name=self.name,
+                # delete below
+                rtarget_paths=rtarget_paths,
+                rindex_exprs=rindex_exprs,
+                orig_raxes=self.orig_raxes,
+                router_loops=indexed_raxes.outer_loops,
+                ctarget_paths=ctarget_paths,
+                cindex_exprs=cindex_exprs,
+                orig_caxes=self.orig_caxes,
+                couter_loops=indexed_caxes.outer_loops,
+            )
+
+        # Otherwise we are context-sensitive
         arrays = {}
         for ctx, (rtree, ctree) in rcforest.items():
             indexed_raxes = _index_axes(rtree, ctx, self.raxes)
@@ -227,27 +289,7 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
 
             if indexed_raxes.alloc_size() == 0 or indexed_caxes.alloc_size() == 0:
                 continue
-            router_loops = indexed_raxes.outer_loops
-            couter_loops = indexed_caxes.outer_loops
 
-            outer_loops = list(router_loops)
-            all_ids = [l.id for l in router_loops]
-            for ol in couter_loops:
-                if ol.id not in all_ids:
-                    outer_loops.append(ol)
-
-            # my_target_paths = indexed_raxes.target_paths | indexed_caxes.target_paths
-            # my_index_exprs = indexed_raxes.index_exprs | indexed_caxes.index_exprs
-
-            # arrays[ctx] = HierarchicalArray(
-            #     axes,
-            #     data=packed,
-            #     target_paths=my_target_paths,
-            #     index_exprs=my_index_exprs,
-            #     # TODO ordered set?
-            #     outer_loops=outer_loops,
-            #     name=self.name,
-            # )
             rtarget_paths, rindex_exprs, _ = _compose_bits(
                 self.raxes,
                 self.rtarget_paths,
@@ -278,12 +320,13 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
                 rtarget_paths=rtarget_paths,
                 rindex_exprs=rindex_exprs,
                 orig_raxes=self.orig_raxes,
-                router_loops=router_loops,
+                router_loops=indexed_raxes.outer_loops,
                 ctarget_paths=ctarget_paths,
                 cindex_exprs=cindex_exprs,
                 orig_caxes=self.orig_caxes,
-                couter_loops=couter_loops,
+                couter_loops=indexed_caxes.outer_loops,
             )
+        # But this is now a PetscMat...
         return ContextSensitiveMultiArray(arrays)
 
     @cached_property
@@ -319,7 +362,18 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
 
         for idxs in my_product(self.router_loops):
             target_indices = {idx.index.id: idx.target_exprs for idx in idxs}
-            for p in self.raxes.iter(idxs):
+
+            # TODO: We use iter_axis_tree here because the target_paths and
+            # index_exprs are not tied to raxes.
+            riter = iter_axis_tree(
+                self.raxes.index(),
+                self.raxes,
+                self.rtarget_paths,
+                self.rindex_exprs,
+                idxs,
+            )
+            # for p in self.raxes.iter(idxs):
+            for p in riter:
                 offset = self.orig_raxes.offset(
                     p.target_exprs, p.target_path, loop_exprs=target_indices
                 )
@@ -332,7 +386,17 @@ class MonolithicPetscMat(PetscMat, abc.ABC):
 
         for idxs in my_product(self.couter_loops):
             target_indices = {idx.index.id: idx.target_exprs for idx in idxs}
-            for p in self.caxes.iter(idxs):
+
+            # TODO: as above, replace with .iter()
+            citer = iter_axis_tree(
+                self.caxes.index(),
+                self.caxes,
+                self.ctarget_paths,
+                self.cindex_exprs,
+                idxs,
+            )
+            # for p in self.caxes.iter(idxs):
+            for p in citer:
                 offset = self.orig_caxes.offset(
                     p.target_exprs, p.target_path, loop_exprs=target_indices
                 )

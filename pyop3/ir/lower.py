@@ -233,10 +233,25 @@ class LoopyCodegenContext(CodegenContext):
         elif isinstance(array.buffer, NullBuffer) or injected:
             name = self.unique_name("t") if not debug else array.name
             shape = self._temporary_shapes.get(array.name, (array.alloc_size,))
+            # if array.name == "array_2":
+            #     breakpoint()
+
             initializer = array.buffer.data_ro if injected else None
-            arg = lp.TemporaryVariable(
-                name, dtype=array.dtype, shape=shape, initializer=initializer
-            )
+            # debug, does this fix things?
+            if initializer is not None:
+                # shape = None  # nope
+                # shape = initializer.shape  # nope
+                arg = lp.TemporaryVariable(
+                    name,
+                    dtype=array.dtype,
+                    initializer=initializer,
+                    address_space=lp.AddressSpace.LOCAL,
+                    read_only=True,
+                )
+            else:
+                arg = lp.TemporaryVariable(
+                    name, dtype=array.dtype, shape=shape, read_only=True
+                )
         else:
             name = self.unique_name("array") if not debug else array.name
             assert isinstance(array.buffer, DistributedBuffer)
