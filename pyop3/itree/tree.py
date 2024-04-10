@@ -1300,7 +1300,7 @@ def _(slice_: Slice, indices, *, target_path_acc, prev_axes, **kwargs):
             assert isinstance(subslice, Subset)
             size = subslice.array.axes.leaf_component.count
         mylabel = subslice.component if is_full_slice else subslice.label
-        cpt = AxisComponent(size, label=mylabel)
+        cpt = AxisComponent(size, label=mylabel, unit=target_cpt.unit)
         components.append(cpt)
 
         target_path_per_subslice.append(pmap({slice_.axis: subslice.component}))
@@ -1788,9 +1788,14 @@ def _compose_bits(
         )
 
     if iaxis is None:
+        iaxis = indexed_axes.root
+
+        # debug
+        # if "field" in iindex_exprs.get(None, {}):
+        #     breakpoint()
+
         target_path |= itarget_paths.get(None, {})
         partial_index_exprs |= iindex_exprs.get(None, {})
-        iaxis = indexed_axes.root
 
     target_path_per_cpt = collections.defaultdict(dict)
     index_exprs = collections.defaultdict(dict)

@@ -17,7 +17,7 @@ from pyrsistent import freeze, pmap
 
 from pyop3.array import HierarchicalArray
 from pyop3.array.harray import CalledMapVariable, ContextSensitiveMultiArray
-from pyop3.array.petsc import PetscMat
+from pyop3.array.petsc import AbstractMat, Sparsity
 from pyop3.axtree import Axis, AxisComponent, AxisTree, AxisVariable, ContextFree
 from pyop3.axtree.tree import subst_layouts
 from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
@@ -227,7 +227,7 @@ class LoopyCodegenContext(CodegenContext):
         debug = bool(config["debug"])
 
         injected = array.constant and array.size < config["max_static_array_size"]
-        if isinstance(array, PetscMat):
+        if isinstance(array, AbstractMat):
             name = self.unique_name("mat") if not debug else array.name
             arg = lp.ValueArg(name, dtype=self._dtype(array))
         elif isinstance(array.buffer, NullBuffer) or injected:
@@ -315,7 +315,7 @@ class LoopyCodegenContext(CodegenContext):
         return self._dtype(array.array)
 
     @_dtype.register
-    def _(self, array: PetscMat):
+    def _(self, array: AbstractMat):
         return OpaqueType("Mat")
 
     def _add_instruction(self, insn):
@@ -346,7 +346,10 @@ class CodegenResult:
             actual_arg_name = self.arg_replace_map[kernel_arg.name]
             array = kwargs.get(actual_arg_name, self.datamap[actual_arg_name])
             data_args.append(_as_pointer(array))
-        compile_loopy(self.ir)(*data_args)
+        func = compile_loopy(self.ir)
+        if len(data_args) > 0:
+            # breakpoint()
+            func(*data_args)
 
     def target_code(self, target):
         raise NotImplementedError("TODO")
@@ -731,11 +734,26 @@ def parse_assignment(
 
 @_compile.register(PetscMatInstruction)
 def _(assignment, loop_indices, codegen_context):
+    mat = assignment.mat_arg
+    array = assignment.array_arg
+
+    if mat.nested:
+        ridx, cidx = map(just_one, just_one(mat.nest_labels))
+        # if ridx is None:
+        #     ridx = 0
+        # if cidx is None:
+        #     cidx = 0
+
+        if mat.mat_type[ridx, cidx] == "dat":
+            # no preallocation is necessary
+            if isinstance(mat, Sparsity):
+                return
+
+            breakpoint()
+
     # now emit the right line of code, this should properly be a lp.ScalarCallable
     # https://petsc.org/release/manualpages/Mat/MatGetValuesLocal/
 
-    mat = assignment.mat_arg
-    array = assignment.array_arg
     rmap = assignment.mat_arg.rmap
     cmap = assignment.mat_arg.cmap
 
@@ -748,6 +766,37 @@ def _(assignment, loop_indices, codegen_context):
     array_name = codegen_context.actual_to_kernel_rename_map[array.name]
     rmap_name = codegen_context.actual_to_kernel_rename_map[rmap.name]
     cmap_name = codegen_context.actual_to_kernel_rename_map[cmap.name]
+
+    if mat.nested:
+        if len(mat.nest_labels) > 1:
+            # Need to loop over the different nest labels and emit separate calls to
+            # MatSetValues, maps may also be wrong.
+            raise NotImplementedError
+
+        submat_name = codegen_context.unique_name("submat")
+        ridxs, cidxs = just_one(mat.nest_labels)
+
+        if any(len(x) != 1 for x in {ridxs, cidxs}):
+            raise NotImplementedError
+
+        (ridx,) = ridxs
+        (cidx,) = cidxs
+
+        if ridx is None:
+            ridx = 0
+        if cidx is None:
+            cidx = 0
+
+        code = textwrap.dedent(
+            f"""
+            Mat {submat_name};
+            MatNestGetSubMat({mat_name}, {ridx}, {cidx}, &{submat_name});
+            """.format()
+        )
+        codegen_context.add_cinstruction(code)
+        mat_name = submat_name
+
+    # TODO: The following code should be done in a loop per submat.
 
     # these sizes can be expressions that need evaluating
     rsize, csize = assignment.mat_arg.shape
@@ -1234,5 +1283,5 @@ def _(arg: PackedBuffer):
 
 
 @_as_pointer.register
-def _(array: PetscMat):
+def _(array: AbstractMat):
     return array.mat.handle

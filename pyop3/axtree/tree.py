@@ -825,6 +825,8 @@ class PartialAxisTree(LabelledTree):
 
     # rename to local_size?
     def alloc_size(self, axis=None):
+        if self.is_empty:
+            return 1
         axis = axis or self.root
         return sum(cpt.alloc_size(self, axis) for cpt in axis.components)
 

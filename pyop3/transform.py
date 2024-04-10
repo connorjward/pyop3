@@ -7,7 +7,8 @@ import numbers
 
 from pyrsistent import freeze, pmap
 
-from pyop3.array import ContextSensitiveMultiArray, HierarchicalArray, PetscMat
+from pyop3.array import ContextSensitiveMultiArray, HierarchicalArray
+from pyop3.array.petsc import AbstractMat
 from pyop3.axtree import Axis, AxisTree, ContextFree, ContextSensitive
 from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
 from pyop3.itree import Map, TabulatedMapComponent
@@ -285,7 +286,7 @@ class ImplicitPackUnpackExpander(Transformer):
                 continue
 
             # emit function calls for PetscMat
-            if isinstance(arg, PetscMat):
+            if isinstance(arg, AbstractMat):
                 axes = AxisTree(arg.axes.parent_to_children)
                 new_arg = HierarchicalArray(
                     axes,
@@ -372,7 +373,7 @@ class ImplicitPackUnpackExpander(Transformer):
 
             # unpick pack/unpack instructions
             if intent != NA and _requires_pack_unpack(arg):
-                is_petsc_mat = isinstance(arg, PetscMat)
+                is_petsc_mat = isinstance(arg, AbstractMat)
 
                 axes = AxisTree(arg.axes.parent_to_children)
                 temporary = HierarchicalArray(
@@ -467,7 +468,7 @@ def _requires_pack_unpack(arg):
     # however, it is overly restrictive since we could pass something like dat[i0, :] directly
     # to a local kernel
     # return isinstance(arg, HierarchicalArray) and arg.subst_layouts != arg.layouts
-    return isinstance(arg, (HierarchicalArray, PetscMat))
+    return isinstance(arg, (HierarchicalArray, AbstractMat))
 
 
 # *below is old untested code*
