@@ -28,16 +28,10 @@ from pyop3.axtree import (
     as_axis_tree,
 )
 from pyop3.axtree.layout import eval_offset
-from pyop3.axtree.tree import (
-    AxisVariable,
-    ExpressionEvaluator,
-    Indexed,
-    MultiArrayCollector,
-    PartialAxisTree,
-)
+from pyop3.axtree.tree import Indexed, IndexedAxisTree, MultiArrayCollector
 from pyop3.buffer import Buffer, DistributedBuffer
-from pyop3.dtypes import IntType, ScalarType, get_mpi_dtype
-from pyop3.lang import KernelArgument, ReplaceAssignment, do_loop
+from pyop3.dtypes import IntType, ScalarType
+from pyop3.lang import KernelArgument, ReplaceAssignment
 from pyop3.log import warning
 from pyop3.sf import single_star
 from pyop3.utils import (
@@ -146,10 +140,10 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         *,
         data=None,
         max_value=None,
-        layouts=None,
-        target_paths=None,
-        index_exprs=None,
-        outer_loops=None,
+        # layouts=None,
+        # target_paths=None,
+        # index_exprs=None,
+        # outer_loops=None,
         name=None,
         prefix=None,
         constant=False,
@@ -192,19 +186,34 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         # TODO This attr really belongs to the buffer not the array
         self.constant = constant
 
-        if some_but_not_all(x is None for x in [target_paths, index_exprs]):
-            raise ValueError
+        # if some_but_not_all(x is None for x in [target_paths, index_exprs]):
+        #     raise ValueError
 
-        if target_paths is None:
-            target_paths = axes._default_target_paths()
-        if index_exprs is None:
-            index_exprs = axes._default_index_exprs()
+        # if target_paths is None:
+        #     target_paths = axes._default_target_paths()
+        # if index_exprs is None:
+        #     index_exprs = axes._default_index_exprs()
+        #
+        # self._target_paths = freeze(target_paths)
+        # self._index_exprs = freeze(index_exprs)
+        # self._outer_loops = outer_loops or ()
+        #
+        # self._layouts = layouts if layouts is not None else axes.layouts
 
-        self._target_paths = freeze(target_paths)
-        self._index_exprs = freeze(index_exprs)
-        self._outer_loops = outer_loops or ()
+    @property
+    @deprecated()
+    def target_paths(self):
+        return self.axes.target_paths
 
-        self._layouts = layouts if layouts is not None else axes.layouts
+    @property
+    @deprecated()
+    def index_exprs(self):
+        return self.axes.index_exprs
+
+    @property
+    @deprecated()
+    def layouts(self):
+        return self.axes.layouts
 
     def __str__(self):
         return self.name
@@ -231,21 +240,37 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
                 indexed_axes.layout_exprs,
             )
 
-            return HierarchicalArray(
-                indexed_axes,
-                data=self.array,
-                max_value=self.max_value,
+            axes = IndexedAxisTree(
+                indexed_axes.node_map,
                 target_paths=target_paths,
                 index_exprs=index_exprs,
+                layout_exprs=layout_exprs,
+                layouts=self.axes.layouts,
                 outer_loops=indexed_axes.outer_loops,
-                layouts=self.layouts,
-                name=self.name,
+                sf=self.axes.sf,
+            )
+
+            # return self.with_axes(axes)
+
+            # return HierarchicalArray(
+            #     indexed_axes,
+            #     data=self.array,
+            #     max_value=self.max_value,
+            #     target_paths=target_paths,
+            #     index_exprs=index_exprs,
+            #     outer_loops=indexed_axes.outer_loops,
+            #     layouts=self.layouts,
+            #     name=self.name,
+            # )
+            return HierarchicalArray(
+                axes, data=self.buffer, max_value=self.max_value, name=self.name
             )
 
         array_per_context = {}
         for loop_context, index_tree in index_forest.items():
             indexed_axes = _index_axes(index_tree, loop_context, self.axes)
 
+            # TODO: Should handle this inside _index_axes!
             (
                 target_paths,
                 index_exprs,
@@ -261,16 +286,31 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
                 indexed_axes.layout_exprs,
             )
 
-            array_per_context[loop_context] = HierarchicalArray(
-                indexed_axes,
-                data=self.array,
-                layouts=self.layouts,
+            axes = IndexedAxisTree(
+                indexed_axes.node_map,
                 target_paths=target_paths,
                 index_exprs=index_exprs,
+                layout_exprs=layout_exprs,
+                layouts=self.axes.layouts,
                 outer_loops=indexed_axes.outer_loops,
-                name=self.name,
-                max_value=self.max_value,
+                sf=self.axes.sf,
             )
+
+            myarray = HierarchicalArray(
+                axes, data=self.buffer, name=self.name, max_value=self.max_value
+            )
+            array_per_context[loop_context] = myarray
+
+            # array_per_context[loop_context] = HierarchicalArray(
+            #     indexed_axes,
+            #     data=self.array,
+            #     layouts=self.layouts,
+            #     target_paths=target_paths,
+            #     index_exprs=index_exprs,
+            #     outer_loops=indexed_axes.outer_loops,
+            #     name=self.name,
+            #     max_value=self.max_value,
+            # )
         return ContextSensitiveMultiArray(array_per_context)
 
     # Since __getitem__ is implemented, this class is implicitly considered
@@ -405,20 +445,8 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         return self._axes
 
     @property
-    def target_paths(self):
-        return self._target_paths
-
-    @property
-    def index_exprs(self):
-        return self._index_exprs
-
-    @property
     def outer_loops(self):
         return self._outer_loops
-
-    @property
-    def layouts(self):
-        return self._layouts
 
     @property
     def sf(self):

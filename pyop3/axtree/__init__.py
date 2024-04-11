@@ -6,7 +6,7 @@ from .tree import (
     ContextAware,
     ContextFree,
     ContextSensitive,
+    IndexedAxisTree,
     LoopIterable,
-    PartialAxisTree,
     as_axis_tree,
 )

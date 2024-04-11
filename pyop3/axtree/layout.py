@@ -17,9 +17,8 @@ from pyop3.axtree.tree import (
     Axis,
     AxisComponent,
     AxisTree,
+    AxisVariable,
     ExpressionEvaluator,
-    PartialAxisTree,
-    UnrecognisedAxisException,
     component_number_from_offsets,
     component_offsets,
 )
@@ -35,31 +34,30 @@ from pyop3.utils import (
     strictly_all,
 )
 
-
 # hacky class for index_exprs to work, needs cleaning up
-class AxisVariable(pym.primitives.Variable):
-    init_arg_names = ("axis",)
-
-    mapper_method = sys.intern("map_axis_variable")
-
-    mycounter = 0
-
-    def __init__(self, axis):
-        super().__init__(f"var{self.mycounter}")
-        self.__class__.mycounter += 1  # ugly
-        self.axis_label = axis
-
-    def __getinitargs__(self):
-        # not very happy about this, is the name required?
-        return (self.axis,)
-
-    @property
-    def axis(self):
-        return self.axis_label
-
-    @property
-    def datamap(self):
-        return pmap()
+# class AxisVariable(pym.primitives.Variable):
+#     init_arg_names = ("axis",)
+#
+#     mapper_method = sys.intern("map_axis_variable")
+#
+#     mycounter = 0
+#
+#     def __init__(self, axis):
+#         super().__init__(f"var{self.mycounter}")
+#         self.__class__.mycounter += 1  # ugly
+#         self.axis_label = axis
+#
+#     def __getinitargs__(self):
+#         # not very happy about this, is the name required?
+#         return (self.axis,)
+#
+#     @property
+#     def axis(self):
+#         return self.axis_label
+#
+#     @property
+#     def datamap(self):
+#         return pmap()
 
 
 class IntRef:
@@ -432,7 +430,7 @@ def _compute_layouts(
             has_constant_step(axes, axis, c, inner_loop_vars)
             for i, c in enumerate(axis.components)
         ):
-            ctree = PartialAxisTree(axis.copy(numbering=None))
+            ctree = AxisTree(axis.copy(numbering=None))
 
             # we enforce here that all subaxes must be tabulated, is this always
             # needed?
@@ -473,7 +471,7 @@ def _compute_layouts(
             or has_halo(axes, axis)
             and axis == axes.root  # at the top
         ):
-            ctree = PartialAxisTree(axis.copy(numbering=None))
+            ctree = AxisTree(axis.copy(numbering=None))
             # we enforce here that all subaxes must be tabulated, is this always
             # needed?
             if strictly_all(sub is not None for sub in csubtrees):
@@ -744,21 +742,8 @@ def axis_tree_size(axes: AxisTree) -> int:
     example, an array with shape ``(10, 3)`` will have a size of 30.
 
     """
-    # outer_loops = collect_external_loops(axes, axes.index_exprs)
     outer_loops = axes.outer_loops
 
-    # loop_exprs = {}
-    # for ol in outer_loops:
-    #     assert not ol.iterset.index_exprs.get(None, {}), "not sure what to do here"
-    #
-    #     loop_exprs[ol.id] = {}
-    #     for axis in ol.iterset.nodes:
-    #         key = (axis.id, axis.component.label)
-    #         for ax, expr in ol.iterset.index_exprs.get(key, {}).items():
-    #             loop_exprs[ol.id][ax] = expr
-
-    # external_axes = collect_externally_indexed_axes(axes)
-    # if len(external_axes) == 0:
     if axes.is_empty:
         return 1
 
@@ -770,40 +755,6 @@ def axis_tree_size(axes: AxisTree) -> int:
         # return _axis_size(axes, axes.root, loop_exprs=loop_exprs)
         return _axis_size(axes, axes.root)
 
-    # axis size is now an array
-
-    # axes_iter = []
-    # index_exprs = {}
-    # outer_loop_map = {}
-    # for ol in outer_loops_ord:
-    #     iterset = ol.index.iterset
-    #     for axis in iterset.path_with_nodes(*iterset.leaf):
-    #         axis_ = axis.copy(id=Axis.unique_id(), label=Axis.unique_label())
-    #         # axis_ = axis
-    #         axes_iter.append(axis_)
-    #         index_exprs[axis_.id, axis_.component.label] = {axis.label: ol}
-    #         outer_loop_map[axis_] = ol
-    # size_axes = PartialAxisTree.from_iterable(axes_iter)
-    #
-    # # hack
-    # target_paths = AxisTree(size_axes.parent_to_children)._default_target_paths()
-    # layout_exprs = {}
-    #
-    # size_axes = AxisTree(size_axes.parent_to_children, target_paths=target_paths, index_exprs=index_exprs, outer_loops=outer_loops_ord[:-1], layout_exprs=layout_exprs)
-    #
-    # sizes = HierarchicalArray(
-    #     size_axes,
-    #     target_paths=target_paths,
-    #     index_exprs=index_exprs,
-    #     # outer_loops=frozenset(),  # only temporaries need this
-    #     # outer_loops=axes.outer_loops,  # causes infinite recursion
-    #     outer_loops=outer_loops_ord[:-1],
-    #     dtype=IntType,
-    #     prefix="size",
-    # )
-    # sizes = HierarchicalArray(AxisTree(), target_paths={}, index_exprs={}, outer_loops=outer_loops_ord[:-1])
-    # sizes = HierarchicalArray(AxisTree(outer_loops=outer_loops_ord), target_paths={}, index_exprs={}, outer_loops=outer_loops_ord)
-    # sizes = HierarchicalArray(axes)
     sizes = []
 
     # for idxs in itertools.product(*outer_loops_iter):

@@ -16,7 +16,7 @@ from pyop3.array.harray import ContextSensitiveMultiArray, HierarchicalArray
 from pyop3.axtree.tree import (
     AxisTree,
     ContextFree,
-    PartialAxisTree,
+    IndexedAxisTree,
     as_axis_tree,
     relabel_axes,
 )
@@ -522,7 +522,7 @@ class AbstractMat(Array, ContextFree):
         raxes_relabel = relabel_axes(self.raxes, self._row_suffix)
         caxes_relabel = relabel_axes(self.caxes, self._col_suffix)
 
-        axes = PartialAxisTree(raxes_relabel.parent_to_children)
+        axes = AxisTree(raxes_relabel.node_map)
         for leaf in raxes_relabel.leaves:
             axes = axes.add_subtree(caxes_relabel, *leaf, uniquify_ids=True)
         axes = axes.set_up()

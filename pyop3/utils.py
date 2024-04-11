@@ -284,44 +284,6 @@ def deprecated(prefer=None, internal=False):
     return decorator
 
 
-class FrozenRecordException(TypeError):
-    pass
-
-
-def _disabled_record_copy(self, **kwargs):
-    raise FrozenRecordException("Cannot call copy on a frozen record class")
-
-
-def frozen_record(cls):
-    """Class decorator that disables record copying.
-
-    This is required to handle the case where we have `pytools.Record` subclasses
-    that have "correlated" attributes. Consider a case where we have class
-    ``MyClass`` with attributes ``a`` and ``b``, where ``a`` and ``b`` are in some
-    sense related. It is therefore invalid to call ``myobj.copy(a=new_a)`` or
-    ``myobj.copy(b=new_b)`` as that will break the connection between ``a``
-    and ``b``.
-
-    The primary use case for this decorator is for `AxisTree` (non-frozen) and
-    `SetUpAxisTree` (frozen). We want to inherit the full set of methods from
-    `LabelledTree` into `AxisTree`, but when we call `AxisTree.set_up` we no longer
-    want to allow "mutator" methods that add additional axes since the tree now
-    has correlated attributes such as the layout functions and star forest and
-    adding new axes would break them.
-
-    Notes
-    -----
-    This behaviour has been implemented as a class decorator as opposed to
-    a mixin class because, for a mixin class, the disabling behaviour would
-    be dependent on the ordering of the classes in the inheritance hierarchy.
-
-    """
-    if not issubclass(cls, pytools.Record):
-        raise TypeError("frozen_record is only valid for subclasses of pytools.Record")
-    cls.copy = _disabled_record_copy
-    return cls
-
-
 def debug_assert(predicate, msg=None):
     if config["debug"]:
         if msg:

@@ -32,11 +32,11 @@ from pyop3.axtree import (
 )
 from pyop3.axtree.layout import _as_int
 from pyop3.axtree.tree import (
+    AxisTree,
     ContextSensitiveAxisTree,
     ContextSensitiveLoopIterable,
     ExpressionEvaluator,
-    PartialAxisTree,
-    UnrecognisedAxisException,
+    IndexedAxisTree,
 )
 from pyop3.dtypes import IntType, get_mpi_dtype
 from pyop3.lang import KernelArgument
@@ -44,6 +44,7 @@ from pyop3.tree import (
     LabelledNodeComponent,
     LabelledTree,
     MultiComponentLabelledNode,
+    MutableLabelledTreeMixin,
     postvisit,
 )
 from pyop3.utils import (
@@ -81,14 +82,16 @@ class IndexExpressionReplacer(pym.mapper.IdentityMapper):
             return index
 
 
-class IndexTree(LabelledTree):
-    fields = LabelledTree.fields | {"outer_loops"}
+class IndexTree(MutableLabelledTreeMixin, LabelledTree):
+    # fields = LabelledTree.fields | {"outer_loops"}
 
+    # TODO: Don't think outer_loops are used any more
     # TODO rename to node_map
-    def __init__(self, parent_to_children=pmap(), outer_loops=()):
+    # def __init__(self, parent_to_children=pmap(), outer_loops=()):
+    def __init__(self, parent_to_children=pmap()):
         super().__init__(parent_to_children)
-        assert isinstance(outer_loops, tuple)
-        self.outer_loops = outer_loops
+        # assert isinstance(outer_loops, tuple)
+        # self.outer_loops = outer_loops
 
     @classmethod
     def from_nest(cls, nest):
@@ -875,7 +878,8 @@ def as_index_forest(forest: Any, *, axes=None, strict=False, **kwargs):
         # TODO: Clean this up, and explain why it's here.
         forest_ = {}
         for ctx, index_tree in forest.items():
-            forest_[ctx] = index_tree.copy(outer_loops=axes.outer_loops)
+            # forest_[ctx] = index_tree.copy(outer_loops=axes.outer_loops)
+            forest_[ctx] = index_tree
         forest = forest_
     return forest
 
@@ -1377,7 +1381,7 @@ def _(slice_: Slice, indices, *, target_path_acc, prev_axes, **kwargs):
             )
 
     axis = Axis(components, label=axis_label, numbering=slice_.numbering)
-    axes = PartialAxisTree(axis)
+    axes = AxisTree(axis)
     target_path_per_component = {}
     index_exprs_per_component = {}
     layout_exprs_per_component = {}
@@ -1439,12 +1443,12 @@ def _(
             prior_index_exprs,
             prev_axes,
         )
-        axes = PartialAxisTree(axis)
+        axes = AxisTree(axis)
 
         extra_index_exprs.update(more_extra_index_exprs)
 
     else:
-        axes = PartialAxisTree(prior_axes.parent_to_children)
+        axes = AxisTree(prior_axes.parent_to_children)
         target_path_per_cpt = {}
         index_exprs_per_cpt = {}
         layout_exprs_per_cpt = {}
@@ -1476,7 +1480,7 @@ def _(
             )
 
             axes = axes.add_subtree(
-                PartialAxisTree(subaxis),
+                AxisTree(subaxis),
                 prior_leaf_axis,
                 prior_leaf_cpt,
             )
@@ -1622,7 +1626,7 @@ def _index_axes(
         prev_axes=axes,
     )
 
-    outer_loops += indices.outer_loops
+    outer_loops += axes.outer_loops
 
     # drop duplicates
     outer_loops_ = []
@@ -1645,12 +1649,14 @@ def _index_axes(
             if not axes.is_valid_path(target_path, leaf=True):
                 raise ValueError("incorrect/insufficient indices")
 
-    return AxisTree(
-        indexed_axes.parent_to_children,
+    return IndexedAxisTree(
+        indexed_axes.node_map,
         target_paths=tpaths,
         index_exprs=index_expr_per_target,
         layout_exprs=layout_expr_per_target,
+        layouts=axes.layouts,
         outer_loops=outer_loops,
+        sf=axes.sf,
     )
 
 
@@ -1744,13 +1750,13 @@ def _index_axes_rec(
     index_exprs_per_component = freeze(index_exprs_per_component)
     layout_exprs_per_component = freeze(layout_exprs_per_cpt_per_index)
 
-    axes = PartialAxisTree(axes_per_index.parent_to_children)
+    axes = AxisTree(axes_per_index.parent_to_children)
     for k, subax in subaxes.items():
         if subax is not None:
             if axes:
                 axes = axes.add_subtree(subax, *k)
             else:
-                axes = PartialAxisTree(subax.parent_to_children)
+                axes = AxisTree(subax.parent_to_children)
 
     return (
         axes,

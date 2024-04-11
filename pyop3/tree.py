@@ -55,11 +55,14 @@ class Node(pytools.ImmutableRecord, Identified):
 
 
 # TODO delete this class, no longer different tree types
-class AbstractTree(pytools.ImmutableRecord, abc.ABC):
-    fields = {"parent_to_children"}
+class AbstractTree(abc.ABC):
+    @property
+    @deprecated("node_map")
+    def parent_to_children(self):
+        return self.node_map
 
-    def __init__(self, parent_to_children=None):
-        self.parent_to_children = self._parse_parent_to_children(parent_to_children)
+    def __init__(self, node_map=None):
+        self.node_map = self._parse_parent_to_children(node_map)
 
     def __str__(self):
         return self._stringify()
@@ -72,22 +75,22 @@ class AbstractTree(pytools.ImmutableRecord, abc.ABC):
         return not self.is_empty
 
     @property
-    def root(self):
-        if not self.is_empty:
-            return just_one(self.parent_to_children[None])
-        else:
+    def root(self) -> Optional[Node]:
+        if self.is_empty:
             return None
+        else:
+            return just_one(self.node_map[None])
 
     @property
     def is_empty(self) -> bool:
-        return not self.parent_to_children
+        return not self.node_map
 
     @property
     def depth(self) -> int:
         if self.is_empty:
             return 0
-        count = lambda _, *o: max(o or [0]) + 1
-        return postvisit(self, count)
+        else:
+            return postvisit(self, lambda _, *o: max(o or [0]) + 1)
 
     @cached_property
     def node_ids(self):
@@ -247,6 +250,32 @@ class MultiComponentLabelledNode(Node, Labelled):
 
 
 class LabelledTree(AbstractTree):
+    def __init__(self, node_map=None):
+        super().__init__(node_map=node_map)
+
+        # post-init checks
+        self._check_node_labels_unique_in_paths(self.parent_to_children)
+
+    @classmethod
+    def _check_node_labels_unique_in_paths(
+        cls, node_map, node=None, seen_labels=frozenset()
+    ):
+        from pyop3.tree import InvalidTreeException
+
+        if not node_map:
+            return
+
+        if node is None:
+            node = just_one(node_map[None])
+
+        if node.label in seen_labels:
+            raise InvalidTreeException("Duplicate labels found along a path")
+
+        for subnode in filter(None, node_map.get(node.id, [])):
+            cls._check_node_labels_unique_in_paths(
+                node_map, subnode, seen_labels | {node.label}
+            )
+
     @deprecated("child")
     def component_child(self, parent, component):
         return self.child(parent, component)
@@ -277,124 +306,6 @@ class LabelledTree(AbstractTree):
             else:
                 leaves.append((node, clabel))
         return tuple(leaves)
-
-    def add_node(
-        self,
-        node,
-        parent=None,
-        parent_component=None,
-        uniquify=False,
-    ):
-        if parent is None:
-            if not self.is_empty:
-                raise ValueError("Cannot add multiple roots")
-            return self.copy(parent_to_children={None: (node,)})
-        else:
-            parent = self._as_node(parent)
-            if parent_component is None:
-                if len(parent.components) == 1:
-                    parent_cpt_label = parent.components[0].label
-                else:
-                    raise ValueError(
-                        "Must specify a component for parents with multiple components"
-                    )
-            else:
-                parent_cpt_label = as_component_label(parent_component)
-
-            cpt_index = parent.component_labels.index(parent_cpt_label)
-
-            if self.parent_to_children[parent.id][cpt_index] is not None:
-                raise ValueError("Node already exists at this location")
-
-            if node in self:
-                if uniquify:
-                    node = node.copy(id=self._first_unique_id(node.id))
-                else:
-                    raise ValueError("Cannot insert a node with the same ID")
-
-            new_parent_to_children = {
-                k: list(v) for k, v in self.parent_to_children.items()
-            }
-            new_parent_to_children[parent.id][cpt_index] = node
-            return self.copy(parent_to_children=new_parent_to_children)
-
-    def replace_node(self, old_node, new_node):
-        parent_to_children = {k: list(v) for k, v in self.parent_to_children.items()}
-        parent_to_children[new_node.id] = parent_to_children.pop(old_node.id)
-        parent, pidx = self.parent(old_node)
-        parent_id = parent.id if parent is not None else None
-        parent_to_children[parent_id][pidx] = new_node
-        return self.copy(parent_to_children=parent_to_children)
-
-    def with_modified_node(self, node, **kwargs):
-        node = self._as_node(node)
-        return self.replace_node(node, node.copy(**kwargs))
-
-    def with_modified_component(self, node, component, **kwargs):
-        return self.replace_node(
-            node, node.with_modified_component(component, **kwargs)
-        )
-
-    def add_subtree(
-        self,
-        subtree,
-        parent=None,
-        component=None,
-        uniquify: bool = False,
-        uniquify_ids=False,
-    ):
-        """
-        Parameters
-        ----------
-        etc
-            ...
-        uniquify
-            If ``False``, duplicate ``ids`` between the tree and subtree
-            will raise an exception. If ``True``, the ``ids`` will be changed
-            to avoid the clash.
-            Also fixes node labels.
-
-        """
-        # FIXME bad API, uniquify implies uniquify labels only
-        # There are cases where the labels should be distinct but IDs may clash
-        # e.g. adding subaxes for a matrix
-        if uniquify_ids:
-            assert not uniquify
-
-        if uniquify:
-            uniquify_ids = True
-
-        if some_but_not_all(x is None for x in {parent, component}):
-            raise ValueError(
-                "Either both or neither of parent and component must be defined"
-            )
-
-        if not parent:
-            raise NotImplementedError("TODO")
-
-        if subtree.is_empty:
-            return self
-
-        assert isinstance(parent, MultiComponentLabelledNode)
-        clabel = as_component_label(component)
-        cidx = parent.component_labels.index(clabel)
-        parent_to_children = {p: list(ch) for p, ch in self.parent_to_children.items()}
-
-        sub_p2c = {p: list(ch) for p, ch in subtree.parent_to_children.items()}
-        if uniquify_ids:
-            self._uniquify_node_ids(sub_p2c, set(parent_to_children.keys()))
-            assert (
-                len(set(sub_p2c.keys()) & set(parent_to_children.keys()) - {None}) == 0
-            )
-
-        subroot = just_one(sub_p2c.pop(None))
-        parent_to_children[parent.id][cidx] = subroot
-        parent_to_children.update(sub_p2c)
-
-        if uniquify:
-            self._uniquify_node_labels(parent_to_children)
-
-        return self.copy(parent_to_children=parent_to_children)
 
     def _uniquify_node_labels(self, node_map, node=None, seen_labels=None):
         if not node_map:
@@ -656,6 +567,126 @@ class LabelledTree(AbstractTree):
             return node
         else:
             raise TypeError(f"No handler defined for {type(node).__name__}")
+
+
+class MutableLabelledTreeMixin:
+    def add_node(
+        self,
+        node,
+        parent_node=None,
+        parent_component=None,
+        uniquify=False,
+    ):
+        if parent_node is None:
+            if not self.is_empty:
+                raise ValueError("Cannot add multiple roots")
+            return self.copy(parent_to_children={None: (node,)})
+        else:
+            parent_node = self._as_node(parent_node)
+            if parent_component is None:
+                if len(parent_node.components) == 1:
+                    parent_cpt_label = parent_node.components[0].label
+                else:
+                    raise ValueError(
+                        "Must specify a component for parents with multiple components"
+                    )
+            else:
+                parent_cpt_label = as_component_label(parent_component)
+
+            cpt_index = parent_node.component_labels.index(parent_cpt_label)
+
+            if self.parent_to_children[parent_node.id][cpt_index] is not None:
+                raise ValueError("Node already exists at this location")
+
+            if node in self:
+                if uniquify:
+                    node = node.copy(id=self._first_unique_id(node.id))
+                else:
+                    raise ValueError("Cannot insert a node with the same ID")
+
+            new_parent_to_children = {
+                k: list(v) for k, v in self.parent_to_children.items()
+            }
+            new_parent_to_children[parent_node.id][cpt_index] = node
+            return type(self)(new_parent_to_children)
+
+    def replace_node(self, old_node, new_node):
+        parent_to_children = {k: list(v) for k, v in self.parent_to_children.items()}
+        parent_to_children[new_node.id] = parent_to_children.pop(old_node.id)
+        parent, pidx = self.parent(old_node)
+        parent_id = parent.id if parent is not None else None
+        parent_to_children[parent_id][pidx] = new_node
+        return self.copy(parent_to_children=parent_to_children)
+
+    def with_modified_node(self, node, **kwargs):
+        node = self._as_node(node)
+        return self.replace_node(node, node.copy(**kwargs))
+
+    def with_modified_component(self, node, component, **kwargs):
+        return self.replace_node(
+            node, node.with_modified_component(component, **kwargs)
+        )
+
+    def add_subtree(
+        self,
+        subtree,
+        parent=None,
+        component=None,
+        uniquify: bool = False,
+        uniquify_ids=False,
+    ):
+        """
+        Parameters
+        ----------
+        etc
+            ...
+        uniquify
+            If ``False``, duplicate ``ids`` between the tree and subtree
+            will raise an exception. If ``True``, the ``ids`` will be changed
+            to avoid the clash.
+            Also fixes node labels.
+
+        """
+        # FIXME bad API, uniquify implies uniquify labels only
+        # There are cases where the labels should be distinct but IDs may clash
+        # e.g. adding subaxes for a matrix
+        if uniquify_ids:
+            assert not uniquify
+
+        if uniquify:
+            uniquify_ids = True
+
+        if some_but_not_all(x is None for x in {parent, component}):
+            raise ValueError(
+                "Either both or neither of parent and component must be defined"
+            )
+
+        if not parent:
+            raise NotImplementedError("TODO")
+
+        if subtree.is_empty:
+            return self
+
+        assert isinstance(parent, MultiComponentLabelledNode)
+        clabel = as_component_label(component)
+        cidx = parent.component_labels.index(clabel)
+        parent_to_children = {p: list(ch) for p, ch in self.parent_to_children.items()}
+
+        sub_p2c = {p: list(ch) for p, ch in subtree.parent_to_children.items()}
+        if uniquify_ids:
+            self._uniquify_node_ids(sub_p2c, set(parent_to_children.keys()))
+            assert (
+                len(set(sub_p2c.keys()) & set(parent_to_children.keys()) - {None}) == 0
+            )
+
+        subroot = just_one(sub_p2c.pop(None))
+        parent_to_children[parent.id][cidx] = subroot
+        parent_to_children.update(sub_p2c)
+
+        if uniquify:
+            self._uniquify_node_labels(parent_to_children)
+
+        return type(self)(parent_to_children)
 
 
 def as_component_label(component):
