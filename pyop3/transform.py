@@ -375,12 +375,16 @@ class ImplicitPackUnpackExpander(Transformer):
             if intent != NA and _requires_pack_unpack(arg):
                 is_petsc_mat = isinstance(arg, AbstractMat)
 
-                axes = AxisTree(arg.axes.parent_to_children)
+                axes = AxisTree(arg.axes.node_map)
                 temporary = HierarchicalArray(
+                    # arg.axes.materialize(),  # TODO
                     axes,
                     data=NullBuffer(arg.dtype),  # does this need a size?
                     prefix="t",
                 )
+
+                # debug
+                temporary.layouts
 
                 if intent == READ:
                     if is_petsc_mat:

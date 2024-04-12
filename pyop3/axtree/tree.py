@@ -50,8 +50,8 @@ from pyop3.utils import (
 )
 
 
-class LinearAxisTreeException(Exception):
-    pass
+class ExpectedLinearAxisTreeException(Exception):
+    ...
 
 
 class Indexed(abc.ABC):
@@ -79,56 +79,6 @@ class Indexed(abc.ABC):
     @abc.abstractmethod
     def layouts(self):
         pass
-
-    @cached_property
-    def subst_layouts(self):
-        return self._subst_layouts()
-
-    # TODO delete this function
-    def _subst_layouts(self, axis=None, path=None, target_path=None, index_exprs=None):
-        return subst_layouts(self, self.target_paths, self.index_exprs, self.layouts)
-        from pyop3.itree.tree import IndexExpressionReplacer
-
-        # TODO Don't do this every time this function is called
-        loop_exprs = {}
-        # for outer_loop in self.outer_loops:
-        #     loop_exprs[outer_loop.id] = {}
-        #     for ax in outer_loop.iterset.nodes:
-        #         key = (ax.id, ax.component.label)
-        #         for ax_, expr in outer_loop.iterset.index_exprs.get(key, {}).items():
-        #             loop_exprs[outer_loop.id][ax_] = expr
-
-        layouts = {}
-        if strictly_all(x is None for x in [axis, path, target_path, index_exprs]):
-            path = pmap()
-            target_path = self.target_paths.get(None, pmap())
-            index_exprs = self.index_exprs.get(None, pmap())
-
-            replacer = IndexExpressionReplacer(index_exprs, loop_exprs=loop_exprs)
-            layouts[path] = replacer(self.layouts.get(target_path, 0))
-
-            if not self.axes.is_empty:
-                layouts.update(
-                    self._subst_layouts(self.axes.root, path, target_path, index_exprs)
-                )
-        else:
-            for component in axis.components:
-                path_ = path | {axis.label: component.label}
-                target_path_ = target_path | self.target_paths.get(
-                    (axis.id, component.label), {}
-                )
-                index_exprs_ = index_exprs | self.index_exprs.get(
-                    (axis.id, component.label), {}
-                )
-
-                replacer = IndexExpressionReplacer(index_exprs_)
-                layouts[path_] = replacer(self.layouts.get(target_path_, 0))
-
-                if subaxis := self.axes.child(axis, component):
-                    layouts.update(
-                        self._subst_layouts(subaxis, path_, target_path_, index_exprs_)
-                    )
-        return freeze(layouts)
 
 
 class ContextAware(abc.ABC):
@@ -251,7 +201,7 @@ class ExpressionEvaluator(pym.mapper.evaluator.EvaluationMapper):
         # replacer = IndexExpressionReplacer(indices, self._loop_exprs)
         # layout_orig = array.layouts[freeze(array_var.target_path)]
         # layout_subst = replacer(layout_orig)
-        layout_subst = array.subst_layouts[array_var.path]
+        layout_subst = array.axes.subst_layouts[array_var.path]
 
         # offset = ExpressionEvaluator(indices, self._loop_exprs)(layout_subst)
         # offset = ExpressionEvaluator(self.context | indices, self._loop_exprs)(layout_subst)
@@ -395,7 +345,7 @@ class Axis(LoopIterable, MultiComponentLabelledNode):
         # Actually this is not the case for "identity" slices since index_exprs
         # and labels are unchanged (AxisTree vs IndexedAxisTree)
         # TODO return a flat axis in these cases
-        return self.as_tree()[indices]
+        return self._tree[indices]
 
     def __call__(self, *args):
         return as_axis_tree(self)(*args)
@@ -439,7 +389,7 @@ class Axis(LoopIterable, MultiComponentLabelledNode):
 
     @property
     def size(self):
-        return as_axis_tree(self).size
+        return self._tree.size
 
     @property
     def count(self):
@@ -713,6 +663,7 @@ class AxisVariable(pym.primitives.Variable):
 
 
 class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
+    # TODO: Cache this function.
     def __getitem__(self, indices):
         from pyop3.itree.tree import _compose_bits, _index_axes, as_index_forest
 
@@ -735,12 +686,11 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
             )
             axis_tree = IndexedAxisTree(
                 indexed_axes.node_map,
+                self.unindexed,
                 target_paths=target_paths,
                 index_exprs=index_exprs,
                 layout_exprs=layout_exprs,
-                layouts=self.layouts,
                 outer_loops=indexed_axes.outer_loops,
-                sf=self.sf,
             )
             axis_trees[context] = axis_tree
 
@@ -748,6 +698,11 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
             return axis_trees[pmap()]
         else:
             return ContextSensitiveAxisTree(axis_trees)
+
+    @property
+    @abc.abstractmethod
+    def unindexed(self):
+        pass
 
     @property
     @abc.abstractmethod
@@ -776,7 +731,7 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
 
     @property
     @abc.abstractmethod
-    def sf(self):
+    def subst_layouts(self):
         pass
 
     def index(self, ghost=False):
@@ -930,6 +885,57 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
             for leaf in self.leaves
         )
 
+    @property
+    def leaf_axis(self):
+        return self.leaf[0]
+
+    @property
+    def leaf_component(self):
+        leaf_axis, leaf_clabel = self.leaf
+        leaf_cidx = leaf_axis.component_index(leaf_clabel)
+        return leaf_axis.components[leaf_cidx]
+
+    @cached_property
+    def size(self):
+        from pyop3.axtree.layout import axis_tree_size
+
+        return axis_tree_size(self)
+
+    @cached_property
+    def global_size(self):
+        from pyop3.array import HierarchicalArray
+        from pyop3.axtree.layout import _axis_size, my_product
+
+        if not self.outer_loops:
+            return self.size
+
+        mysize = 0
+        for idxs in my_product(self.outer_loops):
+            loop_exprs = {idx.index.id: idx.source_exprs for idx in idxs}
+            # target_indices = merge_dicts(idx.target_exprs for idx in idxs)
+            # this is a hack
+            if self.is_empty:
+                mysize += 1
+            else:
+                mysize += _axis_size(self, self.root, loop_indices=loop_exprs)
+        return mysize
+
+        if isinstance(self.size, HierarchicalArray):
+            # does this happen any more?
+            return np.sum(self.size.data_ro, dtype=IntType)
+        if isinstance(self.size, np.ndarray):
+            return np.sum(self.size, dtype=IntType)
+        else:
+            assert isinstance(self.size, numbers.Integral)
+            return self.size
+
+    # rename to local_size?
+    def alloc_size(self, axis=None):
+        if self.is_empty:
+            return 1
+        axis = axis or self.root
+        return sum(cpt.alloc_size(self, axis) for cpt in axis.components)
+
 
 class AxisTree(MutableLabelledTreeMixin, BaseAxisTree):
     @classmethod
@@ -939,11 +945,11 @@ class AxisTree(MutableLabelledTreeMixin, BaseAxisTree):
             subaxis = as_axis(subaxis)
 
             if len(subaxis.components) > 1:
-                raise LinearAxisTreeException(
+                raise ExpectedLinearAxisTreeException(
                     "Cannot construct multi-component axis trees from an iterable."
                 )
 
-            tree = tree.add_axis(subaxis, *tree.leaf)
+            tree = tree.append_axis(subaxis)
         return tree
 
     @classmethod
@@ -952,6 +958,10 @@ class AxisTree(MutableLabelledTreeMixin, BaseAxisTree):
         root, node_map = cls._from_nest(nest)
         node_map.update({None: [root]})
         return cls(node_map)
+
+    @property
+    def unindexed(self):
+        return self
 
     @cached_property
     def target_paths(self):
@@ -1020,87 +1030,35 @@ class AxisTree(MutableLabelledTreeMixin, BaseAxisTree):
             dmap = postvisit(self, _collect_datamap, axes=self)
         return freeze(dmap)
 
-    def add_node(
-        self,
-        axis,
-        parent,
-        parent_component=None,
-        **kwargs,
-    ):
-        parent = self._as_node(parent)
-        if parent_component is None:
-            if len(parent.components) == 1:
-                parent_cpt_label = parent.components[0].label
-            else:
-                raise ValueError("Must specify parent component")
-        else:
-            parent_cpt_label = as_axis_component_label(parent_component)
-        return super().add_node(axis, parent, parent_cpt_label, **kwargs)
+    def add_axis(self, axis, parent_axis, parent_component=None, *, uniquify=False):
+        parent_axis = self._as_node(parent_axis)
+        if parent_component is not None:
+            parent_component = (
+                parent_component.label
+                if isinstance(parent_component, AxisComponent)
+                else parent_component
+            )
+        return super().add_node(axis, parent_axis, parent_component, uniquify=uniquify)
 
-    def add_axis(self, axis, parent_axis, parent_component):
-        return self.add_node(axis, parent_axis, parent_component)
+    def append_axis(self, axis, *, uniquify=False):
+        if self.is_empty:
+            return self.add_axis(axis, None, uniquify=uniquify)
+        else:
+            if len(self.leaves) == 1:
+                leaf_axis, leaf_component = self.leaf
+                return self.add_axis(axis, leaf_axis, leaf_component, uniquify=uniquify)
+            else:
+                raise ExpectedLinearAxisTreeException(
+                    "Can only append axes to trees with one leaf."
+                )
 
     @deprecated("add_axis")
     def add_subaxis(self, *args, **kwargs):
         return self.add_axis(*args, **kwargs)
 
     @property
-    def leaf_axis(self):
-        return self.leaf[0]
-
-    @property
-    def leaf_component(self):
-        leaf_axis, leaf_clabel = self.leaf
-        leaf_cidx = leaf_axis.component_index(leaf_clabel)
-        return leaf_axis.components[leaf_cidx]
-
-    @cached_property
-    def size(self):
-        from pyop3.axtree.layout import axis_tree_size
-
-        return axis_tree_size(self)
-
-    @cached_property
-    def global_size(self):
-        from pyop3.array import HierarchicalArray
-        from pyop3.axtree.layout import _axis_size, my_product
-
-        if not self.outer_loops:
-            return self.size
-
-        mysize = 0
-        for idxs in my_product(self.outer_loops):
-            loop_exprs = {idx.index.id: idx.source_exprs for idx in idxs}
-            # target_indices = merge_dicts(idx.target_exprs for idx in idxs)
-            # this is a hack
-            if self.is_empty:
-                mysize += 1
-            else:
-                mysize += _axis_size(self, self.root, loop_indices=loop_exprs)
-        return mysize
-
-        if isinstance(self.size, HierarchicalArray):
-            # does this happen any more?
-            return np.sum(self.size.data_ro, dtype=IntType)
-        if isinstance(self.size, np.ndarray):
-            return np.sum(self.size, dtype=IntType)
-        else:
-            assert isinstance(self.size, numbers.Integral)
-            return self.size
-
-    # rename to local_size?
-    def alloc_size(self, axis=None):
-        if self.is_empty:
-            return 1
-        axis = axis or self.root
-        return sum(cpt.alloc_size(self, axis) for cpt in axis.components)
-
-    @cached_property
     def layout_axes(self):
-        if not self.outer_loops:
-            return self
-        loop_axes, _ = self.outer_loop_bits
-        return loop_axes.add_subtree(self, *loop_axes.leaf).set_up()
+        return self
 
     @cached_property
     def layouts(self):
@@ -1156,6 +1114,10 @@ class AxisTree(MutableLabelledTreeMixin, BaseAxisTree):
                 layouts_[new_path] = new_layout
         return freeze(layouts_)
 
+    @property
+    def subst_layouts(self):
+        return self.layouts
+
 
 # are all of these necessary?
 # class IndexedAxisTree(Indexed, BaseAxisTree):
@@ -1163,13 +1125,12 @@ class IndexedAxisTree(BaseAxisTree):
     def __init__(
         self,
         node_map,
+        unindexed,
         *,
         target_paths,
         index_exprs,
         layout_exprs,
-        layouts,
         outer_loops,
-        sf,
     ):
         if outer_loops is None:
             outer_loops = ()
@@ -1177,12 +1138,15 @@ class IndexedAxisTree(BaseAxisTree):
             assert isinstance(outer_loops, tuple)
 
         super().__init__(node_map)
+        self._unindexed = unindexed
         self._target_paths = target_paths
         self._index_exprs = index_exprs
         self._layout_exprs = layout_exprs
-        self._layouts = layouts
         self._outer_loops = tuple(outer_loops)
-        self._sf = sf
+
+    @property
+    def unindexed(self):
+        return self._unindexed
 
     @property
     def target_paths(self):
@@ -1198,15 +1162,18 @@ class IndexedAxisTree(BaseAxisTree):
 
     @property
     def layouts(self):
-        return self._layouts
+        return self.unindexed.layouts
 
     @property
     def outer_loops(self):
         return self._outer_loops
 
-    @property
-    def sf(self):
-        return self._sf
+    @cached_property
+    def layout_axes(self) -> AxisTree:
+        if not self.outer_loops:
+            return self
+        loop_axes, _ = self.outer_loop_bits
+        return loop_axes.add_subtree(self, *loop_axes.leaf)
 
     # This could easily be two functions
     @cached_property
@@ -1260,6 +1227,10 @@ class IndexedAxisTree(BaseAxisTree):
             loop_vars.update(lv_rec)
 
         return loop_axes, freeze(loop_vars)
+
+    @cached_property
+    def subst_layouts(self):
+        return subst_layouts(self, self.target_paths, self.index_exprs, self.layouts)
 
 
 class ContextSensitiveAxisTree(ContextSensitiveLoopIterable):

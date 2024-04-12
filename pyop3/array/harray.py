@@ -33,7 +33,7 @@ from pyop3.buffer import Buffer, DistributedBuffer
 from pyop3.dtypes import IntType, ScalarType
 from pyop3.lang import KernelArgument, ReplaceAssignment
 from pyop3.log import warning
-from pyop3.sf import single_star
+from pyop3.sf import serial_forest
 from pyop3.utils import (
     PrettyTuple,
     UniqueNameGenerator,
@@ -171,9 +171,16 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
             else:
                 shape = axes.global_size
 
+            # IndexedAxisTrees do not currently have SFs, so create a dummy one here
+            if isinstance(axes, AxisTree):
+                sf = axes.sf
+            else:
+                assert isinstance(axes, IndexedAxisTree)
+                sf = serial_forest(axes.global_size)
+
             data = DistributedBuffer(
                 shape,
-                axes.sf or axes.comm,
+                sf,
                 dtype,
                 name=self.name,
                 data=data,
@@ -242,12 +249,11 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
 
             axes = IndexedAxisTree(
                 indexed_axes.node_map,
+                self.axes.unindexed,
                 target_paths=target_paths,
                 index_exprs=index_exprs,
                 layout_exprs=layout_exprs,
-                layouts=self.axes.layouts,
                 outer_loops=indexed_axes.outer_loops,
-                sf=self.axes.sf,
             )
 
             # return self.with_axes(axes)
@@ -288,12 +294,12 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
 
             axes = IndexedAxisTree(
                 indexed_axes.node_map,
+                self.axes.unindexed,
                 target_paths=target_paths,
                 index_exprs=index_exprs,
                 layout_exprs=layout_exprs,
                 layouts=self.axes.layouts,
                 outer_loops=indexed_axes.outer_loops,
-                sf=self.axes.sf,
             )
 
             myarray = HierarchicalArray(
@@ -377,7 +383,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         # TODO: Handle any outer loops.
         # TODO: Generate code for this.
         for i, p in enumerate(self.axes.iter()):
-            indices[i] = self.offset(p.source_exprs, p.source_path)
+            indices[i] = self.axes.offset(p.source_exprs, p.source_path)
         debug_assert(lambda: (indices >= 0).all())
 
         # The packed indices are collected component-by-component so, for
@@ -565,21 +571,21 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
             return flattened, count
 
     def get_value(self, indices, path=None, *, loop_exprs=pmap()):
-        offset = self.offset(indices, path, loop_exprs=loop_exprs)
+        offset = self.axes.offset(indices, path, loop_exprs=loop_exprs)
         return self.buffer.data_ro[offset]
 
     def set_value(self, indices, value, path=None, *, loop_exprs=pmap()):
-        offset = self.offset(indices, path, loop_exprs=loop_exprs)
+        offset = self.axes.offset(indices, path, loop_exprs=loop_exprs)
         self.buffer.data_wo[offset] = value
 
-    def offset(self, indices, path=None, *, loop_exprs=pmap()):
-        return eval_offset(
-            self.axes,
-            self.subst_layouts,
-            indices,
-            path,
-            loop_exprs=loop_exprs,
-        )
+    # def offset(self, indices, path=None, *, loop_exprs=pmap()):
+    #     return eval_offset(
+    #         self.axes,
+    #         self.subst_layouts,
+    #         indices,
+    #         path,
+    #         loop_exprs=loop_exprs,
+    #     )
 
     def select_axes(self, indices):
         selected = []

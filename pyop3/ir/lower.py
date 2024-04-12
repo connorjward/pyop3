@@ -819,14 +819,17 @@ def _(assignment, loop_indices, codegen_context):
     else:
         csize_var = csize
 
-    rlayouts = rmap.layouts[pmap()]
+    breakpoint()
+    rlayouts = rmap.subst_layouts[pmap()]
     roffset = JnameSubstitutor(loop_indices, codegen_context)(rlayouts)
 
-    clayouts = cmap.layouts[pmap()]
+    clayouts = cmap.subst_layouts[pmap()]
     coffset = JnameSubstitutor(loop_indices, codegen_context)(clayouts)
 
     irow = f"{rmap_name}[{roffset}]"
     icol = f"{cmap_name}[{coffset}]"
+
+    breakpoint()
 
     call_str = _petsc_mat_insn(
         assignment, mat_name, array_name, rsize_var, csize_var, irow, icol
@@ -965,7 +968,7 @@ def add_leaf_assignment(
 
 def make_array_expr(array, path, inames, ctx):
     array_offset = make_offset_expr(
-        array.subst_layouts[path],
+        array.axes.subst_layouts[path],
         inames,
         ctx,
     )

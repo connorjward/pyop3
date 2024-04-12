@@ -99,7 +99,7 @@ class DistributedBuffer(Buffer):
     def __init__(
         self,
         shape,
-        sf_or_comm,
+        sf_or_comm,  # Should just be SF, or None?
         dtype=None,
         *,
         name=None,

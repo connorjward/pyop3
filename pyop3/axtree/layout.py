@@ -19,6 +19,7 @@ from pyop3.axtree.tree import (
     AxisTree,
     AxisVariable,
     ExpressionEvaluator,
+    IndexedAxisTree,
     component_number_from_offsets,
     component_offsets,
 )
@@ -590,7 +591,16 @@ def _create_count_array_tree(
     arrays = {}
     for component in axis.components:
         path_ = path | {axis.label: component.label}
-        linear_axis = axis[component.label].root
+        # This causes an infinite recursion because axis[component.label]
+        # returns an IndexedAxisTree instead of an AxisTree. This should be
+        # avoidable.
+        # linear_axis = axis[component.label].root
+        # current workaround:
+        if len(axis.components) > 1:
+            linear_axis = axis[component.label].root
+        else:
+            # discard SF since the tabulating arrays are not parallel
+            linear_axis = axis.copy(sf=None)
         axes_acc_ = axes_acc + (linear_axis,)
 
         if subaxis := ctree.child(axis, component):
@@ -620,13 +630,24 @@ def _create_count_array_tree(
                         index_expr = {myaxis.label: AxisVariable(myaxis.label)}
                     index_exprs[key] = index_expr
             else:
-                index_exprs = axtree._default_index_exprs()
+                index_exprs = axtree.index_exprs
+
+            # think this is completely unnecessary - just use the AxisTree
+            # iaxtree = IndexedAxisTree(
+            #     axtree.node_map,
+            #     target_paths=axtree.target_paths,
+            #     index_exprs=index_exprs,
+            #     outer_loops=(),  # ???
+            #     layout_exprs=axtree.layout_exprs,
+            #     layouts=axtree.layouts,
+            #     sf=axtree.sf,
+            # )
 
             countarray = HierarchicalArray(
+                # iaxtree,
                 axtree,
-                target_paths=axtree._default_target_paths(),
-                index_exprs=index_exprs,
-                outer_loops=(),  # ???
+                # target_paths=axtree.target_paths,
+                # index_exprs=index_exprs,
                 data=np.full(axtree.global_size, -1, dtype=IntType),
                 prefix="offset",
             )

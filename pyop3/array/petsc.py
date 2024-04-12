@@ -21,7 +21,7 @@ from pyop3.axtree.tree import (
     relabel_axes,
 )
 from pyop3.dtypes import IntType, ScalarType
-from pyop3.itree.tree import iter_axis_tree
+from pyop3.itree.tree import IndexExpressionReplacer, iter_axis_tree
 from pyop3.lang import PetscMatStore
 from pyop3.utils import (
     deprecated,
@@ -80,28 +80,28 @@ class AbstractMat(Array, ContextFree):
         mat=None,
         *,
         name=None,
-        rtarget_paths=None,
-        rindex_exprs=None,
-        orig_raxes=None,
-        router_loops=None,
-        ctarget_paths=None,
-        cindex_exprs=None,
-        orig_caxes=None,
-        couter_loops=None,
+        # rtarget_paths=None,
+        # rindex_exprs=None,
+        # orig_raxes=None,
+        # router_loops=None,
+        # ctarget_paths=None,
+        # cindex_exprs=None,
+        # orig_caxes=None,
+        # couter_loops=None,
     ):
         # TODO: Remove
-        if strictly_all(
-            x is None
-            for x in [rtarget_paths, rindex_exprs, ctarget_paths, cindex_exprs]
-        ):
-            rtarget_paths = raxes._default_target_paths()
-            rindex_exprs = raxes._default_index_exprs()
-            orig_raxes = raxes
-            router_loops = ()
-            ctarget_paths = caxes._default_target_paths()
-            cindex_exprs = caxes._default_index_exprs()
-            orig_caxes = caxes
-            couter_loops = ()
+        # if strictly_all(
+        #     x is None
+        #     for x in [rtarget_paths, rindex_exprs, ctarget_paths, cindex_exprs]
+        # ):
+        #     rtarget_paths = raxes._default_target_paths()
+        #     rindex_exprs = raxes._default_index_exprs()
+        #     orig_raxes = raxes
+        #     router_loops = ()
+        #     ctarget_paths = caxes._default_target_paths()
+        #     cindex_exprs = caxes._default_index_exprs()
+        #     orig_caxes = caxes
+        #     couter_loops = ()
 
         raxes = as_axis_tree(raxes)
         caxes = as_axis_tree(caxes)
@@ -119,14 +119,14 @@ class AbstractMat(Array, ContextFree):
         self.mat = mat
 
         # TODO: delete
-        self.rtarget_paths = rtarget_paths
-        self.rindex_exprs = rindex_exprs
-        self.orig_raxes = orig_raxes
-        self.router_loops = router_loops
-        self.ctarget_paths = ctarget_paths
-        self.cindex_exprs = cindex_exprs
-        self.orig_caxes = orig_caxes
-        self.couter_loops = couter_loops
+        # self.rtarget_paths = rtarget_paths
+        # self.rindex_exprs = rindex_exprs
+        # self.orig_raxes = orig_raxes
+        # self.router_loops = router_loops
+        # self.ctarget_paths = ctarget_paths
+        # self.cindex_exprs = cindex_exprs
+        # self.orig_caxes = orig_caxes
+        # self.couter_loops = couter_loops
 
     def __getitem__(self, indices):
         return self.getitem(indices, strict=False)
@@ -190,40 +190,59 @@ class AbstractMat(Array, ContextFree):
 
             rtarget_paths, rindex_exprs, _ = _compose_bits(
                 self.raxes,
-                self.rtarget_paths,
-                self.rindex_exprs,
+                self.raxes.target_paths,
+                self.raxes.index_exprs,
                 None,
                 indexed_raxes,
                 indexed_raxes.target_paths,
                 indexed_raxes.index_exprs,
                 {},
             )
+            raxes = IndexedAxisTree(
+                indexed_raxes.node_map,
+                self.raxes.unindexed,
+                target_paths=rtarget_paths,
+                index_exprs=rindex_exprs,
+                layout_exprs={},
+                outer_loops=indexed_raxes.outer_loops,
+            )
+
             ctarget_paths, cindex_exprs, _ = _compose_bits(
                 self.caxes,
-                self.ctarget_paths,
-                self.cindex_exprs,
+                self.caxes.target_paths,
+                self.caxes.index_exprs,
                 None,
                 indexed_caxes,
                 indexed_caxes.target_paths,
                 indexed_caxes.index_exprs,
                 {},
             )
+            caxes = IndexedAxisTree(
+                indexed_caxes.node_map,
+                self.caxes.unindexed,
+                target_paths=ctarget_paths,
+                index_exprs=cindex_exprs,
+                layout_exprs={},
+                outer_loops=indexed_caxes.outer_loops,
+            )
 
             return type(self)(
-                indexed_raxes,
-                indexed_caxes,
+                # indexed_raxes,
+                # indexed_caxes,
+                raxes,
+                caxes,
                 mat_type=self.mat_type,
                 mat=self.mat,
                 name=self.name,
                 # delete below
-                rtarget_paths=rtarget_paths,
-                rindex_exprs=rindex_exprs,
-                orig_raxes=self.orig_raxes,
-                router_loops=indexed_raxes.outer_loops,
-                ctarget_paths=ctarget_paths,
-                cindex_exprs=cindex_exprs,
-                orig_caxes=self.orig_caxes,
-                couter_loops=indexed_caxes.outer_loops,
+                # rtarget_paths=rtarget_paths,
+                # rindex_exprs=rindex_exprs,
+                # orig_raxes=self.orig_raxes,
+                # router_loops=indexed_raxes.outer_loops,
+                # ctarget_paths=ctarget_paths,
+                # cindex_exprs=cindex_exprs,
+                # orig_caxes=self.orig_caxes,
+                # couter_loops=indexed_caxes.outer_loops,
             )
 
         # Otherwise we are context-sensitive
@@ -237,23 +256,40 @@ class AbstractMat(Array, ContextFree):
 
             rtarget_paths, rindex_exprs, _ = _compose_bits(
                 self.raxes,
-                self.rtarget_paths,
-                self.rindex_exprs,
+                self.raxes.target_paths,
+                self.raxes.index_exprs,
                 None,
                 indexed_raxes,
                 indexed_raxes.target_paths,
                 indexed_raxes.index_exprs,
                 {},
             )
+            raxes = IndexedAxisTree(
+                indexed_raxes.node_map,
+                self.raxes.unindexed,
+                target_paths=rtarget_paths,
+                index_exprs=rindex_exprs,
+                layout_exprs={},
+                outer_loops=indexed_raxes.outer_loops,
+            )
+
             ctarget_paths, cindex_exprs, _ = _compose_bits(
                 self.caxes,
-                self.ctarget_paths,
-                self.cindex_exprs,
+                self.caxes.target_paths,
+                self.caxes.index_exprs,
                 None,
                 indexed_caxes,
                 indexed_caxes.target_paths,
                 indexed_caxes.index_exprs,
                 {},
+            )
+            caxes = IndexedAxisTree(
+                indexed_caxes.node_map,
+                self.caxes.unindexed,
+                target_paths=ctarget_paths,
+                index_exprs=cindex_exprs,
+                layout_exprs={},
+                outer_loops=indexed_caxes.outer_loops,
             )
 
             arrays[ctx] = type(self)(
@@ -263,14 +299,14 @@ class AbstractMat(Array, ContextFree):
                 self.mat,
                 name=self.name,
                 # delete below
-                rtarget_paths=rtarget_paths,
-                rindex_exprs=rindex_exprs,
-                orig_raxes=self.orig_raxes,
-                router_loops=indexed_raxes.outer_loops,
-                ctarget_paths=ctarget_paths,
-                cindex_exprs=cindex_exprs,
-                orig_caxes=self.orig_caxes,
-                couter_loops=indexed_caxes.outer_loops,
+                # rtarget_paths=rtarget_paths,
+                # rindex_exprs=rindex_exprs,
+                # orig_raxes=self.orig_raxes,
+                # router_loops=indexed_raxes.outer_loops,
+                # ctarget_paths=ctarget_paths,
+                # cindex_exprs=cindex_exprs,
+                # orig_caxes=self.orig_caxes,
+                # couter_loops=indexed_caxes.outer_loops,
             )
         # But this is now a PetscMat...
         return ContextSensitiveMultiArray(arrays)
@@ -316,8 +352,8 @@ class AbstractMat(Array, ContextFree):
         if strictly_all(
             x is None for x in {raxis, caxis, mat_type, rlabel_acc, clabel_acc}
         ):
-            raxis = self.orig_raxes.root
-            caxis = self.orig_caxes.root
+            raxis = self.raxes.unindexed.root
+            caxis = self.caxes.unindexed.root
             mat_type = self.mat_type
             rlabel_acc = ()
             clabel_acc = ()
@@ -327,7 +363,9 @@ class AbstractMat(Array, ContextFree):
             rlabels = unique(
                 clabel
                 for c in rroot.components
-                for axlabel, clabel in self.rtarget_paths[rroot.id, c.label].items()
+                for axlabel, clabel in self.raxes.target_paths[
+                    rroot.id, c.label
+                ].items()
                 if axlabel == raxis.label
             )
             assert len(rlabels) in {0, 1}
@@ -342,7 +380,9 @@ class AbstractMat(Array, ContextFree):
             clabels = unique(
                 clabel
                 for c in croot.components
-                for axlabel, clabel in self.ctarget_paths[croot.id, c.label].items()
+                for axlabel, clabel in self.caxes.target_paths[
+                    croot.id, c.label
+                ].items()
                 if axlabel == caxis.label
             )
             assert len(clabels) in {0, 1}
@@ -358,8 +398,8 @@ class AbstractMat(Array, ContextFree):
 
             submat_type = mat_type[rlabel, clabel]
             if isinstance(submat_type, collections.abc.Mapping):
-                rsubaxis = self.orig_raxes.child(raxis, rlabel)
-                csubaxis = self.orig_caxes.child(caxis, clabel)
+                rsubaxis = self.raxes.unindexed.child(raxis, rlabel)
+                csubaxis = self.caxes.unindexed.child(caxis, clabel)
                 yield from self._iter_nest_labels(
                     rsubaxis, csubaxis, submat_type, rlabel_acc_, clabel_acc_
                 )
@@ -373,8 +413,8 @@ class AbstractMat(Array, ContextFree):
         # TODO: Don't think these need to be lists here.
         # FIXME: This will only work for singly-nested matrices
         if self.nested:
-            rfield_axis = self.orig_raxes.root
-            cfield_axis = self.orig_caxes.root
+            rfield_axis = self.raxes.unindexed.root
+            cfield_axis = self.caxes.unindexed.root
 
             if strictly_all(c.unit for c in rfield_axis.components):
                 # This weird trick is because the right target path for the field
@@ -383,23 +423,23 @@ class AbstractMat(Array, ContextFree):
                 rfield = single_valued(
                     cpt
                     for mycpt in self.raxes.root.components
-                    for ax, cpt in self.rtarget_paths[
+                    for ax, cpt in self.raxes.target_paths[
                         self.raxes.root.id, mycpt.label
                     ].items()
                     if ax == rfield_axis.label
                 )
-                orig_raxes = AxisTree(self.orig_raxes[rfield].parent_to_children)
+                orig_raxes = AxisTree(self.raxes.unindexed[rfield].node_map)
                 orig_raxess = [orig_raxes]
                 dropped_rkeys = {rfield_axis.label}
             else:
-                orig_raxess = [self.orig_raxes]
+                orig_raxess = [self.raxes.unindexed]
                 dropped_rkeys = frozenset()
 
             if strictly_all(c.unit for c in cfield_axis.components):
                 cfield = single_valued(
                     cpt
                     for mycpt in self.caxes.root.components
-                    for ax, cpt in self.ctarget_paths[
+                    for ax, cpt in self.caxes.target_paths[
                         self.caxes.root.id, mycpt.label
                     ].items()
                     if ax == cfield_axis.label
@@ -411,36 +451,95 @@ class AbstractMat(Array, ContextFree):
                 orig_caxess = [self.orig_caxes]
                 dropped_ckeys = set()
         else:
-            orig_raxess = [self.orig_raxes]
-            orig_caxess = [self.orig_caxes]
+            orig_raxess = [self.raxes.unindexed]
+            orig_caxess = [self.caxes.unindexed]
             dropped_rkeys = set()
             dropped_ckeys = set()
 
-        rmap = HierarchicalArray(
-            self.raxes,
-            # I recall that this was needed to make sure that we reference
-            # outer loops correctly.
-            index_exprs=self.raxes.index_exprs,
-            target_paths=self.raxes._default_target_paths(),
-            layouts=self.raxes.layouts,
-            outer_loops=self.router_loops,
-            dtype=IntType,
-        )
-        cmap = HierarchicalArray(
-            self.caxes,
-            # I recall that this was needed to make sure that we reference
-            # outer loops correctly.
-            index_exprs=self.caxes.index_exprs,
-            target_paths=self.caxes._default_target_paths(),
-            layouts=self.caxes.layouts,
-            outer_loops=self.couter_loops,
-            dtype=IntType,
-        )
+        # rmap = HierarchicalArray(
+        #     self.raxes,
+        #     # I recall that this was needed to make sure that we reference
+        #     # outer loops correctly.
+        #     # index_exprs=self.raxes.index_exprs,
+        #     # target_paths=self.raxes._default_target_paths(),
+        #     # layouts=self.raxes.layouts,
+        #     # outer_loops=self.router_loops,
+        #     dtype=IntType,
+        # )
+        # cmap = HierarchicalArray(
+        #     self.caxes,
+        #     # I recall that this was needed to make sure that we reference
+        #     # outer loops correctly.
+        #     # index_exprs=self.caxes.index_exprs,
+        #     # target_paths=self.caxes._default_target_paths(),
+        #     # layouts=self.caxes.layouts,
+        #     # outer_loops=self.couter_loops,
+        #     dtype=IntType,
+        # )
+
+        # rmap_axes = self.raxes.layout_axes
+        #
+        # rmap_index_exprs = {}
+        # loop_expr_replace_map = self.raxes.outer_loop_bits[1]
+        # replacer = IndexExpressionReplacer(loop_expr_replace_map)
+        # for key, index_exprs in rmap_axes.index_exprs.items():
+        #     index_exprs_ = {}
+        #     for ax, index_expr in index_exprs.items():
+        #         index_exprs_[ax] = replacer(index_expr)
+        #     rmap_index_exprs[key] = index_exprs_
+        #
+        # rmap_axes = IndexedAxisTree(
+        #     rmap_axes.node_map,
+        #     rmap_axes,
+        #     target_paths=rmap_axes.target_paths,
+        #     index_exprs=rmap_index_exprs,
+        #     layout_exprs=rmap_axes.layout_exprs,
+        #     outer_loops=(),
+        # )
+
+        loop_index = just_one(self.raxes.outer_loops)
+        iterset = AxisTree(loop_index.iterset.node_map)
+
+        rmap_axes = iterset.add_subtree(self.raxes, *iterset.leaf)
+        rmap = HierarchicalArray(rmap_axes, dtype=IntType)
+        rmap = rmap[loop_index]
+
+        loop_index = just_one(self.caxes.outer_loops)
+        iterset = AxisTree(loop_index.iterset.node_map)
+
+        cmap_axes = iterset.add_subtree(self.caxes, *iterset.leaf)
+        cmap = HierarchicalArray(cmap_axes, dtype=IntType)
+        cmap = cmap[loop_index]
+
+        # breakpoint()
+        #
+        # cmap_axes = self.caxes.layout_axes
+        #
+        # cmap_index_exprs = {}
+        # loop_expr_replace_map = self.caxes.outer_loop_bits[1]
+        # replacer = IndexExpressionReplacer(loop_expr_replace_map)
+        # for key, index_exprs in cmap_axes.index_exprs.items():
+        #     index_exprs_ = {}
+        #     for ax, index_expr in index_exprs.items():
+        #         index_exprs_[ax] = replacer(index_expr)
+        #     cmap_index_exprs[key] = index_exprs_
+        #
+        # cmap_axes = IndexedAxisTree(
+        #     cmap_axes.node_map,
+        #     cmap_axes,
+        #     target_paths=cmap_axes.target_paths,
+        #     index_exprs=cmap_index_exprs,
+        #     layout_exprs=cmap_axes.layout_exprs,
+        #     outer_loops=(),
+        # )
+        # cmap = HierarchicalArray(cmap_axes, dtype=IntType)
+
+        # breakpoint()
 
         # TODO: Make the code below go into a separate function distinct
         # from mat_type logic. Then can also share code for rmap and cmap.
         for orig_raxes in orig_raxess:
-            for idxs in my_product(self.router_loops):
+            for idxs in my_product(self.raxes.outer_loops):
                 target_indices = {idx.index.id: idx.target_exprs for idx in idxs}
 
                 # TODO: We use iter_axis_tree here because the target_paths and
@@ -448,8 +547,8 @@ class AbstractMat(Array, ContextFree):
                 riter = iter_axis_tree(
                     self.raxes.index(),
                     self.raxes,
-                    self.rtarget_paths,
-                    self.rindex_exprs,
+                    self.raxes.target_paths,
+                    self.raxes.index_exprs,
                     idxs,
                 )
                 # for p in self.raxes.iter(idxs):
@@ -471,15 +570,15 @@ class AbstractMat(Array, ContextFree):
                     )
 
         for orig_caxes in orig_caxess:
-            for idxs in my_product(self.couter_loops):
+            for idxs in my_product(self.caxes.outer_loops):
                 target_indices = {idx.index.id: idx.target_exprs for idx in idxs}
 
                 # TODO: as above, replace with .iter()
                 citer = iter_axis_tree(
                     self.caxes.index(),
                     self.caxes,
-                    self.ctarget_paths,
-                    self.cindex_exprs,
+                    self.caxes.target_paths,
+                    self.caxes.index_exprs,
                     idxs,
                 )
                 # for p in self.caxes.iter(idxs):
@@ -522,10 +621,10 @@ class AbstractMat(Array, ContextFree):
         raxes_relabel = relabel_axes(self.raxes, self._row_suffix)
         caxes_relabel = relabel_axes(self.caxes, self._col_suffix)
 
+        # might not be needed
         axes = AxisTree(raxes_relabel.node_map)
         for leaf in raxes_relabel.leaves:
             axes = axes.add_subtree(caxes_relabel, *leaf, uniquify_ids=True)
-        axes = axes.set_up()
         return axes
 
     @classmethod

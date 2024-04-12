@@ -1651,12 +1651,11 @@ def _index_axes(
 
     return IndexedAxisTree(
         indexed_axes.node_map,
+        axes.unindexed,
         target_paths=tpaths,
         index_exprs=index_expr_per_target,
         layout_exprs=layout_expr_per_target,
-        layouts=axes.layouts,
         outer_loops=outer_loops,
-        sf=axes.sf,
     )
 
 

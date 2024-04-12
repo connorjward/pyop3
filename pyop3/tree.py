@@ -573,27 +573,26 @@ class MutableLabelledTreeMixin:
     def add_node(
         self,
         node,
-        parent_node=None,
-        parent_component=None,
+        parent_node,
+        parent_component_label=None,
+        *,
         uniquify=False,
     ):
         if parent_node is None:
             if not self.is_empty:
                 raise ValueError("Cannot add multiple roots")
-            return self.copy(parent_to_children={None: (node,)})
+            return type(self)(node)
         else:
             parent_node = self._as_node(parent_node)
-            if parent_component is None:
+            if parent_component_label is None:
                 if len(parent_node.components) == 1:
-                    parent_cpt_label = parent_node.components[0].label
+                    parent_component_label = parent_node.components[0].label
                 else:
                     raise ValueError(
                         "Must specify a component for parents with multiple components"
                     )
-            else:
-                parent_cpt_label = as_component_label(parent_component)
 
-            cpt_index = parent_node.component_labels.index(parent_cpt_label)
+            cpt_index = parent_node.component_labels.index(parent_component_label)
 
             if self.parent_to_children[parent_node.id][cpt_index] is not None:
                 raise ValueError("Node already exists at this location")
