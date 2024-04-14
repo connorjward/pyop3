@@ -188,15 +188,13 @@ class AbstractMat(Array, ContextFree):
             indexed_raxes = _index_axes(rtree, pmap(), self.raxes)
             indexed_caxes = _index_axes(ctree, pmap(), self.caxes)
 
-            rtarget_paths, rindex_exprs, _ = _compose_bits(
-                self.raxes,
-                self.raxes.target_paths,
-                self.raxes.index_exprs,
-                None,
+            rtarget_paths, rindex_exprs = _compose_bits(
                 indexed_raxes,
                 indexed_raxes.target_paths,
                 indexed_raxes.index_exprs,
-                {},
+                self.raxes,
+                self.raxes.target_paths,
+                self.raxes.index_exprs,
             )
             raxes = IndexedAxisTree(
                 indexed_raxes.node_map,
@@ -207,15 +205,13 @@ class AbstractMat(Array, ContextFree):
                 outer_loops=indexed_raxes.outer_loops,
             )
 
-            ctarget_paths, cindex_exprs, _ = _compose_bits(
-                self.caxes,
-                self.caxes.target_paths,
-                self.caxes.index_exprs,
-                None,
+            ctarget_paths, cindex_exprs = _compose_bits(
                 indexed_caxes,
                 indexed_caxes.target_paths,
                 indexed_caxes.index_exprs,
-                {},
+                self.caxes,
+                self.caxes.target_paths,
+                self.caxes.index_exprs,
             )
             caxes = IndexedAxisTree(
                 indexed_caxes.node_map,
@@ -254,15 +250,13 @@ class AbstractMat(Array, ContextFree):
             if indexed_raxes.alloc_size() == 0 or indexed_caxes.alloc_size() == 0:
                 continue
 
-            rtarget_paths, rindex_exprs, _ = _compose_bits(
-                self.raxes,
-                self.raxes.target_paths,
-                self.raxes.index_exprs,
-                None,
+            rtarget_paths, rindex_exprs = _compose_bits(
                 indexed_raxes,
                 indexed_raxes.target_paths,
                 indexed_raxes.index_exprs,
-                {},
+                self.raxes,
+                self.raxes.target_paths,
+                self.raxes.index_exprs,
             )
             raxes = IndexedAxisTree(
                 indexed_raxes.node_map,
@@ -273,15 +267,13 @@ class AbstractMat(Array, ContextFree):
                 outer_loops=indexed_raxes.outer_loops,
             )
 
-            ctarget_paths, cindex_exprs, _ = _compose_bits(
-                self.caxes,
-                self.caxes.target_paths,
-                self.caxes.index_exprs,
-                None,
+            ctarget_paths, cindex_exprs = _compose_bits(
                 indexed_caxes,
                 indexed_caxes.target_paths,
                 indexed_caxes.index_exprs,
-                {},
+                self.caxes,
+                self.caxes.target_paths,
+                self.caxes.index_exprs,
             )
             caxes = IndexedAxisTree(
                 indexed_caxes.node_map,

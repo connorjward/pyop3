@@ -674,22 +674,23 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
         for context, index_tree in as_index_forest(indices, axes=self).items():
             indexed_axes = _index_axes(index_tree, context, self)
 
-            target_paths, index_exprs, layout_exprs = _compose_bits(
-                self,
-                self.target_paths,
-                self.index_exprs,
-                self.layout_exprs,
+            # NOTE: If this works combine into _index_axes
+            # itarget_paths, iindex_exprs, ilayout_exprs = acc_bits(indexed_axes, indexed_axes.target_paths, indexed_axes.index_exprs, indexed_axes.layout_exprs)
+
+            target_paths, index_exprs = _compose_bits(
                 indexed_axes,
                 indexed_axes.target_paths,
                 indexed_axes.index_exprs,
-                indexed_axes.layout_exprs,
+                self,
+                self.target_paths,
+                self.index_exprs,
             )
             axis_tree = IndexedAxisTree(
                 indexed_axes.node_map,
                 self.unindexed,
                 target_paths=target_paths,
                 index_exprs=index_exprs,
-                layout_exprs=layout_exprs,
+                layout_exprs={},
                 outer_loops=indexed_axes.outer_loops,
             )
             axis_trees[context] = axis_tree
@@ -967,27 +968,50 @@ class AxisTree(MutableLabelledTreeMixin, BaseAxisTree):
     def target_paths(self):
         if self.is_empty:
             return pmap()
+        else:
+            return self._collect_target_paths()
 
-        return pmap(
-            {
-                (axis.id, cpt.label): pmap({axis.label: cpt.label})
-                for axis in self.nodes
-                for cpt in axis.components
-            }
-        )
+    def _collect_target_paths(self, axis=None, target_path_acc=None):
+        assert not self.is_empty
+
+        if strictly_all(x is None for x in {axis, target_path_acc}):
+            axis = self.root
+            target_path_acc = pmap()
+
+        target_paths = {}
+        for component in axis.components:
+            target_path_acc_ = target_path_acc | {axis.label: component.label}
+            target_paths[axis.id, component.label] = target_path_acc_
+
+            if subaxis := self.child(axis, component):
+                target_paths.update(
+                    self._collect_target_paths(subaxis, target_path_acc_)
+                )
+        return freeze(target_paths)
 
     @cached_property
     def index_exprs(self):
         if self.is_empty:
             return pmap()
+        else:
+            return self._collect_index_exprs()
 
-        return pmap(
-            {
-                (axis.id, cpt.label): pmap({axis.label: AxisVariable(axis.label)})
-                for axis in self.nodes
-                for cpt in axis.components
-            }
-        )
+    # NOTE: This function is very similar to _collect_target_paths
+    def _collect_index_exprs(self, axis=None, index_exprs_acc=None):
+        assert not self.is_empty
+
+        if strictly_all(x is None for x in {axis, index_exprs_acc}):
+            axis = self.root
+            index_exprs_acc = pmap()
+
+        index_exprs = {}
+        for component in axis.components:
+            index_exprs_acc_ = index_exprs_acc | {axis.label: AxisVariable(axis.label)}
+            index_exprs[axis.id, component.label] = index_exprs_acc_
+
+            if subaxis := self.child(axis, component):
+                index_exprs.update(self._collect_index_exprs(subaxis, index_exprs_acc_))
+        return freeze(index_exprs)
 
     @property
     def layout_exprs(self):

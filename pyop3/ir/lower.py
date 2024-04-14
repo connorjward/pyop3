@@ -171,8 +171,6 @@ class LoopyCodegenContext(CodegenContext):
         # assignee = renamer(assignee)
         # expression = renamer(expression)
 
-        # breakpoint()
-
         insn = lp.Assignment(
             assignee,
             expression,
@@ -233,8 +231,6 @@ class LoopyCodegenContext(CodegenContext):
         elif isinstance(array.buffer, NullBuffer) or injected:
             name = self.unique_name("t") if not debug else array.name
             shape = self._temporary_shapes.get(array.name, (array.alloc_size,))
-            # if array.name == "array_2":
-            #     breakpoint()
 
             initializer = array.buffer.data_ro if injected else None
             # debug, does this fix things?
@@ -340,7 +336,6 @@ class CodegenResult:
     def __call__(self, **kwargs):
         from pyop3.target import compile_loopy
 
-        # breakpoint()
         data_args = []
         for kernel_arg in self.ir.default_entrypoint.args:
             actual_arg_name = self.arg_replace_map[kernel_arg.name]
@@ -348,7 +343,6 @@ class CodegenResult:
             data_args.append(_as_pointer(array))
         func = compile_loopy(self.ir)
         if len(data_args) > 0:
-            # breakpoint()
             func(*data_args)
 
     def target_code(self, target):
@@ -483,8 +477,6 @@ def compile(expr: Instruction, name="mykernel"):
     tu = lp.register_callable(tu, "bsearch", BinarySearchCallable())
 
     tu = tu.with_entrypoints(name)
-
-    # breakpoint()
 
     return CodegenResult(expr, tu, ctx.kernel_to_actual_rename_map)
 
@@ -819,17 +811,14 @@ def _(assignment, loop_indices, codegen_context):
     else:
         csize_var = csize
 
-    breakpoint()
-    rlayouts = rmap.subst_layouts[pmap()]
+    rlayouts = rmap.axes.subst_layouts[pmap()]
     roffset = JnameSubstitutor(loop_indices, codegen_context)(rlayouts)
 
-    clayouts = cmap.subst_layouts[pmap()]
+    clayouts = cmap.axes.subst_layouts[pmap()]
     coffset = JnameSubstitutor(loop_indices, codegen_context)(clayouts)
 
     irow = f"{rmap_name}[{roffset}]"
     icol = f"{cmap_name}[{coffset}]"
-
-    breakpoint()
 
     call_str = _petsc_mat_insn(
         assignment, mat_name, array_name, rsize_var, csize_var, irow, icol
@@ -955,9 +944,6 @@ def add_leaf_assignment(
         codegen_context,
     )
 
-    # if larr.name == "t_4":
-    #     breakpoint()
-
     if isinstance(assignment, AddAssignment):
         rexpr = lexpr + rexpr
     else:
@@ -1071,8 +1057,6 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         return jname_expr
 
     def map_loop_index(self, expr):
-        # if expr.id.endswith("1"):
-        #     breakpoint()
         # FIXME pretty sure I have broken local loop index stuff
         if isinstance(expr, LocalLoopIndexVariable):
             return self._replace_map[expr.id][0][expr.axis]

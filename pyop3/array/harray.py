@@ -232,19 +232,17 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         from pyop3.itree.tree import _compose_bits, _index_axes, as_index_forest
 
         index_forest = as_index_forest(indices, axes=self.axes, strict=strict)
-        if len(index_forest) == 1 and pmap() in index_forest:
-            index_tree = just_one(index_forest.values())
+        if index_forest.keys() == {pmap()}:
+            index_tree = index_forest[pmap()]
             indexed_axes = _index_axes(index_tree, pmap(), self.axes)
 
-            target_paths, index_exprs, layout_exprs = _compose_bits(
-                self.axes,
-                self.target_paths,
-                self.index_exprs,
-                None,
+            target_paths, index_exprs = _compose_bits(
                 indexed_axes,
                 indexed_axes.target_paths,
                 indexed_axes.index_exprs,
-                indexed_axes.layout_exprs,
+                self.axes,
+                self.target_paths,
+                self.index_exprs,
             )
 
             axes = IndexedAxisTree(
@@ -252,7 +250,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
                 self.axes.unindexed,
                 target_paths=target_paths,
                 index_exprs=index_exprs,
-                layout_exprs=layout_exprs,
+                layout_exprs={},
                 outer_loops=indexed_axes.outer_loops,
             )
 
@@ -280,16 +278,13 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
             (
                 target_paths,
                 index_exprs,
-                layout_exprs,
             ) = _compose_bits(
-                self.axes,
-                self.target_paths,
-                self.index_exprs,
-                None,
                 indexed_axes,
                 indexed_axes.target_paths,
                 indexed_axes.index_exprs,
-                indexed_axes.layout_exprs,
+                self.axes,
+                self.target_paths,
+                self.index_exprs,
             )
 
             axes = IndexedAxisTree(
@@ -297,7 +292,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
                 self.axes.unindexed,
                 target_paths=target_paths,
                 index_exprs=index_exprs,
-                layout_exprs=layout_exprs,
+                layout_exprs={},
                 layouts=self.axes.layouts,
                 outer_loops=indexed_axes.outer_loops,
             )
