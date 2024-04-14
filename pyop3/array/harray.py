@@ -236,14 +236,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
             index_tree = index_forest[pmap()]
             indexed_axes = _index_axes(index_tree, pmap(), self.axes)
 
-            target_paths, index_exprs = _compose_bits(
-                indexed_axes,
-                indexed_axes.target_paths,
-                indexed_axes.index_exprs,
-                self.axes,
-                self.target_paths,
-                self.index_exprs,
-            )
+            target_paths, index_exprs = _compose_bits(indexed_axes, self.axes)
 
             axes = IndexedAxisTree(
                 indexed_axes.node_map,
@@ -253,19 +246,6 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
                 layout_exprs={},
                 outer_loops=indexed_axes.outer_loops,
             )
-
-            # return self.with_axes(axes)
-
-            # return HierarchicalArray(
-            #     indexed_axes,
-            #     data=self.array,
-            #     max_value=self.max_value,
-            #     target_paths=target_paths,
-            #     index_exprs=index_exprs,
-            #     outer_loops=indexed_axes.outer_loops,
-            #     layouts=self.layouts,
-            #     name=self.name,
-            # )
             return HierarchicalArray(
                 axes, data=self.buffer, max_value=self.max_value, name=self.name
             )
@@ -280,11 +260,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
                 index_exprs,
             ) = _compose_bits(
                 indexed_axes,
-                indexed_axes.target_paths,
-                indexed_axes.index_exprs,
                 self.axes,
-                self.target_paths,
-                self.index_exprs,
             )
 
             axes = IndexedAxisTree(
@@ -297,21 +273,10 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
                 outer_loops=indexed_axes.outer_loops,
             )
 
-            myarray = HierarchicalArray(
+            array_per_context[loop_context] = HierarchicalArray(
                 axes, data=self.buffer, name=self.name, max_value=self.max_value
             )
-            array_per_context[loop_context] = myarray
 
-            # array_per_context[loop_context] = HierarchicalArray(
-            #     indexed_axes,
-            #     data=self.array,
-            #     layouts=self.layouts,
-            #     target_paths=target_paths,
-            #     index_exprs=index_exprs,
-            #     outer_loops=indexed_axes.outer_loops,
-            #     name=self.name,
-            #     max_value=self.max_value,
-            # )
         return ContextSensitiveMultiArray(array_per_context)
 
     # Since __getitem__ is implemented, this class is implicitly considered

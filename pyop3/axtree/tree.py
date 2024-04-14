@@ -674,17 +674,7 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
         for context, index_tree in as_index_forest(indices, axes=self).items():
             indexed_axes = _index_axes(index_tree, context, self)
 
-            # NOTE: If this works combine into _index_axes
-            # itarget_paths, iindex_exprs, ilayout_exprs = acc_bits(indexed_axes, indexed_axes.target_paths, indexed_axes.index_exprs, indexed_axes.layout_exprs)
-
-            target_paths, index_exprs = _compose_bits(
-                indexed_axes,
-                indexed_axes.target_paths,
-                indexed_axes.index_exprs,
-                self,
-                self.target_paths,
-                self.index_exprs,
-            )
+            target_paths, index_exprs = _compose_bits(indexed_axes, self)
             axis_tree = IndexedAxisTree(
                 indexed_axes.node_map,
                 self.unindexed,
