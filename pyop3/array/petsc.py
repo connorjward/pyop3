@@ -210,31 +210,12 @@ class AbstractMat(Array, ContextFree):
             if indexed_raxes.alloc_size() == 0 or indexed_caxes.alloc_size() == 0:
                 continue
 
-            # rtarget_paths, rindex_exprs = _compose_bits(indexed_raxes, self.raxes)
-            # raxes = IndexedAxisTree(
-            #     indexed_raxes.node_map,
-            #     self.raxes.unindexed,
-            #     target_paths=rtarget_paths,
-            #     index_exprs=rindex_exprs,
-            #     layout_exprs={},
-            #     outer_loops=indexed_raxes.outer_loops,
-            # )
             raxes = compose_axes(indexed_raxes, self.raxes)
-
-            # ctarget_paths, cindex_exprs = _compose_bits(indexed_caxes, self.caxes)
-            # caxes = IndexedAxisTree(
-            #     indexed_caxes.node_map,
-            #     self.caxes.unindexed,
-            #     target_paths=ctarget_paths,
-            #     index_exprs=cindex_exprs,
-            #     layout_exprs={},
-            #     outer_loops=indexed_caxes.outer_loops,
-            # )
             caxes = compose_axes(indexed_caxes, self.caxes)
 
             arrays[ctx] = type(self)(
-                indexed_raxes,
-                indexed_caxes,
+                raxes,
+                caxes,
                 self.mat_type,
                 self.mat,
                 name=self.name,
@@ -245,6 +226,11 @@ class AbstractMat(Array, ContextFree):
     # like Dat, bad name? handle?
     @property
     def array(self):
+        return self.mat
+
+    # old alias, deprecate?
+    @property
+    def handle(self):
         return self.mat
 
     def assemble(self):
@@ -394,20 +380,21 @@ class AbstractMat(Array, ContextFree):
 
         rmap_axes = iterset.add_subtree(self.raxes, *iterset.leaf)
         rmap = HierarchicalArray(rmap_axes, dtype=IntType)
-        rmap = rmap[loop_index]
+        rmap = rmap[loop_index.local_index]
 
         loop_index = just_one(self.caxes.outer_loops)
         iterset = AxisTree(loop_index.iterset.node_map)
 
         cmap_axes = iterset.add_subtree(self.caxes, *iterset.leaf)
         cmap = HierarchicalArray(cmap_axes, dtype=IntType)
-        cmap = cmap[loop_index]
+        cmap = cmap[loop_index.local_index]
 
         # TODO: Make the code below go into a separate function distinct
         # from mat_type logic. Then can also share code for rmap and cmap.
         for orig_raxes in orig_raxess:
             for idxs in my_product(self.raxes.outer_loops):
-                target_indices = {idx.index.id: idx.target_exprs for idx in idxs}
+                # target_indices = {idx.index.id: idx.target_exprs for idx in idxs}
+                target_indices = merge_dicts([idx.replace_map for idx in idxs])
 
                 for p in self.raxes.iter(idxs):
                     target_path = p.target_path
@@ -428,7 +415,8 @@ class AbstractMat(Array, ContextFree):
 
         for orig_caxes in orig_caxess:
             for idxs in my_product(self.caxes.outer_loops):
-                target_indices = {idx.index.id: idx.target_exprs for idx in idxs}
+                # target_indices = {idx.index.id: idx.target_exprs for idx in idxs}
+                target_indices = merge_dicts([idx.replace_map for idx in idxs])
 
                 for p in self.caxes.iter(idxs):
                     target_path = p.target_path

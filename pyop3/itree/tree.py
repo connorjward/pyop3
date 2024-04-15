@@ -366,6 +366,12 @@ class ContextFreeLoopIndex(ContextFreeIndex):
     def with_context(self, context, *args):
         return self
 
+    @cached_property
+    def local_index(self):
+        return ContextFreeLocalLoopIndex(
+            self.iterset, self.source_path, self.source_path, id=self.id
+        )
+
     @property
     def leaf_target_paths(self):
         return (self.path,)
@@ -382,8 +388,8 @@ class ContextFreeLoopIndex(ContextFreeIndex):
     # should now be ignored
     @property
     def index_exprs(self):
-        if self.source_path != self.path and len(self.path) != 1:
-            raise NotImplementedError("no idea what to do here")
+        # if self.source_path != self.path and len(self.path) != 1:
+        #     raise NotImplementedError("no idea what to do here")
 
         # Need to replace the index_exprs with LocalLoopIndexVariable equivs
         flat_index_exprs = {}
@@ -788,6 +794,7 @@ class LoopIndexVariable(pym.primitives.Variable):
         return self.index.datamap
 
 
+# don't use this anywhere
 class LoopIndexEnumerateIndexVariable(pym.primitives.Leaf):
     """Variable representing the index of an enumerated index.
 
@@ -861,6 +868,10 @@ def as_index_forest(forest: Any, *, axes=None, strict=False, **kwargs):
         forest_ = {}
         for ctx, tree in forest.items():
             if not strict:
+                # NOTE: This function doesn't always work. In particular if
+                # the loop index is from an already indexed axis. This
+                # requires more thought but for now just use the strict version
+                # and provide additional information elsewhere.
                 tree = _complete_index_tree(tree, axes)
             if not _index_tree_is_complete(tree, axes):
                 raise ValueError("Index tree does not completely index axes")
@@ -1823,17 +1834,21 @@ def _compose_axes_rec(indexed_axes, orig_axes, *, indexed_axis=None):
             ).items():
                 composed_index_exprs[ikey][oaxis_label] = replacer(oindex_expr)
 
+        # Keep the bits that are already indexed out
+        composed_target_paths[None].update(orig_axes.target_paths.get(None, {}))
+        composed_index_exprs[None].update(orig_axes.index_exprs.get(None, {}))
+
     for indexed_component in indexed_axis.components:
         ikey = (indexed_axis.id, indexed_component.label)
-        partial_target_path = indexed_axes.target_paths[ikey]
-        partial_index_exprs = indexed_axes.index_exprs[ikey]
+        partial_target_path = indexed_axes.target_paths.get(ikey, pmap())
+        partial_index_exprs = indexed_axes.index_exprs.get(ikey, pmap())
 
         if orig_axes.is_valid_path(partial_target_path):
             orig_axis, orig_component = orig_axes._node_from_path(partial_target_path)
             okey = (orig_axis.id, orig_component.label)
 
             # 1. Determine target_paths.
-            composed_target_paths[ikey] = orig_axes.target_paths[okey]
+            composed_target_paths[ikey] = orig_axes.target_paths.get(okey, pmap())
 
             # 2. Determine index_exprs. This is done via an *inside* substitution
             # ... old below
@@ -1913,6 +1928,12 @@ class IndexIteratorEntry:
     @property
     def loop_context(self):
         return freeze({self.index.id: (self.source_path, self.target_path)})
+
+    @property
+    def replace_map(self):
+        return freeze(
+            {self.index.id: merge_dicts([self.source_exprs, self.target_exprs])}
+        )
 
     @property
     def target_replace_map(self):
@@ -2012,7 +2033,7 @@ def iter_axis_tree(
     outer_replace_map = merge_dicts(
         # iter_entry.target_replace_map for iter_entry in outer_loops
         # iter_entry.source_replace_map
-        iter_entry.target_replace_map
+        iter_entry.replace_map
         for iter_entry in outer_loops
     )
     if target_path is None:

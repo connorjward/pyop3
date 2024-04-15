@@ -145,7 +145,7 @@ def size_requires_external_index(axes, axis, component, inner_loop_vars, path=pm
             leafpath = pmap()
         else:
             leafpath = just_one(count.axes.leaf_paths)
-        layout = count.subst_layouts[leafpath]
+        layout = count.axes.subst_layouts[leafpath]
         required_loop_vars = LoopIndexCollector(linear=False)(layout)
         if not required_loop_vars.issubset(inner_loop_vars):
             return True
@@ -171,7 +171,7 @@ def step_size(
     axes: AxisTree,
     axis: Axis,
     component: AxisComponent,
-    indices=PrettyTuple(),
+    indices=pmap(),
     *,
     loop_indices=pmap(),
 ):
@@ -476,9 +476,7 @@ def _compute_layouts(
             # we enforce here that all subaxes must be tabulated, is this always
             # needed?
             if strictly_all(sub is not None for sub in csubtrees):
-                for component, subtree, subiexprs in checked_zip(
-                    axis.components, csubtrees
-                ):
+                for component, subtree in checked_zip(axis.components, csubtrees):
                     ctree = ctree.add_subtree(subtree, axis, component)
 
             fulltree = _create_count_array_tree(ctree, loop_vars)

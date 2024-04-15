@@ -303,17 +303,56 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         self._check_no_copy_access()
         return self.buffer.data_wo[self._buffer_indices]
 
+    @property
+    @deprecated(".data_rw_with_halos")
+    def data_with_halos(self):
+        return self.data_rw_with_halos
+
+    @property
+    def data_rw_with_halos(self):
+        self._check_no_copy_access()
+        return self.buffer.data_rw[self._buffer_indices_ghost]
+
+    @property
+    def data_ro_with_halos(self):
+        if not isinstance(self._buffer_indices_ghost, slice):
+            warning(
+                "Read-only access to the array is provided with a copy, "
+                "consider avoiding if possible."
+            )
+        return self.buffer.data_ro[self._buffer_indices_ghost]
+
+    @property
+    def data_wo_with_halos(self):
+        """
+        Have to be careful. If not setting all values (i.e. subsets) should
+        call `reduce_leaves_to_roots` first.
+
+        When this is called we set roots_valid, claiming that any (lazy) 'in-flight' writes
+        can be dropped.
+        """
+        self._check_no_copy_access()
+        return self.buffer.data_wo[self._buffer_indices_ghost]
+
     @cached_property
     def _buffer_indices(self):
+        return self._collect_buffer_indices(ghost=False)
+
+    @cached_property
+    def _buffer_indices_ghost(self):
+        return self._collect_buffer_indices(ghost=True)
+
+    def _collect_buffer_indices(self, *, ghost: bool):
         # TODO: This method is inefficient as for affine things we still tabulate
         # everything first. It would be best to inspect index_exprs to determine
         # if a slice is sufficient, but this is hard.
         # TODO: This should be more widely cached, don't want to tabulate more often
         # than required.
 
-        assert self.axes.owned.size > 0
+        size = self.axes.size if ghost else self.axes.owned.size
+        assert size > 0
 
-        indices = np.full(self.axes.owned.size, -1, dtype=IntType)
+        indices = np.full(size, -1, dtype=IntType)
         # TODO: Handle any outer loops.
         # TODO: Generate code for this.
         for i, p in enumerate(self.axes.iter()):

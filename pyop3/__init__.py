@@ -12,7 +12,7 @@ del pytools
 
 import pyop3.ir
 import pyop3.transform
-from pyop3.array import Array, HierarchicalArray, MultiArray
+from pyop3.array import Array, FancyIndexWriteException, HierarchicalArray, MultiArray
 from pyop3.array.petsc import Mat, Sparsity  # noqa: F401
 from pyop3.axtree import (  # noqa: F401
     Axis,

@@ -13,5 +13,6 @@ class Array(KernelArgument, abc.ABC):
             raise ValueError("Can only specify one of name and prefix")
         self.name = name or self._name_generator(prefix or self._prefix)
 
-    def assign(self, other):
-        return ReplaceAssignment(self, other)
+    def assign(self, other, eager=True):
+        expr = ReplaceAssignment(self, other)
+        return expr() if eager else expr

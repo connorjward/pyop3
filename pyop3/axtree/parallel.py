@@ -132,7 +132,6 @@ def grow_dof_sf(axes, axis, path, indices):
             axes,
             axis,
             selected_component,
-            (),
             indices | {axis.label: component_num},
         )
 
@@ -163,7 +162,7 @@ def grow_dof_sf(axes, axis, path, indices):
             path | {axis.label: selected_component.label},
         )
         local_leaf_offsets[myindex] = offset
-        leaf_ndofs[myindex] = step_size(axes, axis, selected_component, ())
+        leaf_ndofs[myindex] = step_size(axes, axis, selected_component)
 
     # construct a new SF with these offsets
     ndofs = sum(leaf_ndofs)
