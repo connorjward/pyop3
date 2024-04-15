@@ -663,29 +663,22 @@ class AxisVariable(pym.primitives.Variable):
 
 
 class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
-    # TODO: Cache this function.
     def __getitem__(self, indices):
-        from pyop3.itree.tree import _compose_bits, _index_axes, as_index_forest
+        return self.getitem(indices, strict=False)
+
+    # TODO: Cache this function.
+    def getitem(self, indices, *, strict=False):
+        from pyop3.itree.tree import as_index_forest, compose_axes, index_axes
 
         if indices is Ellipsis:
             return self
 
         axis_trees = {}
         for context, index_tree in as_index_forest(indices, axes=self).items():
-            indexed_axes = _index_axes(index_tree, context, self)
+            indexed_axes = index_axes(index_tree, context, self)
+            axis_trees[context] = compose_axes(indexed_axes, self)
 
-            target_paths, index_exprs = _compose_bits(indexed_axes, self)
-            axis_tree = IndexedAxisTree(
-                indexed_axes.node_map,
-                self.unindexed,
-                target_paths=target_paths,
-                index_exprs=index_exprs,
-                layout_exprs={},
-                outer_loops=indexed_axes.outer_loops,
-            )
-            axis_trees[context] = axis_tree
-
-        if len(axis_trees) == 1 and just_one(axis_trees.keys()) == pmap():
+        if axis_trees.keys() == {pmap()}:
             return axis_trees[pmap()]
         else:
             return ContextSensitiveAxisTree(axis_trees)

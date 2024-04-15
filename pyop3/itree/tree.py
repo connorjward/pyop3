@@ -589,69 +589,69 @@ class CalledMap(Identified, Labelled, LoopIterable):
     def __getitem__(self, indices):
         raise NotImplementedError("TODO")
         # figure out the current loop context, just a single loop index
-        from_index = self.from_index
-        while isinstance(from_index, CalledMap):
-            from_index = from_index.from_index
-        existing_loop_contexts = tuple(
-            freeze({from_index.id: path}) for path in from_index.paths
-        )
+        # from_index = self.from_index
+        # while isinstance(from_index, CalledMap):
+        #     from_index = from_index.from_index
+        # existing_loop_contexts = tuple(
+        #     freeze({from_index.id: path}) for path in from_index.paths
+        # )
+        #
+        # index_forest = {}
+        # for existing_context in existing_loop_contexts:
+        #     axes = self.with_context(existing_context)
+        #     index_forest.update(
+        #         as_index_forest(indices, axes=axes, loop_context=existing_context)
+        #     )
+        #
+        # array_per_context = {}
+        # for loop_context, index_tree in index_forest.items():
+        #     indexed_axes = index_axes(index_tree, loop_context, self.axes)
+        #
+        #     (
+        #         target_paths,
+        #         index_exprs,
+        #         layout_exprs,
+        #     ) = _compose_bits(
+        #         self.axes,
+        #         self.target_paths,
+        #         self.index_exprs,
+        #         None,
+        #         indexed_axes,
+        #         indexed_axes.target_paths,
+        #         indexed_axes.index_exprs,
+        #         indexed_axes.layout_exprs,
+        #     )
+        #
+        #     array_per_context[loop_context] = HierarchicalArray(
+        #         indexed_axes,
+        #         data=self.array,
+        #         layouts=self.layouts,
+        #         target_paths=target_paths,
+        #         index_exprs=index_exprs,
+        #         name=self.name,
+        #         max_value=self.max_value,
+        #     )
+        # return ContextSensitiveMultiArray(array_per_context)
 
-        index_forest = {}
-        for existing_context in existing_loop_contexts:
-            axes = self.with_context(existing_context)
-            index_forest.update(
-                as_index_forest(indices, axes=axes, loop_context=existing_context)
-            )
+    # def index(self) -> LoopIndex:
+    #     context_map = {
+    #         ctx: index_axes(itree, ctx) for ctx, itree in as_index_forest(self).items()
+    #     }
+    #     context_sensitive_axes = ContextSensitiveAxisTree(context_map)
+    #     return LoopIndex(context_sensitive_axes)
 
-        array_per_context = {}
-        for loop_context, index_tree in index_forest.items():
-            indexed_axes = _index_axes(index_tree, loop_context, self.axes)
-
-            (
-                target_paths,
-                index_exprs,
-                layout_exprs,
-            ) = _compose_bits(
-                self.axes,
-                self.target_paths,
-                self.index_exprs,
-                None,
-                indexed_axes,
-                indexed_axes.target_paths,
-                indexed_axes.index_exprs,
-                indexed_axes.layout_exprs,
-            )
-
-            array_per_context[loop_context] = HierarchicalArray(
-                indexed_axes,
-                data=self.array,
-                layouts=self.layouts,
-                target_paths=target_paths,
-                index_exprs=index_exprs,
-                name=self.name,
-                max_value=self.max_value,
-            )
-        return ContextSensitiveMultiArray(array_per_context)
-
-    def index(self) -> LoopIndex:
-        context_map = {
-            ctx: _index_axes(itree, ctx) for ctx, itree in as_index_forest(self).items()
-        }
-        context_sensitive_axes = ContextSensitiveAxisTree(context_map)
-        return LoopIndex(context_sensitive_axes)
-
-    def iter(self, outer_loops=()):
-        loop_context = merge_dicts(
-            iter_entry.loop_context for iter_entry in outer_loops
-        )
-        cf_called_map = self.with_context(loop_context)
-        return iter_axis_tree(
-            self.index(),
-            cf_called_map.axes,
-            cf_called_map.target_paths,
-            cf_called_map.index_exprs,
-            outer_loops,
-        )
+    # def iter(self, outer_loops=()):
+    #     loop_context = merge_dicts(
+    #         iter_entry.loop_context for iter_entry in outer_loops
+    #     )
+    #     cf_called_map = self.with_context(loop_context)
+    #     return iter_axis_tree(
+    #         self.index(),
+    #         cf_called_map.axes,
+    #         cf_called_map.target_paths,
+    #         cf_called_map.index_exprs,
+    #         outer_loops,
+    #     )
 
     def with_context(self, context, axes=None):
         # TODO stole this docstring from elsewhere, correct it
@@ -1600,7 +1600,7 @@ def _make_leaf_axis_from_called_map(
     )
 
 
-def _index_axes(
+def index_axes(
     indices: IndexTree,
     loop_context,
     axes=None,
@@ -1781,7 +1781,19 @@ def _index_axes_rec(
     )
 
 
-def _compose_bits(indexed_axes, orig_axes, *, indexed_axis=None):
+def compose_axes(indexed_axes, orig_axes):
+    target_paths, index_exprs = _compose_axes_rec(indexed_axes, orig_axes)
+    return IndexedAxisTree(
+        indexed_axes.node_map,
+        orig_axes.unindexed,
+        target_paths=target_paths,
+        index_exprs=index_exprs,
+        layout_exprs={},
+        outer_loops=indexed_axes.outer_loops,
+    )
+
+
+def _compose_axes_rec(indexed_axes, orig_axes, *, indexed_axis=None):
     composed_target_paths = collections.defaultdict(dict)
     composed_index_exprs = collections.defaultdict(dict)
     # composed_layout_exprs = defaultdict(dict)  # TODO
@@ -1874,7 +1886,7 @@ def _compose_bits(indexed_axes, orig_axes, *, indexed_axis=None):
                 subtarget_paths,
                 subindex_exprs,
                 # sublayout_exprs,
-            ) = _compose_bits(
+            ) = _compose_axes_rec(
                 indexed_axes,
                 orig_axes,
                 indexed_axis=indexed_subaxis,

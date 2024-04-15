@@ -229,50 +229,24 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         return self.getitem(indices, strict=False)
 
     def getitem(self, indices, *, strict=False):
-        from pyop3.itree.tree import _compose_bits, _index_axes, as_index_forest
+        from pyop3.itree.tree import as_index_forest, compose_axes, index_axes
+
+        if indices is Ellipsis:
+            return self
 
         index_forest = as_index_forest(indices, axes=self.axes, strict=strict)
         if index_forest.keys() == {pmap()}:
             index_tree = index_forest[pmap()]
-            indexed_axes = _index_axes(index_tree, pmap(), self.axes)
-
-            target_paths, index_exprs = _compose_bits(indexed_axes, self.axes)
-
-            axes = IndexedAxisTree(
-                indexed_axes.node_map,
-                self.axes.unindexed,
-                target_paths=target_paths,
-                index_exprs=index_exprs,
-                layout_exprs={},
-                outer_loops=indexed_axes.outer_loops,
-            )
+            indexed_axes = index_axes(index_tree, pmap(), self.axes)
+            axes = compose_axes(indexed_axes, self.axes)
             return HierarchicalArray(
                 axes, data=self.buffer, max_value=self.max_value, name=self.name
             )
 
         array_per_context = {}
         for loop_context, index_tree in index_forest.items():
-            indexed_axes = _index_axes(index_tree, loop_context, self.axes)
-
-            # TODO: Should handle this inside _index_axes!
-            (
-                target_paths,
-                index_exprs,
-            ) = _compose_bits(
-                indexed_axes,
-                self.axes,
-            )
-
-            axes = IndexedAxisTree(
-                indexed_axes.node_map,
-                self.axes.unindexed,
-                target_paths=target_paths,
-                index_exprs=index_exprs,
-                layout_exprs={},
-                layouts=self.axes.layouts,
-                outer_loops=indexed_axes.outer_loops,
-            )
-
+            indexed_axes = index_axes(index_tree, loop_context, self.axes)
+            axes = compose_axes(indexed_axes, self.axes)
             array_per_context[loop_context] = HierarchicalArray(
                 axes, data=self.buffer, name=self.name, max_value=self.max_value
             )
@@ -589,46 +563,47 @@ class ContextSensitiveMultiArray(Array, ContextSensitive):
         ContextSensitive.__init__(self, arrays)
 
     def __getitem__(self, indices) -> ContextSensitiveMultiArray:
-        from pyop3.itree.tree import _compose_bits, _index_axes, as_index_forest
-
-        # FIXME for now assume that there is only one context
-        context, array = just_one(self.context_map.items())
-
-        index_forest = as_index_forest(indices, axes=array.axes)
-
-        if len(index_forest) == 1 and pmap() in index_forest:
-            raise NotImplementedError("code path untested")
-
-        array_per_context = {}
-        for loop_context, index_tree in index_forest.items():
-            indexed_axes = _index_axes(index_tree, loop_context, array.axes)
-
-            (
-                target_paths,
-                index_exprs,
-                layout_exprs,
-            ) = _compose_bits(
-                array.axes,
-                array.target_paths,
-                array.index_exprs,
-                None,
-                indexed_axes,
-                indexed_axes.target_paths,
-                indexed_axes.index_exprs,
-                indexed_axes.layout_exprs,
-            )
-            array_per_context[loop_context] = HierarchicalArray(
-                indexed_axes,
-                data=self.array,
-                max_value=self.max_value,
-                target_paths=target_paths,
-                index_exprs=index_exprs,
-                outer_loops=indexed_axes.outer_loops,
-                layouts=self.layouts,
-                name=self.name,
-            )
-
-        return ContextSensitiveMultiArray(array_per_context)
+        raise NotImplementedError("Untested")
+        # from pyop3.itree.tree import _compose_bits, _index_axes, as_index_forest
+        #
+        # # FIXME for now assume that there is only one context
+        # context, array = just_one(self.context_map.items())
+        #
+        # index_forest = as_index_forest(indices, axes=array.axes)
+        #
+        # if len(index_forest) == 1 and pmap() in index_forest:
+        #     raise NotImplementedError("code path untested")
+        #
+        # array_per_context = {}
+        # for loop_context, index_tree in index_forest.items():
+        #     indexed_axes = _index_axes(index_tree, loop_context, array.axes)
+        #
+        #     (
+        #         target_paths,
+        #         index_exprs,
+        #         layout_exprs,
+        #     ) = _compose_bits(
+        #         array.axes,
+        #         array.target_paths,
+        #         array.index_exprs,
+        #         None,
+        #         indexed_axes,
+        #         indexed_axes.target_paths,
+        #         indexed_axes.index_exprs,
+        #         indexed_axes.layout_exprs,
+        #     )
+        #     array_per_context[loop_context] = HierarchicalArray(
+        #         indexed_axes,
+        #         data=self.array,
+        #         max_value=self.max_value,
+        #         target_paths=target_paths,
+        #         index_exprs=index_exprs,
+        #         outer_loops=indexed_axes.outer_loops,
+        #         layouts=self.layouts,
+        #         name=self.name,
+        #     )
+        #
+        # return ContextSensitiveMultiArray(array_per_context)
 
     @property
     def array(self):

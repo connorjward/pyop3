@@ -21,7 +21,12 @@ from pyop3.axtree.tree import (
     relabel_axes,
 )
 from pyop3.dtypes import IntType, ScalarType
-from pyop3.itree.tree import IndexExpressionReplacer, iter_axis_tree
+from pyop3.itree.tree import (
+    IndexExpressionReplacer,
+    as_index_forest,
+    compose_axes,
+    index_axes,
+)
 from pyop3.lang import PetscMatStore
 from pyop3.utils import (
     deprecated,
@@ -136,9 +141,6 @@ class AbstractMat(Array, ContextFree):
     __iter__ = None
 
     def getitem(self, indices, *, strict=False):
-        from pyop3.itree.tree import _compose_bits, _index_axes, as_index_forest
-
-        # TODO also support context-free (see MultiArray.__getitem__)
         if len(indices) != 2:
             raise ValueError
 
@@ -185,31 +187,11 @@ class AbstractMat(Array, ContextFree):
         if rcforest.keys() == {pmap()}:
             rtree, ctree = rcforest[pmap()]
 
-            indexed_raxes = _index_axes(rtree, pmap(), self.raxes)
-            indexed_caxes = _index_axes(ctree, pmap(), self.caxes)
+            indexed_raxes = index_axes(rtree, pmap(), self.raxes)
+            raxes = compose_axes(indexed_raxes, self.raxes)
 
-            rtarget_paths, rindex_exprs = _compose_bits(
-                indexed_raxes,
-                self.raxes,
-            )
-            raxes = IndexedAxisTree(
-                indexed_raxes.node_map,
-                self.raxes.unindexed,
-                target_paths=rtarget_paths,
-                index_exprs=rindex_exprs,
-                layout_exprs={},
-                outer_loops=indexed_raxes.outer_loops,
-            )
-
-            ctarget_paths, cindex_exprs = _compose_bits(indexed_caxes, self.caxes)
-            caxes = IndexedAxisTree(
-                indexed_caxes.node_map,
-                self.caxes.unindexed,
-                target_paths=ctarget_paths,
-                index_exprs=cindex_exprs,
-                layout_exprs={},
-                outer_loops=indexed_caxes.outer_loops,
-            )
+            indexed_caxes = index_axes(ctree, pmap(), self.caxes)
+            caxes = compose_axes(indexed_caxes, self.caxes)
 
             return type(self)(
                 raxes,
@@ -222,31 +204,33 @@ class AbstractMat(Array, ContextFree):
         # Otherwise we are context-sensitive
         arrays = {}
         for ctx, (rtree, ctree) in rcforest.items():
-            indexed_raxes = _index_axes(rtree, ctx, self.raxes)
-            indexed_caxes = _index_axes(ctree, ctx, self.caxes)
+            indexed_raxes = index_axes(rtree, ctx, self.raxes)
+            indexed_caxes = index_axes(ctree, ctx, self.caxes)
 
             if indexed_raxes.alloc_size() == 0 or indexed_caxes.alloc_size() == 0:
                 continue
 
-            rtarget_paths, rindex_exprs = _compose_bits(indexed_raxes, self.raxes)
-            raxes = IndexedAxisTree(
-                indexed_raxes.node_map,
-                self.raxes.unindexed,
-                target_paths=rtarget_paths,
-                index_exprs=rindex_exprs,
-                layout_exprs={},
-                outer_loops=indexed_raxes.outer_loops,
-            )
+            # rtarget_paths, rindex_exprs = _compose_bits(indexed_raxes, self.raxes)
+            # raxes = IndexedAxisTree(
+            #     indexed_raxes.node_map,
+            #     self.raxes.unindexed,
+            #     target_paths=rtarget_paths,
+            #     index_exprs=rindex_exprs,
+            #     layout_exprs={},
+            #     outer_loops=indexed_raxes.outer_loops,
+            # )
+            raxes = compose_axes(indexed_raxes, self.raxes)
 
-            ctarget_paths, cindex_exprs = _compose_bits(indexed_caxes, self.caxes)
-            caxes = IndexedAxisTree(
-                indexed_caxes.node_map,
-                self.caxes.unindexed,
-                target_paths=ctarget_paths,
-                index_exprs=cindex_exprs,
-                layout_exprs={},
-                outer_loops=indexed_caxes.outer_loops,
-            )
+            # ctarget_paths, cindex_exprs = _compose_bits(indexed_caxes, self.caxes)
+            # caxes = IndexedAxisTree(
+            #     indexed_caxes.node_map,
+            #     self.caxes.unindexed,
+            #     target_paths=ctarget_paths,
+            #     index_exprs=cindex_exprs,
+            #     layout_exprs={},
+            #     outer_loops=indexed_caxes.outer_loops,
+            # )
+            caxes = compose_axes(indexed_caxes, self.caxes)
 
             arrays[ctx] = type(self)(
                 indexed_raxes,
