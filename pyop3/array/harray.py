@@ -568,14 +568,17 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
             current_axis = current_axis.get_part(idx.npart).subaxis
         return tuple(selected)
 
-    def copy(self, other):
+    def copy(self, other, subset=Ellipsis):
         """Copy the contents of the array into another."""
         # NOTE: Is copy_to/copy_into a clearer name for this?
         # TODO: Check that self and other are compatible, should have same axes and dtype
         # for sure
         # TODO: We can optimise here and copy the private data attribute and set halo
         # validity. Here we do the simple but hopefully correct thing.
-        other.data_wo[...] = self.data_ro
+        if subset is Ellipsis:
+            other.data_wo[...] = self.data_ro
+        else:
+            self[subset].assign(other[subset])
 
     # symbolic
     def zero(self, *, subset=Ellipsis):

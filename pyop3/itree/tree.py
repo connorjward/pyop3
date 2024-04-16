@@ -1197,7 +1197,7 @@ def _(
 
 
 @collect_shape_index_callback.register
-def _(index: ScalarIndex, indices, **kwargs):
+def _(index: ScalarIndex, indices, *, target_path_acc, prev_axes, **kwargs):
     target_path = freeze({None: just_one(index.leaf_target_paths)})
     index_exprs = freeze({None: {index.axis: index.value}})
     layout_exprs = freeze({None: 0})
@@ -1397,11 +1397,12 @@ def _(slice_: Slice, indices, *, target_path_acc, prev_axes, **kwargs):
         target_path_per_component[axis.id, cpt.label] = target_path
         index_exprs_per_component[axis.id, cpt.label] = index_exprs
         layout_exprs_per_component[axis.id, cpt.label] = layout_exprs
+
     return (
         axes,
-        target_path_per_component,
+        freeze(target_path_per_component),
         freeze(index_exprs_per_component),
-        layout_exprs_per_component,
+        freeze(layout_exprs_per_component),
         (),  # no outer loops
         {},
     )
@@ -1746,7 +1747,23 @@ def _index_axes_rec(
             subaxes[leafkey] = retval[0]
 
             for key in retval[1].keys():
-                if key in target_path_per_cpt_per_index:
+                if key is None:
+                    # if key is None then tie the things to the parent axis
+                    if subaxes[leafkey].is_empty:
+                        mykey = leafkey[0].id, leafkey[1]
+                        # don't overwite (better with defaultdict)
+                        if mykey in target_path_per_cpt_per_index:
+                            # NOTE: .update will not currently work as retval has pmaps
+                            target_path_per_cpt_per_index[mykey] = (
+                                target_path_per_cpt_per_index[mykey] | retval[1][None]
+                            )
+                            index_exprs_per_cpt_per_index[mykey] = (
+                                index_exprs_per_cpt_per_index[mykey] | retval[2][None]
+                            )
+                        else:
+                            target_path_per_cpt_per_index[mykey] = retval[1][None]
+                            index_exprs_per_cpt_per_index[mykey] = retval[2][None]
+                elif key in target_path_per_cpt_per_index:
                     target_path_per_cpt_per_index[key] = (
                         target_path_per_cpt_per_index[key] | retval[1][key]
                     )
