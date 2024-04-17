@@ -85,34 +85,15 @@ class AbstractMat(Array, ContextFree):
         mat=None,
         *,
         name=None,
-        # rtarget_paths=None,
-        # rindex_exprs=None,
-        # orig_raxes=None,
-        # router_loops=None,
-        # ctarget_paths=None,
-        # cindex_exprs=None,
-        # orig_caxes=None,
-        # couter_loops=None,
     ):
-        # TODO: Remove
-        # if strictly_all(
-        #     x is None
-        #     for x in [rtarget_paths, rindex_exprs, ctarget_paths, cindex_exprs]
-        # ):
-        #     rtarget_paths = raxes._default_target_paths()
-        #     rindex_exprs = raxes._default_index_exprs()
-        #     orig_raxes = raxes
-        #     router_loops = ()
-        #     ctarget_paths = caxes._default_target_paths()
-        #     cindex_exprs = caxes._default_index_exprs()
-        #     orig_caxes = caxes
-        #     couter_loops = ()
-
         raxes = as_axis_tree(raxes)
         caxes = as_axis_tree(caxes)
 
         if mat_type is None:
             mat_type = self.DEFAULT_MAT_TYPE
+
+        if mat_type == "baij":
+            raise NotImplementedError("Need to give Mats a shape")
 
         if mat is None:
             mat = self._make_mat(raxes, caxes, mat_type)

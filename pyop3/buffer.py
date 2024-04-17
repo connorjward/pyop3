@@ -201,6 +201,14 @@ class DistributedBuffer(Buffer):
         self._leaves_valid = False
         return self._owned_data
 
+    def copy(self):
+        return type(self)(
+            self.shape,
+            self.sf,
+            data=self.data,
+            name=f"{self.name}_copy",
+        )
+
     @property
     def is_distributed(self) -> bool:
         return self.comm.size > 1

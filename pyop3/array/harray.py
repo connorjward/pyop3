@@ -140,10 +140,6 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         *,
         data=None,
         max_value=None,
-        # layouts=None,
-        # target_paths=None,
-        # index_exprs=None,
-        # outer_loops=None,
         name=None,
         prefix=None,
         constant=False,
@@ -568,6 +564,17 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
             current_axis = current_axis.get_part(idx.npart).subaxis
         return tuple(selected)
 
+    # better to call copy
+    def copy2(self):
+        return type(self)(
+            self.axes,
+            data=self.buffer.copy(),
+            max_value=self.max_value,
+            name=f"{self.name}_copy",
+            constant=self.constant,
+        )
+
+    # assign is a much better name for this
     def copy(self, other, subset=Ellipsis):
         """Copy the contents of the array into another."""
         # NOTE: Is copy_to/copy_into a clearer name for this?
@@ -575,7 +582,8 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         # for sure
         # TODO: We can optimise here and copy the private data attribute and set halo
         # validity. Here we do the simple but hopefully correct thing.
-        if subset is Ellipsis:
+        # None is an old potential argument here.
+        if subset is Ellipsis or subset is None:
             other.data_wo[...] = self.data_ro
         else:
             self[subset].assign(other[subset])
@@ -585,6 +593,8 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         return ReplaceAssignment(self[subset], 0)
 
     def eager_zero(self, *, subset=Ellipsis):
+        if subset is None:
+            subset = Ellipsis
         self.zero(subset=subset)()
 
 
