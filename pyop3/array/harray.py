@@ -28,7 +28,7 @@ from pyop3.axtree import (
     as_axis_tree,
 )
 from pyop3.axtree.layout import eval_offset
-from pyop3.axtree.tree import Indexed, IndexedAxisTree, MultiArrayCollector
+from pyop3.axtree.tree import IndexedAxisTree, MultiArrayCollector
 from pyop3.buffer import Buffer, DistributedBuffer
 from pyop3.dtypes import IntType, ScalarType
 from pyop3.lang import KernelArgument, ReplaceAssignment
@@ -74,12 +74,6 @@ class ArrayVar(pym.primitives.AlgebraicLeaf):
     def __getinitargs__(self):
         return (self.array, self.indices, self.path)
 
-    # def __str__(self) -> str:
-    #     return f"{self.array.name}[{{{', '.join(f'{i[0]}: {i[1]}' for i in self.indices.items())}}}]"
-    #
-    # def __repr__(self) -> str:
-    #     return f"MultiArrayVariable({self.array!r}, {self.indices!r})"
-
 
 from pymbolic.mapper.stringifier import PREC_CALL, PREC_NONE, StringifyMapper
 
@@ -101,29 +95,11 @@ pym.mapper.stringifier.StringifyMapper.map_array = stringify_array
 CalledMapVariable = ArrayVar
 
 
-# does not belong here!
-# class CalledMapVariable(ArrayVar):
-#     mapper_method = sys.intern("map_called_map_variable")
-#
-#     def __init__(self, array, path, input_index_exprs, shape_index_exprs):
-#         super().__init__(array, {**input_index_exprs, **shape_index_exprs}, path)
-#         self.input_index_exprs = freeze(input_index_exprs)
-#         self.shape_index_exprs = freeze(shape_index_exprs)
-#
-#     def __getinitargs__(self):
-#         return (
-#             self.array,
-#             self.target_path,
-#             self.input_index_exprs,
-#             self.shape_index_exprs,
-#         )
-
-
 class FancyIndexWriteException(Exception):
     pass
 
 
-class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
+class HierarchicalArray(Array, ContextFree, KernelArgument):
     """Multi-dimensional, hierarchical array.
 
     Parameters
@@ -189,35 +165,6 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         # TODO This attr really belongs to the buffer not the array
         self.constant = constant
 
-        # if some_but_not_all(x is None for x in [target_paths, index_exprs]):
-        #     raise ValueError
-
-        # if target_paths is None:
-        #     target_paths = axes._default_target_paths()
-        # if index_exprs is None:
-        #     index_exprs = axes._default_index_exprs()
-        #
-        # self._target_paths = freeze(target_paths)
-        # self._index_exprs = freeze(index_exprs)
-        # self._outer_loops = outer_loops or ()
-        #
-        # self._layouts = layouts if layouts is not None else axes.layouts
-
-    @property
-    @deprecated()
-    def target_paths(self):
-        return self.axes.target_paths
-
-    @property
-    @deprecated()
-    def index_exprs(self):
-        return self.axes.index_exprs
-
-    @property
-    @deprecated()
-    def layouts(self):
-        return self.axes.layouts
-
     def __str__(self):
         return self.name
 
@@ -254,13 +201,8 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
     __iter__ = None
 
     @property
-    @deprecated("buffer")
-    def array(self):
-        return self.buffer
-
-    @property
     def dtype(self):
-        return self.array.dtype
+        return self.buffer.dtype
 
     @property
     def kernel_dtype(self):
@@ -425,7 +367,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
 
     @property
     def sf(self):
-        return self.array.sf
+        return self.buffer.sf
 
     @property
     def comm(self):
@@ -436,11 +378,13 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         datamap_ = {}
         datamap_.update(self.buffer.datamap)
         datamap_.update(self.axes.datamap)
-        for index_exprs in self.index_exprs.values():
+
+        # FIXME, deleting this breaks stuff...
+        for index_exprs in self.axes.index_exprs.values():
             for expr in index_exprs.values():
                 for array in MultiArrayCollector()(expr):
                     datamap_.update(array.datamap)
-        for layout_expr in self.layouts.values():
+        for layout_expr in self.axes.layouts.values():
             for array in MultiArrayCollector()(layout_expr):
                 datamap_.update(array.datamap)
         return freeze(datamap_)
@@ -457,9 +401,9 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
 
         """
         if update_leaves:
-            self.array._reduce_then_broadcast()
+            self.buffer._reduce_then_broadcast()
         else:
-            self.array._reduce_leaves_to_roots()
+            self.buffer._reduce_leaves_to_roots()
 
     def materialize(self) -> HierarchicalArray:
         """Return a new "unindexed" array with the same shape."""
@@ -491,7 +435,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         assert False, "do not use, it's wrong"
         return type(self)(
             axes,
-            data=self.array,
+            data=self.buffer,
             max_value=self.max_value,
             name=self.name,
         )
@@ -518,7 +462,7 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
         if isinstance(count, Sequence):
             count = cls.from_list(count, axis_labels[:-1], name, dtype, inc + 1)
             subaxis = Axis(count, axis_labels[-1])
-            axes = count.axes.add_subaxis(subaxis, count.axes.leaf)
+            axes = count.axes.add_axis(subaxis, count.axes.leaf)
         else:
             axes = AxisTree(Axis(count, axis_labels[-1]))
 
@@ -546,15 +490,6 @@ class HierarchicalArray(Array, Indexed, ContextFree, KernelArgument):
     def set_value(self, indices, value, path=None, *, loop_exprs=pmap()):
         offset = self.axes.offset(indices, path, loop_exprs=loop_exprs)
         self.buffer.data_wo[offset] = value
-
-    # def offset(self, indices, path=None, *, loop_exprs=pmap()):
-    #     return eval_offset(
-    #         self.axes,
-    #         self.subst_layouts,
-    #         indices,
-    #         path,
-    #         loop_exprs=loop_exprs,
-    #     )
 
     def select_axes(self, indices):
         selected = []
@@ -656,10 +591,6 @@ class ContextSensitiveMultiArray(Array, ContextSensitive):
         #     )
         #
         # return ContextSensitiveMultiArray(array_per_context)
-
-    @property
-    def array(self):
-        return self._shared_attr("array")
 
     @property
     def buffer(self):

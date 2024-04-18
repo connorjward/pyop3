@@ -56,11 +56,6 @@ class Node(pytools.ImmutableRecord, Identified):
 
 # TODO delete this class, no longer different tree types
 class AbstractTree(abc.ABC):
-    @property
-    @deprecated("node_map")
-    def parent_to_children(self):
-        return self.node_map
-
     def __init__(self, node_map=None):
         self.node_map = self._parse_parent_to_children(node_map)
 
@@ -99,7 +94,7 @@ class AbstractTree(abc.ABC):
     @cached_property
     def child_to_parent(self):
         child_to_parent_ = {}
-        for parent_id, children in self.parent_to_children.items():
+        for parent_id, children in self.node_map.items():
             parent = self._as_node(parent_id)
             for i, child in enumerate(children):
                 child_to_parent_[child] = (parent, i)
@@ -144,36 +139,36 @@ class AbstractTree(abc.ABC):
 
     def children(self, node):
         node_id = self._as_node_id(node)
-        return self.parent_to_children.get(node_id, ())
+        return self.node_map.get(node_id, ())
 
     # TODO, could be improved
     @staticmethod
-    def _parse_parent_to_children(parent_to_children):
-        if not parent_to_children:
+    def _parse_parent_to_children(node_map):
+        if not node_map:
             return pmap()
-        elif isinstance(parent_to_children, Node):
+        elif isinstance(node_map, Node):
             # just passing root
-            return freeze({None: (parent_to_children,)})
+            return freeze({None: (node_map,)})
         else:
-            parent_to_children = dict(parent_to_children)
-            if None not in parent_to_children:
+            node_map = dict(node_map)
+            if None not in node_map:
                 raise ValueError("Root missing from tree")
-            elif len(parent_to_children[None]) != 1:
+            elif len(node_map[None]) != 1:
                 raise ValueError("Multiple roots provided, this is not allowed")
             else:
                 node_ids = [
                     node.id
-                    for node in chain.from_iterable(parent_to_children.values())
+                    for node in chain.from_iterable(node_map.values())
                     if node is not None
                 ]
                 if not has_unique_entries(node_ids):
                     raise ValueError("Nodes with duplicate IDs found")
                 if any(
                     parent_id not in node_ids
-                    for parent_id in parent_to_children.keys() - {None}
+                    for parent_id in node_map.keys() - {None}
                 ):
                     raise ValueError("Tree is disconnected")
-            return freeze(parent_to_children)
+            return freeze(node_map)
 
     @staticmethod
     def _parse_node(node):
@@ -254,7 +249,7 @@ class LabelledTree(AbstractTree):
         super().__init__(node_map=node_map)
 
         # post-init checks
-        self._check_node_labels_unique_in_paths(self.parent_to_children)
+        self._check_node_labels_unique_in_paths(self.node_map)
 
     @classmethod
     def _check_node_labels_unique_in_paths(
@@ -276,15 +271,11 @@ class LabelledTree(AbstractTree):
                 node_map, subnode, seen_labels | {node.label}
             )
 
-    @deprecated("child")
-    def component_child(self, parent, component):
-        return self.child(parent, component)
-
     def child(self, parent, component):
         clabel = as_component_label(component)
         cidx = parent.component_labels.index(clabel)
         try:
-            return self.parent_to_children[parent.id][cidx]
+            return self.node_map[parent.id][cidx]
         except (KeyError, IndexError):
             return None
 
@@ -427,7 +418,7 @@ class LabelledTree(AbstractTree):
         while True:
             cpt_label = path_.pop(node.label)
             cpt_index = node.component_labels.index(cpt_label)
-            new_node = self.parent_to_children.get(node.id, [None] * node.degree)[
+            new_node = self.node_map.get(node.id, [None] * node.degree)[
                 cpt_index
             ]
 
@@ -528,24 +519,24 @@ class LabelledTree(AbstractTree):
 
     # TODO, could be improved, same as other Tree apart from [None, None, ...] bit
     @staticmethod
-    def _parse_parent_to_children(parent_to_children):
-        if not parent_to_children:
+    def _parse_parent_to_children(node_map):
+        if not node_map:
             return pmap()
 
-        if isinstance(parent_to_children, Node):
+        if isinstance(node_map, Node):
             # just passing root
-            parent_to_children = {None: (parent_to_children,)}
+            node_map = {None: (node_map,)}
         else:
-            parent_to_children = dict(parent_to_children)
+            node_map = dict(node_map)
 
-        if None not in parent_to_children:
+        if None not in node_map:
             raise ValueError("Root missing from tree")
-        if len(parent_to_children[None]) != 1:
+        if len(node_map[None]) != 1:
             raise ValueError("Multiple roots provided, this is not allowed")
 
         nodes = [
             node
-            for node in chain.from_iterable(parent_to_children.values())
+            for node in chain.from_iterable(node_map.values())
             if node is not None
         ]
         node_ids = [n.id for n in nodes]
@@ -553,13 +544,13 @@ class LabelledTree(AbstractTree):
             raise ValueError("Nodes with duplicate IDs found")
         if any(
             parent_id not in node_ids
-            for parent_id in parent_to_children.keys() - {None}
+            for parent_id in node_map.keys() - {None}
         ):
             raise ValueError("Tree is disconnected")
         for node in nodes:
-            if node.id not in parent_to_children.keys():
-                parent_to_children[node.id] = [None] * node.degree
-        return freeze(parent_to_children)
+            if node.id not in node_map.keys():
+                node_map[node.id] = [None] * node.degree
+        return freeze(node_map)
 
     @staticmethod
     def _parse_node(node):
@@ -594,7 +585,7 @@ class MutableLabelledTreeMixin:
 
             cpt_index = parent_node.component_labels.index(parent_component_label)
 
-            if self.parent_to_children[parent_node.id][cpt_index] is not None:
+            if self.node_map[parent_node.id][cpt_index] is not None:
                 raise ValueError("Node already exists at this location")
 
             if node in self:
@@ -604,27 +595,10 @@ class MutableLabelledTreeMixin:
                     raise ValueError("Cannot insert a node with the same ID")
 
             new_parent_to_children = {
-                k: list(v) for k, v in self.parent_to_children.items()
+                k: list(v) for k, v in self.node_map.items()
             }
             new_parent_to_children[parent_node.id][cpt_index] = node
             return type(self)(new_parent_to_children)
-
-    def replace_node(self, old_node, new_node):
-        parent_to_children = {k: list(v) for k, v in self.parent_to_children.items()}
-        parent_to_children[new_node.id] = parent_to_children.pop(old_node.id)
-        parent, pidx = self.parent(old_node)
-        parent_id = parent.id if parent is not None else None
-        parent_to_children[parent_id][pidx] = new_node
-        return self.copy(parent_to_children=parent_to_children)
-
-    def with_modified_node(self, node, **kwargs):
-        node = self._as_node(node)
-        return self.replace_node(node, node.copy(**kwargs))
-
-    def with_modified_component(self, node, component, **kwargs):
-        return self.replace_node(
-            node, node.with_modified_component(component, **kwargs)
-        )
 
     def add_subtree(
         self,
@@ -669,9 +643,9 @@ class MutableLabelledTreeMixin:
         assert isinstance(parent, MultiComponentLabelledNode)
         clabel = as_component_label(component)
         cidx = parent.component_labels.index(clabel)
-        parent_to_children = {p: list(ch) for p, ch in self.parent_to_children.items()}
+        parent_to_children = {p: list(ch) for p, ch in self.node_map.items()}
 
-        sub_p2c = {p: list(ch) for p, ch in subtree.parent_to_children.items()}
+        sub_p2c = {p: list(ch) for p, ch in subtree.node_map.items()}
         if uniquify_ids:
             self._uniquify_node_ids(sub_p2c, set(parent_to_children.keys()))
             assert (

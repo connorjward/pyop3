@@ -342,7 +342,7 @@ class AbstractMat(Array, ContextFree):
                     ].items()
                     if ax == cfield_axis.label
                 )
-                orig_caxes = AxisTree(self.orig_caxes[cfield].parent_to_children)
+                orig_caxes = AxisTree(self.orig_caxes[cfield].node_map)
                 orig_caxess = [orig_caxes]
                 dropped_ckeys = {cfield_axis.label}
             else:

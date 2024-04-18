@@ -54,33 +54,6 @@ class ExpectedLinearAxisTreeException(Exception):
     ...
 
 
-class Indexed(abc.ABC):
-    @property
-    @abc.abstractmethod
-    def axes(self):
-        pass
-
-    @property
-    @abc.abstractmethod
-    def target_paths(self):
-        pass
-
-    @property
-    @abc.abstractmethod
-    def index_exprs(self):
-        pass
-
-    @property
-    @abc.abstractmethod
-    def outer_loops(self):
-        pass
-
-    @property
-    @abc.abstractmethod
-    def layouts(self):
-        pass
-
-
 class ContextAware(abc.ABC):
     @abc.abstractmethod
     def with_context(self, context):
@@ -220,55 +193,26 @@ class ExpressionEvaluator(pym.mapper.evaluator.EvaluationMapper):
         return self._loop_exprs[expr.id][expr.axis]
 
 
+# This can just be replaced by component.datamap
 def _collect_datamap(axis, *subdatamaps, axes):
-    from pyop3.array import HierarchicalArray
-
     datamap = {}
-    for cidx, component in enumerate(axis.components):
-        if isinstance(count := component.count, HierarchicalArray):
-            datamap.update(count.datamap)
+    for component in axis.components:
+        datamap.update(component.datamap)
 
     datamap.update(merge_dicts(subdatamaps))
     return datamap
 
 
 class AxisComponent(LabelledNodeComponent):
-    """
-    Parameters
-    ----------
-    indexed : bool
-        Is this axis indexed (as part of a temporary) - used to generate the right layouts
-
-    indices
-        If the thing is sparse then we need to specify the indices of the sparsity here.
-        This is like CSR. This is normally a nested/ragged thing.
-
-        E.g. a diagonal matrix would be 3 x [1, 1, 1] with indices being [0, 1, 2]. The
-        CSR row pointers are [0, 1, 2] (we already calculate this), but when we look up
-        the values we use [0, 1, 2] instead of [0, 0, 0]. A binary search of all the
-        indices is required to find the right offset.
-
-        Note that this is an entirely separate concept to the numbering. Imagine a
-        sparse matrix where the row and column axes are renumbered. The indices are
-        still sorted. The indices gives us a mapping from "dense" indices to "sparse"
-        ones. This is normally inverted (via binary search) to get the "dense" index
-        from the "sparse" one. The numbering then concerns the lookup from dense
-        indices to an offset. This means, for example, that the numbering of a sparse
-        thing is dense and contains the numbers [0, ..., ndense).
-
-    """
-
-    fields = LabelledNodeComponent.fields | {"count", "unit"}
+    fields = LabelledNodeComponent.fields | {"count", "unit", "rank_equal"}
 
     def __init__(
         self,
         count,
         label=None,
         *,
-        indices=None,
-        indexed=False,
-        lgmap=None,
         unit=False,
+        rank_equal=True,  # bad name?
     ):
         from pyop3.array import HierarchicalArray
 
@@ -282,6 +226,17 @@ class AxisComponent(LabelledNodeComponent):
         super().__init__(label=label)
         self.count = count
         self.unit = unit
+        self.rank_equal = rank_equal
+
+    @cached_property
+    def _collective_count(self):
+        """Return the size of the axis component in a format consistent over ranks."""
+        from pyop3 import HierarchicalArray
+
+        if isinstance(self.count, numbers.Integral) and not self.rank_equal:
+            return HierarchicalArray(AxisTree(), data=np.asarray([self.count], dtype=IntType), prefix="size")
+        else:
+            return self.count
 
     # TODO this is just a traversal - clean up
     def alloc_size(self, axtree, axis):
@@ -295,7 +250,7 @@ class AxisComponent(LabelledNodeComponent):
 
         assert npoints is not None
 
-        if subaxis := axtree.component_child(axis, self):
+        if subaxis := axtree.child(axis, self):
             size = npoints * axtree.alloc_size(subaxis)
         else:
             size = npoints
@@ -303,6 +258,13 @@ class AxisComponent(LabelledNodeComponent):
         # TODO: May be excessive
         # Cast to an int as numpy integers cause loopy to break
         return strict_int(size)
+
+    @cached_property
+    def datamap(self):
+        if not isinstance(self._collective_count, numbers.Integral):
+            return self._collective_count.datamap
+        else:
+            return pmap()
 
 
 class Axis(LoopIterable, MultiComponentLabelledNode):
@@ -406,26 +368,25 @@ class Axis(LoopIterable, MultiComponentLabelledNode):
 
     @cached_property
     def count_per_component(self):
-        return freeze({c: c.count for c in self.components})
+        return freeze({c.label: c.count for c in self.components})
 
     @cached_property
-    # @parallel_only
     def owned_count_per_component(self):
         return freeze(
             {
-                cpt: count - self.ghost_count_per_component[cpt]
-                for cpt, count in self.count_per_component.items()
+                clabel: count - self.ghost_count_per_component[clabel]
+                for clabel, count in self.count_per_component.items()
             }
         )
 
     @cached_property
-    # @parallel_only
     def ghost_count_per_component(self):
         counts = np.zeros_like(self.components, dtype=int)
-        for leaf_index in self.sf.ileaf:
-            counts[self._axis_number_to_component_index(leaf_index)] += 1
+        if self.comm.size > 1:
+            for leaf_index in self.sf.ileaf:
+                counts[self._axis_number_to_component_index(leaf_index)] += 1
         return freeze(
-            {cpt: count for cpt, count in checked_zip(self.components, counts)}
+            {cpt.label: count for cpt, count in checked_zip(self.components, counts)}
         )
 
     @cached_property
@@ -438,7 +399,7 @@ class Axis(LoopIterable, MultiComponentLabelledNode):
         slices = [
             AffineSliceComponent(
                 c.label,
-                stop=self.owned_count_per_component[c],
+                stop=self.owned_count_per_component[c.label],
             )
             for c in self.components
         ]
@@ -759,11 +720,13 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
         else:
             dmap = postvisit(self, _collect_datamap, axes=self)
 
-        for cleverdict in [self.index_exprs]:
-            for exprs in cleverdict.values():
-                for expr in exprs.values():
-                    for array in MultiArrayCollector()(expr):
-                        dmap.update(array.datamap)
+        for index_exprs in self.index_exprs.values():
+            for expr in index_exprs.values():
+                for array in MultiArrayCollector()(expr):
+                    dmap.update(array.datamap)
+        for layout_expr in self.layouts.values():
+            for array in MultiArrayCollector()(layout_expr):
+                dmap.update(array.datamap)
         return pmap(dmap)
 
     @cached_property
@@ -784,7 +747,7 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
         slices = [
             AffineSliceComponent(
                 c.label,
-                stop=paraxis.owned_count_per_component[c],
+                stop=paraxis.owned_count_per_component[c.label],
                 # this feels like a hack, generally don't want this ambiguity
                 label=c.label,
             )
@@ -1059,10 +1022,6 @@ class AxisTree(MutableLabelledTreeMixin, BaseAxisTree):
                     "Can only append axes to trees with one leaf."
                 )
 
-    @deprecated("add_axis")
-    def add_subaxis(self, *args, **kwargs):
-        return self.add_axis(*args, **kwargs)
-
     @property
     def layout_axes(self):
         return self
@@ -1073,9 +1032,8 @@ class AxisTree(MutableLabelledTreeMixin, BaseAxisTree):
         from pyop3.axtree.layout import (
             _collect_at_leaves,
             _compute_layouts,
-            collect_externally_indexed_axes,
         )
-        from pyop3.itree.tree import IndexExpressionReplacer, LoopIndexVariable
+        from pyop3.itree.tree import IndexExpressionReplacer
 
         if self.layout_axes.is_empty:
             return freeze({pmap(): 0})
@@ -1216,7 +1174,7 @@ class IndexedAxisTree(BaseAxisTree):
         loop_axes = relabel_axes(loop.iterset, suffix)
 
         # Nasty hack: loop_axes need to be a PartialAxisTree so we can add to it.
-        loop_axes = AxisTree(loop_axes.parent_to_children)
+        loop_axes = AxisTree(loop_axes.node_map)
 
         # When we tabulate the layout, the layout expressions will contain
         # axis variables that we actually want to be loop index variables. Here
@@ -1322,8 +1280,8 @@ def _(arg: numbers.Integral) -> AxisComponent:
 
 def relabel_axes(axes: AxisTree, suffix: str) -> AxisTree:
     # comprehension?
-    parent_to_children = {}
-    for parent_id, children in axes.parent_to_children.items():
+    node_map = {}
+    for parent_id, children in axes.node_map.items():
         children_ = []
         for axis in children:
             if axis is not None:
@@ -1331,8 +1289,8 @@ def relabel_axes(axes: AxisTree, suffix: str) -> AxisTree:
             else:
                 axis_ = None
             children_.append(axis_)
-        parent_to_children[parent_id] = children_
-    return AxisTree(parent_to_children)
+        node_map[parent_id] = children_
+    return AxisTree(node_map)
 
 
 def subst_layouts(

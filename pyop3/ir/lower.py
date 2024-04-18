@@ -474,9 +474,11 @@ def compile(expr: Instruction, name="mykernel"):
     tu = lp.merge((translation_unit, *ctx.subkernels))
 
     # add callables
-    tu = lp.register_callable(tu, "bsearch", BinarySearchCallable())
+    # tu = lp.register_callable(tu, "bsearch", BinarySearchCallable())
 
     tu = tu.with_entrypoints(name)
+
+    # breakpoint()
 
     return CodegenResult(expr, tu, ctx.kernel_to_actual_rename_map)
 
@@ -573,12 +575,10 @@ def parse_loop_properly_this_time(
         axis_index_exprs = axes.index_exprs.get((axis.id, component.label), {})
         index_exprs_ = index_exprs | axis_index_exprs
 
-        # FIXME: This is not the cause of my problems
-        # if component.count != 1:
-        if True:
+        if component._collective_count != 1:
             iname = codegen_context.unique_name("i")
             extent_var = register_extent(
-                component.count,
+                component._collective_count,
                 iname_replace_map | loop_indices,
                 codegen_context,
             )
@@ -877,12 +877,11 @@ def parse_assignment_properly_this_time(
         return
 
     for component in axis.components:
-        # if component.count != 1:
-        if True:
+        if component._collective_count != 1:
             iname = codegen_context.unique_name("i")
 
             extent_var = register_extent(
-                component.count,
+                component._collective_count,
                 iname_replace_map | loop_indices,
                 codegen_context,
             )
@@ -1003,7 +1002,7 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         # layout = my_layouts[expr.path]
 
         # We need to substitute expr.indices into expr.layouts
-        layout = expr.array.layouts[expr.path]
+        layout = expr.array.axes.layouts[expr.path]
         # mylayout = expr.array.subst_layouts[expr.path]
         # layout = IndexExpressionReplacer(expr.indices)(mylayout)
 
@@ -1135,7 +1134,7 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         nitems_varname = ctx.unique_name("nitems")
         ctx.add_temporary(nitems_varname)
 
-        nitems_expr = register_extent(leaf_component.count, replace_map, ctx)
+        nitems_expr = register_extent(leaf_component._collective_count, replace_map, ctx)
 
         # result
         found_varname = ctx.unique_name("ptr")
@@ -1179,11 +1178,11 @@ def register_extent(extent, iname_replace_map, ctx):
     else:
         path = pmap()
 
-    index_exprs = extent.index_exprs.get(None, {})
+    index_exprs = extent.axes.index_exprs.get(None, {})
     # extent must be linear
     if not extent.axes.is_empty:
         for axis, cpt in extent.axes.path_with_nodes(*extent.axes.leaf).items():
-            index_exprs.update(extent.index_exprs[axis.id, cpt])
+            index_exprs.update(extent.axes.index_exprs[axis.id, cpt])
 
     expr = _scalar_assignment(extent, path, index_exprs, iname_replace_map, ctx)
 
@@ -1216,16 +1215,16 @@ def _scalar_assignment(
         (axis.id, cpt.label)
         for axis, cpt in array.axes.detailed_path(source_path).items()
     ]
-    target_path = merge_dicts(array.target_paths.get(key, {}) for key in index_keys)
-    # index_exprs = merge_dicts(array.index_exprs.get(key, {}) for key in index_keys)
+    target_path = merge_dicts(array.axes.target_paths.get(key, {}) for key in index_keys)
 
     jname_replace_map = {}
     replacer = JnameSubstitutor(iname_replace_map, ctx)
     for axlabel, index_expr in index_exprs.items():
         jname_replace_map[axlabel] = replacer(index_expr)
 
+    # subst_layouts?
     offset_expr = make_offset_expr(
-        array.layouts[target_path],
+        array.axes.layouts[target_path],
         jname_replace_map,
         ctx,
     )

@@ -158,7 +158,7 @@ class Loop(Instruction):
             code = compile(parallel_loop)
 
             # interleave communication and computation
-            initializers, finalizerss = self._array_updates()
+            initializers, (reductions, broadcasts) = self._array_updates()
 
             for init in initializers:
                 init()
@@ -171,8 +171,8 @@ class Loop(Instruction):
             code(**core_kwargs)
 
             # await reductions
-            for fin in finalizerss[0]:
-                fin()
+            for red in reductions:
+                red()
 
             # roots
             # replace the parallel axis subset with one for the specific indices here
@@ -183,8 +183,8 @@ class Loop(Instruction):
             code(**root_kwargs)
 
             # await broadcasts
-            for fin in finalizerss[1]:
-                fin()
+            for broadcast in broadcasts:
+                broadcast()
 
             # leaves
             leaf_extent = just_one(ileaf.axes.root.components).count
@@ -262,6 +262,16 @@ class Loop(Instruction):
             (arr, *arrays[arr]) for arr in sorted(arrays.keys(), key=lambda a: a.name)
         )
 
+    @cached_property
+    def _mats(self):
+        from pyop3 import Mat
+
+        mats = []
+        for arg in self.kernel_arguments:
+            if isinstance(arg, Mat):
+                mats.append(arg)
+        return tuple(mats)
+
     def _array_updates(self):
         """Collect appropriate callables for updating shared values in the right order.
 
@@ -338,6 +348,9 @@ class Loop(Instruction):
 
             else:
                 raise AssertionError
+
+        for mat in self._mats:
+            finalizerss[1].append(mat.assemble)
 
         return initializers, finalizerss
 

@@ -287,7 +287,7 @@ class ImplicitPackUnpackExpander(Transformer):
 
             # emit function calls for PetscMat
             if isinstance(arg, AbstractMat):
-                axes = AxisTree(arg.axes.parent_to_children)
+                axes = AxisTree(arg.axes.node_map)
                 new_arg = HierarchicalArray(
                     axes,
                     data=NullBuffer(arg.dtype),  # does this need a size?
@@ -328,49 +328,6 @@ class ImplicitPackUnpackExpander(Transformer):
                 arguments.append(arg)
                 continue
 
-            # TODO: old code, delete
-            # emit function calls for PetscMat
-            # this is a separate stage to the assignment operations because one
-            # can index a packed mat. E.g. mat[p, q][::2] would decompose into
-            # two calls, one to pack t0 <- mat[p, q] and another to pack t1 <- t0[::2]
-            # if (
-            #     isinstance(arg, Pack)
-            #     and isinstance(arg.big.buffer, PackedBuffer)
-            #     or not isinstance(arg, Pack)
-            #     and isinstance(arg.buffer, PackedBuffer)
-            # ):
-            #     if isinstance(arg, Pack):
-            #         myarg = arg.big
-            #     else:
-            #         myarg = arg
-            #
-            #     # TODO add PackedPetscMat as a subclass of buffer?
-            #     if not isinstance(myarg.buffer.array, PetscMat):
-            #         raise NotImplementedError("Only handle Mat at the moment")
-            #
-            #     axes = AxisTree(myarg.axes.parent_to_children)
-            #     new_arg = HierarchicalArray(
-            #         axes,
-            #         data=NullBuffer(myarg.dtype),  # does this need a size?
-            #         prefix="t",
-            #     )
-            #
-            #     if intent == READ:
-            #         gathers.append(PetscMatLoad(myarg, new_arg))
-            #     elif intent == WRITE:
-            #         scatters.insert(0, PetscMatStore(myarg, new_arg))
-            #     elif intent == RW:
-            #         gathers.append(PetscMatLoad(myarg, new_arg))
-            #         scatters.insert(0, PetscMatStore(myarg, new_arg))
-            #     else:
-            #         assert intent == INC
-            #         gathers.append(ReplaceAssignment(new_arg, 0))
-            #         scatters.insert(0, PetscMatAdd(myarg, new_arg))
-            #
-            #     # the rest of the packing code is now dealing with the result of this
-            #     # function call
-            #     arg = new_arg
-
             # unpick pack/unpack instructions
             if intent != NA and _requires_pack_unpack(arg):
                 is_petsc_mat = isinstance(arg, AbstractMat)
@@ -382,9 +339,6 @@ class ImplicitPackUnpackExpander(Transformer):
                     data=NullBuffer(arg.dtype),  # does this need a size?
                     prefix="t",
                 )
-
-                # debug
-                temporary.layouts
 
                 if intent == READ:
                     if is_petsc_mat:

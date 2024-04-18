@@ -35,31 +35,6 @@ from pyop3.utils import (
     strictly_all,
 )
 
-# hacky class for index_exprs to work, needs cleaning up
-# class AxisVariable(pym.primitives.Variable):
-#     init_arg_names = ("axis",)
-#
-#     mapper_method = sys.intern("map_axis_variable")
-#
-#     mycounter = 0
-#
-#     def __init__(self, axis):
-#         super().__init__(f"var{self.mycounter}")
-#         self.__class__.mycounter += 1  # ugly
-#         self.axis_label = axis
-#
-#     def __getinitargs__(self):
-#         # not very happy about this, is the name required?
-#         return (self.axis,)
-#
-#     @property
-#     def axis(self):
-#         return self.axis_label
-#
-#     @property
-#     def datamap(self):
-#         return pmap()
-
 
 class IntRef:
     """Pass-by-reference integer."""
@@ -82,7 +57,7 @@ def has_independently_indexed_subaxis_parts(axes, axis, cpt):
 
     Note that we need to consider both ragged sizes and permutations here
     """
-    if subaxis := axes.component_child(axis, cpt):
+    if subaxis := axes.child(axis, cpt):
         return not any(
             requires_external_index(axes, subaxis, c) for c in subaxis.components
         )
@@ -190,7 +165,7 @@ def has_halo(axes, axis):
         return True
     else:
         for component in axis.components:
-            subaxis = axes.component_child(axis, component)
+            subaxis = axes.child(axis, component)
             if subaxis and has_halo(axes, subaxis):
                 return True
         return False
@@ -229,7 +204,7 @@ def collect_externally_indexed_axes(axes, axis=None, component=None, path=pmap()
     if isinstance(csize, HierarchicalArray):
         # is the path sufficient? i.e. do we have enough externally provided indices
         # to correctly index the axis?
-        loop_indices = collect_external_loops(csize.axes, csize.index_exprs)
+        loop_indices = collect_external_loops(csize.axes, csize.axes.index_exprs)
         for index in sorted(loop_indices, key=lambda i: i.id):
             external_axes[index.id] = index
     else:
@@ -512,10 +487,10 @@ def _compute_layouts(
                     (axis.id, cpt) for axis, cpt in source_path.items()
                 ]
                 mytargetpath = merge_dicts(
-                    offset_data.target_paths.get(key, {}) for key in index_keys
+                    offset_data.axes.target_paths.get(key, {}) for key in index_keys
                 )
                 myindices = merge_dicts(
-                    offset_data.index_exprs.get(key, {}) for key in index_keys
+                    offset_data.axes.index_exprs.get(key, {}) for key in index_keys
                 )
                 offset_var = ArrayVar(offset_data, myindices, mytargetpath)
 
@@ -540,9 +515,7 @@ def _compute_layouts(
             assert all(sub is None for sub in csubtrees)
             layouts = {}
             steps = [
-                # step_size(axes, axis, c, index_exprs_acc_)
                 step_size(axes, axis, c)
-                # step_size(axes, axis, c, subloops[i])
                 for i, c in enumerate(axis.components)
             ]
             start = 0
@@ -550,14 +523,7 @@ def _compute_layouts(
                 mycomponent = axis.components[cidx]
                 sublayouts = sublayoutss[cidx].copy()
 
-                # key = (axis.id, mycomponent.label)
-                # axis_var = index_exprs[key][axis.label]
                 axis_var = AxisVariable(axis.label)
-                # axis_var = axes.index_exprs[key][axis.label]
-                # if key in index_exprs:
-                #     axis_var = index_exprs[key][axis.label]
-                # else:
-                #     axis_var = AxisVariable(axis.label)
                 new_layout = axis_var * step + start
 
                 sublayouts[layout_path | {axis.label: mycomponent.label}] = new_layout
@@ -630,22 +596,8 @@ def _create_count_array_tree(
             else:
                 index_exprs = axtree.index_exprs
 
-            # think this is completely unnecessary - just use the AxisTree
-            # iaxtree = IndexedAxisTree(
-            #     axtree.node_map,
-            #     target_paths=axtree.target_paths,
-            #     index_exprs=index_exprs,
-            #     outer_loops=(),  # ???
-            #     layout_exprs=axtree.layout_exprs,
-            #     layouts=axtree.layouts,
-            #     sf=axtree.sf,
-            # )
-
             countarray = HierarchicalArray(
-                # iaxtree,
                 axtree,
-                # target_paths=axtree.target_paths,
-                # index_exprs=index_exprs,
                 data=np.full(axtree.global_size, -1, dtype=IntType),
                 prefix="offset",
             )
@@ -704,7 +656,7 @@ def _tabulate_count_array_tree(
                     loop_indices=loop_indices_,
                 )
         else:
-            subaxis = axes.component_child(axis, component)
+            subaxis = axes.child(axis, component)
             assert subaxis
             _tabulate_count_array_tree(
                 axes,
@@ -851,7 +803,7 @@ def _axis_component_size(
     loop_indices=pmap(),
 ):
     count = _as_int(component.count, indices, loop_indices=loop_indices)
-    if subaxis := axes.component_child(axis, component):
+    if subaxis := axes.child(axis, component):
         return sum(
             _axis_size(
                 axes,
@@ -870,11 +822,6 @@ def _as_int(arg: Any, indices, path=None, *, loop_indices=pmap()):
     from pyop3.array import HierarchicalArray
 
     if isinstance(arg, HierarchicalArray):
-        # this shouldn't be here, but it will break things the least to do so
-        # at the moment
-        # if index_exprs is None:
-        #     index_exprs = merge_dicts(arg.index_exprs.values())
-
         # TODO this might break if we have something like [:, subset]
         # I will need to map the "source" axis (e.g. slice_label0) back
         # to the "target" axis
@@ -902,7 +849,6 @@ class LoopExpressionReplacer(pym.mapper.IdentityMapper):
 
 
 def eval_offset(
-    # axes, layouts, indices, target_paths, index_exprs, path=None, *, loop_exprs=pmap()
     axes,
     layouts,
     indices,
@@ -910,26 +856,6 @@ def eval_offset(
     *,
     loop_exprs=pmap(),
 ):
-    from pyop3.itree.tree import IndexExpressionReplacer
-
-    # layout_axes = axes.layout_axes
-    layout_axes = axes
-
-    # now select target paths and index exprs from the full collection
-    # target_path = target_paths.get(None, {})
-    # index_exprs_ = index_exprs.get(None, {})
-
-    # if not layout_axes.is_empty:
-    #     if path is None:
-    #         path = just_one(layout_axes.leaf_paths)
-    #     node_path = layout_axes.path_with_nodes(*layout_axes._node_from_path(path))
-    #     for axis, component in node_path.items():
-    #         key = axis.id, component
-    #         if key in target_paths:
-    #             target_path.update(target_paths[key])
-    #         if key in index_exprs:
-    #             index_exprs_.update(index_exprs[key])
-
     if path is None:
         path = pmap() if axes.is_empty else just_one(axes.leaf_paths)
 
@@ -945,50 +871,6 @@ def eval_offset(
             axis_label, _ = next(ordered_path)
             indices_[axis_label] = index
         indices = indices_
-
-    # # then any provided
-    # if index_exprs is not None:
-    #     replace_map_new = {}
-    #     replacer = ExpressionEvaluator(indices)
-    #     for axis, index_expr in index_exprs.items():
-    #         try:
-    #             replace_map_new[axis] = replacer(index_expr)
-    #         except UnrecognisedAxisException:
-    #             pass
-    #     indices2 = replace_map_new
-    # else:
-    #     indices2 = indices
-    #
-    # replace_map_new = {}
-    # replacer = ExpressionEvaluator(indices2)
-    # for axlabel, index_expr in axes.index_exprs.get(None, {}).items():
-    #     try:
-    #         replace_map_new[axlabel] = replacer(index_expr)
-    #     except UnrecognisedAxisException:
-    #         pass
-    # for axis, component in source_path_node.items():
-    #     for axlabel, index_expr in axes.index_exprs.get((axis.id, component), {}).items():
-    #         try:
-    #             replace_map_new[axlabel] = replacer(index_expr)
-    #         except UnrecognisedAxisException:
-    #             pass
-    # indices1 = replace_map_new
-
-    # Substitute indices into index exprs
-    # if index_exprs:
-
-    # Replace any loop index variables in index_exprs
-    # index_exprs_ = {}
-    # replacer = LoopExpressionReplacer(loop_exprs)  # different class?
-    # for ax, expr in index_exprs.items():
-    #     # if isinstance(expr, LoopIndexVariable):
-    #     #     index_exprs_[ax] = loop_exprs[expr.id][ax]
-    #     # else:
-    #     index_exprs_[ax] = replacer(expr)
-
-    # replacer = IndexExpressionReplacer(index_exprs_, loop_exprs)
-    # layout_orig = layouts[freeze(target_path)]
-    # layout_subst = replacer(layout_orig)
 
     layout_subst = layouts[freeze(path)]
 

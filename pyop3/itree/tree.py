@@ -79,15 +79,8 @@ class IndexExpressionReplacer(pym.mapper.IdentityMapper):
 
 
 class IndexTree(MutableLabelledTreeMixin, LabelledTree):
-    # fields = LabelledTree.fields | {"outer_loops"}
-
-    # TODO: Don't think outer_loops are used any more
-    # TODO rename to node_map
-    # def __init__(self, parent_to_children=pmap(), outer_loops=()):
-    def __init__(self, parent_to_children=pmap()):
-        super().__init__(parent_to_children)
-        # assert isinstance(outer_loops, tuple)
-        # self.outer_loops = outer_loops
+    def __init__(self, node_map=pmap()):
+        super().__init__(node_map)
 
     @classmethod
     def from_nest(cls, nest):
@@ -511,7 +504,6 @@ class Slice(ContextFreeIndex):
 
     """
 
-    # fields = Index.fields | {"axis", "slices", "numbering"} - {"label", "component_labels"}
     fields = {"axis", "slices", "numbering", "label"}
 
     def __init__(self, axis, slices, *, numbering=None, id=None, label=None):
@@ -1307,7 +1299,7 @@ def _(slice_: Slice, indices, *, target_path_acc, prev_axes, **kwargs):
             assert isinstance(subslice, Subset)
             size = subslice.array.axes.leaf_component.count
         mylabel = subslice.component if is_full_slice else subslice.label
-        cpt = AxisComponent(size, label=mylabel, unit=target_cpt.unit)
+        cpt = AxisComponent(size, label=mylabel, unit=target_cpt.unit, rank_equal=target_cpt.rank_equal)
         components.append(cpt)
 
         target_path_per_subslice.append(pmap({slice_.axis: subslice.component}))
@@ -1452,7 +1444,7 @@ def _(
         extra_index_exprs.update(more_extra_index_exprs)
 
     else:
-        axes = AxisTree(prior_axes.parent_to_children)
+        axes = AxisTree(prior_axes.node_map)
         target_path_per_cpt = {}
         index_exprs_per_cpt = {}
         layout_exprs_per_cpt = {}
@@ -1553,13 +1545,13 @@ def _make_leaf_axis_from_called_map(
             for axis, cpt in map_axes.detailed_path(source_path).items()
         ]
         my_target_path = merge_dicts(
-            map_array.target_paths.get(key, {}) for key in index_keys
+            map_array.axes.target_paths.get(key, {}) for key in index_keys
         )
 
         # the outer index is provided from "prior" whereas the inner one requires
         # a replacement
         map_leaf_axis, map_leaf_component = map_axes.leaf
-        old_inner_index_expr = map_array.index_exprs[
+        old_inner_index_expr = map_array.axes.index_exprs[
             map_leaf_axis.id, map_leaf_component
         ]
 
@@ -1720,9 +1712,9 @@ def _index_axes_rec(
         leafkeys = [None]
 
     subaxes = {}
-    if current_index.id in indices.parent_to_children:
+    if current_index.id in indices.node_map:
         for leafkey, subindex in checked_zip(
-            leafkeys, indices.parent_to_children[current_index.id]
+            leafkeys, indices.node_map[current_index.id]
         ):
             if subindex is None:
                 continue
@@ -1792,13 +1784,14 @@ def _index_axes_rec(
     index_exprs_per_component = freeze(index_exprs_per_component)
     layout_exprs_per_component = freeze(layout_exprs_per_cpt_per_index)
 
-    axes = AxisTree(axes_per_index.parent_to_children)
+    # This this is no longer necessary
+    axes = AxisTree(axes_per_index.node_map)
     for k, subax in subaxes.items():
         if subax is not None:
             if axes:
                 axes = axes.add_subtree(subax, *k)
             else:
-                axes = AxisTree(subax.parent_to_children)
+                axes = AxisTree(subax.node_map)
 
     return (
         axes,
@@ -2191,14 +2184,8 @@ def partition_iterset(index: LoopIndex, arrays):
     not touch leaves but do roots are marked ROOT. Any remaining entities do not require
     the SF and are marked CORE.
 
-    !!! NOTE !!!
-
-    I am changing this behaviour. I think the distinction between ROOT and LEAF is not
-    meaningful. These can be lumped together into NONCORE (i.e. 'requires communication
-    to be complete before computation can happen').
-
     """
-    from pyop3.array import HierarchicalArray
+    from pyop3.array import HierarchicalArray, Mat
 
     # take first
     # if index.iterset.depth > 1:
@@ -2212,11 +2199,15 @@ def partition_iterset(index: LoopIndex, arrays):
     # at a minimum this should be done per multi-axis instead of per array
     is_root_or_leaf_per_array = {}
     for array in arrays:
-        # skip purely local arrays
-        if not array.array.is_distributed:
+        # skip matrices
+        if isinstance(array, Mat):
             continue
 
-        sf = array.array.sf  # the dof sf
+        # skip purely local arrays
+        if not array.buffer.is_distributed:
+            continue
+
+        sf = array.buffer.sf  # the dof sf
 
         # mark leaves and roots
         is_root_or_leaf = np.full(sf.size, ArrayPointLabel.CORE, dtype=np.uint8)
@@ -2226,16 +2217,18 @@ def partition_iterset(index: LoopIndex, arrays):
         is_root_or_leaf_per_array[array.name] = is_root_or_leaf
 
     labels = np.full(paraxis.size, IterationPointType.CORE, dtype=np.uint8)
-    for p in index.iterset.iter():
-        # hack because I wrote bad code and mix up loop indices and itersets
-        p = dataclasses.replace(p, index=index)
-
+    # for p in index.iterset.iter():
+    #     # hack because I wrote bad code and mix up loop indices and itersets
+    #     p = dataclasses.replace(p, index=index)
+    for p in index.iter():
         parindex = p.source_exprs[paraxis.label]
         assert isinstance(parindex, numbers.Integral)
 
         for array in arrays:
+            if isinstance(array, Mat):
+                continue
             # skip purely local arrays
-            if not array.array.is_distributed:
+            if not array.buffer.is_distributed:
                 continue
             if labels[parindex] == IterationPointType.LEAF:
                 continue
@@ -2243,8 +2236,9 @@ def partition_iterset(index: LoopIndex, arrays):
             # loop over stencil
             array = array.with_context({index.id: (p.source_path, p.target_path)})
 
-            for q in array.iter_indices({p}):
-                offset = array.offset(q.target_exprs, q.target_path)
+            for q in array.axes.iter({p}):
+                # offset = array.axes.offset(q.target_exprs, q.target_path)
+                offset = array.axes.offset(q.source_exprs, q.source_path, loop_exprs=p.replace_map)
 
                 point_label = is_root_or_leaf_per_array[array.name][offset]
                 if point_label == ArrayPointLabel.LEAF:
@@ -2259,13 +2253,17 @@ def partition_iterset(index: LoopIndex, arrays):
 
     parcpt = just_one(paraxis.components)  # for now
 
-    core = just_one(np.nonzero(labels == IterationPointType.CORE))
-    root = just_one(np.nonzero(labels == IterationPointType.ROOT))
-    leaf = just_one(np.nonzero(labels == IterationPointType.LEAF))
+    # I don't think this is working - instead everything touches a leaf
+    # core = just_one(np.nonzero(labels == IterationPointType.CORE))
+    # root = just_one(np.nonzero(labels == IterationPointType.ROOT))
+    # leaf = just_one(np.nonzero(labels == IterationPointType.LEAF))
+    core = np.asarray([], dtype=IntType)
+    root = np.asarray([], dtype=IntType)
+    leaf = np.arange(paraxis.size, dtype=IntType)
 
     subsets = []
     for data in [core, root, leaf]:
-        # Constant?
+        # Constant? no, rank_equal=False
         size = HierarchicalArray(
             AxisTree(), data=np.asarray([len(data)]), dtype=IntType
         )
@@ -2279,11 +2277,11 @@ def partition_iterset(index: LoopIndex, arrays):
     # index with just core (arbitrary)
 
     # need to use the existing labels here
-    new_iterset = index.iterset[
-        Slice(
-            paraxis.label,
-            [Subset(parcpt.label, subsets[0])],
-        )
-    ]
+    mysubset = Slice(
+        paraxis.label,
+        [Subset(parcpt.label, subsets[0], label=parcpt.label)],
+        label=paraxis.label,
+    )
+    new_iterset = index.iterset[mysubset]
 
     return index.copy(iterset=new_iterset), subsets
