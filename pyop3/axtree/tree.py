@@ -209,7 +209,7 @@ def _collect_datamap(axis, *subdatamaps, axes):
 
 
 class AxisComponent(LabelledNodeComponent):
-    fields = LabelledNodeComponent.fields | {"size", "unit"}
+    fields = LabelledNodeComponent.fields | {"size", "unit", "rank_equal"}
 
     def __init__(
         self,
@@ -217,10 +217,12 @@ class AxisComponent(LabelledNodeComponent):
         label=None,
         *,
         unit=False,
+        rank_equal=False,
     ):
         from pyop3.array import HierarchicalArray
 
         if isinstance(size, collections.abc.Iterable):
+            assert not rank_equal  # nasty
             owned_count, count = map(int, size)
             distributed = True
             assert isinstance(owned_count, numbers.Integral) and isinstance(count, numbers.Integral)
@@ -247,8 +249,8 @@ class AxisComponent(LabelledNodeComponent):
         self.unit = unit
         self.distributed = distributed
 
-        # remove
-        self.rank_equal = not distributed
+        # cleanup
+        self.rank_equal = rank_equal
 
     # redone because otherwise getting a bizarre error (numpy types have confusing behaviour!)
     # def __eq__(self, other):
@@ -370,7 +372,7 @@ class Axis(LoopIterable, MultiComponentLabelledNode):
         # renumber the serial axis to store ghost entries at the end of the vector
         component_sizes, numbering = partition_ghost_points(serial, sf)
         components = [
-            c.copy(size=(size, c.count)) for c, size in checked_zip(serial.components, component_sizes)
+            c.copy(size=(size, c.count), rank_equal=False) for c, size in checked_zip(serial.components, component_sizes)
         ]
         return cls(components, serial.label, numbering=numbering, sf=sf)
 
@@ -811,14 +813,6 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
 
         return numbering[self._buffer_indices_ghost]
 
-    @property
-    def comm(self):
-        paraxes = [axis for axis in self.nodes if axis.sf is not None]
-        if not paraxes:
-            return MPI.COMM_SELF
-        else:
-            return single_valued(ax.comm for ax in paraxes)
-
     @cached_property
     def leaf_target_paths(self):
         return tuple(
@@ -907,7 +901,7 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
                 slice_component = AffineSliceComponent(component.label)
             slice_components.append(slice_component)
 
-        slice_ = Slice(axis.label, slice_components)
+        slice_ = Slice(axis.label, slice_components, label=axis.label)
 
         index_tree = IndexTree(slice_)
         for component, slice_component in checked_zip(axis.components, slice_components):
@@ -1025,6 +1019,14 @@ class AxisTree(MutableLabelledTreeMixin, BaseAxisTree):
             iremote = np.concatenate(iremotes)
             return StarForest.from_graph(self.size, nroots, ilocal, iremote, self.comm)
 
+    @property
+    def comm(self):
+        paraxes = [axis for axis in self.nodes if axis.sf is not None]
+        if not paraxes:
+            return MPI.COMM_SELF
+        else:
+            return single_valued(ax.comm for ax in paraxes)
+
     @cached_property
     def datamap(self):
         if self.is_empty:
@@ -1127,8 +1129,6 @@ class AxisTree(MutableLabelledTreeMixin, BaseAxisTree):
         return slice(None)
 
 
-# are all of these necessary?
-# class IndexedAxisTree(Indexed, BaseAxisTree):
 class IndexedAxisTree(BaseAxisTree):
     def __init__(
         self,
@@ -1155,6 +1155,10 @@ class IndexedAxisTree(BaseAxisTree):
     @property
     def unindexed(self):
         return self._unindexed
+
+    @property
+    def comm(self):
+        return self.unindexed.comm
 
     @property
     def target_paths(self):

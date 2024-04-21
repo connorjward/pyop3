@@ -308,7 +308,6 @@ class AbstractMat(Array, ContextFree):
     @cached_property
     @PETSc.Log.EventDecorator()
     def maps(self):
-        print("HIT!")
         from pyop3.axtree.layout import my_product
 
         # TODO: Don't think these need to be lists here.
@@ -380,7 +379,8 @@ class AbstractMat(Array, ContextFree):
                 # target_indices = {idx.index.id: idx.target_exprs for idx in idxs}
                 target_indices = merge_dicts([idx.replace_map for idx in idxs])
 
-                for p in self.raxes.iter(idxs):
+                # for p in self.raxes.iter(idxs):
+                for p in self.raxes.iter(idxs, include_ghost_points=True):  # seems to fix things
                     target_path = p.target_path
                     target_exprs = p.target_exprs
                     for key in dropped_rkeys:
@@ -390,6 +390,7 @@ class AbstractMat(Array, ContextFree):
                     offset = orig_raxes.offset(
                         target_exprs, target_path, loop_exprs=target_indices
                     )
+
                     rmap.set_value(
                         p.source_exprs,
                         offset,
@@ -402,7 +403,8 @@ class AbstractMat(Array, ContextFree):
                 # target_indices = {idx.index.id: idx.target_exprs for idx in idxs}
                 target_indices = merge_dicts([idx.replace_map for idx in idxs])
 
-                for p in self.caxes.iter(idxs):
+                # for p in self.caxes.iter(idxs):
+                for p in self.caxes.iter(idxs, include_ghost_points=True):  # seems to fix things
                     target_path = p.target_path
                     target_exprs = p.target_exprs
                     for key in dropped_ckeys:
@@ -418,6 +420,8 @@ class AbstractMat(Array, ContextFree):
                         p.source_path,
                         loop_exprs=target_indices,
                     )
+
+        # breakpoint()
 
         return (rmap, cmap)
 

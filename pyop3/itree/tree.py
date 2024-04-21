@@ -1301,6 +1301,7 @@ def _(slice_: Slice, indices, *, target_path_acc, prev_axes, **kwargs):
                     size = target_cpt.count
                 else:
                     size = target_cpt.count[indices]
+                rank_equal = True
             else:
                 if subslice.stop is None:
                     stop = target_cpt.count
@@ -1313,13 +1314,22 @@ def _(slice_: Slice, indices, *, target_path_acc, prev_axes, **kwargs):
 
                     owned_count = min(target_cpt.owned_count, stop)
                     count = stop
-                    size = (owned_count, count)
+                    rank_equal = False
+
+                    if owned_count == count:
+                        size = count
+                    else:
+                        size = (owned_count, count)
                 else:
                     size = math.ceil((stop - subslice.start) / subslice.step)
+                    rank_equal = True
 
         else:
             assert isinstance(subslice, Subset)
             size = subslice.array.axes.leaf_component.count
+
+            # kind of misleading, the values may differ I think
+            rank_equal = True
 
             if target_cpt.distributed:
                 raise NotImplementedError
@@ -1328,7 +1338,7 @@ def _(slice_: Slice, indices, *, target_path_acc, prev_axes, **kwargs):
             mylabel = subslice.component
         else:
             mylabel = subslice.label
-        cpt = AxisComponent(size, label=mylabel, unit=target_cpt.unit)
+        cpt = AxisComponent(size, label=mylabel, unit=target_cpt.unit, rank_equal=rank_equal)
         components.append(cpt)
 
         target_path_per_subslice.append(pmap({slice_.axis: subslice.component}))
