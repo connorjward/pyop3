@@ -217,7 +217,7 @@ class AxisComponent(LabelledNodeComponent):
         label=None,
         *,
         unit=False,
-        rank_equal=False,
+        rank_equal=True,
     ):
         from pyop3.array import HierarchicalArray
 
