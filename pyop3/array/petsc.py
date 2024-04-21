@@ -104,15 +104,7 @@ class AbstractMat(Array, ContextFree):
         self.mat_type = mat_type
         self.mat = mat
 
-        # TODO: delete
-        # self.rtarget_paths = rtarget_paths
-        # self.rindex_exprs = rindex_exprs
-        # self.orig_raxes = orig_raxes
-        # self.router_loops = router_loops
-        # self.ctarget_paths = ctarget_paths
-        # self.cindex_exprs = cindex_exprs
-        # self.orig_caxes = orig_caxes
-        # self.couter_loops = couter_loops
+        # self._cache = {}
 
     def __getitem__(self, indices):
         return self.getitem(indices, strict=False)
@@ -122,6 +114,11 @@ class AbstractMat(Array, ContextFree):
     __iter__ = None
 
     def getitem(self, indices, *, strict=False):
+        # does not work as indices may not be hashable, parse first?
+        # cache_key = (indices, strict)
+        # if cache_key in self._cache:
+        #     return self._cache[cache_key]
+
         if len(indices) != 2:
             raise ValueError
 
@@ -174,13 +171,15 @@ class AbstractMat(Array, ContextFree):
             indexed_caxes = index_axes(ctree, pmap(), self.caxes)
             caxes = compose_axes(indexed_caxes, self.caxes)
 
-            return type(self)(
+            mat = type(self)(
                 raxes,
                 caxes,
                 mat_type=self.mat_type,
                 mat=self.mat,
                 name=self.name,
             )
+            # self._cache[cache_key] = mat
+            return mat
 
         # Otherwise we are context-sensitive
         arrays = {}
@@ -202,7 +201,9 @@ class AbstractMat(Array, ContextFree):
                 name=self.name,
             )
         # But this is now a PetscMat...
-        return ContextSensitiveMultiArray(arrays)
+        mat = ContextSensitiveMultiArray(arrays)
+        # self._cache[cache_key] = mat
+        return mat
 
     # like Dat, bad name? handle?
     @property
@@ -305,7 +306,9 @@ class AbstractMat(Array, ContextFree):
                 yield (rlabel_acc_, clabel_acc_)
 
     @cached_property
+    @PETSc.Log.EventDecorator()
     def maps(self):
+        print("HIT!")
         from pyop3.axtree.layout import my_product
 
         # TODO: Don't think these need to be lists here.
@@ -342,11 +345,11 @@ class AbstractMat(Array, ContextFree):
                     ].items()
                     if ax == cfield_axis.label
                 )
-                orig_caxes = AxisTree(self.orig_caxes[cfield].node_map)
+                orig_caxes = AxisTree(self.caxes.unindexed[cfield].node_map)
                 orig_caxess = [orig_caxes]
                 dropped_ckeys = {cfield_axis.label}
             else:
-                orig_caxess = [self.orig_caxes]
+                orig_caxess = [self.caxes.unindexed]
                 dropped_ckeys = set()
         else:
             orig_raxess = [self.raxes.unindexed]
@@ -426,6 +429,22 @@ class AbstractMat(Array, ContextFree):
     def cmap(self):
         return self.maps[1]
 
+    @cached_property
+    def row_lgmap_dat(self):
+        if self.nested or self.mat_type == "baij":
+            raise NotImplementedError("Use a smaller set of axes here")
+        return HierarchicalArray(self.raxes, data=self.raxes.unindexed.global_numbering)
+
+    @cached_property
+    def column_lgmap_dat(self):
+        if self.nested or self.mat_type == "baij":
+            raise NotImplementedError("Use a smaller set of axes here")
+        return HierarchicalArray(self.caxes, data=self.caxes.unindexed.global_numbering)
+
+    @cached_property
+    def comm(self):
+        return single_valued([self.raxes.comm, self.caxes.comm])
+
     @property
     def shape(self):
         return (self.raxes.size, self.caxes.size)
@@ -447,15 +466,6 @@ class AbstractMat(Array, ContextFree):
     @classmethod
     def _make_mat(cls, raxes, caxes, mat_type):
         if isinstance(mat_type, collections.abc.Mapping):
-            # if strictly_all(c.unit for c in raxes.root.components):
-            #     riter = tuple((c.label, raxes[c.label]) for c in raxes.root.components)
-            # else:
-            #     riter = [(None, raxes)]
-            # if strictly_all(c.unit for c in caxes.root.components):
-            #     citer = tuple((c.label, caxes[c.label]) for c in caxes.root.components)
-            # else:
-            #     citer = [(None, caxes)]
-
             # TODO: This is very ugly
             rsize = max(x or 0 for x, _ in mat_type.keys()) + 1
             csize = max(y or 0 for _, y in mat_type.keys()) + 1
@@ -482,10 +492,6 @@ class AbstractMat(Array, ContextFree):
 
 
 class Sparsity(AbstractMat):
-    # def __init__(self, *args, **kwargs):
-    #     super().__init__(*args, **kwargs)
-    #     self._lazy_template = None
-
     def materialize(self) -> PETSc.Mat:
         if not hasattr(self, "_lazy_template"):
             self.assemble()
@@ -495,6 +501,7 @@ class Sparsity(AbstractMat):
             # template.preallocateWithMatPreallocator(self.mat)
             # We can safely set these options since by using a sparsity we
             # are asserting that we know where the non-zeros are going.
+            # NOTE: These may already get set by PETSc.
             template.setOption(PETSc.Mat.Option.NEW_NONZERO_LOCATION_ERR, True)
             template.setOption(PETSc.Mat.Option.IGNORE_ZERO_ENTRIES, True)
 
@@ -537,15 +544,12 @@ class Sparsity(AbstractMat):
             mat = PETSc.Mat().create(comm)
             mat.setType(PETSc.Mat.Type.PREALLOCATOR)
 
-            #     breakpoint()
-            # else:
             # None is for the global size, PETSc will figure it out for us
             sizes = ((raxes.owned.size, None), (caxes.owned.size, None))
-
             mat.setSizes(sizes)
 
-            rlgmap = PETSc.LGMap().create(raxes.global_numbering(), comm=comm)
-            clgmap = PETSc.LGMap().create(caxes.global_numbering(), comm=comm)
+            rlgmap = PETSc.LGMap().create(raxes.global_numbering, comm=comm)
+            clgmap = PETSc.LGMap().create(caxes.global_numbering, comm=comm)
             mat.setLGMap(rlgmap, clgmap)
 
         mat.setUp()
@@ -613,8 +617,8 @@ class Mat(AbstractMat):
             sizes = ((raxes.owned.size, None), (caxes.owned.size, None))
             mat.setSizes(sizes)
 
-            rlgmap = PETSc.LGMap().create(raxes.global_numbering(), comm=comm)
-            clgmap = PETSc.LGMap().create(caxes.global_numbering(), comm=comm)
+            rlgmap = PETSc.LGMap().create(raxes.global_numbering, comm=comm)
+            clgmap = PETSc.LGMap().create(caxes.global_numbering, comm=comm)
             mat.setLGMap(rlgmap, clgmap)
 
         mat.setUp()

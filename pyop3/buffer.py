@@ -11,7 +11,7 @@ from petsc4py import PETSc
 from pyrsistent import freeze, pmap
 
 from pyop3.dtypes import ScalarType
-from pyop3.lang import READ, RW, WRITE, KernelArgument
+from pyop3.lang import KernelArgument
 from pyop3.sf import StarForest
 from pyop3.utils import UniqueNameGenerator, as_tuple, deprecated, readonly
 
@@ -205,6 +205,7 @@ class DistributedBuffer(Buffer):
         return type(self)(
             self.shape,
             self.sf,
+            dtype=self.dtype,
             data=self.data,
             name=f"{self.name}_copy",
         )

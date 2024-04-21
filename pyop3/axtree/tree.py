@@ -24,6 +24,7 @@ from mpi4py import MPI
 from petsc4py import PETSc
 from pyrsistent import freeze, pmap, thaw
 
+from pyop3.axtree.parallel import partition_ghost_points
 from pyop3.dtypes import IntType
 from pyop3.sf import StarForest, serial_forest
 from pyop3.tree import (
@@ -172,9 +173,13 @@ class ExpressionEvaluator(pym.mapper.evaluator.EvaluationMapper):
 
         indices = {ax: self.rec(idx) for ax, idx in array_var.indices.items()}
         # replacer = IndexExpressionReplacer(indices, self._loop_exprs)
-        # layout_orig = array.layouts[freeze(array_var.target_path)]
+        # layout_orig = array.axes.layouts[freeze(array_var.path)]
         # layout_subst = replacer(layout_orig)
-        layout_subst = array.axes.subst_layouts[array_var.path]
+        # nor
+        # layout_subst = array.axes.subst_layouts[array_var.path]
+
+        path, = array.axes.leaf_paths
+        layout_subst = array.axes.subst_layouts[path]
 
         # offset = ExpressionEvaluator(indices, self._loop_exprs)(layout_subst)
         # offset = ExpressionEvaluator(self.context | indices, self._loop_exprs)(layout_subst)
@@ -187,7 +192,7 @@ class ExpressionEvaluator(pym.mapper.evaluator.EvaluationMapper):
         #     # index_exprs=array_var.index_exprs,
         #     loop_exprs=self._loop_exprs,
         # )
-        return array.data_ro[offset]
+        return array.buffer.data_ro[offset]
 
     def map_loop_index(self, expr):
         return self._loop_exprs[expr.id][expr.axis]
@@ -204,17 +209,29 @@ def _collect_datamap(axis, *subdatamaps, axes):
 
 
 class AxisComponent(LabelledNodeComponent):
-    fields = LabelledNodeComponent.fields | {"count", "unit", "rank_equal"}
+    fields = LabelledNodeComponent.fields | {"size", "unit"}
 
     def __init__(
         self,
-        count,
+        size,
         label=None,
         *,
         unit=False,
-        rank_equal=True,  # bad name?
     ):
         from pyop3.array import HierarchicalArray
+
+        if isinstance(size, collections.abc.Iterable):
+            owned_count, count = map(int, size)
+            distributed = True
+            assert isinstance(owned_count, numbers.Integral) and isinstance(count, numbers.Integral)
+            assert owned_count <= count
+        else:
+            # numpy dtypes break things in bizarre ways
+            if isinstance(size, numbers.Integral):
+                size = int(size)
+
+            owned_count = count = size
+            distributed = False
 
         if not isinstance(count, (numbers.Integral, HierarchicalArray)):
             raise TypeError("Invalid count type")
@@ -225,8 +242,32 @@ class AxisComponent(LabelledNodeComponent):
 
         super().__init__(label=label)
         self.count = count
+        self.owned_count = owned_count
+        self.size = size
         self.unit = unit
-        self.rank_equal = rank_equal
+        self.distributed = distributed
+
+        # remove
+        self.rank_equal = not distributed
+
+    # redone because otherwise getting a bizarre error (numpy types have confusing behaviour!)
+    # def __eq__(self, other):
+    #     if type(other) is not type(self):
+    #         return False
+    #     else:
+    #         return other._key == self._key
+    #         # return (
+    #         #     other.size == self.size
+    #         #     and other.label == self.label
+    #         #     and other.unit == self.unit
+    #         # )
+    #
+    # def __hash__(self):
+    #     return hash(self._key)
+    #
+    # @property
+    # def _key(self):
+    #     return (self.size, self.label, self.unit)
 
     @cached_property
     def _collective_count(self):
@@ -320,9 +361,6 @@ class Axis(LoopIterable, MultiComponentLabelledNode):
 
     @classmethod
     def from_serial(cls, serial: Axis, sf):
-        # FIXME
-        from pyop3.axtree.parallel import partition_ghost_points
-
         if serial.sf is not None:
             raise RuntimeError("serial axis is not serial")
 
@@ -330,8 +368,11 @@ class Axis(LoopIterable, MultiComponentLabelledNode):
             sf = StarForest(sf, serial.size)
 
         # renumber the serial axis to store ghost entries at the end of the vector
-        numbering = partition_ghost_points(serial, sf)
-        return cls(serial.components, serial.label, numbering=numbering, sf=sf)
+        component_sizes, numbering = partition_ghost_points(serial, sf)
+        components = [
+            c.copy(size=(size, c.count)) for c, size in checked_zip(serial.components, component_sizes)
+        ]
+        return cls(components, serial.label, numbering=numbering, sf=sf)
 
     @property
     def component_labels(self):
@@ -391,26 +432,13 @@ class Axis(LoopIterable, MultiComponentLabelledNode):
 
     @cached_property
     def owned(self):
-        from pyop3.itree import AffineSliceComponent, Slice
-
-        if self.comm.size == 1:
-            return self
-
-        slices = [
-            AffineSliceComponent(
-                c.label,
-                stop=self.owned_count_per_component[c.label],
-            )
-            for c in self.components
-        ]
-        slice_ = Slice(self.label, slices)
-        return self[slice_].root
+        return self._tree.owned.root
 
     def index(self):
         return self._tree.index()
 
-    def iter(self):
-        return self._tree.iter()
+    def iter(self, *, include_ghost_points=False):
+        return self._tree.iter(include_ghost_points=include_ghost_points)
 
     @property
     def target_path_per_component(self):
@@ -694,10 +722,10 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
         else:
             return LoopIndex(iterset)
 
-    def iter(self, outer_loops=(), loop_index=None, include=False, ghost=False):
+    def iter(self, outer_loops=(), loop_index=None, include=False, include_ghost_points=False):
         from pyop3.itree.tree import iter_axis_tree
 
-        iterset = self if ghost else self.owned
+        iterset = self if include_ghost_points else self.owned
 
         return iter_axis_tree(
             # hack because sometimes we know the right loop index to use
@@ -729,34 +757,6 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
                 dmap.update(array.datamap)
         return pmap(dmap)
 
-    @cached_property
-    def owned(self):
-        """Return the owned portion of the axis tree."""
-        from pyop3.itree import AffineSliceComponent, Slice
-
-        if self.comm.size == 1:
-            return self
-
-        paraxes = [axis for axis in self.nodes if axis.sf is not None]
-        if len(paraxes) == 0:
-            return self
-
-        # assumes that there is at most one parallel axis (can appear multiple times
-        # if mixed)
-        paraxis = paraxes[0]
-        slices = [
-            AffineSliceComponent(
-                c.label,
-                stop=paraxis.owned_count_per_component[c.label],
-                # this feels like a hack, generally don't want this ambiguity
-                label=c.label,
-            )
-            for c in paraxis.components
-        ]
-        # this feels like a hack, generally don't want this ambiguity
-        slice_ = Slice(paraxis.label, slices, label=paraxis.label)
-        return self[slice_]
-
     def as_tree(self):
         return self
 
@@ -786,33 +786,30 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
 
         previsit(self, check, self.root, frozenset())
 
-    # should be a cached property?
+    @property
+    @abc.abstractmethod
+    def _buffer_indices(self):
+        pass
+
+    @property
+    @abc.abstractmethod
+    def _buffer_indices_ghost(self):
+        pass
+
+    @cached_property
     def global_numbering(self):
         if self.comm.size == 1:
-            return np.arange(self.size, dtype=IntType)
+            numbering = np.arange(self.size, dtype=IntType)
+        else:
+            nowned = self.owned.size
+            start = self.sf.comm.tompi4py().exscan(nowned) or 0
+            numbering = np.arange(start, start + self.size, dtype=IntType)
 
-        numbering = np.full(self.size, -1, dtype=IntType)
+            numbering[nowned:] = -1
+            self.sf.broadcast(numbering, MPI.REPLACE)
+            debug_assert(lambda: (numbering >= 0).all())
 
-        start = self.sf.comm.tompi4py().exscan(self.owned.size, MPI.SUM)
-        if start is None:
-            start = 0
-
-        # TODO do I need to account for numbering/layouts? The SF should probably
-        # manage this.
-        numbering[: self.owned.size] = np.arange(
-            start, start + self.owned.size, dtype=IntType
-        )
-        # numbering[self.numbering.data_ro[: self.owned.size]] = np.arange(
-        #     start, start + self.owned.size, dtype=IntType
-        # )
-
-        # print_with_rank("before", numbering)
-
-        self.sf.broadcast(numbering, MPI.REPLACE)
-
-        # print_with_rank("after", numbering)
-        debug_assert(lambda: (numbering >= 0).all())
-        return numbering
+        return numbering[self._buffer_indices_ghost]
 
     @property
     def comm(self):
@@ -882,6 +879,42 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
             return 1
         axis = axis or self.root
         return sum(cpt.alloc_size(self, axis) for cpt in axis.components)
+
+    @cached_property
+    def owned(self):
+        """Return the owned portion of the axis tree."""
+        if self.comm.size == 1:
+            return self
+
+        indices = self._collect_owned_index_tree()
+        return self[indices]
+
+    def _collect_owned_index_tree(self, axis=None):
+        from pyop3.itree import AffineSliceComponent, IndexTree, Slice
+
+        if axis is None:
+            axis = self.root
+
+        slice_components = []
+        for component in axis.components:
+            if component.distributed:
+                slice_component = AffineSliceComponent(
+                    component.label,
+                    stop=component.owned_count,
+                    label=(component.label, "owned")
+                )
+            else:
+                slice_component = AffineSliceComponent(component.label)
+            slice_components.append(slice_component)
+
+        slice_ = Slice(axis.label, slice_components)
+
+        index_tree = IndexTree(slice_)
+        for component, slice_component in checked_zip(axis.components, slice_components):
+            if subaxis := self.child(axis, component):
+                subtree = self._collect_owned_index_tree(subaxis)
+                index_tree = index_tree.add_subtree(subtree, slice_, slice_component.label)
+        return index_tree
 
 
 class AxisTree(MutableLabelledTreeMixin, BaseAxisTree):
@@ -1039,7 +1072,9 @@ class AxisTree(MutableLabelledTreeMixin, BaseAxisTree):
             return freeze({pmap(): 0})
 
         loop_vars = self.outer_loop_bits[1] if self.outer_loops else {}
-        layouts, check_none, _ = _compute_layouts(self.layout_axes, loop_vars)
+
+        with PETSc.Log.Event("pyop3: tabulate layouts"):
+            layouts, check_none, _ = _compute_layouts(self.layout_axes, loop_vars)
 
         assert check_none is None
 
@@ -1082,6 +1117,14 @@ class AxisTree(MutableLabelledTreeMixin, BaseAxisTree):
     @property
     def subst_layouts(self):
         return self.layouts
+
+    @cached_property
+    def _buffer_indices(self):
+        return slice(self.sf.nowned)
+
+    @cached_property
+    def _buffer_indices_ghost(self):
+        return slice(None)
 
 
 # are all of these necessary?
@@ -1196,6 +1239,48 @@ class IndexedAxisTree(BaseAxisTree):
     @cached_property
     def subst_layouts(self):
         return subst_layouts(self, self.target_paths, self.index_exprs, self.layouts)
+
+    @property
+    def _buffer_indices(self):
+        return self._collect_buffer_indices(include_ghost_points=False)
+
+    @cached_property
+    def _buffer_indices_ghost(self):
+        return self._collect_buffer_indices(include_ghost_points=True)
+
+    def _collect_buffer_indices(self, *, include_ghost_points: bool):
+        # TODO: This method is inefficient as for affine things we still tabulate
+        # everything first. It would be best to inspect index_exprs to determine
+        # if a slice is sufficient, but this is hard.
+
+        size = self.size if include_ghost_points else self.owned.size
+        assert size > 0
+
+        indices = np.full(size, -1, dtype=IntType)
+        # TODO: Handle any outer loops.
+        # TODO: Generate code for this.
+        for i, p in enumerate(self.iter()):
+            indices[i] = self.offset(p.source_exprs, p.source_path)
+        debug_assert(lambda: (indices >= 0).all())
+
+        # The packed indices are collected component-by-component so, for
+        # numbered multi-component axes, they are not in ascending order.
+        # We sort them so we can test for "affine-ness".
+        indices.sort()
+
+        # See if we can represent these indices as a slice. This is important
+        # because slices enable no-copy access to the array.
+        steps = np.unique(indices[1:] - indices[:-1])
+        if len(steps) == 0:
+            start = just_one(indices)
+            return slice(start, start + 1, 1)
+        elif len(steps) == 1:
+            start = indices[0]
+            stop = indices[-1] + 1
+            (step,) = steps
+            return slice(start, stop, step)
+        else:
+            return indices
 
 
 class ContextSensitiveAxisTree(ContextSensitiveLoopIterable):

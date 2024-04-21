@@ -34,7 +34,7 @@ from pyop3.itree import (  # noqa: F401
     Subset,
     TabulatedMapComponent,
 )
-from pyop3.itree.tree import ScalarIndex
+from pyop3.itree.tree import ScalarIndex, as_index_forest
 from pyop3.lang import (  # noqa: F401
     INC,
     MAX_RW,

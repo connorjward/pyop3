@@ -1,10 +1,10 @@
 import abc
 
-from pyop3.lang import KernelArgument, ReplaceAssignment
+from pyop3.lang import FunctionArgument, ReplaceAssignment
 from pyop3.utils import UniqueNameGenerator
 
 
-class Array(KernelArgument, abc.ABC):
+class Array(FunctionArgument, abc.ABC):
     _prefix = "array"
     _name_generator = UniqueNameGenerator()
 

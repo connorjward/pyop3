@@ -565,7 +565,12 @@ def _create_count_array_tree(
         else:
             # discard SF since the tabulating arrays are not parallel
             linear_axis = axis.copy(sf=None)
-        axes_acc_ = axes_acc + (linear_axis,)
+
+        # can be None if ScalarIndex is used
+        if linear_axis is not None:
+            axes_acc_ = axes_acc + (linear_axis,)
+        else:
+            axes_acc_ = axes_acc
 
         if subaxis := ctree.child(axis, component):
             arrays.update(

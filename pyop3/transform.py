@@ -318,7 +318,7 @@ class ImplicitPackUnpackExpander(Transformer):
         scatters = []
         arguments = []
         for (arg, intent), shape in checked_zip(
-            terminal.kernel_arguments, terminal.argument_shapes
+            terminal.function_arguments, terminal.argument_shapes
         ):
             assert isinstance(
                 arg, ContextFree

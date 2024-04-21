@@ -3,36 +3,30 @@
 from __future__ import annotations
 
 import abc
-import collections
-import contextlib
 import dataclasses
 import enum
 import functools
 import numbers
-import operator
-from collections import defaultdict
-from functools import cached_property, partial
-from typing import Iterable, Sequence, Tuple
-from weakref import WeakValueDictionary
+from functools import cached_property
+from typing import Iterable, Tuple
 
 import loopy as lp
 import numpy as np
 import pytools
-from pyrsistent import freeze
+from petsc4py import PETSc
 
-from pyop3.axtree import Axis, as_axis_tree
+from pyop3.axtree import Axis
 from pyop3.axtree.tree import ContextFree, ContextSensitive, MultiArrayCollector
-from pyop3.config import config
-from pyop3.dtypes import IntType, dtype_limits
+from pyop3.dtypes import dtype_limits
 from pyop3.utils import (
     UniqueRecord,
+    OrderedSet,
     as_tuple,
     auto,
     checked_zip,
     just_one,
     merge_dicts,
     single_valued,
-    unique,
 )
 
 
@@ -68,12 +62,22 @@ MAX_WRITE = Intent.MAX_WRITE
 NA = Intent.NA
 
 
+# TODO: This exception is not actually ever raised. We should check the
+# intents of the kernel arguments and complain if something illegal is
+# happening.
 class IntentMismatchError(Exception):
     pass
 
 
 class KernelArgument(abc.ABC):
-    """Class representing objects that may be passed as arguments to kernels."""
+    """Abstract class for types that may be passed as arguments to kernels.
+
+    Note that some types that can be passed to *functions* are not in fact
+    kernel arguments. This is because they either wrap actual kernel arguments
+    (e.g. `HierarchicalArray`), or because no argument is actually passed
+    (e.g. a temporary).
+
+    """
 
     @property
     @abc.abstractmethod
@@ -106,22 +110,10 @@ class ContextAwareInstruction(Instruction):
     def datamap(self):
         """Map from names to arrays."""
 
-    # TODO I think this can be combined with datamap
-    @property
-    @abc.abstractmethod
-    def kernel_arguments(self):
-        """Kernel arguments and their intents.
-
-        The arguments are ordered according to when they first appear in
-        the expression.
-
-        Notes
-        -----
-        At the moment arguments are not allowed to appear in the expression
-        multiple times with different intents. This would required thought into
-        how to resolve read-after-write and similar dependencies.
-
-        """
+    # @property
+    # @abc.abstractmethod
+    # def kernel_arguments(self):
+    #     pass
 
 
 class Loop(Instruction):
@@ -146,29 +138,32 @@ class Loop(Instruction):
         from pyop3.itree.tree import partition_iterset
 
         if self.is_parallel:
+            # FIXME: The partitioning code does not seem to always run properly
+            # so for now do all the transfers in advance.
             # interleave computation and communication
-            new_index, (icore, iroot, ileaf) = partition_iterset(
-                self.index, [a for a, _ in self.kernel_arguments]
-            )
-
-            assert self.index.id == new_index.id
-
-            # substitute subsets into loopexpr, should maybe be done in partition_iterset
-            parallel_loop = self.copy(index=new_index)
-            code = compile(parallel_loop)
+            # new_index, (icore, iroot, ileaf) = partition_iterset(
+            #     self.index, [a for a, _ in self.function_arguments]
+            # )
+            #
+            # assert self.index.id == new_index.id
+            #
+            # # substitute subsets into loopexpr, should maybe be done in partition_iterset
+            # parallel_loop = self.copy(index=new_index)
+            # code = compile(parallel_loop)
+            code = compile(self)
 
             # interleave communication and computation
-            initializers, (reductions, broadcasts) = self._array_updates()
+            initializers, reductions, broadcasts = self._array_updates()
 
             for init in initializers:
                 init()
 
             # replace the parallel axis subset with one for the specific indices here
-            extent = just_one(icore.axes.root.components).count
-            core_kwargs = merge_dicts(
-                [kwargs, {icore.name: icore, extent.name: extent}]
-            )
-            code(**core_kwargs)
+            # extent = just_one(icore.axes.root.components).count
+            # core_kwargs = merge_dicts(
+            #     [kwargs, {icore.name: icore, extent.name: extent}]
+            # )
+            # code(**core_kwargs)
 
             # await reductions
             for red in reductions:
@@ -176,22 +171,24 @@ class Loop(Instruction):
 
             # roots
             # replace the parallel axis subset with one for the specific indices here
-            root_extent = just_one(iroot.axes.root.components).count
-            root_kwargs = merge_dicts(
-                [kwargs, {icore.name: iroot, extent.name: root_extent}]
-            )
-            code(**root_kwargs)
+            # root_extent = just_one(iroot.axes.root.components).count
+            # root_kwargs = merge_dicts(
+            #     [kwargs, {icore.name: iroot, extent.name: root_extent}]
+            # )
+            # code(**root_kwargs)
 
             # await broadcasts
             for broadcast in broadcasts:
                 broadcast()
 
             # leaves
-            leaf_extent = just_one(ileaf.axes.root.components).count
-            leaf_kwargs = merge_dicts(
-                [kwargs, {icore.name: ileaf, extent.name: leaf_extent}]
-            )
-            code(**leaf_kwargs)
+            # leaf_extent = just_one(ileaf.axes.root.components).count
+            # leaf_kwargs = merge_dicts(
+            #     [kwargs, {icore.name: ileaf, extent.name: leaf_extent}]
+            # )
+            # code(**leaf_kwargs)
+
+            code(**kwargs)
 
             # also may need to eagerly assemble Mats, or be clever and spike the accessors?
         else:
@@ -205,72 +202,80 @@ class Loop(Instruction):
 
     @cached_property
     def is_parallel(self):
+        from pyop3.buffer import DistributedBuffer
+
+        for arg in self.kernel_arguments:
+            if isinstance(arg, DistributedBuffer):
+                if arg.is_distributed:
+                    return True
+            else:
+                assert isinstance(arg, PETSc.Mat)
+                for local_size, global_size in arg.getSizes():
+                    if local_size != global_size:
+                        return True
+        return False
         return len(self._distarray_args) > 0
 
     @cached_property
-    def kernel_arguments(self):
-        args = {}
+    def function_arguments(self) -> tuple:
+        args = {}  # ordered
         for stmt in self.statements:
-            for arg, intent in stmt.kernel_arguments:
-                assert isinstance(arg, KernelArgument)
-                if arg not in args:
-                    args[arg] = intent
-                else:
-                    # FIXME, I have disabled this check because currently we
-                    # do something special for temporaries in Firedrake and the
-                    # clash is of those.
-                    pass
-                    # if args[arg] != intent:
-                    #     raise NotImplementedError(
-                    #         "Kernel argument used with differing intents"
-                    #     )
+            for arg, intent in stmt.function_arguments:
+                args[arg] = intent
         return tuple((arg, intent) for arg, intent in args.items())
 
     @cached_property
-    def _distarray_args(self):
-        from pyop3.array import ContextSensitiveMultiArray, HierarchicalArray
-        from pyop3.buffer import DistributedBuffer
+    def kernel_arguments(self):
+        args = OrderedSet()
+        for stmt in self.statements:
+            for arg in stmt.kernel_arguments:
+                args.add(arg)
+        return tuple(args)
 
-        arrays = {}
-        for arg, intent in self.kernel_arguments:
-            if isinstance(arg, ContextSensitiveMultiArray):
-                # take first
-                arg, *_ = arg.context_map.values()
-
-            if (
-                not isinstance(arg, HierarchicalArray)
-                or not isinstance(arg.buffer, DistributedBuffer)
-                or not arg.buffer.is_distributed
-            ):
-                continue
-
-            if arg.array not in arrays:
-                arrays[arg.array] = (intent, _has_nontrivial_stencil(arg))
-            else:
-                if arrays[arg.array][0] != intent:
-                    # I think that it does not make sense to access arrays with
-                    # different intents in the same kernel but that it is
-                    # always OK if the same intent is used.
-                    raise IntentMismatchError
-
-                # We need to know if *any* uses of a particular array touch ghost points
-                if not arrays[arg.array][1] and _has_nontrivial_stencil(arg):
-                    arrays[arg.array] = (intent, True)
-
-        # now sort
-        return tuple(
-            (arr, *arrays[arr]) for arr in sorted(arrays.keys(), key=lambda a: a.name)
-        )
-
-    @cached_property
-    def _mats(self):
-        from pyop3 import Mat
-
-        mats = []
-        for arg in self.kernel_arguments:
-            if isinstance(arg, Mat):
-                mats.append(arg)
-        return tuple(mats)
+    # @cached_property
+    # def _distarray_args(self):
+    #     from pyop3.array import ContextSensitiveMultiArray, HierarchicalArray
+    #
+    #     arrays = {}
+    #     for arg in self.function_arguments:
+    #         if isinstance(arg, (ContextSensitiveMultiArray, HierarchicalArray)):
+    #             # take first
+    #             arg, *_ = arg.context_map.values()
+    #
+    #         if (
+    #             not isinstance(arg, HierarchicalArray)
+    #             or not isinstance(arg.buffer, DistributedBuffer)
+    #             or not arg.buffer.is_distributed
+    #         ):
+    #             continue
+    #
+    #         if arg.buffer not in arrays:
+    #             arrays[arg.buffer] = (intent, _has_nontrivial_stencil(arg))
+    #         else:
+    #             if arrays[arg.buffer][0] != intent:
+    #                 # I think that it does not make sense to access arrays with
+    #                 # different intents in the same kernel but that it is
+    #                 # always OK if the same intent is used.
+    #                 raise IntentMismatchError
+    #
+    #             # We need to know if *any* uses of a particular array touch ghost points
+    #             if not arrays[arg.buffer][1] and _has_nontrivial_stencil(arg):
+    #                 arrays[arg.buffer] = (intent, True)
+    #
+    #     # now sort
+    #     return tuple(
+    #         (arr, *arrays[arr]) for arr in sorted(arrays.keys(), key=lambda a: a.name)
+    #     )
+    #
+    # @cached_property
+    # def _mats(self):
+    #     from pyop3 import Mat
+    #
+    #     mats = []
+    #     for arg in self.kernel_arguments:
+    #         if isinstance(arg, Mat):
+    #             mats.append(arg)
+    #     return tuple(mats)
 
     def _array_updates(self):
         """Collect appropriate callables for updating shared values in the right order.
@@ -281,78 +286,100 @@ class Loop(Instruction):
             Collections of callables to be executed at the right times.
 
         """
+        from pyop3 import DistributedBuffer, HierarchicalArray, Mat
+        from pyop3.array.harray import ContextSensitiveMultiArray
+        from pyop3.array.petsc import Sparsity
+
         initializers = []
-        finalizerss = ([], [])
-        for array, intent, touches_ghost_points in self._distarray_args:
-            if intent in {READ, RW}:
-                if touches_ghost_points:
-                    if not array._roots_valid:
-                        initializers.append(array._reduce_leaves_to_roots_begin)
-                        finalizerss[0].extend(
-                            [
-                                array._reduce_leaves_to_roots_end,
-                                array._broadcast_roots_to_leaves_begin,
-                            ]
-                        )
-                        finalizerss[1].append(array._broadcast_roots_to_leaves_end)
-                    else:
-                        initializers.append(array._broadcast_roots_to_leaves_begin)
-                        finalizerss[1].append(array._broadcast_roots_to_leaves_end)
-                else:
-                    if not array._roots_valid:
-                        initializers.append(array._reduce_leaves_to_roots_begin)
-                        finalizerss[0].append(array._reduce_leaves_to_roots_end)
+        reductions = []
+        broadcasts = []
+        for arg, intent in self.function_arguments:
+            if isinstance(arg, (ContextSensitiveMultiArray, HierarchicalArray)) and hasattr(arg, "buffer"):
+                buffer = arg.buffer
+                if isinstance(buffer, DistributedBuffer) and buffer.is_distributed:
+                    # for now assume the most conservative case
+                    touches_ghost_points = True
 
-            elif intent == WRITE:
-                # Assumes that all points are written to (i.e. not a subset). If
-                # this is not the case then a manual reduction is needed.
-                array._leaves_valid = False
-                array._pending_reduction = None
-
-            elif intent in {INC, MIN_WRITE, MIN_RW, MAX_WRITE, MAX_RW}:  # reductions
-                # We don't need to update roots if performing the same reduction
-                # again. For example we can increment into an array as many times
-                # as we want. The reduction only needs to be done when the
-                # data is read.
-                if array._roots_valid or intent == array._pending_reduction:
-                    pass
-                else:
-                    # We assume that all points are visited, and therefore that
-                    # WRITE accesses do not need to update roots. If only a subset
-                    # of entities are written to then a manual reduction is required.
-                    # This is the same assumption that we make for data_wo and is
-                    # explained in the documentation.
-                    if intent in {INC, MIN_RW, MAX_RW}:
-                        assert array._pending_reduction is not None
-                        initializers.append(array._reduce_leaves_to_roots_begin)
-                        finalizerss[0].append(array._reduce_leaves_to_roots_end)
-
-                # We are modifying owned values so the leaves must now be wrong
-                array._leaves_valid = False
-
-                # If ghost points are not modified then no future reduction is required
-                if not touches_ghost_points:
-                    array._pending_reduction = None
-                else:
-                    array._pending_reduction = intent
-
-                    # set leaves to appropriate nil value
-                    if intent == INC:
-                        array._data[array.sf.ileaf] = 0
-                    elif intent in {MIN_WRITE, MIN_RW}:
-                        array._data[array.sf.ileaf] = dtype_limits(array.dtype).max
-                    elif intent in {MAX_WRITE, MAX_RW}:
-                        array._data[array.sf.ileaf] = dtype_limits(array.dtype).min
-                    else:
-                        raise AssertionError
-
+                    inits, reds, bcasts = self._buffer_exchanges(
+                        buffer, intent, touches_ghost_points=touches_ghost_points
+                    )
+                    initializers.extend(inits)
+                    reductions.extend(reds)
+                    broadcasts.extend(bcasts)
             else:
-                raise AssertionError
+                if isinstance(arg, ContextSensitiveMultiArray):
+                    arg = single_valued(v for v in arg.context_map.values())
+                assert isinstance(arg, (Mat, Sparsity))
+                # just in case
+                broadcasts.append(arg.assemble)
 
-        for mat in self._mats:
-            finalizerss[1].append(mat.assemble)
+        return initializers, reductions, broadcasts
 
-        return initializers, finalizerss
+    @staticmethod
+    def _buffer_exchanges(buffer, intent, *, touches_ghost_points):
+        initializers, reductions, broadcasts = [], [], []
+
+        if intent in {READ, RW}:
+            if touches_ghost_points:
+                if not buffer._roots_valid:
+                    initializers.append(buffer._reduce_leaves_to_roots_begin)
+                    reductions.extend([
+                        buffer._reduce_leaves_to_roots_end,
+                        buffer._broadcast_roots_to_leaves_begin,
+                    ])
+                    broadcasts.append(buffer._broadcast_roots_to_leaves_end)
+                else:
+                    initializers.append(buffer._broadcast_roots_to_leaves_begin)
+                    broadcasts.append(buffer._broadcast_roots_to_leaves_end)
+            else:
+                if not buffer._roots_valid:
+                    initializers.append(buffer._reduce_leaves_to_roots_begin)
+                    reductions.append(buffer._reduce_leaves_to_roots_end)
+
+        elif intent == WRITE:
+            # Assumes that all points are written to (i.e. not a subset). If
+            # this is not the case then a manual reduction is needed.
+            buffer._leaves_valid = False
+            buffer._pending_reduction = None
+
+        else:
+            # reductions
+            assert intent in {INC, MIN_WRITE, MIN_RW, MAX_WRITE, MAX_RW}
+            # We don't need to update roots if performing the same reduction
+            # again. For example we can increment into an buffer as many times
+            # as we want. The reduction only needs to be done when the
+            # data is read.
+            if buffer._roots_valid or intent == buffer._pending_reduction:
+                pass
+            else:
+                # We assume that all points are visited, and therefore that
+                # WRITE accesses do not need to update roots. If only a subset
+                # of entities are written to then a manual reduction is required.
+                # This is the same assumption that we make for data_wo.
+                if intent in {INC, MIN_RW, MAX_RW}:
+                    assert buffer._pending_reduction is not None
+                    initializers.append(buffer._reduce_leaves_to_roots_begin)
+                    reductions.append(buffer._reduce_leaves_to_roots_end)
+
+            # We are modifying owned values so the leaves must now be wrong
+            buffer._leaves_valid = False
+
+            # If ghost points are not modified then no future reduction is required
+            if not touches_ghost_points:
+                buffer._pending_reduction = None
+            else:
+                buffer._pending_reduction = intent
+
+                # set leaves to appropriate nil value
+                if intent == INC:
+                    buffer._data[buffer.sf.ileaf] = 0
+                elif intent in {MIN_WRITE, MIN_RW}:
+                    buffer._data[buffer.sf.ileaf] = dtype_limits(buffer.dtype).max
+                else:
+                    assert intent in {MAX_WRITE, MAX_RW}
+                    buffer._data[buffer.sf.ileaf] = dtype_limits(buffer.dtype).min
+
+        return tuple(initializers), tuple(reductions), tuple(broadcasts)
 
 
 class ContextAwareLoop(ContextAwareInstruction):
@@ -369,194 +396,11 @@ class ContextAwareLoop(ContextAwareInstruction):
             stmt.datamap for stmts in self.statements.values() for stmt in stmts
         )
 
-    def __call__(self, **kwargs):
-        from pyop3.ir.lower import compile
-        from pyop3.itree.tree import partition_iterset
-
-        if self.is_parallel:
-            # interleave computation and communication
-            new_index, (icore, iroot, ileaf) = partition_iterset(
-                self.index, [a for a, _ in self.kernel_arguments]
-            )
-
-            assert self.index.id == new_index.id
-
-            # substitute subsets into loopexpr, should maybe be done in partition_iterset
-            parallel_loop = self.copy(index=new_index)
-            code = compile(parallel_loop)
-
-            # interleave communication and computation
-            initializers, finalizerss = self._array_updates()
-
-            for init in initializers:
-                init()
-
-            # replace the parallel axis subset with one for the specific indices here
-            extent = just_one(icore.axes.root.components).count
-            core_kwargs = merge_dicts(
-                [kwargs, {icore.name: icore, extent.name: extent}]
-            )
-            code(**core_kwargs)
-
-            # await reductions
-            for fin in finalizerss[0]:
-                fin()
-
-            # roots
-            # replace the parallel axis subset with one for the specific indices here
-            root_extent = just_one(iroot.axes.root.components).count
-            root_kwargs = merge_dicts(
-                [kwargs, {icore.name: iroot, extent.name: root_extent}]
-            )
-            code(**root_kwargs)
-
-            # await broadcasts
-            for fin in finalizerss[1]:
-                fin()
-
-            # leaves
-            leaf_extent = just_one(ileaf.axes.root.components).count
-            leaf_kwargs = merge_dicts(
-                [kwargs, {icore.name: ileaf, extent.name: leaf_extent}]
-            )
-            code(**leaf_kwargs)
-
-            # also may need to eagerly assemble Mats, or be clever and spike the accessors?
-        else:
-            compile(self)(**kwargs)
-
     @cached_property
     def loopy_code(self):
         from pyop3.ir.lower import compile
 
         return compile(self)
-
-    @cached_property
-    def is_parallel(self):
-        return len(self._distarray_args) > 0
-
-    @cached_property
-    def kernel_arguments(self):
-        args = {}
-        for stmt in self.statements:
-            for arg, intent in stmt.kernel_arguments:
-                assert isinstance(arg, KernelArgument)
-                if arg not in args:
-                    args[arg] = intent
-                else:
-                    if args[arg] != intent:
-                        raise NotImplementedError(
-                            "Kernel argument used with differing intents"
-                        )
-        return tuple((arg, intent) for arg, intent in args.items())
-
-    @cached_property
-    def _distarray_args(self):
-        from pyop3.buffer import DistributedBuffer
-
-        arrays = {}
-        for arg, intent in self.kernel_arguments:
-            if (
-                not isinstance(arg.array, DistributedBuffer)
-                or not arg.array.is_distributed
-            ):
-                continue
-            if arg.array not in arrays:
-                arrays[arg.array] = (intent, _has_nontrivial_stencil(arg))
-            else:
-                if arrays[arg.array][0] != intent:
-                    # I think that it does not make sense to access arrays with
-                    # different intents in the same kernel but that it is
-                    # always OK if the same intent is used.
-                    raise IntentMismatchError
-
-                # We need to know if *any* uses of a particular array touch ghost points
-                if not arrays[arg.array][1] and _has_nontrivial_stencil(arg):
-                    arrays[arg.array] = (intent, True)
-
-        # now sort
-        return tuple(
-            (arr, *arrays[arr]) for arr in sorted(arrays.keys(), key=lambda a: a.name)
-        )
-
-    def _array_updates(self):
-        """Collect appropriate callables for updating shared values in the right order.
-
-        Returns
-        -------
-        (initializers, (finalizers0, finalizers1))
-            Collections of callables to be executed at the right times.
-
-        """
-        initializers = []
-        finalizerss = ([], [])
-        for array, intent, touches_ghost_points in self._distarray_args:
-            if intent in {READ, RW}:
-                if touches_ghost_points:
-                    if not array._roots_valid:
-                        initializers.append(array._reduce_leaves_to_roots_begin)
-                        finalizerss[0].extend(
-                            [
-                                array._reduce_leaves_to_roots_end,
-                                array._broadcast_roots_to_leaves_begin,
-                            ]
-                        )
-                        finalizerss[1].append(array._broadcast_roots_to_leaves_end)
-                    else:
-                        initializers.append(array._broadcast_roots_to_leaves_begin)
-                        finalizerss[1].append(array._broadcast_roots_to_leaves_end)
-                else:
-                    if not array._roots_valid:
-                        initializers.append(array._reduce_leaves_to_roots_begin)
-                        finalizerss[0].append(array._reduce_leaves_to_roots_end)
-
-            elif intent == WRITE:
-                # Assumes that all points are written to (i.e. not a subset). If
-                # this is not the case then a manual reduction is needed.
-                array._leaves_valid = False
-                array._pending_reduction = None
-
-            elif intent in {INC, MIN_WRITE, MIN_RW, MAX_WRITE, MAX_RW}:  # reductions
-                # We don't need to update roots if performing the same reduction
-                # again. For example we can increment into an array as many times
-                # as we want. The reduction only needs to be done when the
-                # data is read.
-                if array._roots_valid or intent == array._pending_reduction:
-                    pass
-                else:
-                    # We assume that all points are visited, and therefore that
-                    # WRITE accesses do not need to update roots. If only a subset
-                    # of entities are written to then a manual reduction is required.
-                    # This is the same assumption that we make for data_wo and is
-                    # explained in the documentation.
-                    if intent in {INC, MIN_RW, MAX_RW}:
-                        assert array._pending_reduction is not None
-                        initializers.append(array._reduce_leaves_to_roots_begin)
-                        finalizerss[0].append(array._reduce_leaves_to_roots_end)
-
-                # We are modifying owned values so the leaves must now be wrong
-                array._leaves_valid = False
-
-                # If ghost points are not modified then no future reduction is required
-                if not touches_ghost_points:
-                    array._pending_reduction = None
-                else:
-                    array._pending_reduction = intent
-
-                    # set leaves to appropriate nil value
-                    if intent == INC:
-                        array._data[array.sf.ileaf] = 0
-                    elif intent in {MIN_WRITE, MIN_RW}:
-                        array._data[array.sf.ileaf] = dtype_limits(array.dtype).max
-                    elif intent in {MAX_WRITE, MAX_RW}:
-                        array._data[array.sf.ileaf] = dtype_limits(array.dtype).min
-                    else:
-                        raise AssertionError
-
-            else:
-                raise AssertionError
-
-        return initializers, finalizerss
 
 
 # TODO singledispatch
@@ -583,7 +427,7 @@ def _has_nontrivial_stencil(array):
 class Terminal(Instruction, abc.ABC):
     @cached_property
     def datamap(self):
-        return merge_dicts(a.datamap for a, _ in self.kernel_arguments)
+        return merge_dicts(a.datamap for a, _ in self.function_arguments)
 
     @property
     @abc.abstractmethod
@@ -602,29 +446,8 @@ class ArgumentSpec:
     space: Tuple[int]
 
 
-@dataclasses.dataclass(frozen=True)
-class FunctionArgument:
-    tensor: "IndexedTensor"
-    spec: ArgumentSpec
-
-    # alias
-
-    @property
-    def name(self):
-        return self.tensor.name
-
-    @property
-    def access(self) -> Intent:
-        return self.spec.access
-
-    @property
-    def dtype(self):
-        # assert self.tensor.dtype == self.spec.dtype
-        return self.spec.dtype
-
-    @property
-    def indices(self):
-        return self.tensor.indices
+class FunctionArgument(abc.ABC):
+    """Abstract class for types that may be passed to functions."""
 
 
 class Function:
@@ -644,7 +467,7 @@ class Function:
         self._access_descrs = access_descrs
 
     def __call__(self, *args):
-        if not all(isinstance(a, KernelArgument) for a in args):
+        if not all(isinstance(a, FunctionArgument) for a in args):
             raise TypeError("invalid kernel argument type")
         if len(args) != len(self.argspec):
             raise ValueError(
@@ -678,7 +501,7 @@ class CalledFunction(Terminal):
     fields = Terminal.fields | {"function", "arguments"}
 
     def __init__(
-        self, function: Function, arguments: Iterable[KernelArgument], **kwargs
+        self, function: Function, arguments: Iterable[FunctionArgument], **kwargs
     ) -> None:
         super().__init__(**kwargs)
         self.function = function
@@ -692,14 +515,20 @@ class CalledFunction(Terminal):
     def argspec(self):
         return self.function.argspec
 
-    @property
+    @cached_property
+    def function_arguments(self):
+        args = {}  # ordered
+        for arg, spec in checked_zip(self.arguments, self.argspec):
+            args[arg] = spec.access
+        return tuple((arg, intent) for arg, intent in args.items())
+
+    @cached_property
     def kernel_arguments(self):
-        return tuple(
-            (arg, intent)
-            for arg, intent in checked_zip(self.arguments, self.function._access_descrs)
-            # this isn't right, loop indices do not count here
-            if isinstance(arg, KernelArgument)
-        )
+        kargs = OrderedSet()
+        for func_arg in self.arguments:
+            for karg in _collect_kernel_arguments(func_arg):
+                kargs.add(karg)
+        return tuple(kargs)
 
     @property
     def argument_shapes(self):
@@ -739,8 +568,6 @@ class Assignment(Terminal, abc.ABC):
             if not isinstance(self.expression, numbers.Number):
                 raise NotImplementedError
         return tuple(arrays_)
-        # collector = MultiArrayCollector()
-        # return collector(self.assignee) | collector(self.expression)
 
     @property
     def argument_shapes(self):
@@ -764,12 +591,27 @@ class Assignment(Terminal, abc.ABC):
         else:
             raise NotImplementedError("Complicated rvalues not yet supported")
 
+    @property
+    def kernel_arguments(self):
+        from pyop3.array.harray import ContextSensitiveMultiArray, HierarchicalArray
+
+        args = OrderedSet()
+        for array, _ in self.function_arguments:
+            if isinstance(array, ContextSensitiveMultiArray):
+                if hasattr(array, "buffer"):
+                    args.add(array.buffer)
+                else:
+                    args.add(array.mat)
+            elif isinstance(array, HierarchicalArray):
+                args.add(array.buffer)
+        return tuple(args)
+
 
 class ReplaceAssignment(Assignment):
     """Like PETSC_INSERT_VALUES."""
 
     @cached_property
-    def kernel_arguments(self):
+    def function_arguments(self):
         return ((self.assignee, WRITE),) + self._expression_kernel_arguments
 
 
@@ -777,7 +619,7 @@ class AddAssignment(Assignment):
     """Like PETSC_ADD_VALUES."""
 
     @cached_property
-    def kernel_arguments(self):
+    def function_arguments(self):
         return ((self.assignee, INC),) + self._expression_kernel_arguments
 
 
@@ -788,26 +630,30 @@ class PetscMatInstruction(Instruction):
         self.array_arg = array_arg
 
     @property
+    def kernel_arguments(self):
+        return (self.mat_arg.mat, self.array_arg.buffer)
+
+    @property
     def datamap(self):
         return self.mat_arg.datamap | self.array_arg.datamap
 
 
 class PetscMatLoad(PetscMatInstruction):
     @cached_property
-    def kernel_arguments(self):
+    def function_arguments(self):
         return ((self.mat_arg, READ), (self.array_arg, WRITE))
 
 
 class PetscMatStore(PetscMatInstruction):
     @cached_property
-    def kernel_arguments(self):
+    def function_arguments(self):
         return ((self.mat_arg, WRITE), (self.array_arg, READ))
 
 
 # potentially confusing name
 class PetscMatAdd(PetscMatInstruction):
     @cached_property
-    def kernel_arguments(self):
+    def function_arguments(self):
         return ((self.mat_arg, INC), (self.array_arg, READ))
 
 
@@ -859,3 +705,25 @@ def fix_intents(tunit, accesses):
         is_output = access in {WRITE, RW, INC, MIN_RW, MIN_WRITE, MAX_WRITE, MAX_RW}
         new_args.append(arg.copy(is_input=is_input, is_output=is_output))
     return tunit.with_kernel(kernel.copy(args=new_args))
+
+
+@functools.singledispatch
+def _collect_kernel_arguments(func_arg: FunctionArgument) -> tuple:
+    from pyop3 import HierarchicalArray, Mat  # cyclic import
+    from pyop3.buffer import DistributedBuffer, NullBuffer
+
+    if isinstance(func_arg, HierarchicalArray):
+        return _collect_kernel_arguments(func_arg.buffer)
+    elif isinstance(func_arg, Mat):
+        return _collect_kernel_arguments(func_arg.mat)
+    elif isinstance(func_arg, DistributedBuffer):
+        return (func_arg,)
+    elif isinstance(func_arg, NullBuffer):
+        return ()
+    else:
+        raise TypeError(f"No handler defined for {type(func_arg).__name__}")
+
+
+@_collect_kernel_arguments.register
+def _(mat: PETSc.Mat) -> tuple:
+    return (mat,)

@@ -128,16 +128,21 @@ class SliceComponent(LabelledNodeComponent, abc.ABC):
 
 
 class AffineSliceComponent(SliceComponent):
-    fields = SliceComponent.fields | {"start", "stop", "step"}
+    fields = SliceComponent.fields | {"start", "stop", "step", "label_was_none"}
 
     # use None for the default args here since that agrees with Python slices
-    def __init__(self, component, start=None, stop=None, step=None, **kwargs):
-        super().__init__(component, **kwargs)
+    def __init__(self, component, start=None, stop=None, step=None, *, label=None, **kwargs):
+        label_was_none = label is None
+
+        super().__init__(component, label=label, **kwargs)
         # could be None here
         self.start = start if start is not None else 0
         self.stop = stop
         # could be None here
         self.step = step if step is not None else 1
+
+        # hack to force a relabelling
+        self.label_was_none = label_was_none
 
     @property
     def datamap(self) -> PMap:
@@ -504,12 +509,15 @@ class Slice(ContextFreeIndex):
 
     """
 
-    fields = {"axis", "slices", "numbering", "label"}
+    fields = ContextFreeIndex.fields - {"component_labels"} | {"axis", "slices", "numbering", "label"}
 
     def __init__(self, axis, slices, *, numbering=None, id=None, label=None):
-        super().__init__(label=label, id=id)
+        slices = as_tuple(slices)
+        component_labels = [s.label for s in slices]
+
+        super().__init__(label=label, id=id, component_labels=component_labels)
         self.axis = axis
-        self.slices = as_tuple(slices)
+        self.slices = slices
         self.numbering = numbering
 
     @property
@@ -1244,6 +1252,7 @@ def _(slice_: Slice, indices, *, target_path_acc, prev_axes, **kwargs):
         isinstance(s, AffineSliceComponent) and s.is_full for s in slice_.slices
     )
 
+    # It would be better here to relabel if a label is provided but default to keeping the same
     axis_label = slice_.axis if is_full_slice else slice_.label
 
     components = []
@@ -1251,26 +1260,26 @@ def _(slice_: Slice, indices, *, target_path_acc, prev_axes, **kwargs):
     index_exprs_per_subslice = []
     layout_exprs_per_subslice = []
 
+    if not prev_axes.is_valid_path(target_path_acc, complete=False):
+        raise NotImplementedError(
+            "If we swap axes around then we must check "
+            "that we don't get clashes."
+        )
+
+        # previous code:
+        # we are assuming that axes with the same label *must* be identical. They are
+        # only allowed to differ in that they have different IDs.
+        # target_axis, target_cpt = prev_axes.find_component(
+        #     slice_.axis, subslice.component, also_node=True
+        # )
+
+    if not target_path_acc:
+        target_axis = prev_axes.root
+    else:
+        parent = prev_axes._node_from_path(target_path_acc)
+        target_axis = prev_axes.child(*parent)
+
     for subslice in slice_.slices:
-        if not prev_axes.is_valid_path(target_path_acc, complete=False):
-            raise NotImplementedError(
-                "If we swap axes around then we must check "
-                "that we don't get clashes."
-            )
-
-            # previous code:
-            # we are assuming that axes with the same label *must* be identical. They are
-            # only allowed to differ in that they have different IDs.
-            # target_axis, target_cpt = prev_axes.find_component(
-            #     slice_.axis, subslice.component, also_node=True
-            # )
-
-        if not target_path_acc:
-            target_axis = prev_axes.root
-        else:
-            parent = prev_axes._node_from_path(target_path_acc)
-            target_axis = prev_axes.child(*parent)
-
         assert target_axis.label == slice_.axis
         target_cpt = just_one(
             c for c in target_axis.components if c.label == subslice.component
@@ -1279,6 +1288,9 @@ def _(slice_: Slice, indices, *, target_path_acc, prev_axes, **kwargs):
         if isinstance(subslice, AffineSliceComponent):
             # TODO handle this is in a test, slices of ragged things
             if isinstance(target_cpt.count, HierarchicalArray):
+                if target_cpt.distributed:
+                    raise NotImplementedError
+
                 if (
                     subslice.stop is not None
                     or subslice.start != 0
@@ -1294,12 +1306,29 @@ def _(slice_: Slice, indices, *, target_path_acc, prev_axes, **kwargs):
                     stop = target_cpt.count
                 else:
                     stop = subslice.stop
-                size = math.ceil((stop - subslice.start) / subslice.step)
+
+                if target_cpt.distributed:
+                    if subslice.start != 0 or subslice.step != 1:
+                        raise NotImplementedError
+
+                    owned_count = min(target_cpt.owned_count, stop)
+                    count = stop
+                    size = (owned_count, count)
+                else:
+                    size = math.ceil((stop - subslice.start) / subslice.step)
+
         else:
             assert isinstance(subslice, Subset)
             size = subslice.array.axes.leaf_component.count
-        mylabel = subslice.component if is_full_slice else subslice.label
-        cpt = AxisComponent(size, label=mylabel, unit=target_cpt.unit, rank_equal=target_cpt.rank_equal)
+
+            if target_cpt.distributed:
+                raise NotImplementedError
+
+        if is_full_slice and subslice.label_was_none:
+            mylabel = subslice.component
+        else:
+            mylabel = subslice.label
+        cpt = AxisComponent(size, label=mylabel, unit=target_cpt.unit)
         components.append(cpt)
 
         target_path_per_subslice.append(pmap({slice_.axis: subslice.component}))
@@ -1341,10 +1370,10 @@ def _(slice_: Slice, indices, *, target_path_acc, prev_axes, **kwargs):
                 for axis, cpt in subset_axes.detailed_path(source_path).items()
             ]
             my_target_path = merge_dicts(
-                subset_array.target_paths.get(key, {}) for key in index_keys
+                subset_array.axes.target_paths.get(key, {}) for key in index_keys
             )
             old_index_exprs = merge_dicts(
-                subset_array.index_exprs.get(key, {}) for key in index_keys
+                subset_array.axes.index_exprs.get(key, {}) for key in index_keys
             )
 
             my_index_exprs = {}
@@ -1820,8 +1849,6 @@ def _compose_axes_rec(indexed_axes, orig_axes, *, indexed_axis=None):
     # composed_layout_exprs = defaultdict(dict)  # TODO
 
     if indexed_axis is None:
-        indexed_axis = indexed_axes.root
-
         ikey = None
         partial_target_path = indexed_axes.target_paths.get(ikey, {})
         partial_index_exprs = indexed_axes.index_exprs.get(ikey, {})
@@ -1847,6 +1874,12 @@ def _compose_axes_rec(indexed_axes, orig_axes, *, indexed_axis=None):
         # Keep the bits that are already indexed out
         composed_target_paths[None].update(orig_axes.target_paths.get(None, {}))
         composed_index_exprs[None].update(orig_axes.index_exprs.get(None, {}))
+
+        if indexed_axes.is_empty:
+            # Can do nothing more, stop here
+            return (freeze(composed_target_paths), freeze(composed_index_exprs))
+        else:
+            indexed_axis = indexed_axes.root
 
     for indexed_component in indexed_axis.components:
         ikey = (indexed_axis.id, indexed_component.label)
@@ -2186,6 +2219,7 @@ def partition_iterset(index: LoopIndex, arrays):
 
     """
     from pyop3.array import HierarchicalArray, Mat
+    from pyop3.array.petsc import Sparsity
 
     # take first
     # if index.iterset.depth > 1:
@@ -2200,7 +2234,8 @@ def partition_iterset(index: LoopIndex, arrays):
     is_root_or_leaf_per_array = {}
     for array in arrays:
         # skip matrices
-        if isinstance(array, Mat):
+        # really nasty hack for now to handle indexed mats
+        if isinstance(array, (Mat, Sparsity)) or not hasattr(array, "buffer"):
             continue
 
         # skip purely local arrays
@@ -2225,7 +2260,8 @@ def partition_iterset(index: LoopIndex, arrays):
         assert isinstance(parindex, numbers.Integral)
 
         for array in arrays:
-            if isinstance(array, Mat):
+            # same nasty hack
+            if isinstance(array, (Mat, Sparsity)) or not hasattr(array, "buffer"):
                 continue
             # skip purely local arrays
             if not array.buffer.is_distributed:

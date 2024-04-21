@@ -4,12 +4,10 @@ import functools
 
 import numpy as np
 from mpi4py import MPI
-from petsc4py import PETSc
 from pyrsistent import pmap
 
-from pyop3.axtree.layout import _as_int, _axis_component_size, step_size
-from pyop3.dtypes import IntType, as_numpy_dtype, get_mpi_dtype
-from pyop3.utils import checked_zip, just_one, strict_int
+from pyop3.dtypes import IntType, as_numpy_dtype
+from pyop3.utils import checked_zip
 
 
 def reduction_op(op, invec, inoutvec, datatype):
@@ -32,12 +30,16 @@ def partition_ghost_points(axis, sf):
     is_owned = np.full(npoints, True, dtype=bool)
     is_owned[sf.ileaf] = False
 
+    component_owned_sizes = [0] * len(axis.components)
     numbering = np.empty(npoints, dtype=IntType)
     owned_ptr = 0
     ghost_ptr = npoints - sf.nleaves
     points = axis.numbering.data_ro if axis.numbering is not None else range(npoints)
     for pt in points:
         if is_owned[pt]:
+            component_index = axis._axis_number_to_component_index(pt)
+            component_owned_sizes[component_index] += 1
+
             numbering[owned_ptr] = pt
             owned_ptr += 1
         else:
@@ -46,10 +48,11 @@ def partition_ghost_points(axis, sf):
 
     assert owned_ptr == npoints - sf.nleaves
     assert ghost_ptr == npoints
-    return numbering
+    return component_owned_sizes, numbering
 
 
 def collect_sf_graphs(axes, axis=None, path=pmap(), indices=pmap()):
+    from pyop3.axtree.layout import _as_int
     # it does not make sense for temporary-like objects to have SFs
     if axes.outer_loops:
         return ()
@@ -80,6 +83,8 @@ def collect_sf_graphs(axes, axis=None, path=pmap(), indices=pmap()):
 # perhaps I can defer renumbering the SF to here?
 # PETSc provides a similar function that composes an SF with a Section, can I use that?
 def grow_dof_sf(axes, axis, path, indices):
+    from pyop3.axtree.layout import step_size
+
     point_sf = axis.sf
     # TODO, use convenience methods
     nroots, ilocal, iremote = point_sf._graph

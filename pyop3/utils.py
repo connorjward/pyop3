@@ -64,6 +64,26 @@ class UniqueRecord(pytools.ImmutableRecord, Identified):
         Identified.__init__(self, id)
 
 
+class OrderedSet:
+    """An ordered set."""
+    def __init__(self):
+        # Python dicts are ordered so we use one to keep the ordering
+        # and also have O(1) access.
+        # self._values = {}
+
+        # actually sometimes we have non-hashable things (PETSc Mats), so use a list
+        self._values = []
+
+    def __iter__(self):
+        # return iter(self._values.keys())
+        return iter(self._values)
+
+    def add(self, value):
+        # self._values[value] = None
+        if value not in self._values:
+            self._values.append(value)
+
+
 def as_tuple(item):
     if isinstance(item, collections.abc.Sequence):
         return tuple(item)

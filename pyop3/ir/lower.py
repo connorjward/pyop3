@@ -222,7 +222,9 @@ class LoopyCodegenContext(CodegenContext):
             return
         self._seen_arrays.add(array.name)
 
-        debug = bool(config["debug"])
+        # set to True to use actual names in generated code, it helps debugging
+        # but makes codegen miss cache all the time
+        debug = False
 
         injected = array.constant and array.size < config["max_static_array_size"]
         if isinstance(array, AbstractMat):
@@ -233,10 +235,7 @@ class LoopyCodegenContext(CodegenContext):
             shape = self._temporary_shapes.get(array.name, (array.alloc_size,))
 
             initializer = array.buffer.data_ro if injected else None
-            # debug, does this fix things?
             if initializer is not None:
-                # shape = None  # nope
-                # shape = initializer.shape  # nope
                 arg = lp.TemporaryVariable(
                     name,
                     dtype=array.dtype,

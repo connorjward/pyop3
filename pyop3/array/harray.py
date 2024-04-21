@@ -139,19 +139,23 @@ class HierarchicalArray(Array, ContextFree, KernelArgument):
 
             if data is not None:
                 data = np.asarray(data, dtype=dtype)
-                shape = data.shape
-            else:
-                shape = axes.global_size
+
+                # always deal with flattened data
+                if len(data.shape) > 1:
+                    data = data.flatten()
+                if data.size != axes.unindexed.global_size:
+                    raise ValueError("Data shape does not match axes")
 
             # IndexedAxisTrees do not currently have SFs, so create a dummy one here
             if isinstance(axes, AxisTree):
                 sf = axes.sf
             else:
                 assert isinstance(axes, IndexedAxisTree)
-                sf = serial_forest(axes.global_size)
+                # not sure this is the right thing to do
+                sf = serial_forest(axes.unindexed.global_size)
 
             data = DistributedBuffer(
-                shape,
+                axes.unindexed.global_size,  # not a useful property anymore
                 sf,
                 dtype,
                 name=self.name,
@@ -165,6 +169,8 @@ class HierarchicalArray(Array, ContextFree, KernelArgument):
         # TODO This attr really belongs to the buffer not the array
         self.constant = constant
 
+        # self._cache = {}
+
     def __str__(self):
         return self.name
 
@@ -177,14 +183,20 @@ class HierarchicalArray(Array, ContextFree, KernelArgument):
         if indices is Ellipsis:
             return self
 
+        # key = (indices, strict)
+        # if key in self._cache:
+        #     return self._cache[key]
+
         index_forest = as_index_forest(indices, axes=self.axes, strict=strict)
         if index_forest.keys() == {pmap()}:
             index_tree = index_forest[pmap()]
             indexed_axes = index_axes(index_tree, pmap(), self.axes)
             axes = compose_axes(indexed_axes, self.axes)
-            return HierarchicalArray(
+            dat = HierarchicalArray(
                 axes, data=self.buffer, max_value=self.max_value, name=self.name
             )
+            # self._cache[key] = dat
+            return dat
 
         array_per_context = {}
         for loop_context, index_tree in index_forest.items():
@@ -194,7 +206,9 @@ class HierarchicalArray(Array, ContextFree, KernelArgument):
                 axes, data=self.buffer, name=self.name, max_value=self.max_value
             )
 
-        return ContextSensitiveMultiArray(array_per_context)
+        dat = ContextSensitiveMultiArray(array_per_context)
+        # self._cache[key] = dat
+        return dat
 
     # Since __getitem__ is implemented, this class is implicitly considered
     # to be iterable (which it's not). This avoids some confusing behaviour.
@@ -218,16 +232,16 @@ class HierarchicalArray(Array, ContextFree, KernelArgument):
     @property
     def data_rw(self):
         self._check_no_copy_access()
-        return self.buffer.data_rw[self._buffer_indices]
+        return self.buffer.data_rw[self.axes._buffer_indices]
 
     @property
     def data_ro(self):
-        if not isinstance(self._buffer_indices, slice):
+        if not isinstance(self.axes._buffer_indices, slice):
             warning(
                 "Read-only access to the array is provided with a copy, "
                 "consider avoiding if possible."
             )
-        return self.buffer.data_ro[self._buffer_indices]
+        return self.buffer.data_ro[self.axes._buffer_indices]
 
     @property
     def data_wo(self):
@@ -239,7 +253,7 @@ class HierarchicalArray(Array, ContextFree, KernelArgument):
         can be dropped.
         """
         self._check_no_copy_access()
-        return self.buffer.data_wo[self._buffer_indices]
+        return self.buffer.data_wo[self.axes._buffer_indices]
 
     @property
     @deprecated(".data_rw_with_halos")
@@ -249,16 +263,16 @@ class HierarchicalArray(Array, ContextFree, KernelArgument):
     @property
     def data_rw_with_halos(self):
         self._check_no_copy_access()
-        return self.buffer.data_rw[self._buffer_indices_ghost]
+        return self.buffer.data_rw[self.axes._buffer_indices_ghost]
 
     @property
     def data_ro_with_halos(self):
-        if not isinstance(self._buffer_indices_ghost, slice):
+        if not isinstance(self.axes._buffer_indices_ghost, slice):
             warning(
                 "Read-only access to the array is provided with a copy, "
                 "consider avoiding if possible."
             )
-        return self.buffer.data_ro[self._buffer_indices_ghost]
+        return self.buffer.data_ro[self.axes._buffer_indices_ghost]
 
     @property
     def data_wo_with_halos(self):
@@ -270,54 +284,10 @@ class HierarchicalArray(Array, ContextFree, KernelArgument):
         can be dropped.
         """
         self._check_no_copy_access()
-        return self.buffer.data_wo[self._buffer_indices_ghost]
-
-    @cached_property
-    def _buffer_indices(self):
-        return self._collect_buffer_indices(ghost=False)
-
-    @cached_property
-    def _buffer_indices_ghost(self):
-        return self._collect_buffer_indices(ghost=True)
-
-    def _collect_buffer_indices(self, *, ghost: bool):
-        # TODO: This method is inefficient as for affine things we still tabulate
-        # everything first. It would be best to inspect index_exprs to determine
-        # if a slice is sufficient, but this is hard.
-        # TODO: This should be more widely cached, don't want to tabulate more often
-        # than required.
-
-        size = self.axes.size if ghost else self.axes.owned.size
-        assert size > 0
-
-        indices = np.full(size, -1, dtype=IntType)
-        # TODO: Handle any outer loops.
-        # TODO: Generate code for this.
-        for i, p in enumerate(self.axes.iter()):
-            indices[i] = self.axes.offset(p.source_exprs, p.source_path)
-        debug_assert(lambda: (indices >= 0).all())
-
-        # The packed indices are collected component-by-component so, for
-        # numbered multi-component axes, they are not in ascending order.
-        # We sort them so we can test for "affine-ness".
-        indices.sort()
-
-        # See if we can represent these indices as a slice. This is important
-        # because slices enable no-copy access to the array.
-        steps = np.unique(indices[1:] - indices[:-1])
-        if len(steps) == 0:
-            start = just_one(indices)
-            return slice(start, start + 1, 1)
-        elif len(steps) == 1:
-            start = indices[0]
-            stop = indices[-1] + 1
-            (step,) = steps
-            return slice(start, stop, step)
-        else:
-            return indices
+        return self.buffer.data_wo[self.axes._buffer_indices_ghost]
 
     def _check_no_copy_access(self):
-        if not isinstance(self._buffer_indices, slice):
+        if not isinstance(self.axes._buffer_indices, slice):
             raise FancyIndexWriteException(
                 "Writing to the array directly is not supported for "
                 "non-trivially indexed (i.e. sliced) arrays."
@@ -541,7 +511,8 @@ class MultiArray(HierarchicalArray):
         super().__init__(*args, **kwargs)
 
 
-# Now ContextSensitiveDat
+# NOTE: I think I can probably get rid of this class and wrap the
+# context-sensitivity inside the axis tree.
 class ContextSensitiveMultiArray(Array, ContextSensitive):
     def __init__(self, arrays):
         name = single_valued(a.name for a in arrays.values())
@@ -595,6 +566,11 @@ class ContextSensitiveMultiArray(Array, ContextSensitive):
     @property
     def buffer(self):
         return self._shared_attr("buffer")
+
+    # this is really nasty, but need to know if wrapping a Mat
+    @property
+    def mat(self):
+        return self._shared_attr("mat")
 
     @property
     def dtype(self):
