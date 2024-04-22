@@ -85,15 +85,13 @@ class AbstractMat(Array, ContextFree):
         mat=None,
         *,
         name=None,
+        block_shape=None,
     ):
         raxes = as_axis_tree(raxes)
         caxes = as_axis_tree(caxes)
 
         if mat_type is None:
             mat_type = self.DEFAULT_MAT_TYPE
-
-        if mat_type == "baij":
-            raise NotImplementedError("Need to give Mats a shape")
 
         if mat is None:
             mat = self._make_mat(raxes, caxes, mat_type)
@@ -103,6 +101,13 @@ class AbstractMat(Array, ContextFree):
         self.caxes = caxes
         self.mat_type = mat_type
         self.mat = mat
+
+        if mat_type == "baij":
+            self.block_shape = block_shape
+            self.block_raxes = self._block_raxes
+        else:
+            self.block_shape = 1
+            self.block_raxes = raxes
 
         # self._cache = {}
 
@@ -177,6 +182,7 @@ class AbstractMat(Array, ContextFree):
                 mat_type=self.mat_type,
                 mat=self.mat,
                 name=self.name,
+                block_shape=self.block_shape,
             )
             # self._cache[cache_key] = mat
             return mat
@@ -199,6 +205,7 @@ class AbstractMat(Array, ContextFree):
                 self.mat_type,
                 self.mat,
                 name=self.name,
+                block_shape=self.block_shape,
             )
         # But this is now a PetscMat...
         mat = ContextSensitiveMultiArray(arrays)
@@ -306,9 +313,46 @@ class AbstractMat(Array, ContextFree):
                 yield (rlabel_acc_, clabel_acc_)
 
     @cached_property
+    def _block_raxes(self):
+        block_axes, target_paths, index_exprs = self._collect_block_axes(self.block_shape)
+        return IndexedAxisTree(
+            block_axes.node_map, target_paths=target_paths, index_exprs=index_exprs,
+            outer_loops=???, unindexed=??)
+
+    def _collect_block_axes(self, block_size, axis=None):
+        from pyop3.axtree.layout import _axis_size
+        target_paths = {}
+        index_exprs = {}
+        if axis is None:
+            axis = self.raxes.root
+            target_paths[None] = self.raxes.target_paths.get(None, {})
+            index_exprs[None] = self.raxes.index_exprs.get(None, {})
+
+        axis_tree = AxisTree(axis)
+        
+        for component in axis.components:
+            key = (axis.id, component.label)
+            target_paths[key] = self.raxes.target_paths.get(key, {})
+            index_exprs[key] = self.raxes.index_exprs.get(key, {})
+            subaxis = self.raxes.child(axis, component)
+            subtree_size = _axis_size(axis_tree, subaxis)
+            if subtree_size != block_size:
+                subtree, subtarget_paths, subindex_exprs = self._collect_block_axes(block_size, axis=subaxis)
+                axis_tree = axis_tree.add_subtree(subtree, axis, component)
+                target_paths.update(subtarget_paths)
+                index_exprs.update(subindex_exprs)
+                #else:
+                #    assert subtree_size == block_size
+        return axis_tree, target_paths, index_exprs
+                
+
+    @cached_property
     @PETSc.Log.EventDecorator()
     def maps(self):
         from pyop3.axtree.layout import my_product
+
+        # if self.mat_type == "baij":
+        #     raise NotImplementedError("Use a smaller set of axes here")
 
         # TODO: Don't think these need to be lists here.
         # FIXME: This will only work for singly-nested matrices
@@ -351,17 +395,17 @@ class AbstractMat(Array, ContextFree):
                 orig_caxess = [self.caxes.unindexed]
                 dropped_ckeys = set()
         else:
-            orig_raxess = [self.raxes.unindexed]
+            orig_raxess = [self.block_raxes.unindexed]
             orig_caxess = [self.caxes.unindexed]
             dropped_rkeys = set()
             dropped_ckeys = set()
 
         # TODO: are dropped_rkeys and dropped_ckeys still needed?
 
-        loop_index = just_one(self.raxes.outer_loops)
+        loop_index = just_one(self.block_raxes.outer_loops)
         iterset = AxisTree(loop_index.iterset.node_map)
 
-        rmap_axes = iterset.add_subtree(self.raxes, *iterset.leaf)
+        rmap_axes = iterset.add_subtree(self.block_raxes, *iterset.leaf)
         rmap = HierarchicalArray(rmap_axes, dtype=IntType)
         rmap = rmap[loop_index.local_index]
 
@@ -375,12 +419,12 @@ class AbstractMat(Array, ContextFree):
         # TODO: Make the code below go into a separate function distinct
         # from mat_type logic. Then can also share code for rmap and cmap.
         for orig_raxes in orig_raxess:
-            for idxs in my_product(self.raxes.outer_loops):
+            for idxs in my_product(self.block_raxes.outer_loops):
                 # target_indices = {idx.index.id: idx.target_exprs for idx in idxs}
                 target_indices = merge_dicts([idx.replace_map for idx in idxs])
 
-                # for p in self.raxes.iter(idxs):
-                for p in self.raxes.iter(idxs, include_ghost_points=True):  # seems to fix things
+                # for p in self.block_raxes.iter(idxs):
+                for p in self.block_raxes.iter(idxs, include_ghost_points=True):  # seems to fix things
                     target_path = p.target_path
                     target_exprs = p.target_exprs
                     for key in dropped_rkeys:
@@ -424,6 +468,7 @@ class AbstractMat(Array, ContextFree):
         # breakpoint()
 
         return (rmap, cmap)
+    
 
     @property
     def rmap(self):
