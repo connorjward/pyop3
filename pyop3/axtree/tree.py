@@ -1286,6 +1286,30 @@ class IndexedAxisTree(BaseAxisTree):
         else:
             return indices
 
+    @cached_property
+    def tabulated_offsets(self):
+        from pyop3.array import HierarchicalArray
+
+        loop_index = just_one(self.outer_loops)
+        iterset = AxisTree(loop_index.iterset.node_map)
+        rmap_axes = iterset.add_subtree(self, *iterset.leaf)
+        rmap = HierarchicalArray(rmap_axes, dtype=IntType)
+        rmap = rmap[loop_index.local_index]
+        for idx in loop_index.iter():
+            target_indices = idx.replace_map
+            # for p in self.iter(idxs):
+            for p in self.iter([idx], include_ghost_points=True):  # seems to fix thing
+                offset = self.axes.unindexed.offset(
+                    p.target_exprs, p.target_path, loop_exprs=target_indices
+                )
+                rmap.set_value(
+                    p.source_exprs,
+                    offset,
+                    p.source_path,
+                    loop_exprs=target_indices,
+                )
+        return rmap
+
 
 class ContextSensitiveAxisTree(ContextSensitiveLoopIterable):
     def __getitem__(self, indices) -> ContextSensitiveAxisTree:
