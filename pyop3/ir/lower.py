@@ -842,7 +842,7 @@ def _(assignment: PetscMatStore, mat_name, array_name, nrow, ncol, irow, icol):
 
 @_petsc_mat_insn.register
 def _(assignment: PetscMatAdd, mat_name, array_name, nrow, ncol, irow, icol):
-    return f"PetscCall(MatSetValuesLocal({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]), ADD_VALUES));"
+    return f"MatSetValuesLocal({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]), ADD_VALUES);"
 
 
 # TODO now I attach a lot of info to the context-free array, do I need to pass axes around?
