@@ -103,7 +103,7 @@ class AbstractMat(Array, ContextFree):
             mat_type = self.DEFAULT_MAT_TYPE
 
         if mat is None:
-            mat = self._make_mat(self.raxes, self.caxes, mat_type, block_shape=block_shape)
+            mat = self._make_mat(self.raxes, self.caxes, mat_type, block_shape=self.block_shape)
 
         super().__init__(name)
         self.mat_type = mat_type
@@ -403,8 +403,8 @@ class AbstractMat(Array, ContextFree):
                 orig_caxess = [self.caxes.unindexed]
                 dropped_ckeys = set()
         else:
-            orig_raxess = [self.raxes.unindexed]
-            orig_caxess = [self.caxes.unindexed]
+            orig_raxess = [self.block_raxes.unindexed]
+            orig_caxess = [self.block_caxes.unindexed]
             dropped_rkeys = set()
             dropped_ckeys = set()
 
@@ -417,7 +417,7 @@ class AbstractMat(Array, ContextFree):
         rmap = HierarchicalArray(rmap_axes, dtype=IntType)
         rmap = rmap[loop_index.local_index]
 
-        loop_index = just_one(self.caxes.outer_loops)
+        loop_index = just_one(self.block_caxes.outer_loops)
         iterset = AxisTree(loop_index.iterset.node_map)
 
         cmap_axes = iterset.add_subtree(self.block_caxes, *iterset.leaf)
@@ -442,7 +442,8 @@ class AbstractMat(Array, ContextFree):
                     offset = orig_raxes.offset(
                         target_exprs, target_path, loop_exprs=target_indices
                     )
-
+                    # Setting the column index where the matrix is different from zero.
+                    # offset is the global index of the nonzero entry in the matrix.
                     rmap.set_value(
                         p.source_exprs,
                         offset,
@@ -472,9 +473,6 @@ class AbstractMat(Array, ContextFree):
                         p.source_path,
                         loop_exprs=target_indices,
                     )
-
-        # breakpoint()
-
         return (rmap, cmap)
     
 
