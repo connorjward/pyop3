@@ -103,7 +103,7 @@ class AbstractMat(Array, ContextFree):
             mat_type = self.DEFAULT_MAT_TYPE
 
         if mat is None:
-            mat = self._make_mat(self.block_raxes, self.block_caxes, mat_type)
+            mat = self._make_mat(self.raxes, self.caxes, mat_type, block_shape=block_shape)
 
         super().__init__(name)
         self.mat_type = mat_type
@@ -337,7 +337,7 @@ class AbstractMat(Array, ContextFree):
         index_exprs = {}
         if axis is None:
             axis = self.raxes.root
-            target_paths[None] = self.raxes.target_paths.get(None, {})
+            target_paths[None] = self.raxes.target_paths.get(None, pmap({}))
 
         axis_tree = AxisTree(axis)
         for component in axis.components:
@@ -521,7 +521,7 @@ class AbstractMat(Array, ContextFree):
         return axes
 
     @classmethod
-    def _make_mat(cls, raxes, caxes, mat_type):
+    def _make_mat(cls, raxes, caxes, mat_type, block_shape=None):
         if isinstance(mat_type, collections.abc.Mapping):
             # TODO: This is very ugly
             rsize = max(x or 0 for x, _ in mat_type.keys()) + 1
@@ -530,14 +530,14 @@ class AbstractMat(Array, ContextFree):
             for (rkey, ckey), submat_type in mat_type.items():
                 subraxes = raxes[rkey] if rkey is not None else raxes
                 subcaxes = caxes[ckey] if ckey is not None else caxes
-                submat = cls._make_mat(subraxes, subcaxes, submat_type)
+                submat = cls._make_mat(subraxes, subcaxes, submat_type, block_shape=block_shape)
                 submats[rkey, ckey] = submat
 
             # TODO: Internal comm? Set as mat property (then not a classmethod)?
             comm = single_valued([raxes.comm, caxes.comm])
             return PETSc.Mat().createNest(submats, comm=comm)
         else:
-            return cls._make_monolithic_mat(raxes, caxes, mat_type)
+            return cls._make_monolithic_mat(raxes, caxes, mat_type, block_shape=block_shape)
 
     @cached_property
     def datamap(self):
@@ -553,14 +553,14 @@ class Sparsity(AbstractMat):
         if not hasattr(self, "_lazy_template"):
             self.assemble()
 
-            template = Mat._make_mat(self.block_raxes, self.block_caxes, self.mat_type)
+            template = Mat._make_mat(self.raxes, self.caxes, self.mat_type, block_shape=self.block_shape)
             self._preallocate(self.mat, template, self.mat_type)
             # template.preallocateWithMatPreallocator(self.mat)
             # We can safely set these options since by using a sparsity we
             # are asserting that we know where the non-zeros are going.
             # NOTE: These may already get set by PETSc.
             template.setOption(PETSc.Mat.Option.NEW_NONZERO_LOCATION_ERR, True)
-            template.setOption(PETSc.Mat.Option.IGNORE_ZERO_ENTRIES, True)
+            #template.setOption(PETSc.Mat.Option.IGNORE_ZERO_ENTRIES, True)
 
             template.assemble()
             self._lazy_template = template
@@ -581,7 +581,7 @@ class Sparsity(AbstractMat):
                 template.preallocateWithMatPreallocator(preallocator)
 
     @classmethod
-    def _make_monolithic_mat(cls, raxes, caxes, mat_type: str):
+    def _make_monolithic_mat(cls, raxes, caxes, mat_type: str, block_shape=None):
         # TODO: Internal comm?
         comm = single_valued([raxes.comm, caxes.comm])
 
@@ -599,14 +599,18 @@ class Sparsity(AbstractMat):
             mat.setPythonContext(matdat)
         else:
             mat = PETSc.Mat().create(comm)
+            mat.setBlockSize(block_shape)
             mat.setType(PETSc.Mat.Type.PREALLOCATOR)
 
             # None is for the global size, PETSc will figure it out for us
             sizes = ((raxes.owned.size, None), (caxes.owned.size, None))
             mat.setSizes(sizes)
 
-            rlgmap = PETSc.LGMap().create(raxes.global_numbering, comm=comm)
-            clgmap = PETSc.LGMap().create(caxes.global_numbering, comm=comm)
+            rlgmap_indices = raxes.global_numbering[::block_shape] // block_shape
+            clgmap_indices = caxes.global_numbering[::block_shape] // block_shape
+
+            rlgmap = PETSc.LGMap().create(rlgmap_indices, comm=comm)
+            clgmap = PETSc.LGMap().create(clgmap_indices, comm=comm)
             mat.setLGMap(rlgmap, clgmap)
 
         mat.setUp()
@@ -617,7 +621,7 @@ class Mat(AbstractMat):
     @classmethod
     def from_sparsity(cls, sparsity, *, name=None):
         mat = sparsity.materialize()
-        return cls(sparsity.raxes, sparsity.caxes, sparsity.mat_type, mat, name=name)
+        return cls(sparsity.raxes, sparsity.caxes, sparsity.mat_type, mat, name=name, block_shape=sparsity.block_shape)
 
     def eager_zero(self):
         self.mat.zeroEntries()
@@ -650,7 +654,7 @@ class Mat(AbstractMat):
 
     # TODO: Almost identical code to Sparsity
     @classmethod
-    def _make_monolithic_mat(cls, raxes, caxes, mat_type: str):
+    def _make_monolithic_mat(cls, raxes, caxes, mat_type: str, block_shape=None):
         # TODO: Internal comm?
         comm = single_valued([raxes.comm, caxes.comm])
 
@@ -669,13 +673,17 @@ class Mat(AbstractMat):
         else:
             mat = PETSc.Mat().create(comm)
             mat.setType(mat_type)
+            mat.setBlockSize(block_shape)
 
             # None is for the global size, PETSc will figure it out for us
             sizes = ((raxes.owned.size, None), (caxes.owned.size, None))
             mat.setSizes(sizes)
 
-            rlgmap = PETSc.LGMap().create(raxes.global_numbering, comm=comm)
-            clgmap = PETSc.LGMap().create(caxes.global_numbering, comm=comm)
+            rlgmap_indices = raxes.global_numbering[::block_shape] // block_shape
+            clgmap_indices = caxes.global_numbering[::block_shape] // block_shape
+
+            rlgmap = PETSc.LGMap().create(rlgmap_indices, comm=comm)
+            clgmap = PETSc.LGMap().create(clgmap_indices, comm=comm)
             mat.setLGMap(rlgmap, clgmap)
 
         mat.setUp()
@@ -702,13 +710,6 @@ class _MatDat:
                 axes = self.caxes
             else:
                 axes = AxisTree()
-
-            dat = HierarchicalArray(axes, dtype=self.dtype)
-            self._lazy_dat = dat
-        return self._lazy_dat
-
-    @property
-    def is_row_matrix(self):
         root = self.raxes.root
         return len(root.components) != 1 or not root.component.unit
 
