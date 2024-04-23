@@ -218,19 +218,21 @@ class AbstractMat(Array, ContextFree):
     def assemble(self):
         self.mat.assemble()
 
-    def assign(self, other):
+    def assign(self, other, *, eager=True):
         if isinstance(other, HierarchicalArray):
             # TODO: Check axes match between self and other
-            return PetscMatStore(self, other)
+            expr = PetscMatStore(self, other)
         elif isinstance(other, numbers.Number):
             static = HierarchicalArray(
                 self.axes,
                 data=np.full(self.axes.size, other, dtype=self.dtype),
                 constant=True,
             )
-            return PetscMatStore(self, static)
+            expr = PetscMatStore(self, static)
         else:
             raise NotImplementedError
+
+        return expr() if eager else expr
 
     @property
     def nested(self):
