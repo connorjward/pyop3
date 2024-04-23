@@ -89,25 +89,26 @@ class AbstractMat(Array, ContextFree):
     ):
         raxes = as_axis_tree(raxes)
         caxes = as_axis_tree(caxes)
-
+        self.raxes = raxes
+        self.caxes = caxes
+        if mat_type == "baij":
+            self.block_shape = block_shape
+            self.block_raxes = self._block_raxes
+            self.block_caxes = self._block_caxes
+        else:
+            self.block_shape = 1
+            self.block_raxes = raxes
+            self.block_caxes = caxes
         if mat_type is None:
             mat_type = self.DEFAULT_MAT_TYPE
 
         if mat is None:
-            mat = self._make_mat(raxes, caxes, mat_type)
+            mat = self._make_mat(self.block_raxes, self.block_caxes, mat_type)
 
         super().__init__(name)
-        self.raxes = raxes
-        self.caxes = caxes
         self.mat_type = mat_type
         self.mat = mat
 
-        if mat_type == "baij":
-            self.block_shape = block_shape
-            self.block_raxes = self._block_raxes
-        else:
-            self.block_shape = 1
-            self.block_raxes = raxes
 
         # self._cache = {}
 
@@ -316,8 +317,19 @@ class AbstractMat(Array, ContextFree):
     def _block_raxes(self):
         block_axes, target_paths, index_exprs = self._collect_block_axes(self.block_shape)
         return IndexedAxisTree(
-            block_axes.node_map, target_paths=target_paths, index_exprs=index_exprs,
-            outer_loops=???, unindexed=??)
+            block_axes.node_map, block_axes.unindexed,
+            target_paths=target_paths, index_exprs=index_exprs,
+            outer_loops=self.raxes.outer_loops,
+            layout_exprs=block_axes.layout_exprs)
+    
+    @cached_property
+    def _block_caxes(self):
+        block_axes, target_paths, index_exprs = self._collect_block_axes(self.block_shape)
+        return IndexedAxisTree(
+            block_axes.node_map, block_axes.unindexed,
+            target_paths=target_paths, index_exprs=index_exprs,
+            outer_loops=self.caxes.outer_loops,
+            layout_exprs=block_axes.layout_exprs)
 
     def _collect_block_axes(self, block_size, axis=None):
         from pyop3.axtree.layout import _axis_size
@@ -326,10 +338,8 @@ class AbstractMat(Array, ContextFree):
         if axis is None:
             axis = self.raxes.root
             target_paths[None] = self.raxes.target_paths.get(None, {})
-            index_exprs[None] = self.raxes.index_exprs.get(None, {})
 
         axis_tree = AxisTree(axis)
-        
         for component in axis.components:
             key = (axis.id, component.label)
             target_paths[key] = self.raxes.target_paths.get(key, {})
@@ -341,8 +351,6 @@ class AbstractMat(Array, ContextFree):
                 axis_tree = axis_tree.add_subtree(subtree, axis, component)
                 target_paths.update(subtarget_paths)
                 index_exprs.update(subindex_exprs)
-                #else:
-                #    assert subtree_size == block_size
         return axis_tree, target_paths, index_exprs
                 
 
@@ -395,7 +403,7 @@ class AbstractMat(Array, ContextFree):
                 orig_caxess = [self.caxes.unindexed]
                 dropped_ckeys = set()
         else:
-            orig_raxess = [self.block_raxes.unindexed]
+            orig_raxess = [self.raxes.unindexed]
             orig_caxess = [self.caxes.unindexed]
             dropped_rkeys = set()
             dropped_ckeys = set()
@@ -412,7 +420,7 @@ class AbstractMat(Array, ContextFree):
         loop_index = just_one(self.caxes.outer_loops)
         iterset = AxisTree(loop_index.iterset.node_map)
 
-        cmap_axes = iterset.add_subtree(self.caxes, *iterset.leaf)
+        cmap_axes = iterset.add_subtree(self.block_caxes, *iterset.leaf)
         cmap = HierarchicalArray(cmap_axes, dtype=IntType)
         cmap = cmap[loop_index.local_index]
 
@@ -443,12 +451,12 @@ class AbstractMat(Array, ContextFree):
                     )
 
         for orig_caxes in orig_caxess:
-            for idxs in my_product(self.caxes.outer_loops):
+            for idxs in my_product(self.block_caxes.outer_loops):
                 # target_indices = {idx.index.id: idx.target_exprs for idx in idxs}
                 target_indices = merge_dicts([idx.replace_map for idx in idxs])
 
                 # for p in self.caxes.iter(idxs):
-                for p in self.caxes.iter(idxs, include_ghost_points=True):  # seems to fix things
+                for p in self.block_caxes.iter(idxs, include_ghost_points=True):  # seems to fix things
                     target_path = p.target_path
                     target_exprs = p.target_exprs
                     for key in dropped_ckeys:
@@ -496,7 +504,7 @@ class AbstractMat(Array, ContextFree):
 
     @property
     def shape(self):
-        return (self.raxes.size, self.caxes.size)
+        return (self.block_raxes.size, self.block_caxes.size)
 
     @cached_property
     def axes(self):
@@ -545,7 +553,7 @@ class Sparsity(AbstractMat):
         if not hasattr(self, "_lazy_template"):
             self.assemble()
 
-            template = Mat._make_mat(self.raxes, self.caxes, self.mat_type)
+            template = Mat._make_mat(self.block_raxes, self.block_caxes, self.mat_type)
             self._preallocate(self.mat, template, self.mat_type)
             # template.preallocateWithMatPreallocator(self.mat)
             # We can safely set these options since by using a sparsity we
