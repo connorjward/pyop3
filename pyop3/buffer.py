@@ -206,7 +206,7 @@ class DistributedBuffer(Buffer):
             self.shape,
             self.sf,
             dtype=self.dtype,
-            data=self.data,
+            data=self.data.copy(),
             name=f"{self.name}_copy",
         )
 
