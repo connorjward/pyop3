@@ -7,6 +7,7 @@ from functools import cached_property
 from itertools import product
 
 import numpy as np
+from enum import Enum
 import pymbolic as pym
 from petsc4py import PETSc
 from pyrsistent import freeze, pmap
@@ -37,6 +38,10 @@ from pyop3.utils import (
     unique,
 )
 
+
+class AxesType(Enum):
+    ROW = 0
+    COL = 1
 
 # don't like that I need this
 class PetscVariable(pym.primitives.Variable):
@@ -315,44 +320,71 @@ class AbstractMat(Array, ContextFree):
 
     @cached_property
     def _block_raxes(self):
-        block_axes, target_paths, index_exprs = self._collect_block_axes(self.block_shape)
+        block_raxes, target_paths, index_exprs = self._collect_block_axes(self.block_shape, AxesType.ROW)
+        block_raxes_unindexed = self._collect_block_axes_unindexed(self.block_shape, AxesType.ROW)
         return IndexedAxisTree(
-            block_axes.node_map, block_axes.unindexed,
+            block_raxes.node_map, block_raxes_unindexed,
             target_paths=target_paths, index_exprs=index_exprs,
             outer_loops=self.raxes.outer_loops,
-            layout_exprs=block_axes.layout_exprs)
+            layout_exprs=None)
     
     @cached_property
     def _block_caxes(self):
-        block_axes, target_paths, index_exprs = self._collect_block_axes(self.block_shape)
+        block_caxes, target_paths, index_exprs = self._collect_block_axes(self.block_shape, AxesType.COL)
+        block_caxes_unindexed = self._collect_block_axes_unindexed(self.block_shape, AxesType.COL)
         return IndexedAxisTree(
-            block_axes.node_map, block_axes.unindexed,
+            block_caxes.node_map, block_caxes_unindexed,
             target_paths=target_paths, index_exprs=index_exprs,
             outer_loops=self.caxes.outer_loops,
-            layout_exprs=block_axes.layout_exprs)
+            layout_exprs=None)
 
-    def _collect_block_axes(self, block_size, axis=None):
+    def _collect_block_axes(self, block_size, axes_type: AxesType, axis=None):
         from pyop3.axtree.layout import _axis_size
         target_paths = {}
         index_exprs = {}
+        if axes_type == AxesType.ROW:
+            axes = self.raxes
+        elif axes_type == AxesType.COL:
+            axes = self.caxes
+        else:
+            raise ValueError("axes_type must be either ROW or COL")
         if axis is None:
-            axis = self.raxes.root
-            target_paths[None] = self.raxes.target_paths.get(None, pmap({}))
+            axis = axes.root
+            target_paths[None] = axes.target_paths.get(None, pmap({}))
 
         axis_tree = AxisTree(axis)
         for component in axis.components:
             key = (axis.id, component.label)
-            target_paths[key] = self.raxes.target_paths.get(key, {})
-            index_exprs[key] = self.raxes.index_exprs.get(key, {})
-            subaxis = self.raxes.child(axis, component)
+            target_paths[key] = axes.target_paths.get(key, {})
+            index_exprs[key] = axes.index_exprs.get(key, {})
+            subaxis = axes.child(axis, component)
             subtree_size = _axis_size(axis_tree, subaxis)
             if subtree_size != block_size:
-                subtree, subtarget_paths, subindex_exprs = self._collect_block_axes(block_size, axis=subaxis)
+                subtree, subtarget_paths, subindex_exprs = self._collect_block_axes(block_size, axes_type, subaxis)
                 axis_tree = axis_tree.add_subtree(subtree, axis, component)
                 target_paths.update(subtarget_paths)
                 index_exprs.update(subindex_exprs)
         return axis_tree, target_paths, index_exprs
-                
+
+    def _collect_block_axes_unindexed(self, block_size, axes_type: AxesType, axis=None):
+        from pyop3.axtree.layout import _axis_size
+        if axes_type == AxesType.ROW:
+            axes = self.raxes.unindexed
+        elif axes_type == AxesType.COL:
+            axes = self.caxes.unindexed
+        else:
+            raise ValueError("axes_type must be either ROW or COL")
+        if axis is None:
+            axis = axes.root
+
+        axis_tree = AxisTree(axis)
+        for component in axis.components:
+            subaxis = axes.child(axis, component)
+            subtree_size = _axis_size(axis_tree, subaxis)
+            if subtree_size != block_size:
+                subtree = self._collect_block_axes_unindexed(block_size, axes_type, subaxis)
+                axis_tree = axis_tree.add_subtree(subtree, axis, component)
+        return axis_tree
 
     @cached_property
     @PETSc.Log.EventDecorator()
@@ -409,8 +441,8 @@ class AbstractMat(Array, ContextFree):
             dropped_ckeys = set()
 
         # TODO: are dropped_rkeys and dropped_ckeys still needed?
-
-        loop_index = just_one(self.block_raxes.outer_loops)
+        # Loop over cells.
+        loop_index = just_one(self.raxes.outer_loops)
         iterset = AxisTree(loop_index.iterset.node_map)
 
         rmap_axes = iterset.add_subtree(self.block_raxes, *iterset.leaf)
@@ -442,8 +474,8 @@ class AbstractMat(Array, ContextFree):
                     offset = orig_raxes.offset(
                         target_exprs, target_path, loop_exprs=target_indices
                     )
-                    # Setting the column index where the matrix is different from zero.
-                    # offset is the global index of the nonzero entry in the matrix.
+                    offset = offset // self.block_shape
+
                     rmap.set_value(
                         p.source_exprs,
                         offset,
@@ -452,7 +484,7 @@ class AbstractMat(Array, ContextFree):
                     )
 
         for orig_caxes in orig_caxess:
-            for idxs in my_product(self.block_caxes.outer_loops):
+            for idxs in my_product(self.caxes.outer_loops):
                 # target_indices = {idx.index.id: idx.target_exprs for idx in idxs}
                 target_indices = merge_dicts([idx.replace_map for idx in idxs])
 
@@ -466,7 +498,8 @@ class AbstractMat(Array, ContextFree):
 
                     offset = orig_caxes.offset(
                         target_exprs, target_path, loop_exprs=target_indices
-                    )
+                        )
+                    offset = offset // self.block_shape
                     cmap.set_value(
                         p.source_exprs,
                         offset,
@@ -474,7 +507,6 @@ class AbstractMat(Array, ContextFree):
                         loop_exprs=target_indices,
                     )
         return (rmap, cmap)
-    
 
     @property
     def rmap(self):
@@ -551,7 +583,9 @@ class Sparsity(AbstractMat):
         if not hasattr(self, "_lazy_template"):
             self.assemble()
 
-            template = Mat._make_mat(self.raxes, self.caxes, self.mat_type, block_shape=self.block_shape)
+            template = Mat._make_mat(self.raxes, self.caxes,
+                                     self.mat_type, block_shape=self.block_shape
+                                     )
             self._preallocate(self.mat, template, self.mat_type)
             # template.preallocateWithMatPreallocator(self.mat)
             # We can safely set these options since by using a sparsity we
@@ -607,8 +641,8 @@ class Sparsity(AbstractMat):
             rlgmap_indices = raxes.global_numbering[::block_shape] // block_shape
             clgmap_indices = caxes.global_numbering[::block_shape] // block_shape
 
-            rlgmap = PETSc.LGMap().create(rlgmap_indices, comm=comm)
-            clgmap = PETSc.LGMap().create(clgmap_indices, comm=comm)
+            rlgmap = PETSc.LGMap().create(rlgmap_indices, bsize=block_shape, comm=comm)
+            clgmap = PETSc.LGMap().create(clgmap_indices,bsize=block_shape, comm=comm)
             mat.setLGMap(rlgmap, clgmap)
 
         mat.setUp()
@@ -680,8 +714,8 @@ class Mat(AbstractMat):
             rlgmap_indices = raxes.global_numbering[::block_shape] // block_shape
             clgmap_indices = caxes.global_numbering[::block_shape] // block_shape
 
-            rlgmap = PETSc.LGMap().create(rlgmap_indices, comm=comm)
-            clgmap = PETSc.LGMap().create(clgmap_indices, comm=comm)
+            rlgmap = PETSc.LGMap().create(rlgmap_indices, bsize=block_shape, comm=comm)
+            clgmap = PETSc.LGMap().create(clgmap_indices, bsize=block_shape, comm=comm)
             mat.setLGMap(rlgmap, clgmap)
 
         mat.setUp()
