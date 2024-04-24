@@ -109,7 +109,9 @@ class AbstractMat(Array, ContextFree):
 
         if mat is None:
             # Add the elements to the rows.
-            mat = self._make_mat(self.raxes, self.caxes, mat_type, block_shape=self.block_shape)
+            mat = self._make_mat(
+                self.raxes, self.caxes, mat_type, block_shape=self.block_shape
+                )
 
         super().__init__(name)
         self.mat_type = mat_type
@@ -321,8 +323,8 @@ class AbstractMat(Array, ContextFree):
 
     @cached_property
     def _block_raxes(self):
-        block_raxes, target_paths, index_exprs = self._collect_block_axes(self.block_shape, AxesType.ROW)
-        block_raxes_unindexed = self._collect_block_axes_unindexed(self.block_shape, AxesType.ROW)
+        block_raxes, target_paths, index_exprs = self._collect_block_axes(self.raxes)
+        block_raxes_unindexed, _, _ = self._collect_block_axes(self.raxes.unindexed)
         return IndexedAxisTree(
             block_raxes.node_map, block_raxes_unindexed,
             target_paths=target_paths, index_exprs=index_exprs,
@@ -331,24 +333,18 @@ class AbstractMat(Array, ContextFree):
     
     @cached_property
     def _block_caxes(self):
-        block_caxes, target_paths, index_exprs = self._collect_block_axes(self.block_shape, AxesType.COL)
-        block_caxes_unindexed = self._collect_block_axes_unindexed(self.block_shape, AxesType.COL)
+        block_caxes, target_paths, index_exprs = self._collect_block_axes(self.caxes)
+        block_caxes_unindexed, _, _ = self._collect_block_axes(self.caxes.unindexed)
         return IndexedAxisTree(
             block_caxes.node_map, block_caxes_unindexed,
             target_paths=target_paths, index_exprs=index_exprs,
             outer_loops=self.caxes.outer_loops,
             layout_exprs=None)
 
-    def _collect_block_axes(self, block_size, axes_type: AxesType, axis=None):
+    def _collect_block_axes(self, axes, axis=None):
         from pyop3.axtree.layout import _axis_size
         target_paths = {}
         index_exprs = {}
-        if axes_type == AxesType.ROW:
-            axes = self.raxes
-        elif axes_type == AxesType.COL:
-            axes = self.caxes
-        else:
-            raise ValueError("axes_type must be either ROW or COL")
         if axis is None:
             axis = axes.root
             target_paths[None] = axes.target_paths.get(None, pmap({}))
@@ -360,32 +356,12 @@ class AbstractMat(Array, ContextFree):
             index_exprs[key] = axes.index_exprs.get(key, {})
             subaxis = axes.child(axis, component)
             subtree_size = _axis_size(axis_tree, subaxis)
-            if subtree_size != block_size:
-                subtree, subtarget_paths, subindex_exprs = self._collect_block_axes(block_size, axes_type, subaxis)
+            if subtree_size != self.block_shape:
+                subtree, subtarget_paths, subindex_exprs = self._collect_block_axes(axes, subaxis)
                 axis_tree = axis_tree.add_subtree(subtree, axis, component)
                 target_paths.update(subtarget_paths)
                 index_exprs.update(subindex_exprs)
         return axis_tree, target_paths, index_exprs
-
-    def _collect_block_axes_unindexed(self, block_size, axes_type: AxesType, axis=None):
-        from pyop3.axtree.layout import _axis_size
-        if axes_type == AxesType.ROW:
-            axes = self.raxes.unindexed
-        elif axes_type == AxesType.COL:
-            axes = self.caxes.unindexed
-        else:
-            raise ValueError("axes_type must be either ROW or COL")
-        if axis is None:
-            axis = axes.root
-
-        axis_tree = AxisTree(axis)
-        for component in axis.components:
-            subaxis = axes.child(axis, component)
-            subtree_size = _axis_size(axis_tree, subaxis)
-            if subtree_size != block_size:
-                subtree = self._collect_block_axes_unindexed(block_size, axes_type, subaxis)
-                axis_tree = axis_tree.add_subtree(subtree, axis, component)
-        return axis_tree
 
     @cached_property
     @PETSc.Log.EventDecorator()
@@ -443,14 +419,14 @@ class AbstractMat(Array, ContextFree):
 
         # TODO: are dropped_rkeys and dropped_ckeys still needed?
         # Loop over cells.
-        loop_index = just_one(self.raxes.outer_loops)
+        loop_index = just_one(self.block_raxes.outer_loops)
         iterset = AxisTree(loop_index.iterset.node_map)
 
         rmap_axes = iterset.add_subtree(self.block_raxes, *iterset.leaf)
         rmap = HierarchicalArray(rmap_axes, dtype=IntType)
         rmap = rmap[loop_index.local_index]
 
-        loop_index = just_one(self.caxes.outer_loops)
+        loop_index = just_one(self.block_caxes.outer_loops)
         iterset = AxisTree(loop_index.iterset.node_map)
 
         cmap_axes = iterset.add_subtree(self.block_caxes, *iterset.leaf)
@@ -475,8 +451,6 @@ class AbstractMat(Array, ContextFree):
                     offset = orig_raxes.offset(
                         target_exprs, target_path, loop_exprs=target_indices
                     )
-                    #offset = offset // self.block_shape
-
                     rmap.set_value(
                         p.source_exprs,
                         offset,
@@ -500,7 +474,6 @@ class AbstractMat(Array, ContextFree):
                     offset = orig_caxes.offset(
                         target_exprs, target_path, loop_exprs=target_indices
                         )
-                    #offset = offset // self.block_shape
                     cmap.set_value(
                         p.source_exprs,
                         offset,
@@ -561,7 +534,9 @@ class AbstractMat(Array, ContextFree):
             for (rkey, ckey), submat_type in mat_type.items():
                 subraxes = raxes[rkey] if rkey is not None else raxes
                 subcaxes = caxes[ckey] if ckey is not None else caxes
-                submat = cls._make_mat(subraxes, subcaxes, submat_type, block_shape=block_shape)
+                submat = cls._make_mat(
+                    subraxes, subcaxes, submat_type, block_shape=block_shape
+                    )
                 submats[rkey, ckey] = submat
 
             # TODO: Internal comm? Set as mat property (then not a classmethod)?

@@ -873,25 +873,6 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
             return 1
         axis = axis or self.root
         return sum(cpt.alloc_size(self, axis) for cpt in axis.components)
-    
-    def subtree_shape(self, axis, component):
-        if axis is None:
-            axis = self.root
-
-        shape = (component.count,)
-
-        subaxis = self.child(axis, component)
-        shape += self.subtree_shape(subaxis, component)
-        return shape
-    
-    def blocked(self, axis, block_shape):
-        # go down the tree
-        # if subtree_shape(current_axis) == block_shape: stop and return
-        # else go further
-        if self.subtree_shape(axis, axis.component) == block_shape:
-            return      
-        
-            
 
     @cached_property
     def owned(self):
