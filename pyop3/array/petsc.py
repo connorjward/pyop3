@@ -435,8 +435,8 @@ class AbstractMat(Array, ContextFree):
                 orig_caxess = [self.caxes.unindexed]
                 dropped_ckeys = set()
         else:
-            orig_raxess = [self.block_raxes.unindexed]
-            orig_caxess = [self.block_caxes.unindexed]
+            orig_raxess = [self.raxes.unindexed]
+            orig_caxess = [self.caxes.unindexed]
             dropped_rkeys = set()
             dropped_ckeys = set()
 
@@ -449,7 +449,7 @@ class AbstractMat(Array, ContextFree):
         rmap = HierarchicalArray(rmap_axes, dtype=IntType)
         rmap = rmap[loop_index.local_index]
 
-        loop_index = just_one(self.block_caxes.outer_loops)
+        loop_index = just_one(self.caxes.outer_loops)
         iterset = AxisTree(loop_index.iterset.node_map)
 
         cmap_axes = iterset.add_subtree(self.block_caxes, *iterset.leaf)
