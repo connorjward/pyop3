@@ -108,6 +108,7 @@ class AbstractMat(Array, ContextFree):
             mat_type = self.DEFAULT_MAT_TYPE
 
         if mat is None:
+            # Add the elements to the rows.
             mat = self._make_mat(self.raxes, self.caxes, mat_type, block_shape=self.block_shape)
 
         super().__init__(name)
@@ -435,8 +436,8 @@ class AbstractMat(Array, ContextFree):
                 orig_caxess = [self.caxes.unindexed]
                 dropped_ckeys = set()
         else:
-            orig_raxess = [self.raxes.unindexed]
-            orig_caxess = [self.caxes.unindexed]
+            orig_raxess = [self.block_raxes.unindexed]
+            orig_caxess = [self.block_caxes.unindexed]
             dropped_rkeys = set()
             dropped_ckeys = set()
 
@@ -474,7 +475,7 @@ class AbstractMat(Array, ContextFree):
                     offset = orig_raxes.offset(
                         target_exprs, target_path, loop_exprs=target_indices
                     )
-                    offset = offset // self.block_shape
+                    #offset = offset // self.block_shape
 
                     rmap.set_value(
                         p.source_exprs,
@@ -499,7 +500,7 @@ class AbstractMat(Array, ContextFree):
                     offset = orig_caxes.offset(
                         target_exprs, target_path, loop_exprs=target_indices
                         )
-                    offset = offset // self.block_shape
+                    #offset = offset // self.block_shape
                     cmap.set_value(
                         p.source_exprs,
                         offset,
@@ -638,11 +639,8 @@ class Sparsity(AbstractMat):
             sizes = ((raxes.owned.size, None), (caxes.owned.size, None))
             mat.setSizes(sizes)
 
-            rlgmap_indices = raxes.global_numbering[::block_shape] // block_shape
-            clgmap_indices = caxes.global_numbering[::block_shape] // block_shape
-
-            rlgmap = PETSc.LGMap().create(rlgmap_indices, bsize=block_shape, comm=comm)
-            clgmap = PETSc.LGMap().create(clgmap_indices,bsize=block_shape, comm=comm)
+            rlgmap = PETSc.LGMap().create(raxes.global_numbering, bsize=block_shape, comm=comm)
+            clgmap = PETSc.LGMap().create(caxes.global_numbering, bsize=block_shape, comm=comm)
             mat.setLGMap(rlgmap, clgmap)
 
         mat.setUp()
@@ -711,11 +709,8 @@ class Mat(AbstractMat):
             sizes = ((raxes.owned.size, None), (caxes.owned.size, None))
             mat.setSizes(sizes)
 
-            rlgmap_indices = raxes.global_numbering[::block_shape] // block_shape
-            clgmap_indices = caxes.global_numbering[::block_shape] // block_shape
-
-            rlgmap = PETSc.LGMap().create(rlgmap_indices, bsize=block_shape, comm=comm)
-            clgmap = PETSc.LGMap().create(clgmap_indices, bsize=block_shape, comm=comm)
+            rlgmap = PETSc.LGMap().create(raxes.global_numbering, bsize=block_shape, comm=comm)
+            clgmap = PETSc.LGMap().create(caxes.global_numbering, bsize=block_shape, comm=comm)
             mat.setLGMap(rlgmap, clgmap)
 
         mat.setUp()
