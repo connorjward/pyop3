@@ -764,7 +764,6 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
 
     def offset(self, indices, path=None, *, loop_exprs=pmap()):
         from pyop3.axtree.layout import eval_offset
-
         return eval_offset(
             self,
             self.subst_layouts,
