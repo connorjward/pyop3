@@ -436,8 +436,8 @@ class Axis(LoopIterable, MultiComponentLabelledNode):
     def owned(self):
         return self._tree.owned.root
 
-    def index(self):
-        return self._tree.index()
+    def index(self, *, include_ghost_points=False):
+        return self._tree.index(include_ghost_points=include_ghost_points)
 
     def iter(self, *, include_ghost_points=False):
         return self._tree.iter(include_ghost_points=include_ghost_points)
@@ -709,10 +709,10 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
     def subst_layouts(self):
         pass
 
-    def index(self, ghost=False):
+    def index(self, *, include_ghost_points=False):
         from pyop3.itree.tree import ContextFreeLoopIndex, LoopIndex
 
-        iterset = self if ghost else self.owned
+        iterset = self if include_ghost_points else self.owned
         # If the iterset is linear (single-component for every axis) then we
         # can consider the loop to be "context-free".
         if len(iterset.leaves) == 1:
@@ -1294,7 +1294,7 @@ class IndexedAxisTree(BaseAxisTree):
         rmap_axes = iterset.add_subtree(self, *iterset.leaf)
         rmap = HierarchicalArray(rmap_axes, dtype=IntType)
         rmap = rmap[loop_index.local_index]
-        for idx in loop_index.iter():
+        for idx in loop_index.iter(include_ghost_points=True):
             target_indices = idx.replace_map
             # for p in self.iter(idxs):
             for p in self.iter([idx], include_ghost_points=True):  # seems to fix thing
