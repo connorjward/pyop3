@@ -201,6 +201,48 @@ class DistributedBuffer(Buffer):
         self._leaves_valid = False
         return self._owned_data
 
+    @property
+    @not_in_flight
+    @deprecated(".data_rw_with_halos")
+    def data_with_halos(self):
+        return self.data_rw_with_halos
+
+    @property
+    @not_in_flight
+    def data_rw_with_halos(self):
+        self.state += 1
+
+        if not self._roots_valid:
+            self._reduce_leaves_to_roots()
+
+        # modifying owned values invalidates ghosts
+        self._leaves_valid = False
+        return self._data
+
+    @property
+    @not_in_flight
+    def data_ro_with_halos(self):
+        if not self._roots_valid:
+            self._reduce_leaves_to_roots()
+        return readonly(self._data)
+
+    @property
+    @not_in_flight
+    def data_wo_with_halos(self):
+        """
+        Have to be careful. If not setting all values (i.e. subsets) should call
+        `reduce_leaves_to_roots` first.
+
+        When this is called we set roots_valid, claiming that any (lazy) 'in-flight' writes
+        can be dropped.
+        """
+        self.state += 1
+
+        # pending writes can be dropped
+        self._pending_reduction = None
+        self._leaves_valid = False
+        return self._data
+
     def copy(self):
         return type(self)(
             self.shape,

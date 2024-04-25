@@ -262,8 +262,8 @@ class HierarchicalArray(Array, ContextFree, KernelArgument):
 
     @property
     def data_rw_with_halos(self):
-        self._check_no_copy_access()
-        return self.buffer.data_rw[self.axes._buffer_indices_ghost]
+        self._check_no_copy_access(include_ghost_points=True)
+        return self.buffer.data_rw_with_halos[self.axes._buffer_indices_ghost]
 
     @property
     def data_ro_with_halos(self):
@@ -272,7 +272,7 @@ class HierarchicalArray(Array, ContextFree, KernelArgument):
                 "Read-only access to the array is provided with a copy, "
                 "consider avoiding if possible."
             )
-        return self.buffer.data_ro[self.axes._buffer_indices_ghost]
+        return self.buffer.data_ro_with_halos[self.axes._buffer_indices_ghost]
 
     @property
     def data_wo_with_halos(self):
@@ -283,11 +283,16 @@ class HierarchicalArray(Array, ContextFree, KernelArgument):
         When this is called we set roots_valid, claiming that any (lazy) 'in-flight' writes
         can be dropped.
         """
-        self._check_no_copy_access()
-        return self.buffer.data_wo[self.axes._buffer_indices_ghost]
+        self._check_no_copy_access(include_ghost_points=True)
+        return self.buffer.data_wo_with_halos[self.axes._buffer_indices_ghost]
 
-    def _check_no_copy_access(self):
-        if not isinstance(self.axes._buffer_indices, slice):
+    def _check_no_copy_access(self, *, include_ghost_points=False):
+        if include_ghost_points:
+            buffer_indices = self.axes._buffer_indices_ghost
+        else:
+            buffer_indices = self.axes._buffer_indices
+
+        if not isinstance(buffer_indices, slice):
             raise FancyIndexWriteException(
                 "Writing to the array directly is not supported for "
                 "non-trivially indexed (i.e. sliced) arrays."
