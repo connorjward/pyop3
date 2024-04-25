@@ -450,8 +450,8 @@ def compile(expr: Instruction, name="mykernel"):
             textwrap.dedent(
                 """
                 #include <stdlib.h>
-                
-                
+
+
                 int32_t cmpfunc(const void * a, const void * b) {
                    return ( *(int32_t*)a - *(int32_t*)b );
                 }

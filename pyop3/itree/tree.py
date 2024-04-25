@@ -567,11 +567,14 @@ class Map(pytools.ImmutableRecord):
 
     def __call__(self, index):
         if isinstance(index, (ContextFreeIndex, ContextFreeCalledMap)):
-            leaf_target_paths = tuple(
-                freeze({mcpt.target_axis: mcpt.target_component})
-                for path in index.leaf_target_paths
-                for mcpt in self.connectivity[path]
-            )
+            try:
+                leaf_target_paths = tuple(
+                    freeze({mcpt.target_axis: mcpt.target_component})
+                    for path in index.leaf_target_paths
+                    for mcpt in self.connectivity[path]
+                )
+            except KeyError:
+                raise KeyError(f"Map does not have a suitable 'from index' that matches the provided index: {index.leaf_target_paths}")
             return ContextFreeCalledMap(self, index, leaf_target_paths)
         else:
             return CalledMap(self, index)
