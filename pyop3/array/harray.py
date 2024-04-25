@@ -498,14 +498,13 @@ class HierarchicalArray(Array, ContextFree, KernelArgument):
         else:
             self[subset].assign(other[subset])
 
-    # symbolic
-    def zero(self, *, subset=Ellipsis):
-        return ReplaceAssignment(self[subset], 0)
-
-    def eager_zero(self, *, subset=Ellipsis):
+    def zero(self, *, subset=Ellipsis, eager=True):
+        # old Firedrake code may hit this, should probably raise a warning
         if subset is None:
             subset = Ellipsis
-        self.zero(subset=subset)()
+
+        expr = ReplaceAssignment(self[subset], 0)
+        return expr() if eager else expr
 
 
 # Needs to be subclass for isinstance checks to work
