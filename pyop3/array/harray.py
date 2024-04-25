@@ -459,7 +459,6 @@ class HierarchicalArray(Array, ContextFree, KernelArgument):
 
     def set_value(self, indices, value, path=None, *, loop_exprs=pmap()):
         offset = self.axes.offset(indices, path, loop_exprs=loop_exprs)
-        # building where the array is different from 0
         self.buffer.data_wo[offset] = value
 
     def select_axes(self, indices):

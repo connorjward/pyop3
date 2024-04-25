@@ -7,7 +7,6 @@ from functools import cached_property
 from itertools import product
 
 import numpy as np
-from enum import Enum
 import pymbolic as pym
 from petsc4py import PETSc
 from pyrsistent import freeze, pmap
@@ -38,10 +37,6 @@ from pyop3.utils import (
     unique,
 )
 
-
-class AxesType(Enum):
-    ROW = 0
-    COL = 1
 
 # don't like that I need this
 class PetscVariable(pym.primitives.Variable):
@@ -712,6 +707,12 @@ class _MatDat:
                 axes = self.caxes
             else:
                 axes = AxisTree()
+            dat = HierarchicalArray(axes, dtype=self.dtype)
+            self._lazy_dat = dat
+        return self._lazy_dat
+
+    @property
+    def is_row_matrix(self):
         root = self.raxes.root
         return len(root.components) != 1 or not root.component.unit
 
