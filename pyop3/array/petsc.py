@@ -343,6 +343,7 @@ class AbstractMat(Array, ContextFree):
         if axis is None:
             axis = axes.root
             target_paths[None] = axes.target_paths.get(None, pmap({}))
+            index_exprs[None] = axes.index_exprs.get(None, pmap({}))
 
         axis_tree = AxisTree(axis)
         for component in axis.components:
@@ -362,9 +363,6 @@ class AbstractMat(Array, ContextFree):
     @PETSc.Log.EventDecorator()
     def maps(self):
         from pyop3.axtree.layout import my_product
-
-        # if self.mat_type == "baij":
-        #     raise NotImplementedError("Use a smaller set of axes here")
 
         # TODO: Don't think these need to be lists here.
         # FIXME: This will only work for singly-nested matrices
@@ -413,7 +411,6 @@ class AbstractMat(Array, ContextFree):
             dropped_ckeys = set()
 
         # TODO: are dropped_rkeys and dropped_ckeys still needed?
-        # Loop over cells.
         loop_index = just_one(self.block_raxes.outer_loops)
         iterset = AxisTree(loop_index.iterset.node_map)
 
@@ -435,7 +432,6 @@ class AbstractMat(Array, ContextFree):
                 # target_indices = {idx.index.id: idx.target_exprs for idx in idxs}
                 target_indices = merge_dicts([idx.replace_map for idx in idxs])
 
-                # for p in self.block_raxes.iter(idxs):
                 for p in self.block_raxes.iter(idxs, include_ghost_points=True):  # seems to fix things
                     target_path = p.target_path
                     target_exprs = p.target_exprs

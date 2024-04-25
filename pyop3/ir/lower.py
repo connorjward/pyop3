@@ -757,10 +757,7 @@ def _(assignment, loop_indices, codegen_context):
     array_name = codegen_context.actual_to_kernel_rename_map[array.name]
     rmap_name = codegen_context.actual_to_kernel_rename_map[rmap.name]
     cmap_name = codegen_context.actual_to_kernel_rename_map[cmap.name]
-    if mat.block_shape > 1:
-        blocked = True
-    else:
-        blocked = False
+    blocked = mat.block_shape > 1
     if mat.nested:
         if len(mat.nest_labels) > 1:
             # Need to loop over the different nest labels and emit separate calls to
