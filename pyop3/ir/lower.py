@@ -494,6 +494,8 @@ def _(expr: ContextAwareLoop):
     for stmts in expr.statements.values():
         for stmt in stmts:
             for temp, shape in _collect_temporary_shapes(stmt).items():
+                if shape is None:
+                    continue
                 if temp in shapes:
                     assert shapes[temp] == shape
                 else:
