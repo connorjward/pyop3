@@ -91,16 +91,15 @@ class AbstractMat(Array, ContextFree):
         caxes = as_axis_tree(caxes)
         self.raxes = raxes
         self.caxes = caxes
-        for key, item in block_shape.items():
-            block_shape[key] = (1, 1)
         self.block_shape = block_shape
         if mat_type is None:
             mat_type = self.DEFAULT_MAT_TYPE
-
+        nested = isinstance(mat_type, collections.abc.Mapping)
         if mat is None:
             # Add the elements to the rows.
             mat = self._make_mat(
-                self.raxes, self.caxes, mat_type, block_shape=self.block_shape
+                self.raxes, self.caxes, mat_type, block_shape=self.block_shape,
+                nested=nested
                 )
 
         super().__init__(name)
@@ -467,7 +466,7 @@ class AbstractMat(Array, ContextFree):
         return axes
 
     @classmethod
-    def _make_mat(cls, raxes, caxes, mat_type, block_shape=None):
+    def _make_mat(cls, raxes, caxes, mat_type, block_shape=None, nested=False):
         if isinstance(mat_type, collections.abc.Mapping):
             # TODO: This is very ugly
             rsize = max(x or 0 for x, _ in mat_type.keys()) + 1
@@ -477,7 +476,8 @@ class AbstractMat(Array, ContextFree):
                 subraxes = raxes[rkey] if rkey is not None else raxes
                 subcaxes = caxes[ckey] if ckey is not None else caxes
                 submat = cls._make_mat(
-                    subraxes, subcaxes, submat_type, block_shape=block_shape[(rkey, ckey)]
+                    subraxes, subcaxes, submat_type, block_shape=block_shape[(rkey, ckey)],
+                    nested=nested
                     )
                 submats[rkey, ckey] = submat
 
@@ -485,7 +485,7 @@ class AbstractMat(Array, ContextFree):
             comm = single_valued([raxes.comm, caxes.comm])
             return PETSc.Mat().createNest(submats, comm=comm)
         else:
-            return cls._make_monolithic_mat(raxes, caxes, mat_type, block_shape=block_shape)
+            return cls._make_monolithic_mat(raxes, caxes, mat_type, block_shape=block_shape, nested=nested)
 
     @cached_property
     def datamap(self):
@@ -502,7 +502,8 @@ class Sparsity(AbstractMat):
             self.assemble()
 
             template = Mat._make_mat(self.raxes, self.caxes,
-                                     self.mat_type, block_shape=self.block_shape
+                                     self.mat_type, block_shape=self.block_shape,
+                                     nested=self.nested
                                      )
             self._preallocate(self.mat, template, self.mat_type)
             # template.preallocateWithMatPreallocator(self.mat)
@@ -531,7 +532,7 @@ class Sparsity(AbstractMat):
                 template.preallocateWithMatPreallocator(preallocator)
 
     @classmethod
-    def _make_monolithic_mat(cls, raxes, caxes, mat_type: str, block_shape=None):
+    def _make_monolithic_mat(cls, raxes, caxes, mat_type: str, block_shape=None, nested=False):
         # TODO: Internal comm?
         comm = single_valued([raxes.comm, caxes.comm])
 
@@ -555,10 +556,10 @@ class Sparsity(AbstractMat):
             # None is for the global size, PETSc will figure it out for us
             sizes = ((raxes.owned.size, None), (caxes.owned.size, None))
             mat.setSizes(sizes)
-
-            rlgmap = PETSc.LGMap().create(raxes.global_numbering, bsize=block_shape[0], comm=comm)
-            clgmap = PETSc.LGMap().create(caxes.global_numbering, bsize=block_shape[1], comm=comm)
-            mat.setLGMap(rlgmap, clgmap)
+            if not nested:
+                rlgmap = PETSc.LGMap().create(raxes.global_numbering, bsize=block_shape[0], comm=comm)
+                clgmap = PETSc.LGMap().create(caxes.global_numbering, bsize=block_shape[1], comm=comm)
+                mat.setLGMap(rlgmap, clgmap)
 
         mat.setUp()
         return mat
@@ -601,7 +602,7 @@ class Mat(AbstractMat):
 
     # TODO: Almost identical code to Sparsity
     @classmethod
-    def _make_monolithic_mat(cls, raxes, caxes, mat_type: str, block_shape=None):
+    def _make_monolithic_mat(cls, raxes, caxes, mat_type: str, block_shape=None, nested=False):
         # TODO: Internal comm?
         comm = single_valued([raxes.comm, caxes.comm])
 
@@ -625,10 +626,10 @@ class Mat(AbstractMat):
             # None is for the global size, PETSc will figure it out for us
             sizes = ((raxes.owned.size, None), (caxes.owned.size, None))
             mat.setSizes(sizes)
-
-            rlgmap = PETSc.LGMap().create(raxes.global_numbering, bsize=block_shape[0], comm=comm)
-            clgmap = PETSc.LGMap().create(caxes.global_numbering, bsize=block_shape[1], comm=comm)
-            mat.setLGMap(rlgmap, clgmap)
+            if not nested:
+                rlgmap = PETSc.LGMap().create(raxes.global_numbering, bsize=block_shape[0], comm=comm)
+                clgmap = PETSc.LGMap().create(caxes.global_numbering, bsize=block_shape[1], comm=comm)
+                mat.setLGMap(rlgmap, clgmap)
 
         mat.setUp()
         return mat
