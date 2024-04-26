@@ -230,6 +230,9 @@ class AbstractMat(Array, ContextFree):
         self.mat.assemble()
 
     def assign(self, other, *, eager=True):
+        if eager:
+            raise NotImplementedError("Cannot eagerly assign to Mats")
+
         if isinstance(other, HierarchicalArray):
             # TODO: Check axes match between self and other
             expr = PetscMatStore(self, other)
@@ -243,7 +246,7 @@ class AbstractMat(Array, ContextFree):
         else:
             raise NotImplementedError
 
-        return expr() if eager else expr
+        return expr
 
     @property
     def nested(self):
@@ -621,8 +624,11 @@ class Mat(AbstractMat):
         mat = sparsity.materialize()
         return cls(sparsity.raxes, sparsity.caxes, sparsity.mat_type, mat, name=name, block_shape=sparsity.block_shape)
 
-    def eager_zero(self):
-        self.mat.zeroEntries()
+    def zero(self, *, eager=True):
+        if eager:
+            self.mat.zeroEntries()
+        else:
+            raise NotImplementedError
 
     @property
     def values(self):
@@ -724,7 +730,7 @@ class _MatDat:
     #     return self.dat.data_ro.reshape(*shape)[key]
 
     def zeroEntries(self, mat):
-        self.dat.eager_zero()
+        self.dat.zero()
 
     def mult(self, A, x, y):
         """Set y = A * x (where A is self)."""
