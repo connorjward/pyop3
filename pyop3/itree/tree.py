@@ -429,10 +429,11 @@ class ContextFreeLoopIndex(ContextFreeIndex):
     def datamap(self):
         return self.iterset.datamap
 
-    def iter(self, stuff=pmap()):
+    def iter(self, stuff=pmap(), *, include_ghost_points=False):
+        iterset = self.iterset if include_ghost_points else self.iterset.owned
         return iter_axis_tree(
             self,
-            self.iterset,
+            iterset,
             self.iterset.target_paths,
             self.iterset.index_exprs,
             stuff,
