@@ -214,6 +214,8 @@ class DistributedBuffer(Buffer):
 
         if not self._roots_valid:
             self._reduce_leaves_to_roots()
+        if not self._leaves_valid:
+            self._broadcast_roots_to_leaves()
 
         # modifying owned values invalidates ghosts
         self._leaves_valid = False
@@ -224,6 +226,8 @@ class DistributedBuffer(Buffer):
     def data_ro_with_halos(self):
         if not self._roots_valid:
             self._reduce_leaves_to_roots()
+        if not self._leaves_valid:
+            self._broadcast_roots_to_leaves()
         return readonly(self._data)
 
     @property
