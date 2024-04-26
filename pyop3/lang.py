@@ -360,6 +360,16 @@ class Loop(Instruction):
                     assert buffer._pending_reduction is not None
                     initializers.append(buffer._reduce_leaves_to_roots_begin)
                     reductions.append(buffer._reduce_leaves_to_roots_end)
+                # set leaves to appropriate nil value
+                if intent == INC:
+                    def _zero():
+                        buffer._data[buffer.sf.ileaf] = 0
+                    reductions.append(_zero)
+                elif intent in {MIN_WRITE, MIN_RW}:
+                    buffer._data[buffer.sf.ileaf] = dtype_limits(buffer.dtype).max
+                else:
+                    assert intent in {MAX_WRITE, MAX_RW}
+                    buffer._data[buffer.sf.ileaf] = dtype_limits(buffer.dtype).min
 
             # We are modifying owned values so the leaves must now be wrong
             buffer._leaves_valid = False
@@ -369,15 +379,6 @@ class Loop(Instruction):
                 buffer._pending_reduction = None
             else:
                 buffer._pending_reduction = intent
-
-                # set leaves to appropriate nil value
-                if intent == INC:
-                    buffer._data[buffer.sf.ileaf] = 0
-                elif intent in {MIN_WRITE, MIN_RW}:
-                    buffer._data[buffer.sf.ileaf] = dtype_limits(buffer.dtype).max
-                else:
-                    assert intent in {MAX_WRITE, MAX_RW}
-                    buffer._data[buffer.sf.ileaf] = dtype_limits(buffer.dtype).min
 
         return tuple(initializers), tuple(reductions), tuple(broadcasts)
 
