@@ -91,14 +91,9 @@ class AbstractMat(Array, ContextFree):
         caxes = as_axis_tree(caxes)
         self.raxes = raxes
         self.caxes = caxes
-        if mat_type == "baij":
-            self.block_shape = block_shape
-        elif isinstance(mat_type, collections.abc.Mapping):
-            # Nested matrix.
-            # I do not know the block shape of the nested matrices.
-            self.block_shape = 1
-        else:
-            self.block_shape = 1
+        for key, item in block_shape.items():
+            block_shape[key] = (1, 1)
+        self.block_shape = block_shape
         if mat_type is None:
             mat_type = self.DEFAULT_MAT_TYPE
 
@@ -337,7 +332,9 @@ class AbstractMat(Array, ContextFree):
     def _nest_axes(self, axes, index):
         if axes.size > 1:
             axes = self._block_axes(axes, axes.size, nested_index=index)
-        axes_unindexed = AxisTree(axes.unindexed[index].node_map)
+            axes_unindexed = AxisTree(axes.unindexed.node_map)
+        else:
+            axes_unindexed = AxisTree(axes.unindexed[index].node_map)
         target_paths = thaw(axes.target_paths)
         to_kill = target_paths.pop(None)
         for key, _ in target_paths.items():
@@ -405,8 +402,9 @@ class AbstractMat(Array, ContextFree):
         # TODO: Don't think these need to be lists here.
         # FIXME: This will only work for singly-nested matrices
         if self.nested:
-            row_index = 1  # for now only!
-            col_index = 1
+            row_index = self.raxes.target_paths.get(None).get('field')
+            label = self.raxes.unindexed.root.label
+            col_index = self.raxes.target_paths.get(None).get('field')
             submat_type = "aij"
             raxes = self._nest_axes(self.raxes, row_index)
             caxes = self._nest_axes(self.caxes, col_index)
@@ -452,8 +450,7 @@ class AbstractMat(Array, ContextFree):
 
     @property
     def shape(self):
-        # That is weird.
-        return (self.raxes.size // self.block_shape, self.caxes.size // self.block_shape)
+        return self.raxes.size, self.caxes.size
 
     @cached_property
     def axes(self):
@@ -480,7 +477,7 @@ class AbstractMat(Array, ContextFree):
                 subraxes = raxes[rkey] if rkey is not None else raxes
                 subcaxes = caxes[ckey] if ckey is not None else caxes
                 submat = cls._make_mat(
-                    subraxes, subcaxes, submat_type, block_shape=block_shape
+                    subraxes, subcaxes, submat_type, block_shape=block_shape[(rkey, ckey)]
                     )
                 submats[rkey, ckey] = submat
 
@@ -552,15 +549,15 @@ class Sparsity(AbstractMat):
             mat.setPythonContext(matdat)
         else:
             mat = PETSc.Mat().create(comm)
-            mat.setBlockSize(block_shape)
+            mat.setBlockSizes(block_shape[0], block_shape[1])
             mat.setType(PETSc.Mat.Type.PREALLOCATOR)
 
             # None is for the global size, PETSc will figure it out for us
             sizes = ((raxes.owned.size, None), (caxes.owned.size, None))
             mat.setSizes(sizes)
 
-            rlgmap = PETSc.LGMap().create(raxes.global_numbering, bsize=block_shape, comm=comm)
-            clgmap = PETSc.LGMap().create(caxes.global_numbering, bsize=block_shape, comm=comm)
+            rlgmap = PETSc.LGMap().create(raxes.global_numbering, bsize=block_shape[0], comm=comm)
+            clgmap = PETSc.LGMap().create(caxes.global_numbering, bsize=block_shape[1], comm=comm)
             mat.setLGMap(rlgmap, clgmap)
 
         mat.setUp()
@@ -623,14 +620,14 @@ class Mat(AbstractMat):
         else:
             mat = PETSc.Mat().create(comm)
             mat.setType(mat_type)
-            mat.setBlockSize(block_shape)
+            mat.setBlockSizes(block_shape[0], block_shape[1])
 
             # None is for the global size, PETSc will figure it out for us
             sizes = ((raxes.owned.size, None), (caxes.owned.size, None))
             mat.setSizes(sizes)
 
-            rlgmap = PETSc.LGMap().create(raxes.global_numbering, bsize=block_shape, comm=comm)
-            clgmap = PETSc.LGMap().create(caxes.global_numbering, bsize=block_shape, comm=comm)
+            rlgmap = PETSc.LGMap().create(raxes.global_numbering, bsize=block_shape[0], comm=comm)
+            clgmap = PETSc.LGMap().create(caxes.global_numbering, bsize=block_shape[1], comm=comm)
             mat.setLGMap(rlgmap, clgmap)
 
         mat.setUp()
