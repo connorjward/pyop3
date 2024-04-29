@@ -346,7 +346,7 @@ class Loop(Instruction):
             # reductions
             assert intent in {INC, MIN_WRITE, MIN_RW, MAX_WRITE, MAX_RW}
             # We don't need to update roots if performing the same reduction
-            # again. For example we can increment into an buffer as many times
+            # again. For example we can increment into a buffer as many times
             # as we want. The reduction only needs to be done when the
             # data is read.
             if buffer._roots_valid or intent == buffer._pending_reduction:
@@ -361,6 +361,20 @@ class Loop(Instruction):
                     initializers.append(buffer._reduce_leaves_to_roots_begin)
                     reductions.append(buffer._reduce_leaves_to_roots_end)
 
+                # set leaves to appropriate nil value
+                if intent == INC:
+                    nil = 0
+                elif intent in {MIN_WRITE, MIN_RW}:
+                    nil = dtype_limits(buffer.dtype).max
+                else:
+                    assert intent in {MAX_WRITE, MAX_RW}
+                    nil = dtype_limits(buffer.dtype).min
+
+                def _init_nil():
+                    buffer._data[buffer.sf.ileaf] = nil
+
+                reductions.append(_init_nil)
+
             # We are modifying owned values so the leaves must now be wrong
             buffer._leaves_valid = False
 
@@ -369,15 +383,6 @@ class Loop(Instruction):
                 buffer._pending_reduction = None
             else:
                 buffer._pending_reduction = intent
-
-                # set leaves to appropriate nil value
-                if intent == INC:
-                    buffer._data[buffer.sf.ileaf] = 0
-                elif intent in {MIN_WRITE, MIN_RW}:
-                    buffer._data[buffer.sf.ileaf] = dtype_limits(buffer.dtype).max
-                else:
-                    assert intent in {MAX_WRITE, MAX_RW}
-                    buffer._data[buffer.sf.ileaf] = dtype_limits(buffer.dtype).min
 
         return tuple(initializers), tuple(reductions), tuple(broadcasts)
 
