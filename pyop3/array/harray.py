@@ -568,6 +568,11 @@ class ContextSensitiveMultiArray(Array, ContextSensitive):
         # return ContextSensitiveMultiArray(array_per_context)
 
     @property
+    def context_free(self):
+        # Will only work if a single context is wrapped
+        return just_one(self.context_map.values())
+
+    @property
     def buffer(self):
         return self._shared_attr("buffer")
 
