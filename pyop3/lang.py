@@ -550,6 +550,9 @@ class Assignment(Terminal, abc.ABC):
     fields = Terminal.fields | {"assignee", "expression"}
 
     def __init__(self, assignee, expression, **kwargs):
+        if not isinstance(expression, numbers.Number):
+            assert assignee.dtype == expression.dtype
+
         super().__init__(**kwargs)
         self.assignee = assignee
         self.expression = expression
@@ -631,6 +634,8 @@ class AddAssignment(Assignment):
 # inherit from Assignment?
 class PetscMatInstruction(Instruction):
     def __init__(self, mat_arg, array_arg):
+        assert mat_arg.dtype == array_arg.dtype
+
         self.mat_arg = mat_arg
         self.array_arg = array_arg
 
