@@ -5,9 +5,9 @@ import collections
 import functools
 import numbers
 
-from pyrsistent import freeze, pmap
+from pyrsistent import pmap
 
-from pyop3.array import ContextSensitiveMultiArray, HierarchicalArray
+from pyop3.array import HierarchicalArray
 from pyop3.array.petsc import AbstractMat
 from pyop3.axtree import Axis, AxisTree, ContextFree, ContextSensitive
 from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
@@ -139,7 +139,7 @@ class LoopContextExpander(Transformer):
         # this is very similar to what happens in PetscMat.__getitem__
         outer_context = collections.defaultdict(dict)  # ordered set per index
         for arg in terminal.arguments:
-            if not isinstance(arg, ContextSensitive):
+            if not isinstance(arg.axes, ContextSensitive):
                 continue
 
             for ctx in arg.context_map.keys():
@@ -158,7 +158,7 @@ class LoopContextExpander(Transformer):
             outer_context_ = (pmap(),)
 
         for arg in terminal.arguments:
-            if isinstance(arg, ContextSensitive):
+            if isinstance(arg.axes, ContextSensitive):
                 outer_context.update(
                     {
                         index: paths
@@ -186,7 +186,7 @@ class LoopContextExpander(Transformer):
             try:
                 cf_arg = (
                     arg.with_context(context)
-                    if isinstance(arg, ContextSensitive)
+                    if isinstance(arg.axes, ContextSensitive)
                     else arg
                 )
             # FIXME We will hit issues here when we are missing outer context I think
@@ -205,7 +205,7 @@ class LoopContextExpander(Transformer):
     @_apply.register
     def _(self, terminal: PetscMatInstruction, *, context):
         if any(
-            isinstance(a, ContextSensitive)
+            isinstance(a.axes, ContextSensitive)
             for a in {terminal.mat_arg, terminal.array_arg}
         ):
             raise NotImplementedError

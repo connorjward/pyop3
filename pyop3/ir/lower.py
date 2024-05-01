@@ -16,7 +16,7 @@ import pymbolic as pym
 from pyrsistent import freeze, pmap
 
 from pyop3.array import HierarchicalArray
-from pyop3.array.harray import CalledMapVariable, ContextSensitiveMultiArray
+from pyop3.array.harray import CalledMapVariable
 from pyop3.array.petsc import AbstractMat, Sparsity
 from pyop3.axtree import Axis, AxisComponent, AxisTree, AxisVariable, ContextFree
 from pyop3.axtree.tree import subst_layouts
@@ -292,10 +292,6 @@ class LoopyCodegenContext(CodegenContext):
 
         """
         raise TypeError(f"No handler provided for {type(array).__name__}")
-
-    @_dtype.register
-    def _(self, array: ContextSensitiveMultiArray):
-        return single_valued(self._dtype(a) for a in array.context_map.values())
 
     @_dtype.register(HierarchicalArray)
     def _(self, array):

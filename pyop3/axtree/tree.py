@@ -148,7 +148,9 @@ class ContextFreeLoopIterable(LoopIterable, ContextFree, abc.ABC):
 
 
 class ContextSensitiveLoopIterable(LoopIterable, ContextSensitive, abc.ABC):
-    pass
+    @property
+    def alloc_size(self):
+        return max(ax.alloc_size for ax in self.context_map.values())
 
 
 class UnrecognisedAxisException(ValueError):
@@ -294,7 +296,7 @@ class AxisComponent(LabelledNodeComponent):
         assert npoints is not None
 
         if subaxis := axtree.child(axis, self):
-            size = npoints * axtree.alloc_size(subaxis)
+            size = npoints * axtree._alloc_size(subaxis)
         else:
             size = npoints
 
@@ -866,8 +868,11 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
             assert isinstance(self.size, numbers.Integral)
             return self.size
 
-    # rename to local_size?
-    def alloc_size(self, axis=None):
+    @cached_property
+    def alloc_size(self):
+        return self._alloc_size()
+
+    def _alloc_size(self, axis=None):
         if self.is_empty:
             return 1
         axis = axis or self.root
@@ -1332,11 +1337,30 @@ class ContextSensitiveAxisTree(ContextSensitiveLoopIterable):
     def datamap(self):
         return merge_dicts(axes.datamap for axes in self.context_map.values())
 
+    # seems a bit dodgy
+    @cached_property
+    def sf(self):
+        return single_valued([ax.sf for ax in self.context_map.values()])
+
+    @cached_property
+    def unindexed(self):
+        return single_valued([ax.unindexed for ax in self.context_map.values()])
+
 
 @functools.singledispatch
 def as_axis_tree(arg: Any) -> AxisTree:
     axis = as_axis(arg)
     return as_axis_tree(axis)
+
+
+@as_axis_tree.register
+def _(axes: ContextSensitiveAxisTree) -> ContextSensitiveAxisTree:
+    return axes
+
+
+@as_axis_tree.register
+def _(axes_per_context: collections.abc.Mapping) -> ContextSensitiveAxisTree:
+    return ContextSensitiveAxisTree(axes_per_context)
 
 
 @as_axis_tree.register

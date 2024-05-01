@@ -12,9 +12,10 @@ from petsc4py import PETSc
 from pyrsistent import freeze, pmap
 
 from pyop3.array.base import Array
-from pyop3.array.harray import ContextSensitiveMultiArray, HierarchicalArray
+from pyop3.array.harray import HierarchicalArray
 from pyop3.axtree.tree import (
     AxisTree,
+    ContextSensitiveAxisTree,
     ContextFree,
     IndexedAxisTree,
     as_axis_tree,
@@ -192,27 +193,26 @@ class AbstractMat(Array, ContextFree):
             return mat
 
         # Otherwise we are context-sensitive
-        arrays = {}
+        cs_raxes = {}
+        cs_caxes = {}
         for ctx, (rtree, ctree) in rcforest.items():
             indexed_raxes = index_axes(rtree, ctx, self.raxes)
             indexed_caxes = index_axes(ctree, ctx, self.caxes)
 
-            if indexed_raxes.alloc_size() == 0 or indexed_caxes.alloc_size() == 0:
+            if indexed_raxes.alloc_size == 0 or indexed_caxes.alloc_size == 0:
                 continue
 
-            raxes = compose_axes(indexed_raxes, self.raxes)
-            caxes = compose_axes(indexed_caxes, self.caxes)
+            cs_raxes[ctx] = compose_axes(indexed_raxes, self.raxes)
+            cs_caxes[ctx] = compose_axes(indexed_caxes, self.caxes)
 
-            arrays[ctx] = type(self)(
-                raxes,
-                caxes,
-                self.mat_type,
-                self.mat,
-                name=self.name,
-                block_shape=self.block_shape,
-            )
-        # But this is now a PetscMat...
-        mat = ContextSensitiveMultiArray(arrays)
+        mat = type(self)(
+            cs_raxes,
+            cs_caxes,
+            mat_type=self.mat_type,
+            mat=self.mat,
+            name=self.name,
+            block_shape=self.block_shape,
+        )
         # self._cache[cache_key] = mat
         return mat
 
@@ -239,7 +239,7 @@ class AbstractMat(Array, ContextFree):
         elif isinstance(other, numbers.Number):
             static = HierarchicalArray(
                 self.axes,
-                data=np.full(self.axes.size, other, dtype=self.dtype),
+                data=np.full(self.axes.alloc_size, other, dtype=self.dtype),
                 constant=True,
             )
             expr = PetscMatStore(self, static)
@@ -506,13 +506,53 @@ class AbstractMat(Array, ContextFree):
     def shape(self):
         return (self.block_raxes.size, self.block_caxes.size)
 
+    @staticmethod
+    def _merge_contexts(row_mapping, col_mapping):
+        merged = {}
+        for row_context, row_value in row_mapping.items():
+            for col_context, col_value in col_mapping.items():
+                # skip if the row and column contexts are incompatible
+                if any(
+                    ckey in row_context and row_context[ckey] != cvalue
+                    for ckey, cvalue in col_context.items()
+                ):
+                    continue
+                merged[row_context | col_context] = (row_value, col_value)
+        return freeze(merged)
+
     @cached_property
     def axes(self):
+        def is_context_sensitive(_axes):
+            return isinstance(_axes, ContextSensitiveAxisTree)
+
+        if is_context_sensitive(self.raxes):
+            if is_context_sensitive(self.caxes):
+                merged_axes = {}
+                cs_axes = self._merge_contexts(self.raxes.context_map, self.caxes.context_map)
+                for context, (row_axes, col_axes) in cs_axes.items():
+                    merged_axes[context] = self._merge_axes(row_axes, col_axes)
+                return ContextSensitiveAxisTree(merged_axes)
+            else:
+                merged_axes = {}
+                for context, row_axes in self.raxes.context_map.items():
+                    merged_axes[context] = self._merge_axes(row_axes, self.caxes)
+                return ContextSensitiveAxisTree(merged_axes)
+        else:
+            if is_context_sensitive(self.caxes):
+                merged_axes = {}
+                for context, col_axes in self.caxes.context_map.items():
+                    merged_axes[context] = self._merge_axes(self.raxes, col_axes)
+                return ContextSensitiveAxisTree(merged_axes)
+            else:
+                return self._merge_axes(self.raxes, self.caxes)
+
+    @classmethod
+    def _merge_axes(cls, row_axes, col_axes):
         # Since axes require unique labels, relabel the row and column axis trees
         # with different suffixes. This allows us to create a combined axis tree
         # without clashes.
-        raxes_relabel = relabel_axes(self.raxes, self._row_suffix)
-        caxes_relabel = relabel_axes(self.caxes, self._col_suffix)
+        raxes_relabel = relabel_axes(row_axes, cls._row_suffix)
+        caxes_relabel = relabel_axes(col_axes, cls._col_suffix)
 
         # might not be needed
         axes = AxisTree(raxes_relabel.node_map)

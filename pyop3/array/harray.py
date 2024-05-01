@@ -13,24 +13,19 @@ from typing import Any, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pymbolic as pym
-import pytools
-from mpi4py import MPI
 from petsc4py import PETSc
 from pyrsistent import freeze, pmap
 
 from pyop3.array.base import Array
 from pyop3.axtree import (
     Axis,
-    AxisComponent,
     AxisTree,
     ContextFree,
-    ContextSensitive,
     as_axis_tree,
 )
-from pyop3.axtree.layout import eval_offset
-from pyop3.axtree.tree import IndexedAxisTree, MultiArrayCollector
+from pyop3.axtree.tree import IndexedAxisTree, MultiArrayCollector, ContextSensitiveAxisTree
 from pyop3.buffer import Buffer, DistributedBuffer
-from pyop3.dtypes import IntType, ScalarType
+from pyop3.dtypes import ScalarType
 from pyop3.lang import KernelArgument, ReplaceAssignment
 from pyop3.log import warning
 from pyop3.sf import serial_forest
@@ -150,7 +145,7 @@ class HierarchicalArray(Array, ContextFree, KernelArgument):
             if isinstance(axes, AxisTree):
                 sf = axes.sf
             else:
-                assert isinstance(axes, IndexedAxisTree)
+                assert isinstance(axes, (ContextSensitiveAxisTree, IndexedAxisTree))
                 # not sure this is the right thing to do
                 sf = serial_forest(axes.unindexed.global_size)
 
@@ -198,15 +193,16 @@ class HierarchicalArray(Array, ContextFree, KernelArgument):
             # self._cache[key] = dat
             return dat
 
-        array_per_context = {}
+        context_sensitive_axes = {}
         for loop_context, index_tree in index_forest.items():
             indexed_axes = index_axes(index_tree, loop_context, self.axes)
             axes = compose_axes(indexed_axes, self.axes)
-            array_per_context[loop_context] = HierarchicalArray(
-                axes, data=self.buffer, name=self.name, max_value=self.max_value
-            )
+            context_sensitive_axes[loop_context] = axes
+        context_sensitive_axes = ContextSensitiveAxisTree(context_sensitive_axes)
 
-        dat = ContextSensitiveMultiArray(array_per_context)
+        dat = HierarchicalArray(
+            context_sensitive_axes, data=self.buffer, name=self.name, max_value=self.max_value
+        )
         # self._cache[key] = dat
         return dat
 
@@ -417,7 +413,7 @@ class HierarchicalArray(Array, ContextFree, KernelArgument):
 
     @property
     def alloc_size(self):
-        return self.axes.alloc_size() if not self.axes.is_empty else 1
+        return self.axes.alloc_size if not self.axes.is_empty else 1
 
     @property
     def size(self):
@@ -513,95 +509,3 @@ class MultiArray(HierarchicalArray):
     @deprecated("HierarchicalArray")
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-
-
-# NOTE: I think I can probably get rid of this class and wrap the
-# context-sensitivity inside the axis tree.
-class ContextSensitiveMultiArray(Array, ContextSensitive):
-    def __init__(self, arrays):
-        name = single_valued(a.name for a in arrays.values())
-
-        Array.__init__(self, name)
-        ContextSensitive.__init__(self, arrays)
-
-    def __getitem__(self, indices) -> ContextSensitiveMultiArray:
-        raise NotImplementedError("Untested")
-        # from pyop3.itree.tree import _compose_bits, _index_axes, as_index_forest
-        #
-        # # FIXME for now assume that there is only one context
-        # context, array = just_one(self.context_map.items())
-        #
-        # index_forest = as_index_forest(indices, axes=array.axes)
-        #
-        # if len(index_forest) == 1 and pmap() in index_forest:
-        #     raise NotImplementedError("code path untested")
-        #
-        # array_per_context = {}
-        # for loop_context, index_tree in index_forest.items():
-        #     indexed_axes = _index_axes(index_tree, loop_context, array.axes)
-        #
-        #     (
-        #         target_paths,
-        #         index_exprs,
-        #         layout_exprs,
-        #     ) = _compose_bits(
-        #         array.axes,
-        #         array.target_paths,
-        #         array.index_exprs,
-        #         None,
-        #         indexed_axes,
-        #         indexed_axes.target_paths,
-        #         indexed_axes.index_exprs,
-        #         indexed_axes.layout_exprs,
-        #     )
-        #     array_per_context[loop_context] = HierarchicalArray(
-        #         indexed_axes,
-        #         data=self.array,
-        #         max_value=self.max_value,
-        #         target_paths=target_paths,
-        #         index_exprs=index_exprs,
-        #         outer_loops=indexed_axes.outer_loops,
-        #         layouts=self.layouts,
-        #         name=self.name,
-        #     )
-        #
-        # return ContextSensitiveMultiArray(array_per_context)
-
-    @property
-    def context_free(self):
-        # Will only work if a single context is wrapped
-        return just_one(self.context_map.values())
-
-    @property
-    def buffer(self):
-        return self._shared_attr("buffer")
-
-    # this is really nasty, but need to know if wrapping a Mat
-    @property
-    def mat(self):
-        return self._shared_attr("mat")
-
-    @property
-    def dtype(self):
-        return self._shared_attr("dtype")
-
-    @property
-    def kernel_dtype(self):
-        # TODO Think about the fact that the dtype refers to either to dtype of the
-        # array entries (e.g. double), or the dtype of the whole thing (double*)
-        return self.dtype
-
-    @property
-    def max_value(self):
-        return self._shared_attr("max_value")
-
-    @property
-    def layouts(self):
-        return self._shared_attr("layouts")
-
-    @functools.cached_property
-    def datamap(self):
-        return merge_dicts(array.datamap for array in self.context_map.values())
-
-    def _shared_attr(self, attr: str):
-        return single_valued(getattr(a, attr) for a in self.context_map.values())

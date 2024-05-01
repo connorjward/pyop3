@@ -232,51 +232,6 @@ class Loop(Instruction):
                 args.add(arg)
         return tuple(args)
 
-    # @cached_property
-    # def _distarray_args(self):
-    #     from pyop3.array import ContextSensitiveMultiArray, HierarchicalArray
-    #
-    #     arrays = {}
-    #     for arg in self.function_arguments:
-    #         if isinstance(arg, (ContextSensitiveMultiArray, HierarchicalArray)):
-    #             # take first
-    #             arg, *_ = arg.context_map.values()
-    #
-    #         if (
-    #             not isinstance(arg, HierarchicalArray)
-    #             or not isinstance(arg.buffer, DistributedBuffer)
-    #             or not arg.buffer.is_distributed
-    #         ):
-    #             continue
-    #
-    #         if arg.buffer not in arrays:
-    #             arrays[arg.buffer] = (intent, _has_nontrivial_stencil(arg))
-    #         else:
-    #             if arrays[arg.buffer][0] != intent:
-    #                 # I think that it does not make sense to access arrays with
-    #                 # different intents in the same kernel but that it is
-    #                 # always OK if the same intent is used.
-    #                 raise IntentMismatchError
-    #
-    #             # We need to know if *any* uses of a particular array touch ghost points
-    #             if not arrays[arg.buffer][1] and _has_nontrivial_stencil(arg):
-    #                 arrays[arg.buffer] = (intent, True)
-    #
-    #     # now sort
-    #     return tuple(
-    #         (arr, *arrays[arr]) for arr in sorted(arrays.keys(), key=lambda a: a.name)
-    #     )
-    #
-    # @cached_property
-    # def _mats(self):
-    #     from pyop3 import Mat
-    #
-    #     mats = []
-    #     for arg in self.kernel_arguments:
-    #         if isinstance(arg, Mat):
-    #             mats.append(arg)
-    #     return tuple(mats)
-
     def _array_updates(self):
         """Collect appropriate callables for updating shared values in the right order.
 
@@ -287,14 +242,13 @@ class Loop(Instruction):
 
         """
         from pyop3 import DistributedBuffer, HierarchicalArray, Mat
-        from pyop3.array.harray import ContextSensitiveMultiArray
         from pyop3.array.petsc import Sparsity
 
         initializers = []
         reductions = []
         broadcasts = []
         for arg, intent in self.function_arguments:
-            if isinstance(arg, (ContextSensitiveMultiArray, HierarchicalArray)) and hasattr(arg, "buffer"):
+            if isinstance(arg, HierarchicalArray):
                 buffer = arg.buffer
                 if isinstance(buffer, DistributedBuffer) and buffer.is_distributed:
                     # for now assume the most conservative case
@@ -307,8 +261,6 @@ class Loop(Instruction):
                     reductions.extend(reds)
                     broadcasts.extend(bcasts)
             else:
-                if isinstance(arg, ContextSensitiveMultiArray):
-                    arg = single_valued(v for v in arg.context_map.values())
                 assert isinstance(arg, (Mat, Sparsity))
                 # just in case
                 broadcasts.append(arg.assemble)
@@ -419,12 +371,10 @@ def _has_nontrivial_stencil(array):
     # FIXME This is WRONG, there are cases (e.g. support(extfacet)) where
     # the halo might be touched but the size (i.e. map arity) is 1. I need
     # to look at index_exprs probably.
-    from pyop3.array import ContextSensitiveMultiArray, HierarchicalArray
+    from pyop3.array import HierarchicalArray
 
     if isinstance(array, HierarchicalArray):
-        return array.axes.size > 1
-    elif isinstance(array, ContextSensitiveMultiArray):
-        return any(_has_nontrivial_stencil(d) for d in array.context_map.values())
+        return _has_nontrivial_stencil(array)
     else:
         raise TypeError
 
@@ -601,17 +551,15 @@ class Assignment(Terminal, abc.ABC):
 
     @property
     def kernel_arguments(self):
-        from pyop3.array.harray import ContextSensitiveMultiArray, HierarchicalArray
+        from pyop3.array.harray import HierarchicalArray
+        from pyop3.array.petsc import Mat
 
         args = OrderedSet()
         for array, _ in self.function_arguments:
-            if isinstance(array, ContextSensitiveMultiArray):
-                if hasattr(array, "buffer"):
-                    args.add(array.buffer)
-                else:
-                    args.add(array.mat)
-            elif isinstance(array, HierarchicalArray):
+            if isinstance(array, HierarchicalArray):
                 args.add(array.buffer)
+            elif isinstance(array, Mat):
+                args.add(array.mat)
         return tuple(args)
 
 
