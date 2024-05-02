@@ -19,6 +19,7 @@ from pyrsistent import freeze, pmap
 from pyop3.array.base import Array
 from pyop3.axtree import (
     Axis,
+    ContextSensitive,
     AxisTree,
     ContextFree,
     as_axis_tree,
@@ -138,7 +139,7 @@ class HierarchicalArray(Array, KernelArgument):
                 # always deal with flattened data
                 if len(data.shape) > 1:
                     data = data.flatten()
-                if data.size != axes.alloc_size:
+                if data.size != axes.unindexed.global_size:
                     raise ValueError("Data shape does not match axes")
 
             # IndexedAxisTrees do not currently have SFs, so create a dummy one here
@@ -147,10 +148,10 @@ class HierarchicalArray(Array, KernelArgument):
             else:
                 assert isinstance(axes, (ContextSensitiveAxisTree, IndexedAxisTree))
                 # not sure this is the right thing to do
-                sf = serial_forest(axes.alloc_size)
+                sf = serial_forest(axes.unindexed.global_size)
 
             data = DistributedBuffer(
-                axes.alloc_size,  # not a useful property anymore
+                axes.unindexed.global_size,  # not a useful property anymore
                 sf,
                 dtype,
                 name=self.name,
@@ -528,3 +529,16 @@ class MultiArray(HierarchicalArray):
     @deprecated("HierarchicalArray")
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
+
+class ContextSensitiveDat(ContextSensitive):
+    """Class for describing arrays that are different within different loop contexts.
+
+    This is useful for the case where one wants to pass a small array through as
+    part of a context-sensitive assignment.
+
+    """
+
+    @property
+    def dtype(self):
+        return self._shared_attr("dtype")

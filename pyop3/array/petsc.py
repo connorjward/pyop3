@@ -12,7 +12,7 @@ from petsc4py import PETSc
 from pyrsistent import freeze, pmap
 
 from pyop3.array.base import Array
-from pyop3.array.harray import HierarchicalArray
+from pyop3.array.harray import HierarchicalArray, ContextSensitiveDat
 from pyop3.axtree.tree import (
     AxisTree,
     ContextSensitiveAxisTree,
@@ -261,11 +261,22 @@ class AbstractMat(Array):
             # TODO: Check axes match between self and other
             expr = PetscMatStore(self, other)
         elif isinstance(other, numbers.Number):
-            static = HierarchicalArray(
-                self.axes,
-                data=np.full(self.axes.alloc_size, other, dtype=self.dtype),
-                constant=True,
-            )
+            if isinstance(self.axes, ContextSensitiveAxisTree):
+                cs_dats = {}
+                for context, axes in self.axes.context_map.items():
+                    cs_dat = HierarchicalArray(
+                        axes,
+                        data=np.full(axes.size, other, dtype=self.dtype),
+                        constant=True,
+                    )
+                    cs_dats[context] = cs_dat
+                static = ContextSensitiveDat(cs_dats)
+            else:
+                static = HierarchicalArray(
+                    self.axes,
+                    data=np.full(self.axes.alloc_size, other, dtype=self.dtype),
+                    constant=True,
+                )
             expr = PetscMatStore(self, static)
         else:
             raise NotImplementedError

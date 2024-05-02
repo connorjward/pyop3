@@ -242,6 +242,7 @@ class Loop(Instruction):
 
         """
         from pyop3 import DistributedBuffer, HierarchicalArray, Mat
+        from pyop3.array.harray import ContextSensitiveDat
         from pyop3.array.petsc import Sparsity
 
         initializers = []
@@ -260,6 +261,9 @@ class Loop(Instruction):
                     initializers.extend(inits)
                     reductions.extend(reds)
                     broadcasts.extend(bcasts)
+            elif isinstance(arg, ContextSensitiveDat):
+                # assumed to not be distributed
+                pass
             else:
                 assert isinstance(arg, (Mat, Sparsity))
                 # just in case
@@ -589,7 +593,12 @@ class PetscMatInstruction(Instruction):
 
     @property
     def kernel_arguments(self):
-        return (self.mat_arg.mat, self.array_arg.buffer)
+        args = (self.mat_arg.mat,)
+        if isinstance(self.array_arg, ContextSensitive):
+            args += tuple(dat.buffer for dat in self.array_arg.context_map.values())
+        else:
+            args += (self.array_arg.buffer,)
+        return args
 
     @property
     def datamap(self):

@@ -3,6 +3,7 @@ from __future__ import annotations
 import abc
 import collections
 import functools
+import itertools
 import operator
 from collections import defaultdict
 from collections.abc import Hashable, Sequence
@@ -251,18 +252,41 @@ class LabelledTree(AbstractTree):
         # post-init checks
         self._check_node_labels_unique_in_paths(self.node_map)
 
-    # This is arguably over-specific. Otherwise equivalent trees will currently
-    # fail this check if their IDs do not match. One way to resolve this would be
-    # to re-ID all of the nodes with a pre-order traversal. This is not a priority.
-    # def __eq__(self, other):
-    #     return type(other) is type(self) and other._hash_key == self._hash_key
-    #
-    # def __hash__(self):
-    #     return hash(self._hash_key)
-    #
-    # @cached_property
-    # def _hash_key(self):
-    #     return (self.node_map,)
+    def __eq__(self, other):
+        return type(other) is type(self) and other._hash_key == self._hash_key
+
+    def __hash__(self):
+        return hash(self._hash_key)
+
+    @cached_property
+    def _hash_key(self):
+        return (self._hash_node_map,)
+
+    @cached_property
+    def _hash_node_map(self):
+        if self.is_empty:
+            return pmap()
+
+        counter = itertools.count()
+        return self._collect_hash_node_map(None, None, counter)
+
+    def _collect_hash_node_map(self, old_parent_id, new_parent_id, counter):
+        if old_parent_id not in self.node_map:
+            return pmap()
+
+        nodes = []
+        node_map = {}
+        for old_node in self.node_map[old_parent_id]:
+            if old_node is not None:
+                new_node = old_node.copy(id=f"id_{next(counter)}")
+                node_map.update(self._collect_hash_node_map(old_node.id, new_node.id, counter))
+            else:
+                new_node = None
+
+            nodes.append(new_node)
+
+        node_map[new_parent_id] = freeze(nodes)
+        return freeze(node_map)
 
     @classmethod
     def _check_node_labels_unique_in_paths(

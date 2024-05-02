@@ -114,6 +114,8 @@ class ContextSensitive(ContextAware, abc.ABC):
                 key.update({loop_index: freeze(path)})
         return freeze(key)
 
+    def _shared_attr(self, attr: str):
+        return single_valued(getattr(a, attr) for a in self.context_map.values())
 
 # this is basically just syntactic sugar, might not be needed
 # avoids the need for
@@ -1164,9 +1166,9 @@ class IndexedAxisTree(BaseAxisTree):
         self._layout_exprs = pmap(layout_exprs)
         self._outer_loops = tuple(outer_loops)
 
-    # @cached_property
-    # def _hash_key(self):
-    #     return super()._hash_key + (self.unindexed, self.target_paths, self.index_exprs, self.layout_exprs, self.outer_loops)
+    @cached_property
+    def _hash_key(self):
+        return super()._hash_key + (self.unindexed, self.target_paths, self.index_exprs, self.layout_exprs, self.outer_loops)
 
     @property
     def unindexed(self):
@@ -1354,11 +1356,9 @@ class ContextSensitiveAxisTree(ContextSensitiveLoopIterable):
     def sf(self):
         return single_valued([ax.sf for ax in self.context_map.values()])
 
-    # @cached_property
-    # def unindexed(self):
-        # this does not work because unindexed may have different IDs, so just return
-        # the first one.
-        # return single_valued([ax.unindexed for ax in self.context_map.values()])
+    @cached_property
+    def unindexed(self):
+        return single_valued([ax.unindexed for ax in self.context_map.values()])
 
     @cached_property
     def context_free(self):
