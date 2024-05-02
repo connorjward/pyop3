@@ -25,6 +25,7 @@ from petsc4py import PETSc
 from pyrsistent import freeze, pmap, thaw
 
 from pyop3.axtree.parallel import partition_ghost_points
+from pyop3.exceptions import Pyop3Exception
 from pyop3.dtypes import IntType
 from pyop3.sf import StarForest, serial_forest
 from pyop3.tree import (
@@ -51,8 +52,12 @@ from pyop3.utils import (
 )
 
 
-class ExpectedLinearAxisTreeException(Exception):
+class ExpectedLinearAxisTreeException(Pyop3Exception):
     ...
+
+
+class ContextMismatchException(Pyop3Exception):
+    pass
 
 
 class ContextAware(abc.ABC):
@@ -97,7 +102,10 @@ class ContextSensitive(ContextAware, abc.ABC):
             return frozenset(indices)
 
     def with_context(self, context):
-        return self.context_map[self.filter_context(context)]
+        try:
+            return self.context_map[self.filter_context(context)]
+        except KeyError:
+            raise ContextMismatchException
 
     def filter_context(self, context):
         key = {}
@@ -1144,17 +1152,21 @@ class IndexedAxisTree(BaseAxisTree):
         layout_exprs,
         outer_loops,
     ):
+        if layout_exprs is None:
+            layout_exprs = pmap()
         if outer_loops is None:
             outer_loops = ()
-        else:
-            assert isinstance(outer_loops, tuple)
 
         super().__init__(node_map)
         self._unindexed = unindexed
-        self._target_paths = target_paths
-        self._index_exprs = index_exprs
-        self._layout_exprs = layout_exprs
+        self._target_paths = pmap(target_paths)
+        self._index_exprs = pmap(index_exprs)
+        self._layout_exprs = pmap(layout_exprs)
         self._outer_loops = tuple(outer_loops)
+
+    # @cached_property
+    # def _hash_key(self):
+    #     return super()._hash_key + (self.unindexed, self.target_paths, self.index_exprs, self.layout_exprs, self.outer_loops)
 
     @property
     def unindexed(self):
@@ -1342,9 +1354,15 @@ class ContextSensitiveAxisTree(ContextSensitiveLoopIterable):
     def sf(self):
         return single_valued([ax.sf for ax in self.context_map.values()])
 
+    # @cached_property
+    # def unindexed(self):
+        # this does not work because unindexed may have different IDs, so just return
+        # the first one.
+        # return single_valued([ax.unindexed for ax in self.context_map.values()])
+
     @cached_property
-    def unindexed(self):
-        return single_valued([ax.unindexed for ax in self.context_map.values()])
+    def context_free(self):
+        return just_one(self.context_map.values())
 
 
 @functools.singledispatch

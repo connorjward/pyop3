@@ -94,7 +94,7 @@ class FancyIndexWriteException(Exception):
     pass
 
 
-class HierarchicalArray(Array, ContextFree, KernelArgument):
+class HierarchicalArray(Array, KernelArgument):
     """Multi-dimensional, hierarchical array.
 
     Parameters
@@ -138,7 +138,7 @@ class HierarchicalArray(Array, ContextFree, KernelArgument):
                 # always deal with flattened data
                 if len(data.shape) > 1:
                     data = data.flatten()
-                if data.size != axes.unindexed.global_size:
+                if data.size != axes.alloc_size:
                     raise ValueError("Data shape does not match axes")
 
             # IndexedAxisTrees do not currently have SFs, so create a dummy one here
@@ -147,10 +147,10 @@ class HierarchicalArray(Array, ContextFree, KernelArgument):
             else:
                 assert isinstance(axes, (ContextSensitiveAxisTree, IndexedAxisTree))
                 # not sure this is the right thing to do
-                sf = serial_forest(axes.unindexed.global_size)
+                sf = serial_forest(axes.alloc_size)
 
             data = DistributedBuffer(
-                axes.unindexed.global_size,  # not a useful property anymore
+                axes.alloc_size,  # not a useful property anymore
                 sf,
                 dtype,
                 name=self.name,
@@ -209,6 +209,25 @@ class HierarchicalArray(Array, ContextFree, KernelArgument):
     # Since __getitem__ is implemented, this class is implicitly considered
     # to be iterable (which it's not). This avoids some confusing behaviour.
     __iter__ = None
+
+    def with_context(self, context):
+        return type(self)(
+            self.axes.with_context(context),
+            name=self.name,
+            data=self.buffer,
+            max_value=self.max_value,
+            constant=self.constant,
+        )
+
+    @property
+    def context_free(self, context):
+        return type(self)(
+            self.axes.context_free,
+            name=self.name,
+            data=self.buffer,
+            max_value=self.max_value,
+            constant=self.constant,
+        )
 
     @property
     def dtype(self):

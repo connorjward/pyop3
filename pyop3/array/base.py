@@ -1,10 +1,11 @@
 import abc
 
+from pyop3.axtree import ContextAware
 from pyop3.lang import FunctionArgument, ReplaceAssignment
 from pyop3.utils import UniqueNameGenerator
 
 
-class Array(FunctionArgument, abc.ABC):
+class Array(ContextAware, FunctionArgument, abc.ABC):
     _prefix = "array"
     _name_generator = UniqueNameGenerator()
 
@@ -16,3 +17,12 @@ class Array(FunctionArgument, abc.ABC):
     def assign(self, other, eager=True):
         expr = ReplaceAssignment(self, other)
         return expr() if eager else expr
+
+    @abc.abstractmethod
+    def with_context(self):
+        pass
+
+    @property
+    @abc.abstractmethod
+    def context_free(self):
+        pass

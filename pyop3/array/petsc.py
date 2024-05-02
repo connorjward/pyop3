@@ -64,7 +64,8 @@ class PetscVecNest(PetscVec):
     ...
 
 
-class AbstractMat(Array, ContextFree):
+# BaseMat?
+class AbstractMat(Array):
     DEFAULT_MAT_TYPE = PETSc.Mat.Type.AIJ
 
     prefix = "mat"
@@ -215,6 +216,29 @@ class AbstractMat(Array, ContextFree):
         )
         # self._cache[cache_key] = mat
         return mat
+
+    def with_context(self, context):
+        row_axes = self.raxes.with_context(context)
+        col_axes = self.caxes.with_context(context)
+        return type(self)(
+            row_axes,
+            col_axes,
+            name=self.name,
+            mat_type=self.mat_type,
+            mat=self.mat,
+        )
+
+    @property
+    def context_free(self):
+        row_axes = self.raxes.context_free
+        col_axes = self.caxes.context_free
+        return type(self)(
+            row_axes,
+            col_axes,
+            name=self.name,
+            mat_type=self.mat_type,
+            mat=self.mat,
+        )
 
     # like Dat, bad name? handle?
     @property

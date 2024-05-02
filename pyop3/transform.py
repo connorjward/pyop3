@@ -9,7 +9,7 @@ from pyrsistent import pmap
 
 from pyop3.array import HierarchicalArray
 from pyop3.array.petsc import AbstractMat
-from pyop3.axtree import Axis, AxisTree, ContextFree, ContextSensitive
+from pyop3.axtree import Axis, AxisTree, ContextFree, ContextSensitive, ContextMismatchException, ContextAware
 from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
 from pyop3.itree import Map, TabulatedMapComponent
 from pyop3.lang import (
@@ -162,7 +162,7 @@ class LoopContextExpander(Transformer):
                 outer_context.update(
                     {
                         index: paths
-                        for ctx in arg.context_map.keys()
+                        for ctx in arg.axes.context_map.keys()
                         for index, paths in ctx.items()
                         if index not in context
                     }
@@ -179,38 +179,29 @@ class LoopContextExpander(Transformer):
         # FIXME for now we assume an outer context of {}. In other words anything
         # context sensitive in the assignment is completely handled by the existing
         # outer loops.
+        # This is meaningful if the kernel accepts a loop index as an argument.
 
-        valid = True
         cf_args = []
         for arg in terminal.arguments:
-            try:
-                cf_arg = (
-                    arg.with_context(context)
-                    if isinstance(arg.axes, ContextSensitive)
-                    else arg
-                )
-            # FIXME We will hit issues here when we are missing outer context I think
-            except KeyError:
-                # assignment is not valid in this context, do nothing
-                valid = False
-                break
-            cf_args.append(cf_arg)
-
-        if valid:
-            return ((pmap(), terminal.with_arguments(cf_args)),)
-        else:
-            return ((pmap(), None),)
+            if isinstance(arg, ContextAware):
+                try:
+                    cf_args.append(arg.with_context(context))
+                except ContextMismatchException:
+                    # assignment is not valid in this context, do nothing
+                    return ((pmap(), None),)
+            else:
+                cf_args.append(arg)
+        return ((pmap(), terminal.with_arguments(cf_args)),)
 
     # TODO: this is just an assignment, fix inheritance
     @_apply.register
     def _(self, terminal: PetscMatInstruction, *, context):
-        if any(
-            isinstance(a.axes, ContextSensitive)
-            for a in {terminal.mat_arg, terminal.array_arg}
-        ):
-            raise NotImplementedError
-
-        return ((pmap(), terminal),)
+        try:
+            mat = terminal.mat_arg.with_context(context)
+            array = terminal.array_arg.with_context(context)
+            return ((pmap(), terminal.copy(mat_arg=mat, array_arg=array)),)
+        except ContextMismatchException:
+            return ((pmap(), None),)
 
 
 def expand_loop_contexts(expr: Instruction):
@@ -320,9 +311,9 @@ class ImplicitPackUnpackExpander(Transformer):
         for (arg, intent), shape in checked_zip(
             terminal.function_arguments, terminal.argument_shapes
         ):
-            assert isinstance(
-                arg, ContextFree
-            ), "Loop contexts should already be expanded"
+            # assert isinstance(
+            #     arg, ContextFree
+            # ), "Loop contexts should already be expanded"
 
             if isinstance(arg, DummyKernelArgument):
                 arguments.append(arg)

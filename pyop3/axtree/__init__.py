@@ -1,5 +1,6 @@
 from .tree import (
     Axis,
+    ContextMismatchException,
     AxisComponent,
     AxisTree,
     AxisVariable,

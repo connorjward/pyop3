@@ -251,6 +251,19 @@ class LabelledTree(AbstractTree):
         # post-init checks
         self._check_node_labels_unique_in_paths(self.node_map)
 
+    # This is arguably over-specific. Otherwise equivalent trees will currently
+    # fail this check if their IDs do not match. One way to resolve this would be
+    # to re-ID all of the nodes with a pre-order traversal. This is not a priority.
+    # def __eq__(self, other):
+    #     return type(other) is type(self) and other._hash_key == self._hash_key
+    #
+    # def __hash__(self):
+    #     return hash(self._hash_key)
+    #
+    # @cached_property
+    # def _hash_key(self):
+    #     return (self.node_map,)
+
     @classmethod
     def _check_node_labels_unique_in_paths(
         cls, node_map, node=None, seen_labels=frozenset()
