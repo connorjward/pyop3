@@ -1078,24 +1078,13 @@ class AxisTree(MutableLabelledTreeMixin, BaseAxisTree):
     @cached_property
     def layouts(self):
         """Initialise the multi-axis by computing the layout functions."""
-        from pyop3.axtree.layout import (
-            _collect_at_leaves,
-            _compute_layouts,
-        )
+        from pyop3.axtree.layout import make_layouts
         from pyop3.itree.tree import IndexExpressionReplacer
-
-        if self.layout_axes.is_empty:
-            return freeze({pmap(): 0})
 
         loop_vars = self.outer_loop_bits[1] if self.outer_loops else {}
 
-        with PETSc.Log.Event("pyop3: tabulate layouts"):
-            layouts, check_none, _ = _compute_layouts(self.layout_axes, loop_vars)
-
-        assert check_none is None
-
-        layoutsnew = _collect_at_leaves(self, self.layout_axes, layouts)
-        layouts = freeze(dict(layoutsnew))
+        with PETSc.Log.Event("pyop3: make_layouts"):
+            layouts = make_layouts(self, loop_vars)
 
         if self.outer_loops:
             _, loop_vars = self.outer_loop_bits
