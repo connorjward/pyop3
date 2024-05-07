@@ -24,6 +24,7 @@ from pyop3.axtree.tree import (
 )
 from pyop3.dtypes import IntType
 from pyop3.utils import (
+    StrictlyUniqueDict,
     as_tuple,
     checked_zip,
     just_one,
@@ -85,11 +86,10 @@ def _make_layout_per_axis_component(
         inner_loop_vars = frozenset()
     inner_loop_vars_with_self = _collect_inner_loop_vars(axes, axis, loop_vars)
 
-    layouts = {}
+    layouts = StrictlyUniqueDict()
 
     # Post-order traversal
     csubtrees = []
-    sublayoutss = []
     for cpt in axis.components:
         layout_path_ = layout_path | {axis.label: cpt.label}
 
@@ -100,11 +100,10 @@ def _make_layout_per_axis_component(
             ) = _make_layout_per_axis_component(
                 axes, loop_vars, subaxis, layout_path_,
             )
-            sublayoutss.append(sublayouts)
+            layouts.update(sublayouts)
             csubtrees.append(csubtree)
         else:
             csubtrees.append(None)
-            sublayoutss.append(defaultdict(list))
 
     """
     There are two conditions that we need to worry about:
@@ -143,7 +142,7 @@ def _make_layout_per_axis_component(
     ) or (has_halo(axes, axis) and axis != axes.root):
         if has_halo(axes, axis) or not all(
             has_constant_step(axes, axis, c, inner_loop_vars)
-            for i, c in enumerate(axis.components)
+            for c in axis.components
         ):
             ctree = AxisTree(axis.copy(numbering=None))
 
@@ -157,7 +156,7 @@ def _make_layout_per_axis_component(
             # add to shape of things
             # in theory if we are ragged and permuted then we do want to include this level
             ctree = None
-            for i, c in enumerate(axis.components):
+            for c in axis.components:
                 step = step_size(axes, axis, c)
                 if (axis.id, c.label) in loop_vars:
                     axis_var = loop_vars[axis.id, c.label][axis.label]
@@ -165,11 +164,7 @@ def _make_layout_per_axis_component(
                     axis_var = AxisVariable(axis.label)
                 layouts.update({layout_path | {axis.label: c.label}: axis_var * step})
 
-        layouts.update(merge_dicts(sublayoutss))
-        return (
-            layouts,
-            ctree,
-        )
+        return (layouts, ctree)
 
     # 2. add layouts here
     else:
@@ -215,10 +210,6 @@ def _make_layout_per_axis_component(
             )
 
             for subpath, offset_data in fulltree.items():
-                # offset_data must be linear so we can unroll the indices
-                # flat_indices = {
-                #     ax: expr
-                # }
                 source_path = offset_data.axes.path_with_nodes(*offset_data.axes.leaf)
                 index_keys = [None] + [
                     (axis.id, cpt) for axis, cpt in source_path.items()
@@ -232,18 +223,12 @@ def _make_layout_per_axis_component(
                 offset_var = ArrayVar(offset_data, myindices, mytargetpath)
 
                 layouts[layout_path | subpath] = offset_var
-            ctree = None
 
-            layouts.update(merge_dicts(sublayoutss))
-            return (
-                layouts,
-                ctree,
-            )
+            return (layouts, None)
 
         # must therefore be affine
         else:
             assert all(sub is None for sub in csubtrees)
-            layouts = {}
             steps = [
                 step_size(axes, axis, c)
                 for i, c in enumerate(axis.components)
@@ -251,19 +236,13 @@ def _make_layout_per_axis_component(
             start = 0
             for cidx, step in enumerate(steps):
                 mycomponent = axis.components[cidx]
-                sublayouts = sublayoutss[cidx].copy()
 
                 axis_var = AxisVariable(axis.label)
                 new_layout = axis_var * step + start
 
-                sublayouts[layout_path | {axis.label: mycomponent.label}] = new_layout
+                layouts[layout_path | {axis.label: mycomponent.label}] = new_layout
                 start += _axis_component_size(axes, axis, mycomponent)
-
-                layouts.update(sublayouts)
-            return (
-                layouts,
-                None,
-            )
+            return (layouts, None)
 
 
 
