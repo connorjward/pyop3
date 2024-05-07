@@ -48,7 +48,7 @@ def make_layouts(axes: AxisTree, loop_vars) -> PMap:
     if axes.layout_axes.is_empty:
         return freeze({pmap(): 0})
 
-    component_layouts, _, _ = _make_layout_per_axis_component(axes.layout_axes, loop_vars)
+    component_layouts, _ = _make_layout_per_axis_component(axes.layout_axes, loop_vars)
     return _accumulate_axis_component_layouts(axes, component_layouts)
 
 
@@ -86,7 +86,6 @@ def _make_layout_per_axis_component(
     inner_loop_vars_with_self = _collect_inner_loop_vars(axes, axis, loop_vars)
 
     layouts = {}
-    steps = {}
 
     # Post-order traversal
     csubtrees = []
@@ -98,13 +97,11 @@ def _make_layout_per_axis_component(
             (
                 sublayouts,
                 csubtree,
-                substeps,
             ) = _make_layout_per_axis_component(
                 axes, loop_vars, subaxis, layout_path_,
             )
             sublayoutss.append(sublayouts)
             csubtrees.append(csubtree)
-            steps.update(substeps)
         else:
             csubtrees.append(None)
             sublayoutss.append(defaultdict(list))
@@ -168,12 +165,10 @@ def _make_layout_per_axis_component(
                     axis_var = AxisVariable(axis.label)
                 layouts.update({layout_path | {axis.label: c.label}: axis_var * step})
 
-        # layouts and steps are just propagated from below
         layouts.update(merge_dicts(sublayoutss))
         return (
             layouts,
             ctree,
-            steps,
         )
 
     # 2. add layouts here
@@ -239,17 +234,10 @@ def _make_layout_per_axis_component(
                 layouts[layout_path | subpath] = offset_var
             ctree = None
 
-            # bit of a hack, we can skip this if we aren't passing higher up
-            if axis == axes.root:
-                steps = "not used"
-            else:
-                steps = {layout_path: _axis_size(axes, axis)}
-
             layouts.update(merge_dicts(sublayoutss))
             return (
                 layouts,
                 ctree,
-                steps,
             )
 
         # must therefore be affine
@@ -272,11 +260,9 @@ def _make_layout_per_axis_component(
                 start += _axis_component_size(axes, axis, mycomponent)
 
                 layouts.update(sublayouts)
-            steps = {layout_path: _axis_size(axes, axis)}
             return (
                 layouts,
                 None,
-                steps,
             )
 
 
