@@ -486,23 +486,15 @@ class LoopIndexCollector(pym.mapper.CombineMapper):
         else:
             return rec | {index}
 
-    def map_multi_array(self, array):
+    def map_array(self, array):
         if self._linear:
             return tuple(
-                item for expr in array.index_exprs.values() for item in self.rec(expr)
+                item for expr in array.indices.values() for item in self.rec(expr)
             )
         else:
             return frozenset(
-                {item for expr in array.index_exprs.values() for item in self.rec(expr)}
+                {item for expr in array.indices.values() for item in self.rec(expr)}
             )
-
-    # def map_called_map_variable(self, index):
-    #     result = (
-    #         idx
-    #         for index_expr in index.input_index_exprs.values()
-    #         for idx in self.rec(index_expr)
-    #     )
-    #     return tuple(result) if self._linear else frozenset(result)
 
 
 def collect_external_loops(axes, index_exprs, linear=False):

@@ -1083,7 +1083,7 @@ class AxisTree(MutableLabelledTreeMixin, BaseAxisTree):
 
         loop_vars = self.outer_loop_bits[1] if self.outer_loops else {}
 
-        with PETSc.Log.Event("pyop3: make_layouts"):
+        with PETSc.Log.Event("pyop3: tabulate layouts"):
             layouts = make_layouts(self, loop_vars)
 
         if self.outer_loops:
