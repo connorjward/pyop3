@@ -206,7 +206,8 @@ class Loop(Instruction):
 
         for arg in self.kernel_arguments:
             if isinstance(arg, DistributedBuffer):
-                if arg.is_distributed:
+                # if arg.is_distributed:
+                if arg.comm.size > 1:
                     return True
             else:
                 assert isinstance(arg, PETSc.Mat)

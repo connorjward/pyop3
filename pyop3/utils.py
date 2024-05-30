@@ -123,6 +123,7 @@ class PrettyTuple(tuple):
         return type(self)(self + (other,))
 
 
+# TODO: Think I prefer strict_zip
 def checked_zip(*iterables):
     if not pytools.is_single_valued(set(len(it) for it in iterables)):
         raise ValueError

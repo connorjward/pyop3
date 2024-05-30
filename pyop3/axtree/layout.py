@@ -17,7 +17,7 @@ from pyop3.axtree.tree import (
     Axis,
     AxisComponent,
     AxisTree,
-    AxisVariable,
+    AxisVar,
     ExpressionEvaluator,
     component_number_from_offsets,
     component_offsets,
@@ -144,10 +144,12 @@ def _make_layout_per_axis_component(
             has_constant_step(axes, axis, c, inner_loop_vars)
             for c in axis.components
         ):
-            ctree = AxisTree(axis.copy(numbering=None))
+            # ctree = AxisTree(axis.copy(numbering=None))
+            ctree = AxisTree(axis)
 
             # we enforce here that all subaxes must be tabulated, is this always
             # needed?
+            # Since each tree is supposed to be linear I think that this bit is wrong.
             if strictly_all(sub is not None for sub in csubtrees):
                 for component, subtree in checked_zip(axis.components, csubtrees):
                     ctree = ctree.add_subtree(subtree, axis, component)
@@ -161,7 +163,7 @@ def _make_layout_per_axis_component(
                 if (axis.id, c.label) in loop_vars:
                     axis_var = loop_vars[axis.id, c.label][axis.label]
                 else:
-                    axis_var = AxisVariable(axis.label)
+                    axis_var = AxisVar(axis.label)
                 layouts.update({layout_path | {axis.label: c.label}: axis_var * step})
 
         return (layouts, ctree)
@@ -169,7 +171,8 @@ def _make_layout_per_axis_component(
     # 2. add layouts here
     else:
         # 1. do we need to tabulate anything?
-        interleaved = len(axis.components) > 1 and axis.numbering is not None
+        # interleaved = len(axis.components) > 1 and axis.numbering is not None
+        interleaved = False
         if (
             interleaved
             or not all(
@@ -179,7 +182,8 @@ def _make_layout_per_axis_component(
             or has_halo(axes, axis)
             and axis == axes.root  # at the top
         ):
-            ctree = AxisTree(axis.copy(numbering=None))
+            # ctree = AxisTree(axis.copy(numbering=None))
+            ctree = AxisTree(axis)
             # we enforce here that all subaxes must be tabulated, is this always
             # needed?
             if strictly_all(sub is not None for sub in csubtrees):
@@ -210,15 +214,11 @@ def _make_layout_per_axis_component(
             )
 
             for subpath, offset_data in fulltree.items():
-                source_path = offset_data.axes.path_with_nodes(*offset_data.axes.leaf)
-                index_keys = [None] + [
-                    (axis.id, cpt) for axis, cpt in source_path.items()
-                ]
                 mytargetpath = merge_dicts(
-                    offset_data.axes.target_paths.get(key, {}) for key in index_keys
+                    just_one(offset_data.axes.paths).values()
                 )
                 myindices = merge_dicts(
-                    offset_data.axes.index_exprs.get(key, {}) for key in index_keys
+                    just_one(offset_data.axes.index_exprs).values()
                 )
                 offset_var = ArrayVar(offset_data, myindices, mytargetpath)
 
@@ -237,7 +237,7 @@ def _make_layout_per_axis_component(
             for cidx, step in enumerate(steps):
                 mycomponent = axis.components[cidx]
 
-                axis_var = AxisVariable(axis.label)
+                axis_var = AxisVar(axis.label)
                 new_layout = axis_var * step + start
 
                 layouts[layout_path | {axis.label: mycomponent.label}] = new_layout
@@ -360,6 +360,8 @@ def step_size(
 
 
 def has_halo(axes, axis):
+    # TODO: cleanup
+    return axes.comm.size > 1
     if axis.sf is not None:
         return True
     else:
@@ -511,16 +513,7 @@ def _create_count_array_tree(
     arrays = {}
     for component in axis.components:
         path_ = path | {axis.label: component.label}
-        # This causes an infinite recursion because axis[component.label]
-        # returns an IndexedAxisTree instead of an AxisTree. This should be
-        # avoidable.
-        # linear_axis = axis[component.label].root
-        # current workaround:
-        if len(axis.components) > 1:
-            linear_axis = axis[component.label].root
-        else:
-            # discard SF since the tabulating arrays are not parallel
-            linear_axis = axis.copy(sf=None)
+        linear_axis = Axis(component.copy(sf=None), axis.label)
 
         # can be None if ScalarIndex is used
         if linear_axis is not None:
@@ -542,6 +535,7 @@ def _create_count_array_tree(
             # make a multiarray here from the given sizes
 
             # do we have any external axes from loop indices?
+            breakpoint()
             axtree = AxisTree.from_iterable(axes_acc_)
 
             if loop_vars:
@@ -552,7 +546,7 @@ def _create_count_array_tree(
                         loop_var = loop_vars[myaxis.label]
                         index_expr = {myaxis.label: loop_var}
                     else:
-                        index_expr = {myaxis.label: AxisVariable(myaxis.label)}
+                        index_expr = {myaxis.label: AxisVar(myaxis.label)}
                     index_exprs[key] = index_expr
             else:
                 index_exprs = axtree.index_exprs
@@ -583,14 +577,15 @@ def _tabulate_count_array_tree(
     npoints = sum(_as_int(c.count, indices) for c in axis.components)
 
     offsets = component_offsets(axis, indices)
-    points = axis.numbering.data_ro if axis.numbering is not None else range(npoints)
+    # points = axis.numbering.data_ro if axis.numbering is not None else range(npoints)
+    points = range(npoints)
 
     counters = {c: itertools.count() for c in axis.components}
     for new_pt, old_pt in enumerate(points):
-        if axis.sf is not None:
-            is_owned = new_pt < axis.sf.nowned
-
         component, _ = component_number_from_offsets(axis, old_pt, offsets)
+
+        if component.sf is not None:
+            is_owned = new_pt < component.sf.nowned
 
         new_strata_pt = next(counters[component])
 

@@ -2,14 +2,9 @@ from __future__ import annotations
 
 import collections
 import contextlib
-import functools
-import itertools
-import numbers
-import operator
 import sys
-import threading
 from functools import cached_property
-from typing import Any, Optional, Sequence, Tuple, Union
+from typing import Sequence
 
 import numpy as np
 import pymbolic as pym
@@ -21,7 +16,6 @@ from pyop3.axtree import (
     Axis,
     ContextSensitive,
     AxisTree,
-    ContextFree,
     as_axis_tree,
 )
 from pyop3.axtree.tree import IndexedAxisTree, MultiArrayCollector, ContextSensitiveAxisTree
@@ -31,18 +25,8 @@ from pyop3.lang import KernelArgument, ReplaceAssignment
 from pyop3.log import warning
 from pyop3.sf import serial_forest
 from pyop3.utils import (
-    PrettyTuple,
-    UniqueNameGenerator,
-    as_tuple,
-    debug_assert,
     deprecated,
-    is_single_valued,
     just_one,
-    merge_dicts,
-    readonly,
-    single_valued,
-    some_but_not_all,
-    strict_int,
     strictly_all,
 )
 
@@ -142,17 +126,18 @@ class HierarchicalArray(Array, KernelArgument):
                 if data.size != axes.unindexed.global_size:
                     raise ValueError("Data shape does not match axes")
 
+            # FIXME: Parallel sf stuff
             # IndexedAxisTrees do not currently have SFs, so create a dummy one here
-            if isinstance(axes, AxisTree):
-                sf = axes.sf
-            else:
-                assert isinstance(axes, (ContextSensitiveAxisTree, IndexedAxisTree))
-                # not sure this is the right thing to do
-                sf = serial_forest(axes.unindexed.global_size)
+            # if isinstance(axes, AxisTree):
+            #     sf = axes.sf
+            # else:
+            #     assert isinstance(axes, (ContextSensitiveAxisTree, IndexedAxisTree))
+            #     # not sure this is the right thing to do
+            #     sf = serial_forest(axes.unindexed.global_size)
 
             data = DistributedBuffer(
                 axes.unindexed.global_size,  # not a useful property anymore
-                sf,
+                # sf,
                 dtype,
                 name=self.name,
                 data=data,
@@ -186,8 +171,8 @@ class HierarchicalArray(Array, KernelArgument):
         index_forest = as_index_forest(indices, axes=self.axes, strict=strict)
         if index_forest.keys() == {pmap()}:
             index_tree = index_forest[pmap()]
-            indexed_axes = index_axes(index_tree, pmap(), self.axes)
-            axes = compose_axes(indexed_axes, self.axes)
+            indexed_axes, indexed_target_paths, indexed_index_exprss = index_axes(index_tree, pmap(), self.axes)
+            axes = compose_axes(self.axes, indexed_axes, indexed_target_paths, indexed_index_exprss)
             dat = HierarchicalArray(
                 axes, data=self.buffer, max_value=self.max_value, name=self.name
             )
