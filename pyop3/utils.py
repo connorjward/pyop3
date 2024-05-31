@@ -123,11 +123,18 @@ class PrettyTuple(tuple):
         return type(self)(self + (other,))
 
 
-# TODO: Think I prefer strict_zip
-def checked_zip(*iterables):
-    if not pytools.is_single_valued(set(len(it) for it in iterables)):
-        raise ValueError
+class LengthMismatchException(Pyop3Exception):
+    pass
+
+
+def strict_zip(*iterables):
+    if not pytools.is_single_valued(len(it) for it in iterables):
+        raise LengthMismatchException("Zipped iterables have different lengths")
     return zip(*iterables)
+
+
+# old alias, remove
+checked_zip = strict_zip
 
 
 def rzip(*iterables):

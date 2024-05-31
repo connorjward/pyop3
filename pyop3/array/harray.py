@@ -23,7 +23,6 @@ from pyop3.buffer import Buffer, DistributedBuffer
 from pyop3.dtypes import ScalarType
 from pyop3.lang import KernelArgument, ReplaceAssignment
 from pyop3.log import warning
-from pyop3.sf import serial_forest
 from pyop3.utils import (
     deprecated,
     just_one,
@@ -159,7 +158,7 @@ class HierarchicalArray(Array, KernelArgument):
         return self.getitem(indices, strict=False)
 
     def getitem(self, indices, *, strict=False):
-        from pyop3.itree.tree import as_index_forest, compose_axes, index_axes
+        from pyop3.itree.tree import as_index_forest, compose_axes, index_axes, accumulate_targets, restrict_targets
 
         if indices is Ellipsis:
             return self
@@ -169,26 +168,35 @@ class HierarchicalArray(Array, KernelArgument):
         #     return self._cache[key]
 
         index_forest = as_index_forest(indices, axes=self.axes, strict=strict)
+
         if index_forest.keys() == {pmap()}:
+            # There is no outer loop context to consider. Needn't return a
+            # context sensitive object.
             index_tree = index_forest[pmap()]
-            indexed_axes, indexed_target_paths, indexed_index_exprss = index_axes(index_tree, pmap(), self.axes)
-            axes = compose_axes(self.axes, indexed_axes, indexed_target_paths, indexed_index_exprss)
+            indexed_axes, indexed_target_paths, indexed_target_exprs = index_axes(index_tree, pmap(), self.axes)
+
+            indexed_target_paths = restrict_targets(indexed_target_paths, indexed_axes, self.axes)
+            indexed_target_exprs = restrict_targets(indexed_target_exprs, indexed_axes, self.axes)
+
+            indexed_target_paths = accumulate_targets(indexed_target_paths, indexed_axes)
+            indexed_target_exprs = accumulate_targets(indexed_target_exprs, indexed_axes)
+
+            axes = compose_axes(self.axes, indexed_axes, indexed_target_paths, indexed_target_exprs)
             dat = HierarchicalArray(
                 axes, data=self.buffer, max_value=self.max_value, name=self.name
             )
-            # self._cache[key] = dat
-            return dat
+        else:
+            context_sensitive_axes = {}
+            for loop_context, index_tree in index_forest.items():
+                indexed_axes = index_axes(index_tree, loop_context, self.axes)
+                breakpoint()
+                axes = compose_axes(indexed_axes, self.axes)
+                context_sensitive_axes[loop_context] = axes
+            context_sensitive_axes = ContextSensitiveAxisTree(context_sensitive_axes)
 
-        context_sensitive_axes = {}
-        for loop_context, index_tree in index_forest.items():
-            indexed_axes = index_axes(index_tree, loop_context, self.axes)
-            axes = compose_axes(indexed_axes, self.axes)
-            context_sensitive_axes[loop_context] = axes
-        context_sensitive_axes = ContextSensitiveAxisTree(context_sensitive_axes)
-
-        dat = HierarchicalArray(
-            context_sensitive_axes, data=self.buffer, name=self.name, max_value=self.max_value
-        )
+            dat = HierarchicalArray(
+                context_sensitive_axes, data=self.buffer, name=self.name, max_value=self.max_value
+            )
         # self._cache[key] = dat
         return dat
 
@@ -356,10 +364,11 @@ class HierarchicalArray(Array, KernelArgument):
         datamap_.update(self.axes.datamap)
 
         # FIXME, deleting this breaks stuff...
-        for index_exprs in self.axes.index_exprs.values():
-            for expr in index_exprs.values():
-                for array in MultiArrayCollector()(expr):
-                    datamap_.update(array.datamap)
+        for index_exprs_per_axis in self.axes.index_exprs:
+            for index_exprs in index_exprs_per_axis.values():
+                for expr in index_exprs.values():
+                    for array in MultiArrayCollector()(expr):
+                        datamap_.update(array.datamap)
         for layout_expr in self.axes.layouts.values():
             for array in MultiArrayCollector()(layout_expr):
                 datamap_.update(array.datamap)

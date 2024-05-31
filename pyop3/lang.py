@@ -10,6 +10,8 @@ import numbers
 from functools import cached_property
 from typing import Iterable, Tuple
 
+from pyrsistent import PMap
+
 import loopy as lp
 import numpy as np
 import pytools
@@ -23,7 +25,7 @@ from pyop3.utils import (
     OrderedSet,
     as_tuple,
     auto,
-    checked_zip,
+    strict_zip,
     just_one,
     merge_dicts,
     single_valued,
@@ -201,6 +203,10 @@ class Loop(Instruction):
         return compile(self)
 
     @cached_property
+    def datamap(self) -> PMap:
+        return self.index.datamap | merge_dicts(s.datamap for s in self.statements)
+
+    @cached_property
     def is_parallel(self):
         from pyop3.buffer import DistributedBuffer
 
@@ -348,6 +354,7 @@ class ContextAwareLoop(ContextAwareInstruction):
     fields = Instruction.fields | {"index", "statements"}
 
     def __init__(self, index, statements, **kwargs):
+        assert False, "dead code"
         super().__init__(**kwargs)
         self.index = index
         self.statements = statements
@@ -445,7 +452,7 @@ class Function:
     @property
     def argspec(self):
         spec = []
-        for access, arg in checked_zip(
+        for access, arg in strict_zip(
             self._access_descrs, self.code.default_entrypoint.args
         ):
             shape = arg.shape if not isinstance(arg, lp.ValueArg) else ()
@@ -478,7 +485,7 @@ class CalledFunction(Terminal):
     @cached_property
     def function_arguments(self):
         args = {}  # ordered
-        for arg, spec in checked_zip(self.arguments, self.argspec):
+        for arg, spec in strict_zip(self.arguments, self.argspec):
             args[arg] = spec.access
         return tuple((arg, intent) for arg, intent in args.items())
 
@@ -667,7 +674,7 @@ def fix_intents(tunit, accesses):
     """
     kernel = tunit.default_entrypoint
     new_args = []
-    for arg, access in checked_zip(kernel.args, accesses):
+    for arg, access in strict_zip(kernel.args, accesses):
         assert isinstance(access, Intent)
         is_input = access in {READ, RW, INC, MIN_RW, MAX_RW, NA}
         is_output = access in {WRITE, RW, INC, MIN_RW, MIN_WRITE, MAX_WRITE, MAX_RW}

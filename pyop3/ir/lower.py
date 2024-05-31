@@ -35,13 +35,6 @@ from pyop3.itree import (
     Subset,
     TabulatedMapComponent,
 )
-from pyop3.itree.tree import (
-    ContextFreeLoopIndex,
-    IndexExpressionReplacer,
-    LocalLoopIndexVariable,
-    LoopIndexVariable,
-    collect_shape_index_callback,
-)
 from pyop3.lang import (
     INC,
     MAX_RW,

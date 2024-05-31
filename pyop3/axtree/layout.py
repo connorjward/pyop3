@@ -26,7 +26,7 @@ from pyop3.dtypes import IntType
 from pyop3.utils import (
     StrictlyUniqueDict,
     as_tuple,
-    checked_zip,
+    strict_zip,
     just_one,
     merge_dicts,
     strict_int,
@@ -151,7 +151,7 @@ def _make_layout_per_axis_component(
             # needed?
             # Since each tree is supposed to be linear I think that this bit is wrong.
             if strictly_all(sub is not None for sub in csubtrees):
-                for component, subtree in checked_zip(axis.components, csubtrees):
+                for component, subtree in strict_zip(axis.components, csubtrees):
                     ctree = ctree.add_subtree(subtree, axis, component)
         else:
             # we must be at the bottom of a ragged patch - therefore don't
@@ -187,7 +187,7 @@ def _make_layout_per_axis_component(
             # we enforce here that all subaxes must be tabulated, is this always
             # needed?
             if strictly_all(sub is not None for sub in csubtrees):
-                for component, subtree in checked_zip(axis.components, csubtrees):
+                for component, subtree in strict_zip(axis.components, csubtrees):
                     ctree = ctree.add_subtree(subtree, axis, component)
 
             fulltree = _create_count_array_tree(ctree, loop_vars)
@@ -535,7 +535,6 @@ def _create_count_array_tree(
             # make a multiarray here from the given sizes
 
             # do we have any external axes from loop indices?
-            breakpoint()
             axtree = AxisTree.from_iterable(axes_acc_)
 
             if loop_vars:

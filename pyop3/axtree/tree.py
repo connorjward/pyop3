@@ -39,7 +39,7 @@ from pyop3.tree import (
     previsit,
 )
 from pyop3.utils import (
-    checked_zip,
+    strict_zip,
     debug_assert,
     deprecated,
     invert,
@@ -343,8 +343,17 @@ class Axis(LoopIterable, MultiComponentLabelledNode):
         super().__init__(label=label, id=id)
         self.components = components
 
-        # if self.label == "_label_Axis_6":
-        #     breakpoint()
+    def __eq__(self, other):
+        return (
+            type(self) is type(other)
+            and self.components == other.components
+            and self.label == other.label
+        )
+
+    def __hash__(self):
+        return hash(
+            (type(self), self.components, self.label)
+        )
 
     def __getitem__(self, indices):
         # NOTE: This *must* return an axis tree because that is where we attach
@@ -438,7 +447,7 @@ class Axis(LoopIterable, MultiComponentLabelledNode):
             for leaf_index in self.sf.ileaf:
                 counts[self._axis_number_to_component_index(leaf_index)] += 1
         return freeze(
-            {cpt.label: count for cpt, count in checked_zip(self.components, counts)}
+            {cpt.label: count for cpt, count in strict_zip(self.components, counts)}
         )
 
     @cached_property
@@ -676,15 +685,22 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
 
     # TODO: Cache this function.
     def getitem(self, indices, *, strict=False):
-        from pyop3.itree.tree import as_index_forest, compose_axes, index_axes
+        from pyop3.itree.tree import as_index_forest, compose_axes, index_axes, accumulate_targets, restrict_targets
 
         if indices is Ellipsis:
             return self
 
         axis_trees = {}
         for context, index_tree in as_index_forest(indices, axes=self).items():
-            indexed_axes, indexed_target_paths, indexed_index_exprss = index_axes(index_tree, context, self)
-            axis_trees[context] = compose_axes(self, indexed_axes, indexed_target_paths, indexed_index_exprss)
+            indexed_axes, indexed_target_paths, indexed_target_exprs = index_axes(index_tree, context, self)
+
+            indexed_target_paths = restrict_targets(indexed_target_paths, indexed_axes, self)
+            indexed_target_exprs = restrict_targets(indexed_target_exprs, indexed_axes, self)
+
+            indexed_target_paths = accumulate_targets(indexed_target_paths, indexed_axes)
+            indexed_target_exprs = accumulate_targets(indexed_target_exprs, indexed_axes)
+
+            axis_trees[context] = compose_axes(self, indexed_axes, indexed_target_paths, indexed_target_exprs)
 
         if axis_trees.keys() == {pmap()}:
             return axis_trees[pmap()]
@@ -759,8 +775,8 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
             # hack because sometimes we know the right loop index to use
             loop_index or self.index(),
             self,
-            self.target_paths,
-            self.index_exprs,
+            self.target_path,
+            self.target_exprs,
             outer_loops,
             include,
         )
@@ -824,10 +840,11 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
         else:
             dmap = postvisit(self, _collect_datamap, axes=self)
 
-        for index_exprs in self.index_exprs.values():
-            for expr in index_exprs.values():
-                for array in MultiArrayCollector()(expr):
-                    dmap.update(array.datamap)
+        for index_exprs_per_axis in self.index_exprs:
+            for index_exprs in index_exprs_per_axis.values():
+                for expr in index_exprs.values():
+                    for array in MultiArrayCollector()(expr):
+                        dmap.update(array.datamap)
         for layout_expr in self.layouts.values():
             for array in MultiArrayCollector()(layout_expr):
                 dmap.update(array.datamap)
@@ -980,7 +997,7 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
         slice_ = Slice(axis.label, slice_components, label=axis.label)
 
         index_tree = IndexTree(slice_)
-        for component, slice_component in checked_zip(axis.components, slice_components):
+        for component, slice_component in strict_zip(axis.components, slice_components):
             if subaxis := self.child(axis, component):
                 subtree = self._collect_owned_index_tree(subaxis)
                 index_tree = index_tree.add_subtree(subtree, slice_, slice_component.label)

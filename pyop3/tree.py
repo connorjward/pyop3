@@ -497,6 +497,10 @@ class LabelledTree(AbstractTree):
                 return True
         return False
 
+    @cached_property
+    def node_labels(self):
+        return frozenset(n.label for n in self.nodes)
+
     def find_component(self, node_label, cpt_label, also_node=False):
         """Return the first component in the tree matching the given labels.
 
