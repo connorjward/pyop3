@@ -3,7 +3,7 @@ from .tree import (
     ContextMismatchException,
     AxisComponent,
     AxisTree,
-    AxisVariable,
+    AxisVar,
     ContextAware,
     ContextFree,
     ContextSensitive,

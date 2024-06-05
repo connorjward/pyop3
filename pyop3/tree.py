@@ -308,13 +308,17 @@ class LabelledTree(AbstractTree):
                 node_map, subnode, seen_labels | {node.label}
             )
 
+    # NOTE: It might be nicer if this were to take a 2-tuple (or None). Though this
+    # would break *so much*...
     def child(self, parent, component):
+        if parent is None and component is None:
+            return self.root
+
+        children = self.node_map[parent.id]
+
         clabel = as_component_label(component)
         cidx = parent.component_labels.index(clabel)
-        try:
-            return self.node_map[parent.id][cidx]
-        except (KeyError, IndexError):
-            return None
+        return children[cidx]
 
     @cached_property
     def leaves(self):
@@ -443,7 +447,11 @@ class LabelledTree(AbstractTree):
         return tuple(self.path(*leaf, ordered=True) for leaf in self.leaves)
 
     @cached_property
-    def ordered_leaf_paths_with_nodes(self):
+    def leaf_node_paths(self):
+        return tuple(self.path_with_nodes(*leaf) for leaf in self.leaves)
+
+    @cached_property
+    def ordered_leaf_node_paths(self):
         return tuple(self.path_with_nodes(*leaf, ordered=True) for leaf in self.leaves)
 
     def _node_from_path(self, path):
@@ -493,6 +501,10 @@ class LabelledTree(AbstractTree):
                 return True
         return False
 
+    @cached_property
+    def node_labels(self):
+        return frozenset(n.label for n in self.nodes)
+
     def find_component(self, node_label, cpt_label, also_node=False):
         """Return the first component in the tree matching the given labels.
 
@@ -511,6 +523,19 @@ class LabelledTree(AbstractTree):
                         else:
                             return cpt
         raise ValueError("Matching component not found")
+
+    def _relabel_node_map(self, replace_map: Mapping) -> Mapping:
+        new_node_map = {}
+        for parent_id, children in self.node_map.items():
+            new_children = []
+            for child in children:
+                if child is not None:
+                    new_child = child.copy(label=replace_map.get(child.label, child.label))
+                else:
+                    new_child = None
+                new_children.append(new_child)
+            new_node_map[parent_id] = new_children
+        return new_node_map
 
     @classmethod
     def _from_nest(cls, nest):
@@ -697,6 +722,10 @@ class MutableLabelledTreeMixin:
             self._uniquify_node_labels(parent_to_children)
 
         return type(self)(parent_to_children)
+
+    def relabel(self, labels: Mapping):
+        node_map = self._relabel_node_map(labels)
+        return type(self)(node_map)
 
 
 def as_component_label(component):

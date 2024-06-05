@@ -12,6 +12,7 @@ from pyop3.array.petsc import AbstractMat
 from pyop3.axtree import Axis, AxisTree, ContextFree, ContextSensitive, ContextMismatchException, ContextAware
 from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
 from pyop3.itree import Map, TabulatedMapComponent
+from pyop3.itree.tree import ContextFreeLoopIndex
 from pyop3.lang import (
     INC,
     NA,
@@ -86,19 +87,11 @@ class LoopContextExpander(Transformer):
 
         loops = []
         for octx in outer_context_:
-            cf_iterset = loop.index.iterset.with_context(context | octx)
-            source_paths = cf_iterset.leaf_paths
-            target_paths = cf_iterset.leaf_target_paths
-            assert len(source_paths) == len(target_paths)
+            if isinstance(loop.index, ContextFreeLoopIndex):
+                loop_context = {loop.index.id: loop.index.leaf_target_paths}
+                context_ = context | loop_context
 
-            if len(source_paths) == 1:
-                # single component iterset, no branching required
-                source_path = just_one(source_paths)
-                target_path = just_one(target_paths)
-
-                context_ = context | {loop.index.id: (source_path, target_path)}
-
-                statements = collections.defaultdict(list)
+                statements = []
                 for stmt in loop.statements:
                     for myctx, mystmt in self._apply(stmt, context=context_ | octx):
                         if myctx:
@@ -106,8 +99,16 @@ class LoopContextExpander(Transformer):
                                 "need to think about how to wrap inner instructions "
                                 "that need outer loops"
                             )
-                        statements[source_path].append(mystmt)
+                        statements.append(mystmt)
+
+                # loop = L(
+                #     loop.index.copy(iterset=cf_iterset),
+                #     statements,
+                # )
+                loops.append((octx, loop.copy(statements=statements)))
+
             else:
+                raise NotImplementedError
                 assert len(source_paths) > 1
                 statements = {}
                 for source_path, target_path in checked_zip(source_paths, target_paths):
@@ -126,12 +127,14 @@ class LoopContextExpander(Transformer):
                                 continue
                             statements[source_path].append(mystmt)
 
-            # FIXME this does not propagate inner outer contexts
-            loop = ContextAwareLoop(
-                loop.index.copy(iterset=cf_iterset),
-                statements,
-            )
-            loops.append((octx, loop))
+                cf_iterset = loop.index.iterset.with_context(context | octx)
+
+                # FIXME this does not propagate inner outer contexts
+                loop = ContextAwareLoop(
+                    loop.index.copy(iterset=cf_iterset),
+                    statements,
+                )
+                loops.append((octx, loop))
         return tuple(loops)
 
     @_apply.register
@@ -237,15 +240,9 @@ class ImplicitPackUnpackExpander(Transformer):
 
     # TODO Can I provide a generic "operands" thing? Put in the parent class?
     @_apply.register
-    def _(self, loop: ContextAwareLoop):
-        return (
-            loop.copy(
-                statements={
-                    ctx: [stmt_ for stmt in stmts for stmt_ in self._apply(stmt)]
-                    for ctx, stmts in loop.statements.items()
-                }
-            ),
-        )
+    def _(self, loop: Loop):
+        new_statements = [s for stmt in loop.statements for s in self._apply(stmt)]
+        return loop.copy(statements=new_statements)
 
     # TODO: Should be the same as Assignment
     @_apply.register

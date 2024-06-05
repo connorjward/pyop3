@@ -18,7 +18,7 @@ from pyop3.axtree import (  # noqa: F401
     Axis,
     AxisComponent,
     AxisTree,
-    AxisVariable,
+    AxisVar,
     IndexedAxisTree,
 )
 from pyop3.buffer import DistributedBuffer, NullBuffer  # noqa: F401

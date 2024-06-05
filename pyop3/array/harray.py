@@ -2,14 +2,9 @@ from __future__ import annotations
 
 import collections
 import contextlib
-import functools
-import itertools
-import numbers
-import operator
 import sys
-import threading
 from functools import cached_property
-from typing import Any, Optional, Sequence, Tuple, Union
+from typing import Any, Sequence
 
 import numpy as np
 import pymbolic as pym
@@ -21,7 +16,6 @@ from pyop3.axtree import (
     Axis,
     ContextSensitive,
     AxisTree,
-    ContextFree,
     as_axis_tree,
 )
 from pyop3.axtree.tree import IndexedAxisTree, MultiArrayCollector, ContextSensitiveAxisTree
@@ -29,20 +23,9 @@ from pyop3.buffer import Buffer, DistributedBuffer
 from pyop3.dtypes import ScalarType
 from pyop3.lang import KernelArgument, ReplaceAssignment
 from pyop3.log import warning
-from pyop3.sf import serial_forest
 from pyop3.utils import (
-    PrettyTuple,
-    UniqueNameGenerator,
-    as_tuple,
-    debug_assert,
     deprecated,
-    is_single_valued,
     just_one,
-    merge_dicts,
-    readonly,
-    single_valued,
-    some_but_not_all,
-    strict_int,
     strictly_all,
 )
 
@@ -86,9 +69,6 @@ def stringify_array(self, array, enclosing_prec, *args, **kwargs):
 
 
 pym.mapper.stringifier.StringifyMapper.map_array = stringify_array
-
-
-CalledMapVariable = ArrayVar
 
 
 class FancyIndexWriteException(Exception):
@@ -142,17 +122,18 @@ class HierarchicalArray(Array, KernelArgument):
                 if data.size != axes.unindexed.global_size:
                     raise ValueError("Data shape does not match axes")
 
+            # FIXME: Parallel sf stuff
             # IndexedAxisTrees do not currently have SFs, so create a dummy one here
-            if isinstance(axes, AxisTree):
-                sf = axes.sf
-            else:
-                assert isinstance(axes, (ContextSensitiveAxisTree, IndexedAxisTree))
-                # not sure this is the right thing to do
-                sf = serial_forest(axes.unindexed.global_size)
+            # if isinstance(axes, AxisTree):
+            #     sf = axes.sf
+            # else:
+            #     assert isinstance(axes, (ContextSensitiveAxisTree, IndexedAxisTree))
+            #     # not sure this is the right thing to do
+            #     sf = serial_forest(axes.unindexed.global_size)
 
             data = DistributedBuffer(
                 axes.unindexed.global_size,  # not a useful property anymore
-                sf,
+                # sf,
                 dtype,
                 name=self.name,
                 data=data,
@@ -173,8 +154,26 @@ class HierarchicalArray(Array, KernelArgument):
     def __getitem__(self, indices):
         return self.getitem(indices, strict=False)
 
-    def getitem(self, indices, *, strict=False):
-        from pyop3.itree.tree import as_index_forest, compose_axes, index_axes
+    def __eq__(self, other: Any) -> bool:
+        return (
+            type(self) is type(other)
+            and self.axes == other.axes
+            and self.dtype == other.dtype
+            and self.buffer is other.buffer
+            and self.max_value == other.max_value
+            and self.name == other.name
+            and self.constant == other.constant
+        )
+
+    def __hash__(self) -> int:
+        return hash(
+            (
+                type(self), self.axes, self.dtype, self.buffer, self.max_value, self.name, self.constant)
+        )
+
+    # NOTE: "strict" is bit vague now that we also have "allow_unused".
+    def getitem(self, indices, *, strict=False, allow_unused=False):
+        from pyop3.itree.tree import as_index_forest, compose_axes, index_axes, accumulate_targets, restrict_targets
 
         if indices is Ellipsis:
             return self
@@ -183,27 +182,36 @@ class HierarchicalArray(Array, KernelArgument):
         # if key in self._cache:
         #     return self._cache[key]
 
-        index_forest = as_index_forest(indices, axes=self.axes, strict=strict)
+        index_forest = as_index_forest(indices, axes=self.axes, strict=strict, allow_unused=allow_unused)
+
         if index_forest.keys() == {pmap()}:
+            # There is no outer loop context to consider. Needn't return a
+            # context sensitive object.
             index_tree = index_forest[pmap()]
-            indexed_axes = index_axes(index_tree, pmap(), self.axes)
-            axes = compose_axes(indexed_axes, self.axes)
+            indexed_axes, indexed_target_paths, indexed_target_exprs = index_axes(index_tree, pmap(), self.axes)
+
+            indexed_target_paths = restrict_targets(indexed_target_paths, indexed_axes, self.axes)
+            indexed_target_exprs = restrict_targets(indexed_target_exprs, indexed_axes, self.axes)
+
+            indexed_target_paths = accumulate_targets(indexed_target_paths, indexed_axes)
+            indexed_target_exprs = accumulate_targets(indexed_target_exprs, indexed_axes)
+
+            axes = compose_axes(self.axes, indexed_axes, indexed_target_paths, indexed_target_exprs)
             dat = HierarchicalArray(
                 axes, data=self.buffer, max_value=self.max_value, name=self.name
             )
-            # self._cache[key] = dat
-            return dat
+        else:
+            context_sensitive_axes = {}
+            for loop_context, index_tree in index_forest.items():
+                indexed_axes = index_axes(index_tree, loop_context, self.axes)
+                breakpoint()
+                axes = compose_axes(indexed_axes, self.axes)
+                context_sensitive_axes[loop_context] = axes
+            context_sensitive_axes = ContextSensitiveAxisTree(context_sensitive_axes)
 
-        context_sensitive_axes = {}
-        for loop_context, index_tree in index_forest.items():
-            indexed_axes = index_axes(index_tree, loop_context, self.axes)
-            axes = compose_axes(indexed_axes, self.axes)
-            context_sensitive_axes[loop_context] = axes
-        context_sensitive_axes = ContextSensitiveAxisTree(context_sensitive_axes)
-
-        dat = HierarchicalArray(
-            context_sensitive_axes, data=self.buffer, name=self.name, max_value=self.max_value
-        )
+            dat = HierarchicalArray(
+                context_sensitive_axes, data=self.buffer, name=self.name, max_value=self.max_value
+            )
         # self._cache[key] = dat
         return dat
 
@@ -371,10 +379,11 @@ class HierarchicalArray(Array, KernelArgument):
         datamap_.update(self.axes.datamap)
 
         # FIXME, deleting this breaks stuff...
-        for index_exprs in self.axes.index_exprs.values():
-            for expr in index_exprs.values():
-                for array in MultiArrayCollector()(expr):
-                    datamap_.update(array.datamap)
+        for index_exprs_per_axis in self.axes.index_exprs:
+            for index_exprs in index_exprs_per_axis.values():
+                for expr in index_exprs.values():
+                    for array in MultiArrayCollector()(expr):
+                        datamap_.update(array.datamap)
         for layout_expr in self.axes.layouts.values():
             for array in MultiArrayCollector()(layout_expr):
                 datamap_.update(array.datamap)

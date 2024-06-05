@@ -16,9 +16,8 @@ import pymbolic as pym
 from pyrsistent import freeze, pmap
 
 from pyop3.array import HierarchicalArray
-from pyop3.array.harray import CalledMapVariable
 from pyop3.array.petsc import AbstractMat, Sparsity
-from pyop3.axtree import Axis, AxisComponent, AxisTree, AxisVariable, ContextFree
+from pyop3.axtree import Axis, AxisComponent, AxisTree, AxisVar, ContextFree
 from pyop3.axtree.tree import subst_layouts
 from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
 from pyop3.config import config
@@ -35,13 +34,6 @@ from pyop3.itree import (
     Subset,
     TabulatedMapComponent,
 )
-from pyop3.itree.tree import (
-    ContextFreeLoopIndex,
-    IndexExpressionReplacer,
-    LocalLoopIndexVariable,
-    LoopIndexVariable,
-    collect_shape_index_callback,
-)
 from pyop3.lang import (
     INC,
     MAX_RW,
@@ -55,7 +47,6 @@ from pyop3.lang import (
     AddAssignment,
     Assignment,
     CalledFunction,
-    ContextAwareLoop,
     DummyKernelArgument,
     Loop,
     PetscMatAdd,
@@ -66,7 +57,9 @@ from pyop3.lang import (
 )
 from pyop3.log import logger
 from pyop3.utils import (
+    KeyAlreadyExistsException,
     PrettyTuple,
+    StrictlyUniqueDict,
     UniqueNameGenerator,
     as_tuple,
     checked_zip,
@@ -485,17 +478,16 @@ def _collect_temporary_shapes(expr):
 
 
 @_collect_temporary_shapes.register
-def _(expr: ContextAwareLoop):
+def _(expr: Loop):
     shapes = {}
-    for stmts in expr.statements.values():
-        for stmt in stmts:
-            for temp, shape in _collect_temporary_shapes(stmt).items():
-                if shape is None:
-                    continue
-                if temp in shapes:
-                    assert shapes[temp] == shape
-                else:
-                    shapes[temp] = shape
+    for statement in expr.statements:
+        for temp, shape in _collect_temporary_shapes(statement).items():
+            if shape is None:
+                continue
+            if temp in shapes:
+                assert shapes[temp] == shape
+            else:
+                shapes[temp] = shape
     return shapes
 
 
@@ -528,7 +520,7 @@ def _compile(expr: Any, loop_indices, ctx: LoopyCodegenContext) -> None:
 
 @_compile.register
 def _(
-    loop: ContextAwareLoop,
+    loop: Loop,
     loop_indices,
     codegen_context: LoopyCodegenContext,
 ) -> None:
@@ -547,87 +539,60 @@ def parse_loop_properly_this_time(
     codegen_context,
     *,
     axis=None,
-    source_path=pmap(),
-    iname_replace_map=pmap(),
-    target_path=None,
-    index_exprs=None,
+    iname_replace_map=None,
 ):
-    if axes.is_empty:
-        raise NotImplementedError("does this even make sense?")
-
-    if axis is None:
-        target_path = freeze(axes.target_paths.get(None, {}))
-
-        # again, repeated this pattern all over the place
-        # target_replace_map = {}
-        index_exprs = freeze(axes.index_exprs.get(None, {}))
-        # replacer = JnameSubstitutor(outer_replace_map, codegen_context)
-        # for axis_label, index_expr in index_exprs.items():
-        #     target_replace_map[axis_label] = replacer(index_expr)
-        # target_replace_map = freeze(target_replace_map)
-
+    if strictly_all(x is None for x in {axis, iname_replace_map}):
         axis = axes.root
+        iname_replace_map = pmap()
 
     for component in axis.components:
-        axis_index_exprs = axes.index_exprs.get((axis.id, component.label), {})
-        index_exprs_ = index_exprs | axis_index_exprs
-
         if component._collective_count != 1:
             iname = codegen_context.unique_name("i")
-            extent_var = register_extent(
+            domain_var = register_extent(
                 component._collective_count,
                 iname_replace_map | loop_indices,
                 codegen_context,
             )
-            codegen_context.add_domain(iname, extent_var)
-            axis_replace_map = {axis.label: pym.var(iname)}
-            within_inames = {iname}
+            codegen_context.add_domain(iname, domain_var)
+            iname_replace_map_ = iname_replace_map | {axis.label: pym.var(iname)}
+            within_inames = frozenset({iname})
         else:
-            axis_replace_map = {axis.label: 0}
+            iname_replace_map_ = iname_replace_map | {axis.label: 0}
             within_inames = set()
 
-        source_path_ = source_path | {axis.label: component.label}
-        iname_replace_map_ = iname_replace_map | axis_replace_map
-
-        target_path_ = target_path | axes.target_paths.get(
-            (axis.id, component.label), {}
-        )
-
         with codegen_context.within_inames(within_inames):
-            subaxis = axes.child(axis, component)
-            if subaxis:
+            if subaxis := axes.child(axis, component):
                 parse_loop_properly_this_time(
                     loop,
                     axes,
                     loop_indices,
                     codegen_context,
                     axis=subaxis,
-                    source_path=source_path_,
                     iname_replace_map=iname_replace_map_,
-                    target_path=target_path_,
-                    index_exprs=index_exprs_,
                 )
             else:
-                target_replace_map = {}
-                replacer = JnameSubstitutor(
-                    # outer_replace_map | iname_replace_map_, codegen_context
+                loop_exprs = StrictlyUniqueDict()
+                substitutor = JnameSubstitutor(
                     iname_replace_map_ | loop_indices,
                     codegen_context,
                 )
-                for axis_label, index_expr in index_exprs_.items():
-                    target_replace_map[axis_label] = replacer(index_expr)
+                axis_key = (axis.id, component.label)
+                for index_exprs in axes.index_exprs:
+                    for axis_label, index_expr in index_exprs.get(axis_key).items():
+                        try:
+                            loop_exprs[axis_label] = substitutor(index_expr)
+                        except KeyAlreadyExistsException:
+                            # Because we don't have pass-through indices we sometimes
+                            # get (identical) clashes
+                            assert substitutor(index_expr) == loop_exprs[axis_label]
+                loop_exprs = pmap(loop_exprs)
 
-                index_replace_map = target_replace_map
-                local_index_replace_map = iname_replace_map_
-                for stmt in loop.statements[source_path_]:
+                for stmt in loop.statements:
                     _compile(
                         stmt,
                         loop_indices
                         | {
-                            loop.index.id: (
-                                local_index_replace_map,
-                                index_replace_map,
-                            ),
+                            loop.index.id: loop_exprs
                         },
                         codegen_context,
                     )
@@ -1061,12 +1026,7 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         return jname_expr
 
     def map_loop_index(self, expr):
-        # FIXME pretty sure I have broken local loop index stuff
-        if isinstance(expr, LocalLoopIndexVariable):
-            return self._replace_map[expr.id][0][expr.axis]
-        else:
-            assert isinstance(expr, LoopIndexVariable)
-            return self._replace_map[expr.id][1][expr.axis]
+        return self._replace_map[expr.id][expr.axis]
 
     def map_call(self, expr):
         if expr.function.name == "mybsearch":
@@ -1183,11 +1143,11 @@ def register_extent(extent, iname_replace_map, ctx):
     else:
         path = pmap()
 
-    index_exprs = extent.axes.index_exprs.get(None, {})
+    index_exprs = extent.axes.target_exprs.get(None, {})
     # extent must be linear
     if not extent.axes.is_empty:
         for axis, cpt in extent.axes.path_with_nodes(*extent.axes.leaf).items():
-            index_exprs.update(extent.axes.index_exprs[axis.id, cpt])
+            index_exprs.update(extent.axes.target_exprs[axis.id, cpt])
 
     expr = _scalar_assignment(extent, path, index_exprs, iname_replace_map, ctx)
 
@@ -1220,7 +1180,7 @@ def _scalar_assignment(
         (axis.id, cpt.label)
         for axis, cpt in array.axes.detailed_path(source_path).items()
     ]
-    target_path = merge_dicts(array.axes.target_paths.get(key, {}) for key in index_keys)
+    target_path = merge_dicts(array.axes.target_path.get(key, {}) for key in index_keys)
 
     jname_replace_map = {}
     replacer = JnameSubstitutor(iname_replace_map, ctx)

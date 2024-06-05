@@ -9,6 +9,7 @@ import pytools
 from pyrsistent import pmap
 
 from pyop3.config import config
+from pyop3.exceptions import Pyop3Exception
 
 
 class UniqueNameGenerator(pytools.UniqueNameGenerator):
@@ -64,8 +65,28 @@ class UniqueRecord(pytools.ImmutableRecord, Identified):
         Identified.__init__(self, id)
 
 
+class KeyAlreadyExistsException(Pyop3Exception):
+    pass
+
+
+class StrictlyUniqueDict(dict):
+    """A dictionary where overwriting entries will raise an error."""
+
+    def __setitem__(self, key, value, /) -> None:
+        if key in self:
+            raise KeyAlreadyExistsException
+        return super().__setitem__(key, value)
+
+    def update(self, other) -> None:
+        shared_keys = self.keys() & other.keys()
+        if len(shared_keys) > 0:
+            raise KeyAlreadyExistsException
+        super().update(other)
+
+
 class OrderedSet:
     """An ordered set."""
+
     def __init__(self):
         # Python dicts are ordered so we use one to keep the ordering
         # and also have O(1) access.
@@ -102,10 +123,18 @@ class PrettyTuple(tuple):
         return type(self)(self + (other,))
 
 
-def checked_zip(*iterables):
-    if not pytools.is_single_valued(set(len(it) for it in iterables)):
-        raise ValueError
+class LengthMismatchException(Pyop3Exception):
+    pass
+
+
+def strict_zip(*iterables):
+    if not pytools.is_single_valued(len(it) for it in iterables):
+        raise LengthMismatchException("Zipped iterables have different lengths")
     return zip(*iterables)
+
+
+# old alias, remove
+checked_zip = strict_zip
 
 
 def rzip(*iterables):
