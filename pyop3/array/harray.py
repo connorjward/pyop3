@@ -4,7 +4,7 @@ import collections
 import contextlib
 import sys
 from functools import cached_property
-from typing import Sequence
+from typing import Any, Sequence
 
 import numpy as np
 import pymbolic as pym
@@ -69,9 +69,6 @@ def stringify_array(self, array, enclosing_prec, *args, **kwargs):
 
 
 pym.mapper.stringifier.StringifyMapper.map_array = stringify_array
-
-
-CalledMapVariable = ArrayVar
 
 
 class FancyIndexWriteException(Exception):
@@ -157,7 +154,25 @@ class HierarchicalArray(Array, KernelArgument):
     def __getitem__(self, indices):
         return self.getitem(indices, strict=False)
 
-    def getitem(self, indices, *, strict=False):
+    def __eq__(self, other: Any) -> bool:
+        return (
+            type(self) is type(other)
+            and self.axes == other.axes
+            and self.dtype == other.dtype
+            and self.buffer is other.buffer
+            and self.max_value == other.max_value
+            and self.name == other.name
+            and self.constant == other.constant
+        )
+
+    def __hash__(self) -> int:
+        return hash(
+            (
+                type(self), self.axes, self.dtype, self.buffer, self.max_value, self.name, self.constant)
+        )
+
+    # NOTE: "strict" is bit vague now that we also have "allow_unused".
+    def getitem(self, indices, *, strict=False, allow_unused=False):
         from pyop3.itree.tree import as_index_forest, compose_axes, index_axes, accumulate_targets, restrict_targets
 
         if indices is Ellipsis:
@@ -167,7 +182,7 @@ class HierarchicalArray(Array, KernelArgument):
         # if key in self._cache:
         #     return self._cache[key]
 
-        index_forest = as_index_forest(indices, axes=self.axes, strict=strict)
+        index_forest = as_index_forest(indices, axes=self.axes, strict=strict, allow_unused=allow_unused)
 
         if index_forest.keys() == {pmap()}:
             # There is no outer loop context to consider. Needn't return a

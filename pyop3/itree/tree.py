@@ -624,7 +624,7 @@ class Map(pytools.ImmutableRecord):
                         # label needs to match the generated axis later on.
                         orig_array = orig_component.array
                         leaf_axis, leaf_component_label = orig_array.axes.leaf
-                        myslice = Slice(leaf_axis.label, [AffineSliceComponent(leaf_component_label)], label=self.name)
+                        myslice = Slice(leaf_axis.label, [AffineSliceComponent(leaf_component_label, label=leaf_component_label)], label=self.name)
                         newarray = orig_component.array[call_index, myslice]
 
                         indexed_component = orig_component.copy(array=newarray)
@@ -919,8 +919,8 @@ class ContextSensitiveCalledMap(ContextSensitiveLoopIterable):
     pass
 
 
-# TODO make kwargs explicit
-def as_index_forest(forest: Any, *, axes=None, strict=False, **kwargs):
+# TODO: make kwargs explicit
+def as_index_forest(forest: Any, *, axes=None, strict=False, allow_unused=False):
     # TODO: I think that this is the wrong place for this to exist. Also
     # the implementation only seems to work for flat axes.
     if forest is Ellipsis:
@@ -933,7 +933,7 @@ def as_index_forest(forest: Any, *, axes=None, strict=False, **kwargs):
             [AffineSliceComponent(c.label) for c in axes.root.components],
         )
 
-    forest = _as_index_forest(forest, axes=axes, target_paths=(pmap(),), loop_context=pmap(), **kwargs)
+    forest = _as_index_forest(forest, axes=axes, loop_context=pmap(), allow_unused=allow_unused)
     assert isinstance(forest, dict), "must be ordered"
 
     # If axes are provided then check that the index tree is compatible
@@ -962,11 +962,12 @@ def as_index_forest(forest: Any, *, axes=None, strict=False, **kwargs):
 
 
 @functools.singledispatch
-def _as_index_forest(arg: Any, *, axes, target_paths, **kwargs):
+def _as_index_forest(arg: Any, *, axes, **_):
     # FIXME no longer a cyclic import
     from pyop3.array import HierarchicalArray
 
-    if isinstance(arg, HierarchicalArray):
+    # if isinstance(arg, HierarchicalArray):
+    if False:
         # NOTE: This is the same behaviour as for slices
         parent = axes._node_from_path(path)
         if parent is not None:
@@ -988,65 +989,65 @@ def _as_index_forest(arg: Any, *, axes, target_paths, **kwargs):
 
 
 @_as_index_forest.register
-def _(indices: collections.abc.Sequence, *, target_paths, loop_context, **kwargs):
-    index, *subindices = indices
-
-    # FIXME This fails because strings are considered sequences, perhaps we should
-    # cast component labels into their own type?
-    # if isinstance(index, collections.abc.Sequence):
-    #     # what's the right exception? Some sort of BadIndexException?
-    #     raise ValueError("Nested iterables are not supported")
-
-    forest = {}
-    # TODO, it is a bad pattern to build a forest here when I really just want to convert
-    # a single index
-    for context, tree in _as_index_forest(
-        index, target_paths=target_paths, loop_context=loop_context, **kwargs
-    ).items():
-        # converting a single index should only produce index trees with depth 1
-        assert tree.depth == 1
-        cf_index = tree.root
-
-        if subindices:
-            for clabel, index_target_paths in strict_zip(
-                cf_index.component_labels, cf_index.leaf_target_paths
-            ):
-                target_paths_ = tuple(tp | itp for tp in target_paths for itp in index_target_paths)
-                subforest = _as_index_forest(
-                    subindices,
-                    target_paths=target_paths_,
-                    loop_context=loop_context | context,
-                    **kwargs,
-                )
-                for subctx, subtree in subforest.items():
-                    forest[subctx] = tree.add_subtree(subtree, cf_index, clabel)
-        else:
-            forest[context] = tree
+def _(forest: collections.abc.Mapping, *, allow_unused: bool, **kwargs):
+    # TODO: Custom exception
+    assert not allow_unused, "Makes no sense in this context"
     return forest
 
 
 @_as_index_forest.register
-def _(forest: collections.abc.Mapping, **kwargs):
-    return forest
-
-
-@_as_index_forest.register
-def _(index_tree: IndexTree, **kwargs):
+def _(index_tree: IndexTree, *, allow_unused: bool, **_):
+    # TODO: Custom exception
+    assert not allow_unused, "Makes no sense in this context"
     return {pmap(): index_tree}
 
 
 @_as_index_forest.register
-def _(index: ContextFreeIndex, **kwargs):
+def _(index: ContextFreeIndex, **_):
     return {pmap(): IndexTree(index)}
 
 
+@_as_index_forest.register
+def _(indices: collections.abc.Sequence, *, axes, loop_context, allow_unused: bool):
+    # The indices can contain a mixture of "true" indices (i.e. subclasses of
+    # Index) and "sugar" indices (e.g. integers, strings and slices). The former
+    # may be used in any order since they declare the axes they target whereas
+    # the latter are order dependent.
+    # To add another complication, the "true" indices may also be context-sensitive:
+    # what they produce is dependent on the state of the outer loops. We therefore
+    # need to unpack this to produce a different index tree for each possible
+    # context.
+
+    index_trees = {}
+    for context, cf_indices in _collect_indices_and_contexts(indices, loop_context=loop_context).items():
+        index_trees[context] = _index_tree_from_iterable(cf_indices, axes=axes, allow_unused=allow_unused)
+    return index_trees
+
+
+@_as_index_forest.register(slice)
+@_as_index_forest.register(str)
+@_as_index_forest.register(numbers.Integral)
+def _(index, **kwargs):
+    return _as_index_forest([index], **kwargs)
+
+
+@functools.singledispatch
+def _as_context_free_index(arg, **_):
+    raise TypeError
+
+
+@_as_context_free_index.register
+def _(cf_index: ContextFreeIndex, **kwargs):
+    return {pmap(): cf_index}
+
+
 # TODO This function can definitely be refactored
-@_as_index_forest.register(AbstractLoopIndex)
-@_as_index_forest.register(LocalLoopIndex)
+@_as_context_free_index.register(AbstractLoopIndex)
+@_as_context_free_index.register(LocalLoopIndex)
 def _(index, *, loop_context, **kwargs):
     local = isinstance(index, LocalLoopIndex)
 
-    forest = {}
+    cf_indices = {}
     if isinstance(index.iterset, ContextSensitive):
         for context, axes in index.iterset.context_map.items():
             if axes.is_empty:
@@ -1057,8 +1058,7 @@ def _(index, *, loop_context, **kwargs):
                     loop_context | context | {index.id: (source_path, target_path)}
                 )
 
-                cf_index = index.with_context(context_)
-                forest[context_] = IndexTree(cf_index)
+                cf_indices[context_] = index.with_context(context_)
             else:
                 for leaf in axes.leaves:
                     source_path = axes.path(*leaf)
@@ -1087,83 +1087,180 @@ def _(index, *, loop_context, **kwargs):
             my_id = index.id if not local else index.loop_index.id
             context = loop_context | {my_id: (source_path, target_path)}
 
-            cf_index = index.with_context(context)
-            forest[context] = IndexTree(cf_index)
-    return forest
+            cf_indices[context] = index.with_context(context)
+    return cf_indices
 
 
-@_as_index_forest.register(CalledMap)
-@_as_index_forest.register(ContextFreeCalledMap)
+@_as_context_free_index.register(CalledMap)
 def _(called_map, *, axes, **kwargs):
-    forest = {}
-    input_forest = _as_index_forest(called_map.from_index, axes=axes, **kwargs)
+    cf_maps = {}
+    input_forest = _as_context_free_index(called_map.from_index, axes=axes, **kwargs)
     for context in input_forest.keys():
-        cf_called_map = called_map.with_context(context, axes)
-        forest[context] = IndexTree(cf_called_map)
-    return forest
+        cf_maps[context] = called_map.with_context(context, axes)
+    return cf_maps
 
 
-@_as_index_forest.register
-def _(index: numbers.Integral, *, axes, **kwargs):
-    # If we are dealing with a multi-component axis (e.g. a mixed thing), then
-    # indexing the axis with an integer will take a full slice of a particular
-    # component, if no component exists with that label then an error is raised.
-    # If instead we are dealing with a single-component axis, then the normal
-    # numpy-style indexing will be used where a particular index from the
-    # axis will be selected for.
-    root = axes.root
-    if len(root.components) > 1:
-        component = just_one(c for c in root.components if c.label == index)
+@functools.singledispatch
+def _desugar_index(index: Any, **_):
+    raise TypeError(f"No handler defined for {type(index).__name__}")
+
+
+@_desugar_index.register
+def _(int_: numbers.Integral, *, axes, parent, **_):
+    axis = axes.child(*parent)
+    if len(axis.components) > 1:
+        # Multi-component axis: take a slice from a matching component.
+        component = just_one(c for c in axis.components if c.label == int_)
         if component.unit:
-            index_ = ScalarIndex(root.label, component.label, 0)
+            index = ScalarIndex(axis.label, component.label, 0)
         else:
-            index_ = Slice(root.label, [AffineSliceComponent(component.label)])
+            index = Slice(axis.label, [AffineSliceComponent(component.label)])
     else:
-        component = just_one(root.components)
-        index_ = ScalarIndex(root.label, component.label, index)
-    return _as_index_forest(index_, axes=axes, **kwargs)
+        # Single-component axis: return a scalar index.
+        component = just_one(axis.components)
+        index = ScalarIndex(axis.label, component.label, int_)
+    return index
 
 
-@_as_index_forest.register
-def _(slice_: slice, *, axes, target_paths, loop_context, **kwargs):
-    if axes is None:
-        raise RuntimeError("invalid slice usage")
-
-    target_path = just_one(tp for tp in target_paths if axes.is_valid_path(tp, complete=False))
-    parent = axes._node_from_path(target_path)
-    if parent is not None:
-        parent_axis, parent_cpt = parent
-        target_axis = axes.child(parent_axis, parent_cpt)
-    else:
-        target_axis = axes.root
-
-    if target_axis.degree > 1:
+@_desugar_index.register
+def _(slice_: slice, *, axes, parent, **_):
+    axis = axes.child(*parent)
+    if axis.degree > 1:
         # badindexexception?
         raise ValueError(
             "Cannot slice multi-component things using generic slices, ambiguous"
         )
 
-    slice_cpt = AffineSliceComponent(
-        target_axis.component.label, slice_.start, slice_.stop, slice_.step
+    return Slice(
+        axis.label,
+        [AffineSliceComponent(axis.component.label, slice_.start, slice_.stop, slice_.step)]
     )
-    slice_ = Slice(target_axis.label, [slice_cpt])
-    return {loop_context: IndexTree(slice_)}
 
 
-@_as_index_forest.register
-def _(label: str, *, axes, **kwargs):
-    # if we use a string then we assume we are taking a full slice of the
-    # top level axis
-    axis = axes.root
+@_desugar_index.register
+def _(label: str, *, axes, parent, **_):
+    # Take a full slice of a component with a matching label
+    axis = axes.child(*parent)
     component = just_one(c for c in axis.components if c.label == label)
 
     # If the component is marked as "unit" then indexing in this way will
     # fully consume the axis.
+    # NOTE: Perhaps it would just be better to always do this if the axis
+    # is one-sized?
     if component.unit:
-        slice_ = ScalarIndex(axis.label, component.label, 0)
+        index = ScalarIndex(axis.label, component.label, 0)
     else:
-        slice_ = Slice(axis.label, [AffineSliceComponent(component.label)])
-    return _as_index_forest(slice_, axes=axes, **kwargs)
+        index = Slice(axis.label, [AffineSliceComponent(component.label)])
+    return index
+
+
+def _collect_indices_and_contexts(indices, *, loop_context):
+    """
+    Syntactic sugar indices (i.e. integers, strings, slices) are
+    treated differently here
+    because they must be handled (in order) later on.
+    """
+    index, *subindices = indices
+    collected = {}
+
+    if isinstance(index, Index):
+        for context, cf_index in _as_context_free_index(
+            index, loop_context=loop_context
+        ).items():
+            if subindices:
+                subcollected = _collect_indices_and_contexts(
+                    subindices,
+                    loop_context=loop_context | context,
+                )
+                for subcontext, cf_subindices in subcollected.items():
+                    collected[subcontext] = (cf_index,) + cf_subindices
+            else:
+                collected[context] = (cf_index,)
+
+    else:
+        if subindices:
+            subcollected = _collect_indices_and_contexts(subindices, loop_context=loop_context)
+            for subcontext, cf_subindices in subcollected.items():
+                collected[subcontext] = (index,) + cf_subindices
+        else:
+            collected[pmap()] = (index,)
+
+    return pmap(collected)
+
+
+class InvalidIndexException(Pyop3Exception):
+    pass
+
+
+def _index_tree_from_iterable(indices, *, axes, allow_unused, parent=None, unhandled_target_paths=None):
+    if strictly_all(x is None for x in {parent, unhandled_target_paths}):
+        parent = (None, None)
+        unhandled_target_paths = pmap()
+
+    unhandled_target_paths_mut = dict(unhandled_target_paths)
+    parent_axis, parent_component = parent
+    while True:
+        axis = axes.child(parent_axis, parent_component)
+
+        if axis is None or axis.label not in unhandled_target_paths_mut:
+            break
+        else:
+            parent_axis = axis
+            parent_component = unhandled_target_paths_mut.pop(parent_axis.label)
+    parent = (parent_axis, parent_component)
+
+    index, *subindices = indices
+
+    skip_index = False
+    if isinstance(index, ContextFreeIndex):
+        if strictly_all(
+            not any(
+                strictly_all(ax in axes.node_labels for ax in target_path.keys())
+                for target_path in equiv_paths
+            )
+            for equiv_paths in index.leaf_target_paths 
+        ):
+            skip_index = True
+    else:
+        try:
+            index = _desugar_index(index, axes=axes, parent=parent)
+        except InvalidIndexException:
+            skip_index = True
+
+    if skip_index:
+        if not allow_unused:
+            raise InvalidIndexException("Provided index does not match with axes")
+
+        if subindices:
+            index_tree = _index_tree_from_iterable(
+                subindices, 
+                axes=axes,
+                allow_unused=allow_unused,
+                parent=parent,
+                unhandled_target_paths=unhandled_target_paths,
+            )
+        else:
+            index_tree = IndexTree()
+
+    else:
+        index_tree = IndexTree(index)
+        for component_label, equiv_target_paths in strict_zip(
+            index.component_labels, index.leaf_target_paths
+        ):
+            # Here we only care about targeting the most recent axis tree.
+            unhandled_target_paths_ = unhandled_target_paths | equiv_target_paths[-1]
+
+            if subindices:
+                subindex_tree = _index_tree_from_iterable(
+                    subindices, 
+                    axes=axes,
+                    allow_unused=allow_unused,
+                    parent=parent,
+                    unhandled_target_paths=unhandled_target_paths_,
+                )
+                index_tree = index_tree.add_subtree(subindex_tree, index, component_label, uniquify_ids=True)
+
+    return index_tree
 
 
 def _complete_index_tree(
@@ -1299,9 +1396,9 @@ def _(
 
 @_index_axes_index.register
 def _(index: ScalarIndex, **_):
-    target_path = freeze({None: just_one(index.leaf_target_paths)})
-    index_exprs = freeze({None: {index.axis: index.value}})
-    layout_exprs = freeze({None: 0})
+    target_path = pmap({None: index.leaf_target_paths})
+    index_exprs = pmap({None: ((pmap({index.axis: index.value}),),)})
+    layout_exprs = pmap({None: 0})
     return (
         AxisTree(),
         target_path,
@@ -1316,8 +1413,55 @@ def _(index: ScalarIndex, **_):
 def _(slice_: Slice, *, parent_indices, prev_axes, **_):
     from pyop3.array.harray import ArrayVar
 
-    # It would be better here to relabel if a label is provided but default to keeping the same
-    axis_label = slice_.label
+    # If we are just taking a component from a multi-component array,
+    # e.g. mesh.points["cells"], then relabelling the axes just leads to
+    # needless confusion. For instance if we had
+    #
+    #     myslice0 = Slice("mesh", AffineSliceComponent("cells", step=2))
+    #
+    # then mesh.points[myslice0] would work but mesh.points["cells"][myslice0]
+    # would fail.
+    # As a counter example, if we have non-trivial subsets then this sort of
+    # relabelling is essential for things to make sense. If we have two subsets:
+    #
+    #     subset0 = Slice("mesh", Subset("cells", [1, 2, 3]))
+    #
+    # and
+    #
+    #     subset1 = Slice("mesh", Subset("cells", [4, 5, 6]))
+    #
+    # then mesh.points[subset0][subset1] is confusing, should subset1 be
+    # assumed to work on the already sliced axis? This can be a major source of
+    # confusion for things like interior facets in Firedrake where the first slice
+    # happens in one function and the other happens elsewhere. We hit situations like
+    #
+    #     mesh.interior_facets[interior_facets_I_want]
+    #
+    # conflicts with
+    #
+    #     mesh.interior_facets[facets_I_want]
+    #
+    # where one subset is given with facet numbering and the other with interior
+    # facet numbering. The labels are the same so identifying this is really difficult.
+    #
+    # We fix this here by requiring that non-full slices perform a relabelling and
+    # full slices do not. A full slice is defined to be a slice where all of the
+    # components are affine with start 0, stop None and step 1. The components must
+    # also not already have a label since that would take precedence.
+    #
+    # NOTE: Ultimately this should be fixed by allowing "passthrough" slices, where one
+    # can index non-source axes (very useful for parallel). This is hard to do however.
+    is_full = all(
+        isinstance(s, AffineSliceComponent) and s.is_full and s.label_was_none
+        for s in slice_.slices
+    )
+    # NOTE: We should be able to eagerly return here?
+
+    if is_full:
+        axis_label = slice_.axis
+    else:
+        # breakpoint()
+        axis_label = slice_.label
 
     components = []
     target_path_per_subslice = []
@@ -1330,37 +1474,35 @@ def _(slice_: Slice, *, parent_indices, prev_axes, **_):
         ax for ax in prev_axes.nodes if ax.label == slice_.axis
     )
 
-    for subslice in slice_.slices:
-        assert target_axis.label == slice_.axis
+    for i, slice_component in enumerate(slice_.slices):
         target_component = just_one(
-            c for c in target_axis.components if c.label == subslice.component
+            c for c in target_axis.components if c.label == slice_component.component
         )
 
-        if isinstance(subslice, AffineSliceComponent):
-            # TODO handle this is in a test, slices of ragged things
+        if isinstance(slice_component, AffineSliceComponent):
             if isinstance(target_component.count, HierarchicalArray):
                 if (
-                    subslice.start != 0
-                    or subslice.step != 1
+                    slice_component.start != 0
+                    or slice_component.step != 1
                 ):
                     raise NotImplementedError("TODO")
 
-                if subslice.stop is None:
-                    # NOTE: This is a simplification. It is not necessarily the case that
-                    # all of parent_indices is required to index count. We need a
-                    # getitem(parent_indices, allow_unused=True) option.
+                if slice_component.stop is None:
                     if len(parent_indices) == 0:
                         size = target_component.count
                     else:
-                        size = target_component.count[parent_indices]
+                        # It is not necessarily the case that all of parent_indices is
+                        # required to index count.
+                        # TODO: Unify with if len(parent_indices) == 0, should work for both
+                        size = target_component.count.getitem(parent_indices, allow_unused=True)
                 else:
-                    size = subslice.stop
+                    size = slice_component.stop
 
             else:
-                if subslice.stop is None:
+                if slice_component.stop is None:
                     stop = target_component.count
                 else:
-                    stop = subslice.stop
+                    stop = slice_component.stop
 
                 # if target_cpt.distributed:
                 if False:
@@ -1376,63 +1518,81 @@ def _(slice_: Slice, *, parent_indices, prev_axes, **_):
                     # else:
                     #     size = (owned_count, count)
                 else:
-                    size = math.ceil((stop - subslice.start) / subslice.step)
+                    size = math.ceil((stop - slice_component.start) / slice_component.step)
 
         else:
-            assert isinstance(subslice, Subset)
-            size = subslice.array.axes.leaf_component.count
+            assert isinstance(slice_component, Subset)
+            size = slice_component.array.axes.leaf_component.count
 
-        cpt = AxisComponent(size, label=subslice.label, unit=target_component.unit)
+        # if slice_.label == "closure":
+        #     breakpoint()
+
+        if is_full:
+            component_label = slice_component.component
+        else:
+            # TODO: Ideally the default labels here would be integers if not
+            # somehow provided. Perhaps the issue stems from the fact that the label
+            # attribute is used for two things: identifying paths in the index tree
+            # and labelling the resultant axis component.
+            component_label = slice_component.label
+
+        cpt = AxisComponent(size, label=component_label, unit=target_component.unit)
         components.append(cpt)
 
-        target_path_per_subslice.append(pmap({slice_.axis: subslice.component}))
-
-        newvar = AxisVar(axis_label)
-        layout_var = AxisVar(slice_.axis)
-        if isinstance(subslice, AffineSliceComponent):
-            index_exprs_per_subslice.append(
-                freeze(
-                    {
-                        slice_.axis: newvar * subslice.step + subslice.start,
-                    }
-                )
-            )
-            layout_exprs_per_subslice.append(
-                pmap({slice_.label: (layout_var - subslice.start) // subslice.step})
-            )
+        # if is_full:
+        if False:
+            target_path_per_subslice.append({})
+            index_exprs_per_subslice.append({})
+            layout_exprs_per_subslice.append({})
         else:
-            assert isinstance(subslice, Subset)
+            target_path_per_subslice.append(pmap({slice_.axis: slice_component.component}))
 
-            # below is also used for maps - cleanup
-            subset_array = subslice.array
-            subset_axes = subset_array.axes
-
-            if isinstance(subset_axes, IndexedAxisTree):
-                raise NotImplementedError("Need more paths, not just 2")
-
-            # must be single component
-            assert subset_axes.leaf
-
-            my_target_path = merge_dicts(just_one(subset_axes.paths).values())
-            old_index_exprs = merge_dicts(just_one(subset_axes.index_exprs).values())
-
-            my_index_exprs = {}
-            index_expr_replace_map = {subset_axes.leaf_axis.label: newvar}
-            replacer = IndexExpressionReplacer(index_expr_replace_map)
-            for axlabel, index_expr in old_index_exprs.items():
-                my_index_exprs[axlabel] = replacer(index_expr)
-            subset_var = ArrayVar(subslice.array, my_index_exprs, my_target_path)
-
-            index_exprs_per_subslice.append(
-                freeze(
-                    {
-                        slice_.axis: subset_var,
-                    }
+            newvar = AxisVar(axis_label)
+            layout_var = AxisVar(slice_.axis)
+            if isinstance(slice_component, AffineSliceComponent):
+                index_exprs_per_subslice.append(
+                    freeze(
+                        {
+                            slice_.axis: newvar * slice_component.step + slice_component.start,
+                        }
+                    )
                 )
-            )
-            layout_exprs_per_subslice.append(
-                pmap({slice_.label: bsearch(subset_var, layout_var)})
-            )
+                layout_exprs_per_subslice.append(
+                    pmap({slice_.label: (layout_var - slice_component.start) // slice_component.step})
+                )
+            else:
+                assert isinstance(slice_component, Subset)
+
+                # below is also used for maps - cleanup
+                subset_array = slice_component.array
+                subset_axes = subset_array.axes
+
+                if isinstance(subset_axes, IndexedAxisTree):
+                    raise NotImplementedError("Need more paths, not just 2")
+
+                # must be single component
+                assert subset_axes.leaf
+
+                my_target_path = merge_dicts(just_one(subset_axes.paths).values())
+                old_index_exprs = merge_dicts(just_one(subset_axes.index_exprs).values())
+
+                my_index_exprs = {}
+                index_expr_replace_map = {subset_axes.leaf_axis.label: newvar}
+                replacer = IndexExpressionReplacer(index_expr_replace_map)
+                for axlabel, index_expr in old_index_exprs.items():
+                    my_index_exprs[axlabel] = replacer(index_expr)
+                subset_var = ArrayVar(slice_component.array, my_index_exprs, my_target_path)
+
+                index_exprs_per_subslice.append(
+                    freeze(
+                        {
+                            slice_.axis: subset_var,
+                        }
+                    )
+                )
+                layout_exprs_per_subslice.append(
+                    pmap({slice_.label: bsearch(subset_var, layout_var)})
+                )
 
     axis = Axis(components, label=axis_label)
     axes = AxisTree(axis)
@@ -1568,8 +1728,6 @@ def _make_leaf_axis_from_called_map(
     inner_target_exprss,
     prev_axes,
 ):
-    from pyop3.array.harray import CalledMapVariable
-
     axis_id = Axis.unique_id()
     components = []
     target_path_per_cpt = collections.defaultdict(list)
@@ -1748,7 +1906,14 @@ def restrict_targets(targets, indexed_axes, orig_axes, *, axis=None) -> PMap:
 
 
 def _matching_target(targets: PMap, orig_axes: AxisTree) -> PMap:
-    return just_one(
+    # NOTE: Ideally this should return just_one(...) instead of
+    # single_valued(...) but because we don't have pass-through
+    # indexing yet we sometimes get duplicate axes inside targets.
+    debug = [
+        t for t in targets
+        if all(ax in orig_axes.node_labels for ax in t.keys())
+    ]
+    return single_valued(
         t for t in targets
         if all(ax in orig_axes.node_labels for ax in t.keys())
     )

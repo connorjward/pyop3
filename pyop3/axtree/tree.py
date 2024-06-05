@@ -1247,6 +1247,29 @@ class IndexedAxisTree(BaseAxisTree):
 
         return axes
 
+    def relabel(self, labels: Mapping) -> IndexedAxisTree:
+        return type(self)(
+            self._relabel_node_map(labels),
+            self.unindexed,
+            target_paths=self._target_paths,
+            target_exprs=self._relabel_target_exprs(labels),
+            layout_exprs=None,  # not used anyway
+            outer_loops=self.outer_loops,
+        )
+
+    def _relabel_target_exprs(self, labels: Mapping) -> Mapping:
+        relabeler = _AxisVarRelabeler(labels)
+
+        new_target_exprs = []
+        for equiv_exprs in self._target_exprs:
+            new_equiv_exprs = {}
+            for axis_key, target_exprs in equiv_exprs.items():
+                new_equiv_exprs[axis_key] = pmap({
+                    k: relabeler(v) for k, v in target_exprs.items()
+                })
+            new_target_exprs.append(pmap(new_equiv_exprs))
+        return tuple(new_target_exprs)
+
     @cached_property
     def layout_axes(self) -> AxisTree:
         if not self.outer_loops:
@@ -1481,19 +1504,20 @@ def _(arg: numbers.Integral) -> AxisComponent:
     return AxisComponent(arg)
 
 
-def relabel_axes(axes: AxisTree, suffix: str) -> AxisTree:
-    # comprehension?
-    node_map = {}
-    for parent_id, children in axes.node_map.items():
-        children_ = []
-        for axis in children:
-            if axis is not None:
-                axis_ = axis.copy(label=axis.label + suffix)
-            else:
-                axis_ = None
-            children_.append(axis_)
-        node_map[parent_id] = children_
-    return AxisTree(node_map)
+# Moved to MutableTreeMixin and works for maps, not suffixes
+def relabel_axes(axes: AxisTree, replace_map: Mapping) -> AxisTree:
+    assert False
+#     new_node_map = {}
+#     for parent_id, children in axes.node_map.items():
+#         new_children = []
+#         for axis in children:
+#             if axis is not None:
+#                 new_axis = axis.copy(label=replace_map[axis.label])
+#             else:
+#                 new_axis = None
+#             new_children_.append(new_axis)
+#         new_node_map[parent_id] = new_children
+#     return AxisTree(new_node_map)
 
 
 def subst_layouts(
@@ -1571,3 +1595,15 @@ def subst_layouts(
                     )
                 )
     return freeze(layouts_subst)
+
+
+class _AxisVarRelabeler(pym.mapper.IdentityMapper):
+    def __init__(self, relabel_map):
+        self._relabel_map = relabel_map
+
+    def map_axis_variable(self, expr):
+        return AxisVar(self._relabel_map.get(expr.axis_label, expr.axis_label))
+
+    def map_array(self, array_var):
+        indices = {ax: self.rec(expr) for ax, expr in array_var.indices.items()}
+        return type(array_var)(array_var.array, indices, array_var.path)

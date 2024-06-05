@@ -484,10 +484,7 @@ class CalledFunction(Terminal):
 
     @cached_property
     def function_arguments(self):
-        args = {}  # ordered
-        for arg, spec in strict_zip(self.arguments, self.argspec):
-            args[arg] = spec.access
-        return tuple((arg, intent) for arg, intent in args.items())
+        return tuple((arg, spec.access) for arg, spec in strict_zip(self.arguments, self.argspec))
 
     @cached_property
     def kernel_arguments(self):

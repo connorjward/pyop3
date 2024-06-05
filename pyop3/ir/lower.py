@@ -16,7 +16,6 @@ import pymbolic as pym
 from pyrsistent import freeze, pmap
 
 from pyop3.array import HierarchicalArray
-from pyop3.array.harray import CalledMapVariable
 from pyop3.array.petsc import AbstractMat, Sparsity
 from pyop3.axtree import Axis, AxisComponent, AxisTree, AxisVar, ContextFree
 from pyop3.axtree.tree import subst_layouts
@@ -58,6 +57,7 @@ from pyop3.lang import (
 )
 from pyop3.log import logger
 from pyop3.utils import (
+    KeyAlreadyExistsException,
     PrettyTuple,
     StrictlyUniqueDict,
     UniqueNameGenerator,
@@ -579,7 +579,12 @@ def parse_loop_properly_this_time(
                 axis_key = (axis.id, component.label)
                 for index_exprs in axes.index_exprs:
                     for axis_label, index_expr in index_exprs.get(axis_key).items():
-                        loop_exprs[axis_label] = substitutor(index_expr)
+                        try:
+                            loop_exprs[axis_label] = substitutor(index_expr)
+                        except KeyAlreadyExistsException:
+                            # Because we don't have pass-through indices we sometimes
+                            # get (identical) clashes
+                            assert substitutor(index_expr) == loop_exprs[axis_label]
                 loop_exprs = pmap(loop_exprs)
 
                 for stmt in loop.statements:
@@ -1138,11 +1143,11 @@ def register_extent(extent, iname_replace_map, ctx):
     else:
         path = pmap()
 
-    index_exprs = extent.axes.index_exprs.get(None, {})
+    index_exprs = extent.axes.target_exprs.get(None, {})
     # extent must be linear
     if not extent.axes.is_empty:
         for axis, cpt in extent.axes.path_with_nodes(*extent.axes.leaf).items():
-            index_exprs.update(extent.axes.index_exprs[axis.id, cpt])
+            index_exprs.update(extent.axes.target_exprs[axis.id, cpt])
 
     expr = _scalar_assignment(extent, path, index_exprs, iname_replace_map, ctx)
 
@@ -1175,7 +1180,7 @@ def _scalar_assignment(
         (axis.id, cpt.label)
         for axis, cpt in array.axes.detailed_path(source_path).items()
     ]
-    target_path = merge_dicts(array.axes.target_paths.get(key, {}) for key in index_keys)
+    target_path = merge_dicts(array.axes.target_path.get(key, {}) for key in index_keys)
 
     jname_replace_map = {}
     replacer = JnameSubstitutor(iname_replace_map, ctx)
