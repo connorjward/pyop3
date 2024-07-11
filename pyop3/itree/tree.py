@@ -2250,10 +2250,18 @@ def iter_axis_tree(
     indices=pmap(),
     target_path=None,
     index_exprs_acc=None,
+    no_index=False,
 ):
-    outer_replace_map = merge_dicts(
-        iter_entry.replace_map for iter_entry in outer_loops
-    )
+    # this is a hack, sometimes things are indexed
+    if no_index:
+        indices = indices | merge_dicts(
+            iter_entry.source_exprs for iter_entry in outer_loops
+        )
+        outer_replace_map = {}
+    else:
+        outer_replace_map = merge_dicts(
+            iter_entry.replace_map for iter_entry in outer_loops
+        )
     if target_path is None:
         assert index_exprs_acc is None
         target_path = target_paths.get(None, pmap())
@@ -2287,15 +2295,15 @@ def iter_axis_tree(
         # bit of a hack, I reckon this can go as we can just get it from component.count
         # inside as_int
         if isinstance(component.count, HierarchicalArray):
-            mypath = component.count.target_paths.get(None, {})
-            myindices = component.count.index_exprs.get(None, {})
+            mypath = component.count.axes.target_path.get(None, {})
+            myindices = component.count.axes.target_exprs.get(None, {})
             if not component.count.axes.is_empty:
                 for cax, ccpt in component.count.axes.path_with_nodes(
                     *component.count.axes.leaf
                 ).items():
-                    mypath.update(component.count.target_paths.get((cax.id, ccpt), {}))
+                    mypath.update(component.count.axes.target_path.get((cax.id, ccpt), {}))
                     myindices.update(
-                        component.count.index_exprs.get((cax.id, ccpt), {})
+                        component.count.axes.target_exprs.get((cax.id, ccpt), {})
                     )
 
             mypath = freeze(mypath)

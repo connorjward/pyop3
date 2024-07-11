@@ -457,8 +457,8 @@ class Axis(LoopIterable, MultiComponentLabelledNode):
     def index(self, *, include_ghost_points=False):
         return self._tree.index(include_ghost_points=include_ghost_points)
 
-    def iter(self):
-        return self._tree.iter()
+    def iter(self, *args, **kwargs):
+        return self._tree.iter(*args, **kwargs)
 
     @property
     def target_path_per_component(self):
@@ -768,7 +768,7 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
         else:
             return LoopIndex(self)
 
-    def iter(self, outer_loops=(), loop_index=None, include=False):
+    def iter(self, outer_loops=(), loop_index=None, include=False, **kwargs):
         from pyop3.itree.tree import iter_axis_tree
 
         return iter_axis_tree(
@@ -779,6 +779,7 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
             self.target_exprs,
             outer_loops,
             include,
+            **kwargs,
         )
 
     @cached_property

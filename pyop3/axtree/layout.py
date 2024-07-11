@@ -13,6 +13,7 @@ import numpy as np
 import pymbolic as pym
 from pyrsistent import PMap, freeze, pmap
 
+from pyop3.array.harray import ArrayVar, HierarchicalArray
 from pyop3.axtree.tree import (
     Axis,
     AxisComponent,
@@ -28,6 +29,7 @@ from pyop3.utils import (
     as_tuple,
     strict_zip,
     just_one,
+    OrderedSet,
     merge_dicts,
     strict_int,
     strictly_all,
@@ -49,8 +51,106 @@ def make_layouts(axes: AxisTree, loop_vars) -> PMap:
     if axes.layout_axes.is_empty:
         return freeze({pmap(): 0})
 
-    component_layouts, _ = _make_layout_per_axis_component(axes.layout_axes, loop_vars)
+    component_layouts = tabulate_again(axes.layout_axes)
     return _accumulate_axis_component_layouts(axes, component_layouts)
+
+
+def tabulate_again(axes, *, axis=None):
+    if axis is None:
+        axis = axes.root
+
+    ragged = any(requires_external_index(axes, axis, c) for c in axis.components)
+
+    if len(axis.components) > 1 and ragged:
+        # Fixing this would require deciding what to do with the start variable, which
+        # might need tabulating itself.
+        raise NotImplementedError(
+            "Cannot yet tabulate axes with multiple components if any of them are ragged"
+        )
+
+    layouts = {}
+    start = 0
+    for component in axis.components:
+
+        # 1. Constant stride
+        if has_constant_step(axes, axis, component, "old"):
+            step = step_size(axes, axis, component)
+            layouts[(axis, component)] = AxisVar(axis.label) * step + start
+
+
+        # 2. Ragged inside - must tabulate
+        else:
+            array_var = _tabulate_offsets(axes, axis, component)
+            layouts[(axis, component)] = array_var + start
+
+        # TODO: should also do this for ragged but this breaks things currently
+        if not ragged:
+            start += _axis_component_size(axes, axis, component)
+
+        # Now traverse subaxes
+        if subaxis := axes.child(axis, component):
+            layouts |= tabulate_again(axes, axis=subaxis)
+
+    return pmap(layouts)
+
+
+def _tabulate_offsets(axes, axis, component):
+    # First we build the right data structure to store the offsets. We can find the
+    # axes that we need by combining the current axis with those needed by subaxes
+    # along with the count of the current component (if ragged).
+    axes_iter = OrderedSet()
+    for ax in _collect_offset_subaxes(axes, axis, component, visited=(axis,)):
+        axes_iter.add(ax)
+    partial_axes = AxisTree.from_iterable(axes_iter)
+
+    axes_iter.add(axis)
+    offset_axes = AxisTree.from_iterable(axes_iter)
+    offsets = HierarchicalArray(offset_axes, data=np.full(offset_axes.size, -1, dtype=IntType))
+    # offsets = HierarchicalArray(axes, dtype=IntType)  # debug
+
+    # this is really bloody close - just need the Python iteration to be less rubbish
+    for multiindex in partial_axes.iter():
+        offset = 0
+
+        for axindex in axis.iter({multiindex}, no_index=True):  # FIXME: Should make this single component only
+            offsets.set_value(multiindex.source_exprs | axindex.source_exprs, offset)
+            offset += step_size(
+                axes,
+                axis,
+                component,
+                indices=multiindex.source_exprs|axindex.source_exprs,
+            )
+
+    # copied from elsewhere, should just go
+    mytargetpath = merge_dicts(
+        just_one(offset_axes.paths).values()
+    )
+    myindices = merge_dicts(
+        just_one(offset_axes.index_exprs).values()
+    )
+    return ArrayVar(offsets, myindices, mytargetpath)
+
+
+
+def _collect_offset_subaxes(axes, axis, component, *, visited):
+    if not isinstance(component.count, numbers.Integral):
+        axes_iter = [ax for ax in sorted(component.count.axes.nodes, key=lambda ax: ax.id) if ax not in visited]
+    else:
+        axes_iter = []
+
+    # needed since we don't care about "internal" axes here
+    visited_ = visited + (axis,)
+
+    if subaxis := axes.child(axis, component):
+        for subcomponent in subaxis.components:
+            subaxes = _collect_offset_subaxes(axes, subaxis, subcomponent, visited=visited_)
+            for ax in subaxes:
+                if ax not in axes_iter:
+                    axes_iter.append(ax)
+
+    return tuple(axes_iter)
+
+
 
 
 # TODO: If an axis has size 1 then we don't need a variable for it.
@@ -88,17 +188,36 @@ def _make_layout_per_axis_component(
 
     layouts = StrictlyUniqueDict()
 
+    # for component in axis.components:
+    #     if not isinstance(component.count, numbers.Integral):
+    #         # ragged, need to tabulate something
+
+
+
+
+
+
+
+
+
+
+
+
+
+
     # Post-order traversal
     csubtrees = []
     for cpt in axis.components:
         layout_path_ = layout_path | {axis.label: cpt.label}
+
+        parents_ = parents + ((axis, component),)
 
         if subaxis := axes.child(axis, cpt):
             (
                 sublayouts,
                 csubtree,
             ) = _make_layout_per_axis_component(
-                axes, loop_vars, subaxis, layout_path_,
+                axes, loop_vars, subaxis, layout_path_, parents_
             )
             layouts.update(sublayouts)
             csubtrees.append(csubtree)
@@ -306,7 +425,7 @@ def requires_external_index(axtree, axis, component_index):
     than exist in the given subaxis.
     """
     return size_requires_external_index(
-        axtree, axis, component_index
+        axtree, axis, component_index, set()
     )  # or numbering_requires_external_index(axtree, axis, component_index)
 
 
@@ -674,7 +793,9 @@ def _accumulate_axis_component_layouts(
         layouts = {}
 
     for component in layout_axis.components:
-        layout_path_ = layout_path | {layout_axis.label: component.label}
+        # better not as a path here
+        # layout_path_ = layout_path | {layout_axis.label: component.label}
+        layout_path_ = (layout_axis, component)
         layout_expr_ = layout_expr + component_layouts.get(layout_path_, 0)
 
         if layout_axis in axes.nodes:
