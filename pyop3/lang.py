@@ -117,7 +117,7 @@ class ContextAwareInstruction(Instruction):
 
 
 class Loop(Instruction):
-    fields = Instruction.fields | {"index", "statements"}
+    fields = Instruction.fields | {"index", "statements", "compiler_parameters"}
 
     # doubt that I need an ID here
     id_generator = pytools.UniqueNameGenerator()
@@ -126,11 +126,14 @@ class Loop(Instruction):
         self,
         index: LoopIndex,
         statements: Iterable[Instruction],
+        *,
+        compiler_parameters=None,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.index = index
         self.statements = as_tuple(statements)
+        self.compiler_parameters = compiler_parameters
 
     def __call__(self, **kwargs):
         # TODO just parse into ContextAwareLoop and call that
@@ -150,7 +153,7 @@ class Loop(Instruction):
             # # substitute subsets into loopexpr, should maybe be done in partition_iterset
             # parallel_loop = self.copy(index=new_index)
             # code = compile(parallel_loop)
-            code = compile(self)
+            code = compile(self, compiler_parameters=self.compiler_parameters)
 
             # interleave communication and computation
             initializers, reductions, broadcasts = self._array_updates()
@@ -192,7 +195,7 @@ class Loop(Instruction):
 
             # also may need to eagerly assemble Mats, or be clever and spike the accessors?
         else:
-            compile(self)(**kwargs)
+            compile(self, compiler_parameters=self.compiler_parameters)(**kwargs)
 
     @cached_property
     def loopy_code(self):

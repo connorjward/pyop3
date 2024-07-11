@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import abc
 import contextlib
+import dataclasses
 import enum
 import functools
 import numbers
@@ -23,6 +24,7 @@ from pyop3.axtree.tree import subst_layouts
 from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
 from pyop3.config import config
 from pyop3.dtypes import IntType
+from pyop3.ir.transform import add_likwid_markers
 from pyop3.itree import (
     AffineSliceComponent,
     CalledMap,
@@ -393,8 +395,25 @@ class BinarySearchCallable(lp.ScalarCallable):
         return
 
 
+@dataclasses.dataclass(frozen=True)
+class CompilerParameters:
+    # NOTE: This sort of thing could have a default set from the config
+    # dict (but do not use PYOP3_USE_LIKWID as that's a separate option).
+    add_likwid_markers: bool = False
+
+
+def parse_compiler_parameters(compiler_parameters) -> CompilerParameters:
+    if compiler_parameters is None:
+        compiler_parameters = {}
+
+    # TODO: Can do extensive error checking here, maybe loop over the dataclass fields
+    return CompilerParameters(**compiler_parameters)
+
+
 # prefer generate_code?
-def compile(expr: Instruction, name="mykernel"):
+def compile(expr: Instruction, name="mykernel", compiler_parameters=None):
+    compiler_parameters = parse_compiler_parameters(compiler_parameters)
+
     # preprocess expr before lowering
     from pyop3.transform import expand_implicit_pack_unpack, expand_loop_contexts
 
@@ -466,14 +485,16 @@ def compile(expr: Instruction, name="mykernel"):
         preambles=preambles,
         # options=lp.Options(check_dep_resolution=False),
     )
+
+    if compiler_parameters.add_likwid_markers:
+        translation_unit = add_likwid_markers(translation_unit)
+
     tu = lp.merge((translation_unit, *ctx.subkernels))
 
     # add callables
     # tu = lp.register_callable(tu, "bsearch", BinarySearchCallable())
 
     tu = tu.with_entrypoints(name)
-
-    # breakpoint()
 
     return CodegenResult(expr, tu, ctx.kernel_to_actual_rename_map)
 

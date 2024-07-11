@@ -88,6 +88,11 @@ def compile_loopy(kernel, **kwargs):
         # + tuple(self.local_kernel.ldargs)
     )
 
+    # TODO: Make some sort of function in config.py
+    if "LIKWID_MODE" in os.environ:
+        cppargs += ("-DLIKWID_PERFMON",)
+        ldargs += ("-llikwid",)
+
     return compile_c(
         code,
         kernel.default_entrypoint.name,
