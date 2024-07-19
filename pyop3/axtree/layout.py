@@ -11,25 +11,25 @@ from typing import Optional
 
 import numpy as np
 import pymbolic as pym
-from pyrsistent import freeze, pmap
+from pyrsistent import PMap, freeze, pmap
 
+from pyop3.array.harray import ArrayVar, HierarchicalArray
 from pyop3.axtree.tree import (
     Axis,
     AxisComponent,
     AxisTree,
-    AxisVariable,
+    AxisVar,
     ExpressionEvaluator,
-    IndexedAxisTree,
     component_number_from_offsets,
     component_offsets,
 )
-from pyop3.dtypes import IntType, PointerType
-from pyop3.tree import LabelledTree, MultiComponentLabelledNode
+from pyop3.dtypes import IntType
 from pyop3.utils import (
-    PrettyTuple,
+    StrictlyUniqueDict,
     as_tuple,
-    checked_zip,
+    strict_zip,
     just_one,
+    OrderedSet,
     merge_dicts,
     strict_int,
     strictly_all,
@@ -45,6 +45,324 @@ class IntRef:
     def __iadd__(self, other):
         self.value += other
         return self
+
+
+def make_layouts(axes: AxisTree, loop_vars) -> PMap:
+    if axes.layout_axes.is_empty:
+        return freeze({pmap(): 0})
+
+    component_layouts = tabulate_again(axes.layout_axes)
+    return _accumulate_axis_component_layouts(axes, component_layouts)
+
+
+def tabulate_again(axes, *, axis=None):
+    if axis is None:
+        axis = axes.root
+
+    ragged = any(requires_external_index(axes, axis, c) for c in axis.components)
+
+    if len(axis.components) > 1 and ragged:
+        # Fixing this would require deciding what to do with the start variable, which
+        # might need tabulating itself.
+        raise NotImplementedError(
+            "Cannot yet tabulate axes with multiple components if any of them are ragged"
+        )
+
+    layouts = {}
+    start = 0
+    for component in axis.components:
+
+        # 1. Constant stride
+        if has_constant_step(axes, axis, component, "old"):
+            step = step_size(axes, axis, component)
+            layouts[(axis, component)] = AxisVar(axis.label) * step + start
+
+
+        # 2. Ragged inside - must tabulate
+        else:
+            array_var = _tabulate_offsets(axes, axis, component)
+            layouts[(axis, component)] = array_var + start
+
+        # TODO: should also do this for ragged but this breaks things currently
+        if not ragged:
+            start += _axis_component_size(axes, axis, component)
+
+        # Now traverse subaxes
+        if subaxis := axes.child(axis, component):
+            layouts |= tabulate_again(axes, axis=subaxis)
+
+    return pmap(layouts)
+
+
+def _tabulate_offsets(axes, axis, component):
+    # First we build the right data structure to store the offsets. We can find the
+    # axes that we need by combining the current axis with those needed by subaxes
+    # along with the count of the current component (if ragged).
+    axes_iter = OrderedSet()
+    for ax in _collect_offset_subaxes(axes, axis, component, visited=(axis,)):
+        axes_iter.add(ax)
+    partial_axes = AxisTree.from_iterable(axes_iter)
+
+    axes_iter.add(axis)
+    offset_axes = AxisTree.from_iterable(axes_iter)
+    offsets = HierarchicalArray(offset_axes, data=np.full(offset_axes.size, -1, dtype=IntType))
+    # offsets = HierarchicalArray(axes, dtype=IntType)  # debug
+
+    # this is really bloody close - just need the Python iteration to be less rubbish
+    for multiindex in partial_axes.iter():
+        offset = 0
+
+        for axindex in axis.iter({multiindex}, no_index=True):  # FIXME: Should make this single component only
+            offsets.set_value(multiindex.source_exprs | axindex.source_exprs, offset)
+            offset += step_size(
+                axes,
+                axis,
+                component,
+                indices=multiindex.source_exprs|axindex.source_exprs,
+            )
+
+    # copied from elsewhere, should just go
+    mytargetpath = merge_dicts(
+        just_one(offset_axes.paths).values()
+    )
+    myindices = merge_dicts(
+        just_one(offset_axes.index_exprs).values()
+    )
+    return ArrayVar(offsets, myindices, mytargetpath)
+
+
+
+def _collect_offset_subaxes(axes, axis, component, *, visited):
+    if not isinstance(component.count, numbers.Integral):
+        axes_iter = [ax for ax in sorted(component.count.axes.nodes, key=lambda ax: ax.id) if ax not in visited]
+    else:
+        axes_iter = []
+
+    # needed since we don't care about "internal" axes here
+    visited_ = visited + (axis,)
+
+    if subaxis := axes.child(axis, component):
+        for subcomponent in subaxis.components:
+            subaxes = _collect_offset_subaxes(axes, subaxis, subcomponent, visited=visited_)
+            for ax in subaxes:
+                if ax not in axes_iter:
+                    axes_iter.append(ax)
+
+    return tuple(axes_iter)
+
+
+
+
+# TODO: If an axis has size 1 then we don't need a variable for it.
+def _make_layout_per_axis_component(
+    axes: AxisTree,
+    loop_vars,
+    axis=None,
+    layout_path=pmap(),
+):
+    """
+    Parameters
+    ----------
+    axes
+        The axis tree to construct a layout for. It must not be empty.
+    loop_vars
+        Mapping from axis label to loop index variable. Needed for tabulating
+        indexed layouts because, as we go up the tree, we can identify which
+        loop indices are materialised.
+    """
+    from pyop3.array.harray import ArrayVar
+
+    assert not axes.is_empty
+
+    if axis is None:
+        axis = axes.root
+
+    # Collect the loop variables that are captured by this axis and those below
+    # it. This lets us determine whether or not something that is indexed is
+    # sufficiently "within" loops for us to tabulate.
+    if len(axis.components) == 1 and (subaxis := axes.child(axis, axis.component)):
+        inner_loop_vars = _collect_inner_loop_vars(axes, subaxis, loop_vars)
+    else:
+        inner_loop_vars = frozenset()
+    inner_loop_vars_with_self = _collect_inner_loop_vars(axes, axis, loop_vars)
+
+    layouts = StrictlyUniqueDict()
+
+    # for component in axis.components:
+    #     if not isinstance(component.count, numbers.Integral):
+    #         # ragged, need to tabulate something
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    # Post-order traversal
+    csubtrees = []
+    for cpt in axis.components:
+        layout_path_ = layout_path | {axis.label: cpt.label}
+
+        parents_ = parents + ((axis, component),)
+
+        if subaxis := axes.child(axis, cpt):
+            (
+                sublayouts,
+                csubtree,
+            ) = _make_layout_per_axis_component(
+                axes, loop_vars, subaxis, layout_path_, parents_
+            )
+            layouts.update(sublayouts)
+            csubtrees.append(csubtree)
+        else:
+            csubtrees.append(None)
+
+    """
+    There are two conditions that we need to worry about:
+        1. does the axis have a fixed size (not ragged)?
+            If so then we should emit a layout function and handle any inner bits.
+            We don't need any external indices to fully index the array. In fact,
+            if we were the use the external indices too then the resulting layout
+            array would be much larger than it has to be (each index is basically
+            a new dimension in the array).
+
+        2. Does the axis have fixed size steps?
+
+        If we have constant steps then we should index things using an affine layout.
+
+    Care needs to be taken with the interplay of these options:
+
+        fixed size x fixed step : affine - great
+        fixed size x variable step : need to tabulate with the current axis and
+                                     everything below that isn't yet handled
+        variable size x fixed step : emit an affine layout but we need to tabulate above
+        variable size x variable step : add an axis to the "count" tree but do nothing else
+                                        not ready for tabulation as not fully indexed
+
+    We only ever care about axes as a whole. If individual components are ragged but
+    others not then we still need to index them separately as the steps are still not
+    a fixed size even for the non-ragged components.
+    """
+
+    # 1. do we need to pass further up? i.e. are we variable size?
+    # also if we have halo data then we need to pass to the top
+    if (
+        not all(
+            has_fixed_size(axes, axis, cpt, inner_loop_vars_with_self)
+            for cpt in axis.components
+        )
+    ) or (has_halo(axes, axis) and axis != axes.root):
+        if has_halo(axes, axis) or not all(
+            has_constant_step(axes, axis, c, inner_loop_vars)
+            for c in axis.components
+        ):
+            # ctree = AxisTree(axis.copy(numbering=None))
+            ctree = AxisTree(axis)
+
+            # we enforce here that all subaxes must be tabulated, is this always
+            # needed?
+            # Since each tree is supposed to be linear I think that this bit is wrong.
+            if strictly_all(sub is not None for sub in csubtrees):
+                for component, subtree in strict_zip(axis.components, csubtrees):
+                    ctree = ctree.add_subtree(subtree, axis, component)
+        else:
+            # we must be at the bottom of a ragged patch - therefore don't
+            # add to shape of things
+            # in theory if we are ragged and permuted then we do want to include this level
+            ctree = None
+            for c in axis.components:
+                step = step_size(axes, axis, c)
+                if (axis.id, c.label) in loop_vars:
+                    axis_var = loop_vars[axis.id, c.label][axis.label]
+                else:
+                    axis_var = AxisVar(axis.label)
+                layouts.update({layout_path | {axis.label: c.label}: axis_var * step})
+
+        return (layouts, ctree)
+
+    # 2. add layouts here
+    else:
+        # 1. do we need to tabulate anything?
+        # interleaved = len(axis.components) > 1 and axis.numbering is not None
+        interleaved = False
+        if (
+            interleaved
+            or not all(
+                has_constant_step(axes, axis, c, inner_loop_vars)
+                for i, c in enumerate(axis.components)
+            )
+            or has_halo(axes, axis)
+            and axis == axes.root  # at the top
+        ):
+            # ctree = AxisTree(axis.copy(numbering=None))
+            ctree = AxisTree(axis)
+            # we enforce here that all subaxes must be tabulated, is this always
+            # needed?
+            if strictly_all(sub is not None for sub in csubtrees):
+                for component, subtree in strict_zip(axis.components, csubtrees):
+                    ctree = ctree.add_subtree(subtree, axis, component)
+
+            fulltree = _create_count_array_tree(ctree, loop_vars)
+
+            # now populate fulltree
+            offset = IntRef(0)
+            _tabulate_count_array_tree(
+                axes,
+                axis,
+                loop_vars,
+                fulltree,
+                offset,
+                setting_halo=False,
+            )
+
+            # apply ghost offset stuff, the offset from the previous pass is used
+            _tabulate_count_array_tree(
+                axes,
+                axis,
+                loop_vars,
+                fulltree,
+                offset,
+                setting_halo=True,
+            )
+
+            for subpath, offset_data in fulltree.items():
+                mytargetpath = merge_dicts(
+                    just_one(offset_data.axes.paths).values()
+                )
+                myindices = merge_dicts(
+                    just_one(offset_data.axes.index_exprs).values()
+                )
+                offset_var = ArrayVar(offset_data, myindices, mytargetpath)
+
+                layouts[layout_path | subpath] = offset_var
+
+            return (layouts, None)
+
+        # must therefore be affine
+        else:
+            assert all(sub is None for sub in csubtrees)
+            steps = [
+                step_size(axes, axis, c)
+                for i, c in enumerate(axis.components)
+            ]
+            start = 0
+            for cidx, step in enumerate(steps):
+                mycomponent = axis.components[cidx]
+
+                axis_var = AxisVar(axis.label)
+                new_layout = axis_var * step + start
+
+                layouts[layout_path | {axis.label: mycomponent.label}] = new_layout
+                start += _axis_component_size(axes, axis, mycomponent)
+            return (layouts, None)
+
 
 
 def has_independently_indexed_subaxis_parts(axes, axis, cpt):
@@ -107,7 +425,7 @@ def requires_external_index(axtree, axis, component_index):
     than exist in the given subaxis.
     """
     return size_requires_external_index(
-        axtree, axis, component_index
+        axtree, axis, component_index, set()
     )  # or numbering_requires_external_index(axtree, axis, component_index)
 
 
@@ -161,6 +479,8 @@ def step_size(
 
 
 def has_halo(axes, axis):
+    # TODO: cleanup
+    return axes.comm.size > 1
     if axis.sf is not None:
         return True
     else:
@@ -252,23 +572,15 @@ class LoopIndexCollector(pym.mapper.CombineMapper):
         else:
             return rec | {index}
 
-    def map_multi_array(self, array):
+    def map_array(self, array):
         if self._linear:
             return tuple(
-                item for expr in array.index_exprs.values() for item in self.rec(expr)
+                item for expr in array.indices.values() for item in self.rec(expr)
             )
         else:
             return frozenset(
-                {item for expr in array.index_exprs.values() for item in self.rec(expr)}
+                {item for expr in array.indices.values() for item in self.rec(expr)}
             )
-
-    # def map_called_map_variable(self, index):
-    #     result = (
-    #         idx
-    #         for index_expr in index.input_index_exprs.values()
-    #         for idx in self.rec(index_expr)
-    #     )
-    #     return tuple(result) if self._linear else frozenset(result)
 
 
 def collect_external_loops(axes, index_exprs, linear=False):
@@ -303,241 +615,6 @@ def _collect_inner_loop_vars(axes: AxisTree, axis: Axis, loop_vars):
         return frozenset({loop_var})
 
 
-# TODO: If an axis has size 1 then we don't need a variable for it.
-def _compute_layouts(
-    axes: AxisTree,
-    loop_vars,
-    axis=None,
-    layout_path=pmap(),
-    index_exprs_acc=pmap(),
-):
-    """
-    Parameters
-    ----------
-    axes
-        The axis tree to construct a layout for.
-    loop_vars
-        Mapping from axis label to loop index variable. Needed for tabulating
-        indexed layouts because, as we go up the tree, we can identify which
-        loop indices are materialised.
-    """
-
-    from pyop3.array.harray import ArrayVar
-
-    if axis is None:
-        assert not axes.is_empty
-        axis = axes.root
-        # get rid of this
-        index_exprs_acc |= axes.index_exprs.get(None, {})
-
-    # Collect the loop variables that are captured by this axis and those below
-    # it. This lets us determine whether or not something that is indexed is
-    # sufficiently "within" loops for us to tabulate.
-    if len(axis.components) == 1 and (subaxis := axes.child(axis, axis.component)):
-        inner_loop_vars = _collect_inner_loop_vars(axes, subaxis, loop_vars)
-    else:
-        inner_loop_vars = frozenset()
-    inner_loop_vars_with_self = _collect_inner_loop_vars(axes, axis, loop_vars)
-
-    layouts = {}
-    steps = {}
-
-    # Post-order traversal
-    csubtrees = []
-    sublayoutss = []
-    for cpt in axis.components:
-        index_exprs_acc_ = index_exprs_acc | axes.index_exprs.get(
-            (axis.id, cpt.label), {}
-        )
-
-        layout_path_ = layout_path | {axis.label: cpt.label}
-
-        if subaxis := axes.child(axis, cpt):
-            (
-                sublayouts,
-                csubtree,
-                substeps,
-            ) = _compute_layouts(
-                axes, loop_vars, subaxis, layout_path_, index_exprs_acc_
-            )
-            sublayoutss.append(sublayouts)
-            csubtrees.append(csubtree)
-            steps.update(substeps)
-        else:
-            csubtrees.append(None)
-            sublayoutss.append(defaultdict(list))
-
-    """
-    There are two conditions that we need to worry about:
-        1. does the axis have a fixed size (not ragged)?
-            If so then we should emit a layout function and handle any inner bits.
-            We don't need any external indices to fully index the array. In fact,
-            if we were the use the external indices too then the resulting layout
-            array would be much larger than it has to be (each index is basically
-            a new dimension in the array).
-
-        2. Does the axis have fixed size steps?
-
-        If we have constant steps then we should index things using an affine layout.
-
-    Care needs to be taken with the interplay of these options:
-
-        fixed size x fixed step : affine - great
-        fixed size x variable step : need to tabulate with the current axis and
-                                     everything below that isn't yet handled
-        variable size x fixed step : emit an affine layout but we need to tabulate above
-        variable size x variable step : add an axis to the "count" tree but do nothing else
-                                        not ready for tabulation as not fully indexed
-
-    We only ever care about axes as a whole. If individual components are ragged but
-    others not then we still need to index them separately as the steps are still not
-    a fixed size even for the non-ragged components.
-    """
-
-    # 1. do we need to pass further up? i.e. are we variable size?
-    # also if we have halo data then we need to pass to the top
-    if (
-        not all(
-            has_fixed_size(axes, axis, cpt, inner_loop_vars_with_self)
-            for cpt in axis.components
-        )
-    ) or (has_halo(axes, axis) and axis != axes.root):
-        if has_halo(axes, axis) or not all(
-            has_constant_step(axes, axis, c, inner_loop_vars)
-            for i, c in enumerate(axis.components)
-        ):
-            ctree = AxisTree(axis.copy(numbering=None))
-
-            # we enforce here that all subaxes must be tabulated, is this always
-            # needed?
-            if strictly_all(sub is not None for sub in csubtrees):
-                for component, subtree in checked_zip(axis.components, csubtrees):
-                    ctree = ctree.add_subtree(subtree, axis, component)
-        else:
-            # we must be at the bottom of a ragged patch - therefore don't
-            # add to shape of things
-            # in theory if we are ragged and permuted then we do want to include this level
-            ctree = None
-            for i, c in enumerate(axis.components):
-                step = step_size(axes, axis, c)
-                if (axis.id, c.label) in loop_vars:
-                    axis_var = loop_vars[axis.id, c.label][axis.label]
-                else:
-                    axis_var = AxisVariable(axis.label)
-                layouts.update({layout_path | {axis.label: c.label}: axis_var * step})
-
-        # layouts and steps are just propagated from below
-        layouts.update(merge_dicts(sublayoutss))
-        return (
-            layouts,
-            ctree,
-            steps,
-        )
-
-    # 2. add layouts here
-    else:
-        # 1. do we need to tabulate anything?
-        interleaved = len(axis.components) > 1 and axis.numbering is not None
-        if (
-            interleaved
-            or not all(
-                has_constant_step(axes, axis, c, inner_loop_vars)
-                for i, c in enumerate(axis.components)
-            )
-            or has_halo(axes, axis)
-            and axis == axes.root  # at the top
-        ):
-            ctree = AxisTree(axis.copy(numbering=None))
-            # we enforce here that all subaxes must be tabulated, is this always
-            # needed?
-            if strictly_all(sub is not None for sub in csubtrees):
-                for component, subtree in checked_zip(axis.components, csubtrees):
-                    ctree = ctree.add_subtree(subtree, axis, component)
-
-            fulltree = _create_count_array_tree(ctree, loop_vars)
-
-            # now populate fulltree
-            offset = IntRef(0)
-            _tabulate_count_array_tree(
-                axes,
-                axis,
-                loop_vars,
-                fulltree,
-                offset,
-                setting_halo=False,
-            )
-
-            # apply ghost offset stuff, the offset from the previous pass is used
-            _tabulate_count_array_tree(
-                axes,
-                axis,
-                loop_vars,
-                fulltree,
-                offset,
-                setting_halo=True,
-            )
-
-            for subpath, offset_data in fulltree.items():
-                # offset_data must be linear so we can unroll the indices
-                # flat_indices = {
-                #     ax: expr
-                # }
-                source_path = offset_data.axes.path_with_nodes(*offset_data.axes.leaf)
-                index_keys = [None] + [
-                    (axis.id, cpt) for axis, cpt in source_path.items()
-                ]
-                mytargetpath = merge_dicts(
-                    offset_data.axes.target_paths.get(key, {}) for key in index_keys
-                )
-                myindices = merge_dicts(
-                    offset_data.axes.index_exprs.get(key, {}) for key in index_keys
-                )
-                offset_var = ArrayVar(offset_data, myindices, mytargetpath)
-
-                layouts[layout_path | subpath] = offset_var
-            ctree = None
-
-            # bit of a hack, we can skip this if we aren't passing higher up
-            if axis == axes.root:
-                steps = "not used"
-            else:
-                steps = {layout_path: _axis_size(axes, axis)}
-
-            layouts.update(merge_dicts(sublayoutss))
-            return (
-                layouts,
-                ctree,
-                steps,
-            )
-
-        # must therefore be affine
-        else:
-            assert all(sub is None for sub in csubtrees)
-            layouts = {}
-            steps = [
-                step_size(axes, axis, c)
-                for i, c in enumerate(axis.components)
-            ]
-            start = 0
-            for cidx, step in enumerate(steps):
-                mycomponent = axis.components[cidx]
-                sublayouts = sublayoutss[cidx].copy()
-
-                axis_var = AxisVariable(axis.label)
-                new_layout = axis_var * step + start
-
-                sublayouts[layout_path | {axis.label: mycomponent.label}] = new_layout
-                start += _axis_component_size(axes, axis, mycomponent)
-
-                layouts.update(sublayouts)
-            steps = {layout_path: _axis_size(axes, axis)}
-            return (
-                layouts,
-                None,
-                steps,
-            )
-
-
 def _create_count_array_tree(
     ctree,
     loop_vars,
@@ -555,16 +632,7 @@ def _create_count_array_tree(
     arrays = {}
     for component in axis.components:
         path_ = path | {axis.label: component.label}
-        # This causes an infinite recursion because axis[component.label]
-        # returns an IndexedAxisTree instead of an AxisTree. This should be
-        # avoidable.
-        # linear_axis = axis[component.label].root
-        # current workaround:
-        if len(axis.components) > 1:
-            linear_axis = axis[component.label].root
-        else:
-            # discard SF since the tabulating arrays are not parallel
-            linear_axis = axis.copy(sf=None)
+        linear_axis = Axis(component.copy(sf=None), axis.label)
 
         # can be None if ScalarIndex is used
         if linear_axis is not None:
@@ -596,7 +664,7 @@ def _create_count_array_tree(
                         loop_var = loop_vars[myaxis.label]
                         index_expr = {myaxis.label: loop_var}
                     else:
-                        index_expr = {myaxis.label: AxisVariable(myaxis.label)}
+                        index_expr = {myaxis.label: AxisVar(myaxis.label)}
                     index_exprs[key] = index_expr
             else:
                 index_exprs = axtree.index_exprs
@@ -627,14 +695,15 @@ def _tabulate_count_array_tree(
     npoints = sum(_as_int(c.count, indices) for c in axis.components)
 
     offsets = component_offsets(axis, indices)
-    points = axis.numbering.data_ro if axis.numbering is not None else range(npoints)
+    # points = axis.numbering.data_ro if axis.numbering is not None else range(npoints)
+    points = range(npoints)
 
     counters = {c: itertools.count() for c in axis.components}
     for new_pt, old_pt in enumerate(points):
-        if axis.sf is not None:
-            is_owned = new_pt < axis.sf.nowned
-
         component, _ = component_number_from_offsets(axis, old_pt, offsets)
+
+        if component.sf is not None:
+            is_owned = new_pt < component.sf.nowned
 
         new_strata_pt = next(counters[component])
 
@@ -678,37 +747,72 @@ def _tabulate_count_array_tree(
             )
 
 
-# TODO this whole function sucks, should accumulate earlier
-def _collect_at_leaves(
-    axes,
-    layout_axes,
-    values,
-    axis: Optional[Axis] = None,
-    path=pmap(),
-    layout_path=pmap(),
-    prior=0,
+def _accumulate_axis_component_layouts(
+    axes: AxisTree,
+    component_layouts: PMap,
+    *,
+    layout_axis: Optional[Axis] = None,
+    layout_path: PMap=pmap(),
+    path: PMap=pmap(),
+    layout_expr=0,
 ):
-    if axis is None:
-        axis = layout_axes.root
+    """Accumulate component-wise layouts to give a complete layout function per node.
 
-    acc = {pmap(): prior} if axis == axes.root else {}
-    for component in axis.components:
-        layout_path_ = layout_path | {axis.label: component.label}
-        prior_ = prior + values.get(layout_path_, 0)
+    Parameters
+    ----------
+    axes
+        The axis tree whose layout functions are being tabulated.
+    component_layouts
+        Mapping from ``(axis id, component label)`` 2-tuples to a layout expression
+        for that specific node in the tree.
 
-        if axis in axes.nodes:
-            path_ = path | {axis.label: component.label}
-            acc[path_] = prior_
+    Other Parameters
+    ----------------
+    layout_axis
+        The current axis in the traversal.
+    layout_path
+        The current path through the layout axes (see `AxisTree.layout_axes`).
+    path
+        The current path through ``axes``.
+    layout_expr
+        The current accumulated layout expression.
+
+    Returns
+    -------
+    PMap
+        The accumulated layout functions per ``(axis id, component label)`` present
+        in ``axes``.
+
+    """
+    if layout_axis is None:
+        layout_axis = axes.layout_axes.root
+
+    if layout_axis == axes.root:
+        layouts = {pmap(): layout_expr}
+    else:
+        layouts = {}
+
+    for component in layout_axis.components:
+        # better not as a path here
+        # layout_path_ = layout_path | {layout_axis.label: component.label}
+        layout_path_ = (layout_axis, component)
+        layout_expr_ = layout_expr + component_layouts.get(layout_path_, 0)
+
+        if layout_axis in axes.nodes:
+            path_ = path | {layout_axis.label: component.label}
+            layouts[path_] = layout_expr_
         else:
             path_ = path
 
-        if subaxis := layout_axes.child(axis, component):
-            acc.update(
-                _collect_at_leaves(
-                    axes, layout_axes, values, subaxis, path_, layout_path_, prior_
-                )
+        if subaxis := axes.layout_axes.child(layout_axis, component):
+            sublayouts = _accumulate_axis_component_layouts(
+                axes,
+                component_layouts,
+                layout_axis=subaxis, layout_path=layout_path_, path=path_, layout_expr=layout_expr_
             )
-    return acc
+            layouts.update(sublayouts)
+
+    return freeze(layouts)
 
 
 def axis_tree_size(axes: AxisTree) -> int:

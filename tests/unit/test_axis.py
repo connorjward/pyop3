@@ -4,6 +4,7 @@ import pytest
 from pyrsistent import freeze, pmap
 
 import pyop3 as op3
+from pyop3.dtypes import IntType
 from pyop3.utils import UniqueNameGenerator, flatten, just_one, single_valued, steps
 
 
@@ -26,7 +27,7 @@ class RenameMapper(pym.mapper.IdentityMapper):
     def map_axis_variable(self, expr):
         return pym.var(self.name_generator("var"))
 
-    def map_multi_array(self, expr):
+    def map_array(self, expr):
         return pym.var(self.name_generator("array"))
 
 
@@ -34,7 +35,7 @@ class OrderedCollector(pym.mapper.CombineMapper):
     def combine(self, values):
         return sum(values, ())
 
-    def map_constant(self, expr):
+    def map_constant(self, _):
         return ()
 
     map_variable = map_constant
@@ -43,7 +44,7 @@ class OrderedCollector(pym.mapper.CombineMapper):
     map_star_wildcard = map_constant
     map_function_symbol = map_constant
 
-    def map_multi_array(self, expr):
+    def map_array(self, expr):
         return (expr.array,)
 
 
@@ -433,3 +434,40 @@ def test_tabulate_nested_ragged_indexed_layouts():
     array0 = just_one(collect_multi_arrays(layout))
     expected = np.asarray(steps(nnz_data, drop_last=True), dtype=op3.IntType) * 2
     assert (array0.data_ro == expected).all()
+
+
+def test_tabulate_nested_ragged_independent_axes():
+    """Test that inner ragged axes needn't be indexed by all the outer axes."""
+    axis0 = op3.Axis({"a": 3}, "A")
+    axis1 = op3.Axis({"b": 2}, "B")
+
+    # only depends on axis0
+    nnz2 = op3.HierarchicalArray(axis0, data=np.asarray([1, 2, 1], dtype=IntType))
+    axis2 = op3.Axis({"c": nnz2}, "C")
+
+    # only depends on axis1
+    nnz3 = op3.HierarchicalArray(axis1, data=np.asarray([1, 2], dtype=IntType))
+    axis3 = op3.Axis({"d": nnz3}, "D")
+
+    axes = op3.AxisTree.from_iterable([axis0, axis1, axis2, axis3])
+
+    path0 = pmap({"A": "a"})
+    path01 = path0 | {"B": "b"}
+    path012 = path01 | {"C": "c"}
+    path0123 = path012 | {"D": "d"}
+
+    assert as_str(axes.layouts[path0]) == "array_0"
+    assert as_str(axes.layouts[path01]) == "array_0 + array_1"
+    assert as_str(axes.layouts[path012]) == "array_0 + array_1 + array_2"
+    assert as_str(axes.layouts[path0123]) == "array_0 + array_1 + array_2 + var_0"
+
+    array0, array1, array2 = collect_multi_arrays(axes.layouts[path0123])
+
+    assert {ax.label for ax in array0.axes.nodes} == {"A"}
+    assert (array0.data_ro == [0, 3, 9]).all()
+
+    assert {ax.label for ax in array1.axes.nodes} == {"A", "B"}
+    assert (array1.data_ro == [0, 1, 0, 2, 0, 1]).all()
+
+    assert {ax.label for ax in array2.axes.nodes} == {"A", "B", "C"}
+    assert (array2.data_ro == [0, 0, 0, 1, 0, 2, 0, 0]).all()
