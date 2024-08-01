@@ -179,6 +179,7 @@ class LoopyCodegenContext(CodegenContext):
             id=self._name_generator(prefix),
             within_inames=frozenset(self._within_inames),
             depends_on=self._depends_on,
+            depends_on_is_final=True,
         )
         self._add_instruction(insn)
 

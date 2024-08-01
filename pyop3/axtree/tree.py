@@ -766,9 +766,12 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
             for expr in index_exprs.values():
                 for array in MultiArrayCollector()(expr):
                     dmap.update(array.datamap)
-        for layout_expr in self.layouts.values():
-            for array in MultiArrayCollector()(layout_expr):
-                dmap.update(array.datamap)
+
+        # TODO: cleanup, indexed axis trees (from map.index()) do not have layouts
+        if not isinstance(self, IndexedAxisTree) or self.unindexed is not None:
+            for layout_expr in self.layouts.values():
+                for array in MultiArrayCollector()(layout_expr):
+                    dmap.update(array.datamap)
         return pmap(dmap)
 
     def as_tree(self):
