@@ -67,6 +67,7 @@ from pyop3.lang import (
     ReplaceAssignment,
 )
 from pyop3.log import logger
+from pyop3.target import compile_loopy
 from pyop3.utils import (
     PrettyTuple,
     UniqueNameGenerator,
@@ -327,21 +328,20 @@ class CodegenResult:
         self.ir = ir
         self.arg_replace_map = arg_replace_map
 
+        self._exec = compile_loopy(self.ir)
+
     @cached_property
     def datamap(self):
         return merge_dicts(e.datamap for e in self.expr)
 
     def __call__(self, **kwargs):
-        from pyop3.target import compile_loopy
-
         data_args = []
         for kernel_arg in self.ir.default_entrypoint.args:
             actual_arg_name = self.arg_replace_map[kernel_arg.name]
             array = kwargs.get(actual_arg_name, self.datamap[actual_arg_name])
             data_args.append(_as_pointer(array))
-        func = compile_loopy(self.ir)
         if len(data_args) > 0:
-            func(*data_args)
+            self._exec(*data_args)
 
     def target_code(self, target):
         raise NotImplementedError("TODO")
