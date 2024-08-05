@@ -1884,10 +1884,14 @@ def restrict_targets(targets, indexed_axes, orig_axes, *, axis=None) -> PMap:
     restricted = collections.defaultdict(dict)
 
     if axis is None:
-        axis = indexed_axes.root
-
         for target_set in targets.get(None, ()):
             restricted[None].update(_matching_target(target_set, orig_axes))
+
+        if indexed_axes.is_empty:
+            # nothing more to be done
+            return freeze(restricted)
+        else:
+            axis = indexed_axes.root
 
     # Make the type checker happy
     axis = cast(Axis, axis)
