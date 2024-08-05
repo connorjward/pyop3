@@ -54,7 +54,7 @@ from pyop3.log import INFO, debug, progress, warning
 
 
 @mpi.collective
-def compile_loopy(kernel, **kwargs):
+def compile_loopy(translation_unit, *, pyop3_compiler_parameters, **kwargs):
     """Build a shared library and return a function pointer from it.
 
     :arg jitmodule: The JIT Module which can generate the code to compile, or
@@ -71,8 +71,8 @@ def compile_loopy(kernel, **kwargs):
     :kwarg comm: Optional communicator to compile the code on (only
         rank 0 compiles code) (defaults to pyop2.mpi.COMM_WORLD).
     """
-    code = lp.generate_code_v2(kernel).device_code()
-    argtypes = [ctypes.c_voidp for _ in kernel.default_entrypoint.args]
+    code = lp.generate_code_v2(translation_unit).device_code()
+    argtypes = [ctypes.c_voidp for _ in translation_unit.default_entrypoint.args]
     restype = None
 
     # ideally move this logic somewhere else
@@ -88,20 +88,29 @@ def compile_loopy(kernel, **kwargs):
         # + tuple(self.local_kernel.ldargs)
     )
 
+    # NOTE: no - instead of this inspect the compiler parameters!!!
     # TODO: Make some sort of function in config.py
     if "LIKWID_MODE" in os.environ:
         cppargs += ("-DLIKWID_PERFMON",)
         ldargs += ("-llikwid",)
 
-    return compile_c(
+    func, lib = compile_c(
         code,
-        kernel.default_entrypoint.name,
+        translation_unit.default_entrypoint.name,
         argtypes,
         restype,
         extra_compiler_flags=cppargs,
         extra_linker_flags=ldargs,
         **kwargs,
     )
+
+    if pyop3_compiler_parameters.add_petsc_event:
+        # Create the event in python and then set in the shared library to avoid
+        # allocating memory over and over again in the C kernel.
+        event_name = translation_unit.default_entrypoint.name
+        ctypes.c_int.in_dll(lib, f"id_{event_name}").value = PETSc.Log.Event(event_name).id
+
+    return func
 
 
 def compile_c(code: str, name, argtypes, restype, **kwargs):
@@ -511,7 +520,7 @@ Compile errors in %s"""
         fn = getattr(dll, name)
         fn.argtypes = argtypes
         fn.restype = restype
-        return fn
+        return fn, dll
 
 
 class MacClangCompiler(Compiler):

@@ -17,32 +17,15 @@ import pymbolic as pym
 from pyrsistent import freeze, pmap
 
 from pyop3.array import HierarchicalArray
-from pyop3.array.harray import CalledMapVariable
 from pyop3.array.petsc import AbstractMat, Sparsity
 from pyop3.axtree import Axis, AxisComponent, AxisTree, AxisVariable, ContextFree
-from pyop3.axtree.tree import subst_layouts
 from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
 from pyop3.config import config
 from pyop3.dtypes import IntType
-from pyop3.ir.transform import add_likwid_markers
-from pyop3.itree import (
-    AffineSliceComponent,
-    CalledMap,
-    Index,
-    IndexTree,
-    LocalLoopIndex,
-    LoopIndex,
-    Map,
-    Slice,
-    Subset,
-    TabulatedMapComponent,
-)
+from pyop3.ir.transform import with_likwid_markers, with_petsc_event
 from pyop3.itree.tree import (
-    ContextFreeLoopIndex,
-    IndexExpressionReplacer,
     LocalLoopIndexVariable,
     LoopIndexVariable,
-    collect_shape_index_callback,
 )
 from pyop3.lang import (
     INC,
@@ -323,12 +306,12 @@ class LoopyCodegenContext(CodegenContext):
 
 
 class CodegenResult:
-    def __init__(self, expr, ir, arg_replace_map):
+    def __init__(self, expr, ir, arg_replace_map, *, compiler_parameters):
         self.expr = as_tuple(expr)
         self.ir = ir
         self.arg_replace_map = arg_replace_map
 
-        self._exec = compile_loopy(self.ir)
+        self._exec = compile_loopy(self.ir, pyop3_compiler_parameters=compiler_parameters)
 
     @cached_property
     def datamap(self):
@@ -401,6 +384,7 @@ class CompilerParameters:
     # NOTE: This sort of thing could have a default set from the config
     # dict (but do not use PYOP3_USE_LIKWID as that's a separate option).
     add_likwid_markers: bool = False
+    add_petsc_event: bool = False
 
 
 def parse_compiler_parameters(compiler_parameters) -> CompilerParameters:
@@ -412,16 +396,18 @@ def parse_compiler_parameters(compiler_parameters) -> CompilerParameters:
 
 
 # prefer generate_code?
-def compile(expr: Instruction, name="mykernel", compiler_parameters=None):
+def compile(expr: Instruction, compiler_parameters=None):
     compiler_parameters = parse_compiler_parameters(compiler_parameters)
 
     # preprocess expr before lowering
     from pyop3.transform import expand_implicit_pack_unpack, expand_loop_contexts
 
+    function_name = expr.name
+
     cs_expr = expand_loop_contexts(expr)
     ctx = LoopyCodegenContext()
-    for context, expr in cs_expr:
-        expr = expand_implicit_pack_unpack(expr)
+    for context, ex in cs_expr:
+        ex = expand_implicit_pack_unpack(ex)
 
         # add external loop indices as kernel arguments
         loop_indices = {}
@@ -441,7 +427,7 @@ def compile(expr: Instruction, name="mykernel", compiler_parameters=None):
             # FIXME currently assume that source and target exprs are the same, they are not!
             loop_indices[index] = (replace_map, replace_map)
 
-        for e in as_tuple(expr):
+        for e in as_tuple(ex):
             # context manager?
             ctx.set_temporary_shapes(_collect_temporary_shapes(e))
             _compile(e, loop_indices, ctx)
@@ -480,24 +466,29 @@ def compile(expr: Instruction, name="mykernel", compiler_parameters=None):
         ctx.domains,
         ctx.instructions,
         ctx.arguments,
-        name=name,
+        name=function_name,
         target=LOOPY_TARGET,
         lang_version=LOOPY_LANG_VERSION,
         preambles=preambles,
         # options=lp.Options(check_dep_resolution=False),
     )
 
+    entrypoint = translation_unit.default_entrypoint
     if compiler_parameters.add_likwid_markers:
-        translation_unit = add_likwid_markers(translation_unit)
+        entrypoint = with_likwid_markers(entrypoint)
+    if compiler_parameters.add_petsc_event:
+        entrypoint = with_petsc_event(entrypoint)
+    translation_unit = translation_unit.with_kernel(entrypoint)
 
-    tu = lp.merge((translation_unit, *ctx.subkernels))
+    translation_unit = lp.merge((translation_unit, *ctx.subkernels))
 
     # add callables
     # tu = lp.register_callable(tu, "bsearch", BinarySearchCallable())
 
-    tu = tu.with_entrypoints(name)
+    # needed?
+    translation_unit = translation_unit.with_entrypoints(entrypoint.name)
 
-    return CodegenResult(expr, tu, ctx.kernel_to_actual_rename_map)
+    return CodegenResult(expr, translation_unit, ctx.kernel_to_actual_rename_map, compiler_parameters=compiler_parameters)
 
 
 # put into a class in transform.py?
