@@ -821,10 +821,10 @@ def _(assignment, loop_indices, codegen_context):
     else:
         csize_var = csize
 
-    rlayouts = rmap.axes.subst_layouts[pmap()]
+    rlayouts = rmap.axes.subst_layouts()[pmap()]
     roffset = JnameSubstitutor(loop_indices, codegen_context)(rlayouts)
 
-    clayouts = cmap.axes.subst_layouts[pmap()]
+    clayouts = cmap.axes.subst_layouts()[pmap()]
     coffset = JnameSubstitutor(loop_indices, codegen_context)(clayouts)
 
     irow = f"{rmap_name}[{roffset}]"
@@ -970,8 +970,12 @@ def add_leaf_assignment(
 
 
 def make_array_expr(array, path, inames, ctx):
+    # TODO: This should be propagated as an option - we don't always want to optimise
+    # TODO: Disabled optimising for now since I can't get it to work without a
+    # symbolic language. That has to be future work.
     array_offset = make_offset_expr(
-        array.axes.subst_layouts[path],
+        # array.axes.subst_layouts(optimize=True)[path],
+        array.axes.subst_layouts(optimize=False)[path],
         inames,
         ctx,
     )
