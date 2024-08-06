@@ -755,7 +755,8 @@ def _(assignment, loop_indices, codegen_context):
     array_name = codegen_context.actual_to_kernel_rename_map[array.name]
     rmap_name = codegen_context.actual_to_kernel_rename_map[rmap.name]
     cmap_name = codegen_context.actual_to_kernel_rename_map[cmap.name]
-    blocked = mat.block_shape > 1
+    # This is a hack
+    blocked = mat.shape[0] > 1 and mat.shape[1] > 1
     if mat.nested:
         if len(mat.nest_labels) > 1:
             # Need to loop over the different nest labels and emit separate calls to
@@ -789,6 +790,10 @@ def _(assignment, loop_indices, codegen_context):
 
     # these sizes can be expressions that need evaluating
     rsize, csize = assignment.mat_arg.shape
+    if blocked:
+        # Daiane: This is a hack.
+        rsize = rsize // 2
+        csize = csize // 2
 
     if not isinstance(rsize, numbers.Integral):
         rsize_var = register_extent(
@@ -818,7 +823,7 @@ def _(assignment, loop_indices, codegen_context):
     icol = f"{cmap_name}[{coffset}]"
 
     call_str = _petsc_mat_insn(
-        assignment, mat_name, array_name, rsize_var, csize_var, irow, icol, blocked
+        assignment, mat_name, array_name, rsize_var, csize_var, irow, icol, blocked, nested=mat.nested
     )
     codegen_context.add_cinstruction(call_str)
 
@@ -829,27 +834,46 @@ def _petsc_mat_insn(assignment, *args):
 
 
 @_petsc_mat_insn.register
-def _(assignment: PetscMatLoad, mat_name, array_name, nrow, ncol, irow, icol, blocked):
-    if blocked:
-        return f"MatSetValuesBlockedLocal({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]));"
+def _(assignment: PetscMatLoad, mat_name, array_name, nrow, ncol, irow, icol, blocked, nested):
+    if nested:
+        if blocked:
+            return f"MatSetValuesBlocked({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]));"
+        else:
+            return f"MatGetValues({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]));"
     else:
-        return f"MatGetValuesLocal({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]));"
+        if blocked:
+            return f"MatGetValuesBlockedLocal({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]));"
+        else:
+            return f"MatGetValuesLocal({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]));"
 
 
 @_petsc_mat_insn.register
-def _(assignment: PetscMatStore, mat_name, array_name, nrow, ncol, irow, icol, blocked):
-    if blocked:
-        return f"MatSetValuesBlockedLocal({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]), INSERT_VALUES);"
+def _(assignment: PetscMatStore, mat_name, array_name, nrow, ncol, irow, icol, blocked, nested):
+    if nested:
+        if blocked:
+            return f"MatSetValuesBlocked({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]));"
+        else:
+            return f"MatSetValues({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]));"
     else:
-        return f"MatSetValuesLocal({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]), INSERT_VALUES);"
+        if blocked:
+            return f"MatSetValuesBlockedLocal({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]), INSERT_VALUES);"
+        else:
+            return f"MatSetValuesLocal({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]), INSERT_VALUES);"
 
 
 @_petsc_mat_insn.register
-def _(assignment: PetscMatAdd, mat_name, array_name, nrow, ncol, irow, icol, blocked):
-    if blocked:
-        return f"MatSetValuesBlockedLocal({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]), ADD_VALUES);"
+def _(assignment: PetscMatAdd, mat_name, array_name, nrow, ncol, irow, icol, blocked, nested):
+    if nested:
+        if blocked:
+            return f"MatSetValuesBlocked({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]), ADD_VALUES);"
+        else:
+            return f"MatSetValues({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]), ADD_VALUES);"
     else:
-        return f"MatSetValuesLocal({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]), ADD_VALUES);"
+        if blocked:
+            return f"MatSetValuesBlockedLocal({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]), ADD_VALUES);"
+        else:
+            return f"MatSetValuesLocal({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]), ADD_VALUES);"
+
 
 # TODO now I attach a lot of info to the context-free array, do I need to pass axes around?
 def parse_assignment_properly_this_time(

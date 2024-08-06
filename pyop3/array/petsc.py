@@ -9,7 +9,7 @@ from itertools import product
 import numpy as np
 import pymbolic as pym
 from petsc4py import PETSc
-from pyrsistent import freeze, pmap
+from pyrsistent import freeze, pmap, thaw
 
 from pyop3.array.base import Array
 from pyop3.array.harray import HierarchicalArray, ContextSensitiveDat
@@ -93,21 +93,15 @@ class AbstractMat(Array):
         caxes = as_axis_tree(caxes)
         self.raxes = raxes
         self.caxes = caxes
-        if mat_type == "baij":
-            self.block_shape = block_shape
-            self.block_raxes = self._block_raxes
-            self.block_caxes = self._block_caxes
-        else:
-            self.block_shape = 1
-            self.block_raxes = raxes
-            self.block_caxes = caxes
+        self.block_shape = block_shape
         if mat_type is None:
             mat_type = self.DEFAULT_MAT_TYPE
-
+        nested = isinstance(mat_type, collections.abc.Mapping)
         if mat is None:
             # Add the elements to the rows.
             mat = self._make_mat(
-                self.raxes, self.caxes, mat_type, block_shape=self.block_shape
+                self.raxes, self.caxes, mat_type, block_shape=self.block_shape,
+                nested=nested
                 )
 
         super().__init__(name)
@@ -356,27 +350,43 @@ class AbstractMat(Array):
             else:
                 yield (rlabel_acc_, clabel_acc_)
 
-    @cached_property
-    def _block_raxes(self):
-        block_raxes, target_paths, index_exprs = self._collect_block_axes(self.raxes)
-        block_raxes_unindexed, _, _ = self._collect_block_axes(self.raxes.unindexed)
+    def _block_axes(self, axes, shape, nested_index=None):
+        block_axes, target_paths, index_exprs = self._collect_block_axes(axes, shape)
+        if self.nested:
+            block_axes_unindexed, _, _ = self._collect_block_axes(
+                axes.unindexed[nested_index], shape
+                )
+        else:
+            block_axes_unindexed, _, _ = self._collect_block_axes(
+                axes.unindexed, shape
+                )
         return IndexedAxisTree(
-            block_raxes.node_map, block_raxes_unindexed,
+            block_axes.node_map, block_axes_unindexed,
             target_paths=target_paths, index_exprs=index_exprs,
-            outer_loops=self.raxes.outer_loops,
-            layout_exprs=None)
-    
-    @cached_property
-    def _block_caxes(self):
-        block_caxes, target_paths, index_exprs = self._collect_block_axes(self.caxes)
-        block_caxes_unindexed, _, _ = self._collect_block_axes(self.caxes.unindexed)
-        return IndexedAxisTree(
-            block_caxes.node_map, block_caxes_unindexed,
-            target_paths=target_paths, index_exprs=index_exprs,
-            outer_loops=self.caxes.outer_loops,
+            outer_loops=axes.outer_loops,
             layout_exprs=None)
 
-    def _collect_block_axes(self, axes, axis=None):
+    def _nest_axes(self, axes, index):
+        if axes.size > 1:
+            axes = self._block_axes(axes, axes.size, nested_index=index)
+            axes_unindexed = AxisTree(axes.unindexed.node_map)
+        else:
+            axes_unindexed = AxisTree(axes.unindexed[index].node_map)
+        target_paths = thaw(axes.target_paths)
+        to_kill = target_paths.pop(None)
+        for key, _ in target_paths.items():
+            for k, _ in to_kill.items():
+                target_paths[key].pop(k)
+        index_exprs = dict(axes.index_exprs)
+        index_exprs.pop(None)
+        return IndexedAxisTree(
+            axes.node_map, axes_unindexed,
+            target_paths=target_paths,
+            index_exprs=index_exprs,
+            outer_loops=axes.outer_loops,
+            layout_exprs=None)
+
+    def _collect_block_axes(self, axes, shape, axis=None):
         from pyop3.axtree.layout import _axis_size
         target_paths = {}
         index_exprs = {}
@@ -392,125 +402,63 @@ class AbstractMat(Array):
             index_exprs[key] = axes.index_exprs.get(key, {})
             subaxis = axes.child(axis, component)
             subtree_size = _axis_size(axis_tree, subaxis)
-            if subtree_size != self.block_shape:
-                subtree, subtarget_paths, subindex_exprs = self._collect_block_axes(axes, subaxis)
+            if subtree_size != shape:
+                subtree, subtarget_paths, subindex_exprs = self._collect_block_axes(axes, shape, axis=subaxis)
                 axis_tree = axis_tree.add_subtree(subtree, axis, component)
                 target_paths.update(subtarget_paths)
                 index_exprs.update(subindex_exprs)
         return axis_tree, target_paths, index_exprs
 
+    def _map(self, axes):
+        from pyop3.axtree.layout import my_product
+        loop_index = just_one(axes.outer_loops)
+        iterset = AxisTree(loop_index.iterset.node_map)
+        map_axes = iterset.add_subtree(axes, *iterset.leaf)
+        mapping = HierarchicalArray(map_axes, dtype=IntType)
+        mapping = mapping[loop_index.local_index]
+        for idxs in my_product(axes.outer_loops):
+            # target_indices = {idx.index.id: idx.target_exprs for idx in idxs}
+            target_indices = merge_dicts([idx.replace_map for idx in idxs])
+
+            for p in axes.iter(idxs, include_ghost_points=True):
+                offset = axes.unindexed.offset(
+                    p.target_exprs, p.target_path, loop_exprs=target_indices
+                )
+                mapping.set_value(
+                    p.source_exprs,
+                    offset,
+                    p.source_path,
+                    loop_exprs=target_indices,
+                )
+        return mapping
+
+
     @cached_property
     @PETSc.Log.EventDecorator()
     def maps(self):
-        from pyop3.axtree.layout import my_product
-
         # TODO: Don't think these need to be lists here.
         # FIXME: This will only work for singly-nested matrices
         if self.nested:
-            rfield_axis = self.raxes.unindexed.root
-            cfield_axis = self.caxes.unindexed.root
-
-            if strictly_all(c.unit for c in rfield_axis.components):
-                # This weird trick is because the right target path for the field
-                # is actually tied to the root of the axis tree, rather than None.
-                # This seems like a limitation of the _compose_bits function.
-                rfield = single_valued(
-                    cpt
-                    for mycpt in self.raxes.root.components
-                    for ax, cpt in self.raxes.target_paths[
-                        self.raxes.root.id, mycpt.label
-                    ].items()
-                    if ax == rfield_axis.label
-                )
-                orig_raxes = AxisTree(self.raxes.unindexed[rfield].node_map)
-                orig_raxess = [orig_raxes]
-                dropped_rkeys = {rfield_axis.label}
+            row_index = self.raxes.target_paths.get(None).get('field')
+            label = self.raxes.unindexed.root.label
+            col_index = self.raxes.target_paths.get(None).get('field')
+            submat_type = "aij"
+            raxes = self._nest_axes(self.raxes, row_index)
+            caxes = self._nest_axes(self.caxes, col_index)
+            rmap = self._map(raxes)
+            cmap = self._map(caxes)
+        elif self.mat_type == "baij" or self.mat_type == "aij":
+            if self.mat_type == "baij":
+                raxes = self._block_axes(self.raxes, self.block_shape)
+                caxes = self._block_axes(self.caxes, self.block_shape)
             else:
-                orig_raxess = [self.raxes.unindexed]
-                dropped_rkeys = frozenset()
-
-            if strictly_all(c.unit for c in cfield_axis.components):
-                cfield = single_valued(
-                    cpt
-                    for mycpt in self.caxes.root.components
-                    for ax, cpt in self.caxes.target_paths[
-                        self.caxes.root.id, mycpt.label
-                    ].items()
-                    if ax == cfield_axis.label
-                )
-                orig_caxes = AxisTree(self.caxes.unindexed[cfield].node_map)
-                orig_caxess = [orig_caxes]
-                dropped_ckeys = {cfield_axis.label}
-            else:
-                orig_caxess = [self.caxes.unindexed]
-                dropped_ckeys = set()
+                raxes = self.raxes
+                caxes = self.caxes
+            rmap = self._map(raxes)
+            cmap = self._map(caxes)
         else:
-            orig_raxess = [self.block_raxes.unindexed]
-            orig_caxess = [self.block_caxes.unindexed]
-            dropped_rkeys = set()
-            dropped_ckeys = set()
+            raise NotImplementedError
 
-        # TODO: are dropped_rkeys and dropped_ckeys still needed?
-        loop_index = just_one(self.block_raxes.outer_loops)
-        iterset = AxisTree(loop_index.iterset.node_map)
-
-        rmap_axes = iterset.add_subtree(self.block_raxes, *iterset.leaf)
-        rmap = HierarchicalArray(rmap_axes, dtype=IntType)
-        rmap = rmap[loop_index.local_index]
-
-        loop_index = just_one(self.block_caxes.outer_loops)
-        iterset = AxisTree(loop_index.iterset.node_map)
-
-        cmap_axes = iterset.add_subtree(self.block_caxes, *iterset.leaf)
-        cmap = HierarchicalArray(cmap_axes, dtype=IntType)
-        cmap = cmap[loop_index.local_index]
-
-        # TODO: Make the code below go into a separate function distinct
-        # from mat_type logic. Then can also share code for rmap and cmap.
-        for orig_raxes in orig_raxess:
-            for idxs in my_product(self.block_raxes.outer_loops):
-                # target_indices = {idx.index.id: idx.target_exprs for idx in idxs}
-                target_indices = merge_dicts([idx.replace_map for idx in idxs])
-
-                for p in self.block_raxes.iter(idxs, include_ghost_points=True):  # seems to fix things
-                    target_path = p.target_path
-                    target_exprs = p.target_exprs
-                    for key in dropped_rkeys:
-                        target_path = target_path.remove(key)
-                        target_exprs = target_exprs.remove(key)
-
-                    offset = orig_raxes.offset(
-                        target_exprs, target_path, loop_exprs=target_indices
-                    )
-                    rmap.set_value(
-                        p.source_exprs,
-                        offset,
-                        p.source_path,
-                        loop_exprs=target_indices,
-                    )
-
-        for orig_caxes in orig_caxess:
-            for idxs in my_product(self.caxes.outer_loops):
-                # target_indices = {idx.index.id: idx.target_exprs for idx in idxs}
-                target_indices = merge_dicts([idx.replace_map for idx in idxs])
-
-                # for p in self.caxes.iter(idxs):
-                for p in self.block_caxes.iter(idxs, include_ghost_points=True):  # seems to fix things
-                    target_path = p.target_path
-                    target_exprs = p.target_exprs
-                    for key in dropped_ckeys:
-                        target_path = target_path.remove(key)
-                        target_exprs = target_exprs.remove(key)
-
-                    offset = orig_caxes.offset(
-                        target_exprs, target_path, loop_exprs=target_indices
-                        )
-                    cmap.set_value(
-                        p.source_exprs,
-                        offset,
-                        p.source_path,
-                        loop_exprs=target_indices,
-                    )
         return (rmap, cmap)
 
     @property
@@ -539,7 +487,7 @@ class AbstractMat(Array):
 
     @property
     def shape(self):
-        return (self.block_raxes.size, self.block_caxes.size)
+        return self.raxes.size, self.caxes.size
 
     @staticmethod
     def _merge_contexts(row_mapping, col_mapping):
@@ -596,7 +544,7 @@ class AbstractMat(Array):
         return axes
 
     @classmethod
-    def _make_mat(cls, raxes, caxes, mat_type, block_shape=None):
+    def _make_mat(cls, raxes, caxes, mat_type, block_shape=None, nested=False):
         if isinstance(mat_type, collections.abc.Mapping):
             # TODO: This is very ugly
             rsize = max(x or 0 for x, _ in mat_type.keys()) + 1
@@ -606,7 +554,8 @@ class AbstractMat(Array):
                 subraxes = raxes[rkey] if rkey is not None else raxes
                 subcaxes = caxes[ckey] if ckey is not None else caxes
                 submat = cls._make_mat(
-                    subraxes, subcaxes, submat_type, block_shape=block_shape
+                    subraxes, subcaxes, submat_type, block_shape=block_shape[(rkey, ckey)],
+                    nested=nested
                     )
                 submats[rkey, ckey] = submat
 
@@ -614,7 +563,7 @@ class AbstractMat(Array):
             comm = single_valued([raxes.comm, caxes.comm])
             return PETSc.Mat().createNest(submats, comm=comm)
         else:
-            return cls._make_monolithic_mat(raxes, caxes, mat_type, block_shape=block_shape)
+            return cls._make_monolithic_mat(raxes, caxes, mat_type, block_shape=block_shape, nested=nested)
 
     @cached_property
     def datamap(self):
@@ -631,7 +580,8 @@ class Sparsity(AbstractMat):
             self.assemble()
 
             template = Mat._make_mat(self.raxes, self.caxes,
-                                     self.mat_type, block_shape=self.block_shape
+                                     self.mat_type, block_shape=self.block_shape,
+                                     nested=self.nested
                                      )
             self._preallocate(self.mat, template, self.mat_type)
             # template.preallocateWithMatPreallocator(self.mat)
@@ -660,7 +610,7 @@ class Sparsity(AbstractMat):
                 template.preallocateWithMatPreallocator(preallocator)
 
     @classmethod
-    def _make_monolithic_mat(cls, raxes, caxes, mat_type: str, block_shape=None):
+    def _make_monolithic_mat(cls, raxes, caxes, mat_type: str, block_shape=None, nested=False):
         # TODO: Internal comm?
         comm = single_valued([raxes.comm, caxes.comm])
 
@@ -678,16 +628,16 @@ class Sparsity(AbstractMat):
             mat.setPythonContext(matdat)
         else:
             mat = PETSc.Mat().create(comm)
-            mat.setBlockSize(block_shape)
+            mat.setBlockSizes(block_shape[0], block_shape[1])
             mat.setType(PETSc.Mat.Type.PREALLOCATOR)
 
             # None is for the global size, PETSc will figure it out for us
             sizes = ((raxes.owned.size, None), (caxes.owned.size, None))
             mat.setSizes(sizes)
-
-            rlgmap = PETSc.LGMap().create(raxes.global_numbering, bsize=block_shape, comm=comm)
-            clgmap = PETSc.LGMap().create(caxes.global_numbering, bsize=block_shape, comm=comm)
-            mat.setLGMap(rlgmap, clgmap)
+            if not nested:
+                rlgmap = PETSc.LGMap().create(raxes.global_numbering, bsize=block_shape[0], comm=comm)
+                clgmap = PETSc.LGMap().create(caxes.global_numbering, bsize=block_shape[1], comm=comm)
+                mat.setLGMap(rlgmap, clgmap)
 
         mat.setUp()
         return mat
@@ -733,7 +683,7 @@ class Mat(AbstractMat):
 
     # TODO: Almost identical code to Sparsity
     @classmethod
-    def _make_monolithic_mat(cls, raxes, caxes, mat_type: str, block_shape=None):
+    def _make_monolithic_mat(cls, raxes, caxes, mat_type: str, block_shape=None, nested=False):
         # TODO: Internal comm?
         comm = single_valued([raxes.comm, caxes.comm])
 
@@ -752,15 +702,15 @@ class Mat(AbstractMat):
         else:
             mat = PETSc.Mat().create(comm)
             mat.setType(mat_type)
-            mat.setBlockSize(block_shape)
+            mat.setBlockSizes(block_shape[0], block_shape[1])
 
             # None is for the global size, PETSc will figure it out for us
             sizes = ((raxes.owned.size, None), (caxes.owned.size, None))
             mat.setSizes(sizes)
-
-            rlgmap = PETSc.LGMap().create(raxes.global_numbering, bsize=block_shape, comm=comm)
-            clgmap = PETSc.LGMap().create(caxes.global_numbering, bsize=block_shape, comm=comm)
-            mat.setLGMap(rlgmap, clgmap)
+            if not nested:
+                rlgmap = PETSc.LGMap().create(raxes.global_numbering, bsize=block_shape[0], comm=comm)
+                clgmap = PETSc.LGMap().create(caxes.global_numbering, bsize=block_shape[1], comm=comm)
+                mat.setLGMap(rlgmap, clgmap)
 
         mat.setUp()
         return mat
