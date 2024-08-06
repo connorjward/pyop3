@@ -1,3 +1,8 @@
+# NOTE: This file should be the first initialised by pyop3 as it inspects the
+# environment and sets some things immutably.
+# It would also be good if the user could import this prior to anything else
+# and set things - we therefore need a configuration that is mutable until pyop3 init.
+
 import os
 from tempfile import gettempdir
 
@@ -6,7 +11,7 @@ class ConfigurationError(RuntimeError):
     pass
 
 
-# TODO I prefer this as a namedtuple or dataclass
+# TODO I prefer this as a namedtuple or dataclass, this should not be mutable!
 class Configuration(dict):
     r"""pyop3 configuration parameters
 

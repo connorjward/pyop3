@@ -1,13 +1,35 @@
-# Many pyop3 objects inherit from pytools.RecordWithoutPickling.
-# RecordWithoutPickling sets __getattr__ for linting purposes but this breaks
-# tracebacks for @property methods so we remove it here.
-import pytools
+import os as _os
+from pyop3.config import config as _config
 
-try:
-    del pytools.RecordWithoutPickling.__getattr__
-except AttributeError:
-    pass
-del pytools
+def _fixup_pytools():
+    # Many pyop3 objects inherit from pytools.RecordWithoutPickling.
+    # RecordWithoutPickling sets __getattr__ for linting purposes but this breaks
+    # tracebacks for @property methods so we remove it here.
+    import pytools
+
+    try:
+        del pytools.RecordWithoutPickling.__getattr__
+    except AttributeError:
+        pass
+
+
+_fixup_pytools()
+del _fixup_pytools
+
+
+# think the command line is a better way to do this.
+def _init_likwid():
+    if "LIKWID_MODE" in _os.environ:
+        # TODO: nice error message if import fails
+        import atexit
+        import pylikwid
+
+        pylikwid.markerinit()
+        atexit.register(pylikwid.markerclose)
+
+
+_init_likwid()
+del _init_likwid
 
 
 import pyop3.ir
@@ -56,3 +78,6 @@ from pyop3.lang import (  # noqa: F401
     loop,
 )
 from pyop3.sf import StarForest, serial_forest, single_star
+
+del _os
+del _config
