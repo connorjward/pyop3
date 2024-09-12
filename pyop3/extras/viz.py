@@ -4,10 +4,12 @@ import numbers
 import graphviz
 import numpy as np
 from matplotlib import cm
+from pyrsistent import pmap
 
 from pyop3.distarray import IndexedMultiArray, MultiArray
 from pyop3.dtypes import IntType
 from pyop3.utils import PrettyTuple, strict_int
+from pyop3.axis import _axis_size
 
 # def plot_dag(expr: tlang.Expression, *, name="expression", view=False, **kwargs):
 #     """Render loop expression as a DAG and write to a file.
@@ -44,13 +46,20 @@ from pyop3.utils import PrettyTuple, strict_int
 
 mybadcolormap = {
     1: ["white"],
-    2: ["red", "lightblue"],
+    2: ["#0066ff", "#ff6666"],
+    3: ["#0066ff", "#ff1a1a", "lightgreen"],
 }
 
 
 # TODO This is just the same tree visitor as we have for computing layouts
-def _view_axis_tree(dag, axes, axis, indices=PrettyTuple()):
-    npoints = sum(cpt.find_integer_count(indices) for cpt in axis.components)
+def _view_axis_tree(dag, axes, axis, indices=PrettyTuple(), show_permutation=False):
+    npoints = 0
+    for component in axis.components:
+        if isinstance(component.count, MultiArray):
+            npoints += strict_int(component.count.get_value(indices))
+        else:
+            assert isinstance(component.count, numbers.Integral)
+            npoints += component.count
 
     permutation = (
         axis.permutation
@@ -76,10 +85,18 @@ def _view_axis_tree(dag, axes, axis, indices=PrettyTuple()):
             point_to_component_num[point] = i
         pos += csize
 
+    inverse_perm = np.empty_like(permutation)
+    for i, p in enumerate(permutation):
+        inverse_perm[p] = i
+
     cells = []
     for pt in range(npoints):
         component_id = point_to_component_id[pt]
-        component_num = point_to_component_num[pt]
+
+        if show_permutation:
+            component_num = inverse_perm[pt]
+        else:
+            component_num = point_to_component_num[pt]
 
         color = mybadcolormap[axis.degree][component_id]
         cells.append(f"<TD PORT='x{pt}' BGCOLOR='{color}'>{component_num}</TD>")
@@ -98,11 +115,12 @@ def _view_axis_tree(dag, axes, axis, indices=PrettyTuple()):
 
     for pt in range(npoints):
         component_id = point_to_component_id[pt]
-        if subaxis := axes.find_node((axis.id, component_id)):
+        component = axis.components[component_id]
+        if subaxis := axes.child(axis, component):
             _view_axis_tree(dag, axes, subaxis, indices | pt)
 
 
-def view_axes(axes, name="axes", display=True):
-    dag = graphviz.Digraph(name)
+def view_axes(axes, name="axes", display=True, format="pdf"):
+    dag = graphviz.Digraph(name, format=format)
     _view_axis_tree(dag, axes, axes.root)
     dag.render(quiet_view=display)
