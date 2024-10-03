@@ -12,6 +12,7 @@ from pyrsistent import freeze, pmap
 
 from pyop3.dtypes import ScalarType
 from pyop3.lang import KernelArgument
+from pyop3.mpi import COMM_SELF
 from pyop3.sf import StarForest
 from pyop3.utils import UniqueNameGenerator, as_tuple, deprecated, readonly
 
@@ -99,8 +100,8 @@ class DistributedBuffer(Buffer):
     def __init__(
         self,
         shape,
-        sf_or_comm,  # Should just be SF, or None?
         dtype=None,
+        sf=None,
         *,
         name=None,
         prefix=None,
@@ -123,23 +124,10 @@ class DistributedBuffer(Buffer):
             if data.dtype != dtype:
                 raise ValueError
 
-        if isinstance(sf_or_comm, StarForest):
-            sf = sf_or_comm
-            comm = sf.comm
-            # TODO I don't really like having shape as an argument...
-            if sf and shape[0] != sf.size:
-                raise IncompatibleStarForestException
-        else:
-            sf = None
-            comm = sf_or_comm
-
         self.shape = shape
         self._dtype = dtype
         self._lazy_data = data
         self.sf = sf
-
-        assert comm is not None
-        self.comm = comm
 
         self.name = name or self._name_generator(prefix or self._prefix)
 
@@ -154,6 +142,13 @@ class DistributedBuffer(Buffer):
     # @classmethod
     # def from_array(cls, array: np.ndarray, **kwargs):
     #     return cls(array.shape, array.dtype, data=array, **kwargs)
+
+    @property
+    def comm(self):
+        if self.sf is not None:
+            return self.sf.comm
+        else:
+            return COMM_SELF
 
     @property
     def dtype(self):
@@ -257,10 +252,6 @@ class DistributedBuffer(Buffer):
         )
 
     @property
-    def is_distributed(self) -> bool:
-        return self.comm.size > 1
-
-    @property
     def leaves_valid(self) -> bool:
         return self._leaves_valid
 
@@ -276,7 +267,7 @@ class DistributedBuffer(Buffer):
 
     @property
     def _owned_data(self):
-        if self.is_distributed and self.sf.nleaves > 0:
+        if self.sf is not None and self.sf.nleaves > 0:
             return self._data[: -self.sf.nleaves]
         else:
             return self._data
@@ -376,7 +367,3 @@ class PackedBuffer(Buffer):
     @property
     def dtype(self):
         return self.array.dtype
-
-    @property
-    def is_distributed(self) -> bool:
-        return False
