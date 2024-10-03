@@ -544,8 +544,8 @@ class Axis(LoopIterable, MultiComponentLabelledNode):
     def owned(self):
         return self._tree.owned.root
 
-    def index(self, *, include_ghost_points=False):
-        return self._tree.index(include_ghost_points=include_ghost_points)
+    def index(self):
+        return self._tree.index()
 
     def iter(self, *args, **kwargs):
         return self._tree.iter(*args, **kwargs)
@@ -1478,7 +1478,7 @@ class IndexedAxisTree(BaseAxisTree):
 
     @cached_property
     def _subst_layouts_default(self):
-        return subst_layouts(self, self.target_paths, self.index_exprs, self.layouts)
+        return subst_layouts(self, self.target_path, self.target_exprs, self.layouts)
 
     @property
     def _buffer_indices(self):
@@ -1531,10 +1531,11 @@ class IndexedAxisTree(BaseAxisTree):
         rmap_axes = iterset.add_subtree(self, *iterset.leaf)
         rmap = HierarchicalArray(rmap_axes, dtype=IntType)
         rmap = rmap[loop_index.local_index]
-        for idx in loop_index.iter(include_ghost_points=True):
+        # for idx in loop_index.iter(include_ghost_points=True):
+        for idx in loop_index.iter():
             target_indices = idx.replace_map
             # for p in self.iter(idxs):
-            for p in self.iter([idx], include_ghost_points=True):  # seems to fix thing
+            for p in self.iter([idx]):  # seems to fix thing
                 offset = self.axes.unindexed.offset(
                     p.target_exprs, p.target_path, loop_exprs=target_indices
                 )

@@ -585,17 +585,17 @@ class Map(pytools.ImmutableRecord):
             self.counter += 1
         self.name = name
 
-    def __call__(self, call_index):
+    def __call__(self, index):
         # If the input index is context-free then we should return something context-free
         # TODO: Should be encoded in some mixin type
         # if isinstance(index, ContextFreeIndex):
-        if isinstance(call_index, (ContextFreeIndex, ContextFreeCalledMap)):
+        if isinstance(index, (ContextFreeIndex, ContextFreeCalledMap)):
 
             equiv_domainss = tuple(frozenset(mappings.keys()) for mappings in self.connectivity)
 
             map_targets = []
             empty = True
-            for equiv_call_index_targets in call_index.leaf_target_paths:
+            for equiv_call_index_targets in index.leaf_target_paths:
 
                 domain_index = None
                 for call_index_target in equiv_call_index_targets:
@@ -625,7 +625,7 @@ class Map(pytools.ImmutableRecord):
                         orig_array = orig_component.array
                         leaf_axis, leaf_component_label = orig_array.axes.leaf
                         myslice = Slice(leaf_axis.label, [AffineSliceComponent(leaf_component_label, label=leaf_component_label)], label=self.name)
-                        newarray = orig_component.array[call_index, myslice]
+                        newarray = orig_component.array[index, myslice]
 
                         indexed_component = orig_component.copy(array=newarray)
                         equiv_map_targets.append(indexed_component)
@@ -639,9 +639,9 @@ class Map(pytools.ImmutableRecord):
                     "resulting axes will be empty."
                 )
 
-            return ContextFreeCalledMap(self, call_index, map_targets)
+            return ContextFreeCalledMap(self, index, map_targets)
         else:
-            return CalledMap(self, call_index)
+            return CalledMap(self, index)
 
     @cached_property
     def datamap(self):
@@ -766,20 +766,20 @@ class CalledMap(Identified, Labelled, LoopIterable):
 class ContextFreeCalledMap(Index):
     # FIXME this is clumsy
     # fields = Index.fields | {"map", "index", "leaf_target_paths"} - {"label", "component_labels"}
-    fields = {"map", "index", "targets", "id", "label"}
+    fields = {"map", "from_index", "targets", "id", "label"}
 
-    def __init__(self, map, index, targets, *, id=None, label=None):
+    def __init__(self, map, from_index, targets, *, id=None, label=None):
         super().__init__(id=id, label=label)
         self.map = map
         # better to call it "input_index"?
-        self.index = index
+        self.index = from_index
         self.targets = tuple(targets)
 
         # alias for compat with ContextFreeCalledMap
         self.from_index = from_index
 
         # better name
-        self.call_index = index
+        self.call_index = from_index
 
     @cached_property
     def _source_paths(self):
@@ -1757,8 +1757,8 @@ def _make_leaf_axis_from_called_map(
         my_map_cpt = equiv_map_cpts[-1]
 
         all_skipped = False
-        if isinstance(map_cpt.arity, HierarchicalArray):
-            arity = map_cpt.arity[called_map.from_index]
+        if isinstance(my_map_cpt.arity, HierarchicalArray):
+            arity = my_map_cpt.arity[called_map.from_index]
         else:
             arity = my_map_cpt.arity
         cpt = AxisComponent(arity, label=my_map_cpt.label)

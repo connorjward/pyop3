@@ -33,6 +33,7 @@ from pyop3.lang import (
     WRITE,
     AddAssignment,
     Assignment,
+    ContextAwareLoop,  # TODO: remove this class
     CalledFunction,
     DummyKernelArgument,
     Loop,
@@ -303,8 +304,7 @@ class LoopyCodegenContext(CodegenContext):
 
 class CodegenResult:
     def __init__(self, expr, ir, arg_replace_map, *, compiler_parameters):
-        # NOTE: should this be iterable?
-        self.expr = as_tuple(expr)
+        self.expr = expr
         self.ir = ir
         self.arg_replace_map = arg_replace_map
 
@@ -312,7 +312,7 @@ class CodegenResult:
 
     @cached_property
     def datamap(self):
-        return merge_dicts(e.preprocessed.datamap for e in self.expr)
+        return self.expr.datamap
 
     def __call__(self, **kwargs):
         data_args = []

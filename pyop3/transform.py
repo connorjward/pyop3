@@ -67,32 +67,37 @@ class LoopContextExpander(Transformer):
 
     @_apply.register
     def _(self, loop: Loop, *, context):
-        # this is very similar to what happens in PetscMat.__getitem__
-        outer_context = collections.defaultdict(dict)  # ordered set per index
-        if isinstance(loop.index.iterset, ContextSensitive):
-            for ctx in loop.index.iterset.context_map.keys():
-                for index, paths in ctx.items():
-                    if index in context:
-                        # assert paths == context[index]
-                        continue
-                    else:
-                        outer_context[index][paths] = None
-        # convert ordered set to a list
-        outer_context = {k: tuple(v.keys()) for k, v in outer_context.items()}
-
-        # convert to a product-like structure of [{index: paths, ...}, {index: paths}, ...]
-        outer_context_ = tuple(context_product(outer_context.items()))
-
-        if not outer_context_:
-            outer_context_ = (pmap(),)
-
         loops = []
-        for octx in outer_context_:
-            if isinstance(loop.index, ContextFreeLoopIndex):
-                loop_context = {loop.index.id: loop.index.leaf_target_paths}
-                context_ = context | loop_context
+        if isinstance(loop.index, ContextFreeLoopIndex):
+            cf_iterset = loop.index.iterset
+            loop_context = {loop.index.id: loop.index.leaf_target_paths}
+            context_ = context | loop_context
 
-                statements = []
+            statements = []
+            for stmt in loop.statements:
+                for myctx, mystmt in self._apply(stmt, context=context_):
+                    if myctx:
+                        raise NotImplementedError(
+                            "need to think about how to wrap inner instructions "
+                            "that need outer loops"
+                        )
+                    statements.append(mystmt)
+
+            # loop = L(
+            #     loop.index.copy(iterset=cf_iterset),
+            #     statements,
+            # )
+            loops.append(loop.copy(statements=statements))
+
+        else:
+            raise NotImplementedError
+            assert len(source_paths) > 1
+            statements = {}
+            for source_path, target_path in checked_zip(source_paths, target_paths):
+                context_ = context | {loop.index.id: (source_path, target_path)}
+
+                statements[source_path] = []
+
                 for stmt in loop.statements:
                     for myctx, mystmt in self._apply(stmt, context=context_ | octx):
                         if myctx:
@@ -100,45 +105,23 @@ class LoopContextExpander(Transformer):
                                 "need to think about how to wrap inner instructions "
                                 "that need outer loops"
                             )
-                        statements.append(mystmt)
+                        if mystmt is None:
+                            continue
+                        statements[source_path].append(mystmt)
 
-                # loop = L(
-                #     loop.index.copy(iterset=cf_iterset),
-                #     statements,
-                # )
-                loops.append((octx, loop.copy(statements=statements)))
+        # FIXME this does not propagate inner outer contexts
+        # NOTE: also I think this is redundant, just use a Loop!!!
+        # csloop = ContextAwareLoop(
+        # csloop = Loop(
+        #     loop.index.copy(iterset=cf_iterset),
+        #     statements,
+        #     state="preprocessed",
+        # )
+        # # NOTE: outer context now needs sniffing out, makes the objects nicer
+        # # loops.append((octx, loop))
+        # loops.append(csloop)
 
-            else:
-                raise NotImplementedError
-                assert len(source_paths) > 1
-                statements = {}
-                for source_path, target_path in checked_zip(source_paths, target_paths):
-                    context_ = context | {loop.index.id: (source_path, target_path)}
-
-                    statements[source_path] = []
-
-                    for stmt in loop.statements:
-                        for myctx, mystmt in self._apply(stmt, context=context_ | octx):
-                            if myctx:
-                                raise NotImplementedError(
-                                    "need to think about how to wrap inner instructions "
-                                    "that need outer loops"
-                                )
-                            if mystmt is None:
-                                continue
-                            statements[source_path].append(mystmt)
-
-            # FIXME this does not propagate inner outer contexts
-            # NOTE: also I think this is redundant, just use a Loop!!!
-            csloop = ContextAwareLoop(
-                loop.index.copy(iterset=cf_iterset),
-                statements,
-            )
-            # NOTE: outer context now needs sniffing out, makes the objects nicer
-            # loops.append((octx, loop))
-            loops.append(csloop)
-
-        return LoopList(loops, name=loop.name, state="preprocessed")
+        return LoopList(loops, name=loop.name)
 
     @_apply.register
     def _(self, terminal: CalledFunction, *, context):
@@ -249,7 +232,7 @@ class ImplicitPackUnpackExpander(Transformer):
 
     @_apply.register
     def _(self, loop_list: LoopList):
-        return loop_list.copy(loops=[loop_ for loop in loop_list.loops for loop_ in self._apply(loop)])
+        return loop_list.copy(loops=[self._apply(loop) for loop in loop_list.loops])
 
     # TODO: Should be the same as Assignment
     @_apply.register
@@ -370,6 +353,9 @@ class ImplicitPackUnpackExpander(Transformer):
                 arguments.append(arg)
 
         return (*gathers, terminal.with_arguments(arguments), *scatters)
+
+
+# class ExprMarker
 
 
 # TODO check this docstring renders correctly
