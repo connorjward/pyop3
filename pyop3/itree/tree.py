@@ -776,7 +776,7 @@ class ContextFreeCalledMap(Index):
         self.targets = tuple(targets)
 
         # alias for compat with ContextFreeCalledMap
-        self.from_index = index
+        self.from_index = from_index
 
         # better name
         self.call_index = index
@@ -794,7 +794,7 @@ class ContextFreeCalledMap(Index):
         raise NotImplementedError
         # maybe this line isn't needed?
         # cf_index = self.from_index.with_context(context, axes)
-        cf_index = self.index
+        cf_index = self.from_index
         leaf_target_paths = tuple(
             freeze({mcpt.target_axis: mcpt.target_component})
             for path in cf_index.leaf_target_paths
@@ -812,6 +812,23 @@ class ContextFreeCalledMap(Index):
     @property
     def name(self) -> str:
         return self.map.name
+
+    def index(self) -> LoopIndex | ContextFreeLoopIndex:
+        index_forest = as_index_forest(self)
+        assert index_forest.keys() == {pmap()}
+        index_tree = index_forest[pmap()]
+        iterset = index_axes(index_tree, pmap())
+
+        # The loop index from a context-free map can be context-sensitive if it
+        # has multiple components.
+        if len(iterset.leaves) == 1:
+            path = iterset.path(*iterset.leaf)
+            target_path = {}
+            for ax, cpt in iterset.path_with_nodes(*iterset.leaf).items():
+                target_path.update(iterset.target_paths.get((ax.id, cpt), {}))
+            return ContextFreeLoopIndex(iterset, path, target_path)
+        else:
+            return LoopIndex(iterset)
 
     # is this ever used?
     # @property
@@ -1735,11 +1752,13 @@ def _make_leaf_axis_from_called_map(
     layout_exprs_per_cpt = collections.defaultdict(list)
     extra_index_exprs = {}  # not used?
 
+    all_skipped = True
     for equiv_map_cpts in called_map.targets:
         my_map_cpt = equiv_map_cpts[-1]
-        # TODO: Do this earlier
-        if isinstance(my_map_cpt.arity, HierarchicalArray):
-            arity = my_map_cpt.arity[called_map.index]
+
+        all_skipped = False
+        if isinstance(map_cpt.arity, HierarchicalArray):
+            arity = map_cpt.arity[called_map.from_index]
         else:
             arity = my_map_cpt.arity
         cpt = AxisComponent(arity, label=my_map_cpt.label)
@@ -1860,7 +1879,8 @@ def index_axes(
         prev_axes=axes,
     )
 
-    outer_loops += axes.outer_loops
+    if axes is not None:
+        outer_loops += axes.outer_loops
 
     # drop duplicates
     outer_loops_ = []
@@ -1878,7 +1898,6 @@ def index_axes(
     # my_index_exprs = _acc_target_paths(indexed_axes, index_exprs)
 
     return indexed_axes, target_paths, target_exprs
-
 
 def restrict_targets(targets, indexed_axes, orig_axes, *, axis=None) -> PMap:
     restricted = collections.defaultdict(dict)
@@ -2418,37 +2437,37 @@ def partition_iterset(index: LoopIndex, arrays):
     # for p in index.iterset.iter():
     #     # hack because I wrote bad code and mix up loop indices and itersets
     #     p = dataclasses.replace(p, index=index)
-    for p in index.iter():
-        parindex = p.source_exprs[paraxis.label]
-        assert isinstance(parindex, numbers.Integral)
-
-        for array in arrays:
-            # same nasty hack
-            if isinstance(array, (Mat, Sparsity)) or not hasattr(array, "buffer"):
-                continue
-            # skip purely local arrays
-            if not array.buffer.is_distributed:
-                continue
-            if labels[parindex] == IterationPointType.LEAF:
-                continue
-
-            # loop over stencil
-            array = array.with_context({index.id: (p.source_path, p.target_path)})
-
-            for q in array.axes.iter({p}):
-                # offset = array.axes.offset(q.target_exprs, q.target_path)
-                offset = array.axes.offset(q.source_exprs, q.source_path, loop_exprs=p.replace_map)
-
-                point_label = is_root_or_leaf_per_array[array.name][offset]
-                if point_label == ArrayPointLabel.LEAF:
-                    labels[parindex] = IterationPointType.LEAF
-                    break  # no point doing more analysis
-                elif point_label == ArrayPointLabel.ROOT:
-                    assert labels[parindex] != IterationPointType.LEAF
-                    labels[parindex] = IterationPointType.ROOT
-                else:
-                    assert point_label == ArrayPointLabel.CORE
-                    pass
+    # for p in index.iter():
+    #     parindex = p.source_exprs[paraxis.label]
+    #     assert isinstance(parindex, numbers.Integral)
+    #
+    #     for array in arrays:
+    #         # same nasty hack
+    #         if isinstance(array, (Mat, Sparsity)) or not hasattr(array, "buffer"):
+    #             continue
+    #         # skip purely local arrays
+    #         if not array.buffer.is_distributed:
+    #             continue
+    #         if labels[parindex] == IterationPointType.LEAF:
+    #             continue
+    #
+    #         # loop over stencil
+    #         array = array.with_context({index.id: (p.source_path, p.target_path)})
+    #
+    #         for q in array.axes.iter({p}):
+    #             # offset = array.axes.offset(q.target_exprs, q.target_path)
+    #             offset = array.axes.offset(q.source_exprs, q.source_path, loop_exprs=p.replace_map)
+    #
+    #             point_label = is_root_or_leaf_per_array[array.name][offset]
+    #             if point_label == ArrayPointLabel.LEAF:
+    #                 labels[parindex] = IterationPointType.LEAF
+    #                 break  # no point doing more analysis
+    #             elif point_label == ArrayPointLabel.ROOT:
+    #                 assert labels[parindex] != IterationPointType.LEAF
+    #                 labels[parindex] = IterationPointType.ROOT
+    #             else:
+    #                 assert point_label == ArrayPointLabel.CORE
+    #                 pass
 
     parcpt = just_one(paraxis.components)  # for now
 
@@ -2456,9 +2475,14 @@ def partition_iterset(index: LoopIndex, arrays):
     # core = just_one(np.nonzero(labels == IterationPointType.CORE))
     # root = just_one(np.nonzero(labels == IterationPointType.ROOT))
     # leaf = just_one(np.nonzero(labels == IterationPointType.LEAF))
-    core = np.asarray([], dtype=IntType)
-    root = np.asarray([], dtype=IntType)
-    leaf = np.arange(paraxis.size, dtype=IntType)
+    # core = np.asarray([], dtype=IntType)
+    # root = np.asarray([], dtype=IntType)
+    # leaf = np.arange(paraxis.size, dtype=IntType)
+
+    # hack to check things
+    core = np.asarray([0], dtype=IntType)
+    root = np.asarray([1], dtype=IntType)
+    leaf = np.arange(2, paraxis.size, dtype=IntType)
 
     subsets = []
     for data in [core, root, leaf]:
@@ -2471,6 +2495,7 @@ def partition_iterset(index: LoopIndex, arrays):
         )
         subsets.append(subset)
     subsets = tuple(subsets)
+    return "not used", subsets
 
     # make a new iteration set over just these indices
     # index with just core (arbitrary)

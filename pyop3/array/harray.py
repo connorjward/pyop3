@@ -34,6 +34,7 @@ class IncompatibleShapeError(Exception):
     """TODO, also bad name"""
 
 
+# TODO: not sure this is needed, can a Dat just be one of these?
 class ArrayVar(pym.primitives.AlgebraicLeaf):
     mapper_method = sys.intern("map_array")
 
@@ -60,11 +61,11 @@ from pymbolic.mapper.stringifier import PREC_CALL, PREC_NONE, StringifyMapper
 # This was adapted from pymbolic's map_subscript
 def stringify_array(self, array, enclosing_prec, *args, **kwargs):
     index_str = self.join_rec(
-        ", ", array.index_exprs.values(), PREC_NONE, *args, **kwargs
+        ", ", array.indices.values(), PREC_NONE, *args, **kwargs
     )
 
     return self.parenthesize_if_needed(
-        self.format("%s[%s]", array.name, index_str), enclosing_prec, PREC_CALL
+        self.format("%s[%s]", array.array.name, index_str), enclosing_prec, PREC_CALL
     )
 
 
@@ -407,17 +408,7 @@ class HierarchicalArray(Array, KernelArgument):
 
     def materialize(self) -> HierarchicalArray:
         """Return a new "unindexed" array with the same shape."""
-        # "unindexed" axis tree
-        # strip parallel semantics (in a bad way)
-        parent_to_children = collections.defaultdict(list)
-        for p, cs in self.axes.parent_to_children.items():
-            for c in cs:
-                if c is not None and c.sf is not None:
-                    c = c.copy(sf=None)
-                parent_to_children[p].append(c)
-
-        axes = AxisTree(parent_to_children)
-        return type(self)(axes, dtype=self.dtype)
+        return type(self)(self.axes.materialize(), dtype=self.dtype)
 
     def iter_indices(self, outer_map):
         from pyop3.itree.tree import iter_axis_tree

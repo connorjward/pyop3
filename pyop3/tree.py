@@ -248,6 +248,7 @@ class MultiComponentLabelledNode(Node, Labelled):
 class LabelledTree(AbstractTree):
     def __init__(self, node_map=None):
         super().__init__(node_map=node_map)
+        self._cache = {}
 
         # post-init checks
         self._check_node_labels_unique_in_paths(self.node_map)

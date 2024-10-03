@@ -2,38 +2,25 @@ from __future__ import annotations
 
 import abc
 import contextlib
+import dataclasses
 import enum
 import functools
 import numbers
 import textwrap
 from functools import cached_property
-from typing import Any, Dict, FrozenSet, Optional, Sequence, Tuple, Union
+from typing import Any
 
 import loopy as lp
-import loopy.symbolic
 import numpy as np
 import pymbolic as pym
 from pyrsistent import freeze, pmap
 
 from pyop3.array import HierarchicalArray
 from pyop3.array.petsc import AbstractMat, Sparsity
-from pyop3.axtree import Axis, AxisComponent, AxisTree, AxisVar, ContextFree
-from pyop3.axtree.tree import subst_layouts
 from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
 from pyop3.config import config
 from pyop3.dtypes import IntType
-from pyop3.itree import (
-    AffineSliceComponent,
-    CalledMap,
-    Index,
-    IndexTree,
-    LocalLoopIndex,
-    LoopIndex,
-    Map,
-    Slice,
-    Subset,
-    TabulatedMapComponent,
-)
+from pyop3.ir.transform import with_likwid_markers, with_petsc_event
 from pyop3.lang import (
     INC,
     MAX_RW,
@@ -49,6 +36,7 @@ from pyop3.lang import (
     CalledFunction,
     DummyKernelArgument,
     Loop,
+    LoopList,
     PetscMatAdd,
     PetscMatInstruction,
     PetscMatLoad,
@@ -56,6 +44,7 @@ from pyop3.lang import (
     ReplaceAssignment,
 )
 from pyop3.log import logger
+from pyop3.target import compile_loopy
 from pyop3.utils import (
     KeyAlreadyExistsException,
     PrettyTuple,
@@ -170,6 +159,7 @@ class LoopyCodegenContext(CodegenContext):
             id=self._name_generator(prefix),
             within_inames=frozenset(self._within_inames),
             depends_on=self._depends_on,
+            depends_on_is_final=True,
         )
         self._add_instruction(insn)
 
@@ -312,26 +302,26 @@ class LoopyCodegenContext(CodegenContext):
 
 
 class CodegenResult:
-    def __init__(self, expr, ir, arg_replace_map):
+    def __init__(self, expr, ir, arg_replace_map, *, compiler_parameters):
+        # NOTE: should this be iterable?
         self.expr = as_tuple(expr)
         self.ir = ir
         self.arg_replace_map = arg_replace_map
 
+        self._exec = compile_loopy(self.ir, pyop3_compiler_parameters=compiler_parameters)
+
     @cached_property
     def datamap(self):
-        return merge_dicts(e.datamap for e in self.expr)
+        return merge_dicts(e.preprocessed.datamap for e in self.expr)
 
     def __call__(self, **kwargs):
-        from pyop3.target import compile_loopy
-
         data_args = []
         for kernel_arg in self.ir.default_entrypoint.args:
             actual_arg_name = self.arg_replace_map[kernel_arg.name]
             array = kwargs.get(actual_arg_name, self.datamap[actual_arg_name])
             data_args.append(_as_pointer(array))
-        func = compile_loopy(self.ir)
         if len(data_args) > 0:
-            func(*data_args)
+            self._exec(*data_args)
 
     def target_code(self, target):
         raise NotImplementedError("TODO")
@@ -386,35 +376,61 @@ class BinarySearchCallable(lp.ScalarCallable):
         return
 
 
-# prefer generate_code?
-def compile(expr: Instruction, name="mykernel"):
-    # preprocess expr before lowering
-    from pyop3.transform import expand_implicit_pack_unpack, expand_loop_contexts
+@dataclasses.dataclass(frozen=True)
+class CompilerParameters:
+    # NOTE: This sort of thing could have a default set from the config
+    # dict (but do not use PYOP3_USE_LIKWID as that's a separate option).
+    add_likwid_markers: bool = False
+    add_petsc_event: bool = False
 
-    cs_expr = expand_loop_contexts(expr)
+
+def parse_compiler_parameters(compiler_parameters) -> CompilerParameters:
+    if compiler_parameters is None:
+        compiler_parameters = {}
+
+    # TODO: Can do extensive error checking here, maybe loop over the dataclass fields
+    return CompilerParameters(**compiler_parameters)
+
+
+# prefer generate_code?
+def compile(expr: Instruction, compiler_parameters=None):
+    compiler_parameters = parse_compiler_parameters(compiler_parameters)
+
+    function_name = expr.name
+
+    if isinstance(expr, LoopList):
+        cs_expr = expr.loops
+    else:
+        assert isinstance(expr, Loop), "other types not handled yet"
+        cs_expr = (expr,)
+
     ctx = LoopyCodegenContext()
-    for context, expr in cs_expr:
-        expr = expand_implicit_pack_unpack(expr)
+    # NOTE: so I think LoopCollection is a better abstraction here - don't want to be
+    # explicitly dealing with contexts at this point. Can always sniff them out again.
+    # for context, ex in cs_expr:
+    for ex in cs_expr:
+        # ex = expand_implicit_pack_unpack(ex)
 
         # add external loop indices as kernel arguments
+        # FIXME: removed because cs_expr needs to sniff the context now
         loop_indices = {}
-        for index, (path, _) in context.items():
-            if len(path) > 1:
-                raise NotImplementedError("needs to be sorted")
+        # for index, (path, _) in context.items():
+        #     if len(path) > 1:
+        #         raise NotImplementedError("needs to be sorted")
+        #
+        #     # dummy = HierarchicalArray(index.iterset, data=NullBuffer(IntType))
+        #     dummy = HierarchicalArray(Axis(1), dtype=IntType)
+        #     # this is dreadful, pass an integer array instead
+        #     ctx.add_argument(dummy)
+        #     myname = ctx.actual_to_kernel_rename_map[dummy.name]
+        #     replace_map = {
+        #         axis: pym.subscript(pym.var(myname), (i,))
+        #         for i, axis in enumerate(path.keys())
+        #     }
+        #     # FIXME currently assume that source and target exprs are the same, they are not!
+        #     loop_indices[index] = (replace_map, replace_map)
 
-            # dummy = HierarchicalArray(index.iterset, data=NullBuffer(IntType))
-            dummy = HierarchicalArray(Axis(1), dtype=IntType)
-            # this is dreadful, pass an integer array instead
-            ctx.add_argument(dummy)
-            myname = ctx.actual_to_kernel_rename_map[dummy.name]
-            replace_map = {
-                axis: pym.subscript(pym.var(myname), (i,))
-                for i, axis in enumerate(path.keys())
-            }
-            # FIXME currently assume that source and target exprs are the same, they are not!
-            loop_indices[index] = (replace_map, replace_map)
-
-        for e in as_tuple(expr):
+        for e in as_tuple(ex): # TODO: get rid of this loop
             # context manager?
             ctx.set_temporary_shapes(_collect_temporary_shapes(e))
             _compile(e, loop_indices, ctx)
@@ -453,22 +469,29 @@ def compile(expr: Instruction, name="mykernel"):
         ctx.domains,
         ctx.instructions,
         ctx.arguments,
-        name=name,
+        name=function_name,
         target=LOOPY_TARGET,
         lang_version=LOOPY_LANG_VERSION,
         preambles=preambles,
         # options=lp.Options(check_dep_resolution=False),
     )
-    tu = lp.merge((translation_unit, *ctx.subkernels))
+
+    entrypoint = translation_unit.default_entrypoint
+    if compiler_parameters.add_likwid_markers:
+        entrypoint = with_likwid_markers(entrypoint)
+    if compiler_parameters.add_petsc_event:
+        entrypoint = with_petsc_event(entrypoint)
+    translation_unit = translation_unit.with_kernel(entrypoint)
+
+    translation_unit = lp.merge((translation_unit, *ctx.subkernels))
 
     # add callables
     # tu = lp.register_callable(tu, "bsearch", BinarySearchCallable())
 
-    tu = tu.with_entrypoints(name)
+    # needed?
+    translation_unit = translation_unit.with_entrypoints(entrypoint.name)
 
-    # breakpoint()
-
-    return CodegenResult(expr, tu, ctx.kernel_to_actual_rename_map)
+    return CodegenResult(expr, translation_unit, ctx.kernel_to_actual_rename_map, compiler_parameters=compiler_parameters)
 
 
 # put into a class in transform.py?
@@ -477,11 +500,26 @@ def _collect_temporary_shapes(expr):
     raise TypeError(f"No handler defined for {type(expr).__name__}")
 
 
+# TODO: get rid of this type
 @_collect_temporary_shapes.register
 def _(expr: Loop):
     shapes = {}
     for statement in expr.statements:
         for temp, shape in _collect_temporary_shapes(statement).items():
+            if shape is None:
+                continue
+            if temp in shapes:
+                assert shapes[temp] == shape
+            else:
+                shapes[temp] = shape
+    return shapes
+
+
+@_collect_temporary_shapes.register
+def _(expr: Loop):
+    shapes = {}
+    for stmt in expr.statements:
+        for temp, shape in _collect_temporary_shapes(stmt).items():
             if shape is None:
                 continue
             if temp in shapes:
@@ -518,9 +556,10 @@ def _compile(expr: Any, loop_indices, ctx: LoopyCodegenContext) -> None:
     raise TypeError(f"No handler defined for {type(expr).__name__}")
 
 
-@_compile.register
+@_compile.register(ContextAwareLoop)  # remove
+@_compile.register(Loop)
 def _(
-    loop: Loop,
+    loop,
     loop_indices,
     codegen_context: LoopyCodegenContext,
 ) -> None:
@@ -773,10 +812,10 @@ def _(assignment, loop_indices, codegen_context):
     else:
         csize_var = csize
 
-    rlayouts = rmap.axes.subst_layouts[pmap()]
+    rlayouts = rmap.axes.subst_layouts()[pmap()]
     roffset = JnameSubstitutor(loop_indices, codegen_context)(rlayouts)
 
-    clayouts = cmap.axes.subst_layouts[pmap()]
+    clayouts = cmap.axes.subst_layouts()[pmap()]
     coffset = JnameSubstitutor(loop_indices, codegen_context)(clayouts)
 
     irow = f"{rmap_name}[{roffset}]"
@@ -922,8 +961,12 @@ def add_leaf_assignment(
 
 
 def make_array_expr(array, path, inames, ctx):
+    # TODO: This should be propagated as an option - we don't always want to optimise
+    # TODO: Disabled optimising for now since I can't get it to work without a
+    # symbolic language. That has to be future work.
     array_offset = make_offset_expr(
-        array.axes.subst_layouts[path],
+        # array.axes.subst_layouts(optimize=True)[path],
+        array.axes.subst_layouts(optimize=False)[path],
         inames,
         ctx,
     )

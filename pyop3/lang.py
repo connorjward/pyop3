@@ -64,6 +64,12 @@ MAX_WRITE = Intent.MAX_WRITE
 NA = Intent.NA
 
 
+class ExpressionState(enum.Enum):
+    """Enum indicating the state of an expression (preprocessed or not)."""
+    INITIAL = "initial"
+    PREPROCESSED = "preprocessed"
+
+
 # TODO: This exception is not actually ever raised. We should check the
 # intents of the kernel arguments and complain if something illegal is
 # happening.
@@ -103,7 +109,32 @@ class Pack(KernelArgument, ContextFree):
 
 
 class Instruction(UniqueRecord, abc.ABC):
-    pass
+    fields = UniqueRecord.fields | {"state"}
+
+    @cached_property
+    def preprocessed(self):
+        from pyop3.transform import expand_implicit_pack_unpack, expand_loop_contexts
+
+        if self.state == ExpressionState.PREPROCESSED:
+            return self
+        else:
+            insn = self
+            insn = expand_loop_contexts(insn)
+            insn = expand_implicit_pack_unpack(insn)
+            # TODO: should make marking things as preprocessed be an extra stage, currently do in expand_loop_contexts which is a bug
+            return insn
+
+    @property
+    def is_preprocessed(self):
+        return self.state == ExpressionState.PREPROCESSED
+
+    @cached_property
+    def loopy_code(self):
+        from pyop3.ir.lower import compile
+
+        return compile(self.preprocessed)
+
+
 
 
 class ContextAwareInstruction(Instruction):
@@ -118,8 +149,11 @@ class ContextAwareInstruction(Instruction):
     #     pass
 
 
+_DEFAULT_LOOP_NAME = "pyop3_loop"
+
+
 class Loop(Instruction):
-    fields = Instruction.fields | {"index", "statements"}
+    fields = Instruction.fields | {"index", "statements", "compiler_parameters", "name"}
 
     # doubt that I need an ID here
     id_generator = pytools.UniqueNameGenerator()
@@ -128,31 +162,39 @@ class Loop(Instruction):
         self,
         index: LoopIndex,
         statements: Iterable[Instruction],
+        *,
+        name: str = _DEFAULT_LOOP_NAME,
+        compiler_parameters=None,
+        state: ExpressionState = ExpressionState.INITIAL,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.index = index
         self.statements = as_tuple(statements)
+        self.name = name
+        self.compiler_parameters = compiler_parameters
+        self.state = state
 
     def __call__(self, **kwargs):
         # TODO just parse into ContextAwareLoop and call that
         from pyop3.ir.lower import compile
         from pyop3.itree.tree import partition_iterset
 
-        if self.is_parallel:
+        code = compile(self.preprocessed, compiler_parameters=self.compiler_parameters)
+
+        if False:
+        # if self.is_parallel:
             # FIXME: The partitioning code does not seem to always run properly
             # so for now do all the transfers in advance.
             # interleave computation and communication
-            # new_index, (icore, iroot, ileaf) = partition_iterset(
-            #     self.index, [a for a, _ in self.function_arguments]
-            # )
+            new_index, (icore, iroot, ileaf) = partition_iterset(
+                self.index, [a for a, _ in self.function_arguments]
+            )
             #
             # assert self.index.id == new_index.id
             #
             # # substitute subsets into loopexpr, should maybe be done in partition_iterset
             # parallel_loop = self.copy(index=new_index)
-            # code = compile(parallel_loop)
-            code = compile(self)
 
             # interleave communication and computation
             initializers, reductions, broadcasts = self._array_updates()
@@ -161,11 +203,13 @@ class Loop(Instruction):
                 init()
 
             # replace the parallel axis subset with one for the specific indices here
-            # extent = just_one(icore.axes.root.components).count
-            # core_kwargs = merge_dicts(
-            #     [kwargs, {icore.name: icore, extent.name: extent}]
-            # )
-            # code(**core_kwargs)
+            extent = just_one(icore.axes.root.components).count
+            core_kwargs = merge_dicts(
+                [kwargs, {icore.name: icore, extent.name: extent}]
+            )
+
+            with PETSc.Log.Event(f"compute_{self.name}_core"):
+                code(**core_kwargs)
 
             # await reductions
             for red in reductions:
@@ -173,34 +217,29 @@ class Loop(Instruction):
 
             # roots
             # replace the parallel axis subset with one for the specific indices here
-            # root_extent = just_one(iroot.axes.root.components).count
-            # root_kwargs = merge_dicts(
-            #     [kwargs, {icore.name: iroot, extent.name: root_extent}]
-            # )
-            # code(**root_kwargs)
+            root_extent = just_one(iroot.axes.root.components).count
+            root_kwargs = merge_dicts(
+                [kwargs, {icore.name: iroot, extent.name: root_extent}]
+            )
+            with PETSc.Log.Event(f"compute_{self.name}_root"):
+                code(**root_kwargs)
 
             # await broadcasts
             for broadcast in broadcasts:
                 broadcast()
 
             # leaves
-            # leaf_extent = just_one(ileaf.axes.root.components).count
-            # leaf_kwargs = merge_dicts(
-            #     [kwargs, {icore.name: ileaf, extent.name: leaf_extent}]
-            # )
-            # code(**leaf_kwargs)
-
-            code(**kwargs)
+            leaf_extent = just_one(ileaf.axes.root.components).count
+            leaf_kwargs = merge_dicts(
+                [kwargs, {icore.name: ileaf, extent.name: leaf_extent}]
+            )
+            with PETSc.Log.Event(f"compute_{self.name}_leaf"):
+                code(**leaf_kwargs)
 
             # also may need to eagerly assemble Mats, or be clever and spike the accessors?
         else:
-            compile(self)(**kwargs)
-
-    @cached_property
-    def loopy_code(self):
-        from pyop3.ir.lower import compile
-
-        return compile(self)
+            with PETSc.Log.Event(f"compute_{self.name}_serial"):
+                code(**kwargs)
 
     @cached_property
     def datamap(self) -> PMap:
@@ -349,6 +388,13 @@ class Loop(Instruction):
 
         return tuple(initializers), tuple(reductions), tuple(broadcasts)
 
+    @cached_property
+    def datamap(self):
+        if self.is_preprocessed:
+            return self.index.datamap | merge_dicts(stmt.datamap for stmt in self.statements)
+        else:
+            return self.preprocessed.datamap
+
 
 class ContextAwareLoop(ContextAwareInstruction):
     fields = Instruction.fields | {"index", "statements"}
@@ -370,6 +416,20 @@ class ContextAwareLoop(ContextAwareInstruction):
         from pyop3.ir.lower import compile
 
         return compile(self)
+
+
+class LoopList(Instruction):
+    fields = Instruction.fields | {"loops"}
+
+    def __init__(self, loops, *, name=_DEFAULT_LOOP_NAME, state=ExpressionState.INITIAL, **kwargs):
+        super().__init__(**kwargs)
+        self.loops = loops
+        self.name = name
+        self.state = ExpressionState(state)
+
+    @cached_property
+    def datamap(self):
+        return merge_dicts(l.datamap for l in self.loops)
 
 
 # TODO singledispatch

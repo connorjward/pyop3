@@ -451,7 +451,9 @@ class AbstractMat(Array):
             dropped_ckeys = set()
 
         # TODO: are dropped_rkeys and dropped_ckeys still needed?
+        # FIXME: this whole thing falls apart if we have multiple loop contexts
         loop_index = just_one(self.block_raxes.outer_loops)
+
         iterset = AxisTree(loop_index.iterset.node_map)
 
         rmap_axes = iterset.add_subtree(self.block_raxes, *iterset.leaf)

@@ -20,6 +20,7 @@ import numpy as np
 import pymbolic as pym
 import pyrsistent
 import pytools
+from cachetools import cachedmethod
 from mpi4py import MPI
 from petsc4py import PETSc
 from pyrsistent import freeze, pmap, thaw
@@ -192,7 +193,7 @@ class ExpressionEvaluator(pym.mapper.evaluator.EvaluationMapper):
         # layout_subst = array.axes.subst_layouts[array_var.path]
 
         path, = array.axes.leaf_paths
-        layout_subst = array.axes.subst_layouts[path]
+        layout_subst = array.axes.subst_layouts()[path]
 
         # offset = ExpressionEvaluator(indices, self._loop_exprs)(layout_subst)
         # offset = ExpressionEvaluator(self.context | indices, self._loop_exprs)(layout_subst)
@@ -209,6 +210,95 @@ class ExpressionEvaluator(pym.mapper.evaluator.EvaluationMapper):
 
     def map_loop_index(self, expr):
         return self._loop_exprs[expr.id][expr.axis]
+
+
+class ExpressionFlatteningCollector(pym.mapper.Mapper):
+    def map_array(self, expr):
+        needs_flattening = False
+        for index_expr in expr.indices.values():
+            subexpr, _ = self.rec(index_expr)
+            needs_flattening = needs_flattening or subexpr is not None
+        return (expr, needs_flattening)
+
+    def map_axis_variable(self, var):
+        return (None, False)
+
+    map_constant = map_axis_variable
+    map_loop_index = map_axis_variable
+
+    def map_sum(self, expr):
+        replace_expr = None
+        needs_flattening = False
+        for child in expr.children:
+            subexpr, needs_flattening_ = self.rec(child)
+            if subexpr is not None:
+                if replace_expr is None:
+                    replace_expr = subexpr
+                    needs_flattening = needs_flattening_
+                else:
+                    replace_expr = expr
+                    needs_flattening = needs_flattening or needs_flattening_
+
+        return (replace_expr, needs_flattening)
+
+    map_product = map_sum
+
+
+# TODO: This is not the right way to do this - pymbolic is not an adequate
+# symbolic language for pyop3.
+def eval_expr(expr):
+    """Convert an array expression into an array."""
+    from pyop3 import HierarchicalArray
+
+    axes_iter, loop_index = axes_from_expr(expr)
+    axes = AxisTree.from_iterable(axes_iter)
+
+    result = HierarchicalArray(axes, dtype=IntType)
+    for ploop in loop_index.iter():
+        for p in axes.iter({ploop}):
+            evaluator = ExpressionEvaluator(p.source_exprs, loop_exprs=ploop.replace_map)
+            num = evaluator(expr)
+            breakpoint()
+            result.set_value(p.source_exprs, num)
+    breakpoint()
+    return result
+
+
+# NOTE: This is a horrendous hack to rebuild structure from expressions. The
+# right way to do this is to have a pyop3 symbolic language where constructs
+# like Sum carries information about things like shape and dtype.
+class AxisBuilder(pym.mapper.Mapper):
+    def map_constant(self, expr):
+        return None, None
+
+    def map_array(self, expr):
+        if len(expr.indices) == 1:
+            return self.rec(just_one(expr.indices.values()))
+        else:
+            # For now limit ourselves to these cases - ultimately this should
+            # all go.
+            assert len(expr.indices) == 2
+
+            shape = expr.array.axes.leaf_component.count
+            subresult = self.rec(just_one([i for i in expr.indices.values() if not isinstance(i, AxisVariable)]))
+            return (subresult[0] + (shape,), subresult[1])
+
+    def map_loop_index(self, expr):
+        assert expr.index.iterset.depth == 1  # for now
+        return ((expr.index.iterset.materialize().root,), expr.index)
+
+
+def axes_from_expr(expr):
+    return AxisBuilder()(expr)
+
+
+# NOTE: I have identical classes all over the place for this
+class ExpressionReplacer(pym.mapper.IdentityMapper):
+    def __init__(self, replace_map):
+        self._replace_map = replace_map
+
+    def map_variable(self, var):
+        return self._replace_map.get(var, var)
 
 
 # This can just be replaced by component.datamap
@@ -755,8 +845,30 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
 
     @property
     @abc.abstractmethod
-    def subst_layouts(self):
+    def _subst_layouts_default(self):
         pass
+
+    # NOTE: Shouldn't be a boolean here as there are different optimisation options.
+    # In particular we can choose to compress multiple maps either only with non-increasing
+    # arity (arity * 1), or not (which leads to a larger array: arity * arity).
+    @cachedmethod(cache=lambda self: self._cache)
+    def subst_layouts(self, optimize=False):
+        if optimize:
+            layouts_opt = {}
+            collector = ExpressionFlatteningCollector()
+            for key, layout in self._subst_layouts_default.items():
+                replace_expr, needs_flattening = collector(layout)
+                if needs_flattening:
+                    target_expr = eval_expr(replace_expr)
+                    replace_map = {replace_expr: target_expr}
+                    breakpoint()
+                    layout_opt = ExpressionReplacer(replace_map)(layout)
+                else:
+                    layout_opt = layout
+                layouts_opt[key] = layout_opt
+            return freeze(layouts_opt)
+        else:
+            return self._subst_layouts_default
 
     def index(self):
         from pyop3.itree.tree import ContextFreeLoopIndex, LoopIndex
@@ -846,19 +958,35 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
                 for expr in index_exprs.values():
                     for array in MultiArrayCollector()(expr):
                         dmap.update(array.datamap)
-        for layout_expr in self.layouts.values():
-            for array in MultiArrayCollector()(layout_expr):
-                dmap.update(array.datamap)
+        # TODO: cleanup, indexed axis trees (from map.index()) do not have layouts
+        if not isinstance(self, IndexedAxisTree) or self.unindexed is not None:
+            for layout_expr in self.layouts.values():
+                for array in MultiArrayCollector()(layout_expr):
+                    dmap.update(array.datamap)
         return pmap(dmap)
 
     def as_tree(self):
         return self
 
+    @abc.abstractmethod
+    def materialize(self):
+        """Return a new "unindexed" axis tree with the same shape."""
+        # "unindexed" axis tree
+        # strip parallel semantics (in a bad way)
+        parent_to_children = collections.defaultdict(list)
+        for p, cs in self.axes.parent_to_children.items():
+            for c in cs:
+                if c is not None and c.sf is not None:
+                    c = c.copy(sf=None)
+                parent_to_children[p].append(c)
+
+        axes = AxisTree(parent_to_children)
+
     def offset(self, indices, path=None, *, loop_exprs=pmap()):
         from pyop3.axtree.layout import eval_offset
         return eval_offset(
             self,
-            self.subst_layouts,
+            self.subst_layouts(),
             indices,
             path,
             loop_exprs=loop_exprs,
@@ -1094,6 +1222,9 @@ class AxisTree(MutableLabelledTreeMixin, BaseAxisTree):
             dmap = postvisit(self, _collect_datamap, axes=self)
         return freeze(dmap)
 
+    def materialize(self):
+        return self
+
     def add_axis(self, axis, parent_axis, parent_component=None, *, uniquify=False):
         parent_axis = self._as_node(parent_axis)
         if parent_component is not None:
@@ -1165,7 +1296,7 @@ class AxisTree(MutableLabelledTreeMixin, BaseAxisTree):
         return freeze(layouts_)
 
     @property
-    def subst_layouts(self):
+    def _subst_layouts_default(self):
         return self.layouts
 
     @cached_property
@@ -1331,9 +1462,23 @@ class IndexedAxisTree(BaseAxisTree):
 
         return loop_axes, freeze(loop_vars)
 
+    def materialize(self):
+        """Return a new "unindexed" axis tree with the same shape."""
+        # "unindexed" axis tree
+        # strip parallel semantics (in a bad way)
+        parent_to_children = collections.defaultdict(list)
+        for p, cs in self.node_map.items():
+            for c in cs:
+                if c is not None and c.sf is not None:
+                    c = c.copy(sf=None)
+                parent_to_children[p].append(c)
+
+        return AxisTree(parent_to_children)
+
+
     @cached_property
-    def subst_layouts(self):
-        return subst_layouts(self, self.target_path, self.target_exprs, self.layouts)
+    def _subst_layouts_default(self):
+        return subst_layouts(self, self.target_paths, self.index_exprs, self.layouts)
 
     @property
     def _buffer_indices(self):
