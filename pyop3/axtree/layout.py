@@ -120,7 +120,7 @@ def size_requires_external_index(axes, axis, component, inner_loop_vars, path=pm
             leafpath = pmap()
         else:
             leafpath = just_one(count.axes.leaf_paths)
-        layout = count.axes.subst_layouts[leafpath]
+        layout = count.axes._subst_layouts_default[leafpath]
         required_loop_vars = LoopIndexCollector(linear=False)(layout)
         if not required_loop_vars.issubset(inner_loop_vars):
             return True
