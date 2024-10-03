@@ -25,6 +25,7 @@ from pyop3.lang import (
     DummyKernelArgument,
     Instruction,
     Loop,
+    LoopList,
     Pack,
     PetscMatAdd,
     PetscMatInstruction,
@@ -33,7 +34,7 @@ from pyop3.lang import (
     ReplaceAssignment,
     Terminal,
 )
-from pyop3.utils import UniqueNameGenerator, checked_zip, just_one
+from pyop3.utils import UniqueNameGenerator, checked_zip, just_one, single_valued
 
 
 # TODO Is this generic for other parsers/transformers? Esp. lower.py
@@ -127,12 +128,16 @@ class LoopContextExpander(Transformer):
                             statements[source_path].append(mystmt)
 
             # FIXME this does not propagate inner outer contexts
-            loop = ContextAwareLoop(
+            # NOTE: also I think this is redundant, just use a Loop!!!
+            csloop = ContextAwareLoop(
                 loop.index.copy(iterset=cf_iterset),
                 statements,
             )
-            loops.append((octx, loop))
-        return tuple(loops)
+            # NOTE: outer context now needs sniffing out, makes the objects nicer
+            # loops.append((octx, loop))
+            loops.append(csloop)
+
+        return LoopList(loops, name=loop.name, state="preprocessed")
 
     @_apply.register
     def _(self, terminal: CalledFunction, *, context):
@@ -246,6 +251,10 @@ class ImplicitPackUnpackExpander(Transformer):
                 }
             ),
         )
+
+    @_apply.register
+    def _(self, loop_list: LoopList):
+        return loop_list.copy(loops=[loop_ for loop in loop_list.loops for loop_ in self._apply(loop)])
 
     # TODO: Should be the same as Assignment
     @_apply.register

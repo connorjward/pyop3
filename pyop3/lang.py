@@ -62,6 +62,12 @@ MAX_WRITE = Intent.MAX_WRITE
 NA = Intent.NA
 
 
+class ExpressionState(enum.Enum):
+    """Enum indicating the state of an expression (preprocessed or not)."""
+    INITIAL = "initial"
+    PREPROCESSED = "preprocessed"
+
+
 # TODO: This exception is not actually ever raised. We should check the
 # intents of the kernel arguments and complain if something illegal is
 # happening.
@@ -101,7 +107,32 @@ class Pack(KernelArgument, ContextFree):
 
 
 class Instruction(UniqueRecord, abc.ABC):
-    pass
+    fields = UniqueRecord.fields | {"state"}
+
+    @cached_property
+    def preprocessed(self):
+        from pyop3.transform import expand_implicit_pack_unpack, expand_loop_contexts
+
+        if self.state == ExpressionState.PREPROCESSED:
+            return self
+        else:
+            insn = self
+            insn = expand_loop_contexts(insn)
+            insn = expand_implicit_pack_unpack(insn)
+            # TODO: should make marking things as preprocessed be an extra stage, currently do in expand_loop_contexts which is a bug
+            return insn
+
+    @property
+    def is_preprocessed(self):
+        return self.state == ExpressionState.PREPROCESSED
+
+    @cached_property
+    def loopy_code(self):
+        from pyop3.ir.lower import compile
+
+        return compile(self.preprocessed)
+
+
 
 
 class ContextAwareInstruction(Instruction):
@@ -132,6 +163,7 @@ class Loop(Instruction):
         *,
         name: str = _DEFAULT_LOOP_NAME,
         compiler_parameters=None,
+        state: ExpressionState = ExpressionState.INITIAL,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -139,15 +171,17 @@ class Loop(Instruction):
         self.statements = as_tuple(statements)
         self.name = name
         self.compiler_parameters = compiler_parameters
+        self.state = state
 
     def __call__(self, **kwargs):
         # TODO just parse into ContextAwareLoop and call that
         from pyop3.ir.lower import compile
         from pyop3.itree.tree import partition_iterset
 
-        code = compile(self, compiler_parameters=self.compiler_parameters)
+        code = compile(self.preprocessed, compiler_parameters=self.compiler_parameters)
 
-        if self.is_parallel:
+        if False:
+        # if self.is_parallel:
             # FIXME: The partitioning code does not seem to always run properly
             # so for now do all the transfers in advance.
             # interleave computation and communication
@@ -204,12 +238,6 @@ class Loop(Instruction):
         else:
             with PETSc.Log.Event(f"compute_{self.name}_serial"):
                 code(**kwargs)
-
-    @cached_property
-    def loopy_code(self):
-        from pyop3.ir.lower import compile
-
-        return compile(self)
 
     @cached_property
     def is_parallel(self):
@@ -355,7 +383,10 @@ class Loop(Instruction):
 
     @cached_property
     def datamap(self):
-        return self.index.datamap | merge_dicts(stmt.datamap for stmt in self.statements)
+        if self.is_preprocessed:
+            return self.index.datamap | merge_dicts(stmt.datamap for stmt in self.statements)
+        else:
+            return self.preprocessed.datamap
 
 
 class ContextAwareLoop(ContextAwareInstruction):
@@ -377,6 +408,20 @@ class ContextAwareLoop(ContextAwareInstruction):
         from pyop3.ir.lower import compile
 
         return compile(self)
+
+
+class LoopList(Instruction):
+    fields = Instruction.fields | {"loops"}
+
+    def __init__(self, loops, *, name=_DEFAULT_LOOP_NAME, state=ExpressionState.INITIAL, **kwargs):
+        super().__init__(**kwargs)
+        self.loops = loops
+        self.name = name
+        self.state = ExpressionState(state)
+
+    @cached_property
+    def datamap(self):
+        return merge_dicts(l.datamap for l in self.loops)
 
 
 # TODO singledispatch

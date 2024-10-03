@@ -43,6 +43,7 @@ from pyop3.lang import (
     ContextAwareLoop,
     DummyKernelArgument,
     Loop,
+    LoopList,
     PetscMatAdd,
     PetscMatInstruction,
     PetscMatLoad,
@@ -307,6 +308,7 @@ class LoopyCodegenContext(CodegenContext):
 
 class CodegenResult:
     def __init__(self, expr, ir, arg_replace_map, *, compiler_parameters):
+        # NOTE: should this be iterable?
         self.expr = as_tuple(expr)
         self.ir = ir
         self.arg_replace_map = arg_replace_map
@@ -315,7 +317,7 @@ class CodegenResult:
 
     @cached_property
     def datamap(self):
-        return merge_dicts(e.datamap for e in self.expr)
+        return merge_dicts(e.preprocessed.datamap for e in self.expr)
 
     def __call__(self, **kwargs):
         data_args = []
@@ -399,35 +401,41 @@ def parse_compiler_parameters(compiler_parameters) -> CompilerParameters:
 def compile(expr: Instruction, compiler_parameters=None):
     compiler_parameters = parse_compiler_parameters(compiler_parameters)
 
-    # preprocess expr before lowering
-    from pyop3.transform import expand_implicit_pack_unpack, expand_loop_contexts
-
     function_name = expr.name
 
-    cs_expr = expand_loop_contexts(expr)
+    if isinstance(expr, LoopList):
+        cs_expr = expr.loops
+    else:
+        assert isinstance(expr, Loop), "other types not handled yet"
+        cs_expr = (expr,)
+
     ctx = LoopyCodegenContext()
-    for context, ex in cs_expr:
-        ex = expand_implicit_pack_unpack(ex)
+    # NOTE: so I think LoopCollection is a better abstraction here - don't want to be
+    # explicitly dealing with contexts at this point. Can always sniff them out again.
+    # for context, ex in cs_expr:
+    for ex in cs_expr:
+        # ex = expand_implicit_pack_unpack(ex)
 
         # add external loop indices as kernel arguments
+        # FIXME: removed because cs_expr needs to sniff the context now
         loop_indices = {}
-        for index, (path, _) in context.items():
-            if len(path) > 1:
-                raise NotImplementedError("needs to be sorted")
+        # for index, (path, _) in context.items():
+        #     if len(path) > 1:
+        #         raise NotImplementedError("needs to be sorted")
+        #
+        #     # dummy = HierarchicalArray(index.iterset, data=NullBuffer(IntType))
+        #     dummy = HierarchicalArray(Axis(1), dtype=IntType)
+        #     # this is dreadful, pass an integer array instead
+        #     ctx.add_argument(dummy)
+        #     myname = ctx.actual_to_kernel_rename_map[dummy.name]
+        #     replace_map = {
+        #         axis: pym.subscript(pym.var(myname), (i,))
+        #         for i, axis in enumerate(path.keys())
+        #     }
+        #     # FIXME currently assume that source and target exprs are the same, they are not!
+        #     loop_indices[index] = (replace_map, replace_map)
 
-            # dummy = HierarchicalArray(index.iterset, data=NullBuffer(IntType))
-            dummy = HierarchicalArray(Axis(1), dtype=IntType)
-            # this is dreadful, pass an integer array instead
-            ctx.add_argument(dummy)
-            myname = ctx.actual_to_kernel_rename_map[dummy.name]
-            replace_map = {
-                axis: pym.subscript(pym.var(myname), (i,))
-                for i, axis in enumerate(path.keys())
-            }
-            # FIXME currently assume that source and target exprs are the same, they are not!
-            loop_indices[index] = (replace_map, replace_map)
-
-        for e in as_tuple(ex):
+        for e in as_tuple(ex): # TODO: get rid of this loop
             # context manager?
             ctx.set_temporary_shapes(_collect_temporary_shapes(e))
             _compile(e, loop_indices, ctx)
@@ -497,6 +505,7 @@ def _collect_temporary_shapes(expr):
     raise TypeError(f"No handler defined for {type(expr).__name__}")
 
 
+# TODO: get rid of this type
 @_collect_temporary_shapes.register
 def _(expr: ContextAwareLoop):
     shapes = {}
@@ -509,6 +518,20 @@ def _(expr: ContextAwareLoop):
                     assert shapes[temp] == shape
                 else:
                     shapes[temp] = shape
+    return shapes
+
+
+@_collect_temporary_shapes.register
+def _(expr: Loop):
+    shapes = {}
+    for stmt in expr.statements:
+        for temp, shape in _collect_temporary_shapes(stmt).items():
+            if shape is None:
+                continue
+            if temp in shapes:
+                assert shapes[temp] == shape
+            else:
+                shapes[temp] = shape
     return shapes
 
 
@@ -539,9 +562,10 @@ def _compile(expr: Any, loop_indices, ctx: LoopyCodegenContext) -> None:
     raise TypeError(f"No handler defined for {type(expr).__name__}")
 
 
-@_compile.register
+@_compile.register(ContextAwareLoop)  # remove
+@_compile.register(Loop)
 def _(
-    loop: ContextAwareLoop,
+    loop,
     loop_indices,
     codegen_context: LoopyCodegenContext,
 ) -> None:
