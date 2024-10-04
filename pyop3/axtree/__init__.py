@@ -1,4 +1,4 @@
-from .tree import (
+from .tree import (  # noqa: F401
     Axis,
     ContextMismatchException,
     AxisComponent,
@@ -10,4 +10,5 @@ from .tree import (
     IndexedAxisTree,
     LoopIterable,
     as_axis_tree,
+    AxisForest,
 )

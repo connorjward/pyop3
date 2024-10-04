@@ -782,15 +782,7 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
 
         axis_trees = {}
         for context, index_tree in as_index_forest(indices, axes=self).items():
-            indexed_axes, indexed_target_paths, indexed_target_exprs = index_axes(index_tree, context, self)
-
-            indexed_target_paths = restrict_targets(indexed_target_paths, indexed_axes, self)
-            indexed_target_exprs = restrict_targets(indexed_target_exprs, indexed_axes, self)
-
-            indexed_target_paths = accumulate_targets(indexed_target_paths, indexed_axes)
-            indexed_target_exprs = accumulate_targets(indexed_target_exprs, indexed_axes)
-
-            axis_trees[context] = compose_axes(self, indexed_axes, indexed_target_paths, indexed_target_exprs)
+            axis_trees[context] = index_axes(index_tree, context, self)
 
         if axis_trees.keys() == {pmap()}:
             return axis_trees[pmap()]
@@ -1326,8 +1318,8 @@ class IndexedAxisTree(BaseAxisTree):
 
         super().__init__(node_map)
         self._unindexed = unindexed
-        self._target_paths = tuple(target_paths)
-        self._target_exprs = tuple(target_exprs)
+        self._target_paths = frozenset(target_paths)
+        self._target_exprs = frozenset(target_exprs)
         # self._layout_exprs = tuple(layout_exprs)
         self._outer_loops = tuple(outer_loops)
 
@@ -1339,13 +1331,40 @@ class IndexedAxisTree(BaseAxisTree):
     def comm(self):
         return self.unindexed.comm
 
-    @property
+    @cached_property
     def paths(self):
-        return self._target_paths + (self._source_path,)
+        """
+        Return a `tuple` of the possible paths represented by this tree.
+        """
+        return self._target_paths | {self._source_path}
+
+    # def _collect_paths(self, *, axis=None):
+    #     """
+    #     Traverse the tree and add the trivial path to the possible paths
+    #     represented by each node.
+    #     """
+    #     paths = {}
+    #
+    #     if axis is None:
+    #         axis = self.root
+    #         paths[None] = self._target_paths.get(None, {})
+    #
+    #     for component in axis.components:
+    #         axis_key = (axis.id, component.label)
+    #         source_path = pmap({axis.label: component.label})
+    #         target_paths = self._target_paths.get(axis_key, ())
+    #         paths[axis_key] = target_paths + (source_path,)
+    #
+    #         if subaxis := self.child(axis, component):
+    #             paths_ = self._collect_paths(axis=subaxis)
+    #             paths.update(paths_)
+    #
+    #     return freeze(paths)
+
 
     @property
     def index_exprs(self):
-        return self._target_exprs + (self._source_exprs,)
+        return self._target_exprs | {self._source_exprs}
 
     @property
     def layout_exprs(self):
@@ -1546,6 +1565,21 @@ class IndexedAxisTree(BaseAxisTree):
                     loop_exprs=target_indices,
                 )
         return rmap
+
+
+class AxisForest:
+    """A collection of (equivalent) `AxisTree`s.
+
+    Axis forests are useful to describe indexed axis trees like ``axis[::2]`` which
+    has two axis trees, one for the new tree and another for the original one (with
+    the right index expressions).
+
+    """
+    def __init__(self, trees: Sequence[BaseAxisTree]) -> None:
+        self.trees = tuple(trees)
+
+    def __repr__(self) -> str:
+        return f"AxisTree([{', '.join(repr(tree) for tree in self.trees)}])"
 
 
 class ContextSensitiveAxisTree(ContextSensitiveLoopIterable):

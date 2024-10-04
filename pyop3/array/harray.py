@@ -189,17 +189,10 @@ class HierarchicalArray(Array, KernelArgument):
             # There is no outer loop context to consider. Needn't return a
             # context sensitive object.
             index_tree = index_forest[pmap()]
-            indexed_axes, indexed_target_paths, indexed_target_exprs = index_axes(index_tree, pmap(), self.axes)
+            indexed_axes = index_axes(index_tree, pmap(), self.axes)
 
-            indexed_target_paths = restrict_targets(indexed_target_paths, indexed_axes, self.axes)
-            indexed_target_exprs = restrict_targets(indexed_target_exprs, indexed_axes, self.axes)
-
-            indexed_target_paths = accumulate_targets(indexed_target_paths, indexed_axes)
-            indexed_target_exprs = accumulate_targets(indexed_target_exprs, indexed_axes)
-
-            axes = compose_axes(self.axes, indexed_axes, indexed_target_paths, indexed_target_exprs)
             dat = HierarchicalArray(
-                axes, data=self.buffer, max_value=self.max_value, name=self.name
+                indexed_axes, data=self.buffer, max_value=self.max_value, name=self.name
             )
         else:
             context_sensitive_axes = {}

@@ -23,6 +23,7 @@ from pyop3.axtree import (
     Axis,
     AxisComponent,
     AxisTree,
+    AxisForest,
     AxisVar,
     ContextAware,
     ContextFree,
@@ -383,13 +384,16 @@ class ContextFreeLoopIndex(ContextFreeIndex):
         # NOTE: This attribute must be a tuple of tuples as other index types return multiple leaves
         leaf_axis, leaf_component_label = self.iterset.leaf
         leaf_key = leaf_axis.id, leaf_component_label
+        # Return the single output path, accomodating for the fact that there may be multiple equivalent ones.
         return (tuple(p[leaf_key] for p in self.iterset.paths),)
 
     @property
     def leaf_index_exprss(self):
         leaf_axis, leaf_component_label = self.iterset.leaf
         leaf_key = leaf_axis.id, leaf_component_label
+        # NOTE: think this should be a 1-tuple (like leaf_target_paths)
         return tuple(e[leaf_key] for e in self.iterset.index_exprs)
+        # return (tuple(e[leaf_key] for e in self.iterset.index_exprs),)
 
     # shouldn't need any more
     # @cached_property
@@ -778,8 +782,9 @@ class ContextFreeCalledMap(Index):
         # alias for compat with ContextFreeCalledMap
         self.from_index = from_index
 
-        # better name
+        # better name - no! use .index and rename .index() to .iter() (default lazy)
         self.call_index = from_index
+        breakpoint()
 
     @cached_property
     def _source_paths(self):
@@ -1025,6 +1030,14 @@ def _(index: ContextFreeIndex, **_):
 
 
 @_as_index_forest.register
+def _(index: LoopIndex, *, loop_context, **_):
+    XXX = _as_context_free_index(index, loop_context=loop_context)
+    breakpoint()
+    cf_index = ...
+    return {pmap(): IndexTree(index)}
+
+
+@_as_index_forest.register
 def _(indices: collections.abc.Sequence, *, axes, loop_context, allow_unused: bool):
     # The indices can contain a mixture of "true" indices (i.e. subclasses of
     # Index) and "sugar" indices (e.g. integers, strings and slices). The former
@@ -1095,7 +1108,7 @@ def _(index, *, loop_context, **kwargs):
         assert isinstance(index.iterset, ContextFree)
         for leaf_axis, leaf_cpt in index.iterset.leaves:
             source_path = index.iterset.path(leaf_axis, leaf_cpt)
-            target_path = index.iterset.target_paths.get(None, pmap())
+            target_path = index.iterset.target_path.get(None, pmap())
             for axis, cpt in index.iterset.path_with_nodes(
                 leaf_axis, leaf_cpt, and_components=True
             ).items():
@@ -1379,6 +1392,21 @@ def _index_tree_is_complete(index_tree: IndexTree, axes: AxisTree, *, index=None
 
 @functools.singledispatch
 def _index_axes_index(index, *args, **kwargs):
+    """TODO.
+
+    Case 1: loop indices
+
+    Assume we have ``axis[p]`` with ``p`` a `ContextFreeLoopIndex`.
+    If p came from other_axis[::2].iter(), then it has *2* possible
+    target paths and expressions: over the indexed or unindexed trees.
+    Therefore when we index axis with p we must account for this, hence all
+    indexing operations return a tuple of possible, equivalent, targets.
+
+    Then, when we combine it all together, if we imagine having 2 loop indices
+    like this, then we need the *product* of them to enumerate all possible
+    targets.
+
+    """
     raise TypeError(f"No handler provided for {type(index)}")
 
 
@@ -1390,6 +1418,11 @@ def _(
     axes = AxisTree()
     target_paths = freeze({None: cf_loop_index.leaf_target_paths})
 
+    # Example:
+    # If we assume that the loop index has target expressions
+    #     AxisVar("a") * 2     and       AxisVar("b")
+    # then this will return
+    #     LoopIndexVar(p, "a") * 2      and LoopIndexVar(p, "b")
     index_exprs = []
     replacer = LoopIndexReplacer(cf_loop_index)
     for leaf_index_exprs in cf_loop_index.leaf_index_exprss:
@@ -1397,8 +1430,7 @@ def _(
         for axis_label, orig_index_expr in leaf_index_exprs.items():
             exprs_per_view[axis_label] = replacer(orig_index_expr)
         index_exprs.append(exprs_per_view)
-    # must be a 1-tuple
-    index_exprs = freeze({None: (index_exprs,)})
+    index_exprs = freeze({None: index_exprs})
 
 
     return (
@@ -1414,7 +1446,7 @@ def _(
 @_index_axes_index.register
 def _(index: ScalarIndex, **_):
     target_path = pmap({None: index.leaf_target_paths})
-    index_exprs = pmap({None: ((pmap({index.axis: index.value}),),)})
+    index_exprs = pmap({None: (pmap({index.axis: index.value}),)})
     layout_exprs = pmap({None: 0})
     return (
         AxisTree(),
@@ -1847,8 +1879,9 @@ def _make_leaf_axis_from_called_map(
 def index_axes(
     index_tree: IndexTree,
     loop_context,
-    axes: Optional[AxisTree] = None,
-):
+    axes: Optional[Union[AxisTree, AxisForest]] = None,
+# ) -> AxisForest:
+    ):
     """Build an axis tree from an index tree.
 
     Parameters
@@ -1867,44 +1900,84 @@ def index_axes(
     plus target paths and target exprs
 
     """
+    assert isinstance(axes, (AxisTree, IndexedAxisTree))
+    # if isinstance(axes, AxisForest):
+    #     trees = axes.trees
+    # else:
+    #     trees = (axes,)
+
     (
         indexed_axes,
-        target_paths,
-        target_exprs,
+        indexed_target_paths_compressed,
+        indexed_target_exprs_compressed,
         _,
-        outer_loops,
+        _,
     ) = _index_axes(
         index_tree,
         loop_indices=loop_context,
         prev_axes=axes,
     )
 
-    if axes is not None:
-        outer_loops += axes.outer_loops
+    # debug
+    assert all(isinstance(x, tuple) for x in indexed_target_paths_compressed.values())
 
-    # drop duplicates
-    outer_loops_ = []
-    allids = set()
-    for ol in outer_loops:
-        if ol.id in allids:
-            continue
-        outer_loops_.append(ol)
-        allids.add(ol.id)
-    outer_loops = tuple(outer_loops_)
+    indexed_target_paths = expand_compressed_target_paths(indexed_target_paths_compressed)
+    # NOTE: should rename the function as it is generic for both
+    indexed_target_exprs = expand_compressed_target_paths(indexed_target_exprs_compressed)
 
-    # NOTE: I think it would be better if this could be done internally by the
-    # IndexedAxisTree.
-    # my_target_paths = _acc_target_paths(indexed_axes, target_paths)
-    # my_index_exprs = _acc_target_paths(indexed_axes, index_exprs)
+    # If the original axis tree is unindexed then no composition is required.
+    if isinstance(axes, AxisTree):
+        # target_paths should be a list, not a mapping, do a product thing!
+        return IndexedAxisTree(
+            indexed_axes.node_map,
+            axes,
+            target_paths=indexed_target_paths,
+            target_exprs=indexed_target_exprs,
+            layout_exprs={},
+            outer_loops=indexed_axes.outer_loops,
+        )
 
-    return indexed_axes, target_paths, target_exprs
+    # breakpoint()
+    # indexed_target_paths = restrict_targets(indexed_target_paths, indexed_axes, unindexed_tree)
+    # indexed_target_pathss = accumulate_targets(indexed_target_paths, indexed_axes)
 
-def restrict_targets(targets, indexed_axes, orig_axes, *, axis=None) -> PMap:
+    # indexed_target_exprs = restrict_targets(indexed_target_exprs, indexed_axes, unindexed_tree)
+    # indexed_target_exprss = accumulate_targets(indexed_target_exprs, indexed_axes)
+
+    # per node or fully unpacked...
+    # NOTE: do not prematurely accumulate...
+    all_target_paths = set()
+    for orig_path in axes.paths:
+        for indexed_path in indexed_target_paths:
+            target_paths = compose_target_paths(axes, orig_path, indexed_axes, indexed_path)
+            all_target_paths.add(target_paths)
+
+    # NOTE: does this need to be done in lock-step with the paths???
+    all_target_exprs = set()
+    for orig_expr in axes.index_exprs:
+        for indexed_expr in indexed_target_exprs:
+            target_exprs = compose_target_exprs(axes, orig_expr, indexed_axes, indexed_expr)
+            all_target_exprs.add(target_exprs)
+    breakpoint()
+
+    # indexed_trees = []
+    # for unindexed_tree in trees:
+
+    indexed_tree = compose_axes(axes, indexed_axes, indexed_target_pathss, indexed_target_exprss)
+        # indexed_trees.append(indexed_tree)
+    return indexed_tree
+    # assert len(indexed_trees) > 0
+    # indexed_trees.append(indexed_axes)
+    # breakpoint()
+    # return AxisForest(indexed_trees)
+
+
+def restrict_targets(targets, indexed_axes: AxisTree, unindexed_axes: AxisTree, *, axis=None) -> PMap:
     restricted = collections.defaultdict(dict)
 
     if axis is None:
         for target_set in targets.get(None, ()):
-            restricted[None].update(_matching_target(target_set, orig_axes))
+            restricted[None].update(_matching_target(target_set, unindexed_axes))
 
         if indexed_axes.is_empty:
             # nothing more to be done
@@ -1919,10 +1992,10 @@ def restrict_targets(targets, indexed_axes, orig_axes, *, axis=None) -> PMap:
         axis_key = (axis.id, component.label)
         if axis_key in targets:
             target_set = targets[axis_key]
-            restricted[axis_key].update(_matching_target(target_set, orig_axes))
+            restricted[axis_key].update(_matching_target(target_set, unindexed_axes))
 
         if subaxis := indexed_axes.child(axis, component):
-            subrestricted = restrict_targets(targets, indexed_axes, orig_axes, axis=subaxis)
+            subrestricted = restrict_targets(targets, indexed_axes, unindexed_axes, axis=subaxis)
             restricted.update(subrestricted)
 
     return freeze(restricted)
@@ -1932,46 +2005,46 @@ def _matching_target(targets: PMap, orig_axes: AxisTree) -> PMap:
     # NOTE: Ideally this should return just_one(...) instead of
     # single_valued(...) but because we don't have pass-through
     # indexing yet we sometimes get duplicate axes inside targets.
-    debug = [
-        t for t in targets
-        if all(ax in orig_axes.node_labels for ax in t.keys())
-    ]
+    # NOTE: But passthrough indexing is now wrong to try and do...
     return single_valued(
         t for t in targets
         if all(ax in orig_axes.node_labels for ax in t.keys())
     )
 
 
-def accumulate_targets(target_paths, indexed_axes, *, axis=None, target_path_acc=None):
+# NOTE: Arguably this does not need to be done eagerly. The targets can be per-axis
+# until later.
+def accumulate_targets(targets, indexed_axes, *, axis=None, target_acc=None):
+    """Traverse indexed_axes and accumulate per-axis ``targets`` as we go down."""
     if indexed_axes.is_empty:
-        return target_paths
+        return targets
 
-    target_paths_merged = {}
+    targets_merged = {}
 
-    if strictly_all(x is None for x in {axis, target_path_acc}):
+    if strictly_all(x is None for x in {axis, target_acc}):
         axis = indexed_axes.root
-        target_path_acc = target_paths.get(None, pmap())
-        target_paths_merged[None] = target_path_acc
+        target_acc = targets.get(None, pmap())
+        targets_merged[None] = target_acc
 
     # To make the type checker happy
     axis = cast(Axis, axis)
 
     for component in axis.components:
         key = (axis.id, component.label)
-        target_path_acc_ = target_path_acc | target_paths.get(key, {})
-        target_paths_merged[key] = target_path_acc_
+        target_acc_ = target_acc | targets.get(key, {})
+        targets_merged[key] = target_acc_
 
         if subaxis := indexed_axes.child(axis, component):
-            target_paths_merged.update(
-                accumulate_targets(target_paths, indexed_axes, axis=subaxis, target_path_acc=target_path_acc_)
+            targets_merged.update(
+                accumulate_targets(targets, indexed_axes, axis=subaxis, target_acc=target_acc_)
             )
-    return freeze(target_paths_merged)
+    return freeze(targets_merged)
 
 
 def _index_axes(
     index_tree,
     *,
-    loop_indices,
+    loop_indices,  # NOTE: I don't think that this is ever needed, remove?
     prev_axes,
     index=None,
     parent_indices=None,
@@ -1994,6 +2067,8 @@ def _index_axes(
     target_path_per_cpt_per_index = dict(target_path_per_cpt_per_index)
     index_exprs_per_cpt_per_index = dict(index_exprs_per_cpt_per_index)
     layout_exprs_per_cpt_per_index = dict(layout_exprs_per_cpt_per_index)
+
+    # breakpoint()
 
     if axes_per_index:
         leafkeys = axes_per_index.leaves
@@ -2080,6 +2155,112 @@ def _index_axes(
         layout_exprs_per_component,
         outer_loops,
     )
+
+
+# NOTE: should be similar to index_exprs
+def compose_target_paths(orig_axes, orig_target_paths, indexed_axes, indexed_target_paths, *, axis=None, indexed_target_paths_acc=None, visited_orig_axes=None):
+    """
+
+    Traverse ``indexed_axes``, picking up bits from indexed_target_paths and keep
+    trying to address orig_axes.paths with it. If there is a hit then we take that
+    bit of the original target path into the new location.
+
+    We *do not* accumulate things as we go. The final result should be the map
+
+    { (indexed_axis, component) -> (target_path1, target_path2, ...), ... }
+
+    Things are complicated by the fact that not all of the targets from indexed_target_paths
+    will resolve.
+
+    """
+    if axis is None:  # strictly_all
+        axis = indexed_axes.root
+        indexed_target_paths_acc = pmap()
+        visited_orig_axes = frozenset()
+
+    composed_target_paths = collections.defaultdict(dict)
+
+    for component in axis.components:
+        # loop over equivalent target paths, only one of these should be valid for
+        # this target
+        found = 0
+        indexed_target_path = indexed_target_paths[axis.id, component.label]
+        indexed_target_paths_acc_ = indexed_target_paths_acc | indexed_target_path
+
+        # does the accumulated path match a part of orig_axes?
+        if orig_axes.is_valid_path(indexed_target_paths_acc_):
+            found += 1
+            # if so then add previously unvisited node values to the composed target path for the current axis
+            for orig_axis, orig_component in orig_axes.detailed_path(indexed_target_paths_acc_).items():
+                if orig_axis in visited_orig_axes:
+                    continue
+                visited_orig_axes_ = visited_orig_axes | {orig_axis}
+
+                orig_key = (orig_axis.id, orig_component.label)
+                orig_target_path = orig_target_paths.get(orig_key, {})
+                composed_target_paths[axis.id, component.label].update(orig_target_path)
+
+        # now recurse
+        if subaxis := indexed_axes.child(axis, component):
+            composed_target_paths_ = compose_target_paths(
+                orig_axes,
+                orig_target_paths,
+                indexed_axes,
+                indexed_target_paths,
+                axis=subaxis,
+                indexed_target_paths_acc=indexed_target_paths_acc_,
+                visited_orig_axes=visited_orig_axes_,
+            )
+            composed_target_paths.update(composed_target_paths_)
+
+        # can I propagate this higher up?
+        assert found <= 1, "should not be multiple matches here"
+
+    return freeze(composed_target_paths)
+
+
+def expand_compressed_target_paths(compressed_target_paths):
+    """
+    Expand target paths written in "compressed" form like:
+
+        {
+            (axis_id0, component_label0): (path0, path1),
+            (axis_id1, component_label0): (path2,),
+        }
+
+    Instead to the "expanded" `frozenset` form:
+
+        (
+            {
+                (axis_id0, component_label0): path0
+                (axis_id1, component_label0): path2
+            },
+            {
+                (axis_id0, component_label0): path1
+                (axis_id1, component_label0): path2
+            },
+        )
+
+    At present I do not think that ordering matters here.
+
+    """
+    expanded_paths = set()
+    compressed_target_paths_mut = dict(compressed_target_paths)
+
+    axis_key, compressed_target_paths = compressed_target_paths_mut.popitem()
+
+    if len(compressed_target_paths_mut) > 0:
+        expanded_subpaths = expand_compressed_target_paths(compressed_target_paths_mut)
+        for target_path in compressed_target_paths:
+            keyed_path = pmap({axis_key: target_path})
+            for expanded_subpath in expanded_subpaths:
+                expanded_paths.add(keyed_path | expanded_subpath)
+    else:
+        for target_path in compressed_target_paths:
+            keyed_path = pmap({axis_key: target_path})
+            expanded_paths.add(keyed_path)
+
+    return frozenset(expanded_paths)
 
 
 def compose_axes(orig_axes, indexed_axes, indexed_target_paths, indexed_target_exprs):

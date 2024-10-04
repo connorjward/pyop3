@@ -125,6 +125,7 @@ class AbstractMat(Array):
     __iter__ = None
 
     def getitem(self, indices, *, strict=False):
+        from pyop3.itree.tree import as_index_forest, compose_axes, index_axes, accumulate_targets, restrict_targets
         # does not work as indices may not be hashable, parse first?
         # cache_key = (indices, strict)
         # if cache_key in self._cache:
@@ -177,14 +178,10 @@ class AbstractMat(Array):
             rtree, ctree = rcforest[pmap()]
 
             indexed_raxes = index_axes(rtree, pmap(), self.raxes)
-            raxes = compose_axes(indexed_raxes, self.raxes)
-
             indexed_caxes = index_axes(ctree, pmap(), self.caxes)
-            caxes = compose_axes(indexed_caxes, self.caxes)
-
             mat = type(self)(
-                raxes,
-                caxes,
+                indexed_raxes,
+                indexed_caxes,
                 mat_type=self.mat_type,
                 mat=self.mat,
                 name=self.name,
