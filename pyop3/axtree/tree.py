@@ -799,13 +799,47 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
     def paths(self):
         pass
 
-    @property
+    @cached_property
     def source_path(self):
-        return self.paths[-1]
+        # return self.paths[-1]
+        return self._match_path_and_exprs(self)[0]
 
-    @property
+    @cached_property
     def target_path(self):
-        return self.paths[0]
+        # return self.paths[0]
+        return self._match_path_and_exprs(self.unindexed)[0]
+
+    # TODO: refactor/move
+    def _match_path_and_exprs(self, tree):
+        """
+        Find the set of paths and expressions that match the given tree. This is
+        needed because we have multiple such expressions for intermediate indexing.
+
+        If we retained an order then this might be easier to index with 0 and -1.
+        """
+        map_path = None
+        map_exprs = None
+        for paths_and_exprs in self.paths_and_exprs:
+            matching = True
+            for key, (mypath, myexprs) in paths_and_exprs.items():
+                # check if mypath is consistent with the labels of tree
+                # NOTE: should probably also check component labels
+                if not (mypath.keys() <= tree.node_labels):
+                    matching = False
+                    break
+
+            if not matching:
+                continue
+
+            assert map_path is None and map_exprs is None
+            # do an accumulation
+            map_path = {}
+            map_exprs = {}
+            for key, (mypath, myexprs) in paths_and_exprs.items():
+                map_path.update(mypath)
+                map_exprs.update(myexprs)
+        assert map_path is not None and map_exprs is not None
+        return map_path, map_exprs
 
     @property
     @abc.abstractmethod
@@ -814,11 +848,13 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
 
     @property
     def source_exprs(self):
-        return self.index_exprs[-1]
+        # return self.index_exprs[-1]
+        return self._match_path_and_exprs(self)[1]
 
     @property
     def target_exprs(self):
-        return self.index_exprs[0]
+        # return self.index_exprs[0]
+        return self._match_path_and_exprs(self.unindexed)[1]
 
     @property
     @abc.abstractmethod
@@ -1156,6 +1192,18 @@ class AxisTree(MutableLabelledTreeMixin, BaseAxisTree):
         return (self._source_path,)
 
     @cached_property
+    def _source_path_and_exprs(self):
+        # TODO: merge source path and source expr collection here
+        return freeze({key: (self._source_path[key], self._source_exprs[key]) for key in self._source_path})
+
+    @cached_property
+    def paths_and_exprs(self):
+        """
+        Return the possible paths represented by this tree.
+        """
+        return frozenset({self._source_path_and_exprs})
+
+    @cached_property
     def index_exprs(self):
         return (self._source_exprs,)
 
@@ -1306,8 +1354,7 @@ class IndexedAxisTree(BaseAxisTree):
         node_map,
         unindexed,
         *,
-        target_paths,
-        target_exprs,
+        targets,
         layout_exprs,
         outer_loops,
     ):
@@ -1318,8 +1365,8 @@ class IndexedAxisTree(BaseAxisTree):
 
         super().__init__(node_map)
         self._unindexed = unindexed
-        self._target_paths = frozenset(target_paths)
-        self._target_exprs = frozenset(target_exprs)
+        self._targets = frozenset(targets)
+        # self._target_exprs = frozenset(target_exprs)
         # self._layout_exprs = tuple(layout_exprs)
         self._outer_loops = tuple(outer_loops)
 
@@ -1331,12 +1378,39 @@ class IndexedAxisTree(BaseAxisTree):
     def comm(self):
         return self.unindexed.comm
 
+    # compat for now while I tinker
+    @cached_property
+    def _target_paths(self):
+        return frozenset({
+            freeze({key: path for key, (path, _) in target.items()})
+            for target in self._targets
+        })
+
+    @cached_property
+    def _target_exprs(self):
+        return frozenset({
+            freeze({key: exprs for key, (_, exprs) in target.items()})
+            for target in self._targets
+        })
+
     @cached_property
     def paths(self):
         """
         Return a `tuple` of the possible paths represented by this tree.
         """
         return self._target_paths | {self._source_path}
+
+    @cached_property
+    def _source_path_and_exprs(self):
+        # TODO: merge source path and source expr collection here
+        return freeze({key: (self._source_path[key], self._source_exprs[key]) for key in self._source_path})
+
+    @cached_property
+    def paths_and_exprs(self):
+        """
+        Return a `tuple` of the possible paths represented by this tree.
+        """
+        return self._targets | {self._source_path_and_exprs}
 
     # def _collect_paths(self, *, axis=None):
     #     """
@@ -1717,6 +1791,8 @@ def subst_layouts(
     if isinstance(axes, HierarchicalArray):
         assert axis is None
         axes = axes.axes
+
+    breakpoint()
 
     # TODO Don't do this every time this function is called
     loop_exprs = {}
