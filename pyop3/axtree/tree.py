@@ -836,8 +836,8 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
             map_path = {}
             map_exprs = {}
             for key, (mypath, myexprs) in paths_and_exprs.items():
-                map_path.update(mypath)
-                map_exprs.update(myexprs)
+                map_path[key] = mypath
+                map_exprs[key] = myexprs
         assert map_path is not None and map_exprs is not None
         return map_path, map_exprs
 
@@ -1792,7 +1792,7 @@ def subst_layouts(
         assert axis is None
         axes = axes.axes
 
-    breakpoint()
+    # breakpoint()
 
     # TODO Don't do this every time this function is called
     loop_exprs = {}

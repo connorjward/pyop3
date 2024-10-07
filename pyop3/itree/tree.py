@@ -1873,33 +1873,50 @@ def _make_leaf_axis_from_called_map(
             # could be a map), and Y is the new "arity" index.
 
             # one of paths_and_exprs should be suitable for indexing the map, this will get cleaned up later.
-            myleafpath =  map_axes.path(*map_axes.leaf)
+            myleafpath =  map_axes.path_with_nodes(*map_axes.leaf)
 
-            map_path = None
-            map_exprs = None
-            for paths_and_exprs in map_axes.paths_and_exprs:
-                matching = True
-                for key, (mypath, myexprs) in paths_and_exprs.items():
-                    if not (dict(mypath).items() <= dict(myleafpath).items()):  # subset check
-                        matching = False
-                        break
+            map_path = {}
+            map_exprs = {}
+            map_path.update(map_axes.target_path.get(None, {}))
+            map_exprs.update(map_axes.target_exprs.get(None, {}))
+            for axis, component_label in myleafpath.items():
+                axis_key = (axis.id, component_label)
+                map_path.update(map_axes.target_path.get(axis_key, {}))
+                map_exprs.update(map_axes.target_exprs.get(axis_key, {}))
 
-                if not matching:
-                    continue
-
-                assert map_path is None and map_exprs is None
-                # do an accumulation
-                map_path = {}
-                map_exprs = {}
-                for key, (mypath, myexprs) in paths_and_exprs.items():
-                    map_path.update(mypath)
-                    map_exprs.update(myexprs)
-            assert map_path is not None and map_exprs is not None
-
-
-            # map_exprs = map_axes.target_exprs[leaf_key]
+            # breakpoint()
             #
+            # map_path = None
+            # map_exprs = None
+            # for paths_and_exprs in map_axes.paths_and_exprs:
+            #     matching = True
+            #     for key, (mypath, myexprs) in paths_and_exprs.items():
+            #         if not (dict(mypath).items() <= dict(myleafpath).items()):  # subset check
+            #             matching = False
+            #             break
+            #
+            #     if not matching:
+            #         continue
+            #
+            #     assert map_path is None and map_exprs is None
+            #     # do an accumulation
+            #     map_path = {}
+            #     map_exprs = {}
+            #     for key, (mypath, myexprs) in paths_and_exprs.items():
+            #         map_path.update(mypath)
+            #         map_exprs.update(myexprs)
+            # assert map_path is not None and map_exprs is not None
+
+
+            # my_leaf_axis, my_leaf_component_label = map_axes.leaf
+            # leaf_key = (my_leaf_axis.id, my_leaf_component_label)
+            #
+            # # NOTE: these used to be accumulated, are they still?
+            # breakpoint()
             # map_path = map_axes.target_path[leaf_key]
+            # map_exprs = map_axes.target_exprs[leaf_key]
+
+            # breakpoint()
 
             # NOTE: we should be able to get away with just indexing the map array here.
             map_var = ArrayVar(map_cpt.array,
