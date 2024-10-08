@@ -18,7 +18,6 @@ import pytools
 from pyrsistent import PMap, freeze, pmap, thaw
 
 from pyop3.array import HierarchicalArray
-from pyop3.array.harray import ArrayVar
 from pyop3.axtree import (
     Axis,
     AxisComponent,
@@ -33,9 +32,10 @@ from pyop3.axtree import (
 from pyop3.axtree.layout import _as_int
 from pyop3.axtree.tree import (
     AxisTree,
+    Mul, Add, AxisVar, Operator,
     ContextSensitiveAxisTree,
     ContextSensitiveLoopIterable,
-    ExpressionEvaluator,
+    evaluate as eval_expr,
     IndexedAxisTree,
 )
 from pyop3.dtypes import IntType, get_mpi_dtype
@@ -62,24 +62,39 @@ from pyop3.utils import (
 bsearch = pym.var("mybsearch")
 
 
-class IndexExpressionReplacer(pym.mapper.IdentityMapper):
-    def __init__(self, replace_map, loop_exprs=pmap()):
-        self._replace_map = replace_map
-        self._loop_exprs = loop_exprs
+# class IndexExpressionReplacer(pym.mapper.IdentityMapper):
+#     def __init__(self, replace_map, loop_exprs=pmap()):
+#         self._replace_map = replace_map
+#         self._loop_exprs = loop_exprs
+#
+#     def map_axis_variable(self, expr):
+#         return self._replace_map.get(expr.axis_label, expr)
+#
+#     def map_array(self, array_var):
+#         indices = {ax: self.rec(expr) for ax, expr in array_var.indices.items()}
+#         return type(array_var)(array_var.array, indices, array_var.path)
+#
+#     def map_loop_index(self, index):
+#         breakpoint()
+#         if index.id in self._loop_exprs:
+#             return self._loop_exprs[index.id][index.axis]
+#         else:
+#             return index
 
-    def map_axis_variable(self, expr):
-        return self._replace_map.get(expr.axis_label, expr)
 
-    def map_array(self, array_var):
-        indices = {ax: self.rec(expr) for ax, expr in array_var.indices.items()}
-        return type(array_var)(array_var.array, indices, array_var.path)
+@functools.singledispatch
+def replace(obj: Any, replace_map):
+    raise TypeError()
 
-    def map_loop_index(self, index):
-        breakpoint()
-        if index.id in self._loop_exprs:
-            return self._loop_exprs[index.id][index.axis]
-        else:
-            return index
+
+@replace.register
+def _(var: AxisVar, replace_map):
+    return replace_map[var.axis_label]
+
+
+@replace.register
+def _(op: Operator, replace_map):
+    return type(op)(replace(op.a, replace_map), replace(op.b, replace_map))
 
 
 class IndexTree(MutableLabelledTreeMixin, LabelledTree):
@@ -1482,8 +1497,6 @@ def _(index: ScalarIndex, **_):
 
 @_index_axes_index.register
 def _(slice_: Slice, *, parent_indices, prev_axes, **_):
-    from pyop3.array.harray import ArrayVar
-
     # If we are just taking a component from a multi-component array,
     # e.g. mesh.points["cells"], then relabelling the axes just leads to
     # needless confusion. For instance if we had
@@ -1635,24 +1648,25 @@ def _(slice_: Slice, *, parent_indices, prev_axes, **_):
                 assert isinstance(slice_component, Subset)
 
                 # below is also used for maps - cleanup
-                subset_array = slice_component.array
-                subset_axes = subset_array.axes
+                # subset_array = slice_component.array
+                # subset_axes = subset_array.axes
+                #
+                # if isinstance(subset_axes, IndexedAxisTree):
+                #     raise NotImplementedError("Need more paths, not just 2")
+                #
+                # # must be single component
+                # assert subset_axes.leaf
 
-                if isinstance(subset_axes, IndexedAxisTree):
-                    raise NotImplementedError("Need more paths, not just 2")
-
-                # must be single component
-                assert subset_axes.leaf
-
-                my_target_path = merge_dicts(just_one(subset_axes.paths).values())
-                old_index_exprs = merge_dicts(just_one(subset_axes.index_exprs).values())
-
-                my_index_exprs = {}
-                index_expr_replace_map = {subset_axes.leaf_axis.label: newvar}
-                replacer = IndexExpressionReplacer(index_expr_replace_map)
-                for axlabel, index_expr in old_index_exprs.items():
-                    my_index_exprs[axlabel] = replacer(index_expr)
-                subset_var = ArrayVar(slice_component.array, my_index_exprs, my_target_path)
+                # my_target_path = merge_dicts(just_one(subset_axes.paths).values())
+                # old_index_exprs = merge_dicts(just_one(subset_axes.index_exprs).values())
+                #
+                # my_index_exprs = {}
+                # index_expr_replace_map = {subset_axes.leaf_axis.label: newvar}
+                # replacer = IndexExpressionReplacer(index_expr_replace_map)
+                # for axlabel, index_expr in old_index_exprs.items():
+                #     my_index_exprs[axlabel] = replacer(index_expr)
+                # subset_var = ArrayVar(slice_component.array, my_index_exprs, my_target_path)
+                subset_var = slice_component.array
 
                 index_exprs_per_subslice.append(
                     freeze(
@@ -1919,14 +1933,15 @@ def _make_leaf_axis_from_called_map(
             # breakpoint()
 
             # NOTE: we should be able to get away with just indexing the map array here.
-            map_var = ArrayVar(map_cpt.array,
-                # order is important to avoid overwriting prior, cleanup
-                # merge_dicts([prior_index_exprs, new_inner_index_expr]),
-                # merge_dicts([new_inner_index_expr, inner_target_exprss[connectivity_index]]),
-                map_exprs,
-                # path should be allowed to be None
-                               map_path,
-            )
+            map_var = map_cpt.array
+            # map_var = ArrayVar(map_cpt.array,
+            #     # order is important to avoid overwriting prior, cleanup
+            #     # merge_dicts([prior_index_exprs, new_inner_index_expr]),
+            #     # merge_dicts([new_inner_index_expr, inner_target_exprss[connectivity_index]]),
+            #     map_exprs,
+            #     # path should be allowed to be None
+            #                    map_path,
+            # )
 
             target_expr = pmap({map_cpt.target_axis: map_var})
 
@@ -2271,13 +2286,15 @@ def compose_targets(orig_axes, orig_target_paths_and_exprs, indexed_axes, indexe
         indexed_target_path, indexed_target_exprs = indexed_target_paths_and_exprs[axis.id, component.label]
         indexed_target_paths_acc_ = indexed_target_paths_acc | indexed_target_path
 
+        visited_orig_axes_ = visited_orig_axes
+
         # does the accumulated path match a part of orig_axes?
         if orig_axes.is_valid_path(indexed_target_paths_acc_):
             # if so then add previously unvisited node values to the composed target path for the current axis
             for orig_axis, orig_component in orig_axes.detailed_path(indexed_target_paths_acc_).items():
                 if orig_axis in visited_orig_axes:
                     continue
-                visited_orig_axes_ = visited_orig_axes | {orig_axis}
+                visited_orig_axes_ |= {orig_axis}
 
                 orig_key = (orig_axis.id, orig_component.label)
 
@@ -2286,9 +2303,10 @@ def compose_targets(orig_axes, orig_target_paths_and_exprs, indexed_axes, indexe
 
                     # now index exprs
                     new_exprs = {}
-                    replacer = IndexExpressionReplacer(indexed_target_exprs)
+                    # replacer = IndexExpressionReplacer(indexed_target_exprs)
                     for orig_axis_label, orig_index_expr in orig_target_exprs.items():
-                        new_exprs[orig_axis_label] = replacer(orig_index_expr)
+                        # new_exprs[orig_axis_label] = replacer(orig_index_expr)
+                        new_exprs[orig_axis_label] = replace(orig_index_expr, indexed_target_exprs)
 
                     composed_target_paths_and_exprs[axis.id, component.label] = (orig_target_path, freeze(new_exprs))
 
@@ -2415,9 +2433,10 @@ def _compose_axes(
 
             # 2. Determine target expressions. This is done via an *inside* substitution.
             orig_index_exprs = orig_index_exprss.get(orig_key, {})
-            replacer = IndexExpressionReplacer(indexed_target_exprs)
+            # replacer = IndexExpressionReplacer(indexed_target_exprs)
             for orig_axis_label, orig_index_expr in orig_index_exprs.items():
-                composed_target_exprss[None][orig_axis_label] = replacer(orig_index_expr)
+                # composed_target_exprss[None][orig_axis_label] = replacer(orig_index_expr)
+                composed_target_exprss[None][orig_axis_label] = replace(orig_index_expr, indexed_target_exprs)
 
         if indexed_axes.is_empty:
             # Can do nothing more, stop here.
@@ -2439,9 +2458,9 @@ def _compose_axes(
 
             # 2. Determine index_exprs.
             orig_index_exprs = orig_index_exprss.get(orig_key, {})
-            replacer = IndexExpressionReplacer(indexed_target_exprs)
+            # replacer = IndexExpressionReplacer(indexed_target_exprs)
             for orig_axis_label, orig_index_expr in orig_index_exprs.items():
-                composed_target_exprss[indexed_key][orig_axis_label] = replacer(orig_index_expr)
+                composed_target_exprss[indexed_key][orig_axis_label] = replace(orig_index_expr, indexed_target_exprs)
 
             # 3. Determine layout_exprs...
             # ...
@@ -2565,10 +2584,10 @@ def iter_axis_tree(
         # Substitute the index exprs, which map target to source, into
         # indices, giving target index exprs
         myindex_exprs = index_exprs.get(None, pmap())
-        evaluator = ExpressionEvaluator(indices, outer_replace_map)
+        # evaluator = ExpressionEvaluator(indices, outer_replace_map)
         new_exprs = {}
         for axlabel, index_expr in myindex_exprs.items():
-            new_exprs[axlabel] = evaluator(index_expr)
+            new_exprs[axlabel] = eval_expr(index_expr, indices)
         index_exprs_acc = freeze(new_exprs)
 
     if axes.is_empty:
@@ -2618,11 +2637,12 @@ def iter_axis_tree(
             )
         ):
             new_exprs = {}
-            evaluator = ExpressionEvaluator(
-                indices | {axis.label: pt}, outer_replace_map
-            )
+            # evaluator = ExpressionEvaluator(
+            #     indices | {axis.label: pt}, outer_replace_map
+            # )
             for axlabel, index_expr in myindex_exprs.items():
-                new_index = evaluator(index_expr)
+                # new_index = evaluator(index_expr)
+                new_index = eval_expr(index_expr, indices | {axis.label: pt})
                 new_exprs[axlabel] = new_index
             index_exprs_ = index_exprs_acc | new_exprs
             indices_ = indices | {axis.label: pt}

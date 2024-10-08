@@ -1,11 +1,15 @@
 import abc
+import functools
+import numbers
+from functools import cached_property
 
 from pyop3.axtree import ContextAware
+from pyop3.axtree.tree import Terminal
 from pyop3.lang import FunctionArgument, ReplaceAssignment
 from pyop3.utils import UniqueNameGenerator
 
 
-class Array(ContextAware, FunctionArgument, abc.ABC):
+class Array(ContextAware, FunctionArgument, Terminal, abc.ABC):
     _prefix = "array"
     _name_generator = UniqueNameGenerator()
 
@@ -14,6 +18,7 @@ class Array(ContextAware, FunctionArgument, abc.ABC):
             raise ValueError("Can only specify one of name and prefix")
         self.name = name or self._name_generator(prefix or self._prefix)
 
+    # TODO: make eager=False the default
     def assign(self, other, eager=True):
         expr = ReplaceAssignment(self, other)
         return expr() if eager else expr
@@ -26,3 +31,4 @@ class Array(ContextAware, FunctionArgument, abc.ABC):
     @abc.abstractmethod
     def context_free(self):
         pass
+

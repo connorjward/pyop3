@@ -169,47 +169,47 @@ class UnrecognisedAxisException(ValueError):
     pass
 
 
-class ExpressionEvaluator(pym.mapper.evaluator.EvaluationMapper):
-    def __init__(self, context, loop_exprs):
-        super().__init__(context)
-        self._loop_exprs = loop_exprs
-
-    def map_axis_variable(self, expr):
-        try:
-            return self.context[expr.axis_label]
-        except KeyError as e:
-            raise UnrecognisedAxisException from e
-
-    def map_array(self, array_var):
-        from pyop3.itree.tree import ExpressionEvaluator, IndexExpressionReplacer
-
-        array = array_var.array
-
-        indices = {ax: self.rec(idx) for ax, idx in array_var.indices.items()}
-        # replacer = IndexExpressionReplacer(indices, self._loop_exprs)
-        # layout_orig = array.axes.layouts[freeze(array_var.path)]
-        # layout_subst = replacer(layout_orig)
-        # nor
-        # layout_subst = array.axes.subst_layouts[array_var.path]
-
-        path, = array.axes.leaf_paths
-        layout_subst = array.axes.subst_layouts()[path]
-
-        # offset = ExpressionEvaluator(indices, self._loop_exprs)(layout_subst)
-        # offset = ExpressionEvaluator(self.context | indices, self._loop_exprs)(layout_subst)
-        offset = ExpressionEvaluator(indices, self._loop_exprs)(layout_subst)
-        offset = strict_int(offset)
-
-        # return array_var.array.get_value(
-        #     self.context,
-        #     array_var.target_path,  # should be source path
-        #     # index_exprs=array_var.index_exprs,
-        #     loop_exprs=self._loop_exprs,
-        # )
-        return array.buffer.data_ro[offset]
-
-    def map_loop_index(self, expr):
-        return self._loop_exprs[expr.id][expr.axis]
+# class ExpressionEvaluator(pym.mapper.evaluator.EvaluationMapper):
+#     def __init__(self, context, loop_exprs):
+#         super().__init__(context)
+#         self._loop_exprs = loop_exprs
+#
+#     def map_axis_variable(self, expr):
+#         try:
+#             return self.context[expr.axis_label]
+#         except KeyError as e:
+#             raise UnrecognisedAxisException from e
+#
+#     def map_array(self, array_var):
+#         from pyop3.itree.tree import ExpressionEvaluator, IndexExpressionReplacer
+#
+#         array = array_var.array
+#
+#         indices = {ax: self.rec(idx) for ax, idx in array_var.indices.items()}
+#         # replacer = IndexExpressionReplacer(indices, self._loop_exprs)
+#         # layout_orig = array.axes.layouts[freeze(array_var.path)]
+#         # layout_subst = replacer(layout_orig)
+#         # nor
+#         # layout_subst = array.axes.subst_layouts[array_var.path]
+#
+#         path, = array.axes.leaf_paths
+#         layout_subst = array.axes.subst_layouts()[path]
+#
+#         # offset = ExpressionEvaluator(indices, self._loop_exprs)(layout_subst)
+#         # offset = ExpressionEvaluator(self.context | indices, self._loop_exprs)(layout_subst)
+#         offset = ExpressionEvaluator(indices, self._loop_exprs)(layout_subst)
+#         offset = strict_int(offset)
+#
+#         # return array_var.array.get_value(
+#         #     self.context,
+#         #     array_var.target_path,  # should be source path
+#         #     # index_exprs=array_var.index_exprs,
+#         #     loop_exprs=self._loop_exprs,
+#         # )
+#         return array.buffer.data_ro[offset]
+#
+#     def map_loop_index(self, expr):
+#         return self._loop_exprs[expr.id][expr.axis]
 
 
 class ExpressionFlatteningCollector(pym.mapper.Mapper):
@@ -256,8 +256,9 @@ def eval_expr(expr):
     result = HierarchicalArray(axes, dtype=IntType)
     for ploop in loop_index.iter():
         for p in axes.iter({ploop}):
-            evaluator = ExpressionEvaluator(p.source_exprs, loop_exprs=ploop.replace_map)
-            num = evaluator(expr)
+            # evaluator = ExpressionEvaluator(p.source_exprs, loop_exprs=ploop.replace_map)
+            num = evaluate(expr, p.source_exprs)
+            # num = evaluator(expr)
             breakpoint()
             result.set_value(p.source_exprs, num)
     breakpoint()
@@ -739,34 +740,99 @@ class MultiArrayCollector(pym.mapper.Collector):
         return set()
 
 
+# NOTE: does this sort of expression stuff live in here? Or expr.py perhaps?
+class Expression(abc.ABC):
+    def __add__(self, other):
+        return Add(self, other)
+
+    def __radd__(self, other):
+        return Add(other, self)
+
+    def __sub__(self, other):
+        return Sub(self, other)
+
+    def __rsub__(self, other):
+        return Sub(other, self)
+
+    def __mul__(self, other):
+        return Mul(self, other)
+
+    def __rmul__(self, other):
+        return Mul(other, self)
+
+    def __floordiv__(self, other):
+        if not isinstance(other, numbers.Integral):
+            return NotImplemented
+
+        return FloorDiv(self, other)
+
+
+
+class Terminal(Expression, abc.ABC):
+    pass
+
+
+class Operator(Expression):
+    def __init__(self, a, b):
+        self.a = a
+        self.b = b
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({self.a!r}, {self.b!r})"
+
+    @cached_property
+    def axes(self):
+        return merge_trees(_extract_axes(self.a), _extract_axes(self.b))
+
+
+class AxisVar(Terminal):
+    def __init__(self, axis_label) -> None:
+        self.axis_label = axis_label
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({self.axis_label!r})"
+
+
+class Add(Operator):
+    pass
+
+
+class Sub(Operator):
+    pass
+
+
+class Mul(Operator):
+    pass
+
+
+class FloorDiv(Operator):
+    pass
+
+
 # hacky class for index_exprs to work, needs cleaning up
-class AxisVar(pym.primitives.Variable):
-    init_arg_names = ("axis",)
-
-    mapper_method = sys.intern("map_axis_variable")
-
-    mycounter = 0
-
-    def __init__(self, axis):
-        super().__init__(f"var{self.mycounter}")
-        self.__class__.mycounter += 1  # ugly
-        self.axis_label = axis
-
-    def __getinitargs__(self):
-        # not very happy about this, is the name required?
-        return (self.axis,)
-
-    @property
-    def axis(self):
-        return self.axis_label
-
-    @property
-    def datamap(self):
-        return pmap()
-
-
-# better name
-AxisVar = AxisVar
+# class AxisVar(pym.primitives.Variable):
+#     init_arg_names = ("axis",)
+#
+#     mapper_method = sys.intern("map_axis_variable")
+#
+#     mycounter = 0
+#
+#     def __init__(self, axis):
+#         super().__init__(f"var{self.mycounter}")
+#         self.__class__.mycounter += 1  # ugly
+#         self.axis_label = axis
+#
+#     def __getinitargs__(self):
+#         # not very happy about this, is the name required?
+#         return (self.axis,)
+#
+#     @property
+#     def axis(self):
+#         return self.axis_label
+#
+#     @property
+#     def datamap(self):
+#         return pmap()
 
 
 class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
@@ -1295,7 +1361,6 @@ class AxisTree(MutableLabelledTreeMixin, BaseAxisTree):
     def layouts(self):
         """Initialise the multi-axis by computing the layout functions."""
         from pyop3.axtree.layout import make_layouts
-        from pyop3.itree.tree import IndexExpressionReplacer
 
         loop_vars = self.outer_loop_bits[1] if self.outer_loops else {}
 
@@ -1307,7 +1372,7 @@ class AxisTree(MutableLabelledTreeMixin, BaseAxisTree):
 
             layouts_ = {}
             for k, layout in layouts.items():
-                layouts_[k] = IndexExpressionReplacer(loop_vars)(layout)
+                layouts_[k] = replace(layout, loop_vars)
             layouts = freeze(layouts_)
 
         # for now
@@ -1775,6 +1840,75 @@ def relabel_axes(axes: AxisTree, replace_map: Mapping) -> AxisTree:
 #     return AxisTree(new_node_map)
 
 
+def merge_trees(tree1: BaseAxisTree, tree2: BaseAxisTree) -> AxisTree:
+    """Merge two axis trees together.
+
+    If the second tree has no common axes (share a lable) with the first then it is
+    appended to every leaf of the first tree. Any common axes are skipped.
+
+    Case 1:
+
+        TODO: show example where 
+        axis_a = Axis({"x": 2, "y": 2}, "a")
+        axis_b = Axis({"x": 2}, "b")
+        axis_c = Axis({"x": 2}, "c")
+        AxisTree.from_nest({axis_a: [axis_b, axis_c]})
+
+        is added to axis_a: things should split up.
+
+    """
+    # The algorithm proceeds by visiting each element in the second tree and
+    # attempting to add it to the tree. If the axis is already present then
+    # the axis is not added.
+    subtrees = _merge_trees(tree1, tree2)
+    breakpoint()
+
+    merged = AxisTree(tree1.node_map)
+    for leaf, subtree in subtrees:
+        merged = merged.add_subtree(subtree, *leaf)
+    return merged
+
+
+def _merge_trees(tree1, tree2, *, axis1=None, parents=None):
+    if axis1 is None:  # strictly all
+        axis1 = tree1.root
+        parents = pmap()
+
+    subtrees = []
+    for component1 in axis1.components:
+        parents_ = parents | {axis1: component1}
+        if subaxis1 := tree1.child(axis1, component1):
+            subtrees_ = _merge_trees(tree1, tree2, axis1=subaxis1, parents=parents_)
+            subtrees.extend(subtrees_)
+        else:
+            # at the bottom, now visit tree2 and try to add bits
+            subtree = _build_distinct_subtree(tree2, parents_)
+            subtrees.append(((axis1, component1), subtree))
+    return tuple(subtrees)
+
+
+def _build_distinct_subtree(axes, parents, *, axis=None):
+    if axis is None:
+        axis = axes.root
+
+    if axis in parents:
+        # Axis is already visited, do not include in the new tree and make sure
+        # to only use the right component
+        if subaxis := axes.child(axis, parents[axis]):
+            return _build_distinct_subtree(axes, parents, axis=subaxis)
+        else:
+            return AxisTree()
+    else:
+        # Axis has not yet been visited, include in the new tree
+        # and traverse all subaxes
+        subtree = AxisTree(axis)
+        for component in axis.components:
+            if subaxis := axes.child(axis, component):
+                subtree_ = _build_distinct_subtree(axes, parents, axis=subaxis)
+                subtree = subtree.add_subtree(subtree_, axis, component)
+        return subtree
+
+
 def subst_layouts(
     axes,
     target_paths,
@@ -1786,7 +1920,6 @@ def subst_layouts(
     index_exprs_acc=None,
 ):
     from pyop3 import HierarchicalArray
-    from pyop3.itree.tree import IndexExpressionReplacer
 
     if isinstance(axes, HierarchicalArray):
         assert axis is None
@@ -1809,8 +1942,8 @@ def subst_layouts(
         target_path_acc = target_paths.get(None, pmap())
         index_exprs_acc = index_exprs.get(None, pmap())
 
-        replacer = IndexExpressionReplacer(index_exprs_acc, loop_exprs=loop_exprs)
-        layouts_subst[path] = replacer(layouts.get(target_path_acc, 0))
+        # replacer = IndexExpressionReplacer(index_exprs_acc, loop_exprs=loop_exprs)
+        layouts_subst[path] = replace(layouts.get(target_path_acc, 0), index_exprs_acc)
 
         if not axes.is_empty:
             layouts_subst.update(
@@ -1835,8 +1968,8 @@ def subst_layouts(
                 (axis.id, component.label), {}
             )
 
-            replacer = IndexExpressionReplacer(index_exprs_acc_)
-            layouts_subst[path_] = replacer(layouts.get(target_path_acc_, 0))
+            # replacer = IndexExpressionReplacer(index_exprs_acc_)
+            layouts_subst[path_] = replace(layouts.get(target_path_acc_, 0), index_exprs_acc)
 
             if subaxis := axes.child(axis, component):
                 layouts_subst.update(
@@ -1864,3 +1997,44 @@ class _AxisVarRelabeler(pym.mapper.IdentityMapper):
     def map_array(self, array_var):
         indices = {ax: self.rec(expr) for ax, expr in array_var.indices.items()}
         return type(array_var)(array_var.array, indices, array_var.path)
+
+
+@functools.singledispatch
+def _extract_axes(obj: Any) -> BaseAxisTree:
+    from pyop3.array.base import Array  # cyclic import, better overwriting in base.py?
+
+    if isinstance(obj, Array):
+        return obj.axes
+    else:
+        raise TypeError()
+
+
+@_extract_axes.register
+def _(_: numbers.Integral) -> BaseAxisTree:
+    return AxisTree()
+
+
+# TODO: could make a postvisitor
+@functools.singledispatch
+def evaluate(expr: Any, *args, **kwargs):
+    raise TypeError
+
+
+@evaluate.register
+def _(expr: Add, *args, **kwargs):
+    return evaluate(expr.a, *args, **kwargs) + evaluate(expr.b, *args, **kwargs)
+
+
+@evaluate.register
+def _(mul: Mul, *args, **kwargs):
+    return evaluate(mul.a, *args, **kwargs) * evaluate(mul.b, *args, **kwargs)
+
+
+@evaluate.register
+def _(num: numbers.Number, *args, **kwargs):
+    return num
+
+
+@evaluate.register
+def _(var: AxisVar, replace_map):
+    return replace_map[var.axis_label]

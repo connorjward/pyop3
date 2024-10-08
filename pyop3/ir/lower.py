@@ -16,7 +16,9 @@ import pymbolic as pym
 from pyrsistent import freeze, pmap
 
 from pyop3.array import HierarchicalArray
+from pyop3.array.base import Array
 from pyop3.array.petsc import AbstractMat, Sparsity
+from pyop3.axtree.tree import AxisVar
 from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
 from pyop3.config import config
 from pyop3.dtypes import IntType
@@ -992,6 +994,17 @@ def make_array_expr(array, path, inames, ctx):
     return pym.subscript(pym.var(name), indices)
 
 
+@functools.singledispatch
+def as_pymbolic(obj: Any, _):
+    raise TypeError(f"No handler defined for {type(obj).__name__}")
+
+
+@as_pymbolic.register
+def _(axis_var: AxisVar, iname_replace_map):
+    breakpoint()
+
+
+# TODO: remove this class
 class JnameSubstitutor(pym.mapper.IdentityMapper):
     def __init__(self, replace_map, codegen_context):
         self._replace_map = replace_map

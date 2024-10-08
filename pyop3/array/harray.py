@@ -35,24 +35,24 @@ class IncompatibleShapeError(Exception):
 
 
 # TODO: not sure this is needed, can a Dat just be one of these?
-class ArrayVar(pym.primitives.AlgebraicLeaf):
-    mapper_method = sys.intern("map_array")
-
-    def __init__(self, array, indices, path=None):
-        assert path is not None
-        if path is None:
-            if array.axes.is_empty:
-                path = pmap()
-            else:
-                path = just_one(array.axes.leaf_paths)
-
-        super().__init__()
-        self.array = array
-        self.indices = freeze(indices)
-        self.path = freeze(path)
-
-    def __getinitargs__(self):
-        return (self.array, self.indices, self.path)
+# class ArrayVar(pym.primitives.AlgebraicLeaf):
+#     mapper_method = sys.intern("map_array")
+#
+#     def __init__(self, array, indices, path=None):
+#         assert path is not None
+#         if path is None:
+#             if array.axes.is_empty:
+#                 path = pmap()
+#             else:
+#                 path = just_one(array.axes.leaf_paths)
+#
+#         super().__init__()
+#         self.array = array
+#         self.indices = freeze(indices)
+#         self.path = freeze(path)
+#
+#     def __getinitargs__(self):
+#         return (self.array, self.indices, self.path)
 
 
 from pymbolic.mapper.stringifier import PREC_CALL, PREC_NONE, StringifyMapper

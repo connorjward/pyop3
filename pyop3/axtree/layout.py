@@ -13,13 +13,13 @@ import numpy as np
 import pymbolic as pym
 from pyrsistent import PMap, freeze, pmap
 
-from pyop3.array.harray import ArrayVar, HierarchicalArray
+from pyop3.array.harray import HierarchicalArray
 from pyop3.axtree.tree import (
     Axis,
     AxisComponent,
     AxisTree,
     AxisVar,
-    ExpressionEvaluator,
+    evaluate as eval_expr,
     component_number_from_offsets,
     component_offsets,
 )
@@ -122,13 +122,14 @@ def _tabulate_offsets(axes, axis, component):
             )
 
     # copied from elsewhere, should just go
-    mytargetpath = merge_dicts(
-        just_one(offset_axes.paths).values()
-    )
-    myindices = merge_dicts(
-        just_one(offset_axes.index_exprs).values()
-    )
-    return ArrayVar(offsets, myindices, mytargetpath)
+    # mytargetpath = merge_dicts(
+    #     just_one(offset_axes.paths).values()
+    # )
+    # myindices = merge_dicts(
+    #     just_one(offset_axes.index_exprs).values()
+    # )
+    return offsets
+    # return ArrayVar(offsets, myindices, mytargetpath)
 
 
 
@@ -170,8 +171,6 @@ def _make_layout_per_axis_component(
         indexed layouts because, as we go up the tree, we can identify which
         loop indices are materialised.
     """
-    from pyop3.array.harray import ArrayVar
-
     assert not axes.is_empty
 
     if axis is None:
@@ -333,13 +332,14 @@ def _make_layout_per_axis_component(
             )
 
             for subpath, offset_data in fulltree.items():
-                mytargetpath = merge_dicts(
-                    just_one(offset_data.axes.paths).values()
-                )
-                myindices = merge_dicts(
-                    just_one(offset_data.axes.index_exprs).values()
-                )
-                offset_var = ArrayVar(offset_data, myindices, mytargetpath)
+                # mytargetpath = merge_dicts(
+                #     just_one(offset_data.axes.paths).values()
+                # )
+                # myindices = merge_dicts(
+                #     just_one(offset_data.axes.index_exprs).values()
+                # )
+                # offset_var = ArrayVar(offset_data, myindices, mytargetpath)
+                offset_var = offset_data
 
                 layouts[layout_path | subpath] = offset_var
 
@@ -439,9 +439,10 @@ def size_requires_external_index(axes, axis, component, inner_loop_vars, path=pm
         else:
             leafpath = just_one(count.axes.leaf_paths)
         layout = count.axes._subst_layouts_default[leafpath]
-        required_loop_vars = LoopIndexCollector(linear=False)(layout)
-        if not required_loop_vars.issubset(inner_loop_vars):
-            return True
+        # no longer needed I believe
+        # required_loop_vars = LoopIndexCollector(linear=False)(layout)
+        # if not required_loop_vars.issubset(inner_loop_vars):
+        #     return True
         # is the path sufficient? i.e. do we have enough externally provided indices
         # to correctly index the axis?
         if not count.axes.is_empty:
@@ -623,7 +624,6 @@ def _create_count_array_tree(
     path=pmap(),
 ):
     from pyop3.array import HierarchicalArray
-    from pyop3.itree.tree import IndexExpressionReplacer
 
     if strictly_all(x is None for x in [axis, axes_acc]):
         axis = ctree.root
@@ -983,5 +983,6 @@ def eval_offset(
 
     layout_subst = layouts[freeze(path)]
 
-    offset = ExpressionEvaluator(indices, loop_exprs)(layout_subst)
+    # offset = ExpressionEvaluator(indices, loop_exprs)(layout_subst)
+    offset = eval_expr(layout_subst, indices)
     return strict_int(offset)

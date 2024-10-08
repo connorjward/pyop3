@@ -23,7 +23,6 @@ from pyop3.axtree.tree import (
 )
 from pyop3.dtypes import IntType, ScalarType
 from pyop3.itree.tree import (
-    IndexExpressionReplacer,
     as_index_forest,
     compose_axes,
     index_axes,
