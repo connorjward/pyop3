@@ -714,22 +714,6 @@ def component_offsets(axis, context):
     return steps([_as_int(c.count, context) for c in axis.components])
 
 
-class LoopIndexReplacer(pym.mapper.IdentityMapper):
-    def __init__(self, replace_map):
-        super().__init__()
-        self._replace_map = replace_map
-
-    def map_axis_variable(self, var):
-        try:
-            return self._replace_map[var.axis]
-        except KeyError:
-            return var
-
-    def map_array(self, array_var):
-        indices = {ax: self(expr) for ax, expr in array_var.indices.items()}
-        return type(array_var)(array_var.array, indices, array_var.path)
-
-
 class MultiArrayCollector(pym.mapper.Collector):
     def map_array(self, array_var):
         return {array_var.array}.union(
@@ -743,10 +727,16 @@ class MultiArrayCollector(pym.mapper.Collector):
 # NOTE: does this sort of expression stuff live in here? Or expr.py perhaps?
 class Expression(abc.ABC):
     def __add__(self, other):
-        return Add(self, other)
+        if other == 0:
+            return self
+        else:
+            return Add(self, other)
 
     def __radd__(self, other):
-        return Add(other, self)
+        if other == 0:
+            return self
+        else:
+            return Add(other, self)
 
     def __sub__(self, other):
         return Sub(self, other)
@@ -755,10 +745,16 @@ class Expression(abc.ABC):
         return Sub(other, self)
 
     def __mul__(self, other):
-        return Mul(self, other)
+        if other == 1:
+            return self
+        else:
+            return Mul(self, other)
 
     def __rmul__(self, other):
-        return Mul(other, self)
+        if other == 1:
+            return self
+        else:
+            return Mul(other, self)
 
     def __floordiv__(self, other):
         if not isinstance(other, numbers.Integral):
@@ -1463,19 +1459,21 @@ class IndexedAxisTree(BaseAxisTree):
         """
         Return a `tuple` of the possible paths represented by this tree.
         """
-        return self._target_paths | {self._source_path}
+        # return self._target_paths | {self._source_path}
+        return self._target_paths
 
-    @cached_property
-    def _source_path_and_exprs(self):
-        # TODO: merge source path and source expr collection here
-        return freeze({key: (self._source_path[key], self._source_exprs[key]) for key in self._source_path})
+    # @cached_property
+    # def _source_path_and_exprs(self):
+    #     # TODO: merge source path and source expr collection here
+    #     return freeze({key: (self._source_path[key], self._source_exprs[key]) for key in self._source_path})
 
     @cached_property
     def paths_and_exprs(self):
         """
         Return a `tuple` of the possible paths represented by this tree.
         """
-        return self._targets | {self._source_path_and_exprs}
+        # return self._targets | {self._source_path_and_exprs}
+        return self._targets
 
     # def _collect_paths(self, *, axis=None):
     #     """
@@ -1503,7 +1501,8 @@ class IndexedAxisTree(BaseAxisTree):
 
     @property
     def index_exprs(self):
-        return self._target_exprs | {self._source_exprs}
+        # return self._target_exprs | {self._source_exprs}
+        return self._target_exprs
 
     @property
     def layout_exprs(self):
@@ -1570,7 +1569,7 @@ class IndexedAxisTree(BaseAxisTree):
     # This could easily be two functions
     @cached_property
     def outer_loop_bits(self):
-        from pyop3.itree.tree import LocalLoopIndexVariable
+        # from pyop3.itree.tree import LocalLoopIndexVariable
 
         if len(self.outer_loops) > 1:
             # We do not yet support something like dat[p, q] if p and q
@@ -1920,6 +1919,7 @@ def subst_layouts(
     index_exprs_acc=None,
 ):
     from pyop3 import HierarchicalArray
+    from pyop3.itree.tree import replace  # should move this
 
     if isinstance(axes, HierarchicalArray):
         assert axis is None
@@ -1969,7 +1969,8 @@ def subst_layouts(
             )
 
             # replacer = IndexExpressionReplacer(index_exprs_acc_)
-            layouts_subst[path_] = replace(layouts.get(target_path_acc_, 0), index_exprs_acc)
+            layouts_subst[path_] = replace(layouts.get(target_path_acc_, 0), index_exprs_acc_)
+            # breakpoint()
 
             if subaxis := axes.child(axis, component):
                 layouts_subst.update(

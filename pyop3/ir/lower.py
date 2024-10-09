@@ -18,11 +18,12 @@ from pyrsistent import freeze, pmap
 from pyop3.array import HierarchicalArray
 from pyop3.array.base import Array
 from pyop3.array.petsc import AbstractMat, Sparsity
-from pyop3.axtree.tree import AxisVar
+from pyop3.axtree.tree import Add, AxisVar, Mul
 from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
 from pyop3.config import config
 from pyop3.dtypes import IntType
 from pyop3.ir.transform import with_likwid_markers, with_petsc_event
+from pyop3.itree.tree import LoopIndexVar, replace as replace_expr
 from pyop3.lang import (
     INC,
     MAX_RW,
@@ -580,25 +581,29 @@ def parse_loop_properly_this_time(
     codegen_context,
     *,
     axis=None,
-    iname_replace_map=None,
+    path=None,
+    iname_map=None,
 ):
-    if strictly_all(x is None for x in {axis, iname_replace_map}):
+    if strictly_all(x is None for x in {axis, path, iname_map}):
         axis = axes.root
-        iname_replace_map = pmap()
+        path = pmap()
+        iname_map = pmap()
 
     for component in axis.components:
+        path_ = path | {axis.label: component.label}
+
         if component._collective_count != 1:
             iname = codegen_context.unique_name("i")
             domain_var = register_extent(
                 component._collective_count,
-                iname_replace_map | loop_indices,
+                iname_map | loop_indices,
                 codegen_context,
             )
             codegen_context.add_domain(iname, domain_var)
-            iname_replace_map_ = iname_replace_map | {axis.label: pym.var(iname)}
+            iname_replace_map_ = iname_map | {axis.label: pym.var(iname)}
             within_inames = frozenset({iname})
         else:
-            iname_replace_map_ = iname_replace_map | {axis.label: 0}
+            iname_replace_map_ = iname_map | {axis.label: 0}
             within_inames = set()
 
         with codegen_context.within_inames(within_inames):
@@ -609,23 +614,21 @@ def parse_loop_properly_this_time(
                     loop_indices,
                     codegen_context,
                     axis=subaxis,
-                    iname_replace_map=iname_replace_map_,
+                    path=path_,
+                    iname_map=iname_replace_map_,
                 )
             else:
                 loop_exprs = StrictlyUniqueDict()
-                substitutor = JnameSubstitutor(
-                    iname_replace_map_ | loop_indices,
-                    codegen_context,
-                )
+                # substitutor = JnameSubstitutor(
+                #     iname_replace_map_ | loop_indices,
+                #     codegen_context,
+                # )
+                iname_map = iname_replace_map_ | loop_indices
                 axis_key = (axis.id, component.label)
                 for index_exprs in axes.index_exprs:
                     for axis_label, index_expr in index_exprs.get(axis_key).items():
-                        try:
-                            loop_exprs[axis_label] = substitutor(index_expr)
-                        except KeyAlreadyExistsException:
-                            # Because we don't have pass-through indices we sometimes
-                            # get (identical) clashes
-                            assert substitutor(index_expr) == loop_exprs[axis_label]
+                        # loop_exprs[axis_label] = substitutor(index_expr)
+                        loop_exprs[axis_label] = lower_expr(index_expr, path_, iname_map, codegen_context)
                 loop_exprs = pmap(loop_exprs)
 
                 for stmt in loop.statements:
@@ -966,9 +969,10 @@ def make_array_expr(array, path, inames, ctx):
     # TODO: This should be propagated as an option - we don't always want to optimise
     # TODO: Disabled optimising for now since I can't get it to work without a
     # symbolic language. That has to be future work.
-    array_offset = make_offset_expr(
+    array_offset = lower_expr(
         # array.axes.subst_layouts(optimize=True)[path],
         array.axes.subst_layouts(optimize=False)[path],
+        path,
         inames,
         ctx,
     )
@@ -995,18 +999,64 @@ def make_array_expr(array, path, inames, ctx):
 
 
 @functools.singledispatch
-def as_pymbolic(obj: Any, _):
+def lower_expr(obj: Any, *_):
     raise TypeError(f"No handler defined for {type(obj).__name__}")
 
 
-@as_pymbolic.register
-def _(axis_var: AxisVar, iname_replace_map):
-    breakpoint()
+@lower_expr.register
+def _(add: Add, *args, **kwargs):
+    return lower_expr(add.a, *args, **kwargs) + lower_expr(add.b, *args, **kwargs)
+
+
+@lower_expr.register
+def _(mul: Mul, *args, **kwargs):
+    return lower_expr(mul.a, *args, **kwargs) + lower_expr(mul.b, *args, **kwargs)
+
+
+@lower_expr.register
+def _(num: numbers.Number, *args, **kwargs):
+    return num
+
+
+@lower_expr.register
+def _(axis_var: AxisVar, path, iname_map, context):
+    return iname_map[axis_var.axis_label]
+
+
+@lower_expr.register
+def _(index_var: LoopIndexVar, path, iname_map, context):
+    return iname_map[axis_var.axis_label]
+
+
+@lower_expr.register
+def _(dat: HierarchicalArray, path, iname_map, context):
+    # Register data
+    context.add_argument(dat)
+    new_name = context.actual_to_kernel_rename_map[dat.name]
+    #
+    # replace_map = {ax: self.rec(expr_) for ax, expr_ in expr.indices.items()}
+    # replace_map.update(self._replace_map)
+
+    # doing this is putting zeros where I don't want them!
+    # my_layouts = subst_layouts(expr.array, expr.path, expr.indices, expr.array.layouts)[expr.path]
+    # layout = my_layouts[expr.path]
+
+    # We need to substitute expr.indices into expr.layouts
+    # layout = expr.array.axes.layouts[expr.path]
+    # mylayout = expr.array.subst_layouts[expr.path]
+    # layout = IndexExpressionReplacer(expr.indices)(mylayout)
+
+    # NOTE: This won't work if path is more complicated, need to partial match
+    offset_expr = lower_expr(dat.axes.subst_layouts()[path], path, iname_map, context)
+
+    rexpr = pym.subscript(pym.var(new_name), offset_expr)
+    return rexpr
 
 
 # TODO: remove this class
 class JnameSubstitutor(pym.mapper.IdentityMapper):
     def __init__(self, replace_map, codegen_context):
+        assert False, "old code!"
         self._replace_map = replace_map
         self._codegen_context = codegen_context
 
@@ -1178,6 +1228,7 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         # return offset_var - start_expr
 
 
+# TODO: remove!
 def make_offset_expr(
     layouts,
     jname_replace_map,
