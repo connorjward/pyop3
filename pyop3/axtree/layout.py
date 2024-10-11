@@ -103,23 +103,37 @@ def _tabulate_offsets(axes, axis, component):
         axes_iter.add(ax)
     partial_axes = AxisTree.from_iterable(axes_iter)
 
+    # NOTE: This code is quite unclear (partial axes made then axes_iter further modified)
     axes_iter.add(axis)
     offset_axes = AxisTree.from_iterable(axes_iter)
     offsets = HierarchicalArray(offset_axes, data=np.full(offset_axes.size, -1, dtype=IntType))
     # offsets = HierarchicalArray(axes, dtype=IntType)  # debug
 
     # this is really bloody close - just need the Python iteration to be less rubbish
-    for multiindex in partial_axes.iter():
+    # TODO: handle iteration over empty trees
+    if partial_axes.is_empty:
         offset = 0
 
-        for axindex in axis.iter({multiindex}, no_index=True):  # FIXME: Should make this single component only
-            offsets.set_value(multiindex.source_exprs | axindex.source_exprs, offset)
+        for axindex in axis.iter(no_index=True):  # FIXME: Should make this single component only
+            offsets.set_value(axindex.source_exprs, offset)
             offset += step_size(
                 axes,
                 axis,
                 component,
-                indices=multiindex.source_exprs|axindex.source_exprs,
+                indices=axindex.source_exprs,
             )
+    else:
+        for multiindex in partial_axes.iter():
+            offset = 0
+
+            for axindex in axis.iter({multiindex}, no_index=True):  # FIXME: Should make this single component only
+                offsets.set_value(multiindex.source_exprs | axindex.source_exprs, offset)
+                offset += step_size(
+                    axes,
+                    axis,
+                    component,
+                    indices=multiindex.source_exprs|axindex.source_exprs,
+                )
 
     # copied from elsewhere, should just go
     # mytargetpath = merge_dicts(

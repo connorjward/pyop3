@@ -237,7 +237,7 @@ class MultiComponentLabelledNode(Node, Labelled):
 
     @property
     @abc.abstractmethod
-    def component_labels(self):
+    def component_labels(self) -> tuple:
         pass
 
     @property
@@ -323,9 +323,9 @@ class LabelledTree(AbstractTree):
 
     @cached_property
     def leaves(self):
-        # NOTE: ordered!!
+        """ordered tuple of leaves"""
         if self.is_empty:
-            return ()
+            return (None,)
         else:
             return self._collect_leaves(self.root)
 
@@ -414,7 +414,11 @@ class LabelledTree(AbstractTree):
             }
         )
 
-    def path(self, node, component, ordered=False):
+    def path(self, node, component=None, ordered=False):
+        # TODO: make target always be a 2-tuple
+        if isinstance(node, tuple):
+            assert component is None
+            node, component = node
         clabel = as_component_label(component)
         node_id = self._as_node_id(node)
         path_ = self._paths[node_id, clabel]
@@ -424,8 +428,13 @@ class LabelledTree(AbstractTree):
             return pmap(path_)
 
     def path_with_nodes(
-        self, node, component_label, ordered=False, and_components=False
+        self, node, component_label=None, ordered=False, and_components=False
     ):
+        # TODO: make target always be a 2-tuple
+        if isinstance(node, tuple):
+            assert component_label is None
+            node, component_label = node
+
         component_label = as_component_label(component_label)
         node_id = self._as_node_id(node)
         path_ = self._paths_with_nodes[node_id, component_label]

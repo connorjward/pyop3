@@ -150,9 +150,10 @@ class LoopIterable(abc.ABC):
     # not iterable in the Python sense
     __iter__ = None
 
-    @abc.abstractmethod
-    def index(self) -> LoopIndex:
-        pass
+    # should be .iter() (and support eager=True)
+    # @abc.abstractmethod
+    # def index(self) -> LoopIndex:
+    #     pass
 
 
 class ContextFreeLoopIterable(LoopIterable, ContextFree, abc.ABC):
@@ -837,18 +838,25 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
 
     # TODO: Cache this function.
     def getitem(self, indices, *, strict=False):
-        from pyop3.itree.tree import as_index_forest, compose_axes, index_axes, accumulate_targets, restrict_targets
+        from pyop3.itree.tree import as_index_forest, index_axes
 
         if indices is Ellipsis:
             return self
 
         axis_trees = {}
-        for context, index_tree in as_index_forest(indices, axes=self).items():
-            axis_trees[context] = index_axes(index_tree, context, self)
+        for context, index_forest in as_index_forest(indices, axes=self).items():
+            axis_trees[context] = []
+            for index_tree in index_forest:
+                axis_trees[context].append(index_axes(index_tree, context, self))
 
         if axis_trees.keys() == {pmap()}:
-            return axis_trees[pmap()]
+            indexed_axis_trees = axis_trees[pmap()]
+            if len(indexed_axis_trees) > 1:
+                raise NotImplementedError("Need axis forests")
+            else:
+                return just_one(indexed_axis_trees)
         else:
+            raise NotImplementedError
             return ContextSensitiveAxisTree(axis_trees)
 
     @property
@@ -1328,6 +1336,10 @@ class AxisTree(MutableLabelledTreeMixin, BaseAxisTree):
         return self
 
     def add_axis(self, axis, parent_axis, parent_component=None, *, uniquify=False):
+        # FIXME: I want parent to be a *single argument*
+        if isinstance(parent_axis, tuple):
+            assert parent_component is None
+            parent_axis, parent_component = parent_axis
         parent_axis = self._as_node(parent_axis)
         if parent_component is not None:
             parent_component = (
@@ -1410,14 +1422,15 @@ class AxisTree(MutableLabelledTreeMixin, BaseAxisTree):
 
 
 class IndexedAxisTree(BaseAxisTree):
+    # NOTE: It is OK for unindexed to be None, then we just have a map-like thing
     def __init__(
         self,
         node_map,
-        unindexed,
+        unindexed,  # allowed to be None
         *,
         targets,
-        layout_exprs,
-        outer_loops,
+        layout_exprs=None,  # not used
+        outer_loops=(),  # not used
     ):
         if layout_exprs is None:
             layout_exprs = pmap()
@@ -1427,6 +1440,8 @@ class IndexedAxisTree(BaseAxisTree):
         super().__init__(node_map)
         self._unindexed = unindexed
         self._targets = frozenset(targets)
+        self.targets = frozenset(targets)
+
         # self._target_exprs = frozenset(target_exprs)
         # self._layout_exprs = tuple(layout_exprs)
         self._outer_loops = tuple(outer_loops)
@@ -1438,6 +1453,41 @@ class IndexedAxisTree(BaseAxisTree):
     @property
     def comm(self):
         return self.unindexed.comm
+
+    # ideally this is ordered
+    @cached_property
+    def targets_acc(self):
+        return frozenset(self._accumulate_targets(t) for t in self.targets)
+
+    def _accumulate_targets(self, targets_per_axis, *, axis=None, target_path_acc=None, target_exprs_acc=None):
+        """Traverse the tree and accumulate per-node targets."""
+        targets = {}
+
+        if axis is None:  # strictly_all
+            target_path_acc, target_exprs_acc = targets_per_axis.get(None, (pmap(), pmap()))
+            targets[None] = (target_path_acc, target_exprs_acc)
+
+            if self.is_empty:
+                return pmap(targets)
+            else:
+                axis = self.root
+
+        for component in axis.components:
+            axis_key = (axis.id, component.label)
+            axis_target_path, axis_target_exprs = targets_per_axis.get(axis_key, (pmap(), pmap()))
+            target_path_acc_ = target_path_acc | axis_target_path
+            target_exprs_acc_ = target_exprs_acc | axis_target_exprs
+            targets[axis.id, component.label] = (target_path_acc_, target_exprs_acc_)
+
+            if subaxis := self.child(axis, component):
+                targets_ = self._accumulate_targets(
+                    targets_per_axis,
+                    axis=subaxis,
+                    target_path_acc=target_path_acc_,
+                    target_exprs_acc=target_exprs_acc_,
+                )
+                targets.update(targets_)
+        return pmap(targets)
 
     # compat for now while I tinker
     @cached_property
@@ -1635,7 +1685,17 @@ class IndexedAxisTree(BaseAxisTree):
 
     @cached_property
     def _subst_layouts_default(self):
-        return subst_layouts(self, self.target_path, self.target_exprs, self.layouts)
+        all_layouts = []
+        for t in self.targets:
+            try:
+                new_layout = subst_layouts(self, t, self.layouts)
+                all_layouts.append(new_layout)
+            except KeyError:
+                # this path does not match the layout functions
+                # there is definitely a nicer way of doing this.
+                continue
+
+        return just_one(all_layouts)
 
     @property
     def _buffer_indices(self):
@@ -1910,13 +1970,15 @@ def _build_distinct_subtree(axes, parents, *, axis=None):
 
 def subst_layouts(
     axes,
-    target_paths,
-    index_exprs,
+    # target_paths,
+    # index_exprs,
+    targets,
     layouts,
     axis=None,
     path=None,
     target_path_acc=None,
-    index_exprs_acc=None,
+    # index_exprs_acc=None,
+    linear_axes_acc=None,
 ):
     from pyop3 import HierarchicalArray
     from pyop3.itree.tree import replace  # should move this
@@ -1937,52 +1999,62 @@ def subst_layouts(
     #             loop_exprs[outer_loop.id][ax_] = expr
 
     layouts_subst = {}
-    if strictly_all(x is None for x in [axis, path, target_path_acc, index_exprs_acc]):
+    # if strictly_all(x is None for x in [axis, path, target_path_acc, index_exprs_acc]):
+    if strictly_all(x is None for x in [axis, path]):
         path = pmap()
-        target_path_acc = target_paths.get(None, pmap())
-        index_exprs_acc = index_exprs.get(None, pmap())
+
+        # NOTE: I think I can get rid of this if I prescribe an empty axis tree to expression
+        # arrays
+        linear_axes_acc = AxisTree()
+        target_path_acc, _ = targets.get(None, (pmap(), pmap()))
+        # index_exprs_acc = index_exprs.get(None, pmap())
 
         # replacer = IndexExpressionReplacer(index_exprs_acc, loop_exprs=loop_exprs)
-        layouts_subst[path] = replace(layouts.get(target_path_acc, 0), index_exprs_acc)
+        layouts_subst[path] = replace(layouts[target_path_acc], linear_axes_acc, targets)
 
         if not axes.is_empty:
             layouts_subst.update(
                 subst_layouts(
                     axes,
-                    target_paths,
-                    index_exprs,
+                    # target_paths,
+                    # index_exprs,
+                    targets,
                     layouts,
                     axes.root,
                     path,
                     target_path_acc,
-                    index_exprs_acc,
+                    # index_exprs_acc,
+                    linear_axes_acc,
                 )
             )
     else:
         for component in axis.components:
             path_ = path | {axis.label: component.label}
-            target_path_acc_ = target_path_acc | target_paths.get(
-                (axis.id, component.label), {}
-            )
-            index_exprs_acc_ = index_exprs_acc | index_exprs.get(
-                (axis.id, component.label), {}
-            )
+            axis_target_path, _ = targets.get((axis.id, component.label), (pmap(), pmap()))
+            target_path_acc_ = target_path_acc | axis_target_path
+            # index_exprs_acc_ = index_exprs_acc | index_exprs.get(
+            #     (axis.id, component.label), {}
+            # )
+            linear_axis = Axis([component], axis.label, id=axis.id)
+            linear_axes_acc_ = linear_axes_acc.add_axis(linear_axis, linear_axes_acc.leaf)
 
             # replacer = IndexExpressionReplacer(index_exprs_acc_)
-            layouts_subst[path_] = replace(layouts.get(target_path_acc_, 0), index_exprs_acc_)
+            layouts_subst[path_] = replace(layouts[target_path_acc_], linear_axes_acc_, targets)
             # breakpoint()
 
             if subaxis := axes.child(axis, component):
                 layouts_subst.update(
                     subst_layouts(
                         axes,
-                        target_paths,
-                        index_exprs,
+                        # target_paths,
+                        # index_exprs,
+                        targets,
                         layouts,
                         subaxis,
                         path_,
                         target_path_acc_,
-                        index_exprs_acc_,
+                        # index_exprs_acc_,
+                        linear_axes_acc_,
                     )
                 )
     return freeze(layouts_subst)

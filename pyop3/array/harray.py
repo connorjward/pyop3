@@ -174,7 +174,7 @@ class HierarchicalArray(Array, KernelArgument):
 
     # NOTE: "strict" is bit vague now that we also have "allow_unused".
     def getitem(self, indices, *, strict=False, allow_unused=False):
-        from pyop3.itree.tree import as_index_forest, compose_axes, index_axes, accumulate_targets, restrict_targets
+        from pyop3.itree.tree import as_index_forest, compose_axes, index_axes
 
         if indices is Ellipsis:
             return self
@@ -188,13 +188,34 @@ class HierarchicalArray(Array, KernelArgument):
         if index_forest.keys() == {pmap()}:
             # There is no outer loop context to consider. Needn't return a
             # context sensitive object.
-            index_tree = index_forest[pmap()]
-            indexed_axes = index_axes(index_tree, pmap(), self.axes)
+            index_trees = index_forest[pmap()]
 
-            dat = HierarchicalArray(
-                indexed_axes, data=self.buffer, max_value=self.max_value, name=self.name
-            )
+            # Loop over "restricted" index trees. This is necessary because maps
+            # can yield multiple equivalent indexed axis trees. For example,
+            # closure(cell) can map any of:
+            #
+            #   "points"  ->  {"points"}
+            #   "points"  ->  {"cells", "edges", "vertices"}
+            #   "cells"   ->  {"points"}
+            #   "cells"   ->  {"cells", "edges", "vertices"}
+            #
+            # In each case the required arrays are different from each other and the
+            # resulting axis tree is also different. Hence in order for things to work
+            # we need to consider each of these separately and produce an axis *forest*.
+            indexed_axess = []
+            for restricted_index_tree in index_trees:
+                indexed_axes = index_axes(restricted_index_tree, pmap(), self.axes)
+                indexed_axess.append(indexed_axes)
+
+            if len(indexed_axess) > 1:
+                raise NotImplementedError("Need axis forests")
+            else:
+                indexed_axes = just_one(indexed_axess)
+                dat = HierarchicalArray(
+                    indexed_axes, data=self.buffer, max_value=self.max_value, name=self.name
+                )
         else:
+            raise NotImplementedError
             context_sensitive_axes = {}
             for loop_context, index_tree in index_forest.items():
                 indexed_axes = index_axes(index_tree, loop_context, self.axes)
