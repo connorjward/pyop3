@@ -250,6 +250,7 @@ class ExpressionFlatteningCollector(pym.mapper.Mapper):
 def eval_expr(expr):
     """Convert an array expression into an array."""
     from pyop3 import HierarchicalArray
+    from pyop3.expr_visitors import evaluate
 
     axes_iter, loop_index = axes_from_expr(expr)
     axes = AxisTree.from_iterable(axes_iter)
@@ -258,7 +259,7 @@ def eval_expr(expr):
     for ploop in loop_index.iter():
         for p in axes.iter({ploop}):
             # evaluator = ExpressionEvaluator(p.source_exprs, loop_exprs=ploop.replace_map)
-            num = evaluate(expr, p.source_exprs)
+            num = evaluate(expr, p.source_path, p.source_exprs)
             # num = evaluator(expr)
             breakpoint()
             result.set_value(p.source_exprs, num)
@@ -715,14 +716,14 @@ def component_offsets(axis, context):
     return steps([_as_int(c.count, context) for c in axis.components])
 
 
-class MultiArrayCollector(pym.mapper.Collector):
-    def map_array(self, array_var):
-        return {array_var.array}.union(
-            *(self.rec(expr) for expr in array_var.indices.values())
-        )
-
-    def map_nan(self, nan):
-        return set()
+# class MultiArrayCollector(pym.mapper.Collector):
+#     def map_array(self, array_var):
+#         return {array_var.array}.union(
+#             *(self.rec(expr) for expr in array_var.indices.values())
+#         )
+#
+#     def map_nan(self, nan):
+#         return set()
 
 
 # NOTE: does this sort of expression stuff live in here? Or expr.py perhaps?
@@ -788,6 +789,9 @@ class AxisVar(Terminal):
 
     def __repr__(self) -> str:
         return f"{type(self).__name__}({self.axis_label!r})"
+
+    def __str__(self) -> str:
+        return f"i{{{self.axis_label}}}"
 
 
 class Add(Operator):
@@ -1046,6 +1050,8 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
 
     @cached_property
     def datamap(self):
+        from pyop3.expr_visitors import collect_datamap
+
         if self.is_empty:
             dmap = {}
         else:
@@ -1054,13 +1060,15 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
         for index_exprs_per_axis in self.index_exprs:
             for index_exprs in index_exprs_per_axis.values():
                 for expr in index_exprs.values():
-                    for array in MultiArrayCollector()(expr):
-                        dmap.update(array.datamap)
+                    dmap.update(collect_datamap(expr))
+                    # for array in MultiArrayCollector()(expr):
+                    #     dmap.update(array.datamap)
         # TODO: cleanup, indexed axis trees (from map.index()) do not have layouts
         if not isinstance(self, IndexedAxisTree) or self.unindexed is not None:
             for layout_expr in self.layouts.values():
-                for array in MultiArrayCollector()(layout_expr):
-                    dmap.update(array.datamap)
+                # for array in MultiArrayCollector()(layout_expr):
+                #     dmap.update(array.datamap)
+                dmap.update(collect_datamap(layout_expr))
         return pmap(dmap)
 
     def as_tree(self):
@@ -1706,6 +1714,8 @@ class IndexedAxisTree(BaseAxisTree):
         return self._collect_buffer_indices(include_ghost_points=True)
 
     def _collect_buffer_indices(self, *, include_ghost_points: bool):
+        from pyop3.expr_visitors import evaluate
+
         # TODO: This method is inefficient as for affine things we still tabulate
         # everything first. It would be best to inspect index_exprs to determine
         # if a slice is sufficient, but this is hard.
@@ -1716,9 +1726,12 @@ class IndexedAxisTree(BaseAxisTree):
         indices = np.full(size, -1, dtype=IntType)
         # TODO: Handle any outer loops.
         # TODO: Generate code for this.
+        # breakpoint()
         for i, p in enumerate(self.iter()):
-            indices[i] = self.offset(p.source_exprs, p.source_path)
+            # indices[i] = evaluate(self.offset(p.source_exprs, p.source_path)
+            indices[i] = evaluate(self.subst_layouts()[p.source_path], p.source_exprs)
         debug_assert(lambda: (indices >= 0).all())
+        # breakpoint()
 
         # The packed indices are collected component-by-component so, for
         # numbered multi-component axes, they are not in ascending order.
@@ -1970,15 +1983,13 @@ def _build_distinct_subtree(axes, parents, *, axis=None):
 
 def subst_layouts(
     axes,
-    # target_paths,
-    # index_exprs,
     targets,
     layouts,
+    *,
     axis=None,
     path=None,
-    target_path_acc=None,
-    # index_exprs_acc=None,
     linear_axes_acc=None,
+    target_paths_and_exprs_acc=None,
 ):
     from pyop3 import HierarchicalArray
     from pyop3.itree.tree import replace  # should move this
@@ -2006,11 +2017,13 @@ def subst_layouts(
         # NOTE: I think I can get rid of this if I prescribe an empty axis tree to expression
         # arrays
         linear_axes_acc = AxisTree()
-        target_path_acc, _ = targets.get(None, (pmap(), pmap()))
+        # target_path_acc, target_exprs_acc = targets.get(None, (pmap(), pmap()))
+        target_paths_and_exprs_acc = {None: targets.get(None, (pmap(), pmap()))}
         # index_exprs_acc = index_exprs.get(None, pmap())
 
         # replacer = IndexExpressionReplacer(index_exprs_acc, loop_exprs=loop_exprs)
-        layouts_subst[path] = replace(layouts[target_path_acc], linear_axes_acc, targets)
+        accumulated_path = merge_dicts(p for p, _ in target_paths_and_exprs_acc.values())
+        layouts_subst[path] = replace(layouts[accumulated_path], linear_axes_acc, target_paths_and_exprs_acc)
 
         if not axes.is_empty:
             layouts_subst.update(
@@ -2020,41 +2033,41 @@ def subst_layouts(
                     # index_exprs,
                     targets,
                     layouts,
-                    axes.root,
-                    path,
-                    target_path_acc,
-                    # index_exprs_acc,
-                    linear_axes_acc,
+                    axis=axes.root,
+                    path=path,
+                    linear_axes_acc=linear_axes_acc,
+                    target_paths_and_exprs_acc=target_paths_and_exprs_acc,
                 )
             )
     else:
         for component in axis.components:
             path_ = path | {axis.label: component.label}
-            axis_target_path, _ = targets.get((axis.id, component.label), (pmap(), pmap()))
-            target_path_acc_ = target_path_acc | axis_target_path
-            # index_exprs_acc_ = index_exprs_acc | index_exprs.get(
-            #     (axis.id, component.label), {}
-            # )
-            linear_axis = Axis([component], axis.label, id=axis.id)
+
+            linear_axis = Axis([component], axis.label)
             linear_axes_acc_ = linear_axes_acc.add_axis(linear_axis, linear_axes_acc.leaf)
 
+            target_paths_and_exprs_acc_ = target_paths_and_exprs_acc | {(linear_axis.id, component.label): targets.get((axis.id, component.label), (pmap(), pmap()))}
+            # axis_target_path, axis_target_exprs = 
+            # target_path_acc_ = target_path_acc | axis_target_path
+            # target_exprs_acc_ = target_exprs_acc | axis_target_exprs
+
             # replacer = IndexExpressionReplacer(index_exprs_acc_)
-            layouts_subst[path_] = replace(layouts[target_path_acc_], linear_axes_acc_, targets)
+            accumulated_path = merge_dicts(p for p, _ in target_paths_and_exprs_acc_.values())
+            layouts_subst[path_] = replace(layouts[accumulated_path], linear_axes_acc_, target_paths_and_exprs_acc_)
             # breakpoint()
 
             if subaxis := axes.child(axis, component):
                 layouts_subst.update(
                     subst_layouts(
                         axes,
-                        # target_paths,
-                        # index_exprs,
                         targets,
                         layouts,
-                        subaxis,
-                        path_,
-                        target_path_acc_,
-                        # index_exprs_acc_,
-                        linear_axes_acc_,
+                        axis=subaxis,
+                        path=path_,
+                        # target_path_acc_,
+                        # target_exprs_acc_,
+                        linear_axes_acc=linear_axes_acc_,
+                        target_paths_and_exprs_acc=target_paths_and_exprs_acc_,
                     )
                 )
     return freeze(layouts_subst)
@@ -2085,29 +2098,3 @@ def _extract_axes(obj: Any) -> BaseAxisTree:
 @_extract_axes.register
 def _(_: numbers.Integral) -> BaseAxisTree:
     return AxisTree()
-
-
-# TODO: could make a postvisitor
-@functools.singledispatch
-def evaluate(expr: Any, *args, **kwargs):
-    raise TypeError
-
-
-@evaluate.register
-def _(expr: Add, *args, **kwargs):
-    return evaluate(expr.a, *args, **kwargs) + evaluate(expr.b, *args, **kwargs)
-
-
-@evaluate.register
-def _(mul: Mul, *args, **kwargs):
-    return evaluate(mul.a, *args, **kwargs) * evaluate(mul.b, *args, **kwargs)
-
-
-@evaluate.register
-def _(num: numbers.Number, *args, **kwargs):
-    return num
-
-
-@evaluate.register
-def _(var: AxisVar, replace_map):
-    return replace_map[var.axis_label]

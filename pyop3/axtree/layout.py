@@ -19,7 +19,6 @@ from pyop3.axtree.tree import (
     AxisComponent,
     AxisTree,
     AxisVar,
-    evaluate as eval_expr,
     component_number_from_offsets,
     component_offsets,
 )
@@ -979,6 +978,8 @@ def eval_offset(
     *,
     loop_exprs=pmap(),
 ):
+    from pyop3.expr_visitors import evaluate as eval_expr
+
     if path is None:
         path = pmap() if axes.is_empty else just_one(axes.leaf_paths)
 
@@ -998,5 +999,7 @@ def eval_offset(
     layout_subst = layouts[freeze(path)]
 
     # offset = ExpressionEvaluator(indices, loop_exprs)(layout_subst)
+    # offset = eval_expr(layout_subst, path, indices)
     offset = eval_expr(layout_subst, indices)
+    # breakpoint()
     return strict_int(offset)

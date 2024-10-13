@@ -1,7 +1,4 @@
 import abc
-import functools
-import numbers
-from functools import cached_property
 
 from pyop3.axtree import ContextAware
 from pyop3.axtree.tree import Terminal
@@ -31,4 +28,3 @@ class Array(ContextAware, FunctionArgument, Terminal, abc.ABC):
     @abc.abstractmethod
     def context_free(self):
         pass
-

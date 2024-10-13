@@ -628,7 +628,7 @@ def parse_loop_properly_this_time(
                 for index_exprs in axes.index_exprs:
                     for axis_label, index_expr in index_exprs.get(axis_key).items():
                         # loop_exprs[axis_label] = substitutor(index_expr)
-                        loop_exprs[axis_label] = lower_expr(index_expr, path_, iname_map, codegen_context)
+                        loop_exprs[axis_label] = lower_expr(index_expr, iname_map, codegen_context, path=path_)
                 loop_exprs = pmap(loop_exprs)
 
                 for stmt in loop.statements:
@@ -965,6 +965,7 @@ def add_leaf_assignment(
     codegen_context.add_assignment(lexpr, rexpr)
 
 
+# NOTE: This could really just be lower_expr itself
 def make_array_expr(array, path, inames, ctx):
     # TODO: This should be propagated as an option - we don't always want to optimise
     # TODO: Disabled optimising for now since I can't get it to work without a
@@ -972,7 +973,6 @@ def make_array_expr(array, path, inames, ctx):
     array_offset = lower_expr(
         # array.axes.subst_layouts(optimize=True)[path],
         array.axes.subst_layouts(optimize=False)[path],
-        path,
         inames,
         ctx,
     )
@@ -999,7 +999,7 @@ def make_array_expr(array, path, inames, ctx):
 
 
 @functools.singledispatch
-def lower_expr(obj: Any, *_):
+def lower_expr(obj: Any, *args, **kwargs):
     raise TypeError(f"No handler defined for {type(obj).__name__}")
 
 
@@ -1010,7 +1010,7 @@ def _(add: Add, *args, **kwargs):
 
 @lower_expr.register
 def _(mul: Mul, *args, **kwargs):
-    return lower_expr(mul.a, *args, **kwargs) + lower_expr(mul.b, *args, **kwargs)
+    return lower_expr(mul.a, *args, **kwargs) * lower_expr(mul.b, *args, **kwargs)
 
 
 @lower_expr.register
@@ -1019,17 +1019,21 @@ def _(num: numbers.Number, *args, **kwargs):
 
 
 @lower_expr.register
-def _(axis_var: AxisVar, path, iname_map, context):
+def _(axis_var: AxisVar, iname_map, context, path=None):
     return iname_map[axis_var.axis_label]
 
 
 @lower_expr.register
-def _(index_var: LoopIndexVar, path, iname_map, context):
-    return iname_map[axis_var.axis_label]
+def _(loop_var: LoopIndexVar, iname_map, context, path=None):
+    return iname_map[loop_var.index.id][loop_var.axis_label]
 
 
 @lower_expr.register
-def _(dat: HierarchicalArray, path, iname_map, context):
+def _(dat: HierarchicalArray, iname_map, context, path=None):
+    if path is None:
+        assert dat.axes.is_linear
+        path = dat.axes.path(dat.axes.leaf)
+
     # Register data
     context.add_argument(dat)
     new_name = context.actual_to_kernel_rename_map[dat.name]
@@ -1046,8 +1050,9 @@ def _(dat: HierarchicalArray, path, iname_map, context):
     # mylayout = expr.array.subst_layouts[expr.path]
     # layout = IndexExpressionReplacer(expr.indices)(mylayout)
 
-    # NOTE: This won't work if path is more complicated, need to partial match
-    offset_expr = lower_expr(dat.axes.subst_layouts()[path], path, iname_map, context)
+    # TODO: I think path might always be needed?
+    offset_expr = lower_expr(dat.axes.subst_layouts()[path], iname_map, context)
+    # breakpoint()
 
     rexpr = pym.subscript(pym.var(new_name), offset_expr)
     return rexpr

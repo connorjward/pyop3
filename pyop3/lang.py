@@ -18,7 +18,7 @@ import pytools
 from petsc4py import PETSc
 
 from pyop3.axtree import Axis
-from pyop3.axtree.tree import ContextFree, ContextSensitive, MultiArrayCollector
+from pyop3.axtree.tree import ContextFree, ContextSensitive
 from pyop3.dtypes import dtype_limits
 from pyop3.utils import (
     UniqueRecord,

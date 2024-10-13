@@ -13,7 +13,7 @@ from pyrsistent import freeze, pmap
 from pyop3.dtypes import ScalarType
 from pyop3.lang import KernelArgument
 from pyop3.mpi import COMM_SELF
-from pyop3.sf import StarForest
+from pyop3.sf import StarForest, serial_forest
 from pyop3.utils import UniqueNameGenerator, as_tuple, deprecated, readonly
 
 
@@ -123,6 +123,10 @@ class DistributedBuffer(Buffer):
                 raise ValueError
             if data.dtype != dtype:
                 raise ValueError
+
+        if sf is None:
+            size = np.prod(shape, dtype=int)  # should be more obvious
+            sf = serial_forest(size)
 
         self.shape = shape
         self._dtype = dtype

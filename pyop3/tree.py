@@ -340,6 +340,10 @@ class LabelledTree(AbstractTree):
                 leaves.append((node, clabel))
         return tuple(leaves)
 
+    @property
+    def is_linear(self) -> bool:
+        return len(self.leaves) == 1
+
     def _uniquify_node_labels(self, node_map, node=None, seen_labels=None):
         if not node_map:
             return
@@ -416,6 +420,10 @@ class LabelledTree(AbstractTree):
 
     def path(self, node, component=None, ordered=False):
         # TODO: make target always be a 2-tuple
+        if node is None:
+            assert component is None
+            return pmap()
+
         if isinstance(node, tuple):
             assert component is None
             node, component = node
@@ -501,6 +509,7 @@ class LabelledTree(AbstractTree):
                 for node in self.nodes
                 for cpt in node.components
             ]
+            all_paths.append(set())  # handle empty case
 
         path_set = set(path.items())
 

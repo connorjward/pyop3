@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import abc
 import collections
 import itertools
@@ -87,17 +89,31 @@ class StrictlyUniqueDict(dict):
 class OrderedSet:
     """An ordered set."""
 
-    def __init__(self):
+    def __init__(self, values=None, /) -> None:
         # Python dicts are ordered so we use one to keep the ordering
         # and also have O(1) access.
         # self._values = {}
 
         # actually sometimes we have non-hashable things (PETSc Mats), so use a list
-        self._values = []
+        # NOTE: This is very unsatisfying
+        if values is not None:
+            self._values = list(values)
+        else:
+            self._values = []
 
     def __iter__(self):
         # return iter(self._values.keys())
         return iter(self._values)
+
+    def __or__(self, other, /) -> OrderedSet:
+        # NOTE: other must be iterable
+        merged = self.copy()
+        for item in other:
+            merged.add(item)
+        return merged
+
+    def copy(self) -> OrderedSet:
+        return OrderedSet(self._values)
 
     def add(self, value):
         # self._values[value] = None

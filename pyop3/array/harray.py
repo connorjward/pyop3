@@ -18,7 +18,7 @@ from pyop3.axtree import (
     AxisTree,
     as_axis_tree,
 )
-from pyop3.axtree.tree import IndexedAxisTree, MultiArrayCollector, ContextSensitiveAxisTree
+from pyop3.axtree.tree import ContextSensitiveAxisTree
 from pyop3.buffer import Buffer, DistributedBuffer
 from pyop3.dtypes import ScalarType
 from pyop3.lang import KernelArgument, ReplaceAssignment
@@ -149,8 +149,12 @@ class HierarchicalArray(Array, KernelArgument):
 
         # self._cache = {}
 
-    def __str__(self):
-        return self.name
+    def __str__(self) -> str:
+        # nasty, need a better solution!
+        if len(self.axes.leaves) > 1:
+            return repr(self)
+        leaf_path = self.axes.path(self.axes.leaf)
+        return f"{self.name}[{self.axes.subst_layouts()[leaf_path]}]"
 
     def __getitem__(self, indices):
         return self.getitem(indices, strict=False)
@@ -389,19 +393,26 @@ class HierarchicalArray(Array, KernelArgument):
 
     @cached_property
     def datamap(self):
+        from pyop3.expr_visitors import collect_datamap
+
         datamap_ = {}
         datamap_.update(self.buffer.datamap)
         datamap_.update(self.axes.datamap)
+
+
+        # I reckon instead use subst_layouts here!!!
 
         # FIXME, deleting this breaks stuff...
         for index_exprs_per_axis in self.axes.index_exprs:
             for index_exprs in index_exprs_per_axis.values():
                 for expr in index_exprs.values():
-                    for array in MultiArrayCollector()(expr):
-                        datamap_.update(array.datamap)
+                    # for array in MultiArrayCollector()(expr):
+                    #     datamap_.update(array.datamap)
+                    datamap_.update(collect_datamap(expr))
         for layout_expr in self.axes.layouts.values():
-            for array in MultiArrayCollector()(layout_expr):
-                datamap_.update(array.datamap)
+            # for array in MultiArrayCollector()(layout_expr):
+            #     datamap_.update(array.datamap)
+            datamap_.update(collect_datamap(layout_expr))
         return freeze(datamap_)
 
     # TODO update docstring
