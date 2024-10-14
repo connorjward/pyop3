@@ -929,7 +929,7 @@ class CalledMap(AxisIndependentIndex, Identified, Labelled, LoopIterable):
 
             # something, something make linear, needed for replace to work properly
             if input_axes.is_empty:
-                linear_input_axes = input_axes
+                linear_input_axes = AxisTree(input_axes.node_map)
             else:
                 raise NotImplementedError
 
@@ -972,7 +972,7 @@ class CalledMap(AxisIndependentIndex, Identified, Labelled, LoopIterable):
 
                     # make a method
                     subaxis, subtargets = _make_leaf_axis_from_called_map_new(
-                        self.name, output_spec, input_axes, input_targets,
+                        self.name, output_spec, linear_input_axes, input_targets,
                     )
 
                     axes_ = axes_.add_axis(subaxis, leaf_key)
@@ -2182,11 +2182,11 @@ def _(
     )
 
 
-def _make_leaf_axis_from_called_map_new(map_name, output_spec, input_axes, input_paths_and_exprs):
+def _make_leaf_axis_from_called_map_new(map_name, output_spec, linear_input_axes, input_paths_and_exprs):
     components = []
     for map_output in output_spec:
         # NOTE: This could probably be done more eagerly.
-        arity = replace(map_output.arity, input_axes, input_paths_and_exprs)
+        arity = replace(map_output.arity, linear_input_axes, input_paths_and_exprs)
         component = AxisComponent(arity, label=map_output.label)
         components.append(component)
     axis = Axis(components, label=map_name)
@@ -2196,8 +2196,16 @@ def _make_leaf_axis_from_called_map_new(map_name, output_spec, input_axes, input
         if not isinstance(map_output, TabulatedMapComponent):
             raise NotImplementedError("Currently we assume only arrays here")
 
+        linear_axis = Axis(component, axis.label)
+        linear_axes = linear_input_axes.add_axis(linear_axis, linear_input_axes.leaf)
+
+        map_output_leaf = map_output.array.axes.leaf
+        leaf_axis, leaf_component_label = map_output_leaf
+
+        paths_and_exprs = input_paths_and_exprs | {(linear_axis.id, component.label): (pmap({leaf_axis.label: leaf_component_label}), pmap({leaf_axis.label: AxisVar(leaf_axis.label)}))}
+
         target_path = pmap({map_output.target_axis: map_output.target_component})
-        target_exprs = pmap({map_output.target_axis: replace(map_output.array, input_axes, input_paths_and_exprs)})
+        target_exprs = pmap({map_output.target_axis: replace(map_output.array, linear_axes, paths_and_exprs)})
         targets[axis.id, component.label] = (target_path, target_exprs)
     targets = pmap(targets)
 
