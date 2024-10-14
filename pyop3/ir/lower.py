@@ -1250,19 +1250,7 @@ def register_extent(extent, iname_replace_map, ctx):
     if not isinstance(extent, HierarchicalArray):
         raise NotImplementedError("need to tidy up assignment logic")
 
-    if not extent.axes.is_empty:
-        path = extent.axes.path(*extent.axes.leaf)
-    else:
-        path = pmap()
-
-    index_exprs = extent.axes.target_exprs.get(None, {})
-    # extent must be linear
-    if not extent.axes.is_empty:
-        for axis, cpt in extent.axes.path_with_nodes(*extent.axes.leaf).items():
-            index_exprs.update(extent.axes.target_exprs[axis.id, cpt])
-
-    expr = _scalar_assignment(extent, path, index_exprs, iname_replace_map, ctx)
-
+    expr = lower_expr(extent, iname_replace_map, ctx)
     varname = ctx.unique_name("p")
     ctx.add_temporary(varname)
     ctx.add_assignment(pym.var(varname), expr)
@@ -1284,6 +1272,7 @@ def _scalar_assignment(
     iname_replace_map,
     ctx,
 ):
+    assert False, "old code"
     # Register data
     ctx.add_argument(array)
 

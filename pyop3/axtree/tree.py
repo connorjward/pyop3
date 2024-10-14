@@ -388,6 +388,7 @@ class AxisComponent(LabelledNodeComponent):
 
         # if isinstance(self.count, numbers.Integral) and not self.rank_equal:
         if self.sf is not None:
+            # TODO: Should be a Global here
             return HierarchicalArray(AxisTree(), data=np.asarray([self.count], dtype=IntType), prefix="size")
         else:
             return self.count
