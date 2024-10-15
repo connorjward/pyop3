@@ -176,8 +176,19 @@ class AbstractMat(Array):
         if rcforest.keys() == {pmap()}:
             rtree, ctree = rcforest[pmap()]
 
-            indexed_raxes = index_axes(rtree, pmap(), self.raxes)
-            indexed_caxes = index_axes(ctree, pmap(), self.caxes)
+            indexed_raxess = tuple(
+                index_axes(restricted, pmap(), self.raxes)
+                for restricted in rtree
+            )
+            indexed_caxess = tuple(
+                index_axes(restricted, pmap(), self.caxes)
+                for restricted in ctree
+            )
+            if len(indexed_raxess) > 1 or len(indexed_caxess) > 1:
+                raise NotImplementedError("Need axis forests")
+            else:
+                indexed_raxes = just_one(indexed_raxess)
+                indexed_caxes = just_one(indexed_caxess)
             mat = type(self)(
                 indexed_raxes,
                 indexed_caxes,
@@ -190,17 +201,24 @@ class AbstractMat(Array):
             return mat
 
         # Otherwise we are context-sensitive
+        raise NotImplementedError("TODO")
         cs_raxes = {}
         cs_caxes = {}
         for ctx, (rtree, ctree) in rcforest.items():
-            indexed_raxes = index_axes(rtree, ctx, self.raxes)
-            indexed_caxes = index_axes(ctree, ctx, self.caxes)
+            indexed_raxess = tuple(
+                index_axes(restricted, ctx, self.raxes)
+                for restricted in rtree
+            )
+            indexed_caxess = tuple(
+                index_axes(restricted, ctx, self.caxes)
+                for restricted in ctree
+            )
 
-            if indexed_raxes.alloc_size == 0 or indexed_caxes.alloc_size == 0:
-                continue
+            # if indexed_raxes.alloc_size == 0 or indexed_caxes.alloc_size == 0:
+            #     continue
 
-            cs_raxes[ctx] = compose_axes(indexed_raxes, self.raxes)
-            cs_caxes[ctx] = compose_axes(indexed_caxes, self.caxes)
+            cs_raxes[ctx] = indexed_raxes
+            cs_caxes[ctx] = indexed_caxes
 
         mat = type(self)(
             cs_raxes,
@@ -446,15 +464,36 @@ class AbstractMat(Array):
             dropped_rkeys = set()
             dropped_ckeys = set()
 
-        # TODO: are dropped_rkeys and dropped_ckeys still needed?
-        # FIXME: this whole thing falls apart if we have multiple loop contexts
-        loop_index = just_one(self.block_raxes.outer_loops)
+        from pyop3.expr_visitors import collect_loops
 
+        loop_indicess = []
+        for leaf in self.block_raxes.leaves:
+            leaf_path = self.block_raxes.path(leaf)
+            leaf_layout_expr = self.block_raxes.subst_layouts()[leaf_path]
+            leaf_loop_indices = collect_loops(leaf_layout_expr)
+            loop_indicess.append(leaf_loop_indices)
+        # each leaf must have the same loop indices
+        loop_indices = single_valued(loop_indicess)
+
+        if len(loop_indices) > 1:
+            # should be straightforward enough to do
+            raise NotImplementedError
+        else:
+            loop_index = just_one(loop_indices)
+
+        # NOTE: It is safe to discard indexing information about the iterset here
+        # because we immediately index it with the loop and reinstate all the
+        # symbolic information.
         iterset = AxisTree(loop_index.iterset.node_map)
 
-        rmap_axes = iterset.add_subtree(self.block_raxes, *iterset.leaf)
-        rmap = HierarchicalArray(rmap_axes, dtype=IntType)
-        rmap = rmap[loop_index.local_index]
+        rmap_axes = iterset.add_subtree(self.block_raxes, iterset.leaf)
+        rmap = HierarchicalArray(rmap_axes, dtype=IntType, prefix="map")
+
+        # index the map so it has the same indexing information as the original expression
+        rmap = rmap[loop_index]
+        assert rmap.axes.node_map == self.block_raxes
+
+        breakpoint()
 
         loop_index = just_one(self.block_caxes.outer_loops)
         iterset = AxisTree(loop_index.iterset.node_map)
@@ -587,10 +626,9 @@ class AbstractMat(Array):
         raxes_relabel = relabel_axes(row_axes, cls._row_suffix)
         caxes_relabel = relabel_axes(col_axes, cls._col_suffix)
 
-        # might not be needed
-        axes = AxisTree(raxes_relabel.node_map)
+        axes = raxes_relabel
         for leaf in raxes_relabel.leaves:
-            axes = axes.add_subtree(caxes_relabel, *leaf, uniquify_ids=True)
+            axes = axes.add_subtree(caxes_relabel, leaf, uniquify_ids=True)
         return axes
 
     @classmethod

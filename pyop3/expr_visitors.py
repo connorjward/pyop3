@@ -110,3 +110,33 @@ def _(num: numbers.Number, *args, **kwargs):
 @evaluate.register
 def _(var: AxisVar, indices):
     return indices[var.axis_label]
+
+
+@functools.singledispatch
+def collect_loops(expr: Any):
+    raise TypeError
+
+
+@collect_loops.register(LoopIndexVar)
+def _(loop_var: LoopIndexVar):
+    return OrderedSet({loop_var.index})
+
+
+@collect_loops.register(AxisVar)
+@collect_loops.register(numbers.Number)
+def _(var):
+    return OrderedSet()
+
+@collect_loops.register(Operator)
+def _(op: Operator):
+    return collect_loops(op.a) | collect_loops(op.b)
+
+
+@collect_loops.register(HierarchicalArray)
+def _(dat):
+    if not dat.axes.is_linear:
+        # guess this is optional at the top level, extra kwarg?
+        raise NotImplementedError
+    else:
+        path = dat.axes.path(dat.axes.leaf)
+    return collect_loops(dat.axes.subst_layouts()[path])

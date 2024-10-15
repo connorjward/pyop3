@@ -710,10 +710,13 @@ class MutableLabelledTreeMixin:
         if uniquify:
             uniquify_ids = True
 
-        if some_but_not_all(x is None for x in {parent, component}):
-            raise ValueError(
-                "Either both or neither of parent and component must be defined"
-            )
+        if parent is None:
+            assert component is None, "makes no sense otherwise"
+        elif isinstance(parent, tuple):  # improved API
+            assert component is None
+            parent, component = parent
+        else:
+            pass
 
         if not parent:
             raise NotImplementedError("TODO")

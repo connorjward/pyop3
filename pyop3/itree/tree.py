@@ -1300,12 +1300,15 @@ def _(index: ContextFreeIndex, **_):
     return {pmap(): (IndexTree(index),)}
 
 
-@_as_index_forest.register
-def _(index: LoopIndex, *, loop_context, **_):
-    XXX = _as_context_free_index(index, loop_context=loop_context)
-    breakpoint()
-    cf_index = ...
-    return {pmap(): IndexTree(index)}
+@_as_index_forest.register(LoopIndex)
+@_as_index_forest.register(CalledMap)
+def _(index, *, loop_context, **_):
+    unpacked = _as_context_free_index(index, loop_context=loop_context)
+    forest = {
+        context: tuple(IndexTree(idx) for idx in idxs)
+        for context, idxs in unpacked.items()
+    }
+    return forest
 
 
 @_as_index_forest.register
@@ -1342,7 +1345,7 @@ def _as_context_free_index(arg, **_):
 @_as_context_free_index.register(ContextFreeIndex)
 @_as_context_free_index.register(ContextFreeCalledMap)
 def _(cf_index, **kwargs):
-    return {pmap(): cf_index}
+    return {pmap(): (cf_index,)}
 
 
 # TODO This function can definitely be refactored
@@ -1396,9 +1399,9 @@ def _(index, *, loop_context, **kwargs):
 
 
 @_as_context_free_index.register(CalledMap)
-def _(called_map, *, axes, **kwargs):
+def _(called_map, **kwargs):
     cf_maps = {}
-    cf_indicess = _as_context_free_index(called_map.from_index, axes=axes, **kwargs)
+    cf_indicess = _as_context_free_index(called_map.from_index, **kwargs)
     # loop over different "outer loop contexts"
     for context, cf_indices in cf_indicess.items():
         cf_maps[context] = []
@@ -1427,36 +1430,36 @@ def _(called_map, *, axes, **kwargs):
             #    etc
             #
             # In effect for a concrete set of inputs having a concrete set of outputs
+            #
+            # Note that this gets more complicated in cases like
+            #
+            #   { x -> [[a]], y -> [[a]] }
+            #
+            # where we assume x and y to be "equivalent".
+            # because if two equivalent input paths map to the same output then they can
+            # be considered equivalent in the final axis tree.
+            #
+            # This is later work.
 
-            possibilities = [
-                [(input_path, output_spec)
-                for output_spec in called_map.connectivity[input_path]]
-                for input_path in cf_index.leaf_target_paths
-            ]
+            possibilities = []
+            for equivalent_input_paths in cf_index.leaf_target_paths:
+                found = False
+                for input_path in equivalent_input_paths:
+                    if input_path in called_map.connectivity:
+                        found = True
+                        for output_spec in called_map.connectivity[input_path]:
+                            possibilities.append((input_path, output_spec))
+                assert found, "must be at least one matching path"
 
-            breakpoint()
-            list(itertools.product(possibilities))
-
-            # if the index is a map then it can target multiple axes
-            for input_path in cf_index.leaf_target_paths:
-                # we have to do the product here?
-                # loop over semantically equivalent output specs
-                for output_spec in called_map.connectivity[input_path]:
-                    restricted_connectivity = {input_path: (output_spec,)}
-                    restricted_map = Map(restricted_connectivity, self.name)(cf_index)
-                    cf_maps[context].append(restricted_map)
+            if len(possibilities) > 1:
+                # list(itertools.product(possibilities))
+                raise NotImplementedError("Need to think about taking the product of these")
+            else:
+                input_path, output_spec = just_one(possibilities)
+                restricted_connectivity = {input_path: (output_spec,)}
+                restricted_map = Map(restricted_connectivity, called_map.name)(cf_index)
+                cf_maps[context].append(restricted_map)
     return freeze(cf_maps)
-
-
-    #     cf_maps[context] = called_map.with_context(context, axes)
-    #
-    # for index in self.call_index.expanded:
-    #     for input_path in index.leaf_target_paths:
-    #         for output_spec in self.connectivity[input_path]:
-    #             restricted_connectivity = {input_path: (output_spec,)}
-    #             restricted_map = Map(restricted_connectivity, self.name)(index)
-    #             restricted_maps.append(restricted_map)
-    # return cf_maps
 
 
 @functools.singledispatch

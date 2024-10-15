@@ -1897,20 +1897,18 @@ def _(arg: numbers.Integral) -> AxisComponent:
     return AxisComponent(arg)
 
 
-# Moved to MutableTreeMixin and works for maps, not suffixes
-def relabel_axes(axes: AxisTree, replace_map: Mapping) -> AxisTree:
-    assert False
-#     new_node_map = {}
-#     for parent_id, children in axes.node_map.items():
-#         new_children = []
-#         for axis in children:
-#             if axis is not None:
-#                 new_axis = axis.copy(label=replace_map[axis.label])
-#             else:
-#                 new_axis = None
-#             new_children_.append(new_axis)
-#         new_node_map[parent_id] = new_children
-#     return AxisTree(new_node_map)
+def relabel_axes(axes: AxisTree, suffix: str) -> AxisTree:
+    new_node_map = {}
+    for axis_id, children in axes.node_map.items():
+        new_children = []
+        for subaxis in children:
+            if subaxis is not None:
+                new_axis = subaxis.copy(label=subaxis.label+suffix)
+            else:
+                new_axis = None
+            new_children.append(new_axis)
+        new_node_map[axis_id] = new_children
+    return AxisTree(new_node_map)
 
 
 def merge_trees(tree1: BaseAxisTree, tree2: BaseAxisTree) -> AxisTree:

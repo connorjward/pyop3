@@ -87,7 +87,7 @@ class StrictlyUniqueDict(dict):
 
 
 class OrderedSet:
-    """An ordered set."""
+    """A mutable ordered set."""
 
     def __init__(self, values=None, /) -> None:
         # Python dicts are ordered so we use one to keep the ordering
@@ -100,6 +100,18 @@ class OrderedSet:
             self._values = list(values)
         else:
             self._values = []
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({self._values!r})"
+
+    def __str__(self) -> str:
+        return f"{{{', '.join(self._values)}}})"
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def __eq__(self, other, /) -> bool:
+        return type(other) is type(self) and other._values == self._values
 
     def __iter__(self):
         # return iter(self._values.keys())
