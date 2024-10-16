@@ -63,6 +63,16 @@ from pyop3.utils import (
 
 bsearch = pym.var("mybsearch")
 
+class LoopIndexVar(Expression):
+    def __init__(self, index, axis_label) -> None:
+        self.index = index
+        self.axis_label = axis_label
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({self.index!r}, {self.axis_label!r})"
+
+
+
 
 # class IndexExpressionReplacer(pym.mapper.IdentityMapper):
 #     def __init__(self, replace_map, loop_exprs=pmap()):
@@ -90,8 +100,9 @@ def replace(obj: Any, axes, paths_and_exprs):
     raise TypeError()
 
 
-@replace.register
-def _(var: AxisVar, axes, pathsandexprs):
+@replace.register(AxisVar)
+@replace.register(LoopIndexVar)
+def _(var, axes, pathsandexprs):
     assert axes.is_linear
     # NOTE: The commented out bit will not work for None as part of the path
     # replace_map = merge_dicts(pathsandexprs[axis.id, component_label] for axis, component_label in axes.path_with_nodes(axes.leaf).items())
@@ -128,6 +139,9 @@ def _(op: Operator, *args):
     return type(op)(replace(op.a, *args), replace(op.b, *args))
 
 
+# NOTE: index trees are not really labelled trees. The component labels are always
+# nonsense. Instead I think they should just advertise a degree and then attach
+# to matching index (instead of label).
 class IndexTree(MutableLabelledTreeMixin, LabelledTree):
     def __init__(self, node_map=pmap()):
         super().__init__(node_map)
@@ -479,11 +493,21 @@ class ContextFreeLoopIndex(ContextFreeIndex, AxisIndependentIndex):
     # TODO: don't think this is useful any more, certainly a confusing name
     @property
     def leaf_target_paths(self):
-        # NOTE: This attribute must be a tuple of tuples as other index types return multiple leaves
+        """
+
+        Unlike with maps and slices, loop indices are single-component (so return a 1-tuple)
+        but that component can target differently labelled axes (so the tuple entry is an n-tuple).
+
+        """
+        equivalent_paths = []
         leaf_axis, leaf_component_label = self.iterset.leaf
-        leaf_key = leaf_axis.id, leaf_component_label
-        # Return the single output path, accomodating for the fact that there may be multiple equivalent ones.
-        return (tuple(p[leaf_key] for p in self.iterset.paths),)
+        leaf_key = (leaf_axis.id, leaf_component_label)
+        for targets_acc in self.iterset.targets_acc:
+            equivalent_path, _ = targets_acc[leaf_key]
+            equivalent_paths.append(equivalent_path)
+        equivalent_paths = tuple(equivalent_paths)
+
+        return (equivalent_paths,)
 
     @property
     def leaf_index_exprss(self):
@@ -641,10 +665,13 @@ class Slice(ContextFreeIndex):
 
     @cached_property
     def leaf_target_paths(self):
-        target_paths = tuple(
-            pmap({self.axis: subslice.component}) for subslice in self.slices
+        # We return a collection of 1-tuples because each slice component
+        # targets only a single (axis, component) pair. There are no
+        # 'equivalent' target paths.
+        return tuple(
+            (pmap({self.axis: subslice.component}),)
+            for subslice in self.slices
         )
-        return (target_paths,)
 
     @property
     def expanded(self) -> tuple:
@@ -756,55 +783,55 @@ class Map(pytools.ImmutableRecord):
         if isinstance(index, (ContextFreeIndex, ContextFreeCalledMap)):
             return ContextFreeCalledMap(self, index)
 
-            equiv_domainss = tuple(frozenset(mappings.keys()) for mappings in self.connectivity)
-
-            map_targets = []
-            empty = True
-            for equiv_call_index_targets in index.leaf_target_paths:
-
-                domain_index = None
-                for call_index_target in equiv_call_index_targets:
-                    for i, equiv_domains in enumerate(equiv_domainss):
-                        if call_index_target in equiv_domains:
-                            assert domain_index in {None, i}
-                            domain_index = i
-
-                if domain_index is None:
-                    continue
-
-                empty = False
-
-                equiv_mappings = self.connectivity[domain_index]
-                ntargets = single_valued(len(mcs) for mcs in equiv_mappings.values())
-
-                for itarget in range(ntargets):
-                    equiv_map_targets = []
-                    for call_index_target in equiv_call_index_targets:
-                        if call_index_target not in equiv_domainss[domain_index]:
-                            continue
-
-                        orig_component = equiv_mappings[call_index_target][itarget]
-
-                        # We need to be careful with the slice here because the source
-                        # label needs to match the generated axis later on.
-                        orig_array = orig_component.array
-                        leaf_axis, leaf_component_label = orig_array.axes.leaf
-                        myslice = Slice(leaf_axis.label, [AffineSliceComponent(leaf_component_label, label=leaf_component_label)], label=self.name)
-                        newarray = orig_component.array[index, myslice]
-
-                        indexed_component = orig_component.copy(array=newarray)
-                        equiv_map_targets.append(indexed_component)
-                    equiv_map_targets = tuple(equiv_map_targets)
-                    map_targets.append(equiv_map_targets)
-
-            if empty:
-                import warnings
-                warnings.warn(
-                    "Provided index is not recognised by the map, so the "
-                    "resulting axes will be empty."
-                )
-
-            return ContextFreeCalledMap(self, index, map_targets)
+            # equiv_domainss = tuple(frozenset(mappings.keys()) for mappings in self.connectivity)
+            #
+            # map_targets = []
+            # empty = True
+            # for equiv_call_index_targets in index.leaf_target_paths:
+            #
+            #     domain_index = None
+            #     for call_index_target in equiv_call_index_targets:
+            #         for i, equiv_domains in enumerate(equiv_domainss):
+            #             if call_index_target in equiv_domains:
+            #                 assert domain_index in {None, i}
+            #                 domain_index = i
+            #
+            #     if domain_index is None:
+            #         continue
+            #
+            #     empty = False
+            #
+            #     equiv_mappings = self.connectivity[domain_index]
+            #     ntargets = single_valued(len(mcs) for mcs in equiv_mappings.values())
+            #
+            #     for itarget in range(ntargets):
+            #         equiv_map_targets = []
+            #         for call_index_target in equiv_call_index_targets:
+            #             if call_index_target not in equiv_domainss[domain_index]:
+            #                 continue
+            #
+            #             orig_component = equiv_mappings[call_index_target][itarget]
+            #
+            #             # We need to be careful with the slice here because the source
+            #             # label needs to match the generated axis later on.
+            #             orig_array = orig_component.array
+            #             leaf_axis, leaf_component_label = orig_array.axes.leaf
+            #             myslice = Slice(leaf_axis.label, [AffineSliceComponent(leaf_component_label, label=leaf_component_label)], label=self.name)
+            #             newarray = orig_component.array[index, myslice]
+            #
+            #             indexed_component = orig_component.copy(array=newarray)
+            #             equiv_map_targets.append(indexed_component)
+            #         equiv_map_targets = tuple(equiv_map_targets)
+            #         map_targets.append(equiv_map_targets)
+            #
+            # if empty:
+            #     import warnings
+            #     warnings.warn(
+            #         "Provided index is not recognised by the map, so the "
+            #         "resulting axes will be empty."
+            #     )
+            #
+            # return ContextFreeCalledMap(self, index, map_targets)
         else:
             return CalledMap(self, index)
 
@@ -995,20 +1022,19 @@ class CalledMap(AxisIndependentIndex, Identified, Labelled, LoopIterable):
     # NOTE: nothing about this is specific to an index
     @property
     def leaf_target_paths(self) -> tuple:
-        equivalent_paths = []
-        for targets_acc in self.axes.targets_acc:
-            paths = []
-            for leaf in self.axes.leaves:
-                if leaf is None:
-                    leaf_key = None
-                else:
-                    leaf_axis, leaf_component_label = leaf
-                    leaf_key = (leaf_axis.id, leaf_component_label)
-                path = targets_acc[leaf_key][0]
-                paths.append(path)
-            paths = tuple(paths)
-            equivalent_paths.append(paths)
-        return tuple(equivalent_paths)
+        targets_acc = just_one(self.axes.targets_acc)
+
+        paths = []
+        for leaf in self.axes.leaves:
+            if leaf is None:
+                leaf_key = None
+            else:
+                leaf_axis, leaf_component_label = leaf
+                leaf_key = (leaf_axis.id, leaf_component_label)
+
+            equivalent_paths = (targets_acc[leaf_key][0],)
+            paths.append(equivalent_paths)
+        return tuple(paths)
 
     @cached_property
     def expanded(self):
@@ -1144,15 +1170,6 @@ ContextFreeCalledMap = CalledMap
 #     @property
 #     def datamap(self):
 #         return self.index.datamap
-
-
-class LoopIndexVar(Expression):
-    def __init__(self, index, axis_label) -> None:
-        self.index = index
-        self.axis_label = axis_label
-
-    def __repr__(self) -> str:
-        return f"{type(self).__name__}({self.index!r}, {self.axis_label!r})"
 
 
 # don't use this anywhere
@@ -1526,6 +1543,7 @@ def _collect_indices_and_contexts(indices, *, loop_context):
     collected = {}
 
     if isinstance(index, Index):
+        raise NotImplementedError("This is harder now we track equivalent paths")
         for context, cf_index in _as_context_free_index(
             index, loop_context=loop_context
         ).items():
@@ -1666,39 +1684,28 @@ def _complete_index_tree(
 
     index_tree_ = IndexTree(index)
 
-    found = False
-    equivalent_target_paths = index.leaf_target_paths
-    for target_paths in equivalent_target_paths:
-        for component_label, target_path_per_component in strict_zip(
-            index.component_labels, target_paths
-        ):
-            possible_target_paths_acc_ = tuple(
-                tp | target_path_per_component
-                for tp in possible_target_paths_acc
+    for component_label, equivalent_target_paths in strict_zip(
+        index.component_labels, index.leaf_target_paths
+    ):
+        possible_target_paths_acc_ = tuple(
+            possible_target_path | target_path
+            for possible_target_path in possible_target_paths_acc
+            for target_path in equivalent_target_paths
+        )
+
+        if subindex := index_tree.child(index, component_label):
+            subtree = _complete_index_tree(
+                index_tree,
+                axes,
+                index=subindex,
+                possible_target_paths_acc=possible_target_paths_acc_,
             )
+        else:
+            # At the bottom of the index tree, add any extra slices if needed.
+            subtree = _complete_index_tree_slices(axes, possible_target_paths_acc_)
 
-            if subindex := index_tree.child(index, component_label):
-                subtree = _complete_index_tree(
-                    index_tree,
-                    axes,
-                    index=subindex,
-                    possible_target_paths_acc=possible_target_paths_acc_,
-                )
-            else:
-                # At the bottom of the index tree, add any extra slices if needed.
-                subtree = _complete_index_tree_slices(axes, possible_target_paths_acc_)
+        index_tree_ = index_tree_.add_subtree(subtree, index, component_label)
 
-            index_tree_ = index_tree_.add_subtree(subtree, index, component_label)
-
-        # NOTE: need to think about how 'equivalent but wrong' target paths are
-        # skipped over, currently we will fail if we have more than one.
-        if found:
-            # TODO: better error type
-            raise ValueError("shouldn't be a duplicate")
-
-        found = True
-
-    assert found
     return index_tree_
 
 
@@ -1750,27 +1757,26 @@ def _index_tree_is_complete(index_tree: IndexTree, axes: AxisTree, *, index=None
         index = index_tree.root
         possible_target_paths_acc = (pmap(),)
 
-    equivalent_target_paths = index.leaf_target_paths
-    for possible_target_paths in equivalent_target_paths:
-        for component_label, possible_target_path in strict_zip(
-            index.component_labels, possible_target_paths
-        ):
-            possible_target_paths_acc_ = tuple(
-                tp | possible_target_path
-                for tp in possible_target_paths_acc
-            )
+    for component_label, equivalent_target_paths in strict_zip(
+        index.component_labels, index.leaf_target_paths
+    ):
+        possible_target_paths_acc_ = tuple(
+            possible_target_path_acc | possible_target_path
+            for possible_target_path_acc in possible_target_paths_acc
+            for possible_target_path in equivalent_target_paths
+        )
 
-            if subindex := index_tree.child(index, component_label):
-                if not _index_tree_is_complete(
-                    index_tree,
-                    axes,
-                    index=subindex,
-                    possible_target_paths_acc=possible_target_paths_acc_,
-                ):
-                    return False
-            else:
-                if all(tp not in axes.leaf_paths for tp in possible_target_paths_acc_):
-                    return False
+        if subindex := index_tree.child(index, component_label):
+            if not _index_tree_is_complete(
+                index_tree,
+                axes,
+                index=subindex,
+                possible_target_paths_acc=possible_target_paths_acc_,
+            ):
+                return False
+        else:
+            if all(tp not in axes.leaf_paths for tp in possible_target_paths_acc_):
+                return False
     return True
 
 
@@ -1823,7 +1829,7 @@ def _(
         )
         for axis, component_label in cf_loop_index.iterset.path_with_nodes(cf_loop_index.iterset.leaf).items()
     }
-    targets = []
+    targets = {None: []}
     for equivalent_targets in cf_loop_index.iterset.paths_and_exprs:
         new_path = {}
         new_exprs = {}
@@ -1831,14 +1837,14 @@ def _(
             new_path.update(orig_path)
             for axis_label, orig_expr in orig_exprs.items():
                 new_exprs[axis_label] = replace(orig_expr, cf_loop_index.iterset, replace_map)
-                print("AAA", new_exprs[axis_label])
         new_path = pmap(new_path)
         new_exprs = pmap(new_exprs)
-        targets.append(pmap({None: (new_path, new_exprs)}))
+        targets[None].append((new_path, new_exprs))
+    targets[None] = tuple(targets[None])
 
     return (
         axes,
-        tuple(targets),
+        pmap(targets),
         cf_loop_index.layout_exprs,
         cf_loop_index.loops,
         {},
@@ -2430,6 +2436,8 @@ def index_axes(
             outer_loops=indexed_axes.outer_loops,
         )
 
+    # debug, composition appears not to be working
+    # breakpoint()
 
     # for each input expression traverse the axes/index tree and index any arrays that are part
     # of it. This could perhaps be combined into the earlier traversal.
@@ -2666,9 +2674,26 @@ def compose_targets(orig_axes, orig_target_paths_and_exprs, indexed_axes, indexe
     if axis is None:  # strictly_all
         visited_orig_axes = frozenset()
 
-        # copied from below, refactor
         indexed_axes_acc = AxisTree()
         indexed_target_paths_and_exprs_acc = {None: indexed_target_paths_and_exprs.get(None, (pmap(), pmap()))}
+
+        # special handling for None entries
+        none_mapped_target_path = {}
+        none_mapped_target_exprs = {}
+
+        orig_none_mapped_target_path, orig_none_mapped_target_exprs = orig_target_paths_and_exprs.get(None, ({}, {}))
+
+        none_mapped_target_path |= orig_none_mapped_target_path
+        for orig_axis_label, orig_index_expr in orig_none_mapped_target_exprs.items():
+            none_mapped_target_exprs[orig_axis_label] = replace(orig_index_expr, indexed_axes_acc, indexed_target_paths_and_exprs_acc)
+
+        # make sure to add existing None entries - these will not require composition I think?
+
+        # debug
+        # if not indexed_axes.is_empty and indexed_axes.root.id == "_id_Axis_413":
+        #     breakpoint()
+
+        # copied from below, refactor
 
         # does the accumulated path match a part of orig_axes?
         accumulated_path = merge_dicts(p for p, _ in indexed_target_paths_and_exprs_acc.values())
@@ -2685,13 +2710,13 @@ def compose_targets(orig_axes, orig_target_paths_and_exprs, indexed_axes, indexe
                 if orig_key in orig_target_paths_and_exprs:
                     orig_target_path, orig_target_exprs = orig_target_paths_and_exprs[orig_key]
 
-                    # now index exprs
-                    new_exprs = {}
+                    none_mapped_target_path |= orig_target_path
                     for orig_axis_label, orig_index_expr in orig_target_exprs.items():
-                        new_exprs[orig_axis_label] = replace(orig_index_expr, indexed_axes_acc, indexed_target_paths_and_exprs_acc)
-                        print("BBB", new_exprs[orig_axis_label])
+                        none_mapped_target_exprs[orig_axis_label] = replace(orig_index_expr, indexed_axes_acc, indexed_target_paths_and_exprs_acc)
 
-                    composed_target_paths_and_exprs[None] = (orig_target_path, freeze(new_exprs))
+        composed_target_paths_and_exprs[None] = (
+            pmap(none_mapped_target_path), pmap(none_mapped_target_exprs)
+        )
 
         if indexed_axes.is_empty:
             return freeze(composed_target_paths_and_exprs)

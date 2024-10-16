@@ -864,6 +864,36 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
             raise NotImplementedError
             return ContextSensitiveAxisTree(axis_trees)
 
+    def _accumulate_targets(self, targets_per_axis, *, axis=None, target_path_acc=None, target_exprs_acc=None):
+        """Traverse the tree and accumulate per-node targets."""
+        targets = {}
+
+        if axis is None:  # strictly_all
+            target_path_acc, target_exprs_acc = targets_per_axis.get(None, (pmap(), pmap()))
+            targets[None] = (target_path_acc, target_exprs_acc)
+
+            if self.is_empty:
+                return pmap(targets)
+            else:
+                axis = self.root
+
+        for component in axis.components:
+            axis_key = (axis.id, component.label)
+            axis_target_path, axis_target_exprs = targets_per_axis.get(axis_key, (pmap(), pmap()))
+            target_path_acc_ = target_path_acc | axis_target_path
+            target_exprs_acc_ = target_exprs_acc | axis_target_exprs
+            targets[axis.id, component.label] = (target_path_acc_, target_exprs_acc_)
+
+            if subaxis := self.child(axis, component):
+                targets_ = self._accumulate_targets(
+                    targets_per_axis,
+                    axis=subaxis,
+                    target_path_acc=target_path_acc_,
+                    target_exprs_acc=target_exprs_acc_,
+                )
+                targets.update(targets_)
+        return pmap(targets)
+
     @property
     @abc.abstractmethod
     def unindexed(self):
@@ -1270,6 +1300,11 @@ class AxisTree(MutableLabelledTreeMixin, BaseAxisTree):
     def paths(self):
         return (self._source_path,)
 
+    # bit of a hack, think about the design
+    @cached_property
+    def targets_acc(self):
+        return frozenset({self._accumulate_targets(self._source_path_and_exprs)})
+
     @cached_property
     def _source_path_and_exprs(self):
         # TODO: merge source path and source expr collection here
@@ -1464,39 +1499,10 @@ class IndexedAxisTree(BaseAxisTree):
         return self.unindexed.comm
 
     # ideally this is ordered
+    # TODO: should include source I think to be consistent with AxisTree
     @cached_property
     def targets_acc(self):
         return frozenset(self._accumulate_targets(t) for t in self.targets)
-
-    def _accumulate_targets(self, targets_per_axis, *, axis=None, target_path_acc=None, target_exprs_acc=None):
-        """Traverse the tree and accumulate per-node targets."""
-        targets = {}
-
-        if axis is None:  # strictly_all
-            target_path_acc, target_exprs_acc = targets_per_axis.get(None, (pmap(), pmap()))
-            targets[None] = (target_path_acc, target_exprs_acc)
-
-            if self.is_empty:
-                return pmap(targets)
-            else:
-                axis = self.root
-
-        for component in axis.components:
-            axis_key = (axis.id, component.label)
-            axis_target_path, axis_target_exprs = targets_per_axis.get(axis_key, (pmap(), pmap()))
-            target_path_acc_ = target_path_acc | axis_target_path
-            target_exprs_acc_ = target_exprs_acc | axis_target_exprs
-            targets[axis.id, component.label] = (target_path_acc_, target_exprs_acc_)
-
-            if subaxis := self.child(axis, component):
-                targets_ = self._accumulate_targets(
-                    targets_per_axis,
-                    axis=subaxis,
-                    target_path_acc=target_path_acc_,
-                    target_exprs_acc=target_exprs_acc_,
-                )
-                targets.update(targets_)
-        return pmap(targets)
 
     # compat for now while I tinker
     @cached_property

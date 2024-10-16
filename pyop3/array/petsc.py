@@ -7,7 +7,6 @@ from functools import cached_property
 from itertools import product
 
 import numpy as np
-import pymbolic as pym
 from petsc4py import PETSc
 from pyrsistent import freeze, pmap
 
@@ -24,10 +23,13 @@ from pyop3.axtree.tree import (
 from pyop3.dtypes import IntType, ScalarType
 from pyop3.itree.tree import (
     as_index_forest,
+    Slice,
+    IndexTree,
+    AffineSliceComponent,
     compose_axes,
     index_axes,
 )
-from pyop3.lang import PetscMatStore
+from pyop3.lang import PetscMatStore, Loop, LoopList
 from pyop3.utils import (
     deprecated,
     just_one,
@@ -36,13 +38,6 @@ from pyop3.utils import (
     strictly_all,
     unique,
 )
-
-
-# don't like that I need this
-class PetscVariable(pym.primitives.Variable):
-    def __init__(self, obj: PetscObject):
-        super().__init__(obj.name)
-        self.obj = obj
 
 
 class PetscObject(Array, abc.ABC):
@@ -464,12 +459,83 @@ class AbstractMat(Array):
             dropped_rkeys = set()
             dropped_ckeys = set()
 
+        rmap = self._make_map_part1(self.block_raxes)
+        cmap = self._make_map_part1(self.block_caxes)
+
+        return (rmap, cmap)
+
+        # if len(rloop_indices) > 1 or len(cloop_indices) > 1:
+        #     raise NotImplementedError
+        # else:
+        #     rloop_index = just_one(rloop_indices)
+        #     cloop_index = just_one(cloop_indices)
+        #
+        # breakpoint()
+        #
+        # # TODO: Make the code below go into a separate function distinct
+        # # from mat_type logic. Then can also share code for rmap and cmap.
+        # for orig_raxes in orig_raxess:
+        #     for idxs in my_product(self.block_raxes.outer_loops):
+        #         # target_indices = {idx.index.id: idx.target_exprs for idx in idxs}
+        #         target_indices = merge_dicts([idx.replace_map for idx in idxs])
+        #
+        #         for p in self.block_raxes.iter(idxs, include_ghost_points=True):  # seems to fix things
+        #             target_path = p.target_path
+        #             target_exprs = p.target_exprs
+        #             for key in dropped_rkeys:
+        #                 target_path = target_path.remove(key)
+        #                 target_exprs = target_exprs.remove(key)
+        #
+        #             offset = orig_raxes.offset(
+        #                 target_exprs, target_path, loop_exprs=target_indices
+        #             )
+        #             rmap.set_value(
+        #                 p.source_exprs,
+        #                 offset,
+        #                 p.source_path,
+        #                 loop_exprs=target_indices,
+        #             )
+        #
+        # for orig_caxes in orig_caxess:
+        #     for idxs in my_product(self.caxes.outer_loops):
+        #         # target_indices = {idx.index.id: idx.target_exprs for idx in idxs}
+        #         target_indices = merge_dicts([idx.replace_map for idx in idxs])
+        #
+        #         # for p in self.caxes.iter(idxs):
+        #         for p in self.block_caxes.iter(idxs, include_ghost_points=True):  # seems to fix things
+        #             target_path = p.target_path
+        #             target_exprs = p.target_exprs
+        #             for key in dropped_ckeys:
+        #                 target_path = target_path.remove(key)
+        #                 target_exprs = target_exprs.remove(key)
+        #
+        #             offset = orig_caxes.offset(
+        #                 target_exprs, target_path, loop_exprs=target_indices
+        #                 )
+        #             cmap.set_value(
+        #                 p.source_exprs,
+        #                 offset,
+        #                 p.source_path,
+        #                 loop_exprs=target_indices,
+        #             )
+        # return (rmap, cmap)
+
+    @property
+    def rmap(self):
+        return self.maps[0]
+
+    @property
+    def cmap(self):
+        return self.maps[1]
+
+    # TODO: refactor
+    def _make_map_part1(self, axes):
         from pyop3.expr_visitors import collect_loops
 
         loop_indicess = []
-        for leaf in self.block_raxes.leaves:
-            leaf_path = self.block_raxes.path(leaf)
-            leaf_layout_expr = self.block_raxes.subst_layouts()[leaf_path]
+        for leaf in axes.leaves:
+            leaf_path = axes.path(leaf)
+            leaf_layout_expr = axes.subst_layouts()[leaf_path]
             leaf_loop_indices = collect_loops(leaf_layout_expr)
             loop_indicess.append(leaf_loop_indices)
         # each leaf must have the same loop indices
@@ -486,77 +552,39 @@ class AbstractMat(Array):
         # symbolic information.
         iterset = AxisTree(loop_index.iterset.node_map)
 
-        rmap_axes = iterset.add_subtree(self.block_raxes, iterset.leaf)
+        rmap_axes = iterset.add_subtree(axes, iterset.leaf)
         rmap = HierarchicalArray(rmap_axes, dtype=IntType, prefix="map")
 
         # index the map so it has the same indexing information as the original expression
         rmap = rmap[loop_index]
-        assert rmap.axes.node_map == self.block_raxes
+        # TODO: Need a nice way to cast indexed axes to a fresh axis tree
+        assert AxisTree(rmap.axes.node_map) == AxisTree(axes.node_map)
 
-        breakpoint()
+        # now populate with values
+        loops = []
+        for leaf in axes.leaves:
+            leaf_layout_expr = axes.subst_layouts()[axes.path(leaf)]
 
-        loop_index = just_one(self.block_caxes.outer_loops)
-        iterset = AxisTree(loop_index.iterset.node_map)
+            slices = [
+                Slice(axis_label, AffineSliceComponent(component_label))
+                for axis_label, component_label in axes.path(leaf, ordered=True)
+            ]
+            # TODO: Ideally index tree parsing is done inside __getitem__
+            slices_tree = IndexTree.from_iterable(slices)
+            rmap_restrict = rmap[slices_tree]
 
-        cmap_axes = iterset.add_subtree(self.block_caxes, *iterset.leaf)
-        cmap = HierarchicalArray(cmap_axes, dtype=IntType)
-        cmap = cmap[loop_index.local_index]
+            loop = Loop(
+                loop_index,
+                rmap_restrict.assign(leaf_layout_expr)
+            )
+            loops.append(loop)
+        loop_list = LoopList(loops)
 
-        # TODO: Make the code below go into a separate function distinct
-        # from mat_type logic. Then can also share code for rmap and cmap.
-        for orig_raxes in orig_raxess:
-            for idxs in my_product(self.block_raxes.outer_loops):
-                # target_indices = {idx.index.id: idx.target_exprs for idx in idxs}
-                target_indices = merge_dicts([idx.replace_map for idx in idxs])
+        # breakpoint()
 
-                for p in self.block_raxes.iter(idxs, include_ghost_points=True):  # seems to fix things
-                    target_path = p.target_path
-                    target_exprs = p.target_exprs
-                    for key in dropped_rkeys:
-                        target_path = target_path.remove(key)
-                        target_exprs = target_exprs.remove(key)
+        loop_list()
 
-                    offset = orig_raxes.offset(
-                        target_exprs, target_path, loop_exprs=target_indices
-                    )
-                    rmap.set_value(
-                        p.source_exprs,
-                        offset,
-                        p.source_path,
-                        loop_exprs=target_indices,
-                    )
-
-        for orig_caxes in orig_caxess:
-            for idxs in my_product(self.caxes.outer_loops):
-                # target_indices = {idx.index.id: idx.target_exprs for idx in idxs}
-                target_indices = merge_dicts([idx.replace_map for idx in idxs])
-
-                # for p in self.caxes.iter(idxs):
-                for p in self.block_caxes.iter(idxs, include_ghost_points=True):  # seems to fix things
-                    target_path = p.target_path
-                    target_exprs = p.target_exprs
-                    for key in dropped_ckeys:
-                        target_path = target_path.remove(key)
-                        target_exprs = target_exprs.remove(key)
-
-                    offset = orig_caxes.offset(
-                        target_exprs, target_path, loop_exprs=target_indices
-                        )
-                    cmap.set_value(
-                        p.source_exprs,
-                        offset,
-                        p.source_path,
-                        loop_exprs=target_indices,
-                    )
-        return (rmap, cmap)
-
-    @property
-    def rmap(self):
-        return self.maps[0]
-
-    @property
-    def cmap(self):
-        return self.maps[1]
+        return rmap
 
     @cached_property
     def row_lgmap_dat(self):

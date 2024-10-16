@@ -874,8 +874,8 @@ def parse_assignment_properly_this_time(
     axes = assignment.assignee.axes
 
     if strictly_all(x is None for x in [axis, path]):
-        for array in assignment.arrays:
-            codegen_context.add_argument(array)
+        # for array in assignment.arrays:
+        #     codegen_context.add_argument(array)
 
         axis = axes.root
         path = pmap()
@@ -936,40 +936,50 @@ def add_leaf_assignment(
     codegen_context,
     loop_indices,
 ):
-    larr = assignment.assignee
-    rarr = assignment.expression
+    # larr = assignment.assignee
+    # rarr = assignment.expression
+    #
+    # if isinstance(rarr, HierarchicalArray):
+    #     rexpr = make_array_expr(
+    #         rarr,
+    #         path,
+    #         iname_replace_map,
+    #         codegen_context,
+    #     )
+    # else:
+    #     assert isinstance(rarr, numbers.Number)
+    #     rexpr = rarr
+    #
+    # lexpr = make_array_expr(
+    #     larr,
+    #     path,
+    #     iname_replace_map,
+    #     codegen_context,
+    # )
 
-    if isinstance(rarr, HierarchicalArray):
-        rexpr = make_array_expr(
-            rarr,
-            path,
-            iname_replace_map,
-            codegen_context,
-        )
-    else:
-        assert isinstance(rarr, numbers.Number)
-        rexpr = rarr
+    lexpr = lower_expr(assignment.assignee, iname_replace_map, codegen_context, path=path)
+    rexpr = lower_expr(assignment.expression, iname_replace_map, codegen_context, path=path)
 
-    lexpr = make_array_expr(
-        larr,
-        path,
-        iname_replace_map,
-        codegen_context,
-    )
-
+    # single dispatch?
     if isinstance(assignment, AddAssignment):
         rexpr = lexpr + rexpr
     else:
         assert isinstance(assignment, ReplaceAssignment)
+        pass
 
     codegen_context.add_assignment(lexpr, rexpr)
 
 
 # NOTE: This could really just be lower_expr itself
 def make_array_expr(array, path, inames, ctx):
+    assert False, "old code"
     # TODO: This should be propagated as an option - we don't always want to optimise
     # TODO: Disabled optimising for now since I can't get it to work without a
     # symbolic language. That has to be future work.
+
+    # ultimately this can go when everything is just lower_expr
+    ctx.add_argument(array)  # (lower_expr registers the rest)
+
     array_offset = lower_expr(
         # array.axes.subst_layouts(optimize=True)[path],
         array.axes.subst_layouts(optimize=False)[path],
@@ -1037,24 +1047,27 @@ def _(dat: HierarchicalArray, iname_map, context, path=None):
     # Register data
     context.add_argument(dat)
     new_name = context.actual_to_kernel_rename_map[dat.name]
-    #
-    # replace_map = {ax: self.rec(expr_) for ax, expr_ in expr.indices.items()}
-    # replace_map.update(self._replace_map)
 
-    # doing this is putting zeros where I don't want them!
-    # my_layouts = subst_layouts(expr.array, expr.path, expr.indices, expr.array.layouts)[expr.path]
-    # layout = my_layouts[expr.path]
-
-    # We need to substitute expr.indices into expr.layouts
-    # layout = expr.array.axes.layouts[expr.path]
-    # mylayout = expr.array.subst_layouts[expr.path]
-    # layout = IndexExpressionReplacer(expr.indices)(mylayout)
-
-    # TODO: I think path might always be needed?
     offset_expr = lower_expr(dat.axes.subst_layouts()[path], iname_map, context)
-    # breakpoint()
 
-    rexpr = pym.subscript(pym.var(new_name), offset_expr)
+    # hack to handle the fact that temporaries can have shape but we want to
+    # linearly index it here
+    if dat.name in context._temporary_shapes:
+        shape = context._temporary_shapes[dat.name]
+        assert shape is not None
+        rank = len(shape)
+        extra_indices = (0,) * (rank - 1)
+
+        # also has to be a scalar, not an expression
+        temp_offset_name = context.unique_name("j")
+        temp_offset_var = pym.var(temp_offset_name)
+        context.add_temporary(temp_offset_name)
+        context.add_assignment(temp_offset_var, offset_expr)
+        indices = extra_indices + (temp_offset_var,)
+    else:
+        indices = (offset_expr,)
+
+    rexpr = pym.subscript(pym.var(new_name), indices)
     return rexpr
 
 

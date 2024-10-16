@@ -65,8 +65,18 @@ class LoopContextExpander(Transformer):
     def _apply(self, expr: Instruction, **kwargs):
         raise TypeError(f"No handler provided for {type(expr).__name__}")
 
+    @_apply.register(LoopList)
+    def _(self, loop_list: LoopList, /, *, context):
+        # NOTE: do I need a name here?? is that part of the compilation like compiler params?
+        new_loops = [
+            loop_
+            for loop in loop_list.loops
+            for loop_ in self._apply(loop, context=context).loops
+        ]
+        return LoopList(new_loops, name=loop_list.name)
+
     @_apply.register
-    def _(self, loop: Loop, *, context):
+    def _(self, loop: Loop, /, *, context):
         loops = []
         if isinstance(loop.index, ContextFreeLoopIndex):
             cf_iterset = loop.index.iterset

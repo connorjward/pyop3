@@ -108,8 +108,20 @@ class PreprocessedExpression:
     expression: Instruction
 
 
-# NOTE: or "Expression"?
+# NOTE: or "Expression"? But that conflicts...
+# TODO: Should always offer __call__ method
 class Instruction(UniqueRecord, abc.ABC):
+    # TODO: should handle compiler parameters here instead of at initialisation
+    # as they are a property of the preprocessed expression.
+    def __call__(self, **kwargs):
+        from pyop3.ir.lower import compile
+
+        if kwargs:
+            raise NotImplementedError("TODO")
+
+        executable = compile(self.preprocessed.expression)
+        executable()
+
     @cached_property
     def preprocessed(self):
         from pyop3.transform import expand_implicit_pack_unpack, expand_loop_contexts
@@ -162,6 +174,8 @@ class Loop(Instruction):
         self.index = index
         self.statements = as_tuple(statements)
         self.name = name
+        # TODO: not the right place to pass this information - should be tied to
+        # preprocessed expression
         self.compiler_parameters = compiler_parameters
 
     def __call__(self, **kwargs):
@@ -549,9 +563,6 @@ class Assignment(Terminal, abc.ABC):
     fields = Terminal.fields | {"assignee", "expression"}
 
     def __init__(self, assignee, expression, **kwargs):
-        if not isinstance(expression, numbers.Number):
-            assert assignee.dtype == expression.dtype
-
         super().__init__(**kwargs)
         self.assignee = assignee
         self.expression = expression

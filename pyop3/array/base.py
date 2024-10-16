@@ -15,8 +15,7 @@ class Array(ContextAware, FunctionArgument, Terminal, abc.ABC):
             raise ValueError("Can only specify one of name and prefix")
         self.name = name or self._name_generator(prefix or self._prefix)
 
-    # TODO: make eager=False the default
-    def assign(self, other, eager=True):
+    def assign(self, other, /, *, eager=False):
         expr = ReplaceAssignment(self, other)
         return expr() if eager else expr
 
