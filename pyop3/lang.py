@@ -567,8 +567,16 @@ class Assignment(Terminal, abc.ABC):
         self.assignee = assignee
         self.expression = expression
 
-    def __call__(self):
-        do_loop(Axis(1).index(), self)
+    # more generic now?
+    # def __call__(self):
+    #     do_loop(Axis(1).index(), self)
+
+    # TODO: Attach to terminal? Or just make even more generic as a visitor?
+    @property
+    def datamap(self):
+        from pyop3.expr_visitors import collect_datamap
+
+        return collect_datamap(self.assignee) | collect_datamap(self.expression)
 
     @property
     def arguments(self):

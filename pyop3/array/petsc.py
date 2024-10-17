@@ -578,10 +578,9 @@ class AbstractMat(Array):
                 rmap_restrict.assign(leaf_layout_expr)
             )
             loops.append(loop)
+
+        # TODO: Needn't be a loop list, outer loops will always be the same
         loop_list = LoopList(loops)
-
-        # breakpoint()
-
         loop_list()
 
         return rmap
