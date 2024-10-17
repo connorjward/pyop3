@@ -984,7 +984,7 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
     # NOTE: Shouldn't be a boolean here as there are different optimisation options.
     # In particular we can choose to compress multiple maps either only with non-increasing
     # arity (arity * 1), or not (which leads to a larger array: arity * arity).
-    @cachedmethod(cache=lambda self: self._cache)
+    # @cachedmethod(cache=lambda self: self._cache)
     def subst_layouts(self, optimize=False):
         if optimize:
             layouts_opt = {}
@@ -1454,7 +1454,8 @@ class AxisTree(MutableLabelledTreeMixin, BaseAxisTree):
 
     @property
     def _subst_layouts_default(self):
-        return self.layouts
+        print("AAAAAAAAAAAAAAAAAAA")
+        return subst_layouts(self, self._source_path_and_exprs, self.layouts)
 
     @cached_property
     def _buffer_indices(self):
@@ -1700,6 +1701,7 @@ class IndexedAxisTree(BaseAxisTree):
 
     @cached_property
     def _subst_layouts_default(self):
+        print("AAAAAAAAAAAAAAAAAAA")
         all_layouts = []
         for t in self.targets:
             try:
@@ -1733,12 +1735,10 @@ class IndexedAxisTree(BaseAxisTree):
         indices = np.full(size, -1, dtype=IntType)
         # TODO: Handle any outer loops.
         # TODO: Generate code for this.
-        # breakpoint()
         for i, p in enumerate(self.iter()):
             # indices[i] = evaluate(self.offset(p.source_exprs, p.source_path)
             indices[i] = evaluate(self.subst_layouts()[p.source_path], p.source_exprs)
         debug_assert(lambda: (indices >= 0).all())
-        # breakpoint()
 
         # The packed indices are collected component-by-component so, for
         # numbered multi-component axes, they are not in ascending order.
@@ -2003,7 +2003,6 @@ def subst_layouts(
         assert axis is None
         axes = axes.axes
 
-    # breakpoint()
 
     # TODO Don't do this every time this function is called
     loop_exprs = {}
@@ -2059,7 +2058,6 @@ def subst_layouts(
             # replacer = IndexExpressionReplacer(index_exprs_acc_)
             accumulated_path = merge_dicts(p for p, _ in target_paths_and_exprs_acc_.values())
             layouts_subst[path_] = replace(layouts[accumulated_path], linear_axes_acc_, target_paths_and_exprs_acc_)
-            # breakpoint()
 
             if subaxis := axes.child(axis, component):
                 layouts_subst.update(

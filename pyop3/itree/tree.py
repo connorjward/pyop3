@@ -117,6 +117,8 @@ def _(num: numbers.Number, axes, pathsandexprs):
 
 @replace.register
 def _(array: Array, axes, paths_and_exprs):
+    if array.parent:
+        raise NotImplementedError
     # breakpoint()
     if not isinstance(array, HierarchicalArray):
         raise NotImplementedError
@@ -1582,8 +1584,9 @@ def _(index):
     return index.expanded
 
 
-@_expand_index.register(str)
 @_expand_index.register(numbers.Integral)
+@_expand_index.register(str)
+@_expand_index.register(slice)
 def _(value):
     return (value,)
 

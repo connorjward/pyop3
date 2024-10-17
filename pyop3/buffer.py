@@ -61,6 +61,7 @@ class Buffer(KernelArgument, abc.ABC):
         return self.dtype
 
 
+# TODO: Should this carry a size?
 class NullBuffer(Buffer):
     """A buffer that does not carry data.
 

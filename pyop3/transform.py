@@ -1,18 +1,25 @@
+# TODO: rename this file to insn_visitors.py? Consistent with expr_visitors
+
 from __future__ import annotations
 
 import abc
 import collections
 import functools
 import numbers
+from typing import Any, Union
 
 from pyrsistent import pmap
+from immutabledict import ImmutableOrderedDict
 
-from pyop3.array import HierarchicalArray
+from pyop3.array import Dat
+from pyop3.array.transforms import Reshape
 from pyop3.array.petsc import AbstractMat
 from pyop3.axtree import Axis, AxisTree, ContextFree, ContextSensitive, ContextMismatchException, ContextAware
+from pyop3.axtree.tree import Operator, AxisVar
 from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
 from pyop3.itree import Map, TabulatedMapComponent
-from pyop3.itree.tree import ContextFreeLoopIndex
+from pyop3.itree.tree import ContextFreeLoopIndex, LoopIndexVar
+from pyop3.expr_visitors import collect_loops as expr_collect_loops
 from pyop3.lang import (
     INC,
     NA,
@@ -26,7 +33,7 @@ from pyop3.lang import (
     DummyKernelArgument,
     Instruction,
     Loop,
-    LoopList,
+    InstructionList,
     Pack,
     PetscMatAdd,
     PetscMatInstruction,
@@ -35,7 +42,26 @@ from pyop3.lang import (
     ReplaceAssignment,
     Terminal,
 )
-from pyop3.utils import UniqueNameGenerator, checked_zip, just_one, single_valued
+from pyop3.utils import UniqueNameGenerator, checked_zip, just_one, single_valued, OrderedSet
+
+
+# @functools.singledispatch
+# def collect_loop_indices(insn: Any, /) -> OrderedSet:
+#     raise TypeError
+#
+#
+# @collect_loop_indices.register(LoopList)
+# def _(loop_list: LoopList, /) -> OrderedSet:
+#     return OrderedSet(
+#         loop_idxs for loop in loop_list for loop_idxs in collect_loop_indices(loop)
+#     )
+#
+#
+# @collect_loop_indices.register(Loop)
+# def _(loop: Loop, /) -> OrderedSet:
+#     return OrderedSet(
+#         loop_idxs for loop in loop_list for loop_idxs in collect_loop_indices(loop)
+#     )
 
 
 # TODO Is this generic for other parsers/transformers? Esp. lower.py
@@ -65,15 +91,16 @@ class LoopContextExpander(Transformer):
     def _apply(self, expr: Instruction, **kwargs):
         raise TypeError(f"No handler provided for {type(expr).__name__}")
 
-    @_apply.register(LoopList)
-    def _(self, loop_list: LoopList, /, *, context):
-        # NOTE: do I need a name here?? is that part of the compilation like compiler params?
-        new_loops = [
-            loop_
-            for loop in loop_list.loops
-            for loop_ in self._apply(loop, context=context).loops
-        ]
-        return LoopList(new_loops, name=loop_list.name)
+    @_apply.register(InstructionList)
+    def _(self, loop_list: InstructionList, /, *, context):
+        # NOTE: I don't think that this is right... need each loop to have the same context set?
+        cf_loops_per_context = collections.defaultdict(list)
+        for loop in loop_list.loops:
+            for ctx, cf_loop in self._apply(loop):
+                cf_loops_per_context[ctx].append(cf_loop)
+        return ImmutableOrderedDict({
+            ctx: tuple(cf_loops) for ctx, cf_loops in cf_loops_per_context.items()
+        })
 
     @_apply.register
     def _(self, loop: Loop, /, *, context):
@@ -131,7 +158,7 @@ class LoopContextExpander(Transformer):
         # # loops.append((octx, loop))
         # loops.append(csloop)
 
-        return LoopList(loops, name=loop.name)
+        return InstructionList(loops, name=loop.name)
 
     @_apply.register
     def _(self, terminal: CalledFunction, *, context):
@@ -203,6 +230,9 @@ class LoopContextExpander(Transformer):
             return ((pmap(), None),)
 
 
+# NOTE: We do not currently do this because loop contexts are quite complicated
+# and rarely used. Also the whole "context-free"/"context-sensitive" thing is less
+# clear now since the changes to maps. This needs a fair bit of thought (later).
 def expand_loop_contexts(expr: Instruction):
     return LoopContextExpander().apply(expr)
 
@@ -241,8 +271,8 @@ class ImplicitPackUnpackExpander(Transformer):
         return loop.copy(statements=new_statements)
 
     @_apply.register
-    def _(self, loop_list: LoopList):
-        return loop_list.copy(loops=[self._apply(loop) for loop in loop_list.loops])
+    def _(self, insn_list: InstructionList):
+        return insn_list.copy(instructions=[self._apply(insn) for insn in insn_list])
 
     # TODO: Should be the same as Assignment
     @_apply.register
@@ -276,7 +306,7 @@ class ImplicitPackUnpackExpander(Transformer):
             # emit function calls for PetscMat
             if isinstance(arg, AbstractMat):
                 axes = AxisTree(arg.axes.node_map)
-                new_arg = HierarchicalArray(
+                new_arg = Dat(
                     axes,
                     data=NullBuffer(arg.dtype),  # does this need a size?
                     prefix="t",
@@ -297,7 +327,7 @@ class ImplicitPackUnpackExpander(Transformer):
             else:
                 arguments.append(arg)
 
-        return (*gathers, assignment.with_arguments(arguments), *scatters)
+        return InstructionList([*gathers, assignment.with_arguments(arguments), *scatters])
 
     @_apply.register
     def _(self, terminal: CalledFunction):
@@ -321,7 +351,7 @@ class ImplicitPackUnpackExpander(Transformer):
                 is_petsc_mat = isinstance(arg, AbstractMat)
 
                 axes = AxisTree(arg.axes.node_map)
-                temporary = HierarchicalArray(
+                temporary = Dat(
                     # arg.axes.materialize(),  # TODO
                     axes,
                     data=NullBuffer(arg.dtype),  # does this need a size?
@@ -362,7 +392,7 @@ class ImplicitPackUnpackExpander(Transformer):
             else:
                 arguments.append(arg)
 
-        return (*gathers, terminal.with_arguments(arguments), *scatters)
+        return InstructionList([*gathers, terminal.with_arguments(arguments), *scatters])
 
 
 # class ExprMarker
@@ -417,7 +447,100 @@ def _requires_pack_unpack(arg):
     # however, it is overly restrictive since we could pass something like dat[i0, :] directly
     # to a local kernel
     # return isinstance(arg, HierarchicalArray) and arg.subst_layouts != arg.layouts
-    return isinstance(arg, (HierarchicalArray, AbstractMat))
+    return isinstance(arg, (Dat, AbstractMat))
+
+
+@functools.singledispatch
+def expand_array_transformations(insn: Any, /):
+    raise TypeError(f"No handler defined for {type(insn.__name__)}")
+
+
+@expand_array_transformations.register(InstructionList)
+def _(insn_list: InstructionList, /):
+    return insn_list.copy(
+        instructions=[
+            insn_ for insn in insn_list for insn_ in expand_array_transformations(insn)
+        ],
+    )
+
+
+# NOTE: in theory loop could be over something transformed
+@expand_array_transformations.register(Loop)
+def _(loop: Loop, /):
+    return loop.copy(
+        statements=[
+            insn for stmt in loop.statements for insn in expand_array_transformations(stmt)
+        ],
+    )
+
+
+@expand_array_transformations.register(Assignment)
+def _(assignment: Assignment, /) -> Union[Assignment, InstructionList]:
+    bare_expression, input_insns = _generate_array_transformations(assignment.expression, "in")
+    bare_assignee, output_insns = _generate_array_transformations(assignment.assignee, "out")
+
+    bare_assignment = ReplaceAssignment(bare_assignee, bare_expression)
+
+    return InstructionList([*input_insns, bare_assignment, *output_insns])
+
+
+# TODO: better word than "mode"? And use an enum.
+@functools.singledispatch
+def _generate_array_transformations(expr: Any, /, mode):
+    raise TypeError(f"No handler provided for {type(expr).__name__}")
+
+
+@_generate_array_transformations.register(Operator)
+def _(op: Operator, /, mode):
+    bare_a, a_insns = _generate_array_transformations(op.a, mode)
+    bare_b, b_insns = _generate_array_transformations(op.a, mode)
+    # reconstruct?
+    return (type(op)(bare_a, bare_b), a_insns + b_insns)
+
+
+@_generate_array_transformations.register(numbers.Number)
+@_generate_array_transformations.register(AxisVar)
+@_generate_array_transformations.register(LoopIndexVar)
+def _(var, /, mode):
+    return (var, ())
+
+
+@_generate_array_transformations.register(Dat)
+def _(dat: Dat, /, mode):
+    # NOTE: In this function we assume that subst_layouts cannot contain
+    # any transformations. This is probably never going to occur but for
+    # things to work properly we should be tracking the path so as not
+    # to emit unnecessary assignments.
+    if dat.transform:
+        bare_dat, transform_insns = _generate_array_transformations2(dat.transform, dat, mode)
+        return (bare_dat, transform_insns)
+    else:
+        return (dat, ())
+
+
+# TODO: Need a good name for this.
+@functools.singledispatch
+def _generate_array_transformations2(expr: Any, /, mode):
+    raise TypeError(f"No handler provided for {type(expr).__name__}")
+
+
+@_generate_array_transformations2.register(Reshape)
+def _(reshape: Reshape, /, dat, mode):
+    temp_initial_axes = AxisTree(reshape.initial.axes.node_map)
+    temp_initial = Dat(temp_initial_axes, data=NullBuffer(dat.dtype), prefix="t")
+
+    temp_axes_reshaped = AxisTree(dat.axes.node_map)
+    temp_reshaped = temp_initial.with_axes(temp_axes_reshaped)
+
+    transformed_dat, transform_insns = _generate_array_transformations(reshape.initial, mode)
+
+    if mode == "in":
+        assignment = ReplaceAssignment(temp_initial, transformed_dat)
+    else:
+        assert mode == "out"
+        assignment = ReplaceAssignment(transformed_dat, temp_initial)
+
+    return (temp_reshaped, transform_insns + (assignment,))
 
 
 # *below is old untested code*

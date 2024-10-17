@@ -262,7 +262,7 @@ class AbstractMat(Array):
     def assemble(self):
         self.mat.assemble()
 
-    def assign(self, other, *, eager=True):
+    def assign(self, other, *, eager=False):
         if eager:
             raise NotImplementedError("Cannot eagerly assign to Mats")
 
@@ -650,7 +650,7 @@ class Mat(AbstractMat):
         mat = sparsity.materialize()
         return cls(sparsity.raxes, sparsity.caxes, sparsity.mat_type, mat, name=name, block_shape=sparsity.block_shape)
 
-    def zero(self, *, eager=True):
+    def zero(self, *, eager=False):
         if eager:
             self.mat.zeroEntries()
         else:

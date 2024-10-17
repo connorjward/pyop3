@@ -21,6 +21,7 @@ from pyop3.axtree import (
 from pyop3.axtree.tree import ContextSensitiveAxisTree
 from pyop3.buffer import Buffer, DistributedBuffer
 from pyop3.dtypes import ScalarType
+from pyop3.exceptions import Pyop3Exception
 from pyop3.lang import KernelArgument, ReplaceAssignment
 from pyop3.log import warning
 from pyop3.utils import (
@@ -30,8 +31,13 @@ from pyop3.utils import (
 )
 
 
+# is this used?
 class IncompatibleShapeError(Exception):
     """TODO, also bad name"""
+
+
+class AxisMismatchException(Pyop3Exception):
+    pass
 
 
 # TODO: not sure this is needed, can a Dat just be one of these?
@@ -76,7 +82,7 @@ class FancyIndexWriteException(Exception):
     pass
 
 
-class HierarchicalArray(Array, KernelArgument):
+class Dat(Array, KernelArgument):
     """Multi-dimensional, hierarchical array.
 
     Parameters
@@ -96,6 +102,7 @@ class HierarchicalArray(Array, KernelArgument):
         name=None,
         prefix=None,
         constant=False,
+        transform=None,
     ):
         super().__init__(name=name, prefix=prefix)
 
@@ -147,14 +154,15 @@ class HierarchicalArray(Array, KernelArgument):
         # TODO This attr really belongs to the buffer not the array
         self.constant = constant
 
+        self.transform = transform
+
         # self._cache = {}
 
     def __str__(self) -> str:
-        # nasty, need a better solution!
-        if len(self.axes.leaves) > 1:
-            return repr(self)
-        leaf_path = self.axes.path(self.axes.leaf)
-        return f"{self.name}[{self.axes.subst_layouts()[leaf_path]}]"
+        return "\n".join(
+            f"{self.name}[{self.axes.subst_layouts()[self.axes.path(leaf)]}]"
+            for leaf in self.axes.leaves
+        )
 
     def __getitem__(self, indices):
         return self.getitem(indices, strict=False)
@@ -446,16 +454,6 @@ class HierarchicalArray(Array, KernelArgument):
             outer_map,
         )
 
-    def _with_axes(self, axes):
-        """Return a new `Dat` with new axes pointing to the same data."""
-        assert False, "do not use, it's wrong"
-        return type(self)(
-            axes,
-            data=self.buffer,
-            max_value=self.max_value,
-            name=self.name,
-        )
-
     @property
     def alloc_size(self):
         return self.axes.alloc_size if not self.axes.is_empty else 1
@@ -539,7 +537,7 @@ class HierarchicalArray(Array, KernelArgument):
         else:
             self[subset].assign(other[subset])
 
-    def zero(self, *, subset=Ellipsis, eager=True):
+    def zero(self, *, subset=Ellipsis, eager=False):
         # old Firedrake code may hit this, should probably raise a warning
         if subset is None:
             subset = Ellipsis
@@ -547,11 +545,70 @@ class HierarchicalArray(Array, KernelArgument):
         expr = ReplaceAssignment(self[subset], 0)
         return expr() if eager else expr
 
+    def reshape(self, axes: AxisTree) -> Dat:
+        """Return a reshaped view of the `Dat`.
+
+        TODO
+
+        """
+        from pyop3.array.transforms import Reshape
+
+        assert isinstance(axes, AxisTree), "not indexed"
+
+        # NOTE: This will get nicer if we have a pyop3_init special method for this
+        # sort of object to facilitate reconstruction
+        return type(self)(
+            axes,
+            data=self.buffer,
+            max_value=self.max_value,
+            name=self.name,
+            constant=self.constant,
+            transform=Reshape(self),
+        )
+
+    # NOTE: should this only accept AxisTrees, or are IndexedAxisTrees fine also?
+    def with_axes(self, axes) -> Dat:
+        """Return a view of the current `Dat` with new axes.
+
+        Parameters
+        ----------
+        axes
+            XXX (type?)
+
+        Returns
+        -------
+        Dat
+            XXX
+
+        """
+        if axes.size != self.axes.size:
+            raise AxisMismatchException(
+                "New axis tree is a different size to the existing one."
+            )
+
+        # NOTE: This will get nicer if we have a pyop3_init special method for this
+        # sort of object to facilitate reconstruction
+        return type(self)(
+            axes,
+            data=self.buffer,
+            max_value=self.max_value,
+            name=self.name,
+            constant=self.constant,
+        )
+
 
 # Needs to be subclass for isinstance checks to work
 # TODO Delete
-class MultiArray(HierarchicalArray):
-    @deprecated("HierarchicalArray")
+class MultiArray(Dat):
+    @deprecated("Dat")
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
+
+# Needs to be subclass for isinstance checks to work
+# TODO Delete
+class HierarchicalArray(Dat):
+    @deprecated("Dat")
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 

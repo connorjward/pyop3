@@ -19,6 +19,11 @@ class Array(ContextAware, FunctionArgument, Terminal, abc.ABC):
         expr = ReplaceAssignment(self, other)
         return expr() if eager else expr
 
+    # TODO: Add this to different types
+    # @abc.abstractmethod
+    # def reshape(self, *axes):
+    #     pass
+
     @abc.abstractmethod
     def with_context(self):
         pass

@@ -22,6 +22,7 @@ from pyop3.axtree.tree import ContextFree, ContextSensitive
 from pyop3.dtypes import dtype_limits
 from pyop3.utils import (
     UniqueRecord,
+    deprecated,
     OrderedSet,
     as_tuple,
     auto,
@@ -124,11 +125,12 @@ class Instruction(UniqueRecord, abc.ABC):
 
     @cached_property
     def preprocessed(self):
-        from pyop3.transform import expand_implicit_pack_unpack, expand_loop_contexts
+        from pyop3.transform import expand_implicit_pack_unpack, expand_loop_contexts, expand_array_transformations
 
         insn = self
-        insn = expand_loop_contexts(insn)
+        # insn = expand_loop_contexts(insn)  # skipped for now, see comment on expand_loop_contexts
         insn = expand_implicit_pack_unpack(insn)
+        insn = expand_array_transformations(insn)
         return PreprocessedExpression(insn)
 
     @cached_property
@@ -413,17 +415,45 @@ class ContextAwareLoop(ContextAwareInstruction):
         )
 
 
-class LoopList(Instruction):
-    fields = Instruction.fields | {"loops"}
+class InstructionList(Instruction):
+    """
+    A list of instructions.
+    """
+    fields = Instruction.fields | {"instructions"}
 
-    def __init__(self, loops, *, name=_DEFAULT_LOOP_NAME, **kwargs):
+    def __new__(cls, instructions, **kwargs):
+        # an instruction list with one instruction is just the instruction
+        if len(instructions) == 0:
+            # or return EmptyInstruction?
+            raise ValueError("makes no sense")
+        elif len(instructions) == 1:
+            return just_one(instructions)
+        else:
+            return super().__new__(cls)
+
+    def __init__(self, instructions, *, name=_DEFAULT_LOOP_NAME, **kwargs):
         super().__init__(**kwargs)
-        self.loops = loops
+        self.instructions = instructions
         self.name = name
+
+    def __iter__(self):
+        return iter(self.instructions)
 
     @cached_property
     def datamap(self):
-        return merge_dicts(l.datamap for l in self.loops)
+        return merge_dicts(insn.datamap for insn in self.instructions)
+
+    @property
+    @deprecated("instructions")
+    def loops(self):
+        return self.instructions
+
+
+# old. instruction list is more generic
+class LoopList(InstructionList):
+    @deprecated("InstructionList")
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
 
 # TODO singledispatch
@@ -631,6 +661,7 @@ class Assignment(Terminal, abc.ABC):
         return tuple(args)
 
 
+# TODO: now expressions are better I think we can stop treating INC and REPLACE separately
 class ReplaceAssignment(Assignment):
     """Like PETSC_INSERT_VALUES."""
 

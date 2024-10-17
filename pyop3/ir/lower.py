@@ -15,7 +15,7 @@ import numpy as np
 import pymbolic as pym
 from pyrsistent import freeze, pmap
 
-from pyop3.array import HierarchicalArray
+from pyop3.array import Dat
 from pyop3.array.base import Array
 from pyop3.array.petsc import AbstractMat, Sparsity
 from pyop3.axtree.tree import Add, AxisVar, Mul
@@ -40,7 +40,7 @@ from pyop3.lang import (
     CalledFunction,
     DummyKernelArgument,
     Loop,
-    LoopList,
+    InstructionList,
     PetscMatAdd,
     PetscMatInstruction,
     PetscMatLoad,
@@ -204,7 +204,7 @@ class LoopyCodegenContext(CodegenContext):
         return self.add_array(array)
 
     # TODO we pass a lot more data here than we need I think, need to use unique *buffers*
-    def add_array(self, array: HierarchicalArray) -> None:
+    def add_array(self, array: Dat) -> None:
         if array.name in self._seen_arrays:
             return
         self._seen_arrays.add(array.name)
@@ -280,7 +280,7 @@ class LoopyCodegenContext(CodegenContext):
         """
         raise TypeError(f"No handler provided for {type(array).__name__}")
 
-    @_dtype.register(HierarchicalArray)
+    @_dtype.register(Dat)
     def _(self, array):
         return self._dtype(array.buffer)
 
@@ -401,8 +401,8 @@ def compile(expr: Instruction, compiler_parameters=None):
 
     function_name = expr.name
 
-    if isinstance(expr, LoopList):
-        cs_expr = expr.loops
+    if isinstance(expr, InstructionList):
+        cs_expr = expr.instructions
     else:
         assert isinstance(expr, Loop), "other types not handled yet"
         cs_expr = (expr,)
@@ -421,8 +421,8 @@ def compile(expr: Instruction, compiler_parameters=None):
         #     if len(path) > 1:
         #         raise NotImplementedError("needs to be sorted")
         #
-        #     # dummy = HierarchicalArray(index.iterset, data=NullBuffer(IntType))
-        #     dummy = HierarchicalArray(Axis(1), dtype=IntType)
+        #     # dummy = Dat(index.iterset, data=NullBuffer(IntType))
+        #     dummy = Dat(Axis(1), dtype=IntType)
         #     # this is dreadful, pass an integer array instead
         #     ctx.add_argument(dummy)
         #     myname = ctx.actual_to_kernel_rename_map[dummy.name]
@@ -674,7 +674,7 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
 
             # Register data
             # TODO This might be bad for temporaries
-            if isinstance(arg, HierarchicalArray):
+            if isinstance(arg, Dat):
                 ctx.add_argument(arg)
 
             # this should already be done in an assignment
@@ -1007,12 +1007,12 @@ def make_array_expr(array, path, inames, ctx):
 
 
 @functools.singledispatch
-def lower_expr(obj: Any, *args, **kwargs):
+def lower_expr(obj: Any, /, *args, **kwargs):
     raise TypeError(f"No handler defined for {type(obj).__name__}")
 
 
-@lower_expr.register
-def _(add: Add, *args, **kwargs):
+@lower_expr.register(Add)
+def _(add: Add, /, *args, **kwargs):
     return lower_expr(add.a, *args, **kwargs) + lower_expr(add.b, *args, **kwargs)
 
 
@@ -1036,15 +1036,17 @@ def _(loop_var: LoopIndexVar, iname_map, context, path=None):
     return iname_map[loop_var.index.id][loop_var.axis_label]
 
 
-@lower_expr.register
-def _(dat: HierarchicalArray, iname_map, context, path=None):
+@lower_expr.register(Dat)
+def _(dat: Dat, /, iname_map, context, path=None):
+    assert not dat.transform, "should be handled in preprocessing"
+
+    context.add_argument(dat)
+
+    new_name = context.actual_to_kernel_rename_map[dat.name]
+
     if path is None:
         assert dat.axes.is_linear
         path = dat.axes.path(dat.axes.leaf)
-
-    # Register data
-    context.add_argument(dat)
-    new_name = context.actual_to_kernel_rename_map[dat.name]
 
     offset_expr = lower_expr(dat.axes.subst_layouts()[path], iname_map, context)
 
@@ -1109,7 +1111,7 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         return rexpr
 
     def map_called_map(self, expr):
-        if not isinstance(expr.function.map_component.array, HierarchicalArray):
+        if not isinstance(expr.function.map_component.array, Dat):
             raise NotImplementedError("Affine map stuff not supported yet")
 
         # TODO I think I can clean the indexing up a lot here
@@ -1258,7 +1260,7 @@ def register_extent(extent, iname_replace_map, ctx):
         return extent
 
     # actually a pymbolic expression
-    if not isinstance(extent, HierarchicalArray):
+    if not isinstance(extent, Dat):
         raise NotImplementedError("need to tidy up assignment logic")
 
     expr = lower_expr(extent, iname_replace_map, ctx)
@@ -1328,7 +1330,7 @@ def _(arg: np.ndarray):
 
 
 @_as_pointer.register
-def _(arg: HierarchicalArray):
+def _(arg: Dat):
     # TODO if we use the right accessor here we modify the state appropriately
     return _as_pointer(arg.buffer)
 

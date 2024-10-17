@@ -4,7 +4,7 @@ from typing import Any
 
 from pyrsistent import pmap
 
-from pyop3.array import HierarchicalArray
+from pyop3.array import Dat
 from pyop3.axtree.tree import AxisVar, Operator, Add, Mul
 from pyop3.itree.tree import LoopIndexVar
 from pyop3.utils import OrderedSet
@@ -25,8 +25,8 @@ def collect_datamap(expr):
     raise TypeError()
 
 
-@collect_datamap.register(HierarchicalArray)
-def _(dat: HierarchicalArray, /):
+@collect_datamap.register(Dat)
+def _(dat: Dat, /):
     return dat.datamap
 
 
@@ -54,8 +54,8 @@ def _(num: numbers.Number, /):
 #     raise TypeError(f"No handler defined for {type(expr).__name__}")
 #
 #
-# @collect_arrays.register(HierarchicalArray)
-# def _(dat: HierarchicalArray) -> OrderedSet:
+# @collect_arrays.register(Dat)
+# def _(dat: Dat) -> OrderedSet:
 #     return OrderedSet([dat]) | collect_arrays(dat.subst_layouts())
 #
 #
@@ -82,7 +82,10 @@ def evaluate(expr: Any, *args, **kwargs):
 
 
 @evaluate.register
-def _(dat: HierarchicalArray, indices):
+def _(dat: Dat, indices):
+    if dat.parent:
+        raise NotImplementedError
+
     if not dat.axes.is_linear:
         # guess this is optional at the top level, extra kwarg?
         raise NotImplementedError
@@ -132,8 +135,10 @@ def _(op: Operator):
     return collect_loops(op.a) | collect_loops(op.b)
 
 
-@collect_loops.register(HierarchicalArray)
+@collect_loops.register(Dat)
 def _(dat):
+    if dat.parent:
+        raise NotImplementedError
     if not dat.axes.is_linear:
         # guess this is optional at the top level, extra kwarg?
         raise NotImplementedError
