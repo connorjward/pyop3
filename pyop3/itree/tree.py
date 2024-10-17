@@ -2758,7 +2758,6 @@ def compose_targets(orig_axes, orig_target_paths_and_exprs, indexed_axes, indexe
                         # orig_index_expr_new = replace(orig_index_expr, indexed_axes_acc_, indexed_target_paths_and_exprs)
                         # new_exprs[orig_axis_label] = replacer(orig_index_expr)
                         new_exprs[orig_axis_label] = replace(orig_index_expr, indexed_axes_acc_, indexed_target_paths_and_exprs_acc_)
-                        print("CCC", new_exprs[orig_axis_label])
 
                     composed_target_paths_and_exprs[axis.id, component.label] = (orig_target_path, freeze(new_exprs))
 

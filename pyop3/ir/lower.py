@@ -789,7 +789,7 @@ def _(assignment, loop_indices, codegen_context):
             f"""
             Mat {submat_name};
             MatNestGetSubMat({mat_name}, {ridx}, {cidx}, &{submat_name});
-            """.format()
+            """
         )
         codegen_context.add_cinstruction(code)
         mat_name = submat_name
@@ -800,6 +800,7 @@ def _(assignment, loop_indices, codegen_context):
     rsize, csize = assignment.mat_arg.shape
 
     if not isinstance(rsize, numbers.Integral):
+        raise NotImplementedError
         rsize_var = register_extent(
             rsize,
             loop_indices,
@@ -809,6 +810,7 @@ def _(assignment, loop_indices, codegen_context):
         rsize_var = rsize
 
     if not isinstance(csize, numbers.Integral):
+        raise NotImplementedError
         csize_var = register_extent(
             csize,
             loop_indices,
@@ -817,14 +819,10 @@ def _(assignment, loop_indices, codegen_context):
     else:
         csize_var = csize
 
-    rlayouts = rmap.axes.subst_layouts()[pmap()]
-    roffset = JnameSubstitutor(loop_indices, codegen_context)(rlayouts)
-
-    clayouts = cmap.axes.subst_layouts()[pmap()]
-    coffset = JnameSubstitutor(loop_indices, codegen_context)(clayouts)
-
-    irow = f"{rmap_name}[{roffset}]"
-    icol = f"{cmap_name}[{coffset}]"
+    # use pmap() as the path here because we don't want to emit any loops
+    # here that do not already exist.
+    irow = str(lower_expr(rmap, loop_indices, codegen_context, path=pmap()))
+    icol = str(lower_expr(cmap, loop_indices, codegen_context, path=pmap()))
 
     call_str = _petsc_mat_insn(
         assignment, mat_name, array_name, rsize_var, csize_var, irow, icol, blocked

@@ -408,127 +408,15 @@ class AbstractMat(Array):
                 index_exprs.update(subindex_exprs)
         return axis_tree, target_paths, index_exprs
 
-    @cached_property
-    @PETSc.Log.EventDecorator()
-    def maps(self):
-        from pyop3.axtree.layout import my_product
-
-        # TODO: Don't think these need to be lists here.
-        # FIXME: This will only work for singly-nested matrices
-        if self.nested:
-            rfield_axis = self.raxes.unindexed.root
-            cfield_axis = self.caxes.unindexed.root
-
-            if strictly_all(c.unit for c in rfield_axis.components):
-                # This weird trick is because the right target path for the field
-                # is actually tied to the root of the axis tree, rather than None.
-                # This seems like a limitation of the _compose_bits function.
-                rfield = single_valued(
-                    cpt
-                    for mycpt in self.raxes.root.components
-                    for ax, cpt in self.raxes.target_paths[
-                        self.raxes.root.id, mycpt.label
-                    ].items()
-                    if ax == rfield_axis.label
-                )
-                orig_raxes = AxisTree(self.raxes.unindexed[rfield].node_map)
-                orig_raxess = [orig_raxes]
-                dropped_rkeys = {rfield_axis.label}
-            else:
-                orig_raxess = [self.raxes.unindexed]
-                dropped_rkeys = frozenset()
-
-            if strictly_all(c.unit for c in cfield_axis.components):
-                cfield = single_valued(
-                    cpt
-                    for mycpt in self.caxes.root.components
-                    for ax, cpt in self.caxes.target_paths[
-                        self.caxes.root.id, mycpt.label
-                    ].items()
-                    if ax == cfield_axis.label
-                )
-                orig_caxes = AxisTree(self.caxes.unindexed[cfield].node_map)
-                orig_caxess = [orig_caxes]
-                dropped_ckeys = {cfield_axis.label}
-            else:
-                orig_caxess = [self.caxes.unindexed]
-                dropped_ckeys = set()
-        else:
-            orig_raxess = [self.block_raxes.unindexed]
-            orig_caxess = [self.block_caxes.unindexed]
-            dropped_rkeys = set()
-            dropped_ckeys = set()
-
-        rmap = self._make_map_part1(self.block_raxes)
-        cmap = self._make_map_part1(self.block_caxes)
-
-        return (rmap, cmap)
-
-        # if len(rloop_indices) > 1 or len(cloop_indices) > 1:
-        #     raise NotImplementedError
-        # else:
-        #     rloop_index = just_one(rloop_indices)
-        #     cloop_index = just_one(cloop_indices)
-        #
-        # breakpoint()
-        #
-        # # TODO: Make the code below go into a separate function distinct
-        # # from mat_type logic. Then can also share code for rmap and cmap.
-        # for orig_raxes in orig_raxess:
-        #     for idxs in my_product(self.block_raxes.outer_loops):
-        #         # target_indices = {idx.index.id: idx.target_exprs for idx in idxs}
-        #         target_indices = merge_dicts([idx.replace_map for idx in idxs])
-        #
-        #         for p in self.block_raxes.iter(idxs, include_ghost_points=True):  # seems to fix things
-        #             target_path = p.target_path
-        #             target_exprs = p.target_exprs
-        #             for key in dropped_rkeys:
-        #                 target_path = target_path.remove(key)
-        #                 target_exprs = target_exprs.remove(key)
-        #
-        #             offset = orig_raxes.offset(
-        #                 target_exprs, target_path, loop_exprs=target_indices
-        #             )
-        #             rmap.set_value(
-        #                 p.source_exprs,
-        #                 offset,
-        #                 p.source_path,
-        #                 loop_exprs=target_indices,
-        #             )
-        #
-        # for orig_caxes in orig_caxess:
-        #     for idxs in my_product(self.caxes.outer_loops):
-        #         # target_indices = {idx.index.id: idx.target_exprs for idx in idxs}
-        #         target_indices = merge_dicts([idx.replace_map for idx in idxs])
-        #
-        #         # for p in self.caxes.iter(idxs):
-        #         for p in self.block_caxes.iter(idxs, include_ghost_points=True):  # seems to fix things
-        #             target_path = p.target_path
-        #             target_exprs = p.target_exprs
-        #             for key in dropped_ckeys:
-        #                 target_path = target_path.remove(key)
-        #                 target_exprs = target_exprs.remove(key)
-        #
-        #             offset = orig_caxes.offset(
-        #                 target_exprs, target_path, loop_exprs=target_indices
-        #                 )
-        #             cmap.set_value(
-        #                 p.source_exprs,
-        #                 offset,
-        #                 p.source_path,
-        #                 loop_exprs=target_indices,
-        #             )
-        # return (rmap, cmap)
-
     @property
     def rmap(self):
-        return self.maps[0]
+        return self._make_map_part1(self.block_raxes)
 
     @property
     def cmap(self):
-        return self.maps[1]
+        return self._make_map_part1(self.block_caxes)
 
-    # TODO: refactor
+    # TODO: rename, also cache somewhere
     def _make_map_part1(self, axes):
         from pyop3.expr_visitors import collect_loops
 
