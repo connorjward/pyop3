@@ -421,16 +421,6 @@ class InstructionList(Instruction):
     """
     fields = Instruction.fields | {"instructions"}
 
-    def __new__(cls, instructions, **kwargs):
-        # an instruction list with one instruction is just the instruction
-        if len(instructions) == 0:
-            # or return EmptyInstruction?
-            raise ValueError("makes no sense")
-        elif len(instructions) == 1:
-            return just_one(instructions)
-        else:
-            return super().__new__(cls)
-
     def __init__(self, instructions, *, name=_DEFAULT_LOOP_NAME, **kwargs):
         super().__init__(**kwargs)
         self.instructions = instructions

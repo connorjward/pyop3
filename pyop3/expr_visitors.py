@@ -83,7 +83,7 @@ def evaluate(expr: Any, *args, **kwargs):
 
 @evaluate.register
 def _(dat: Dat, indices):
-    if dat.parent:
+    if dat.transform:
         raise NotImplementedError
 
     if not dat.axes.is_linear:
@@ -137,7 +137,7 @@ def _(op: Operator):
 
 @collect_loops.register(Dat)
 def _(dat):
-    if dat.parent:
+    if dat.transform:
         raise NotImplementedError
     if not dat.axes.is_linear:
         # guess this is optional at the top level, extra kwarg?

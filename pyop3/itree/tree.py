@@ -19,7 +19,7 @@ import pytools
 from immutabledict import ImmutableOrderedDict
 from pyrsistent import PMap, freeze, pmap, thaw
 
-from pyop3.array import HierarchicalArray
+from pyop3.array import Dat
 from pyop3.array.base import Array
 from pyop3.axtree import (
     Axis,
@@ -120,7 +120,7 @@ def _(array: Array, axes, paths_and_exprs):
     if array.transform:
         raise NotImplementedError
     # breakpoint()
-    if not isinstance(array, HierarchicalArray):
+    if not isinstance(array, Dat):
         raise NotImplementedError
 
     # NOTE: identical to index_axes()
@@ -131,7 +131,7 @@ def _(array: Array, axes, paths_and_exprs):
 
     new_axes = IndexedAxisTree(axes.node_map, array.axes.unindexed, targets=new_targets)
     # NOTE: .with_axes(...)?
-    return HierarchicalArray(
+    return Dat(
         new_axes, data=array.buffer, max_value=array.max_value, name=array.name
     )
 
@@ -1275,8 +1275,6 @@ def as_index_forest(forest: Any, *, axes=None, strict=False, allow_unused=False)
 
 @functools.singledispatch
 def _as_index_forest(arg: Any, *, axes, **_):
-    # FIXME no longer a cyclic import
-    from pyop3.array import HierarchicalArray
 
     # if isinstance(arg, HierarchicalArray):
     if False:
@@ -1402,18 +1400,27 @@ def _(index, *, loop_context, **kwargs):
                     forest[context_] = IndexTree(cf_index)
     else:
         assert isinstance(index.iterset, ContextFree)
-        for leaf_axis, leaf_cpt in index.iterset.leaves:
-            source_path = index.iterset.path(leaf_axis, leaf_cpt)
-            target_path = index.iterset.target_path.get(None, pmap())
-            for axis, cpt in index.iterset.path_with_nodes(
-                leaf_axis, leaf_cpt, and_components=True
-            ).items():
-                target_path |= index.iterset.target_paths[axis.id, cpt.label]
-            # TODO cleanup
-            my_id = index.id if not local else index.loop_index.id
-            context = loop_context | {my_id: (source_path, target_path)}
+        for leaf in index.iterset.leaves:
+            slices = [
+                Slice(axis_label, [AffineSliceComponent(component_label, label=component_label)], label=axis_label)
+                for axis_label, component_label in index.iterset.path(leaf, ordered=True)
+            ]
+            linear_iterset = index.iterset[slices]
 
-            cf_indices[context] = index.with_context(context)
+            # source_path = index.iterset.path(leaf_axis, leaf_cpt)
+            # target_path = index.iterset.target_path.get(None, pmap())
+            # for axis, cpt in index.iterset.path_with_nodes(
+            #     leaf_axis, leaf_cpt, and_components=True
+            # ).items():
+            #     target_path |= index.iterset.target_paths[axis.id, cpt.label]
+            # # TODO cleanup
+            # my_id = index.id if not local else index.loop_index.id
+            # context = loop_context | {index.id: (source_path, target_path)}
+            context = loop_context | {index.id: "anything"}
+
+            cf_index = ContextFreeLoopIndex(linear_iterset, id=index.id)
+
+            cf_indices[context] = cf_index
     return cf_indices
 
 
@@ -1937,7 +1944,7 @@ def _(slice_: Slice, *, prev_axes, **_):
         )
 
         if isinstance(slice_component, AffineSliceComponent):
-            if isinstance(target_component.count, HierarchicalArray):
+            if isinstance(target_component.count, Dat):
                 if (
                     slice_component.start != 0
                     or slice_component.step != 1
@@ -2259,7 +2266,7 @@ def _make_leaf_axis_from_called_map(
         my_map_cpt = equivalent_map_components[-1]
 
         all_skipped = False
-        if isinstance(my_map_cpt.arity, HierarchicalArray):
+        if isinstance(my_map_cpt.arity, Dat):
             arity = my_map_cpt.arity[called_map.from_index]
         else:
             arity = my_map_cpt.arity
@@ -2832,9 +2839,7 @@ def expand_compressed_target_paths(compressed_target_paths):
 # NOTE: Think this should just be a replace
 @functools.singledispatch
 def apply_index_tree_to_expr(obj, indices):
-    from pyop3.array import HierarchicalArray
-
-    if isinstance(obj, HierarchicalArray):
+    if isinstance(obj, Dat):
         return obj[indices]
     else:
         raise TypeError
@@ -3084,7 +3089,7 @@ def iter_axis_tree(
 
         # bit of a hack, I reckon this can go as we can just get it from component.count
         # inside as_int
-        if isinstance(component.count, HierarchicalArray):
+        if isinstance(component.count, Dat):
             mypath = component.count.axes.target_path.get(None, {})
             myindices = component.count.axes.target_exprs.get(None, {})
             if not component.count.axes.is_empty:
@@ -3169,7 +3174,7 @@ def partition_iterset(index: LoopIndex, arrays):
     the SF and are marked CORE.
 
     """
-    from pyop3.array import HierarchicalArray, Mat
+    from pyop3.array import Mat
     from pyop3.array.petsc import Sparsity
 
     # take first
@@ -3256,10 +3261,10 @@ def partition_iterset(index: LoopIndex, arrays):
     subsets = []
     for data in [core, root, leaf]:
         # Constant? no, rank_equal=False
-        size = HierarchicalArray(
+        size = Dat(
             AxisTree(), data=np.asarray([len(data)]), dtype=IntType
         )
-        subset = HierarchicalArray(
+        subset = Dat(
             Axis([AxisComponent(size, parcpt.label)], paraxis.label), data=data
         )
         subsets.append(subset)

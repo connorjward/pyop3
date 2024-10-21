@@ -452,7 +452,7 @@ def _requires_pack_unpack(arg):
 
 @functools.singledispatch
 def expand_array_transformations(insn: Any, /):
-    raise TypeError(f"No handler defined for {type(insn.__name__)}")
+    raise TypeError(f"No handler defined for {type(insn).__name__}")
 
 
 @expand_array_transformations.register(InstructionList)
@@ -467,21 +467,40 @@ def _(insn_list: InstructionList, /):
 # NOTE: in theory loop could be over something transformed
 @expand_array_transformations.register(Loop)
 def _(loop: Loop, /):
-    return loop.copy(
-        statements=[
-            insn for stmt in loop.statements for insn in expand_array_transformations(stmt)
-        ],
-    )
+    return InstructionList([
+        loop.copy(
+            statements=[
+                insn for stmt in loop.statements for insn in expand_array_transformations(stmt)
+            ],
+        )
+    ])
 
 
 @expand_array_transformations.register(Assignment)
-def _(assignment: Assignment, /) -> Union[Assignment, InstructionList]:
+def _(assignment: Assignment, /) -> InstructionList:
     bare_expression, input_insns = _generate_array_transformations(assignment.expression, "in")
     bare_assignee, output_insns = _generate_array_transformations(assignment.assignee, "out")
 
     bare_assignment = ReplaceAssignment(bare_assignee, bare_expression)
 
     return InstructionList([*input_insns, bare_assignment, *output_insns])
+
+
+@expand_array_transformations.register(CalledFunction)
+def _(func: CalledFunction, /) -> InstructionList:
+    if any(a.transform for a in func.arguments):
+        raise NotImplementedError
+    else:
+        return InstructionList([func])
+
+
+@expand_array_transformations.register(PetscMatInstruction)
+def _(mat_insn, /) -> InstructionList:
+    # if mat_insn.mat_arg.transform or mat_insn.array_arg.transform:
+    if mat_insn.array_arg.transform:
+        raise NotImplementedError
+    else:
+        return InstructionList([mat_insn])
 
 
 # TODO: better word than "mode"? And use an enum.
@@ -526,6 +545,7 @@ def _generate_array_transformations2(expr: Any, /, mode):
 
 @_generate_array_transformations2.register(Reshape)
 def _(reshape: Reshape, /, dat, mode):
+    breakpoint()
     temp_initial_axes = AxisTree(reshape.initial.axes.node_map)
     temp_initial = Dat(temp_initial_axes, data=NullBuffer(dat.dtype), prefix="t")
 

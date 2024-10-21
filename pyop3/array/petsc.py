@@ -374,7 +374,7 @@ class AbstractMat(Array):
             target_paths=target_paths, index_exprs=index_exprs,
             outer_loops=self.raxes.outer_loops,
             layout_exprs=None)
-    
+
     @cached_property
     def _block_caxes(self):
         block_caxes, target_paths, index_exprs = self._collect_block_axes(self.caxes)
@@ -408,11 +408,11 @@ class AbstractMat(Array):
                 index_exprs.update(subindex_exprs)
         return axis_tree, target_paths, index_exprs
 
-    @property
+    @cached_property
     def rmap(self):
         return self._make_map_part1(self.block_raxes)
 
-    @property
+    @cached_property
     def cmap(self):
         return self._make_map_part1(self.block_caxes)
 
