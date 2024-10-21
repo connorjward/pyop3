@@ -117,7 +117,7 @@ def _(num: numbers.Number, axes, pathsandexprs):
 
 @replace.register
 def _(array: Array, axes, paths_and_exprs):
-    if array.parent:
+    if array.transform:
         raise NotImplementedError
     # breakpoint()
     if not isinstance(array, HierarchicalArray):
