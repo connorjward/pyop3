@@ -132,7 +132,7 @@ def _(array: Array, axes, paths_and_exprs):
     new_axes = IndexedAxisTree(axes.node_map, array.axes.unindexed, targets=new_targets)
     # NOTE: .with_axes(...)?
     return Dat(
-        new_axes, data=array.buffer, max_value=array.max_value, name=array.name
+        new_axes, data=array.buffer, max_value=array.max_value, name=array.name, constant=array.constant
     )
 
 
