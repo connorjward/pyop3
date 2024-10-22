@@ -10,6 +10,7 @@ import numbers
 from functools import cached_property
 from typing import Iterable, Tuple
 
+from cachetools import cachedmethod
 from pyrsistent import PMap
 
 import loopy as lp
@@ -20,6 +21,7 @@ from petsc4py import PETSc
 from pyop3.axtree import Axis
 from pyop3.axtree.tree import ContextFree, ContextSensitive
 from pyop3.dtypes import dtype_limits
+from pyop3.exceptions import Pyop3Exception
 from pyop3.utils import (
     UniqueRecord,
     deprecated,
@@ -88,19 +90,8 @@ class KernelArgument(abc.ABC):
         pass
 
 
-# this is an expression, like passing an array through to a kernel
-# but it is transformed first.
-class Pack(KernelArgument, ContextFree):
-    def __init__(self, big, small):
-        self.big = big
-        self.small = small
-
-    @property
-    def kernel_dtype(self):
-        try:
-            return single_valued([self.big.dtype, self.small.dtype])
-        except ValueError:
-            raise ValueError("dtypes must match")
+class UnprocessedExpressionException(Pyop3Exception):
+    """Exception raised when pyop3 expected a preprocessed expression."""
 
 
 @dataclasses.dataclass(frozen=True)
@@ -108,23 +99,24 @@ class PreprocessedExpression:
     """Wrapper for an expression indicating that it has been prepared for code generation."""
     expression: Instruction
 
-
-# NOTE: or "Expression"? But that conflicts...
-# TODO: Should always offer __call__ method
-class Instruction(UniqueRecord, abc.ABC):
-    # TODO: should handle compiler parameters here instead of at initialisation
-    # as they are a property of the preprocessed expression.
-    def __call__(self, **kwargs):
-        from pyop3.ir.lower import compile
-
-        if kwargs:
-            raise NotImplementedError("TODO")
-
-        executable = compile(self.preprocessed.expression)
-        executable()
-
     @cached_property
-    def preprocessed(self):
+    def datamap(self):
+        from pyop3.transform import collect_datamap
+
+        return collect_datamap(self.expression)
+
+
+class Instruction(UniqueRecord, abc.ABC):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._cache = {}
+
+    def __call__(self, *, compiler_parameters=None, **kwargs):
+        executable = self.compile(compiler_parameters)
+        executable(**kwargs)
+
+    @cachedmethod(lambda self: self._cache)
+    def preprocess(self, compiler_parameters=None):
         from pyop3.transform import expand_implicit_pack_unpack, expand_loop_contexts, expand_array_transformations
 
         insn = self
@@ -133,13 +125,12 @@ class Instruction(UniqueRecord, abc.ABC):
         insn = expand_array_transformations(insn)
         return PreprocessedExpression(insn)
 
-    @cached_property
-    def loopy_code(self):
+    @cachedmethod(lambda self: self._cache)
+    def compile(self, compiler_parameters=None):
         from pyop3.ir.lower import compile
 
-        return compile(self.preprocessed.expression)
-
-
+        preprocessed = self.preprocess(compiler_parameters)
+        return compile(preprocessed, compiler_parameters=compiler_parameters)
 
 
 class ContextAwareInstruction(Instruction):
@@ -158,7 +149,7 @@ _DEFAULT_LOOP_NAME = "pyop3_loop"
 
 
 class Loop(Instruction):
-    fields = Instruction.fields | {"index", "statements", "compiler_parameters", "name"}
+    fields = Instruction.fields | {"index", "statements", "name"}
 
     # doubt that I need an ID here
     id_generator = pytools.UniqueNameGenerator()
@@ -169,23 +160,19 @@ class Loop(Instruction):
         statements: Iterable[Instruction],
         *,
         name: str = _DEFAULT_LOOP_NAME,
-        compiler_parameters=None,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.index = index
         self.statements = as_tuple(statements)
         self.name = name
-        # TODO: not the right place to pass this information - should be tied to
-        # preprocessed expression
-        self.compiler_parameters = compiler_parameters
 
-    def __call__(self, **kwargs):
+    def __call__(self, *, compiler_parameters=None, **kwargs):
         # TODO just parse into ContextAwareLoop and call that
         from pyop3.ir.lower import compile
         from pyop3.itree.tree import partition_iterset
 
-        code = compile(self.preprocessed.expression, compiler_parameters=self.compiler_parameters)
+        code = self.compile(compiler_parameters)
 
         if False:
         # if self.is_parallel:
@@ -579,24 +566,27 @@ class CalledFunction(Terminal):
         return self.copy(arguments=arguments)
 
 
-class Assignment(Terminal, abc.ABC):
-    fields = Terminal.fields | {"assignee", "expression"}
 
-    def __init__(self, assignee, expression, **kwargs):
+class AbstractAssignment(Terminal, abc.ABC):
+    pass
+
+
+# TODO: With Python 3.11 can be made a StrEnum
+class AssignmentType(enum.Enum):
+    INSERT = "insert"
+    ADD = "add"
+
+
+class Assignment(AbstractAssignment):
+    fields = AbstractAssignment.fields | {"assignee", "expression", "assignment_type"}
+
+    def __init__(self, assignee, expression, assignment_type=AssignmentType.INSERT, **kwargs):
+        assignment_type = AssignmentType(assignment_type)
+
         super().__init__(**kwargs)
         self.assignee = assignee
         self.expression = expression
-
-    # more generic now?
-    # def __call__(self):
-    #     do_loop(Axis(1).index(), self)
-
-    # TODO: Attach to terminal? Or just make even more generic as a visitor?
-    @property
-    def datamap(self):
-        from pyop3.expr_visitors import collect_datamap
-
-        return collect_datamap(self.assignee) | collect_datamap(self.expression)
+        self.assignment_type = assignment_type
 
     @property
     def arguments(self):
@@ -651,30 +641,23 @@ class Assignment(Terminal, abc.ABC):
         return tuple(args)
 
 
-# TODO: now expressions are better I think we can stop treating INC and REPLACE separately
-class ReplaceAssignment(Assignment):
-    """Like PETSC_INSERT_VALUES."""
-
-    @cached_property
-    def function_arguments(self):
-        return ((self.assignee, WRITE),) + self._expression_kernel_arguments
+# TODO: With Python 3.11 can be made a StrEnum
+class PetscMatAccessType(enum.Enum):
+    READ = "read"
+    INSERT = "insert"
+    ADD = "add"
 
 
-class AddAssignment(Assignment):
-    """Like PETSC_ADD_VALUES."""
+class PetscMatAccess(AbstractAssignment):
+    fields = AbstractAssignment.fields | {"mat_arg", "array_arg", "access_type"}
 
-    @cached_property
-    def function_arguments(self):
-        return ((self.assignee, INC),) + self._expression_kernel_arguments
-
-
-# inherit from Assignment?
-class PetscMatInstruction(Instruction):
-    def __init__(self, mat_arg, array_arg):
+    def __init__(self, mat_arg, array_arg, access_type):
+        access_type = PetscMatAccessType(access_type)
         assert mat_arg.dtype == array_arg.dtype
 
         self.mat_arg = mat_arg
         self.array_arg = array_arg
+        self.access_type = access_type
 
     @property
     def kernel_arguments(self):
@@ -684,29 +667,6 @@ class PetscMatInstruction(Instruction):
         else:
             args += (self.array_arg.buffer,)
         return args
-
-    @property
-    def datamap(self):
-        return self.mat_arg.datamap | self.array_arg.datamap
-
-
-class PetscMatLoad(PetscMatInstruction):
-    @cached_property
-    def function_arguments(self):
-        return ((self.mat_arg, READ), (self.array_arg, WRITE))
-
-
-class PetscMatStore(PetscMatInstruction):
-    @cached_property
-    def function_arguments(self):
-        return ((self.mat_arg, WRITE), (self.array_arg, READ))
-
-
-# potentially confusing name
-class PetscMatAdd(PetscMatInstruction):
-    @cached_property
-    def function_arguments(self):
-        return ((self.mat_arg, INC), (self.array_arg, READ))
 
 
 class OpaqueKernelArgument(KernelArgument, ContextFree):

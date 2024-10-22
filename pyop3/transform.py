@@ -6,6 +6,7 @@ import abc
 import collections
 import functools
 import numbers
+import operator
 from typing import Any, Union
 
 from pyrsistent import pmap
@@ -19,14 +20,13 @@ from pyop3.axtree.tree import Operator, AxisVar
 from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
 from pyop3.itree import Map, TabulatedMapComponent
 from pyop3.itree.tree import ContextFreeLoopIndex, LoopIndexVar
-from pyop3.expr_visitors import collect_loops as expr_collect_loops
+from pyop3.expr_visitors import collect_loops as expr_collect_loops, collect_datamap as collect_expr_datamap
 from pyop3.lang import (
     INC,
     NA,
     READ,
     RW,
     WRITE,
-    AddAssignment,
     Assignment,
     CalledFunction,
     ContextAwareLoop,
@@ -34,15 +34,9 @@ from pyop3.lang import (
     Instruction,
     Loop,
     InstructionList,
-    Pack,
-    PetscMatAdd,
-    PetscMatInstruction,
-    PetscMatLoad,
-    PetscMatStore,
-    ReplaceAssignment,
     Terminal,
 )
-from pyop3.utils import UniqueNameGenerator, checked_zip, just_one, single_valued, OrderedSet
+from pyop3.utils import UniqueNameGenerator, checked_zip, just_one, single_valued, OrderedSet, merge_dicts
 
 
 # @functools.singledispatch
@@ -219,15 +213,15 @@ class LoopContextExpander(Transformer):
                 cf_args.append(arg)
         return ((pmap(), terminal.with_arguments(cf_args)),)
 
-    # TODO: this is just an assignment, fix inheritance
-    @_apply.register
-    def _(self, terminal: PetscMatInstruction, *, context):
-        try:
-            mat = terminal.mat_arg.with_context(context)
-            array = terminal.array_arg.with_context(context)
-            return ((pmap(), terminal.copy(mat_arg=mat, array_arg=array)),)
-        except ContextMismatchException:
-            return ((pmap(), None),)
+    # # TODO: this is just an assignment, fix inheritance
+    # @_apply.register
+    # def _(self, terminal: PetscMatInstruction, *, context):
+    #     try:
+    #         mat = terminal.mat_arg.with_context(context)
+    #         array = terminal.array_arg.with_context(context)
+    #         return ((pmap(), terminal.copy(mat_arg=mat, array_arg=array)),)
+    #     except ContextMismatchException:
+    #         return ((pmap(), None),)
 
 
 # NOTE: We do not currently do this because loop contexts are quite complicated
@@ -274,15 +268,18 @@ class ImplicitPackUnpackExpander(Transformer):
     def _(self, insn_list: InstructionList):
         return insn_list.copy(instructions=[self._apply(insn) for insn in insn_list])
 
-    # TODO: Should be the same as Assignment
-    @_apply.register
-    def _(self, assignment: PetscMatInstruction):
-        # FIXME: Probably will not work for things like mat[x, y].assign(dat[z])
-        # where the expression is indexed.
-        return (assignment,)
+    # # TODO: Should be the same as Assignment
+    # @_apply.register
+    # def _(self, assignment: PetscMatInstruction):
+    #     # FIXME: Probably will not work for things like mat[x, y].assign(dat[z])
+    #     # where the expression is indexed.
+    #     return (assignment,)
 
     @_apply.register
     def _(self, assignment: Assignment):
+        # I think this is fine...
+        return InstructionList([assignment])
+
         # same as for CalledFunction
         gathers = []
         # NOTE: scatters are executed in LIFO order
@@ -360,32 +357,32 @@ class ImplicitPackUnpackExpander(Transformer):
 
                 if intent == READ:
                     if is_petsc_mat:
-                        gathers.append(PetscMatLoad(arg, temporary))
+                        gathers.append(PetscMatAccess(arg, temporary, "read"))
                     else:
-                        gathers.append(ReplaceAssignment(temporary, arg))
+                        gathers.append(Assignment(temporary, arg))
                 elif intent == WRITE:
                     # This is currently necessary because some local kernels
                     # (interpolation) actually increment values instead of setting
                     # them directly. This should ideally be addressed.
-                    gathers.append(ReplaceAssignment(temporary, 0))
+                    gathers.append(Assignment(temporary, 0))
                     if is_petsc_mat:
-                        scatters.insert(0, PetscMatStore(arg, temporary))
+                        scatters.insert(0, PetscMatAccess(arg, temporary, "insert"))
                     else:
-                        scatters.insert(0, ReplaceAssignment(arg, temporary))
+                        scatters.insert(0, Assignment(arg, temporary))
                 elif intent == RW:
                     if is_petsc_mat:
-                        gathers.append(PetscMatLoad(arg, temporary))
-                        scatters.insert(0, PetscMatStore(arg, temporary))
+                        gathers.append(PetscMatAccess(arg, temporary, "read"))
+                        scatters.insert(0, PetscMatAccess(arg, temporary, "insert"))
                     else:
-                        gathers.append(ReplaceAssignment(temporary, arg))
-                        scatters.insert(0, ReplaceAssignment(arg, temporary))
+                        gathers.append(Assignment(temporary, arg))
+                        scatters.insert(0, Assignment(arg, temporary))
                 else:
                     assert intent == INC
-                    gathers.append(ReplaceAssignment(temporary, 0))
+                    gathers.append(Assignment(temporary, 0))
                     if is_petsc_mat:
-                        scatters.insert(0, PetscMatAdd(arg, temporary))
+                        scatters.insert(0, PetscMatAccess(arg, temporary, "add"))
                     else:
-                        scatters.insert(0, AddAssignment(arg, temporary))
+                        scatters.insert(0, Assignment(arg, temporary, "add"))
 
                 arguments.append(temporary)
 
@@ -478,10 +475,19 @@ def _(loop: Loop, /):
 
 @expand_array_transformations.register(Assignment)
 def _(assignment: Assignment, /) -> InstructionList:
+    # NOTE: I think perhaps we need a new type for this...
+    if any(isinstance(x, AbstractMat) for x in {assignment.assignee, assignment.expression}):
+        mat_arg = just_one(arg for arg in {assignment.assignee, assignment.expression} if isinstance(arg, AbstractMat))
+        # if mat_arg.transform:
+        #     raise NotImplementedError
+        # else:
+        #     return InstructionList([assignment])
+        return InstructionList([assignment])
+
     bare_expression, input_insns = _generate_array_transformations(assignment.expression, "in")
     bare_assignee, output_insns = _generate_array_transformations(assignment.assignee, "out")
 
-    bare_assignment = ReplaceAssignment(bare_assignee, bare_expression)
+    bare_assignment = Assignment(bare_assignee, bare_expression)
 
     return InstructionList([*input_insns, bare_assignment, *output_insns])
 
@@ -494,13 +500,13 @@ def _(func: CalledFunction, /) -> InstructionList:
         return InstructionList([func])
 
 
-@expand_array_transformations.register(PetscMatInstruction)
-def _(mat_insn, /) -> InstructionList:
-    # if mat_insn.mat_arg.transform or mat_insn.array_arg.transform:
-    if mat_insn.array_arg.transform:
-        raise NotImplementedError
-    else:
-        return InstructionList([mat_insn])
+# @expand_array_transformations.register(PetscMatInstruction)
+# def _(mat_insn, /) -> InstructionList:
+#     # if mat_insn.mat_arg.transform or mat_insn.array_arg.transform:
+#     if mat_insn.array_arg.transform:
+#         raise NotImplementedError
+#     else:
+#         return InstructionList([mat_insn])
 
 
 # TODO: better word than "mode"? And use an enum.
@@ -561,6 +567,58 @@ def _(reshape: Reshape, /, dat, mode):
         assignment = ReplaceAssignment(transformed_dat, temp_initial)
 
     return (temp_reshaped, transform_insns + (assignment,))
+
+
+@functools.singledispatch
+def collect_datamap(insn: Any, /) -> PMap:
+    raise TypeError(f"No handler defined for {type(insn).__name__}")
+
+
+@collect_datamap.register(InstructionList)
+def _(insn_list: InstructionList, /) -> PMap:
+    return merge_dicts(collect_datamap(insn) for insn in insn_list)
+
+
+@collect_datamap.register(Loop)
+def _(loop: Loop, /) -> PMap:
+    # NOTE: I don't think that this will work if we have something ragged as
+    # we will miss the extent variable. I think in most other cases this is fine however.
+    return merge_dicts(collect_datamap(stmt) for stmt in loop.statements)
+
+
+@collect_datamap.register(Assignment)
+def _(assignment: Assignment, /) -> PMap:
+    return collect_expr_datamap(assignment.assignee) | collect_expr_datamap(assignment.expression)
+
+
+@collect_datamap.register(CalledFunction)
+def _(func: CalledFunction, /) -> PMap:
+    return merge_dicts(collect_expr_datamap(arg) for arg in func.arguments)
+
+
+@functools.singledispatch
+def expand_petsc_mat_accesses(insn: Any, /) -> InstructionList:
+    raise TypeError()
+
+
+@expand_petsc_mat_accesses.register(InstructionList)
+def _(insn_list: InstructionList, /) -> InstructionList:
+    return InstructionList([expand_petsc_mat_accesses(insn) for insn in insn_list])
+
+
+@expand_petsc_mat_accesses.register(Assignment)
+def _(assignment: Assignment, /) -> InstructionList:
+    # NOTE: Can imagine more complex scenarios where an indexed matrix is
+    # part of an expression or similar. For now we just deal with the
+    # core Firedrake use case of
+    #
+    #   mat[f(i0, i1), f(i0, i1)] <- t0[i1, i1]
+    array = assignment.assignee
+    if isinstance(array, Mat) and any(isinstance(axes, IndexedAxisTree) for axes in {array.raxes, array.caxes}):
+        raise NotImplementedError("TODO next")
+    else:
+        return InstructionList([assignment])
+
 
 
 # *below is old untested code*

@@ -22,7 +22,7 @@ from pyop3.axtree.tree import ContextSensitiveAxisTree
 from pyop3.buffer import Buffer, DistributedBuffer
 from pyop3.dtypes import ScalarType
 from pyop3.exceptions import Pyop3Exception
-from pyop3.lang import KernelArgument, ReplaceAssignment
+from pyop3.lang import KernelArgument, Assignment
 from pyop3.log import warning
 from pyop3.utils import (
     deprecated,
@@ -542,7 +542,7 @@ class Dat(Array, KernelArgument):
         if subset is None:
             subset = Ellipsis
 
-        expr = ReplaceAssignment(self[subset], 0)
+        expr = Assignment(self[subset], 0)
         return expr() if eager else expr
 
     def reshape(self, axes: AxisTree) -> Dat:

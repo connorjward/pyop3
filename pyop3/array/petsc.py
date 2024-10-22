@@ -29,7 +29,7 @@ from pyop3.itree.tree import (
     compose_axes,
     index_axes,
 )
-from pyop3.lang import PetscMatStore, Loop, LoopList
+from pyop3.lang import Loop, LoopList, Assignment
 from pyop3.utils import (
     deprecated,
     just_one,
@@ -268,7 +268,7 @@ class AbstractMat(Array):
 
         if isinstance(other, HierarchicalArray):
             # TODO: Check axes match between self and other
-            expr = PetscMatStore(self, other)
+            expr = Assignment(self, other)
         elif isinstance(other, numbers.Number):
             if isinstance(self.axes, ContextSensitiveAxisTree):
                 cs_dats = {}
@@ -286,7 +286,7 @@ class AbstractMat(Array):
                     data=np.full(self.axes.alloc_size, other, dtype=self.dtype),
                     constant=True,
                 )
-            expr = PetscMatStore(self, static)
+            expr = Assignment(self, static)
         else:
             raise NotImplementedError
 

@@ -1454,7 +1454,6 @@ class AxisTree(MutableLabelledTreeMixin, BaseAxisTree):
 
     @property
     def _subst_layouts_default(self):
-        print("AAAAAAAAAAAAAAAAAAA")
         return subst_layouts(self, self._source_path_and_exprs, self.layouts)
 
     @cached_property
@@ -1701,7 +1700,6 @@ class IndexedAxisTree(BaseAxisTree):
 
     @cached_property
     def _subst_layouts_default(self):
-        print("AAAAAAAAAAAAAAAAAAA")
         all_layouts = []
         for t in self.targets:
             try:

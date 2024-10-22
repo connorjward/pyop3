@@ -34,18 +34,16 @@ from pyop3.lang import (
     READ,
     RW,
     WRITE,
-    AddAssignment,
+    AssignmentType,
     Assignment,
     ContextAwareLoop,  # TODO: remove this class
     CalledFunction,
+    PreprocessedExpression,
+    UnprocessedExpressionException,
     DummyKernelArgument,
     Loop,
     InstructionList,
-    PetscMatAdd,
-    PetscMatInstruction,
-    PetscMatLoad,
-    PetscMatStore,
-    ReplaceAssignment,
+    PetscMatAccess,
 )
 from pyop3.log import logger
 from pyop3.target import compile_loopy
@@ -71,13 +69,6 @@ LOOPY_LANG_VERSION = (2018, 2)
 class OpaqueType(lp.types.OpaqueType):
     def __repr__(self) -> str:
         return f"OpaqueType('{self.name}')"
-
-
-class AssignmentType(enum.Enum):
-    READ = enum.auto()
-    WRITE = enum.auto()
-    INC = enum.auto()
-    ZERO = enum.auto()
 
 
 class Renamer(pym.mapper.IdentityMapper):
@@ -305,23 +296,25 @@ class LoopyCodegenContext(CodegenContext):
         self._temporary_shapes = shapes
 
 
+# bad name
 class CodegenResult:
     def __init__(self, expr, ir, arg_replace_map, *, compiler_parameters):
+        if not isinstance(expr, PreprocessedExpression):
+            raise UnprocessedExpressionException("Expected a preprocessed expression")
+
         self.expr = expr
         self.ir = ir
         self.arg_replace_map = arg_replace_map
 
         self._exec = compile_loopy(self.ir, pyop3_compiler_parameters=compiler_parameters)
 
-    @cached_property
-    def datamap(self):
-        return self.expr.datamap
-
     def __call__(self, **kwargs):
+        # TODO: Check each of kwargs and make sure that the replacement is
+        # valid (e.g. same size, same data type, same layout funcs).
         data_args = []
         for kernel_arg in self.ir.default_entrypoint.args:
             actual_arg_name = self.arg_replace_map[kernel_arg.name]
-            array = kwargs.get(actual_arg_name, self.datamap[actual_arg_name])
+            array = kwargs.get(actual_arg_name, self.expr.datamap[actual_arg_name])
             data_args.append(_as_pointer(array))
         if len(data_args) > 0:
             self._exec(*data_args)
@@ -396,16 +389,21 @@ def parse_compiler_parameters(compiler_parameters) -> CompilerParameters:
 
 
 # prefer generate_code?
-def compile(expr: Instruction, compiler_parameters=None):
+def compile(expr: PreprocessedExpression, compiler_parameters=None):
+    if not isinstance(expr, PreprocessedExpression):
+        raise UnprocessedExpressionException("Expected a preprocessed expression")
+
+    insn = expr.expression
+
     compiler_parameters = parse_compiler_parameters(compiler_parameters)
 
-    function_name = expr.name
+    function_name = insn.name
 
-    if isinstance(expr, InstructionList):
-        cs_expr = expr.instructions
+    if isinstance(insn, InstructionList):
+        cs_expr = insn.instructions
     else:
-        assert isinstance(expr, Loop), "other types not handled yet"
-        cs_expr = (expr,)
+        assert isinstance(insn, Loop), "other types not handled yet"
+        cs_expr = (insn,)
 
     ctx = LoopyCodegenContext()
     # NOTE: so I think LoopCollection is a better abstraction here - don't want to be
@@ -534,11 +532,6 @@ def _(expr: Loop):
 
 @_collect_temporary_shapes.register
 def _(expr: Assignment):
-    return pmap()
-
-
-@_collect_temporary_shapes.register
-def _(expr: PetscMatInstruction):
     return pmap()
 
 
@@ -722,7 +715,6 @@ def parse_assignment(
     loop_indices,
     codegen_ctx,
 ):
-    # this seems wrong
     parse_assignment_properly_this_time(
         assignment,
         loop_indices,
@@ -730,7 +722,7 @@ def parse_assignment(
     )
 
 
-@_compile.register(PetscMatInstruction)
+@_compile.register(PetscMatAccess)
 def _(assignment, loop_indices, codegen_context):
     mat = assignment.mat_arg
     array = assignment.array_arg
@@ -824,35 +816,36 @@ def _(assignment, loop_indices, codegen_context):
     irow = str(lower_expr(rmap, loop_indices, codegen_context, path=pmap()))
     icol = str(lower_expr(cmap, loop_indices, codegen_context, path=pmap()))
 
-    call_str = _petsc_mat_insn(
+    # hacky
+    myargs = [
         assignment, mat_name, array_name, rsize_var, csize_var, irow, icol, blocked
-    )
+    ]
+    if assignment.access_type == PetscMatAccessType.READ:
+        call_str = _petsc_mat_load(*myargs)
+    elif assignment.access_type == PetscMatAccessType.INSERT:
+        call_str = _petsc_mat_store(*myargs)
+    else:
+        assert assignment.access_type == PetscMatAccessType.ADD
+        call_str = _petsc_mat_add(*myargs)
+
     codegen_context.add_cinstruction(call_str)
 
 
-@functools.singledispatch
-def _petsc_mat_insn(assignment, *args):
-    raise TypeError(f"{assignment} not recognised")
-
-
-@_petsc_mat_insn.register
-def _(assignment: PetscMatLoad, mat_name, array_name, nrow, ncol, irow, icol, blocked):
+def _petsc_mat_load(assignment, mat_name, array_name, nrow, ncol, irow, icol, blocked):
     if blocked:
         return f"MatSetValuesBlockedLocal({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]));"
     else:
         return f"MatGetValuesLocal({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]));"
 
 
-@_petsc_mat_insn.register
-def _(assignment: PetscMatStore, mat_name, array_name, nrow, ncol, irow, icol, blocked):
+def _petsc_mat_store(assignment, mat_name, array_name, nrow, ncol, irow, icol, blocked):
     if blocked:
         return f"MatSetValuesBlockedLocal({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]), INSERT_VALUES);"
     else:
         return f"MatSetValuesLocal({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]), INSERT_VALUES);"
 
 
-@_petsc_mat_insn.register
-def _(assignment: PetscMatAdd, mat_name, array_name, nrow, ncol, irow, icol, blocked):
+def _petsc_mat_add(assignment, mat_name, array_name, nrow, ncol, irow, icol, blocked):
     if blocked:
         return f"MatSetValuesBlockedLocal({mat_name}, {nrow}, &({irow}), {ncol}, &({icol}), &({array_name}[0]), ADD_VALUES);"
     else:
@@ -934,36 +927,15 @@ def add_leaf_assignment(
     codegen_context,
     loop_indices,
 ):
-    # larr = assignment.assignee
-    # rarr = assignment.expression
-    #
-    # if isinstance(rarr, HierarchicalArray):
-    #     rexpr = make_array_expr(
-    #         rarr,
-    #         path,
-    #         iname_replace_map,
-    #         codegen_context,
-    #     )
-    # else:
-    #     assert isinstance(rarr, numbers.Number)
-    #     rexpr = rarr
-    #
-    # lexpr = make_array_expr(
-    #     larr,
-    #     path,
-    #     iname_replace_map,
-    #     codegen_context,
-    # )
 
     lexpr = lower_expr(assignment.assignee, iname_replace_map, codegen_context, path=path)
     rexpr = lower_expr(assignment.expression, iname_replace_map, codegen_context, path=path)
 
-    # single dispatch?
-    if isinstance(assignment, AddAssignment):
-        rexpr = lexpr + rexpr
-    else:
-        assert isinstance(assignment, ReplaceAssignment)
+    if assignment.assignment_type == AssignmentType.INSERT:
         pass
+    else:
+        assert assignment.assignment_type == AssignmentType.ADD
+        rexpr = lexpr + rexpr
 
     codegen_context.add_assignment(lexpr, rexpr)
 

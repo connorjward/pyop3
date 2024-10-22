@@ -2,7 +2,7 @@ import abc
 
 from pyop3.axtree import ContextAware
 from pyop3.axtree.tree import Terminal
-from pyop3.lang import FunctionArgument, ReplaceAssignment
+from pyop3.lang import FunctionArgument, Assignment
 from pyop3.utils import UniqueNameGenerator
 
 
@@ -16,7 +16,7 @@ class Array(ContextAware, FunctionArgument, Terminal, abc.ABC):
         self.name = name or self._name_generator(prefix or self._prefix)
 
     def assign(self, other, /, *, eager=False):
-        expr = ReplaceAssignment(self, other)
+        expr = Assignment(self, other)
         return expr() if eager else expr
 
     # TODO: Add this to different types
