@@ -117,12 +117,13 @@ class Instruction(UniqueRecord, abc.ABC):
 
     @cachedmethod(lambda self: self._cache)
     def preprocess(self, compiler_parameters=None):
-        from pyop3.transform import expand_implicit_pack_unpack, expand_loop_contexts, expand_array_transformations
+        from pyop3.transform import expand_implicit_pack_unpack, expand_loop_contexts, expand_array_transformations, expand_petsc_mat_accesses
 
         insn = self
-        # insn = expand_loop_contexts(insn)  # skipped for now, see comment on expand_loop_contexts
+        insn = expand_loop_contexts(insn)
         insn = expand_implicit_pack_unpack(insn)
         insn = expand_array_transformations(insn)
+        insn = expand_petsc_mat_accesses(insn)
         return PreprocessedExpression(insn)
 
     @cachedmethod(lambda self: self._cache)
@@ -453,18 +454,19 @@ def _has_nontrivial_stencil(array):
 
 
 class Terminal(Instruction, abc.ABC):
-    @cached_property
-    def datamap(self):
-        return merge_dicts(a.datamap for a, _ in self.function_arguments)
-
-    @property
-    @abc.abstractmethod
-    def argument_shapes(self):
-        pass
-
-    @abc.abstractmethod
-    def with_arguments(self, arguments: Iterable[KernelArgument]):
-        pass
+    # @cached_property
+    # def datamap(self):
+    #     return merge_dicts(a.datamap for a, _ in self.function_arguments)
+    #
+    # @property
+    # @abc.abstractmethod
+    # def argument_shapes(self):
+    #     pass
+    #
+    # @abc.abstractmethod
+    # def with_arguments(self, arguments: Iterable[KernelArgument]):
+    #     pass
+    pass
 
 
 @dataclasses.dataclass(frozen=True)

@@ -1,5 +1,6 @@
 import os as _os
 from pyop3.config import config as _config
+from pyop3.itree.parse import as_index_forest
 
 def _fixup_pytools():
     # Many pyop3 objects inherit from pytools.RecordWithoutPickling.
@@ -56,8 +57,9 @@ from pyop3.itree import (  # noqa: F401
     SliceComponent,
     Subset,
     TabulatedMapComponent,
+    ScalarIndex,
+    as_index_forest,
 )
-from pyop3.itree.tree import ScalarIndex, as_index_forest
 from pyop3.lang import (  # noqa: F401
     INC,
     MAX_RW,

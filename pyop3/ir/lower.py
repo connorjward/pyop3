@@ -13,7 +13,7 @@ from typing import Any
 import loopy as lp
 import numpy as np
 import pymbolic as pym
-from pyrsistent import freeze, pmap
+from pyrsistent import freeze, pmap, PMap
 
 from pyop3.array import Dat
 from pyop3.array.base import Array
@@ -35,6 +35,7 @@ from pyop3.lang import (
     RW,
     WRITE,
     AssignmentType,
+    AbstractAssignment,
     Assignment,
     ContextAwareLoop,  # TODO: remove this class
     CalledFunction,
@@ -44,6 +45,7 @@ from pyop3.lang import (
     Loop,
     InstructionList,
     PetscMatAccess,
+    PetscMatAccessType,
 )
 from pyop3.log import logger
 from pyop3.target import compile_loopy
@@ -501,25 +503,15 @@ def _collect_temporary_shapes(expr):
     raise TypeError(f"No handler defined for {type(expr).__name__}")
 
 
-# TODO: get rid of this type
-@_collect_temporary_shapes.register
-def _(expr: Loop):
-    shapes = {}
-    for statement in expr.statements:
-        for temp, shape in _collect_temporary_shapes(statement).items():
-            if shape is None:
-                continue
-            if temp in shapes:
-                assert shapes[temp] == shape
-            else:
-                shapes[temp] = shape
-    return shapes
+@_collect_temporary_shapes.register(InstructionList)
+def _(insn_list: InstructionList, /) -> PMap:
+    return merge_dicts(_collect_temporary_shapes(insn) for insn in insn_list)
 
 
-@_collect_temporary_shapes.register
-def _(expr: Loop):
+@_collect_temporary_shapes.register(Loop)
+def _(loop: Loop, /):
     shapes = {}
-    for stmt in expr.statements:
+    for stmt in loop.statements:
         for temp, shape in _collect_temporary_shapes(stmt).items():
             if shape is None:
                 continue
@@ -530,8 +522,8 @@ def _(expr: Loop):
     return shapes
 
 
-@_collect_temporary_shapes.register
-def _(expr: Assignment):
+@_collect_temporary_shapes.register(AbstractAssignment)
+def _(assignment: AbstractAssignment, /) -> PMap:
     return pmap()
 
 
@@ -550,6 +542,12 @@ def _(call: CalledFunction):
 @functools.singledispatch
 def _compile(expr: Any, loop_indices, ctx: LoopyCodegenContext) -> None:
     raise TypeError(f"No handler defined for {type(expr).__name__}")
+
+
+@_compile.register(InstructionList)
+def _(insn_list: InstructionList, /, loop_indices, ctx) -> None:
+    for insn in insn_list:
+        _compile(insn, loop_indices, ctx)
 
 
 @_compile.register(ContextAwareLoop)  # remove

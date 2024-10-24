@@ -1,7 +1,9 @@
-from .tree import (
+from .tree import (  # noqa: F401
     AffineSliceComponent,
     CalledMap,
     Index,
+    ScalarIndex,
+    index_axes,
     IndexTree,
     LocalLoopIndex,
     LoopIndex,
@@ -10,5 +12,5 @@ from .tree import (
     SliceComponent,
     Subset,
     TabulatedMapComponent,
-    as_index_forest,
 )
+from .parse import as_index_forest  # noqa: F401

@@ -9,14 +9,14 @@ import numbers
 import operator
 from typing import Any, Union
 
-from pyrsistent import pmap
+from pyrsistent import pmap, PMap
 from immutabledict import ImmutableOrderedDict
 
-from pyop3.array import Dat
+from pyop3.array import Dat, AbstractMat
 from pyop3.array.transforms import Reshape
 from pyop3.array.petsc import AbstractMat
 from pyop3.axtree import Axis, AxisTree, ContextFree, ContextSensitive, ContextMismatchException, ContextAware
-from pyop3.axtree.tree import Operator, AxisVar
+from pyop3.axtree.tree import Operator, AxisVar, IndexedAxisTree
 from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
 from pyop3.itree import Map, TabulatedMapComponent
 from pyop3.itree.tree import ContextFreeLoopIndex, LoopIndexVar
@@ -28,12 +28,14 @@ from pyop3.lang import (
     RW,
     WRITE,
     Assignment,
+    AssignmentType,
     CalledFunction,
     ContextAwareLoop,
     DummyKernelArgument,
     Instruction,
     Loop,
     InstructionList,
+    PetscMatAccess,
     Terminal,
 )
 from pyop3.utils import UniqueNameGenerator, checked_zip, just_one, single_valued, OrderedSet, merge_dicts
@@ -345,8 +347,6 @@ class ImplicitPackUnpackExpander(Transformer):
 
             # unpick pack/unpack instructions
             if intent != NA and _requires_pack_unpack(arg):
-                is_petsc_mat = isinstance(arg, AbstractMat)
-
                 axes = AxisTree(arg.axes.node_map)
                 temporary = Dat(
                     # arg.axes.materialize(),  # TODO
@@ -356,33 +356,20 @@ class ImplicitPackUnpackExpander(Transformer):
                 )
 
                 if intent == READ:
-                    if is_petsc_mat:
-                        gathers.append(PetscMatAccess(arg, temporary, "read"))
-                    else:
-                        gathers.append(Assignment(temporary, arg))
+                    gathers.append(Assignment(temporary, arg))
                 elif intent == WRITE:
                     # This is currently necessary because some local kernels
                     # (interpolation) actually increment values instead of setting
                     # them directly. This should ideally be addressed.
                     gathers.append(Assignment(temporary, 0))
-                    if is_petsc_mat:
-                        scatters.insert(0, PetscMatAccess(arg, temporary, "insert"))
-                    else:
-                        scatters.insert(0, Assignment(arg, temporary))
+                    scatters.insert(0, Assignment(arg, temporary))
                 elif intent == RW:
-                    if is_petsc_mat:
-                        gathers.append(PetscMatAccess(arg, temporary, "read"))
-                        scatters.insert(0, PetscMatAccess(arg, temporary, "insert"))
-                    else:
-                        gathers.append(Assignment(temporary, arg))
-                        scatters.insert(0, Assignment(arg, temporary))
+                    gathers.append(Assignment(temporary, arg))
+                    scatters.insert(0, Assignment(arg, temporary))
                 else:
                     assert intent == INC
                     gathers.append(Assignment(temporary, 0))
-                    if is_petsc_mat:
-                        scatters.insert(0, PetscMatAccess(arg, temporary, "add"))
-                    else:
-                        scatters.insert(0, Assignment(arg, temporary, "add"))
+                    scatters.insert(0, Assignment(arg, temporary, "add"))
 
                 arguments.append(temporary)
 
@@ -591,6 +578,11 @@ def _(assignment: Assignment, /) -> PMap:
     return collect_expr_datamap(assignment.assignee) | collect_expr_datamap(assignment.expression)
 
 
+@collect_datamap.register(PetscMatAccess)
+def _(mat_insn: PetscMatAccess, /) -> PMap:
+    return collect_expr_datamap(mat_insn.mat_arg) | collect_expr_datamap(mat_insn.array_arg)
+
+
 @collect_datamap.register(CalledFunction)
 def _(func: CalledFunction, /) -> PMap:
     return merge_dicts(collect_expr_datamap(arg) for arg in func.arguments)
@@ -606,6 +598,21 @@ def _(insn_list: InstructionList, /) -> InstructionList:
     return InstructionList([expand_petsc_mat_accesses(insn) for insn in insn_list])
 
 
+@expand_petsc_mat_accesses.register(Loop)
+def _(loop: Loop, /) -> InstructionList:
+    return InstructionList([
+        Loop(loop.index, [
+            expand_petsc_mat_accesses(stmt) for stmt in loop.statements
+        ])
+    ])
+
+
+@expand_petsc_mat_accesses.register(CalledFunction)
+def _(func: CalledFunction, /) -> InstructionList:
+    # Assume that this isn't a problem here, think about this
+    return InstructionList([func])
+
+
 @expand_petsc_mat_accesses.register(Assignment)
 def _(assignment: Assignment, /) -> InstructionList:
     # NOTE: Can imagine more complex scenarios where an indexed matrix is
@@ -614,10 +621,17 @@ def _(assignment: Assignment, /) -> InstructionList:
     #
     #   mat[f(i0, i1), f(i0, i1)] <- t0[i1, i1]
     array = assignment.assignee
-    if isinstance(array, Mat) and any(isinstance(axes, IndexedAxisTree) for axes in {array.raxes, array.caxes}):
-        raise NotImplementedError("TODO next")
-    else:
-        return InstructionList([assignment])
+    if isinstance(array, AbstractMat) and any(isinstance(axes, IndexedAxisTree) for axes in {array.raxes, array.caxes}):
+        if not isinstance(assignment.expression, Dat) or isinstance(assignment.expression.axes, IndexedAxisTree):
+            raise NotImplementedError("Assume an unindexed Dat as RHS")
+
+        if assignment.assignment_type == AssignmentType.INSERT:
+            assignment = PetscMatAccess(array, assignment.expression, "insert")
+        else:
+            assert assignment.assignment_type == AssignmentType.ADD
+            assignment = PetscMatAccess(array, assignment.expression, "add")
+
+    return InstructionList([assignment])
 
 
 

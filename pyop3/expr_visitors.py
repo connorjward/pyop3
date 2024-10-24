@@ -5,6 +5,7 @@ from typing import Any
 from pyrsistent import pmap
 
 from pyop3.array import Dat
+from pyop3.array.petsc import AbstractMat
 from pyop3.axtree.tree import AxisVar, Operator, Add, Mul
 from pyop3.itree.tree import LoopIndexVar
 from pyop3.utils import OrderedSet
@@ -25,9 +26,15 @@ def collect_datamap(expr):
     raise TypeError()
 
 
+# NOTE: should get rid of .datamap entirely
 @collect_datamap.register(Dat)
 def _(dat: Dat, /):
     return dat.datamap
+
+
+@collect_datamap.register(AbstractMat)
+def _(mat: AbstractMat, /):
+    return mat.datamap
 
 
 @collect_datamap.register(Operator)

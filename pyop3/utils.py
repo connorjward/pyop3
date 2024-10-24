@@ -8,10 +8,19 @@ from typing import Any, Collection, Hashable, Optional
 
 import numpy as np
 import pytools
+from immutabledict import ImmutableOrderedDict
 from pyrsistent import pmap
 
 from pyop3.config import config
 from pyop3.exceptions import Pyop3Exception
+
+
+class UnorderedCollectionException(Pyop3Exception):
+    """Exception raised when an ordered collection is required."""
+
+
+class EmptyCollectionException(Pyop3Exception):
+    """Exception raised when a non-empty collection is required."""
 
 
 class UniqueNameGenerator(pytools.UniqueNameGenerator):
@@ -346,6 +355,7 @@ def readonly(array):
     return view
 
 
+# NOTE: Python 3.13 has warnings.deprecated
 def deprecated(prefer=None, internal=False):
     def decorator(fn):
         def wrapper(*args, **kwargs):
@@ -367,3 +377,67 @@ def debug_assert(predicate, msg=None):
             assert predicate(), msg
         else:
             assert predicate()
+
+
+_ordered_mapping_types = (dict, collections.OrderedDict, ImmutableOrderedDict)
+
+
+def expand_collection_of_iterables(compressed, /, *, ordered: bool = True) -> tuple[ImmutableOrderedDict]:
+    """
+    Expand target paths written in 'compressed' form like:
+
+        {key1: [item1, item2], key2: [item3]}
+
+    Instead to the 'expanded' form:
+
+        ({key1: item1, key2: item3}, {key1: item2, key2: item3})
+
+    Valid input types for ``compressed`` include ordered mappings and iterables
+    of 2-tuples (i.e. things that can be parsed into a `dict`).
+
+    """
+    if not ordered:
+        raise NotImplementedError("Need to think about valid classes")
+
+    # If `compressed` is not already a mapping then parse it to one
+    if not isinstance(compressed, collections.abc.Mapping):
+        compressed = dict(compressed)
+
+    if not any(isinstance(compressed, type_) for type_ in _ordered_mapping_types):
+        raise UnorderedCollectionException(
+            "Expected an ordered mapping, valid options include: "
+            f"{{{', '.join(type_.__name__ for type_ in _ordered_mapping_types)}}}"
+        )
+
+    if not compressed:
+        return (ImmutableOrderedDict(),)
+    else:
+        compressed_mut = dict(compressed)
+        return _expand_dict_of_iterables_rec(compressed_mut, ordered=ordered)
+
+
+def _expand_dict_of_iterables_rec(compressed_mut, /, *, ordered):
+    expanded = []
+    key, items = popfirst(compressed_mut)
+
+    if compressed_mut:
+        subexpanded = _expand_dict_of_iterables_rec(compressed_mut, ordered=ordered)
+        for item in items:
+            entry = ImmutableOrderedDict({key: item})
+            for subentry in subexpanded:
+                expanded.append(entry | subentry)
+    else:
+        for item in items:
+            entry = ImmutableOrderedDict({key: item})
+            expanded.append(entry)
+
+    return tuple(expanded)
+
+
+def popfirst(dict_: dict) -> Any:
+    """Remove the first item from a dictionary and return it with its key."""
+    if not dict_:
+        raise EmptyCollectionException("Expected a non-empty dict")
+
+    key = next(iter(dict_))
+    return (key, dict_.pop(key))

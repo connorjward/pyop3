@@ -843,7 +843,7 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
 
     # TODO: Cache this function.
     def getitem(self, indices, *, strict=False):
-        from pyop3.itree.tree import as_index_forest, index_axes
+        from pyop3.itree import as_index_forest, index_axes
 
         if indices is Ellipsis:
             return self

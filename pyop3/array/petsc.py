@@ -21,14 +21,6 @@ from pyop3.axtree.tree import (
     relabel_axes,
 )
 from pyop3.dtypes import IntType, ScalarType
-from pyop3.itree.tree import (
-    as_index_forest,
-    Slice,
-    IndexTree,
-    AffineSliceComponent,
-    compose_axes,
-    index_axes,
-)
 from pyop3.lang import Loop, LoopList, Assignment
 from pyop3.utils import (
     deprecated,

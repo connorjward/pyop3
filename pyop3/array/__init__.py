@@ -8,4 +8,4 @@ from .harray import (  # noqa: F401
     MultiArray,  # old
     Dat,
 )
-from .petsc import Mat  # noqa: F401
+from .petsc import Mat,  AbstractMat  # noqa: F401
