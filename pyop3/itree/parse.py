@@ -145,6 +145,7 @@ def _(called_map: CalledMap, /) -> OrderedSet:
 
 @collect_loop_contexts.register(numbers.Number)
 @collect_loop_contexts.register(str)
+@collect_loop_contexts.register(slice)
 @collect_loop_contexts.register(Slice)
 @collect_loop_contexts.register(ScalarIndex)
 def _(index: Any, /) -> OrderedSet:
@@ -229,7 +230,7 @@ def _desugar_index(obj: Any, *args, **kwargs) -> Index:
 
 @_desugar_index.register(numbers.Integral)
 def _(int_: numbers.Integral, /, axes, *, parent=None) -> Index:
-    axis = axes.child(*parent)
+    axis = axes.child(*parent) if parent else axes.root
     if len(axis.components) > 1:
         # Multi-component axis: take a slice from a matching component.
         component = just_one(c for c in axis.components if c.label == int_)
@@ -246,7 +247,7 @@ def _(int_: numbers.Integral, /, axes, *, parent=None) -> Index:
 
 @_desugar_index.register(slice)
 def _(slice_: slice, /, axes, *, parent=None) -> Index:
-    axis = axes.child(*parent)
+    axis = axes.child(*parent) if parent else axes.root
     if axis.degree > 1:
         # badindexexception?
         raise ValueError(

@@ -119,10 +119,11 @@ def _(op: Operator):
 
 @collect_loops.register(Dat)
 def _(dat: Dat, /) -> OrderedSet:
-    if dat.transform:
-        raise NotImplementedError
-
     loop_indices = OrderedSet()
+
+    if dat.transform:
+        loop_indices |= collect_loops(dat.transform.initial)
+
     for leaf in dat.axes.leaves:
         path = dat.axes.path(leaf)
         loop_indices |= collect_loops(dat.axes.subst_layouts()[path])

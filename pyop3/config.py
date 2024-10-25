@@ -140,7 +140,7 @@ def get_petsc_dir():
             config = petsc4py.get_config()
             petsc_dir = config["PETSC_DIR"]
             petsc_arch = config["PETSC_ARCH"]
-            return petsc_dir, petsc_dir + petsc_arch
+            return petsc_dir, f"{petsc_dir}/{petsc_arch}"
         except ImportError:
             sys.exit(
                 """Error: Could not find PETSc library.
