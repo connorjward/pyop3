@@ -184,9 +184,8 @@ class Dat(Array, KernelArgument):
                 type(self), self.axes, self.dtype, self.buffer, self.max_value, self.name, self.constant)
         )
 
-    # NOTE: "strict" is bit vague now that we also have "allow_unused".
-    def getitem(self, indices, *, strict=False, allow_unused=False):
-        from pyop3.itree.tree import as_index_forest, compose_axes, index_axes
+    def getitem(self, indices, *, strict=False):
+        from pyop3.itree import as_index_forest, index_axes
 
         if indices is Ellipsis:
             return self
@@ -195,12 +194,12 @@ class Dat(Array, KernelArgument):
         # if key in self._cache:
         #     return self._cache[key]
 
-        index_forest = as_index_forest(indices, axes=self.axes, strict=strict, allow_unused=allow_unused)
+        index_forest = as_index_forest(indices, axes=self.axes, strict=strict)
 
-        if index_forest.keys() == {pmap()}:
+        if len(index_forest) == 1:
             # There is no outer loop context to consider. Needn't return a
             # context sensitive object.
-            index_trees = index_forest[pmap()]
+            index_trees = just_one(index_forest.values())
 
             # Loop over "restricted" index trees. This is necessary because maps
             # can yield multiple equivalent indexed axis trees. For example,
@@ -542,7 +541,7 @@ class Dat(Array, KernelArgument):
         if subset is None:
             subset = Ellipsis
 
-        expr = Assignment(self[subset], 0)
+        expr = Assignment(self[subset], 0, "write")
         return expr() if eager else expr
 
     def reshape(self, axes: AxisTree) -> Dat:

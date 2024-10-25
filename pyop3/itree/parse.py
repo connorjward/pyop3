@@ -1,18 +1,28 @@
 import collections
 import functools
 import numbers
+from collections.abc import Mapping, Sequence
 from typing import Any
 
-from pyrsistent import PMap
+from immutabledict import ImmutableOrderedDict
+from pyrsistent import PMap, pmap
 
+from pyop3.array.harray import Dat, HierarchicalArray
 from pyop3.axtree import AxisTree
 from pyop3.axtree.tree import BaseAxisTree
-from pyop3.itree.tree import CalledMap, IndexTree, LoopIndex, Slice, AffineSliceComponent, ScalarIndex, Index, AbstractLoopIndex, LocalLoopIndex
-from pyop3.utils import OrderedSet, expand_collection_of_iterables
+from pyop3.exceptions import Pyop3Exception
+from pyop3.itree.tree import CalledMap, IndexTree, LoopIndex, Slice, AffineSliceComponent, ScalarIndex, Index, Map
+from pyop3.utils import OrderedSet, expand_collection_of_iterables, strictly_all, strict_zip, single_valued, just_one
+
+
+class IncompletelyIndexedException(Pyop3Exception):
+    """Exception raised when an axis tree is incompletely indexed by an index tree/forest."""
 
 
 # NOTE: Now really should be plural: 'forests'
-def as_index_forest(forest: Any, /, axes: BaseAxisTree, *, strict: bool = False) -> PMap:
+# NOTE: Is this definitely the case? I think at the moment I always return just a single
+# tree per context.
+def as_index_forests(forest: Any, /, axes: BaseAxisTree, *, strict: bool = False) -> PMap:
     """Return a collection of index trees, split by loop context.
 
     Parameters
@@ -36,142 +46,144 @@ def as_index_forest(forest: Any, /, axes: BaseAxisTree, *, strict: bool = False)
         Multiple index trees are needed because maps are able to yield multiple
         equivalent index trees.
     """
-    assert forest is not Ellipsis, "Ellipses should be handled before calling"
+    if forest is Ellipsis:
+        return ImmutableOrderedDict({pmap(): (forest,)})
 
     forests = {}
-    loop_contexts = _collect_loop_contexts(forest)
-    for loop_context in expand_collection_of_iterables(loop_contexts):
-        forest_ = _as_index_forest(forest, axes, loop_context=loop_context)
-        forests[loop_context] = forest_
+    compressed_loop_contexts = collect_loop_contexts(forest)
+    # Pass `pmap` as the mapping type because we do not care about the ordering
+    # of `loop_context` (though we *do* care about the order of iteration).
+    for loop_context in expand_collection_of_iterables(compressed_loop_contexts, mapping_type=pmap):
+        forest_ = _as_index_forest(forest, axes, loop_context)
+        matched_forest = []
 
-    breakpoint()
+        found_match = False
+        for index_tree in forest_:
+            if strict:
+                # Make sure that `axes` are completely indexed by each of the index
+                # forests. Note that, since the index trees in a forest represent
+                # 'equivalent' indexing operations, only one of them is expected to work.
+                if not _index_tree_completely_indexes_axes(index_tree, axes):
+                    continue
+            else:
+                # Add extra slices to make sure that index tree targets
+                # all the axes in `axes`
+                # FIXME: needs try-except
+                index_tree = _complete_index_tree(index_tree, axes)
 
-    # If axes are provided then check that the index tree is compatible
-    # and add extra slices if required.
-    if axes is not None:
-        forest_ = {}
-        for ctx, trees in forest.items():
-            checked_trees = []
-            for tree in trees:
-                if not strict:
-                    # NOTE: This function doesn't always work. In particular if
-                    # the loop index is from an already indexed axis. This
-                    # requires more thought but for now just use the strict version
-                    # and provide additional information elsewhere.
-                    tree = _complete_index_tree(tree, axes)
+            if found_match:
+                # Each of the index trees in a forest are considered
+                # 'equivalent' in that they represent semantically
+                # equivalent operations, differing only in the axes that
+                # they target. For example, the loop index
+                #
+                #     p = axis[::2].iter()
+                #
+                # will target *both* the unindexed `axis`, as well as the
+                # intermediate indexed axis `axis[::2]`. There are therefore
+                # two index trees in play.
+                #
+                # For maps I think that it is possible for us to have clashes
+                # in the target axes (e.g. points -> points and cells -> points).
+                # If we ever hit this we will need to think a bit.
+                raise NotImplementedError(
+                    "Found multiple matching index trees, I thought this "
+                    "day might come eventually"
+                )
 
-                if not _index_tree_is_complete(tree, axes):
-                    raise ValueError("Index tree does not completely index axes")
+            matched_forest.append(index_tree)
+            found_match = True
 
-                checked_trees.append(tree)
-            forest_[ctx] = checked_trees
-        forest = forest_
+        if not found_match:
+            raise IncompletelyIndexedException(
+                "Index forest does not correctly index the axis tree"
+            )
 
-        # # TODO: Clean this up, and explain why it's here.
-        # forest_ = {}
-        # for ctx, index_tree in forest.items():
-        #     # forest_[ctx] = index_tree.copy(outer_loops=axes.outer_loops)
-        #     forest_[ctx] = index_tree
-        # forest = forest_
-    return forest
+        forests[loop_context] = tuple(matched_forest)
+    return ImmutableOrderedDict(forests)
+
+
+# old alias, remove
+as_index_forest = as_index_forests
 
 
 @functools.singledispatch
-def _collect_loop_contexts(obj: Any, /) -> OrderedSet:
+def collect_loop_contexts(obj: Any, /) -> OrderedSet:
     raise TypeError(f"No handler provided for {type(obj).__name__}")
 
 
-@_collect_loop_contexts.register(IndexTree)
+@collect_loop_contexts.register(IndexTree)
 def _(index_tree: IndexTree, /) -> OrderedSet:
     loop_contexts = OrderedSet()
     for index in index_tree.nodes:
-        loop_contexts |= _collect_loop_contexts(index)
+        loop_contexts |= collect_loop_contexts(index)
 
     assert len(loop_contexts) < 2, "By definition an index tree cannot be context-sensitive"
     return loop_contexts
 
 
-@_collect_loop_contexts.register(LoopIndex)
+@collect_loop_contexts.register(LoopIndex)
 def _(loop_index: LoopIndex, /) -> OrderedSet:
     if not isinstance(loop_index.iterset, BaseAxisTree):
         raise NotImplementedError("Need to think about context-sensitive itersets and add them here")
 
-    return OrderedSet({(loop_index.id, loop_index.iterset.paths)})
+    return OrderedSet({
+        (
+            loop_index.id,
+            tuple(
+                loop_index.iterset.source_path[axis.id, component_label]
+                for axis, component_label in loop_index.iterset.leaves
+            )
+        )
+    })
 
 
-@_collect_loop_contexts.register(CalledMap)
+@collect_loop_contexts.register(CalledMap)
 def _(called_map: CalledMap, /) -> OrderedSet:
-    return _collect_loop_contexts(called_map.index)
+    return collect_loop_contexts(called_map.index)
 
 
-@_collect_loop_contexts.register(str)
-@_collect_loop_contexts.register(Slice)
-@_collect_loop_contexts.register(ScalarIndex)
+@collect_loop_contexts.register(numbers.Number)
+@collect_loop_contexts.register(str)
+@collect_loop_contexts.register(Slice)
+@collect_loop_contexts.register(ScalarIndex)
 def _(index: Any, /) -> OrderedSet:
     return OrderedSet()
 
 
+@collect_loop_contexts.register(Sequence)
+def _(seq: Sequence, /) -> OrderedSet:
+    loop_contexts = OrderedSet()
+    for item in seq:
+        loop_contexts |= collect_loop_contexts(item)
+    return loop_contexts
+
+
 @functools.singledispatch
-def _as_index_forest(arg: Any, *, axes, **_):
-
-    # if isinstance(arg, HierarchicalArray):
-    if False:
-        # NOTE: This is the same behaviour as for slices
-        parent = axes._node_from_path(path)
-        if parent is not None:
-            parent_axis, parent_cpt = parent
-            target_axis = axes.child(parent_axis, parent_cpt)
-        else:
-            target_axis = axes.root
-
-        if target_axis.degree > 1:
-            raise ValueError(
-                "Passing arrays as indices is only allowed when there is no ambiguity"
-            )
-
-        slice_cpt = Subset(target_axis.component.label, arg)
-        slice_ = Slice(target_axis.label, [slice_cpt])
-        return {pmap(): IndexTree(slice_)}
-    else:
-        raise TypeError(f"No handler provided for {type(arg).__name__}")
+def _as_index_forest(obj: Any, /, *args, **kwargs) -> tuple[IndexTree]:
+    raise TypeError(f"No handler provided for {type(obj).__name__}")
 
 
-@_as_index_forest.register
-def _(forest: collections.abc.Mapping, **kwargs):
-    return forest
+@_as_index_forest.register(IndexTree)
+def _(index_tree: IndexTree, /, *args, **kwargs) -> tuple[IndexTree]:
+    return (index_tree,)
 
 
-@_as_index_forest.register
-def _(index_tree: IndexTree, **_):
-    return {pmap(): (index_tree,)}
+@_as_index_forest.register(Index)
+def _(index: Index, /, axes, loop_context) -> tuple[IndexTree]:
+    cf_indices = _as_context_free_indices(index, loop_context)
+    return tuple(IndexTree(cf_index) for cf_index in cf_indices)
 
 
-# @_as_index_forest.register
-# def _(index: ContextFreeIndex, **_):
-#     return {pmap(): (IndexTree(index),)}
-
-
-@_as_index_forest.register(LoopIndex)
-@_as_index_forest.register(CalledMap)
-def _(index, *, loop_context, **_):
-    unpacked = _as_context_free_index(index, loop_context=loop_context)
-    forest = {
-        context: tuple(IndexTree(idx) for idx in idxs)
-        for context, idxs in unpacked.items()
-    }
-    return forest
-
-
-@_as_index_forest.register
-def _(indices: collections.abc.Sequence, *, axes, loop_context):
-    # The indices can contain a mixture of "true" indices (i.e. subclasses of
-    # Index) and "sugar" indices (e.g. integers, strings and slices). The former
+@_as_index_forest.register(Sequence)
+def _(seq: Sequence, /, axes, loop_context) -> tuple[IndexTree]:
+    raise NotImplementedError
+    # The indices can contain a mixture of 'true' indices (i.e. subclasses of
+    # `Index`) and 'sugar' indices (e.g. integers, strings and slices). The former
     # may be used in any order since they declare the axes they target whereas
     # the latter are order dependent.
-    # To add another complication, the "true" indices may also be context-sensitive:
-    # what they produce is dependent on the state of the outer loops. We therefore
-    # need to unpack this to produce a different index tree for each possible
-    # context.
+    first, *rest = seq
+    # for cf_index in _as_context_free_indices(first, axes
 
     index_trees = {}
     indices_and_contexts = _collect_indices_and_contexts(indices, loop_context=loop_context)
@@ -181,21 +193,42 @@ def _(indices: collections.abc.Sequence, *, axes, loop_context):
     return index_trees
 
 
+@_as_index_forest.register(Dat)
+def _(dat: Dat, /, *args, **kwargs) -> tuple[IndexTree]:
+    raise NotImplementedError
+    # NOTE: This is the same behaviour as for slices
+    parent = axes._node_from_path(path)
+    if parent is not None:
+        parent_axis, parent_cpt = parent
+        target_axis = axes.child(parent_axis, parent_cpt)
+    else:
+        target_axis = axes.root
+
+    if target_axis.degree > 1:
+        raise ValueError(
+            "Passing arrays as indices is only allowed when there is no ambiguity"
+        )
+
+    slice_cpt = Subset(target_axis.component.label, arg)
+    slice_ = Slice(target_axis.label, [slice_cpt])
+    return {pmap(): IndexTree(slice_)}
+
+
 @_as_index_forest.register(slice)
 @_as_index_forest.register(str)
 @_as_index_forest.register(numbers.Integral)
-def _(index, **kwargs):
-    return _as_index_forest([index], **kwargs)
-
+def _(index: Any, /, axes, loop_context) -> tuple[IndexTree]:
+    desugared = _desugar_index(index, axes)
+    return _as_index_forest(desugared, axes, loop_context)
 
 
 @functools.singledispatch
-def _desugar_index(index: Any, **_):
-    raise TypeError(f"No handler defined for {type(index).__name__}")
+def _desugar_index(obj: Any, *args, **kwargs) -> Index:
+    raise TypeError(f"No handler defined for {type(obj).__name__}")
 
 
-@_desugar_index.register
-def _(int_: numbers.Integral, *, axes, parent, **_):
+@_desugar_index.register(numbers.Integral)
+def _(int_: numbers.Integral, /, axes, *, parent=None) -> Index:
     axis = axes.child(*parent)
     if len(axis.components) > 1:
         # Multi-component axis: take a slice from a matching component.
@@ -211,8 +244,8 @@ def _(int_: numbers.Integral, *, axes, parent, **_):
     return index
 
 
-@_desugar_index.register
-def _(slice_: slice, *, axes, parent, **_):
+@_desugar_index.register(slice)
+def _(slice_: slice, /, axes, *, parent=None) -> Index:
     axis = axes.child(*parent)
     if axis.degree > 1:
         # badindexexception?
@@ -226,10 +259,10 @@ def _(slice_: slice, *, axes, parent, **_):
     )
 
 
-@_desugar_index.register
-def _(label: str, *, axes, parent, **_):
+@_desugar_index.register(str)
+def _(label, /, axes, *, parent=None):
     # Take a full slice of a component with a matching label
-    axis = axes.child(*parent)
+    axis = axes.child(*parent) if parent else axes.root
     component = just_one(c for c in axis.components if c.label == label)
 
     # If the component is marked as "unit" then indexing in this way will
@@ -334,6 +367,7 @@ def _index_tree_from_iterable(indices, *, axes, parent=None, unhandled_target_pa
     return index_tree
 
 
+# TODO: This function needs overhauling to work in more cases.
 def _complete_index_tree(
     index_tree: IndexTree, axes: AxisTree, *, index=None, possible_target_paths_acc=None,
 ) -> IndexTree:
@@ -412,7 +446,7 @@ def _complete_index_tree_slices(axes, target_paths, *, axis=None) -> IndexTree:
             return IndexTree()
 
 
-def _index_tree_is_complete(index_tree: IndexTree, axes: AxisTree, *, index=None, possible_target_paths_acc=None) -> bool:
+def  _index_tree_completely_indexes_axes(index_tree: IndexTree, axes, *, index=None, possible_target_paths_acc=None) -> bool:
     """Return whether the index tree completely indexes the axis tree.
 
     This is done by traversing the index tree and collecting the possible target
@@ -434,7 +468,7 @@ def _index_tree_is_complete(index_tree: IndexTree, axes: AxisTree, *, index=None
         )
 
         if subindex := index_tree.child(index, component_label):
-            if not _index_tree_is_complete(
+            if not _index_tree_completely_indexes_axes(
                 index_tree,
                 axes,
                 index=subindex,
@@ -448,169 +482,93 @@ def _index_tree_is_complete(index_tree: IndexTree, axes: AxisTree, *, index=None
 
 
 @functools.singledispatch
-def _as_context_free_index(arg, **_):
-    raise TypeError
+def _as_context_free_indices(obj: Any, /, loop_context: Mapping) -> Index:
+    raise TypeError(f"No handler provided for {type(obj).__name__}")
 
 
-# @_as_context_free_index.register(ContextFreeIndex)
-# @_as_context_free_index.register(ContextFreeCalledMap)
-# def _(cf_index, **kwargs):
-#     return {pmap(): (cf_index,)}
+@_as_context_free_indices.register(Slice)
+@_as_context_free_indices.register(ScalarIndex)
+def _(index, /, loop_context: Mapping) -> tuple[Index]:
+    return (index,)
 
 
-# TODO This function can definitely be refactored
-@_as_context_free_index.register(AbstractLoopIndex)
-@_as_context_free_index.register(LocalLoopIndex)
-def _(index, *, loop_context, **kwargs):
-    local = isinstance(index, LocalLoopIndex)
-
-    cf_indices = {}
-    if isinstance(index.iterset, ContextSensitive):
-        for context, axes in index.iterset.context_map.items():
-            if axes.is_empty:
-                source_path = pmap()
-                target_path = axes.target_paths.get(None, pmap())
-
-                context_ = (
-                    loop_context | context | {index.id: (source_path, target_path)}
-                )
-
-                cf_indices[context_] = index.with_context(context_)
-            else:
-                for leaf in axes.leaves:
-                    source_path = axes.path(*leaf)
-                    target_path = axes.target_paths.get(None, pmap())
-                    for axis, cpt in axes.path_with_nodes(
-                        *leaf, and_components=True
-                    ).items():
-                        target_path |= axes.target_paths.get((axis.id, cpt.label), {})
-
-                    context_ = (
-                        loop_context | context | {index.id: (source_path, target_path)}
-                    )
-
-                    cf_index = index.with_context(context_)
-                    forest[context_] = IndexTree(cf_index)
+@_as_context_free_indices.register(LoopIndex)
+def _(loop_index: LoopIndex, /, loop_context) -> tuple[LoopIndex]:
+    if loop_index.is_context_free:
+        return (loop_index,)
     else:
-        assert isinstance(index.iterset, ContextFree)
-        for leaf in index.iterset.leaves:
-            slices = [
-                Slice(axis_label, [AffineSliceComponent(component_label, label=component_label)], label=axis_label)
-                for axis_label, component_label in index.iterset.path(leaf, ordered=True)
-            ]
-            linear_iterset = index.iterset[slices]
+        path = loop_context[loop_index.id]
 
-            # source_path = index.iterset.path(leaf_axis, leaf_cpt)
-            # target_path = index.iterset.target_path.get(None, pmap())
-            # for axis, cpt in index.iterset.path_with_nodes(
-            #     leaf_axis, leaf_cpt, and_components=True
-            # ).items():
-            #     target_path |= index.iterset.target_paths[axis.id, cpt.label]
-            # # TODO cleanup
-            # my_id = index.id if not local else index.loop_index.id
-            # context = loop_context | {index.id: (source_path, target_path)}
-            context = loop_context | {index.id: "anything"}
+        leaf = loop_index.iterset._node_from_path(path)
+        slices = [
+            Slice(axis_label, [AffineSliceComponent(component_label, label=component_label)], label=axis_label)
+            for axis_label, component_label in loop_index.iterset.path(leaf, ordered=True)
+        ]
 
-            cf_index = ContextFreeLoopIndex(linear_iterset, id=index.id)
+        # TODO: should accept the iterable directly
+        slices_tree = IndexTree.from_iterable(slices)
 
-            cf_indices[context] = cf_index
-    return cf_indices
+        linear_iterset = loop_index.iterset[slices_tree]
+        return (loop_index.copy(iterset=linear_iterset),)
 
 
-@_as_context_free_index.register(CalledMap)
-def _(called_map, **kwargs):
-    cf_maps = {}
-    cf_indicess = _as_context_free_index(called_map.from_index, **kwargs)
-    # loop over different "outer loop contexts"
-    for context, cf_indices in cf_indicess.items():
-        cf_maps[context] = []
-        # loop over semantically equivalent indices
-        for cf_index in cf_indices:
+@_as_context_free_indices.register(CalledMap)
+def _(called_map, /, loop_context):
+    cf_maps = []
+    cf_indices = _as_context_free_indices(called_map.from_index, loop_context)
 
-            # imagine that we have
-            #
-            #   {
-            #      x -> [[a], [b, c]],
-            #      y -> [[a], [d]],
-            #   }
-            #
-            # ie xmaps to *either* [a] or [b, c] and y maps to either [a] or [d]
-            # then we want to end up with
-            #
-            #   {
-            #     x -> [[a]],
-            #     y -> [[a]],
-            #   }
-            #   and
-            #   {
-            #     x -> [[b, c]],
-            #     y -> [[a]],
-            #   }
-            #    etc
-            #
-            # In effect for a concrete set of inputs having a concrete set of outputs
-            #
-            # Note that this gets more complicated in cases like
-            #
-            #   { x -> [[a]], y -> [[a]] }
-            #
-            # where we assume x and y to be "equivalent".
-            # because if two equivalent input paths map to the same output then they can
-            # be considered equivalent in the final axis tree.
-            #
-            # This is later work.
+    # loop over semantically equivalent indices
+    for cf_index in cf_indices:
 
-            possibilities = []
-            for equivalent_input_paths in cf_index.leaf_target_paths:
-                found = False
-                for input_path in equivalent_input_paths:
-                    if input_path in called_map.connectivity:
-                        found = True
-                        for output_spec in called_map.connectivity[input_path]:
-                            possibilities.append((input_path, output_spec))
-                assert found, "must be at least one matching path"
+        # imagine that we have
+        #
+        #   {
+        #      x -> [[a], [b, c]],
+        #      y -> [[a], [d]],
+        #   }
+        #
+        # ie xmaps to *either* [a] or [b, c] and y maps to either [a] or [d]
+        # then we want to end up with
+        #
+        #   {
+        #     x -> [[a]],
+        #     y -> [[a]],
+        #   }
+        #   and
+        #   {
+        #     x -> [[b, c]],
+        #     y -> [[a]],
+        #   }
+        #    etc
+        #
+        # In effect for a concrete set of inputs having a concrete set of outputs
+        #
+        # Note that this gets more complicated in cases like
+        #
+        #   { x -> [[a]], y -> [[a]] }
+        #
+        # where we assume x and y to be "equivalent".
+        # because if two equivalent input paths map to the same output then they can
+        # be considered equivalent in the final axis tree.
+        #
+        # This is later work.
 
-            if len(possibilities) > 1:
-                # list(itertools.product(possibilities))
-                raise NotImplementedError("Need to think about taking the product of these")
-            else:
-                input_path, output_spec = just_one(possibilities)
-                restricted_connectivity = {input_path: (output_spec,)}
-                restricted_map = Map(restricted_connectivity, called_map.name)(cf_index)
-                cf_maps[context].append(restricted_map)
-    return freeze(cf_maps)
+        possibilities = []
+        for equivalent_input_paths in cf_index.leaf_target_paths:
+            found = False
+            for input_path in equivalent_input_paths:
+                if input_path in called_map.connectivity:
+                    found = True
+                    for output_spec in called_map.connectivity[input_path]:
+                        possibilities.append((input_path, output_spec))
+            assert found, "must be at least one matching path"
 
-
-def _collect_indices_and_contexts(indices, *, loop_context):
-    """
-    Syntactic sugar indices (i.e. integers, strings, slices) are
-    treated differently here
-    because they must be handled (in order) later on.
-    """
-    index, *subindices = indices
-    collected = {}
-
-    if isinstance(index, Index):
-        raise NotImplementedError("This is harder now we track equivalent paths")
-        for context, cf_index in _as_context_free_index(
-            index, loop_context=loop_context
-        ).items():
-            if subindices:
-                subcollected = _collect_indices_and_contexts(
-                    subindices,
-                    loop_context=loop_context | context,
-                )
-                for subcontext, cf_subindices in subcollected.items():
-                    collected[subcontext] = (cf_index,) + cf_subindices
-            else:
-                collected[context] = (cf_index,)
-
-    else:
-        if subindices:
-            subcollected = _collect_indices_and_contexts(subindices, loop_context=loop_context)
-            for subcontext, cf_subindices in subcollected.items():
-                collected[subcontext] = (index,) + cf_subindices
+        if len(possibilities) > 1:
+            # list(itertools.product(possibilities))
+            raise NotImplementedError("Need to think about taking the product of these")
         else:
-            collected[pmap()] = (index,)
-
-    return pmap(collected)
+            input_path, output_spec = just_one(possibilities)
+            restricted_connectivity = {input_path: (output_spec,)}
+            restricted_map = Map(restricted_connectivity, called_map.name)(cf_index)
+            cf_maps.append(restricted_map)
+    return tuple(cf_maps)

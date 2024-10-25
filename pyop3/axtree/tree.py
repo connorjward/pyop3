@@ -22,6 +22,7 @@ import pyrsistent
 import pytools
 from cachetools import cachedmethod
 from mpi4py import MPI
+from immutabledict import ImmutableOrderedDict
 from petsc4py import PETSc
 from pyrsistent import freeze, pmap, thaw
 
@@ -90,6 +91,7 @@ class ContextSensitive(ContextAware, abc.ABC):
     #     """
     #
     def __init__(self, context_map):
+        # TODO: make a constant utils type
         if isinstance(context_map, pyrsistent.PMap):
             raise TypeError("context_map must be deterministically ordered")
         self.context_map = context_map
@@ -103,9 +105,12 @@ class ContextSensitive(ContextAware, abc.ABC):
                 indices.add(loop_index)
             return frozenset(indices)
 
-    def with_context(self, context):
+    def with_context(self, context, *, strict=False):
+        if not strict:
+            context = self.filter_context(context)
+
         try:
-            return self.context_map[self.filter_context(context)]
+            return self.context_map[context]
         except KeyError:
             raise ContextMismatchException
 
@@ -129,6 +134,10 @@ class ContextFree(ContextAware, abc.ABC):
 
     def filter_context(self, context):
         return pmap()
+
+    @property
+    def context_map(self):
+        return ImmutableOrderedDict({pmap(): self})
 
 
 class LoopIterable(abc.ABC):
@@ -772,7 +781,7 @@ class Terminal(Expression, abc.ABC):
 
 
 class Operator(Expression):
-    def __init__(self, a, b):
+    def __init__(self, a, b, /):
         self.a = a
         self.b = b
 
@@ -796,7 +805,10 @@ class AxisVar(Terminal):
 
 
 class Add(Operator):
-    pass
+    def __init__(self, a, b):
+        if a is b:
+            breakpoint()
+        super().__init__(a, b)
 
 
 class Sub(Operator):
@@ -837,6 +849,7 @@ class FloorDiv(Operator):
 #         return pmap()
 
 
+# NOTE: More consistent to be AbstractAxisTree I think
 class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
     def __getitem__(self, indices):
         return self.getitem(indices, strict=False)
@@ -1003,15 +1016,11 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
         else:
             return self._subst_layouts_default
 
-    def index(self):
-        from pyop3.itree.tree import ContextFreeLoopIndex, LoopIndex
+    # TODO: rename to iter
+    def index(self) -> LoopIndex:
+        from pyop3.itree.tree import LoopIndex
 
-        # If the iterset is linear (single-component for every axis) then we
-        # can consider the loop to be "context-free".
-        if len(self.leaves) == 1:
-            return ContextFreeLoopIndex(self)
-        else:
-            return LoopIndex(self)
+        return LoopIndex(self)
 
     def iter(self, outer_loops=(), loop_index=None, include=False, **kwargs):
         from pyop3.itree.tree import iter_axis_tree
@@ -1308,7 +1317,7 @@ class AxisTree(MutableLabelledTreeMixin, BaseAxisTree):
     @cached_property
     def _source_path_and_exprs(self):
         # TODO: merge source path and source expr collection here
-        return freeze({key: (self._source_path[key], self._source_exprs[key]) for key in self._source_path})
+        return ImmutableOrderedDict({key: (self._source_path[key], self._source_exprs[key]) for key in self._source_path})
 
     @cached_property
     def paths_and_exprs(self):
@@ -1379,6 +1388,7 @@ class AxisTree(MutableLabelledTreeMixin, BaseAxisTree):
     def materialize(self):
         return self
 
+    # NOTE: should default to appending (assuming linear)
     def add_axis(self, axis, parent_axis, parent_component=None, *, uniquify=False):
         # FIXME: I want parent to be a *single argument*
         if isinstance(parent_axis, tuple):
@@ -1483,12 +1493,18 @@ class IndexedAxisTree(BaseAxisTree):
 
         super().__init__(node_map)
         self._unindexed = unindexed
-        self._targets = frozenset(targets)
-        self.targets = frozenset(targets)
+
+        assert not isinstance(targets, collections.abc.Set), "now ordered!"
+        self.targets = tuple(targets)
 
         # self._target_exprs = frozenset(target_exprs)
         # self._layout_exprs = tuple(layout_exprs)
         self._outer_loops = tuple(outer_loops)
+
+    # old alias
+    @property
+    def _targets(self):
+        return self.targets
 
     @property
     def unindexed(self):

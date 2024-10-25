@@ -16,7 +16,7 @@ class Array(ContextAware, FunctionArgument, Terminal, abc.ABC):
         self.name = name or self._name_generator(prefix or self._prefix)
 
     def assign(self, other, /, *, eager=False):
-        expr = Assignment(self, other)
+        expr = Assignment(self, other, "write")
         return expr() if eager else expr
 
     # TODO: Add this to different types

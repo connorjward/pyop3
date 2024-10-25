@@ -18,9 +18,10 @@ from pyop3.array.petsc import AbstractMat
 from pyop3.axtree import Axis, AxisTree, ContextFree, ContextSensitive, ContextMismatchException, ContextAware
 from pyop3.axtree.tree import Operator, AxisVar, IndexedAxisTree
 from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
-from pyop3.itree import Map, TabulatedMapComponent
-from pyop3.itree.tree import ContextFreeLoopIndex, LoopIndexVar
-from pyop3.expr_visitors import collect_loops as expr_collect_loops, collect_datamap as collect_expr_datamap
+from pyop3.itree import Map, TabulatedMapComponent, collect_loop_contexts
+from pyop3.itree.tree import LoopIndexVar
+from pyop3.itree.parse import _as_context_free_indices
+from pyop3.expr_visitors import collect_loops as expr_collect_loops, collect_datamap as collect_expr_datamap, restrict_to_context as restrict_expression_to_context
 from pyop3.lang import (
     INC,
     NA,
@@ -30,34 +31,53 @@ from pyop3.lang import (
     Assignment,
     AssignmentType,
     CalledFunction,
-    ContextAwareLoop,
     DummyKernelArgument,
     Instruction,
     Loop,
     InstructionList,
     PetscMatAccess,
-    Terminal,
 )
-from pyop3.utils import UniqueNameGenerator, checked_zip, just_one, single_valued, OrderedSet, merge_dicts
+from pyop3.utils import UniqueNameGenerator, checked_zip, just_one, single_valued, OrderedSet, merge_dicts, expand_collection_of_iterables
 
 
-# @functools.singledispatch
-# def collect_loop_indices(insn: Any, /) -> OrderedSet:
-#     raise TypeError
-#
-#
-# @collect_loop_indices.register(LoopList)
-# def _(loop_list: LoopList, /) -> OrderedSet:
-#     return OrderedSet(
-#         loop_idxs for loop in loop_list for loop_idxs in collect_loop_indices(loop)
-#     )
-#
-#
-# @collect_loop_indices.register(Loop)
-# def _(loop: Loop, /) -> OrderedSet:
-#     return OrderedSet(
-#         loop_idxs for loop in loop_list for loop_idxs in collect_loop_indices(loop)
-#     )
+@functools.singledispatch
+def collect_loop_indices(obj: Any, /) -> OrderedSet:
+    raise TypeError(f"No handler provided for {type(obj).__name__}")
+
+
+@collect_loop_indices.register(InstructionList)
+def _(insn_list: InstructionList, /) -> OrderedSet:
+    loop_indices = OrderedSet()
+    for insn in insn_list:
+        loop_indices |= collect_loop_indices(insn)
+    return loop_indices
+
+
+@collect_loop_indices.register(Loop)
+def _(loop: Loop, /) -> OrderedSet:
+    # NOTE: Need to look at loop index in more detail to extract other indices
+    loop_indices = OrderedSet([loop.index])
+    for stmt in loop.statements:
+        loop_indices |= collect_loop_indices(stmt)
+    return loop_indices
+
+
+@collect_loop_indices.register(Assignment)
+def _(assignment: Assignment, /) -> OrderedSet:
+    return expr_collect_loops(assignment.assignee) | expr_collect_loops(assignment.expression)
+
+
+@collect_loop_indices.register(PetscMatAccess)
+def _(mat_access: PetscMatAccess, /) -> OrderedSet:
+    return expr_collect_loops(mat_access.mat_arg) | expr_collect_loops(mat_access.array_arg)
+
+
+@collect_loop_indices.register(CalledFunction)
+def _(func: CalledFunction, /) -> OrderedSet:
+    loop_indices = OrderedSet()
+    for arg in func.arguments:
+        loop_indices |= expr_collect_loops(arg)
+    return loop_indices
 
 
 # TODO Is this generic for other parsers/transformers? Esp. lower.py
@@ -78,142 +98,26 @@ right now.
 """
 
 
-class LoopContextExpander(Transformer):
-    # TODO prefer __call__ instead
-    def apply(self, expr: Instruction):
-        return self._apply(expr, context=pmap())
+# class LoopContextExpander(Transformer):
 
-    @functools.singledispatchmethod
-    def _apply(self, expr: Instruction, **kwargs):
-        raise TypeError(f"No handler provided for {type(expr).__name__}")
-
-    @_apply.register(InstructionList)
-    def _(self, loop_list: InstructionList, /, *, context):
-        # NOTE: I don't think that this is right... need each loop to have the same context set?
-        cf_loops_per_context = collections.defaultdict(list)
-        for loop in loop_list.loops:
-            for ctx, cf_loop in self._apply(loop):
-                cf_loops_per_context[ctx].append(cf_loop)
-        return ImmutableOrderedDict({
-            ctx: tuple(cf_loops) for ctx, cf_loops in cf_loops_per_context.items()
-        })
-
-    @_apply.register
-    def _(self, loop: Loop, /, *, context):
-        loops = []
-        if isinstance(loop.index, ContextFreeLoopIndex):
-            cf_iterset = loop.index.iterset
-            loop_context = {loop.index.id: loop.index.leaf_target_paths}
-            context_ = context | loop_context
-
-            statements = []
-            for stmt in loop.statements:
-                for myctx, mystmt in self._apply(stmt, context=context_):
-                    if myctx:
-                        raise NotImplementedError(
-                            "need to think about how to wrap inner instructions "
-                            "that need outer loops"
-                        )
-                    statements.append(mystmt)
-
-            # loop = L(
-            #     loop.index.copy(iterset=cf_iterset),
-            #     statements,
-            # )
-            loops.append(loop.copy(statements=statements))
-
-        else:
-            raise NotImplementedError
-            assert len(source_paths) > 1
-            statements = {}
-            for source_path, target_path in checked_zip(source_paths, target_paths):
-                context_ = context | {loop.index.id: (source_path, target_path)}
-
-                statements[source_path] = []
-
-                for stmt in loop.statements:
-                    for myctx, mystmt in self._apply(stmt, context=context_ | octx):
-                        if myctx:
-                            raise NotImplementedError(
-                                "need to think about how to wrap inner instructions "
-                                "that need outer loops"
-                            )
-                        if mystmt is None:
-                            continue
-                        statements[source_path].append(mystmt)
-
-        # FIXME this does not propagate inner outer contexts
-        # NOTE: also I think this is redundant, just use a Loop!!!
-        # csloop = ContextAwareLoop(
-        # csloop = Loop(
-        #     loop.index.copy(iterset=cf_iterset),
-        #     statements,
-        #     state="preprocessed",
-        # )
-        # # NOTE: outer context now needs sniffing out, makes the objects nicer
-        # # loops.append((octx, loop))
-        # loops.append(csloop)
-
-        return InstructionList(loops, name=loop.name)
-
-    @_apply.register
-    def _(self, terminal: CalledFunction, *, context):
-        # this is very similar to what happens in PetscMat.__getitem__
-        outer_context = collections.defaultdict(dict)  # ordered set per index
-        for arg in terminal.arguments:
-            if not isinstance(arg.axes, ContextSensitive):
-                continue
-
-            for ctx in arg.context_map.keys():
-                for index, paths in ctx.items():
-                    if index in context:
-                        assert paths == context[index]
-                    else:
-                        outer_context[index][paths] = None
-        # convert ordered set to a list
-        outer_context = {k: tuple(v.keys()) for k, v in outer_context.items()}
-
-        # convert to a product-like structure of [{index: paths, ...}, {index: paths}, ...]
-        outer_context_ = tuple(context_product(outer_context.items()))
-
-        if not outer_context_:
-            outer_context_ = (pmap(),)
-
-        for arg in terminal.arguments:
-            if isinstance(arg.axes, ContextSensitive):
-                outer_context.update(
-                    {
-                        index: paths
-                        for ctx in arg.axes.context_map.keys()
-                        for index, paths in ctx.items()
-                        if index not in context
-                    }
-                )
-
-        retval = []
-        for octx in outer_context_:
-            cf_args = [a.with_context(octx | context) for a in terminal.arguments]
-            retval.append((octx, terminal.with_arguments(cf_args)))
-        return retval
-
-    @_apply.register
-    def _(self, terminal: Assignment, *, context):
-        # FIXME for now we assume an outer context of {}. In other words anything
-        # context sensitive in the assignment is completely handled by the existing
-        # outer loops.
-        # This is meaningful if the kernel accepts a loop index as an argument.
-
-        cf_args = []
-        for arg in terminal.arguments:
-            if isinstance(arg, ContextAware):
-                try:
-                    cf_args.append(arg.with_context(context))
-                except ContextMismatchException:
-                    # assignment is not valid in this context, do nothing
-                    return ((pmap(), None),)
-            else:
-                cf_args.append(arg)
-        return ((pmap(), terminal.with_arguments(cf_args)),)
+    # @_apply.register
+    # def _(self, terminal: Assignment, *, context):
+    #     # FIXME for now we assume an outer context of {}. In other words anything
+    #     # context sensitive in the assignment is completely handled by the existing
+    #     # outer loops.
+    #     # This is meaningful if the kernel accepts a loop index as an argument.
+    #
+    #     cf_args = []
+    #     for arg in terminal.arguments:
+    #         if isinstance(arg, ContextAware):
+    #             try:
+    #                 cf_args.append(arg.with_context(context))
+    #             except ContextMismatchException:
+    #                 # assignment is not valid in this context, do nothing
+    #                 return ((pmap(), None),)
+    #         else:
+    #             cf_args.append(arg)
+    #     return ((pmap(), terminal.with_arguments(cf_args)),)
 
     # # TODO: this is just an assignment, fix inheritance
     # @_apply.register
@@ -226,11 +130,60 @@ class LoopContextExpander(Transformer):
     #         return ((pmap(), None),)
 
 
-# NOTE: We do not currently do this because loop contexts are quite complicated
-# and rarely used. Also the whole "context-free"/"context-sensitive" thing is less
-# clear now since the changes to maps. This needs a fair bit of thought (later).
-def expand_loop_contexts(expr: Instruction):
-    return LoopContextExpander().apply(expr)
+def expand_loop_contexts(insn: Instruction, /) -> InstructionList:
+    insns = []
+
+    loop_indices = collect_loop_indices(insn)
+    compressed_loop_contexts = collect_loop_contexts(loop_indices)
+    # Pass `pmap` as the mapping type because we do not care about the ordering
+    # of `loop_context` (though we *do* care about the order of iteration).
+    for loop_context in expand_collection_of_iterables(compressed_loop_contexts, mapping_type=pmap):
+        cf_insn = _restrict_instruction_to_loop_context(insn, loop_context)
+        insns.append(cf_insn)
+
+    return InstructionList(insns)
+
+
+@functools.singledispatch
+def _restrict_instruction_to_loop_context(obj: Any, /, loop_context) -> Instruction:
+    raise TypeError(f"No handler defined for {type(obj).__name__}")
+
+
+@_restrict_instruction_to_loop_context.register(InstructionList)
+def _(insn_list: InstructionList, /, loop_context) -> InstructionList:
+    return InstructionList([
+        _restrict_instruction_to_loop_context(insn, loop_context)
+        for insn in insn_list
+    ])
+
+
+@_restrict_instruction_to_loop_context.register(Loop)
+def _(loop: Loop, /, loop_context) -> Loop:
+    cf_loop_index = just_one(_as_context_free_indices(loop.index, loop_context))
+    return Loop(
+        cf_loop_index,
+        [
+            _restrict_instruction_to_loop_context(stmt, loop_context)
+            for stmt in loop.statements
+        ],
+    )
+
+
+@_restrict_instruction_to_loop_context.register(CalledFunction)
+def _(func: CalledFunction, /, loop_context) -> CalledFunction:
+    return CalledFunction(
+        func.function,
+        [arg.with_context(loop_context) for arg in func.arguments],
+    )
+
+
+@_restrict_instruction_to_loop_context.register(Assignment)
+def _(assignment: Assignment, /, loop_context) -> Assignment:
+    return Assignment(
+        restrict_expression_to_context(assignment.assignee, loop_context),
+        restrict_expression_to_context(assignment.expression, loop_context),
+        assignment.assignment_type,
+    )
 
 
 def context_product(contexts, acc=pmap()):
@@ -356,20 +309,20 @@ class ImplicitPackUnpackExpander(Transformer):
                 )
 
                 if intent == READ:
-                    gathers.append(Assignment(temporary, arg))
+                    gathers.append(Assignment(temporary, arg, "write"))
                 elif intent == WRITE:
                     # This is currently necessary because some local kernels
                     # (interpolation) actually increment values instead of setting
                     # them directly. This should ideally be addressed.
-                    gathers.append(Assignment(temporary, 0))
-                    scatters.insert(0, Assignment(arg, temporary))
+                    gathers.append(Assignment(temporary, 0, "write"))
+                    scatters.insert(0, Assignment(arg, temporary, "write"))
                 elif intent == RW:
-                    gathers.append(Assignment(temporary, arg))
-                    scatters.insert(0, Assignment(arg, temporary))
+                    gathers.append(Assignment(temporary, arg, "write"))
+                    scatters.insert(0, Assignment(arg, temporary, "write"))
                 else:
                     assert intent == INC
-                    gathers.append(Assignment(temporary, 0))
-                    scatters.insert(0, Assignment(arg, temporary, "add"))
+                    gathers.append(Assignment(temporary, 0, "write"))
+                    scatters.insert(0, Assignment(arg, temporary, "inc"))
 
                 arguments.append(temporary)
 
@@ -474,7 +427,7 @@ def _(assignment: Assignment, /) -> InstructionList:
     bare_expression, input_insns = _generate_array_transformations(assignment.expression, "in")
     bare_assignee, output_insns = _generate_array_transformations(assignment.assignee, "out")
 
-    bare_assignment = Assignment(bare_assignee, bare_expression)
+    bare_assignment = Assignment(bare_assignee, bare_expression, assignment.assignment_type)
 
     return InstructionList([*input_insns, bare_assignment, *output_insns])
 
@@ -505,7 +458,7 @@ def _generate_array_transformations(expr: Any, /, mode):
 @_generate_array_transformations.register(Operator)
 def _(op: Operator, /, mode):
     bare_a, a_insns = _generate_array_transformations(op.a, mode)
-    bare_b, b_insns = _generate_array_transformations(op.a, mode)
+    bare_b, b_insns = _generate_array_transformations(op.b, mode)
     # reconstruct?
     return (type(op)(bare_a, bare_b), a_insns + b_insns)
 
@@ -622,14 +575,11 @@ def _(assignment: Assignment, /) -> InstructionList:
     #   mat[f(i0, i1), f(i0, i1)] <- t0[i1, i1]
     array = assignment.assignee
     if isinstance(array, AbstractMat) and any(isinstance(axes, IndexedAxisTree) for axes in {array.raxes, array.caxes}):
-        if not isinstance(assignment.expression, Dat) or isinstance(assignment.expression.axes, IndexedAxisTree):
-            raise NotImplementedError("Assume an unindexed Dat as RHS")
-
-        if assignment.assignment_type == AssignmentType.INSERT:
-            assignment = PetscMatAccess(array, assignment.expression, "insert")
+        if assignment.assignment_type == AssignmentType.WRITE:
+            assignment = PetscMatAccess(array, assignment.expression, "write")
         else:
-            assert assignment.assignment_type == AssignmentType.ADD
-            assignment = PetscMatAccess(array, assignment.expression, "add")
+            assert assignment.assignment_type == AssignmentType.INC
+            assignment = PetscMatAccess(array, assignment.expression, "inc")
 
     return InstructionList([assignment])
 

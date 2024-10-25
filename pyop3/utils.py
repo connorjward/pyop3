@@ -95,7 +95,8 @@ class StrictlyUniqueDict(dict):
         super().update(other)
 
 
-class OrderedSet:
+
+class OrderedSet(collections.abc.Sequence):
     """A mutable ordered set."""
 
     def __init__(self, values=None, /) -> None:
@@ -122,9 +123,18 @@ class OrderedSet:
     def __eq__(self, other, /) -> bool:
         return type(other) is type(self) and other._values == self._values
 
+    def __getitem__(self, index, /):
+        return self._values[index]
+
+    def __contains__(self, item, /) -> bool:
+        return item in self._values
+
     def __iter__(self):
         # return iter(self._values.keys())
         return iter(self._values)
+
+    def __reversed__(self):
+        return iter(reversed(self._values))
 
     def __or__(self, other, /) -> OrderedSet:
         # NOTE: other must be iterable
@@ -132,6 +142,12 @@ class OrderedSet:
         for item in other:
             merged.add(item)
         return merged
+
+    def index(self, value) -> int:
+        return self._values.index(value)
+
+    def count(self, value) -> int:
+        return 1
 
     def copy(self) -> OrderedSet:
         return OrderedSet(self._values)
@@ -382,7 +398,7 @@ def debug_assert(predicate, msg=None):
 _ordered_mapping_types = (dict, collections.OrderedDict, ImmutableOrderedDict)
 
 
-def expand_collection_of_iterables(compressed, /, *, ordered: bool = True) -> tuple[ImmutableOrderedDict]:
+def expand_collection_of_iterables(compressed, /, *, ordered: bool = True, mapping_type=ImmutableOrderedDict) -> tuple[ImmutableOrderedDict]:
     """
     Expand target paths written in 'compressed' form like:
 
@@ -410,25 +426,25 @@ def expand_collection_of_iterables(compressed, /, *, ordered: bool = True) -> tu
         )
 
     if not compressed:
-        return (ImmutableOrderedDict(),)
+        return (mapping_type(),)
     else:
         compressed_mut = dict(compressed)
-        return _expand_dict_of_iterables_rec(compressed_mut, ordered=ordered)
+        return _expand_dict_of_iterables_rec(compressed_mut, ordered=ordered, mapping_type=mapping_type)
 
 
-def _expand_dict_of_iterables_rec(compressed_mut, /, *, ordered):
+def _expand_dict_of_iterables_rec(compressed_mut, /, *, ordered, mapping_type):
     expanded = []
     key, items = popfirst(compressed_mut)
 
     if compressed_mut:
-        subexpanded = _expand_dict_of_iterables_rec(compressed_mut, ordered=ordered)
+        subexpanded = _expand_dict_of_iterables_rec(compressed_mut, ordered=ordered, mapping_type=mapping_type)
         for item in items:
-            entry = ImmutableOrderedDict({key: item})
+            entry = mapping_type({key: item})
             for subentry in subexpanded:
                 expanded.append(entry | subentry)
     else:
         for item in items:
-            entry = ImmutableOrderedDict({key: item})
+            entry = mapping_type({key: item})
             expanded.append(entry)
 
     return tuple(expanded)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import abc
+import collections
 import dataclasses
 import enum
 import functools
@@ -109,13 +110,13 @@ class PreprocessedExpression:
 class Instruction(UniqueRecord, abc.ABC):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self._cache = {}
+        self._cache = collections.defaultdict(dict)
 
     def __call__(self, *, compiler_parameters=None, **kwargs):
         executable = self.compile(compiler_parameters)
         executable(**kwargs)
 
-    @cachedmethod(lambda self: self._cache)
+    @cachedmethod(lambda self: self._cache["Instruction.preprocess"])
     def preprocess(self, compiler_parameters=None):
         from pyop3.transform import expand_implicit_pack_unpack, expand_loop_contexts, expand_array_transformations, expand_petsc_mat_accesses
 
@@ -126,7 +127,7 @@ class Instruction(UniqueRecord, abc.ABC):
         insn = expand_petsc_mat_accesses(insn)
         return PreprocessedExpression(insn)
 
-    @cachedmethod(lambda self: self._cache)
+    @cachedmethod(lambda self: self._cache["Instruction.compile"])
     def compile(self, compiler_parameters=None):
         from pyop3.ir.lower import compile
 
@@ -575,14 +576,14 @@ class AbstractAssignment(Terminal, abc.ABC):
 
 # TODO: With Python 3.11 can be made a StrEnum
 class AssignmentType(enum.Enum):
-    INSERT = "insert"
-    ADD = "add"
+    WRITE = "write"
+    INC = "inc"
 
 
 class Assignment(AbstractAssignment):
     fields = AbstractAssignment.fields | {"assignee", "expression", "assignment_type"}
 
-    def __init__(self, assignee, expression, assignment_type=AssignmentType.INSERT, **kwargs):
+    def __init__(self, assignee, expression, assignment_type, **kwargs):
         assignment_type = AssignmentType(assignment_type)
 
         super().__init__(**kwargs)
@@ -646,15 +647,27 @@ class Assignment(AbstractAssignment):
 # TODO: With Python 3.11 can be made a StrEnum
 class PetscMatAccessType(enum.Enum):
     READ = "read"
-    INSERT = "insert"
-    ADD = "add"
+    WRITE = "write"
+    INC = "inc"
 
 
 class PetscMatAccess(AbstractAssignment):
     fields = AbstractAssignment.fields | {"mat_arg", "array_arg", "access_type"}
 
     def __init__(self, mat_arg, array_arg, access_type):
+        from pyop3.array import Dat
+
         access_type = PetscMatAccessType(access_type)
+
+        if isinstance(array_arg, numbers.Number):
+            array_arg = Dat(
+                mat_arg.axes,
+                data=np.full(mat_arg.axes.size, array_arg, dtype=mat_arg.dtype),
+                prefix="t",
+                constant=True,
+            )
+
+
         assert mat_arg.dtype == array_arg.dtype
 
         self.mat_arg = mat_arg

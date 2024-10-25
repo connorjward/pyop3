@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import abc
+import collections
 import contextlib
 import dataclasses
 import enum
@@ -9,6 +10,9 @@ import numbers
 import textwrap
 from functools import cached_property
 from typing import Any
+import weakref
+
+from cachetools import cachedmethod
 
 import loopy as lp
 import numpy as np
@@ -108,6 +112,8 @@ class LoopyCodegenContext(CodegenContext):
 
         self._seen_arrays = set()
 
+        self.datamap = weakref.WeakValueDictionary()
+
     @property
     def domains(self):
         return tuple(self._domains)
@@ -184,7 +190,7 @@ class LoopyCodegenContext(CodegenContext):
         )
         self._add_instruction(insn)
 
-    # TODO wrap into add_argument
+    # TODO wrap into add_array
     def add_dummy_argument(self, arg, dtype):
         if arg in self._dummy_names:
             name = self._dummy_names[arg]
@@ -192,15 +198,13 @@ class LoopyCodegenContext(CodegenContext):
             name = self._dummy_names.setdefault(arg, self._name_generator("dummy"))
         self._args.append(lp.ValueArg(name, dtype=dtype))
 
-    # deprecated
-    def add_argument(self, array):
-        return self.add_array(array)
-
     # TODO we pass a lot more data here than we need I think, need to use unique *buffers*
     def add_array(self, array: Dat) -> None:
         if array.name in self._seen_arrays:
             return
         self._seen_arrays.add(array.name)
+
+        self.datamap[array.name] = array
 
         # set to True to use actual names in generated code, it helps debugging
         # but makes codegen miss cache all the time
@@ -298,17 +302,21 @@ class LoopyCodegenContext(CodegenContext):
         self._temporary_shapes = shapes
 
 
-# bad name
+# bad name, bit misleading as this is just the loopy bit, further optimisation
+# and lowering to go...
 class CodegenResult:
-    def __init__(self, expr, ir, arg_replace_map, *, compiler_parameters):
-        if not isinstance(expr, PreprocessedExpression):
-            raise UnprocessedExpressionException("Expected a preprocessed expression")
-
-        self.expr = expr
+    def __init__(self, ir, arg_replace_map, datamap, compiler_parameters):
         self.ir = ir
         self.arg_replace_map = arg_replace_map
+        self.datamap = datamap
+        self.compiler_parameters = compiler_parameters
 
-        self._exec = compile_loopy(self.ir, pyop3_compiler_parameters=compiler_parameters)
+        # self._cache = collections.defaultdict(dict)
+
+    # @cachedmethod(lambda self: self._cache["CodegenResult._compile"])
+    # not really needed, just a @property
+    def _compile(self):
+        return compile_loopy(self.ir, pyop3_compiler_parameters=self.compiler_parameters)
 
     def __call__(self, **kwargs):
         # TODO: Check each of kwargs and make sure that the replacement is
@@ -316,10 +324,12 @@ class CodegenResult:
         data_args = []
         for kernel_arg in self.ir.default_entrypoint.args:
             actual_arg_name = self.arg_replace_map[kernel_arg.name]
-            array = kwargs.get(actual_arg_name, self.expr.datamap[actual_arg_name])
+            array = kwargs.get(actual_arg_name, self.datamap[actual_arg_name])
             data_args.append(_as_pointer(array))
+
         if len(data_args) > 0:
-            self._exec(*data_args)
+            executable = self._compile()
+            executable(*data_args)
 
     def target_code(self, target):
         raise NotImplementedError("TODO")
@@ -494,7 +504,7 @@ def compile(expr: PreprocessedExpression, compiler_parameters=None):
     # needed?
     translation_unit = translation_unit.with_entrypoints(entrypoint.name)
 
-    return CodegenResult(expr, translation_unit, ctx.kernel_to_actual_rename_map, compiler_parameters=compiler_parameters)
+    return CodegenResult(translation_unit, ctx.kernel_to_actual_rename_map, ctx.datamap, compiler_parameters)
 
 
 # put into a class in transform.py?
@@ -666,7 +676,7 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
             # Register data
             # TODO This might be bad for temporaries
             if isinstance(arg, Dat):
-                ctx.add_argument(arg)
+                ctx.add_array(arg)
 
             # this should already be done in an assignment
             # ctx.add_temporary(temporary.name, temporary.dtype, shape)
@@ -745,10 +755,10 @@ def _(assignment, loop_indices, codegen_context):
     rmap = assignment.mat_arg.rmap
     cmap = assignment.mat_arg.cmap
 
-    codegen_context.add_argument(assignment.mat_arg)
-    codegen_context.add_argument(array)
-    codegen_context.add_argument(rmap)
-    codegen_context.add_argument(cmap)
+    codegen_context.add_array(assignment.mat_arg)
+    codegen_context.add_array(array)
+    codegen_context.add_array(rmap)
+    codegen_context.add_array(cmap)
 
     mat_name = codegen_context.actual_to_kernel_rename_map[mat.name]
     array_name = codegen_context.actual_to_kernel_rename_map[array.name]
@@ -820,10 +830,10 @@ def _(assignment, loop_indices, codegen_context):
     ]
     if assignment.access_type == PetscMatAccessType.READ:
         call_str = _petsc_mat_load(*myargs)
-    elif assignment.access_type == PetscMatAccessType.INSERT:
+    elif assignment.access_type == PetscMatAccessType.WRITE:
         call_str = _petsc_mat_store(*myargs)
     else:
-        assert assignment.access_type == PetscMatAccessType.ADD
+        assert assignment.access_type == PetscMatAccessType.INC
         call_str = _petsc_mat_add(*myargs)
 
     codegen_context.add_cinstruction(call_str)
@@ -929,10 +939,10 @@ def add_leaf_assignment(
     lexpr = lower_expr(assignment.assignee, iname_replace_map, codegen_context, path=path)
     rexpr = lower_expr(assignment.expression, iname_replace_map, codegen_context, path=path)
 
-    if assignment.assignment_type == AssignmentType.INSERT:
+    if assignment.assignment_type == AssignmentType.WRITE:
         pass
     else:
-        assert assignment.assignment_type == AssignmentType.ADD
+        assert assignment.assignment_type == AssignmentType.INC
         rexpr = lexpr + rexpr
 
     codegen_context.add_assignment(lexpr, rexpr)
@@ -946,7 +956,7 @@ def make_array_expr(array, path, inames, ctx):
     # symbolic language. That has to be future work.
 
     # ultimately this can go when everything is just lower_expr
-    ctx.add_argument(array)  # (lower_expr registers the rest)
+    ctx.add_array(array)  # (lower_expr registers the rest)
 
     array_offset = lower_expr(
         # array.axes.subst_layouts(optimize=True)[path],
@@ -983,7 +993,11 @@ def lower_expr(obj: Any, /, *args, **kwargs):
 
 @lower_expr.register(Add)
 def _(add: Add, /, *args, **kwargs):
-    return lower_expr(add.a, *args, **kwargs) + lower_expr(add.b, *args, **kwargs)
+    newa = lower_expr(add.a, *args, **kwargs)
+    newb = lower_expr(add.b, *args, **kwargs)
+    if isinstance(newb, pym.primitives.Subscript):
+        breakpoint()
+    return newa + newb
 
 
 @lower_expr.register
@@ -1010,7 +1024,7 @@ def _(loop_var: LoopIndexVar, iname_map, context, path=None):
 def _(dat: Dat, /, iname_map, context, path=None):
     assert not dat.transform, "should be handled in preprocessing"
 
-    context.add_argument(dat)
+    context.add_array(dat)
 
     new_name = context.actual_to_kernel_rename_map[dat.name]
 
@@ -1055,7 +1069,7 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
     # rather than register assignments for things.
     def map_array(self, expr):
         # Register data
-        self._codegen_context.add_argument(expr.array)
+        self._codegen_context.add_array(expr.array)
         new_name = self._codegen_context.actual_to_kernel_rename_map[expr.array.name]
 
         replace_map = {ax: self.rec(expr_) for ax, expr_ in expr.indices.items()}
@@ -1137,7 +1151,7 @@ class JnameSubstitutor(pym.mapper.IdentityMapper):
         ctx = self._codegen_context
 
         # should do elsewhere?
-        ctx.add_argument(indices)
+        ctx.add_array(indices)
 
         # for reference
         """
@@ -1257,7 +1271,7 @@ def _scalar_assignment(
 ):
     assert False, "old code"
     # Register data
-    ctx.add_argument(array)
+    ctx.add_array(array)
 
     # can this all go?
     index_keys = [None] + [

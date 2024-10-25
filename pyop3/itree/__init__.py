@@ -5,7 +5,6 @@ from .tree import (  # noqa: F401
     ScalarIndex,
     index_axes,
     IndexTree,
-    LocalLoopIndex,
     LoopIndex,
     Map,
     Slice,
@@ -13,4 +12,4 @@ from .tree import (  # noqa: F401
     Subset,
     TabulatedMapComponent,
 )
-from .parse import as_index_forest  # noqa: F401
+from .parse import as_index_forest, collect_loop_contexts  # noqa: F401

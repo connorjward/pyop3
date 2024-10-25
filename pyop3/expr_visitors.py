@@ -4,7 +4,7 @@ from typing import Any
 
 from pyrsistent import pmap
 
-from pyop3.array import Dat
+from pyop3.array import Array, Dat
 from pyop3.array.petsc import AbstractMat
 from pyop3.axtree.tree import AxisVar, Operator, Add, Mul
 from pyop3.itree.tree import LoopIndexVar
@@ -55,31 +55,6 @@ def _(var: AxisVar, /):
 @collect_datamap.register(numbers.Number)
 def _(num: numbers.Number, /):
     return pmap()
-
-# @functools.singledispatch
-# def collect_arrays(expr: Any) -> OrderedSet:
-#     raise TypeError(f"No handler defined for {type(expr).__name__}")
-#
-#
-# @collect_arrays.register(Dat)
-# def _(dat: Dat) -> OrderedSet:
-#     return OrderedSet([dat]) | collect_arrays(dat.subst_layouts())
-#
-#
-# @collect_arrays.register(Operator)
-# def _(op: Operator) -> OrderedSet:
-#     return collect_arrays(op.a) | collect_arrays(op.b)
-#
-#
-# @collect_arrays.register(AxisVar)
-# def _(var: AxisVar) -> OrderedSet:
-#     return OrderedSet()
-#
-#
-# @collect_arrays.register(numbers.Number)
-# def _(num: numbers.Number) -> OrderedSet:
-#     return OrderedSet()
-
 
 
 # TODO: could make a postvisitor
@@ -143,12 +118,47 @@ def _(op: Operator):
 
 
 @collect_loops.register(Dat)
-def _(dat):
+def _(dat: Dat, /) -> OrderedSet:
     if dat.transform:
         raise NotImplementedError
-    if not dat.axes.is_linear:
-        # guess this is optional at the top level, extra kwarg?
-        raise NotImplementedError
-    else:
-        path = dat.axes.path(dat.axes.leaf)
-    return collect_loops(dat.axes.subst_layouts()[path])
+
+    loop_indices = OrderedSet()
+    for leaf in dat.axes.leaves:
+        path = dat.axes.path(leaf)
+        loop_indices |= collect_loops(dat.axes.subst_layouts()[path])
+    return loop_indices
+
+
+@collect_loops.register(AbstractMat)
+def _(mat: AbstractMat, /) -> OrderedSet:
+    # if mat.transform:
+    #     raise NotImplementedError
+
+    loop_indices = OrderedSet()
+    for cs_axes in {mat.raxes, mat.caxes}:
+        for cf_axes in cs_axes.context_map.values():
+            for leaf in cf_axes.leaves:
+                path = cf_axes.path(leaf)
+                loop_indices |= collect_loops(cf_axes.subst_layouts()[path])
+    return loop_indices
+
+
+@functools.singledispatch
+def restrict_to_context(obj: Any, /, loop_context):
+    raise TypeError(f"No handler defined for {type(obj).__name__}")
+
+
+@restrict_to_context.register(AxisVar)
+@restrict_to_context.register(numbers.Number)
+def _(var: Any, /, loop_context) -> Any:
+    return var
+
+
+@restrict_to_context.register(Operator)
+def _(op: Operator, /, loop_context):
+    return type(op)(restrict_to_context(op.a, loop_context), restrict_to_context(op.b, loop_context))
+
+
+@restrict_to_context.register(Array)
+def _(array: Array, /, loop_context):
+    return array.with_context(loop_context)

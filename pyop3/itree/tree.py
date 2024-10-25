@@ -27,8 +27,6 @@ from pyop3.axtree import (
     AxisTree,
     AxisForest,
     AxisVar,
-    ContextAware,
-    ContextFree,
     ContextSensitive,
     LoopIterable,
 )
@@ -73,6 +71,10 @@ class LoopIndexVar(Expression):
         return f"{type(self).__name__}({self.index!r}, {self.axis_label!r})"
 
 
+class InvalidIndexTargetException(Pyop3Exception):
+    """Exception raised when we try to match index information to a mismatching axis tree."""
+
+
 
 
 # TODO: make this a nice generic traversal
@@ -105,10 +107,10 @@ def _(array: Array, axes, paths_and_exprs):
         raise NotImplementedError
 
     # NOTE: identical to index_axes()
-    new_targets = set()
+    new_targets = []
     for orig_path in array.axes.paths_and_exprs:
         target_path_and_exprs = compose_targets(array.axes, orig_path, axes, paths_and_exprs)
-        new_targets.add(target_path_and_exprs)
+        new_targets.append(target_path_and_exprs)
 
     new_axes = IndexedAxisTree(axes.node_map, array.axes.unindexed, targets=new_targets)
     # NOTE: .with_axes(...)?
@@ -262,60 +264,45 @@ class AxisIndependentIndex(Index):
         return tuple(i for i, _ in enumerate(self.axes.leaves))
 
 
-class ContextFreeIndex(Index, ContextFree, abc.ABC):
-    # The following is unimplemented but may prove useful
-    # @property
-    # def axes(self):
-    #     return self._tree.axes
-    #
-    # @property
-    # def target_paths(self):
-    #     return self._tree.target_paths
-    #
-    # @cached_property
-    # def _tree(self):
-    #     """
-    #
-    #     Notes
-    #     -----
-    #     This method will deliberately not work for slices since slices
-    #     require additional existing axis information in order to be valid.
-    #
-    #     """
-    #     return as_index_tree(self)
-    @abc.abstractmethod
-    def restrict(self, paths):
-        """Return a restricted index with only the paths provided.
-
-        The resulting index will have its components ordered as given by ``paths``.
-
-        """
-
-
-
-class ContextSensitiveIndex(Index, ContextSensitive, abc.ABC):
-    def __init__(self, context_map, *, id=None):
-        Index.__init__(self, id)
-        ContextSensitive.__init__(self, context_map)
-
-
-class AbstractLoopIndex(
-    pytools.ImmutableRecord, KernelArgument, Identified, ContextAware, abc.ABC
-):
-    dtype = IntType
-    fields = {"id"}
-
-    def __init__(self, id=None):
-        pytools.ImmutableRecord.__init__(self)
-        Identified.__init__(self, id)
-
-    @property
-    def kernel_dtype(self):
-        return self.dtype
+# class ContextFreeIndex(Index, ContextFree, abc.ABC):
+#     # The following is unimplemented but may prove useful
+#     # @property
+#     # def axes(self):
+#     #     return self._tree.axes
+#     #
+#     # @property
+#     # def target_paths(self):
+#     #     return self._tree.target_paths
+#     #
+#     # @cached_property
+#     # def _tree(self):
+#     #     """
+#     #
+#     #     Notes
+#     #     -----
+#     #     This method will deliberately not work for slices since slices
+#     #     require additional existing axis information in order to be valid.
+#     #
+#     #     """
+#     #     return as_index_tree(self)
+#     @abc.abstractmethod
+#     def restrict(self, paths):
+#         """Return a restricted index with only the paths provided.
+#
+#         The resulting index will have its components ordered as given by ``paths``.
+#
+#         """
+#
+#
+#
+# class ContextSensitiveIndex(Index, ContextSensitive, abc.ABC):
+#     def __init__(self, context_map, *, id=None):
+#         Index.__init__(self, id)
+#         ContextSensitive.__init__(self, context_map)
 
 
-# Is this really an index? I dont think it's valid in an index tree
-class LoopIndex(AbstractLoopIndex):
+
+class LoopIndex(Index, KernelArgument):
     """
     Parameters
     ----------
@@ -323,18 +310,94 @@ class LoopIndex(AbstractLoopIndex):
         Only add context later on
 
     """
+    dtype = IntType
+    fields = Index.fields - {"label"}
 
     def __init__(self, iterset, *, id=None):
-        super().__init__(id=id)
+        assert len(iterset.leaves) >= 1
+
+        super().__init__(label=id, id=id)
         self.iterset = iterset
 
-    @cached_property
-    def local_index(self):
-        return LocalLoopIndex(self)
+    @property
+    def kernel_dtype(self):
+        return self.dtype
+
+    # NOTE: should really just be 'degree' or similar, labels do not really make sense for
+    # index trees
+    @property
+    def component_labels(self) -> tuple:
+        if not self.is_context_free:  # TODO: decorator?
+            # custom exception type
+            raise ValueError("only valid (context-free) in single component case")
+
+        return (0,)
 
     @property
-    def i(self):
-        return self.local_index
+    def is_context_free(self):
+        return len(self.iterset.leaves) == 1
+
+    @cached_property
+    def axes(self) -> IndexedAxisTree:
+        if not self.is_context_free:
+            raise ContextSensitiveException("Expected a context-free index")
+
+        # NOTE: same as _index_axes_index
+
+        # Example:
+        # If we assume that the loop index has target expressions
+        #     AxisVar("a") * 2     and       AxisVar("b")
+        # then this will return
+        #     LoopIndexVar(p, "a") * 2      and LoopIndexVar(p, "b")
+        replace_map = {
+            None: (
+                {axis.label: component_label for axis, component_label in self.iterset.path_with_nodes(self.iterset.leaf).items()},
+                {axis.label: LoopIndexVar(self, axis.label) for axis, component_label in self.iterset.path_with_nodes(self.iterset.leaf).items()},
+            )
+        }
+
+        targets = []
+        for equivalent_targets in self.iterset.paths_and_exprs:
+            new_path = {}
+            new_exprs = {}
+            for (orig_path, orig_exprs) in equivalent_targets.values():
+                new_path.update(orig_path)
+                for axis_label, orig_expr in orig_exprs.items():
+                    new_exprs[axis_label] = replace(orig_expr, AxisTree(), replace_map)
+            new_path = pmap(new_path)
+            new_exprs = pmap(new_exprs)
+            targets.append(pmap({None: (new_path, new_exprs)}))
+        return IndexedAxisTree({}, unindexed=None, targets=targets)
+
+    # TODO: don't think this is useful any more, certainly a confusing name
+    @property
+    def leaf_target_paths(self):
+        """
+
+        Unlike with maps and slices, loop indices are single-component (so return a 1-tuple)
+        but that component can target differently labelled axes (so the tuple entry is an n-tuple).
+
+        """
+        assert self.is_context_free
+
+        equivalent_paths = []
+        leaf_axis, leaf_component_label = self.iterset.leaf
+        leaf_key = (leaf_axis.id, leaf_component_label)
+        for targets_acc in self.iterset.targets_acc:
+            equivalent_path, _ = targets_acc[leaf_key]
+            equivalent_paths.append(equivalent_path)
+        equivalent_paths = tuple(equivalent_paths)
+
+        return (equivalent_paths,)
+
+
+    # @cached_property
+    # def local_index(self):
+    #     return LocalLoopIndex(self)
+
+    # @property
+    # def i(self):
+    #     return self.local_index
 
     # @property
     # def paths(self):
@@ -360,7 +423,8 @@ class LoopIndex(AbstractLoopIndex):
 
         # the iterset is a single-component full slice of the overall iterset
         iterset_ = iterset[slices]
-        return ContextFreeLoopIndex(iterset_, source_path, path, id=self.id)
+        # return eLoopIndex(iterset_, source_path, path, id=self.id)
+        return LoopIndex(iterset_, id=self.id)
 
     # unsure if this is required
     @property
@@ -373,217 +437,217 @@ class InvalidIterationSetException(Pyop3Exception):
 
 
 # FIXME class hierarchy is very confusing
-class ContextFreeLoopIndex(ContextFreeIndex, AxisIndependentIndex):
-    fields = {"iterset", "id"}
-
-    def __init__(self, iterset, *, id=None):
-        if iterset.is_empty:
-            raise InvalidIterationSetException("Cannot iterate over an empty axis tree")
-        if len(iterset.leaves) > 1:
-            raise InvalidIterationSetException("Context-free loop indices must be over linear axis trees")
-
-        super().__init__(id=id, label=id)
-        self.iterset = iterset
-
-    @property
-    def is_context_free(self) -> bool:
-        # NOTE: when this class goes I will actually have to think about how to do this.
-        # something like making sure the iterset is a linear tree and not multi-component or a forest
-        return True
-
-    @property
-    def component_labels(self) -> tuple:
-        return (0,)
-
-    @cached_property
-    def axes(self) -> IndexedAxisTree:
-        if not self.is_context_free:
-            raise ContextSensitiveException("Expected a context-free index")
-
-        # NOTE: same as _index_axes_index
-
-        # Example:
-        # If we assume that the loop index has target expressions
-        #     AxisVar("a") * 2     and       AxisVar("b")
-        # then this will return
-        #     LoopIndexVar(p, "a") * 2      and LoopIndexVar(p, "b")
-        # replace_map = {
-        #     (axis.id, component_label): (
-        #         {axis.label: component_label},
-        #         {axis.label: LoopIndexVar(self.id, axis.label)},
-        #     )
-        #     for axis, component_label in self.iterset.path_with_nodes(self.iterset.leaf).items()
-        # }
-        # replace_map = {
-        #     axis.label: LoopIndexVar(self, axis.label)
-        #     for axis in self.iterset.path_with_nodes(self.iterset.leaf)
-        # }
-        replace_map = {
-            None: (
-                {axis.label: component_label for axis, component_label in self.iterset.path_with_nodes(self.iterset.leaf).items()},
-                {axis.label: LoopIndexVar(self, axis.label) for axis, component_label in self.iterset.path_with_nodes(self.iterset.leaf).items()},
-            )
-        }
-
-        targets = []
-        for equivalent_targets in self.iterset.paths_and_exprs:
-            new_path = {}
-            new_exprs = {}
-            for (orig_path, orig_exprs) in equivalent_targets.values():
-                new_path.update(orig_path)
-                for axis_label, orig_expr in orig_exprs.items():
-                    new_exprs[axis_label] = replace(orig_expr, AxisTree(), replace_map)
-            new_path = pmap(new_path)
-            new_exprs = pmap(new_exprs)
-            targets.append(pmap({None: (new_path, new_exprs)}))
-        return IndexedAxisTree({}, unindexed=None, targets=targets)
-
-    def restrict(self, paths):
-        # Since context-free loop indices are linear the restriction must be trivial
-        if tuple(paths) != (None,):
-            raise ValueError
-        return self
-
-    @cached_property
-    def expanded(self):
-        return self
-
-    # parent class thing?
-    def with_context(self, context, *args):
-        return self
-
-    # TODO: don't think this is useful any more, certainly a confusing name
-    @property
-    def leaf_target_paths(self):
-        """
-
-        Unlike with maps and slices, loop indices are single-component (so return a 1-tuple)
-        but that component can target differently labelled axes (so the tuple entry is an n-tuple).
-
-        """
-        equivalent_paths = []
-        leaf_axis, leaf_component_label = self.iterset.leaf
-        leaf_key = (leaf_axis.id, leaf_component_label)
-        for targets_acc in self.iterset.targets_acc:
-            equivalent_path, _ = targets_acc[leaf_key]
-            equivalent_paths.append(equivalent_path)
-        equivalent_paths = tuple(equivalent_paths)
-
-        return (equivalent_paths,)
-
-    @property
-    def leaf_index_exprss(self):
-        leaf_axis, leaf_component_label = self.iterset.leaf
-        leaf_key = leaf_axis.id, leaf_component_label
-        # NOTE: think this should be a 1-tuple (like leaf_target_paths)
-        return tuple(e[leaf_key] for e in self.iterset.index_exprs)
-        # return (tuple(e[leaf_key] for e in self.iterset.index_exprs),)
-
-    @property
-    def leaf_target_paths_and_exprss(self):
-        return self.iterset._targets
-        # NOTE: This attribute must be a tuple of tuples as other index types return multiple leaves
-        retval = set()
-        for path, exprs in checked_zip(self.leaf_target_paths[0], self.leaf_index_exprss):
-            merged = freeze({key: (path[key], exprs[key]) for key in path})
-            retval.add(merged)
-        return frozenset(retval)
-
-    # shouldn't need any more
-    # @cached_property
-    # def local_index(self):
-    #     return ContextFreeLocalLoopIndex(
-    #         self.iterset, self.source_path, self.source_path, id=self.id
-    #     )
-
-    # should now be ignored
-    @property
-    def index_exprs(self):
-        # if self.source_path != self.path and len(self.path) != 1:
-        #     raise NotImplementedError("no idea what to do here")
-
-        # Need to replace the index_exprs with LocalLoopIndexVariable equivs
-        assert False, "is this used?"
-        flat_index_exprs = {}
-        replacer = LoopIndexReplacer(self)
-        for axis in self.iterset.nodes:
-            key = axis.id, axis.component.label
-            for axis_label, orig_expr in self.iterset.index_exprs[key].items():
-                new_expr = replacer(orig_expr)
-                flat_index_exprs[axis_label] = new_expr
-
-        return freeze({None: flat_index_exprs})
-
-    @property
-    def loops(self):
-        # return self.iterset.outer_loops | {
-        #     LocalLoopIndexVariable(self, axis)
-        #     for axis in self.iterset.path(*self.iterset.leaf).keys()
-        # }
-        # return self.iterset.outer_loops + (self,)
-        return (self,)
-
-    @property
-    def layout_exprs(self):
-        # FIXME, no clue if this is right or not
-        return freeze({None: 0})
-
-    @property
-    def datamap(self):
-        return self.iterset.datamap
-
-    def iter(self, stuff=pmap()):
-        return iter_axis_tree(
-            self,
-            self.iterset,
-            self.iterset.target_paths,
-            self.iterset.index_exprs,
-            stuff,
-        )
-
-
-# TODO This is properly awful, needs a big cleanup
-class ContextFreeLocalLoopIndex(ContextFreeLoopIndex):
-    @property
-    def index_exprs(self):
-        return freeze(
-            {
-                None: {
-                    axis: LocalLoopIndexVariable(self, axis)
-                    for axis in self.path.keys()
-                }
-            }
-        )
+# class ContextFreeLoopIndex(ContextFreeIndex, AxisIndependentIndex):
+#     fields = {"iterset", "id"}
+#
+#     def __init__(self, iterset, *, id=None):
+#         if iterset.is_empty:
+#             raise InvalidIterationSetException("Cannot iterate over an empty axis tree")
+#         if len(iterset.leaves) > 1:
+#             raise InvalidIterationSetException("Context-free loop indices must be over linear axis trees")
+#
+#         super().__init__(id=id, label=id)
+#         self.iterset = iterset
+#
+#     @property
+#     def is_context_free(self) -> bool:
+#         # NOTE: when this class goes I will actually have to think about how to do this.
+#         # something like making sure the iterset is a linear tree and not multi-component or a forest
+#         return True
+#
+#     @property
+#     def component_labels(self) -> tuple:
+#         return (0,)
+#
+#     @cached_property
+#     def axes(self) -> IndexedAxisTree:
+#         if not self.is_context_free:
+#             raise ContextSensitiveException("Expected a context-free index")
+#
+#         # NOTE: same as _index_axes_index
+#
+#         # Example:
+#         # If we assume that the loop index has target expressions
+#         #     AxisVar("a") * 2     and       AxisVar("b")
+#         # then this will return
+#         #     LoopIndexVar(p, "a") * 2      and LoopIndexVar(p, "b")
+#         # replace_map = {
+#         #     (axis.id, component_label): (
+#         #         {axis.label: component_label},
+#         #         {axis.label: LoopIndexVar(self.id, axis.label)},
+#         #     )
+#         #     for axis, component_label in self.iterset.path_with_nodes(self.iterset.leaf).items()
+#         # }
+#         # replace_map = {
+#         #     axis.label: LoopIndexVar(self, axis.label)
+#         #     for axis in self.iterset.path_with_nodes(self.iterset.leaf)
+#         # }
+#         replace_map = {
+#             None: (
+#                 {axis.label: component_label for axis, component_label in self.iterset.path_with_nodes(self.iterset.leaf).items()},
+#                 {axis.label: LoopIndexVar(self, axis.label) for axis, component_label in self.iterset.path_with_nodes(self.iterset.leaf).items()},
+#             )
+#         }
+#
+#         targets = []
+#         for equivalent_targets in self.iterset.paths_and_exprs:
+#             new_path = {}
+#             new_exprs = {}
+#             for (orig_path, orig_exprs) in equivalent_targets.values():
+#                 new_path.update(orig_path)
+#                 for axis_label, orig_expr in orig_exprs.items():
+#                     new_exprs[axis_label] = replace(orig_expr, AxisTree(), replace_map)
+#             new_path = pmap(new_path)
+#             new_exprs = pmap(new_exprs)
+#             targets.append(pmap({None: (new_path, new_exprs)}))
+#         return IndexedAxisTree({}, unindexed=None, targets=targets)
+#
+#     def restrict(self, paths):
+#         # Since context-free loop indices are linear the restriction must be trivial
+#         if tuple(paths) != (None,):
+#             raise ValueError
+#         return self
+#
+#     @cached_property
+#     def expanded(self):
+#         return self
+#
+#     # parent class thing?
+#     def with_context(self, context, *args):
+#         return self
+#
+#     # TODO: don't think this is useful any more, certainly a confusing name
+#     @property
+#     def leaf_target_paths(self):
+#         """
+#
+#         Unlike with maps and slices, loop indices are single-component (so return a 1-tuple)
+#         but that component can target differently labelled axes (so the tuple entry is an n-tuple).
+#
+#         """
+#         equivalent_paths = []
+#         leaf_axis, leaf_component_label = self.iterset.leaf
+#         leaf_key = (leaf_axis.id, leaf_component_label)
+#         for targets_acc in self.iterset.targets_acc:
+#             equivalent_path, _ = targets_acc[leaf_key]
+#             equivalent_paths.append(equivalent_path)
+#         equivalent_paths = tuple(equivalent_paths)
+#
+#         return (equivalent_paths,)
+#
+#     @property
+#     def leaf_index_exprss(self):
+#         leaf_axis, leaf_component_label = self.iterset.leaf
+#         leaf_key = leaf_axis.id, leaf_component_label
+#         # NOTE: think this should be a 1-tuple (like leaf_target_paths)
+#         return tuple(e[leaf_key] for e in self.iterset.index_exprs)
+#         # return (tuple(e[leaf_key] for e in self.iterset.index_exprs),)
+#
+#     @property
+#     def leaf_target_paths_and_exprss(self):
+#         return self.iterset._targets
+#         # NOTE: This attribute must be a tuple of tuples as other index types return multiple leaves
+#         retval = set()
+#         for path, exprs in checked_zip(self.leaf_target_paths[0], self.leaf_index_exprss):
+#             merged = freeze({key: (path[key], exprs[key]) for key in path})
+#             retval.add(merged)
+#         return frozenset(retval)
+#
+#     # shouldn't need any more
+#     # @cached_property
+#     # def local_index(self):
+#     #     return ContextFreeLocalLoopIndex(
+#     #         self.iterset, self.source_path, self.source_path, id=self.id
+#     #     )
+#
+#     # should now be ignored
+#     @property
+#     def index_exprs(self):
+#         # if self.source_path != self.path and len(self.path) != 1:
+#         #     raise NotImplementedError("no idea what to do here")
+#
+#         # Need to replace the index_exprs with LocalLoopIndexVariable equivs
+#         assert False, "is this used?"
+#         flat_index_exprs = {}
+#         replacer = LoopIndexReplacer(self)
+#         for axis in self.iterset.nodes:
+#             key = axis.id, axis.component.label
+#             for axis_label, orig_expr in self.iterset.index_exprs[key].items():
+#                 new_expr = replacer(orig_expr)
+#                 flat_index_exprs[axis_label] = new_expr
+#
+#         return freeze({None: flat_index_exprs})
+#
+#     @property
+#     def loops(self):
+#         # return self.iterset.outer_loops | {
+#         #     LocalLoopIndexVariable(self, axis)
+#         #     for axis in self.iterset.path(*self.iterset.leaf).keys()
+#         # }
+#         # return self.iterset.outer_loops + (self,)
+#         return (self,)
+#
+#     @property
+#     def layout_exprs(self):
+#         # FIXME, no clue if this is right or not
+#         return freeze({None: 0})
+#
+#     @property
+#     def datamap(self):
+#         return self.iterset.datamap
+#
+#     def iter(self, stuff=pmap()):
+#         return iter_axis_tree(
+#             self,
+#             self.iterset,
+#             self.iterset.target_paths,
+#             self.iterset.index_exprs,
+#             stuff,
+#         )
+#
+#
+# # TODO This is properly awful, needs a big cleanup
+# class ContextFreeLocalLoopIndex(ContextFreeLoopIndex):
+#     @property
+#     def index_exprs(self):
+#         return freeze(
+#             {
+#                 None: {
+#                     axis: LocalLoopIndexVariable(self, axis)
+#                     for axis in self.path.keys()
+#                 }
+#             }
+#         )
 
 
 # class LocalLoopIndex(AbstractLoopIndex):
-class LocalLoopIndex:
-    """Class representing a 'local' index."""
+# class LocalLoopIndex:
+#     """Class representing a 'local' index."""
+#
+#     def __init__(self, loop_index: LoopIndex):
+#         # super().__init__(id)
+#         self.loop_index = loop_index
+#
+#     # @property
+#     # def id(self):
+#     #     return self.loop_index.id
+#
+#     @property
+#     def iterset(self):
+#         return self.loop_index.iterset
+#
+#     def with_context(self, context, axes=None):
+#         # not sure about this
+#         iterset = self.loop_index.iterset.with_context(context)
+#         path, _ = context[self.loop_index.id]  # here different from LoopIndex
+#         return ContextFreeLocalLoopIndex(iterset, path, path, id=self.loop_index.id)
+#
+#     @property
+#     def datamap(self):
+#         return self.loop_index.datamap
 
-    def __init__(self, loop_index: LoopIndex):
-        # super().__init__(id)
-        self.loop_index = loop_index
 
-    # @property
-    # def id(self):
-    #     return self.loop_index.id
-
-    @property
-    def iterset(self):
-        return self.loop_index.iterset
-
-    def with_context(self, context, axes=None):
-        # not sure about this
-        iterset = self.loop_index.iterset.with_context(context)
-        path, _ = context[self.loop_index.id]  # here different from LoopIndex
-        return ContextFreeLocalLoopIndex(iterset, path, path, id=self.loop_index.id)
-
-    @property
-    def datamap(self):
-        return self.loop_index.datamap
-
-
-class ScalarIndex(ContextFreeIndex):
+class ScalarIndex(Index):
     fields = {"axis", "component", "value", "id"}
 
     def __init__(self, axis, component, value, *, id=None):
@@ -598,7 +662,7 @@ class ScalarIndex(ContextFreeIndex):
 
 
 # TODO I want a Slice to have "bits" like a Map/CalledMap does
-class Slice(ContextFreeIndex):
+class Slice(Index):
     """
 
     A slice can be thought of as a map from a smaller space to the target space.
@@ -608,7 +672,7 @@ class Slice(ContextFreeIndex):
 
     """
 
-    fields = ContextFreeIndex.fields | {"axis", "slices", "label"}
+    fields = Index.fields | {"axis", "slices", "label"}
 
     def __init__(self, axis, slices, *, id=None, label=None):
         slices = as_tuple(slices)
@@ -742,7 +806,8 @@ class Map(pytools.ImmutableRecord):
         # If the input index is context-free then we should return something context-free
         # TODO: Should be encoded in some mixin type
         # if isinstance(index, ContextFreeIndex):
-        if isinstance(index, (ContextFreeIndex, ContextFreeCalledMap)):
+        # if isinstance(index, (ContextFreeIndex, ContextFreeCalledMap)):
+        if False:
             return ContextFreeCalledMap(self, index)
 
             # equiv_domainss = tuple(frozenset(mappings.keys()) for mappings in self.connectivity)
@@ -1109,7 +1174,7 @@ class CalledMap(AxisIndependentIndex, Identified, Labelled, LoopIterable):
 
 
 # remove this old class, loop contexts are now implicit
-ContextFreeCalledMap = CalledMap
+# ContextFreeCalledMap = CalledMap
 
 
 class ContextSensitiveCalledMap(ContextSensitiveLoopIterable):
@@ -1142,7 +1207,7 @@ def _index_axes_index(index, *args, **kwargs):
 
 @_index_axes_index.register
 def _(
-    cf_loop_index: ContextFreeLoopIndex,
+    cf_loop_index: LoopIndex,
     **_,
 ):
     # This function should return {None: [(path0, expr0), (path1, expr1)]}
@@ -1185,8 +1250,8 @@ def _(
     return (
         axes,
         pmap(targets),
-        cf_loop_index.layout_exprs,
-        cf_loop_index.loops,
+        {},
+        (),
         {},
     )
 
@@ -1429,7 +1494,7 @@ def _(slice_: Slice, *, prev_axes, **_):
 
 @_index_axes_index.register
 def _(
-    called_map: ContextFreeCalledMap,
+    called_map: CalledMap,
     **kwargs,
 ):
     # compress the targets here
@@ -1717,7 +1782,7 @@ def _make_leaf_axis_from_called_map(
 
 
 def index_axes(
-    index_tree: IndexTree,
+    index_tree: Union[IndexTree, Ellipsis],
     loop_context,
     axes: Optional[Union[AxisTree, AxisForest]] = None,
 # ) -> AxisForest:
@@ -1741,10 +1806,9 @@ def index_axes(
 
     """
     assert isinstance(axes, (AxisTree, IndexedAxisTree))
-    # if isinstance(axes, AxisForest):
-    #     trees = axes.trees
-    # else:
-    #     trees = (axes,)
+
+    if index_tree is Ellipsis:
+        return axes
 
     (
         indexed_axes,
@@ -1758,43 +1822,32 @@ def index_axes(
         prev_axes=axes,
     )
 
-    # debug
-    assert all(isinstance(x, tuple) for x in indexed_target_paths_and_exprs_compressed.values())
-
     indexed_target_paths_and_exprs = expand_compressed_target_paths(indexed_target_paths_and_exprs_compressed)
-    # NOTE: should rename the function as it is generic for both
-    # indexed_target_exprs = expand_compressed_target_paths(indexed_target_exprs_compressed)
 
     # If the original axis tree is unindexed then no composition is required.
     if isinstance(axes, AxisTree):
-        # target_paths should be a list, not a mapping, do a product thing!
         return IndexedAxisTree(
             indexed_axes.node_map,
             axes,
-            targets=indexed_target_paths_and_exprs | {indexed_axes._source_path_and_exprs},
+            targets=indexed_target_paths_and_exprs + (indexed_axes._source_path_and_exprs,),
             layout_exprs={},
             outer_loops=indexed_axes.outer_loops,
         )
 
-    # debug, composition appears not to be working
-    # breakpoint()
-
-    # for each input expression traverse the axes/index tree and index any arrays that are part
-    # of it. This could perhaps be combined into the earlier traversal.
-    # new_orig_paths_and_exprs = set()
-    # for orig_path_and_exprs in axes.paths_and_exprs:
-    #
-    #     new_orig_path_exprs = index_index_exprs(index_tree)
-    #     new_orig_paths_and_exprs.add(new_orig_path_exprs)
-
-    # per node or fully unpacked...
-    # NOTE: do not prematurely accumulate...
-    all_target_paths_and_exprs = set()
+    all_target_paths_and_exprs = []
     for orig_path in axes.paths_and_exprs:
+
+        match_found = False
         for indexed_path_and_exprs in indexed_target_paths_and_exprs:
-            # target_path_and_exprs = compose_targets(axes, orig_path, indexed_axes, indexed_path, partial_linear_index_trees)
+            # catch invalid indexed_target_paths_and_exprs
+            if not _index_info_targets_axes(indexed_axes, indexed_path_and_exprs, axes):
+                continue
+
+            assert not match_found, "don't expect multiple hits"
             target_path_and_exprs = compose_targets(axes, orig_path, indexed_axes, indexed_path_and_exprs)
-            all_target_paths_and_exprs.add(target_path_and_exprs)
+            match_found = True
+            all_target_paths_and_exprs.append(target_path_and_exprs)
+        assert match_found, "must hit once"
 
     # TODO: reorder so the if statement captures the composition and this line is only needed once
     return IndexedAxisTree(
@@ -1912,25 +1965,11 @@ def _index_axes(
     for leafkey, subindex in strict_zip(
         leafkeys, index_tree.node_map[index.id]
     ):
-        # restrict to single component!
-        # if leafkey is not None:
-        #     source_path = axes_per_index.path(*leafkey)
-        #     restricted_index = index.restrict([source_path])
-        # else:
-        #     restricted_index = index
-        # parent_indices_ = parent_indices + (restricted_index,)
-        #
-        # if leafkey is None: # i.e. the root
-        #     partial_index_trees[None] = parent_indices_
-        # else:
-        #     partial_index_trees[leafkey[0].id, leafkey[1]] = parent_indices_
-
         if subindex is None:
             continue
 
         subtree, subpathsandexprs, _, subouterloops, subpartialindextree = _index_axes(
             index_tree,
-            # parent_indices=parent_indices_,
             loop_indices=loop_indices,
             prev_axes=prev_axes,
             index=subindex,
@@ -1944,27 +1983,9 @@ def _index_axes(
         else:
             target_path_per_cpt_per_index.update(subpathsandexprs)
 
-        # for key in subpathsandexprs.keys():
-        #     # if key is None then tie the things to the parent axis
-        #     if subaxes[leafkey].is_empty:
-        #         assert key is None
-        #         parentkey = leafkey[0].id, leafkey[1]
-        #     else:
-        #         parentkey = key
-        #
-        #     if parentkey not in target_path_per_cpt_per_index:
-        #         target_path_per_cpt_per_index[parentkey] = ({}, {})
-        #
-        #     for XXX in subpathsandexprs[key]:
-        #         target_path_per_cpt_per_index[parentkey][0].update(XXX[0])
-        #     for XXX in subpathsandexprs[key]:
-        #         target_path_per_cpt_per_index[parentkey][1].update(XXX[1])
-
         outer_loops += subouterloops
-        # partial_index_trees.update(subpartialindextree)
 
-    target_path_per_component = pmap(target_path_per_cpt_per_index)
-    # partial_index_trees = pmap(partial_index_trees)
+    target_path_per_component = ImmutableOrderedDict(target_path_per_cpt_per_index)
 
     # This this is no longer necessary
     axes = AxisTree(axes_per_index.node_map)
@@ -1980,7 +2001,6 @@ def _index_axes(
         target_path_per_component,
         {},
         outer_loops,
-        # partial_index_trees,
         "anything"
     )
 
@@ -2000,7 +2020,8 @@ def compose_targets(orig_axes, orig_target_paths_and_exprs, indexed_axes, indexe
     { (indexed_axis, component) -> ((target_path1 | target_path2, ...), (targetexpr1 | targetexpr2)), ... }
 
     Things are complicated by the fact that not all of the targets from indexed_target_paths
-    will resolve. (I think?)
+    will resolve. Imagine axisB[p] where p is from axisA[::2].iter(). p targets 2 things and
+    only one will match with axisB. We need to check for this outside the function.
 
     ---
 
@@ -2117,6 +2138,26 @@ def compose_targets(orig_axes, orig_target_paths_and_exprs, indexed_axes, indexe
             composed_target_paths_and_exprs.update(composed_target_paths_)
 
     return freeze(composed_target_paths_and_exprs)
+
+
+def _index_info_targets_axes(indexed_axes, index_info, orig_axes) -> bool:
+    """Return whether the index information targets the original axis tree.
+
+    This is useful for when multiple interpretations of axis information are
+    provided (e.g. with loop indices) and we want to filter for the right one.
+
+    """
+    for indexed_leaf in indexed_axes.leaves:
+        none_target_path, _ = index_info.get(None, (pmap(), pmap()))
+        target_path_acc = dict(none_target_path)
+        for axis, component_label in indexed_axes.path_with_nodes(indexed_leaf).items():
+            target_path, _ = index_info.get((axis.id, component_label), (pmap(), pmap()))
+            target_path_acc |= target_path
+
+        if not orig_axes.is_valid_path(target_path_acc):
+            return False
+
+    return True
 
 
 # TODO: just get rid of this, assuming the new system works

@@ -11,7 +11,7 @@ from petsc4py import PETSc
 from pyrsistent import freeze, pmap
 
 from pyop3.array.base import Array
-from pyop3.array.harray import HierarchicalArray, ContextSensitiveDat
+from pyop3.array.harray import Dat
 from pyop3.axtree.tree import (
     AxisTree,
     ContextSensitiveAxisTree,
@@ -111,7 +111,7 @@ class AbstractMat(Array):
     __iter__ = None
 
     def getitem(self, indices, *, strict=False):
-        from pyop3.itree.tree import as_index_forest, compose_axes, index_axes, accumulate_targets, restrict_targets
+        from pyop3.itree import as_index_forest, index_axes
         # does not work as indices may not be hashable, parse first?
         # cache_key = (indices, strict)
         # if cache_key in self._cache:
@@ -149,8 +149,8 @@ class AbstractMat(Array):
         #     {p: "b", q: "y"}: [rtree1, ctree1],
         #   }
 
-        rtrees = as_index_forest(indices[0], axes=self.raxes, strict=strict)
-        ctrees = as_index_forest(indices[1], axes=self.caxes, strict=strict)
+        rtrees = as_index_forest(indices[0], self.raxes, strict=strict)
+        ctrees = as_index_forest(indices[1], self.caxes, strict=strict)
         rcforest = {}
         for rctx, rtree in rtrees.items():
             for cctx, ctree in ctrees.items():
@@ -160,8 +160,8 @@ class AbstractMat(Array):
                 rcforest[rctx | cctx] = (rtree, ctree)
 
         # If there are no outer loops then we can return a context-free array.
-        if rcforest.keys() == {pmap()}:
-            rtree, ctree = rcforest[pmap()]
+        if len(rcforest) == 1:
+            rtree, ctree = just_one(rcforest.values())
 
             indexed_raxess = tuple(
                 index_axes(restricted, pmap(), self.raxes)
@@ -176,6 +176,7 @@ class AbstractMat(Array):
             else:
                 indexed_raxes = just_one(indexed_raxess)
                 indexed_caxes = just_one(indexed_caxess)
+
             mat = type(self)(
                 indexed_raxes,
                 indexed_caxes,
@@ -184,41 +185,46 @@ class AbstractMat(Array):
                 name=self.name,
                 block_shape=self.block_shape,
             )
-            # self._cache[cache_key] = mat
-            return mat
+        else:
+            # Otherwise we are context-sensitive
+            cs_indexed_raxess = {}
+            cs_indexed_caxess = {}
+            for loop_context, (rindex_forest, cindex_forest) in rcforest.items():
+                indexed_raxess = tuple(
+                    index_axes(restricted, loop_context, self.raxes)
+                    for restricted in rindex_forest
+                )
+                indexed_caxess = tuple(
+                    index_axes(restricted, loop_context, self.caxes)
+                    for restricted in cindex_forest
+                )
 
-        # Otherwise we are context-sensitive
-        raise NotImplementedError("TODO")
-        cs_raxes = {}
-        cs_caxes = {}
-        for ctx, (rtree, ctree) in rcforest.items():
-            indexed_raxess = tuple(
-                index_axes(restricted, ctx, self.raxes)
-                for restricted in rtree
+                if len(indexed_raxess) > 1 or len(indexed_caxess) > 1:
+                    raise NotImplementedError("Need axis forests")
+                else:
+                    indexed_raxes = just_one(indexed_raxess)
+                    indexed_caxes = just_one(indexed_caxess)
+
+                cs_indexed_raxess[loop_context] = indexed_raxes
+                cs_indexed_caxess[loop_context] = indexed_caxes
+
+            cs_indexed_raxess = ContextSensitiveAxisTree(cs_indexed_raxess)
+            cs_indexed_caxess = ContextSensitiveAxisTree(cs_indexed_caxess)
+
+            mat = type(self)(
+                cs_indexed_raxess,
+                cs_indexed_caxess,
+                mat_type=self.mat_type,
+                mat=self.mat,
+                name=self.name,
+                block_shape=self.block_shape,
             )
-            indexed_caxess = tuple(
-                index_axes(restricted, ctx, self.caxes)
-                for restricted in ctree
-            )
 
-            # if indexed_raxes.alloc_size == 0 or indexed_caxes.alloc_size == 0:
-            #     continue
-
-            cs_raxes[ctx] = indexed_raxes
-            cs_caxes[ctx] = indexed_caxes
-
-        mat = type(self)(
-            cs_raxes,
-            cs_caxes,
-            mat_type=self.mat_type,
-            mat=self.mat,
-            name=self.name,
-            block_shape=self.block_shape,
-        )
         # self._cache[cache_key] = mat
         return mat
 
     def with_context(self, context):
+        # Need a reconstruct method!
         row_axes = self.raxes.with_context(context)
         col_axes = self.caxes.with_context(context)
         return type(self)(
@@ -253,36 +259,6 @@ class AbstractMat(Array):
 
     def assemble(self):
         self.mat.assemble()
-
-    def assign(self, other, *, eager=False):
-        if eager:
-            raise NotImplementedError("Cannot eagerly assign to Mats")
-
-        if isinstance(other, HierarchicalArray):
-            # TODO: Check axes match between self and other
-            expr = Assignment(self, other)
-        elif isinstance(other, numbers.Number):
-            if isinstance(self.axes, ContextSensitiveAxisTree):
-                cs_dats = {}
-                for context, axes in self.axes.context_map.items():
-                    cs_dat = HierarchicalArray(
-                        axes,
-                        data=np.full(axes.size, other, dtype=self.dtype),
-                        constant=True,
-                    )
-                    cs_dats[context] = cs_dat
-                static = ContextSensitiveDat(cs_dats)
-            else:
-                static = HierarchicalArray(
-                    self.axes,
-                    data=np.full(self.axes.alloc_size, other, dtype=self.dtype),
-                    constant=True,
-                )
-            expr = Assignment(self, static)
-        else:
-            raise NotImplementedError
-
-        return expr
 
     @property
     def nested(self):
@@ -411,6 +387,7 @@ class AbstractMat(Array):
     # TODO: rename, also cache somewhere
     def _make_map_part1(self, axes):
         from pyop3.expr_visitors import collect_loops
+        from pyop3.itree import Slice, AffineSliceComponent, IndexTree
 
         loop_indicess = []
         for leaf in axes.leaves:
@@ -433,7 +410,9 @@ class AbstractMat(Array):
         iterset = AxisTree(loop_index.iterset.node_map)
 
         rmap_axes = iterset.add_subtree(axes, iterset.leaf)
-        rmap = HierarchicalArray(rmap_axes, dtype=IntType, prefix="map")
+        rmap = Dat(rmap_axes, dtype=IntType, prefix="map")
+
+
 
         # index the map so it has the same indexing information as the original expression
         rmap = rmap[loop_index]
@@ -469,13 +448,13 @@ class AbstractMat(Array):
     def row_lgmap_dat(self):
         if self.nested or self.mat_type == "baij":
             raise NotImplementedError("Use a smaller set of axes here")
-        return HierarchicalArray(self.raxes, data=self.raxes.unindexed.global_numbering)
+        return Dat(self.raxes, data=self.raxes.unindexed.global_numbering)
 
     @cached_property
     def column_lgmap_dat(self):
         if self.nested or self.mat_type == "baij":
             raise NotImplementedError("Use a smaller set of axes here")
-        return HierarchicalArray(self.caxes, data=self.caxes.unindexed.global_numbering)
+        return Dat(self.caxes, data=self.caxes.unindexed.global_numbering)
 
     @cached_property
     def comm(self):
@@ -729,7 +708,7 @@ class _MatDat:
                 axes = self.caxes
             else:
                 axes = AxisTree()
-            dat = HierarchicalArray(axes, dtype=self.dtype)
+            dat = Dat(axes, dtype=self.dtype)
             self._lazy_dat = dat
         return self._lazy_dat
 
