@@ -12,12 +12,12 @@ def test_loop_over_ragged_subset(scalar_copy_kernel):
     # [0 x x]
     axis0 = op3.Axis(3)
     nnz_data = np.asarray([2, 3, 2])
-    nnz = op3.HierarchicalArray(axis0, name="nnz", data=nnz_data, dtype=op3.IntType)
+    nnz = op3.Dat(axis0, name="nnz", data=nnz_data, dtype=op3.IntType)
 
     axis1 = op3.Axis(nnz, "ax1")
     subset_axes = op3.AxisTree.from_nest({axis0: axis1})
     subset_data = np.asarray(flatten([[0, 1], [0, 1, 2], [1, 2]]))
-    subset = op3.HierarchicalArray(
+    subset = op3.Dat(
         subset_axes,
         name="subset",
         data=subset_data,
@@ -26,10 +26,10 @@ def test_loop_over_ragged_subset(scalar_copy_kernel):
 
     axis2 = op3.Axis(3, "ax1")
     axes = op3.AxisTree.from_nest({axis0: axis2})
-    dat0 = op3.HierarchicalArray(
+    dat0 = op3.Dat(
         axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType
     )
-    dat1 = op3.HierarchicalArray(axes, name="dat1", dtype=dat0.dtype)
+    dat1 = op3.Dat(axes, name="dat1", dtype=dat0.dtype)
 
     op3.do_loop(p := axes[:, subset].index(), scalar_copy_kernel(dat0[p], dat1[p]))
 
@@ -50,19 +50,19 @@ def test_sparse_copy(scalar_copy_kernel):
     # [0 x x]
     axis0 = op3.Axis(3)
     nnz_data = np.asarray([2, 3, 2])
-    nnz = op3.HierarchicalArray(axis0, name="nnz", data=nnz_data, dtype=op3.IntType)
+    nnz = op3.Dat(axis0, name="nnz", data=nnz_data, dtype=op3.IntType)
 
     dense_axes = op3.AxisTree.from_nest({axis0: op3.Axis({"pt0": 3}, "ax1")})
     sparse_axes = op3.AxisTree.from_nest({axis0: op3.Axis({"pt0": nnz}, "ax1")})
 
-    dat0 = op3.HierarchicalArray(
+    dat0 = op3.Dat(
         dense_axes, name="dat0", data=np.arange(dense_axes.size), dtype=op3.ScalarType
     )
-    dat1 = op3.HierarchicalArray(sparse_axes, name="dat1", dtype=dat0.dtype)
+    dat1 = op3.Dat(sparse_axes, name="dat1", dtype=dat0.dtype)
 
     subset_list = [[0, 1], [0, 1, 2], [1, 2]]
     subset_data = np.asarray(flatten(subset_list))
-    subset = op3.HierarchicalArray(
+    subset = op3.Dat(
         sparse_axes,
         name="subset",
         data=subset_data,
@@ -91,11 +91,11 @@ def test_sliced_array(scalar_copy_kernel):
     n = 30
     axes = op3.Axis({"pt0": n}, "ax0")
 
-    dat0 = op3.HierarchicalArray(
+    dat0 = op3.Dat(
         axes, name="dat0", data=np.arange(axes.size), dtype=op3.ScalarType
     )
     # dat1 expects indices [2, 4, 6, ...]
-    dat1 = op3.HierarchicalArray(axes[::2][1:], name="dat1", dtype=dat0.dtype)
+    dat1 = op3.Dat(axes[::2][1:], name="dat1", dtype=dat0.dtype)
 
     # loop over [4, 8, 12, 16, ...]
     op3.do_loop(p := axes[::4][1:].index(), scalar_copy_kernel(dat0[p], dat1[p]))
@@ -110,12 +110,12 @@ def test_sparse_matrix_insertion(scalar_copy_kernel):
     # [0 x x]
     axis0 = op3.Axis(3)
     nnz_data = np.asarray([2, 3, 2])
-    nnz = op3.HierarchicalArray(axis0, name="nnz", data=nnz_data, dtype=op3.IntType)
+    nnz = op3.Dat(axis0, name="nnz", data=nnz_data, dtype=op3.IntType)
 
     subset_axes = op3.AxisTree.from_nest({axis0: op3.Axis({"pt0": nnz}, "ax1")})
     subset_data = flatten([[0, 1], [0, 1, 2], [1, 2]])
     # TODO strongly type that this must be ordered and unique
-    subset = op3.HierarchicalArray(
+    subset = op3.Dat(
         subset_axes,
         name="subset",
         data=np.asarray(subset_data),
@@ -123,8 +123,8 @@ def test_sparse_matrix_insertion(scalar_copy_kernel):
     )
 
     axes = op3.AxisTree.from_nest({axis0: op3.Axis({"pt0": 3}, "ax1")})
-    matrix = op3.HierarchicalArray(axes[:, subset], name="matrix", dtype=op3.ScalarType)
-    scalar = op3.HierarchicalArray(
+    matrix = op3.Dat(axes[:, subset], name="matrix", dtype=op3.ScalarType)
+    scalar = op3.Dat(
         op3.Axis(1), name="scalar", data=np.asarray([666]), dtype=matrix.dtype
     )
 

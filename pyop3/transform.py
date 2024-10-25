@@ -383,7 +383,7 @@ def _requires_pack_unpack(arg):
     # if subst_layouts and layouts are the same I *think* it is safe to avoid a pack/unpack
     # however, it is overly restrictive since we could pass something like dat[i0, :] directly
     # to a local kernel
-    # return isinstance(arg, HierarchicalArray) and arg.subst_layouts != arg.layouts
+    # return isinstance(arg, Dat) and arg.subst_layouts != arg.layouts
     return isinstance(arg, (Dat, AbstractMat))
 
 
@@ -620,7 +620,7 @@ def _(assignment: Assignment, /) -> InstructionList:
 #             assert subiterset.depth == 1
 #             subiterset = subiterset.root
 #
-#             sizes[target_path] = HierarchicalArray(
+#             sizes[target_path] = Dat(
 #                 subiterset, dtype=IntType, prefix="nnz"
 #             )
 #         sizess[iterset_path] = sizes
@@ -646,7 +646,7 @@ def _(assignment: Assignment, /) -> InstructionList:
 #         for target_path, nnz in sizes.items():
 #             subiterset = nnz.axes.root
 #             map_axes = AxisTree.from_nest({subiterset: Axis(nnz)})
-#             flat_maps[target_path] = HierarchicalArray(
+#             flat_maps[target_path] = Dat(
 #                 map_axes, dtype=IntType, prefix="map"
 #             )
 #         flat_mapss[iterset_path] = flat_maps

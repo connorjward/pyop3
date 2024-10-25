@@ -78,12 +78,12 @@ def test_read_matrix_values():
     dofs = op3.Axis(4, "dofs")
 
     # construct the matrix
-    nnz = op3.HierarchicalArray(
+    nnz = op3.Dat(
         dofs, data=np.asarray([2, 3, 3, 2]), dtype=op3.IntType, max_value=3
     )
     iaxes = op3.AxisTree.from_nest({dofs: op3.Axis(nnz)})
     idata = flatten([[0, 1], [0, 1, 2], [1, 2, 3], [2, 3]])
-    indices = op3.HierarchicalArray(iaxes, data=np.asarray(idata), dtype=op3.IntType)
+    indices = op3.Dat(iaxes, data=np.asarray(idata), dtype=op3.IntType)
     # FIXME we need to be able to distinguish row and col DoFs (and the IDs must differ)
     # this should be handled internally somehow
     dofs_ = op3.Axis(4, "dofs_")
@@ -107,12 +107,12 @@ def test_read_matrix_values():
     mat.petscmat.assemble()
 
     # construct the vector to store the accumulated values
-    dat = op3.HierarchicalArray(cells, dtype=mat.dtype)
+    dat = op3.Dat(cells, dtype=mat.dtype)
 
     # construct the cell -> dof map
     map_axes = op3.AxisTree.from_nest({cells: op3.Axis(2)})
     map_data = np.asarray([[0, 1], [1, 2], [2, 3]], dtype=op3.IntType)
-    map_dat = op3.HierarchicalArray(
+    map_dat = op3.Dat(
         map_axes,
         name="map_dat",
         data=map_data.flatten(),

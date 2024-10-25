@@ -932,7 +932,7 @@ class CalledMap(AxisIndependentIndex, Identified, Labelled, LoopIterable):
         #         indexed_axes.layout_exprs,
         #     )
         #
-        #     array_per_context[loop_context] = HierarchicalArray(
+        #     array_per_context[loop_context] = Dat(
         #         indexed_axes,
         #         data=self.array,
         #         layouts=self.layouts,

@@ -13,7 +13,7 @@ import numpy as np
 import pymbolic as pym
 from pyrsistent import PMap, freeze, pmap
 
-from pyop3.array.harray import HierarchicalArray
+from pyop3.array.harray import Dat
 from pyop3.axtree.tree import (
     Axis,
     AxisComponent,
@@ -105,8 +105,8 @@ def _tabulate_offsets(axes, axis, component):
     # NOTE: This code is quite unclear (partial axes made then axes_iter further modified)
     axes_iter.add(axis)
     offset_axes = AxisTree.from_iterable(axes_iter)
-    offsets = HierarchicalArray(offset_axes, data=np.full(offset_axes.size, -1, dtype=IntType))
-    # offsets = HierarchicalArray(axes, dtype=IntType)  # debug
+    offsets = Dat(offset_axes, data=np.full(offset_axes.size, -1, dtype=IntType))
+    # offsets = Dat(axes, dtype=IntType)  # debug
 
     # this is really bloody close - just need the Python iteration to be less rubbish
     # TODO: handle iteration over empty trees
@@ -443,10 +443,10 @@ def requires_external_index(axtree, axis, component_index):
 
 
 def size_requires_external_index(axes, axis, component, inner_loop_vars, path=pmap()):
-    from pyop3.array import HierarchicalArray
+    from pyop3.array import Dat
 
     count = component.count
-    if isinstance(count, HierarchicalArray):
+    if isinstance(count, Dat):
         if count.axes.is_empty:
             leafpath = pmap()
         else:
@@ -511,7 +511,7 @@ def has_halo(axes, axis):
 # No, we need this because loop indices do not necessarily mean we need extra shape.
 def collect_externally_indexed_axes(axes, axis=None, component=None, path=pmap()):
     assert False, "old code"
-    from pyop3.array import HierarchicalArray
+    from pyop3.array import Dat
 
     if axes.is_empty:
         return ()
@@ -535,7 +535,7 @@ def collect_externally_indexed_axes(axes, axis=None, component=None, path=pmap()
 
     external_axes = {}
     csize = component.count
-    if isinstance(csize, HierarchicalArray):
+    if isinstance(csize, Dat):
         # is the path sufficient? i.e. do we have enough externally provided indices
         # to correctly index the axis?
         loop_indices = collect_external_loops(csize.axes, csize.axes.index_exprs)
@@ -636,7 +636,7 @@ def _create_count_array_tree(
     axes_acc=None,
     path=pmap(),
 ):
-    from pyop3.array import HierarchicalArray
+    from pyop3.array import Dat
 
     if strictly_all(x is None for x in [axis, axes_acc]):
         axis = ctree.root
@@ -682,7 +682,7 @@ def _create_count_array_tree(
             else:
                 index_exprs = axtree.index_exprs
 
-            countarray = HierarchicalArray(
+            countarray = Dat(
                 axtree,
                 data=np.full(axtree.global_size, -1, dtype=IntType),
                 prefix="offset",
@@ -941,9 +941,9 @@ def _axis_component_size(
 
 @functools.singledispatch
 def _as_int(arg: Any, indices, path=None, *, loop_indices=pmap()):
-    from pyop3.array import HierarchicalArray
+    from pyop3.array import Dat
 
-    if isinstance(arg, HierarchicalArray):
+    if isinstance(arg, Dat):
         # TODO this might break if we have something like [:, subset]
         # I will need to map the "source" axis (e.g. slice_label0) back
         # to the "target" axis

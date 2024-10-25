@@ -109,7 +109,7 @@ def cone_map(comm, mesh_axis):
             new_vert = mesh_axis.default_to_applied_component_number("verts", old_vert)
             mdata_renum[new_cell, i] = new_vert
 
-    mdat = op3.HierarchicalArray(maxes, name="cone", data=mdata_renum.flatten())
+    mdat = op3.Dat(maxes, name="cone", data=mdata_renum.flatten())
     return op3.Map(
         {
             freeze({"mesh": "cells"}): [
@@ -127,10 +127,10 @@ def cone_map(comm, mesh_axis):
 def test_parallel_loop(comm, paxis, intent, fill_value):
     assert comm.size == 2
 
-    rank_dat = op3.HierarchicalArray(
+    rank_dat = op3.Dat(
         op3.Axis(1), name="rank", data=np.asarray([comm.rank + 1]), dtype=int
     )
-    dat = op3.HierarchicalArray(paxis, data=np.full(paxis.size, fill_value, dtype=int))
+    dat = op3.Dat(paxis, data=np.full(paxis.size, fill_value, dtype=int))
     knl = set_kernel(1, intent)
 
     op3.do_loop(
@@ -159,10 +159,10 @@ def test_parallel_loop_with_map(comm, mesh_axis, cone_map, scalar_copy_kernel):
     write_value = rank + 1
     other_write_value = other_rank + 1
 
-    rank_dat = op3.HierarchicalArray(
+    rank_dat = op3.Dat(
         op3.Axis(1), name="rank", data=np.asarray([write_value]), dtype=int
     )
-    dat = op3.HierarchicalArray(
+    dat = op3.Dat(
         mesh_axis, data=np.full(mesh_axis.size, fill_value), dtype=int
     )
 

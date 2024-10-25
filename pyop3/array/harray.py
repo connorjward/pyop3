@@ -222,7 +222,7 @@ class Dat(Array, KernelArgument):
                 raise NotImplementedError("Need axis forests")
             else:
                 indexed_axes = just_one(indexed_axess)
-                dat = HierarchicalArray(
+                dat = Dat(
                     indexed_axes, data=self.buffer, max_value=self.max_value, name=self.name
                 )
         else:
@@ -235,7 +235,7 @@ class Dat(Array, KernelArgument):
                 context_sensitive_axes[loop_context] = axes
             context_sensitive_axes = ContextSensitiveAxisTree(context_sensitive_axes)
 
-            dat = HierarchicalArray(
+            dat = Dat(
                 context_sensitive_axes, data=self.buffer, name=self.name, max_value=self.max_value
             )
         # self._cache[key] = dat
@@ -438,7 +438,7 @@ class Dat(Array, KernelArgument):
         else:
             self.buffer._reduce_leaves_to_roots()
 
-    def materialize(self) -> HierarchicalArray:
+    def materialize(self) -> Dat:
         """Return a new "unindexed" array with the same shape."""
         return type(self)(self.axes.materialize(), dtype=self.dtype)
 
@@ -594,32 +594,3 @@ class Dat(Array, KernelArgument):
             name=self.name,
             constant=self.constant,
         )
-
-
-# Needs to be subclass for isinstance checks to work
-# TODO Delete
-class MultiArray(Dat):
-    @deprecated("Dat")
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-
-# Needs to be subclass for isinstance checks to work
-# TODO Delete
-class HierarchicalArray(Dat):
-    @deprecated("Dat")
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-
-class ContextSensitiveDat(ContextSensitive):
-    """Class for describing arrays that are different within different loop contexts.
-
-    This is useful for the case where one wants to pass a small array through as
-    part of a context-sensitive assignment.
-
-    """
-
-    @property
-    def dtype(self):
-        return self._shared_attr("dtype")

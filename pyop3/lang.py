@@ -80,7 +80,7 @@ class KernelArgument(abc.ABC):
 
     Note that some types that can be passed to *functions* are not in fact
     kernel arguments. This is because they either wrap actual kernel arguments
-    (e.g. `HierarchicalArray`), or because no argument is actually passed
+    (e.g. `Dat`), or because no argument is actually passed
     (e.g. a temporary).
 
     """
@@ -281,7 +281,7 @@ class Loop(Instruction):
             Collections of callables to be executed at the right times.
 
         """
-        from pyop3 import DistributedBuffer, HierarchicalArray, Mat
+        from pyop3 import DistributedBuffer, Dat, Mat
         from pyop3.array.harray import ContextSensitiveDat
         from pyop3.array.petsc import Sparsity
 
@@ -289,7 +289,7 @@ class Loop(Instruction):
         reductions = []
         broadcasts = []
         for arg, intent in self.function_arguments:
-            if isinstance(arg, HierarchicalArray):
+            if isinstance(arg, Dat):
                 buffer = arg.buffer
                 if isinstance(buffer, DistributedBuffer) and buffer.is_distributed:
                     # for now assume the most conservative case
@@ -446,9 +446,9 @@ def _has_nontrivial_stencil(array):
     # FIXME This is WRONG, there are cases (e.g. support(extfacet)) where
     # the halo might be touched but the size (i.e. map arity) is 1. I need
     # to look at index_exprs probably.
-    from pyop3.array import HierarchicalArray
+    from pyop3.array import Dat
 
-    if isinstance(array, HierarchicalArray):
+    if isinstance(array, Dat):
         return _has_nontrivial_stencil(array)
     else:
         raise TypeError
@@ -598,10 +598,10 @@ class Assignment(AbstractAssignment):
 
     @property
     def arrays(self):
-        from pyop3.array import HierarchicalArray
+        from pyop3.array import Dat
 
         arrays_ = [self.assignee]
-        if isinstance(self.expression, HierarchicalArray):
+        if isinstance(self.expression, Dat):
             arrays_.append(self.expression)
         else:
             if not isinstance(self.expression, numbers.Number):
@@ -621,9 +621,9 @@ class Assignment(AbstractAssignment):
 
     @property
     def _expression_kernel_arguments(self):
-        from pyop3.array import HierarchicalArray
+        from pyop3.array import Dat
 
-        if isinstance(self.expression, HierarchicalArray):
+        if isinstance(self.expression, Dat):
             return ((self.expression, READ),)
         elif isinstance(self.expression, numbers.Number):
             return ()
@@ -632,12 +632,12 @@ class Assignment(AbstractAssignment):
 
     @property
     def kernel_arguments(self):
-        from pyop3.array.harray import HierarchicalArray
+        from pyop3.array.harray import Dat
         from pyop3.array.petsc import Mat
 
         args = OrderedSet()
         for array, _ in self.function_arguments:
-            if isinstance(array, HierarchicalArray):
+            if isinstance(array, Dat):
                 args.add(array.buffer)
             elif isinstance(array, Mat):
                 args.add(array.mat)
@@ -736,10 +736,10 @@ def fix_intents(tunit, accesses):
 
 @functools.singledispatch
 def _collect_kernel_arguments(func_arg: FunctionArgument) -> tuple:
-    from pyop3 import HierarchicalArray, Mat  # cyclic import
+    from pyop3 import Dat, Mat  # cyclic import
     from pyop3.buffer import DistributedBuffer, NullBuffer
 
-    if isinstance(func_arg, HierarchicalArray):
+    if isinstance(func_arg, Dat):
         return _collect_kernel_arguments(func_arg.buffer)
     elif isinstance(func_arg, Mat):
         return _collect_kernel_arguments(func_arg.mat)

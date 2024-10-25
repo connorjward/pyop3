@@ -258,13 +258,13 @@ class ExpressionFlatteningCollector(pym.mapper.Mapper):
 # symbolic language for pyop3.
 def eval_expr(expr):
     """Convert an array expression into an array."""
-    from pyop3 import HierarchicalArray
+    from pyop3 import Dat
     from pyop3.expr_visitors import evaluate
 
     axes_iter, loop_index = axes_from_expr(expr)
     axes = AxisTree.from_iterable(axes_iter)
 
-    result = HierarchicalArray(axes, dtype=IntType)
+    result = Dat(axes, dtype=IntType)
     for ploop in loop_index.iter():
         for p in axes.iter({ploop}):
             # evaluator = ExpressionEvaluator(p.source_exprs, loop_exprs=ploop.replace_map)
@@ -336,7 +336,7 @@ class AxisComponent(LabelledNodeComponent):
         sf=None,
         unit=False,
     ):
-        from pyop3.array import HierarchicalArray
+        from pyop3.array import Dat
 
         # if isinstance(size, collections.abc.Iterable):
         #     assert not rank_equal  # nasty
@@ -352,7 +352,7 @@ class AxisComponent(LabelledNodeComponent):
         #     owned_count = count = size
         #     distributed = False
 
-        # if not isinstance(count, (numbers.Integral, HierarchicalArray)):
+        # if not isinstance(count, (numbers.Integral, Dat)):
         #     raise TypeError("Invalid count type")
         # if unit and count != 1:
         #     raise ValueError(
@@ -393,20 +393,20 @@ class AxisComponent(LabelledNodeComponent):
     @cached_property
     def _collective_count(self):
         """Return the size of the axis component in a format consistent over ranks."""
-        from pyop3 import HierarchicalArray
+        from pyop3 import Dat
 
         # if isinstance(self.count, numbers.Integral) and not self.rank_equal:
         if self.sf is not None:
             # TODO: Should be a Global here
-            return HierarchicalArray(AxisTree(), data=np.asarray([self.count], dtype=IntType), prefix="size")
+            return Dat(AxisTree(), data=np.asarray([self.count], dtype=IntType), prefix="size")
         else:
             return self.count
 
     # TODO this is just a traversal - clean up
     def alloc_size(self, axtree, axis):
-        from pyop3.array import HierarchicalArray
+        from pyop3.array import Dat
 
-        if isinstance(self.count, HierarchicalArray):
+        if isinstance(self.count, Dat):
             npoints = self.count.max_value
         else:
             assert isinstance(self.count, numbers.Integral)
@@ -687,14 +687,14 @@ class Axis(LoopIterable, MultiComponentLabelledNode):
 
     # @staticmethod
     # def _parse_numbering(numbering):
-    #     from pyop3.array import HierarchicalArray
+    #     from pyop3.array import Dat
     #
     #     if numbering is None:
     #         return None
-    #     elif isinstance(numbering, HierarchicalArray):
+    #     elif isinstance(numbering, Dat):
     #         return numbering
     #     elif isinstance(numbering, collections.abc.Collection):
-    #         return HierarchicalArray(len(numbering), data=numbering, dtype=IntType)
+    #         return Dat(len(numbering), data=numbering, dtype=IntType)
     #     else:
     #         raise TypeError(
     #             f"{type(numbering).__name__} is not a supported type for numbering"
@@ -1206,7 +1206,7 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
 
     @cached_property
     def global_size(self):
-        from pyop3.array import HierarchicalArray
+        from pyop3.array import Dat
         from pyop3.axtree.layout import _axis_size, my_product
 
         if not self.outer_loops:
@@ -1223,7 +1223,7 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
                 mysize += _axis_size(self, self.root, loop_indices=loop_exprs)
         return mysize
 
-        if isinstance(self.size, HierarchicalArray):
+        if isinstance(self.size, Dat):
             # does this happen any more?
             return np.sum(self.size.data_ro, dtype=IntType)
         if isinstance(self.size, np.ndarray):
@@ -1775,12 +1775,12 @@ class IndexedAxisTree(BaseAxisTree):
 
     @cached_property
     def tabulated_offsets(self):
-        from pyop3.array import HierarchicalArray
+        from pyop3.array import Dat
 
         loop_index = just_one(self.outer_loops)
         iterset = AxisTree(loop_index.iterset.node_map)
         rmap_axes = iterset.add_subtree(self, *iterset.leaf)
-        rmap = HierarchicalArray(rmap_axes, dtype=IntType)
+        rmap = Dat(rmap_axes, dtype=IntType)
         rmap = rmap[loop_index.local_index]
         # for idx in loop_index.iter(include_ghost_points=True):
         for idx in loop_index.iter():
@@ -1899,9 +1899,9 @@ def _(component: AxisComponent) -> Axis:
 
 @functools.singledispatch
 def as_axis_component(arg: Any) -> AxisComponent:
-    from pyop3.array import HierarchicalArray  # cyclic import
+    from pyop3.array import Dat  # cyclic import
 
-    if isinstance(arg, HierarchicalArray):
+    if isinstance(arg, Dat):
         return AxisComponent(arg)
     else:
         raise TypeError(f"No handler defined for {type(arg).__name__}")
@@ -2010,10 +2010,10 @@ def subst_layouts(
     linear_axes_acc=None,
     target_paths_and_exprs_acc=None,
 ):
-    from pyop3 import HierarchicalArray
+    from pyop3 import Dat
     from pyop3.itree.tree import replace  # should move this
 
-    if isinstance(axes, HierarchicalArray):
+    if isinstance(axes, Dat):
         assert axis is None
         axes = axes.axes
 
