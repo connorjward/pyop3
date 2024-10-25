@@ -1,7 +1,13 @@
-from __future__ import annotations
-
 import abc
 
+from pyop3.array.base import Array
+from pyop3.array.harray import Dat
+from pyop3.array.petsc import AbstractMat
+
+
+# NOTE: I do not love how this is arranged. I feel like the actual transformation
+# should be tied to the Transformation instance. E.g. for a reshape the new shape
+# is not actually handled here.
 
 class ArrayTransformation(abc.ABC):
     """A reversible transformation that acts on an array."""
@@ -21,9 +27,13 @@ class DatTransformation(ArrayTransformation, abc.ABC):
 
 
 class MatTransformation(ArrayTransformation, abc.ABC):
-    def __init__(self, initial: Mat) -> None:
+    def __init__(self, initial: AbstractMat) -> None:
         super().__init__(initial)
 
 
-class Reshape(DatTransformation):
+class DatReshape(DatTransformation):
+    pass
+
+
+class MatReshape(MatTransformation):
     pass

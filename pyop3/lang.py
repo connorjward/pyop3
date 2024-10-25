@@ -123,8 +123,8 @@ class Instruction(UniqueRecord, abc.ABC):
         insn = self
         insn = expand_loop_contexts(insn)
         insn = expand_implicit_pack_unpack(insn)
-        insn = expand_array_transformations(insn)
         insn = expand_petsc_mat_accesses(insn)
+        insn = expand_array_transformations(insn)
         return PreprocessedExpression(insn)
 
     @cachedmethod(lambda self: self._cache["Instruction.compile"])

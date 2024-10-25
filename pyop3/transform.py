@@ -13,7 +13,7 @@ from pyrsistent import pmap, PMap
 from immutabledict import ImmutableOrderedDict
 
 from pyop3.array import Dat, AbstractMat
-from pyop3.array.transforms import Reshape
+from pyop3.array.transforms import DatReshape
 from pyop3.array.petsc import AbstractMat
 from pyop3.axtree import Axis, AxisTree, ContextFree, ContextSensitive, ContextMismatchException, ContextAware
 from pyop3.axtree.tree import Operator, AxisVar, IndexedAxisTree
@@ -434,6 +434,7 @@ def _(assignment: Assignment, /) -> InstructionList:
 
 @expand_array_transformations.register(CalledFunction)
 def _(func: CalledFunction, /) -> InstructionList:
+    breakpoint()
     if any(a.transform for a in func.arguments):
         raise NotImplementedError
     else:
@@ -489,8 +490,8 @@ def _generate_array_transformations2(expr: Any, /, mode):
     raise TypeError(f"No handler provided for {type(expr).__name__}")
 
 
-@_generate_array_transformations2.register(Reshape)
-def _(reshape: Reshape, /, dat, mode):
+@_generate_array_transformations2.register(DatReshape)
+def _(reshape: DatReshape, /, dat, mode):
     breakpoint()
     temp_initial_axes = AxisTree(reshape.initial.axes.node_map)
     temp_initial = Dat(temp_initial_axes, data=NullBuffer(dat.dtype), prefix="t")
@@ -509,6 +510,7 @@ def _(reshape: Reshape, /, dat, mode):
     return (temp_reshaped, transform_insns + (assignment,))
 
 
+# NOTE: Not used any more
 @functools.singledispatch
 def collect_datamap(insn: Any, /) -> PMap:
     raise TypeError(f"No handler defined for {type(insn).__name__}")

@@ -74,6 +74,7 @@ class AbstractMat(Array):
         *,
         name=None,
         block_shape=None,
+        transform=None,
     ):
         raxes = as_axis_tree(raxes)
         caxes = as_axis_tree(caxes)
@@ -99,6 +100,7 @@ class AbstractMat(Array):
         super().__init__(name)
         self.mat_type = mat_type
         self.mat = mat
+        self.transform = transform
 
 
         # self._cache = {}
@@ -184,6 +186,7 @@ class AbstractMat(Array):
                 mat=self.mat,
                 name=self.name,
                 block_shape=self.block_shape,
+                transform=self.transform,
             )
         else:
             # Otherwise we are context-sensitive
@@ -218,10 +221,35 @@ class AbstractMat(Array):
                 mat=self.mat,
                 name=self.name,
                 block_shape=self.block_shape,
+                transform=self.transform,
             )
 
         # self._cache[cache_key] = mat
         return mat
+
+    def reshape(self, row_axes: AxisTree, col_axes: AxisTree) -> AbstractMat:
+        """Return a reshaped view of the `Dat`.
+
+        TODO
+
+        """
+        from pyop3.array.transforms import MatReshape
+
+        assert isinstance(row_axes, AxisTree), "not indexed"
+        assert isinstance(col_axes, AxisTree), "not indexed"
+
+        # NOTE: This will get nicer if we have a pyop3_init special method for this
+        # sort of object to facilitate reconstruction
+        return type(self)(
+            row_axes,
+            col_axes,
+            mat_type=self.mat_type,
+            mat=self.mat,
+            name=self.name,
+            block_shape=self.block_shape,
+            transform=MatReshape(self),
+        )
+
 
     def with_context(self, context):
         # Need a reconstruct method!
@@ -233,6 +261,7 @@ class AbstractMat(Array):
             name=self.name,
             mat_type=self.mat_type,
             mat=self.mat,
+            transform=self.transform,
         )
 
     @property
@@ -245,6 +274,7 @@ class AbstractMat(Array):
             name=self.name,
             mat_type=self.mat_type,
             mat=self.mat,
+            transform=self.transform,
         )
 
     # like Dat, bad name? handle?
@@ -389,14 +419,7 @@ class AbstractMat(Array):
         from pyop3.expr_visitors import collect_loops
         from pyop3.itree import Slice, AffineSliceComponent, IndexTree
 
-        loop_indicess = []
-        for leaf in axes.leaves:
-            leaf_path = axes.path(leaf)
-            leaf_layout_expr = axes.subst_layouts()[leaf_path]
-            leaf_loop_indices = collect_loops(leaf_layout_expr)
-            loop_indicess.append(leaf_loop_indices)
-        # each leaf must have the same loop indices
-        loop_indices = single_valued(loop_indicess)
+        loop_indices = collect_loops(self)
 
         if len(loop_indices) > 1:
             # should be straightforward enough to do

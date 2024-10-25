@@ -550,7 +550,7 @@ class Dat(Array, KernelArgument):
         TODO
 
         """
-        from pyop3.array.transforms import Reshape
+        from pyop3.array.transforms import DatReshape
 
         assert isinstance(axes, AxisTree), "not indexed"
 
@@ -562,7 +562,7 @@ class Dat(Array, KernelArgument):
             max_value=self.max_value,
             name=self.name,
             constant=self.constant,
-            transform=Reshape(self),
+            transform=DatReshape(self),
         )
 
     # NOTE: should this only accept AxisTrees, or are IndexedAxisTrees fine also?

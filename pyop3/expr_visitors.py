@@ -21,6 +21,7 @@ from pyop3.utils import OrderedSet
 # I can do that later. For now do the naive datamap approach
 
 
+# NOTE: not used any more!
 @functools.singledispatch
 def collect_datamap(expr):
     raise TypeError()
@@ -132,10 +133,10 @@ def _(dat: Dat, /) -> OrderedSet:
 
 @collect_loops.register(AbstractMat)
 def _(mat: AbstractMat, /) -> OrderedSet:
-    # if mat.transform:
-    #     raise NotImplementedError
-
     loop_indices = OrderedSet()
+    if mat.transform:
+        loop_indices |= collect_loops(mat.transform.initial)
+
     for cs_axes in {mat.raxes, mat.caxes}:
         for cf_axes in cs_axes.context_map.values():
             for leaf in cf_axes.leaves:
