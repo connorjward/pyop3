@@ -118,13 +118,12 @@ class Instruction(UniqueRecord, abc.ABC):
 
     @cachedmethod(lambda self: self._cache["Instruction.preprocess"])
     def preprocess(self, compiler_parameters=None):
-        from pyop3.transform import expand_implicit_pack_unpack, expand_loop_contexts, expand_array_transformations, expand_petsc_mat_accesses
+        from pyop3.transform import expand_implicit_pack_unpack, expand_loop_contexts, expand_assignments
 
         insn = self
         insn = expand_loop_contexts(insn)
         insn = expand_implicit_pack_unpack(insn)
-        insn = expand_petsc_mat_accesses(insn)
-        insn = expand_array_transformations(insn)
+        insn = expand_assignments(insn)
         return PreprocessedExpression(insn)
 
     @cachedmethod(lambda self: self._cache["Instruction.compile"])
@@ -570,18 +569,14 @@ class CalledFunction(Terminal):
 
 
 
-class AbstractAssignment(Terminal, abc.ABC):
-    pass
-
-
 # TODO: With Python 3.11 can be made a StrEnum
 class AssignmentType(enum.Enum):
     WRITE = "write"
     INC = "inc"
 
 
-class Assignment(AbstractAssignment):
-    fields = AbstractAssignment.fields | {"assignee", "expression", "assignment_type"}
+class Assignment(Terminal):
+    fields = Terminal.fields | {"assignee", "expression", "assignment_type"}
 
     def __init__(self, assignee, expression, assignment_type, **kwargs):
         assignment_type = AssignmentType(assignment_type)
@@ -643,45 +638,53 @@ class Assignment(AbstractAssignment):
                 args.add(array.mat)
         return tuple(args)
 
+    @property
+    def is_mat_access(self) -> bool:
+        # NOTE: Could also check for things like a NullBuffer `.is_temporary`?
+        return (
+            (isinstance(self.assignee, AbstractMat) and isinstance(self.expression, Dat))
+            or (isinstance(self.assignee, Dat) and isinstance(self.expression, AbstractMat))
+        )
+
 
 # TODO: With Python 3.11 can be made a StrEnum
-class PetscMatAccessType(enum.Enum):
+class ArrayAccessType(enum.Enum):
     READ = "read"
     WRITE = "write"
     INC = "inc"
 
 
-class PetscMatAccess(AbstractAssignment):
-    fields = AbstractAssignment.fields | {"mat_arg", "array_arg", "access_type"}
-
-    def __init__(self, mat_arg, array_arg, access_type):
-        from pyop3.array import Dat
-
-        access_type = PetscMatAccessType(access_type)
-
-        if isinstance(array_arg, numbers.Number):
-            array_arg = Dat(
-                mat_arg.axes,
-                data=np.full(mat_arg.axes.size, array_arg, dtype=mat_arg.dtype),
-                prefix="t",
-                constant=True,
-            )
-
-
-        assert mat_arg.dtype == array_arg.dtype
-
-        self.mat_arg = mat_arg
-        self.array_arg = array_arg
-        self.access_type = access_type
-
-    @property
-    def kernel_arguments(self):
-        args = (self.mat_arg.mat,)
-        if isinstance(self.array_arg, ContextSensitive):
-            args += tuple(dat.buffer for dat in self.array_arg.context_map.values())
-        else:
-            args += (self.array_arg.buffer,)
-        return args
+# class PetscMatAccess(AbstractAssignment):
+#     fields = AbstractAssignment.fields | {"mat_arg", "array_arg", "access_type"}
+#
+#     def __init__(self, mat_arg, array_arg, access_type):
+#         from pyop3.array import Dat
+#
+#         access_type = PetscMatAccessType(access_type)
+#
+#         if isinstance(array_arg, numbers.Number):
+#             array_arg = Dat(
+#                 mat_arg.axes,
+#                 data=np.full(mat_arg.axes.size, array_arg, dtype=mat_arg.dtype),
+#                 prefix="t",
+#                 constant=True,
+#             )
+#
+#
+#         assert mat_arg.dtype == array_arg.dtype
+#
+#         self.mat_arg = mat_arg
+#         self.array_arg = array_arg
+#         self.access_type = access_type
+#
+#     @property
+#     def kernel_arguments(self):
+#         args = (self.mat_arg.mat,)
+#         if isinstance(self.array_arg, ContextSensitive):
+#             args += tuple(dat.buffer for dat in self.array_arg.context_map.values())
+#         else:
+#             args += (self.array_arg.buffer,)
+#         return args
 
 
 class OpaqueKernelArgument(KernelArgument, ContextFree):

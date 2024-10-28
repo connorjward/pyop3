@@ -1,13 +1,12 @@
+# TODO: This module is quite redundant. Most transformations do not fit this paradigm.
+# Only reshapes.
+
 import abc
 
 from pyop3.array.base import Array
 from pyop3.array.harray import Dat
 from pyop3.array.petsc import AbstractMat
 
-
-# NOTE: I do not love how this is arranged. I feel like the actual transformation
-# should be tied to the Transformation instance. E.g. for a reshape the new shape
-# is not actually handled here.
 
 class ArrayTransformation(abc.ABC):
     """A reversible transformation that acts on an array."""

@@ -39,7 +39,6 @@ from pyop3.lang import (
     RW,
     WRITE,
     AssignmentType,
-    AbstractAssignment,
     Assignment,
     ContextAwareLoop,  # TODO: remove this class
     CalledFunction,
@@ -48,8 +47,7 @@ from pyop3.lang import (
     DummyKernelArgument,
     Loop,
     InstructionList,
-    PetscMatAccess,
-    PetscMatAccessType,
+    ArrayAccessType,
 )
 from pyop3.log import logger
 from pyop3.target import compile_loopy
@@ -532,8 +530,8 @@ def _(loop: Loop, /):
     return shapes
 
 
-@_collect_temporary_shapes.register(AbstractAssignment)
-def _(assignment: AbstractAssignment, /) -> PMap:
+@_collect_temporary_shapes.register(Assignment)
+def _(assignment: Assignment, /) -> PMap:
     return pmap()
 
 
@@ -723,15 +721,17 @@ def parse_assignment(
     loop_indices,
     codegen_ctx,
 ):
-    parse_assignment_properly_this_time(
-        assignment,
-        loop_indices,
-        codegen_ctx,
-    )
+    if assignment.is_mat_access:
+        _compile_petscmat(assignment, loop_indices, codegen_ctx)
+    else:
+        parse_assignment_properly_this_time(
+            assignment,
+            loop_indices,
+            codegen_ctx,
+        )
 
 
-@_compile.register(PetscMatAccess)
-def _(assignment, loop_indices, codegen_context):
+def _compile_petscmat(assignment, loop_indices, codegen_context):
     mat = assignment.mat_arg
     array = assignment.array_arg
 
@@ -828,12 +828,12 @@ def _(assignment, loop_indices, codegen_context):
     myargs = [
         assignment, mat_name, array_name, rsize_var, csize_var, irow, icol, blocked
     ]
-    if assignment.access_type == PetscMatAccessType.READ:
+    if assignment.access_type == ArrayAccessType.READ:
         call_str = _petsc_mat_load(*myargs)
-    elif assignment.access_type == PetscMatAccessType.WRITE:
+    elif assignment.access_type == ArrayAccessType.WRITE:
         call_str = _petsc_mat_store(*myargs)
     else:
-        assert assignment.access_type == PetscMatAccessType.INC
+        assert assignment.access_type == ArrayAccessType.INC
         call_str = _petsc_mat_add(*myargs)
 
     codegen_context.add_cinstruction(call_str)

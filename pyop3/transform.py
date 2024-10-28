@@ -35,7 +35,7 @@ from pyop3.lang import (
     Instruction,
     Loop,
     InstructionList,
-    PetscMatAccess,
+    # PetscMatAccess,
 )
 from pyop3.utils import UniqueNameGenerator, checked_zip, just_one, single_valued, OrderedSet, merge_dicts, expand_collection_of_iterables
 
@@ -67,9 +67,9 @@ def _(assignment: Assignment, /) -> OrderedSet:
     return expr_collect_loops(assignment.assignee) | expr_collect_loops(assignment.expression)
 
 
-@collect_loop_indices.register(PetscMatAccess)
-def _(mat_access: PetscMatAccess, /) -> OrderedSet:
-    return expr_collect_loops(mat_access.mat_arg) | expr_collect_loops(mat_access.array_arg)
+# @collect_loop_indices.register(PetscMatAccess)
+# def _(mat_access: PetscMatAccess, /) -> OrderedSet:
+#     return expr_collect_loops(mat_access.mat_arg) | expr_collect_loops(mat_access.array_arg)
 
 
 @collect_loop_indices.register(CalledFunction)
@@ -387,32 +387,6 @@ def _requires_pack_unpack(arg):
     return isinstance(arg, (Dat, AbstractMat))
 
 
-@functools.singledispatch
-def expand_array_transformations(insn: Any, /):
-    raise TypeError(f"No handler defined for {type(insn).__name__}")
-
-
-@expand_array_transformations.register(InstructionList)
-def _(insn_list: InstructionList, /):
-    return insn_list.copy(
-        instructions=[
-            insn_ for insn in insn_list for insn_ in expand_array_transformations(insn)
-        ],
-    )
-
-
-# NOTE: in theory loop could be over something transformed
-@expand_array_transformations.register(Loop)
-def _(loop: Loop, /):
-    return InstructionList([
-        loop.copy(
-            statements=[
-                insn for stmt in loop.statements for insn in expand_array_transformations(stmt)
-            ],
-        )
-    ])
-
-
 @expand_array_transformations.register(Assignment)
 def _(assignment: Assignment, /) -> InstructionList:
     # NOTE: I think perhaps we need a new type for this...
@@ -432,22 +406,48 @@ def _(assignment: Assignment, /) -> InstructionList:
     return InstructionList([*input_insns, bare_assignment, *output_insns])
 
 
-@expand_array_transformations.register(CalledFunction)
+@functools.singledispatch
+def expand_assignments(obj: Any, /) -> InstructionList:
+    raise TypeError(f"No handler provided for {type(obj).__name__}")
+
+
+@expand_assignments.register(InstructionList)
+def _(insn_list: InstructionList, /) -> InstructionList:
+    return InstructionList([expand_assignments(insn) for insn in insn_list])
+
+
+@expand_assignments.register(Loop)
+def _(loop: Loop, /) -> InstructionList:
+    return InstructionList([
+        Loop(loop.index, [
+            expand_assignments(stmt) for stmt in loop.statements
+        ])
+    ])
+
+
+@expand_assignments.register(CalledFunction)
 def _(func: CalledFunction, /) -> InstructionList:
-    breakpoint()
-    if any(a.transform for a in func.arguments):
-        raise NotImplementedError
-    else:
-        return InstructionList([func])
+    # Assume that this isn't a problem here, think about this
+    return InstructionList([func])
 
 
-# @expand_array_transformations.register(PetscMatInstruction)
-# def _(mat_insn, /) -> InstructionList:
-#     # if mat_insn.mat_arg.transform or mat_insn.array_arg.transform:
-#     if mat_insn.array_arg.transform:
-#         raise NotImplementedError
-#     else:
-#         return InstructionList([mat_insn])
+@expand_assignments.register(Assignment)
+def _(assignment: Assignment, /) -> InstructionList:
+    # NOTE: I think perhaps we need a new type for this...
+    if any(isinstance(x, AbstractMat) for x in {assignment.assignee, assignment.expression}):
+        mat_arg = just_one(arg for arg in {assignment.assignee, assignment.expression} if isinstance(arg, AbstractMat))
+        # if mat_arg.transform:
+        #     raise NotImplementedError
+        # else:
+        #     return InstructionList([assignment])
+        return InstructionList([assignment])
+
+    bare_expression, input_insns = _generate_array_transformations(assignment.expression, "in")
+    bare_assignee, output_insns = _generate_array_transformations(assignment.assignee, assignment.assignment_type)
+
+    bare_assignment = Assignment(bare_assignee, bare_expression, assignment.assignment_type)
+
+    return InstructionList([*input_insns, bare_assignment, *output_insns])
 
 
 # TODO: better word than "mode"? And use an enum.
@@ -484,6 +484,25 @@ def _(dat: Dat, /, mode):
         return (dat, ())
 
 
+@_generate_array_transformations.register(AbstractMat)
+def _(mat: AbstractMat, /, mode):
+    if not any(isinstance(axes, IndexedAxisTree) for axes in {mat.raxes, mat.caxes}):
+        raise NotImplementedError("Always expecting a packed matrix")
+
+    temp = Dat(mat.axes, data=NullBuffer(mat.dtype), prefix="t")
+
+    # NOTE: mode must encode more information than an assignment!
+    if mode == AssignmentType.READ:
+        assignment = Assignment(temp, mat, "write")
+    elif mode == AssignmentType.WRITE:
+        assignment = Assignment(mat, temp, "write")
+    else:
+        assert mode == AssignmentType.INC
+        assignment = Assignment(mat, temp, "inc")
+
+    return (temp, (assignment,))
+
+
 # TODO: Need a good name for this.
 @functools.singledispatch
 def _generate_array_transformations2(expr: Any, /, mode):
@@ -492,7 +511,6 @@ def _generate_array_transformations2(expr: Any, /, mode):
 
 @_generate_array_transformations2.register(DatReshape)
 def _(reshape: DatReshape, /, dat, mode):
-    breakpoint()
     temp_initial_axes = AxisTree(reshape.initial.axes.node_map)
     temp_initial = Dat(temp_initial_axes, data=NullBuffer(dat.dtype), prefix="t")
 
@@ -502,88 +520,13 @@ def _(reshape: DatReshape, /, dat, mode):
     transformed_dat, transform_insns = _generate_array_transformations(reshape.initial, mode)
 
     if mode == "in":
-        assignment = ReplaceAssignment(temp_initial, transformed_dat)
+        assignment = Assignment(temp_initial, transformed_dat, "write")
     else:
         assert mode == "out"
-        assignment = ReplaceAssignment(transformed_dat, temp_initial)
+        assignment = Assignment(transformed_dat, temp_initial, "write")
 
     return (temp_reshaped, transform_insns + (assignment,))
 
-
-# NOTE: Not used any more
-@functools.singledispatch
-def collect_datamap(insn: Any, /) -> PMap:
-    raise TypeError(f"No handler defined for {type(insn).__name__}")
-
-
-@collect_datamap.register(InstructionList)
-def _(insn_list: InstructionList, /) -> PMap:
-    return merge_dicts(collect_datamap(insn) for insn in insn_list)
-
-
-@collect_datamap.register(Loop)
-def _(loop: Loop, /) -> PMap:
-    # NOTE: I don't think that this will work if we have something ragged as
-    # we will miss the extent variable. I think in most other cases this is fine however.
-    return merge_dicts(collect_datamap(stmt) for stmt in loop.statements)
-
-
-@collect_datamap.register(Assignment)
-def _(assignment: Assignment, /) -> PMap:
-    return collect_expr_datamap(assignment.assignee) | collect_expr_datamap(assignment.expression)
-
-
-@collect_datamap.register(PetscMatAccess)
-def _(mat_insn: PetscMatAccess, /) -> PMap:
-    return collect_expr_datamap(mat_insn.mat_arg) | collect_expr_datamap(mat_insn.array_arg)
-
-
-@collect_datamap.register(CalledFunction)
-def _(func: CalledFunction, /) -> PMap:
-    return merge_dicts(collect_expr_datamap(arg) for arg in func.arguments)
-
-
-@functools.singledispatch
-def expand_petsc_mat_accesses(insn: Any, /) -> InstructionList:
-    raise TypeError()
-
-
-@expand_petsc_mat_accesses.register(InstructionList)
-def _(insn_list: InstructionList, /) -> InstructionList:
-    return InstructionList([expand_petsc_mat_accesses(insn) for insn in insn_list])
-
-
-@expand_petsc_mat_accesses.register(Loop)
-def _(loop: Loop, /) -> InstructionList:
-    return InstructionList([
-        Loop(loop.index, [
-            expand_petsc_mat_accesses(stmt) for stmt in loop.statements
-        ])
-    ])
-
-
-@expand_petsc_mat_accesses.register(CalledFunction)
-def _(func: CalledFunction, /) -> InstructionList:
-    # Assume that this isn't a problem here, think about this
-    return InstructionList([func])
-
-
-@expand_petsc_mat_accesses.register(Assignment)
-def _(assignment: Assignment, /) -> InstructionList:
-    # NOTE: Can imagine more complex scenarios where an indexed matrix is
-    # part of an expression or similar. For now we just deal with the
-    # core Firedrake use case of
-    #
-    #   mat[f(i0, i1), f(i0, i1)] <- t0[i1, i1]
-    array = assignment.assignee
-    if isinstance(array, AbstractMat) and any(isinstance(axes, IndexedAxisTree) for axes in {array.raxes, array.caxes}):
-        if assignment.assignment_type == AssignmentType.WRITE:
-            assignment = PetscMatAccess(array, assignment.expression, "write")
-        else:
-            assert assignment.assignment_type == AssignmentType.INC
-            assignment = PetscMatAccess(array, assignment.expression, "inc")
-
-    return InstructionList([assignment])
 
 
 
