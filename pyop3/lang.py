@@ -640,6 +640,8 @@ class Assignment(Terminal):
 
     @property
     def is_mat_access(self) -> bool:
+        from pyop3.array import AbstractMat, Dat
+
         # NOTE: Could also check for things like a NullBuffer `.is_temporary`?
         return (
             (isinstance(self.assignee, AbstractMat) and isinstance(self.expression, Dat))

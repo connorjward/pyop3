@@ -216,6 +216,8 @@ class LoopyCodegenContext(CodegenContext):
             name = self.unique_name("t") if not debug else array.name
             shape = self._temporary_shapes.get(array.name, (array.alloc_size,))
 
+            read_only = array.constant
+
             initializer = array.buffer.data_ro if injected else None
             if initializer is not None:
                 arg = lp.TemporaryVariable(
@@ -223,16 +225,19 @@ class LoopyCodegenContext(CodegenContext):
                     dtype=array.dtype,
                     initializer=initializer,
                     address_space=lp.AddressSpace.LOCAL,
-                    read_only=True,
+                    read_only=read_only,
                 )
             else:
                 arg = lp.TemporaryVariable(
-                    name, dtype=array.dtype, shape=shape, read_only=True
+                    name, dtype=array.dtype, shape=shape, read_only=read_only, address_space=lp.AddressSpace.LOCAL,
                 )
         else:
             name = self.unique_name("array") if not debug else array.name
             assert isinstance(array.buffer, DistributedBuffer)
             arg = lp.GlobalArg(name, dtype=self._dtype(array), shape=None)
+
+        # if name == "array_9":
+        #     breakpoint()
 
         self.actual_to_kernel_rename_map[array.name] = name
         self._args.append(arg)
@@ -618,10 +623,6 @@ def parse_loop_properly_this_time(
                 )
             else:
                 loop_exprs = StrictlyUniqueDict()
-                # substitutor = JnameSubstitutor(
-                #     iname_replace_map_ | loop_indices,
-                #     codegen_context,
-                # )
                 iname_map = iname_replace_map_ | loop_indices
                 axis_key = (axis.id, component.label)
                 for index_exprs in axes.index_exprs:
@@ -732,8 +733,19 @@ def parse_assignment(
 
 
 def _compile_petscmat(assignment, loop_indices, codegen_context):
-    mat = assignment.mat_arg
-    array = assignment.array_arg
+    if isinstance(assignment.expression, AbstractMat):
+        assert assignment.assignment_type == AssignmentType.WRITE, "INC not supported yet"
+        mat = assignment.expression
+        array = assignment.assignee
+        access_type = ArrayAccessType.READ
+    else:
+        mat = assignment.assignee
+        array = assignment.expression
+        if assignment.assignment_type == AssignmentType.WRITE:
+            access_type = ArrayAccessType.WRITE
+        else:
+            assert assignment.assignment_type == AssignmentType.INC
+            access_type = ArrayAccessType.INC
 
     if mat.nested:
         ridx, cidx = map(just_one, just_one(mat.nest_labels))
@@ -752,10 +764,10 @@ def _compile_petscmat(assignment, loop_indices, codegen_context):
     # now emit the right line of code, this should properly be a lp.ScalarCallable
     # https://petsc.org/release/manualpages/Mat/MatGetValuesLocal/
 
-    rmap = assignment.mat_arg.rmap
-    cmap = assignment.mat_arg.cmap
+    rmap = mat.rmap
+    cmap = mat.cmap
 
-    codegen_context.add_array(assignment.mat_arg)
+    codegen_context.add_array(mat)
     codegen_context.add_array(array)
     codegen_context.add_array(rmap)
     codegen_context.add_array(cmap)
@@ -797,7 +809,7 @@ def _compile_petscmat(assignment, loop_indices, codegen_context):
     # TODO: The following code should be done in a loop per submat.
 
     # these sizes can be expressions that need evaluating
-    rsize, csize = assignment.mat_arg.shape
+    rsize, csize = mat.shape
 
     if not isinstance(rsize, numbers.Integral):
         raise NotImplementedError
@@ -828,12 +840,12 @@ def _compile_petscmat(assignment, loop_indices, codegen_context):
     myargs = [
         assignment, mat_name, array_name, rsize_var, csize_var, irow, icol, blocked
     ]
-    if assignment.access_type == ArrayAccessType.READ:
+    if access_type == ArrayAccessType.READ:
         call_str = _petsc_mat_load(*myargs)
-    elif assignment.access_type == ArrayAccessType.WRITE:
+    elif access_type == ArrayAccessType.WRITE:
         call_str = _petsc_mat_store(*myargs)
     else:
-        assert assignment.access_type == ArrayAccessType.INC
+        assert access_type == ArrayAccessType.INC
         call_str = _petsc_mat_add(*myargs)
 
     codegen_context.add_cinstruction(call_str)
@@ -1055,190 +1067,6 @@ def _(dat: Dat, /, iname_map, context, path=None):
     return rexpr
 
 
-# TODO: remove this class
-class JnameSubstitutor(pym.mapper.IdentityMapper):
-    def __init__(self, replace_map, codegen_context):
-        assert False, "old code!"
-        self._replace_map = replace_map
-        self._codegen_context = codegen_context
-
-    def map_axis_variable(self, expr):
-        return self._replace_map[expr.axis_label]
-
-    # this is cleaner if I do it as a single line expression
-    # rather than register assignments for things.
-    def map_array(self, expr):
-        # Register data
-        self._codegen_context.add_array(expr.array)
-        new_name = self._codegen_context.actual_to_kernel_rename_map[expr.array.name]
-
-        replace_map = {ax: self.rec(expr_) for ax, expr_ in expr.indices.items()}
-        replace_map.update(self._replace_map)
-
-        # doing this is putting zeros where I don't want them!
-        # my_layouts = subst_layouts(expr.array, expr.path, expr.indices, expr.array.layouts)[expr.path]
-        # layout = my_layouts[expr.path]
-
-        # We need to substitute expr.indices into expr.layouts
-        layout = expr.array.axes.layouts[expr.path]
-        # mylayout = expr.array.subst_layouts[expr.path]
-        # layout = IndexExpressionReplacer(expr.indices)(mylayout)
-
-        offset_expr = make_offset_expr(
-            # expr.array.subst_layouts[expr.path],
-            layout,
-            replace_map,
-            self._codegen_context,
-        )
-
-        rexpr = pym.subscript(pym.var(new_name), offset_expr)
-        return rexpr
-
-    def map_called_map(self, expr):
-        if not isinstance(expr.function.map_component.array, Dat):
-            raise NotImplementedError("Affine map stuff not supported yet")
-
-        # TODO I think I can clean the indexing up a lot here
-        inner_expr = {axis: self.rec(idx) for axis, idx in expr.parameters.items()}
-        map_array = expr.function.map_component.array
-
-        # handle [map0(p)][map1(p)] where map0 does not have an associated loop
-        try:
-            jname = self._replace_map[expr.function.full_map.name]
-        except KeyError:
-            jname = self._codegen_context.unique_name("j")
-            self._codegen_context.add_temporary(jname)
-            jname = pym.var(jname)
-
-        # ? = map[j0, j1]
-        # where j0 comes from the from_index and j1 is advertised as the shape
-        # of the resulting axis (jname_per_cpt)
-        # j0 is now fixed but j1 can still be changed
-        rootaxis = map_array.axes.root
-        inner_axis, inner_cpt = map_array.axes.leaf
-
-        # the inner_expr tells us the right mapping for the temporary, however,
-        # for maps that are arrays the innermost axis label does not always match
-        # the label used by the temporary. Therefore we need to do a swap here.
-        # I don't like this.
-        replace_map = inner_expr.copy()
-        replace_map[inner_axis.label] = replace_map.pop(expr.function.full_map.name)
-
-        jname_expr = _scalar_assignment(
-            map_array,
-            pmap({rootaxis.label: just_one(rootaxis.components).label})
-            | pmap({inner_axis.label: inner_cpt.label}),
-            replace_map,
-            self._codegen_context,
-        )
-        return jname_expr
-
-    def map_loop_index(self, expr):
-        return self._replace_map[expr.id][expr.axis]
-
-    def map_call(self, expr):
-        if expr.function.name == "mybsearch":
-            return self._map_bsearch(expr)
-        else:
-            raise NotImplementedError("hmm")
-
-    def _map_bsearch(self, expr):
-        indices_var, axis_var = expr.parameters
-        indices = indices_var.array
-
-        leaf_axis = indices.axes.leaf_axis
-        leaf_component = indices.axes.leaf_component
-        ctx = self._codegen_context
-
-        # should do elsewhere?
-        ctx.add_array(indices)
-
-        # for reference
-        """
-        void *bsearch(
-            const void *key,
-            const void *base,
-            size_t nitems,
-            size_t size,
-            int (*compar)(const void *, const void *)
-        )
-        """
-        # key
-        key_varname = ctx.unique_name("key")
-        ctx.add_temporary(key_varname)
-        key_var = pym.var(key_varname)
-        key_expr = self.rec(axis_var)
-        ctx.add_assignment(key_var, key_expr)
-
-        # base
-        # replace loop indices with axis variables - this feels very hacky
-        replace_map = {}
-        for key, replace_expr in self._replace_map.items():
-            # loop indices
-            if isinstance(replace_expr, tuple):
-                # use target exprs
-                replace_expr = replace_expr[1]
-                for ax, rep_expr in replace_expr.items():
-                    replace_map[ax] = rep_expr
-            else:
-                replace_map[key] = replace_expr
-        # and set start to zero
-        start_replace_map = replace_map.copy()
-        start_replace_map[leaf_axis.label] = 0
-
-        start_expr = make_offset_expr(
-            indices.subst_layouts[indices.axes.path(leaf_axis, leaf_component)],
-            start_replace_map,
-            self._codegen_context,
-        )
-        base_varname = ctx.unique_name("base")
-
-        # rename things
-        indices_name = ctx.actual_to_kernel_rename_map[indices.name]
-        renamer = Renamer(ctx.actual_to_kernel_rename_map)
-        start_expr = renamer(start_expr)
-
-        # breaks if unsigned
-        ctx.add_cinstruction(
-            f"int32_t* {base_varname} = {indices_name} + {start_expr};", {indices_name}
-        )
-
-        # nitems
-        nitems_varname = ctx.unique_name("nitems")
-        ctx.add_temporary(nitems_varname)
-
-        nitems_expr = register_extent(leaf_component._collective_count, replace_map, ctx)
-
-        # result
-        found_varname = ctx.unique_name("ptr")
-
-        # call
-        bsearch_str = f"int32_t* {found_varname} = (int32_t*) bsearch(&{key_var}, {base_varname}, {nitems_expr}, sizeof(int32_t), cmpfunc);"
-        ctx.add_cinstruction(bsearch_str, {indices.name})
-
-        # equivalent to offset_var = found_var - base_var (but pointer arithmetic is hard in loopy)
-        offset_varname = ctx.unique_name("offset")
-        ctx.add_temporary(offset_varname)
-        offset_var = pym.var(offset_varname)
-        offset_str = f"size_t {offset_varname} = {found_varname} - {base_varname};"
-        ctx.add_cinstruction(offset_str, {indices.name})
-
-        # This gives us a pointer to the right place in the array. To recover
-        # the offset we need to subtract the initial offset (if nested) and also
-        # the address of the array itself.
-        return offset_var
-        # return offset_var - start_expr
-
-
-# TODO: remove!
-def make_offset_expr(
-    layouts,
-    jname_replace_map,
-    codegen_context,
-):
-    return JnameSubstitutor(jname_replace_map, codegen_context)(layouts)
-
-
 def register_extent(extent, iname_replace_map, ctx):
     if isinstance(extent, numbers.Integral):
         return extent
@@ -1260,40 +1088,6 @@ class VariableReplacer(pym.mapper.IdentityMapper):
 
     def map_variable(self, expr):
         return self._replace_map.get(expr.name, expr)
-
-
-def _scalar_assignment(
-    array,
-    source_path,
-    index_exprs,
-    iname_replace_map,
-    ctx,
-):
-    assert False, "old code"
-    # Register data
-    ctx.add_array(array)
-
-    # can this all go?
-    index_keys = [None] + [
-        (axis.id, cpt.label)
-        for axis, cpt in array.axes.detailed_path(source_path).items()
-    ]
-    target_path = merge_dicts(array.axes.target_path.get(key, {}) for key in index_keys)
-
-    jname_replace_map = {}
-    replacer = JnameSubstitutor(iname_replace_map, ctx)
-    for axlabel, index_expr in index_exprs.items():
-        jname_replace_map[axlabel] = replacer(index_expr)
-
-    # subst_layouts?
-    offset_expr = make_offset_expr(
-        array.axes.layouts[target_path],
-        jname_replace_map,
-        ctx,
-    )
-    name = ctx.actual_to_kernel_rename_map[array.name]
-    rexpr = pym.subscript(pym.var(name), offset_expr)
-    return rexpr
 
 
 # lives here??

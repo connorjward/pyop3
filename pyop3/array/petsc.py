@@ -465,6 +465,8 @@ class AbstractMat(Array):
         loop_list = LoopList(loops)
         loop_list()
 
+        # breakpoint()
+
         return rmap
 
     @cached_property

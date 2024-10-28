@@ -6,9 +6,6 @@ import pyop3 as op3
 
 @pytest.mark.parametrize("reshaped", ["lhs", "rhs"])
 def test_linear_reshaped_assign(reshaped):
-    if reshaped == "rhs":
-        pytest.skip("Need to consider that expression axes must be a subset of assignee's")
-
     axes1 = op3.AxisTree.from_iterable([10, 3])
     axes2 = op3.AxisTree(op3.Axis(15))
 

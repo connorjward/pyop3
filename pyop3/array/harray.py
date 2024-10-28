@@ -25,6 +25,7 @@ from pyop3.exceptions import Pyop3Exception
 from pyop3.lang import KernelArgument, Assignment
 from pyop3.log import warning
 from pyop3.utils import (
+    Record,
     deprecated,
     just_one,
     strictly_all,
@@ -82,7 +83,7 @@ class FancyIndexWriteException(Exception):
     pass
 
 
-class Dat(Array, KernelArgument):
+class Dat(Array, KernelArgument, Record):
     """Multi-dimensional, hierarchical array.
 
     Parameters
@@ -148,7 +149,7 @@ class Dat(Array, KernelArgument):
             )
 
         self.buffer = data
-        self._axes = axes
+        self.axes = axes
         self.max_value = max_value
 
         # TODO This attr really belongs to the buffer not the array
@@ -157,6 +158,10 @@ class Dat(Array, KernelArgument):
         self.transform = transform
 
         # self._cache = {}
+
+    @property
+    def _record_fields(self) -> frozenset:
+        return frozenset({"axes", "buffer", "max_value", "name", "constant", "transform"})
 
     def __str__(self) -> str:
         return "\n".join(
@@ -167,17 +172,7 @@ class Dat(Array, KernelArgument):
     def __getitem__(self, indices):
         return self.getitem(indices, strict=False)
 
-    def __eq__(self, other: Any) -> bool:
-        return (
-            type(self) is type(other)
-            and self.axes == other.axes
-            and self.dtype == other.dtype
-            and self.buffer is other.buffer
-            and self.max_value == other.max_value
-            and self.name == other.name
-            and self.constant == other.constant
-        )
-
+    # TODO: redo now that we have Record?
     def __hash__(self) -> int:
         return hash(
             (
@@ -222,9 +217,7 @@ class Dat(Array, KernelArgument):
                 raise NotImplementedError("Need axis forests")
             else:
                 indexed_axes = just_one(indexed_axess)
-                dat = Dat(
-                    indexed_axes, data=self.buffer, max_value=self.max_value, name=self.name
-                )
+                dat = self.reconstruct(axes=indexed_axes)
         else:
             raise NotImplementedError
             context_sensitive_axes = {}
@@ -235,9 +228,7 @@ class Dat(Array, KernelArgument):
                 context_sensitive_axes[loop_context] = axes
             context_sensitive_axes = ContextSensitiveAxisTree(context_sensitive_axes)
 
-            dat = Dat(
-                context_sensitive_axes, data=self.buffer, name=self.name, max_value=self.max_value
-            )
+            dat = self.reconstruct(axes=context_sensitive_axes)
         # self._cache[key] = dat
         return dat
 
@@ -246,16 +237,19 @@ class Dat(Array, KernelArgument):
     __iter__ = None
 
     def with_context(self, context):
-        return type(self)(
-            self.axes.with_context(context),
-            name=self.name,
-            data=self.buffer,
-            max_value=self.max_value,
-            constant=self.constant,
-        )
+        return self.reconstruct(axes=self.axes.with_context(context))
+        # return type(self)(
+        #     self.axes.with_context(context),
+        #     name=self.name,
+        #     data=self.buffer,
+        #     max_value=self.max_value,
+        #     constant=self.constant,
+        #     transform=self.transform,
+        # )
 
     @property
     def context_free(self, context):
+        return self.reconstruct(axes=self.axes.context_free)
         return type(self)(
             self.axes.context_free,
             name=self.name,
@@ -383,10 +377,6 @@ class Dat(Array, KernelArgument):
             )
 
     @property
-    def axes(self):
-        return self._axes
-
-    @property
     def outer_loops(self):
         return self._outer_loops
 
@@ -440,6 +430,7 @@ class Dat(Array, KernelArgument):
 
     def materialize(self) -> Dat:
         """Return a new "unindexed" array with the same shape."""
+        assert False, "old code"
         return type(self)(self.axes.materialize(), dtype=self.dtype)
 
     def iter_indices(self, outer_map):
@@ -514,6 +505,7 @@ class Dat(Array, KernelArgument):
 
     # better to call copy
     def copy2(self):
+        assert False, "old?"
         return type(self)(
             self.axes,
             data=self.buffer.copy(),
@@ -554,18 +546,10 @@ class Dat(Array, KernelArgument):
 
         assert isinstance(axes, AxisTree), "not indexed"
 
-        # NOTE: This will get nicer if we have a pyop3_init special method for this
-        # sort of object to facilitate reconstruction
-        return type(self)(
-            axes,
-            data=self.buffer,
-            max_value=self.max_value,
-            name=self.name,
-            constant=self.constant,
-            transform=DatReshape(self),
-        )
+        return self.reconstruct(axes=axes, transform=DatReshape(self))
 
     # NOTE: should this only accept AxisTrees, or are IndexedAxisTrees fine also?
+    # is this ever used?
     def with_axes(self, axes) -> Dat:
         """Return a view of the current `Dat` with new axes.
 
@@ -585,12 +569,4 @@ class Dat(Array, KernelArgument):
                 "New axis tree is a different size to the existing one."
             )
 
-        # NOTE: This will get nicer if we have a pyop3_init special method for this
-        # sort of object to facilitate reconstruction
-        return type(self)(
-            axes,
-            data=self.buffer,
-            max_value=self.max_value,
-            name=self.name,
-            constant=self.constant,
-        )
+        return self.reconstruct(axes=axes)

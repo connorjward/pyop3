@@ -35,7 +35,7 @@ from pyop3.lang import (
     Instruction,
     Loop,
     InstructionList,
-    # PetscMatAccess,
+    ArrayAccessType,
 )
 from pyop3.utils import UniqueNameGenerator, checked_zip, just_one, single_valued, OrderedSet, merge_dicts, expand_collection_of_iterables
 
@@ -387,25 +387,6 @@ def _requires_pack_unpack(arg):
     return isinstance(arg, (Dat, AbstractMat))
 
 
-@expand_array_transformations.register(Assignment)
-def _(assignment: Assignment, /) -> InstructionList:
-    # NOTE: I think perhaps we need a new type for this...
-    if any(isinstance(x, AbstractMat) for x in {assignment.assignee, assignment.expression}):
-        mat_arg = just_one(arg for arg in {assignment.assignee, assignment.expression} if isinstance(arg, AbstractMat))
-        # if mat_arg.transform:
-        #     raise NotImplementedError
-        # else:
-        #     return InstructionList([assignment])
-        return InstructionList([assignment])
-
-    bare_expression, input_insns = _generate_array_transformations(assignment.expression, "in")
-    bare_assignee, output_insns = _generate_array_transformations(assignment.assignee, "out")
-
-    bare_assignment = Assignment(bare_assignee, bare_expression, assignment.assignment_type)
-
-    return InstructionList([*input_insns, bare_assignment, *output_insns])
-
-
 @functools.singledispatch
 def expand_assignments(obj: Any, /) -> InstructionList:
     raise TypeError(f"No handler provided for {type(obj).__name__}")
@@ -433,19 +414,27 @@ def _(func: CalledFunction, /) -> InstructionList:
 
 @expand_assignments.register(Assignment)
 def _(assignment: Assignment, /) -> InstructionList:
-    # NOTE: I think perhaps we need a new type for this...
-    if any(isinstance(x, AbstractMat) for x in {assignment.assignee, assignment.expression}):
-        mat_arg = just_one(arg for arg in {assignment.assignee, assignment.expression} if isinstance(arg, AbstractMat))
-        # if mat_arg.transform:
-        #     raise NotImplementedError
-        # else:
-        #     return InstructionList([assignment])
+    # NOTE: This is incorrect, we only include this because if we have a 'basic' matrix assignment
+    # like
+    #
+    #     mat[f(p), f(p)] <- t0
+    #
+    # we don't want to expand it into
+    #
+    #     t1 <- t0
+    #     mat[f(p), f(p)] <- t1
+    if assignment.is_mat_access:
         return InstructionList([assignment])
 
+    # first generate any expression instructions
     bare_expression, input_insns = _generate_array_transformations(assignment.expression, "in")
-    bare_assignee, output_insns = _generate_array_transformations(assignment.assignee, assignment.assignment_type)
 
-    bare_assignment = Assignment(bare_assignee, bare_expression, assignment.assignment_type)
+    if assignment.assignee.transform:
+        bare_assignee, output_insns = _generate_array_transformations(assignment.assignee, assignment.assignment_type)
+        bare_assignment = Assignment(bare_assignee, bare_expression, AssignmentType.WRITE)
+    else:
+        bare_assignment = Assignment(assignment.assignee, bare_expression, assignment.assignment_type)
+        output_insns = ()
 
     return InstructionList([*input_insns, bare_assignment, *output_insns])
 
@@ -492,12 +481,12 @@ def _(mat: AbstractMat, /, mode):
     temp = Dat(mat.axes, data=NullBuffer(mat.dtype), prefix="t")
 
     # NOTE: mode must encode more information than an assignment!
-    if mode == AssignmentType.READ:
+    if mode == ArrayAccessType.READ:
         assignment = Assignment(temp, mat, "write")
-    elif mode == AssignmentType.WRITE:
+    elif mode == ArrayAccessType.WRITE:
         assignment = Assignment(mat, temp, "write")
     else:
-        assert mode == AssignmentType.INC
+        assert mode == ArrayAccessType.INC
         assignment = Assignment(mat, temp, "inc")
 
     return (temp, (assignment,))
@@ -514,16 +503,21 @@ def _(reshape: DatReshape, /, dat, mode):
     temp_initial_axes = AxisTree(reshape.initial.axes.node_map)
     temp_initial = Dat(temp_initial_axes, data=NullBuffer(dat.dtype), prefix="t")
 
-    temp_axes_reshaped = AxisTree(dat.axes.node_map)
-    temp_reshaped = temp_initial.with_axes(temp_axes_reshaped)
+    # temp_axes_reshaped = AxisTree(dat.axes.node_map)
+    temp_reshaped = temp_initial.with_axes(dat.axes)
+
+    # temp_reshaped = Dat(axes=dat.axes, transform=None, data=NullBuffer(dat.dtype), prefix="t")
 
     transformed_dat, transform_insns = _generate_array_transformations(reshape.initial, mode)
 
     if mode == "in":
         assignment = Assignment(temp_initial, transformed_dat, "write")
-    else:
-        assert mode == "out"
+    # TODO: Think hard about the access types here.
+    elif mode == AssignmentType.WRITE:
         assignment = Assignment(transformed_dat, temp_initial, "write")
+    else:
+        assert mode == AssignmentType.INC
+        assignment = Assignment(transformed_dat, temp_initial, "inc")
 
     return (temp_reshaped, transform_insns + (assignment,))
 
