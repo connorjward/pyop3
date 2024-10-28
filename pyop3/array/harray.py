@@ -103,9 +103,9 @@ class Dat(Array, KernelArgument, Record):
         name=None,
         prefix=None,
         constant=False,
-        transform=None,
+        parent=None,
     ):
-        super().__init__(name=name, prefix=prefix)
+        super().__init__(name=name, prefix=prefix, parent=parent)
 
         axes = as_axis_tree(axes)
 
@@ -155,13 +155,11 @@ class Dat(Array, KernelArgument, Record):
         # TODO This attr really belongs to the buffer not the array
         self.constant = constant
 
-        self.transform = transform
-
         # self._cache = {}
 
     @property
     def _record_fields(self) -> frozenset:
-        return frozenset({"axes", "buffer", "max_value", "name", "constant", "transform"})
+        return frozenset({"axes", "buffer", "max_value", "name", "constant", "parent"})
 
     def __str__(self) -> str:
         return "\n".join(
@@ -238,14 +236,6 @@ class Dat(Array, KernelArgument, Record):
 
     def with_context(self, context):
         return self.reconstruct(axes=self.axes.with_context(context))
-        # return type(self)(
-        #     self.axes.with_context(context),
-        #     name=self.name,
-        #     data=self.buffer,
-        #     max_value=self.max_value,
-        #     constant=self.constant,
-        #     transform=self.transform,
-        # )
 
     @property
     def context_free(self, context):
@@ -542,11 +532,9 @@ class Dat(Array, KernelArgument, Record):
         TODO
 
         """
-        from pyop3.array.transforms import DatReshape
-
         assert isinstance(axes, AxisTree), "not indexed"
 
-        return self.reconstruct(axes=axes, transform=DatReshape(self))
+        return self.reconstruct(axes=axes, parent=self)
 
     # NOTE: should this only accept AxisTrees, or are IndexedAxisTrees fine also?
     # is this ever used?

@@ -1034,7 +1034,7 @@ def _(loop_var: LoopIndexVar, iname_map, context, path=None):
 
 @lower_expr.register(Dat)
 def _(dat: Dat, /, iname_map, context, path=None):
-    assert not dat.transform, "should be handled in preprocessing"
+    assert not dat.parent, "Should be handled in preprocessing"
 
     context.add_array(dat)
 

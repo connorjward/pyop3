@@ -13,7 +13,6 @@ from pyrsistent import pmap, PMap
 from immutabledict import ImmutableOrderedDict
 
 from pyop3.array import Dat, AbstractMat
-from pyop3.array.transforms import DatReshape
 from pyop3.array.petsc import AbstractMat
 from pyop3.axtree import Axis, AxisTree, ContextFree, ContextSensitive, ContextMismatchException, ContextAware
 from pyop3.axtree.tree import Operator, AxisVar, IndexedAxisTree
@@ -427,7 +426,7 @@ def _(assignment: Assignment, /) -> InstructionList:
         raise NotImplementedError("think")
         return InstructionList([assignment])
 
-    bare_expression, extra_input_insns = _generate_array_transformations(
+    bare_expression, extra_input_insns = _expand_reshapes(
         assignment.expression, ArrayAccessType.READ
     )
 
@@ -437,56 +436,67 @@ def _(assignment: Assignment, /) -> InstructionList:
         assert assignment.assignment_type == AssignmentType.INC
         assignee_access_type = ArrayAccessType.INC
 
-    bare_assignee, extra_output_insns = _generate_array_transformations(
+    bare_assignee, extra_output_insns = _expand_reshapes(
         assignment.assignee, assignee_access_type
     )
 
-    # if assignment.assignee.transform:
-    #     bare_assignee, output_insns = _generate_array_transformations(assignment.assignee, assignment.assignment_type)
-    #     bare_assignment = Assignment(bare_assignee, bare_expression, AssignmentType.WRITE)
-    # else:
-    #     bare_assignment = Assignment(assignment.assignee, bare_expression, assignment.assignment_type)
-    #     output_insns = ()
-
-    if extra_output_insns:
-        bare_assignment = Assignment(bare_assignee, bare_expression, "write")
-    else:
+    if bare_assignee == assignment.assignee:
         bare_assignment = Assignment(bare_assignee, bare_expression, assignment.assignment_type)
+    else:
+        bare_assignment = Assignment(bare_assignee, bare_expression, "write")
 
     return InstructionList([*extra_input_insns, bare_assignment, *extra_output_insns])
 
 
 # TODO: better word than "mode"? And use an enum.
 @functools.singledispatch
-def _generate_array_transformations(expr: Any, /, mode):
+def _expand_reshapes(expr: Any, /, mode):
     raise TypeError(f"No handler provided for {type(expr).__name__}")
 
 
-@_generate_array_transformations.register(Operator)
+@_expand_reshapes.register(Operator)
 def _(op: Operator, /, access_type):
-    bare_a, a_insns = _generate_array_transformations(op.a, access_type)
-    bare_b, b_insns = _generate_array_transformations(op.b, access_type)
-    # reconstruct?
+    bare_a, a_insns = _expand_reshapes(op.a, access_type)
+    bare_b, b_insns = _expand_reshapes(op.b, access_type)
     return (type(op)(bare_a, bare_b), a_insns + b_insns)
 
 
-@_generate_array_transformations.register(numbers.Number)
-@_generate_array_transformations.register(AxisVar)
-@_generate_array_transformations.register(LoopIndexVar)
+@_expand_reshapes.register(numbers.Number)
+@_expand_reshapes.register(AxisVar)
+@_expand_reshapes.register(LoopIndexVar)
 def _(var, /, access_type):
     return (var, ())
 
 
-@_generate_array_transformations.register(Dat)
+@_expand_reshapes.register(Dat)
 def _(dat: Dat, /, access_type):
-    if dat.transform:
-        bare_dat, extra_insns = _generate_array_transformations2(dat.transform, dat, access_type)
-        return (bare_dat, extra_insns)
+    if dat.parent:
+        temp_initial = Dat(
+            AxisTree(dat.parent.axes.node_map),
+            data=NullBuffer(dat.dtype),
+            prefix="t"
+        )
+        temp_reshaped = temp_initial.with_axes(dat.axes)
+
+        transformed_dat, extra_insns = _expand_reshapes(dat.parent, access_type)
+
+        if extra_insns:
+            raise NotImplementedError("Pretty sure this doesn't work as is")
+
+        if access_type == ArrayAccessType.READ:
+            assignment = Assignment(temp_initial, transformed_dat, "write")
+        elif access_type == ArrayAccessType.WRITE:
+            assignment = Assignment(transformed_dat, temp_initial, "write")
+        else:
+            assert access_type == ArrayAccessType.INC
+            assignment = Assignment(transformed_dat, temp_initial, "inc")
+
+        return (temp_reshaped, extra_insns + (assignment,))
     else:
         return (dat, ())
 
 
-@_generate_array_transformations.register(AbstractMat)
+@_expand_reshapes.register(AbstractMat)
 def _(mat: AbstractMat, /, mode):
     raise NotImplementedError("TODO")
     if not any(isinstance(axes, IndexedAxisTree) for axes in {mat.raxes, mat.caxes}):
@@ -504,34 +514,6 @@ def _(mat: AbstractMat, /, mode):
         assignment = Assignment(mat, temp, "inc")
 
     return (temp, (assignment,))
-
-
-# TODO: Need a good name for this.
-@functools.singledispatch
-def _generate_array_transformations2(expr: Any, /, access_type):
-    raise TypeError(f"No handler provided for {type(expr).__name__}")
-
-
-@_generate_array_transformations2.register(DatReshape)
-def _(reshape: DatReshape, /, dat, access_type):
-    temp_initial_axes = AxisTree(reshape.initial.axes.node_map)
-    temp_initial = Dat(temp_initial_axes, data=NullBuffer(dat.dtype), prefix="t")
-
-    temp_reshaped = temp_initial.with_axes(dat.axes)
-
-    transformed_dat, extra_insns = _generate_array_transformations(reshape.initial, access_type)
-
-    if access_type == ArrayAccessType.READ:
-        assignment = Assignment(temp_initial, transformed_dat, "write")
-    # TODO: Think hard about the access types here.
-    elif access_type == ArrayAccessType.WRITE:
-        assignment = Assignment(transformed_dat, temp_initial, "write")
-    else:
-        assert access_type == ArrayAccessType.INC
-        assignment = Assignment(transformed_dat, temp_initial, "inc")
-
-    return (temp_reshaped, extra_insns + (assignment,))
-
 
 
 

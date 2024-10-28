@@ -66,7 +66,7 @@ def evaluate(expr: Any, *args, **kwargs):
 
 @evaluate.register
 def _(dat: Dat, indices):
-    if dat.transform:
+    if dat.parent:
         raise NotImplementedError
 
     if not dat.axes.is_linear:
@@ -122,8 +122,8 @@ def _(op: Operator):
 def _(dat: Dat, /) -> OrderedSet:
     loop_indices = OrderedSet()
 
-    if dat.transform:
-        loop_indices |= collect_loops(dat.transform.initial)
+    if dat.parent:
+        loop_indices |= collect_loops(dat.parent)
 
     for leaf in dat.axes.leaves:
         path = dat.axes.path(leaf)
@@ -134,8 +134,8 @@ def _(dat: Dat, /) -> OrderedSet:
 @collect_loops.register(AbstractMat)
 def _(mat: AbstractMat, /) -> OrderedSet:
     loop_indices = OrderedSet()
-    if mat.transform:
-        loop_indices |= collect_loops(mat.transform.initial)
+    if mat.parent:
+        loop_indices |= collect_loops(mat.parent)
 
     for cs_axes in {mat.raxes, mat.caxes}:
         for cf_axes in cs_axes.context_map.values():

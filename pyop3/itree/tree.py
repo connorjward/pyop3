@@ -100,7 +100,7 @@ def _(num: numbers.Number, axes, pathsandexprs):
 
 @replace.register
 def _(array: Array, axes, paths_and_exprs):
-    if array.transform:
+    if array.parent:
         raise NotImplementedError
     # breakpoint()
     if not isinstance(array, Dat):

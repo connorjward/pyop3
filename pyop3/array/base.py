@@ -10,10 +10,12 @@ class Array(ContextAware, FunctionArgument, Terminal, abc.ABC):
     _prefix = "array"
     _name_generator = UniqueNameGenerator()
 
-    def __init__(self, name=None, *, prefix=None) -> None:
+    def __init__(self, name=None, *, prefix=None, parent=None) -> None:
         if name and prefix:
             raise ValueError("Can only specify one of name and prefix")
         self.name = name or self._name_generator(prefix or self._prefix)
+
+        self.parent = parent
 
     def assign(self, other, /, *, eager=False):
         expr = Assignment(self, other, "write")
