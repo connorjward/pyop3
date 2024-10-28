@@ -424,19 +424,36 @@ def _(assignment: Assignment, /) -> InstructionList:
     #     t1 <- t0
     #     mat[f(p), f(p)] <- t1
     if assignment.is_mat_access:
+        raise NotImplementedError("think")
         return InstructionList([assignment])
 
-    # first generate any expression instructions
-    bare_expression, input_insns = _generate_array_transformations(assignment.expression, "in")
+    bare_expression, extra_input_insns = _generate_array_transformations(
+        assignment.expression, ArrayAccessType.READ
+    )
 
-    if assignment.assignee.transform:
-        bare_assignee, output_insns = _generate_array_transformations(assignment.assignee, assignment.assignment_type)
-        bare_assignment = Assignment(bare_assignee, bare_expression, AssignmentType.WRITE)
+    if assignment.assignment_type == AssignmentType.WRITE:
+        assignee_access_type = ArrayAccessType.WRITE
     else:
-        bare_assignment = Assignment(assignment.assignee, bare_expression, assignment.assignment_type)
-        output_insns = ()
+        assert assignment.assignment_type == AssignmentType.INC
+        assignee_access_type = ArrayAccessType.INC
 
-    return InstructionList([*input_insns, bare_assignment, *output_insns])
+    bare_assignee, extra_output_insns = _generate_array_transformations(
+        assignment.assignee, assignee_access_type
+    )
+
+    # if assignment.assignee.transform:
+    #     bare_assignee, output_insns = _generate_array_transformations(assignment.assignee, assignment.assignment_type)
+    #     bare_assignment = Assignment(bare_assignee, bare_expression, AssignmentType.WRITE)
+    # else:
+    #     bare_assignment = Assignment(assignment.assignee, bare_expression, assignment.assignment_type)
+    #     output_insns = ()
+
+    if extra_output_insns:
+        bare_assignment = Assignment(bare_assignee, bare_expression, "write")
+    else:
+        bare_assignment = Assignment(bare_assignee, bare_expression, assignment.assignment_type)
+
+    return InstructionList([*extra_input_insns, bare_assignment, *extra_output_insns])
 
 
 # TODO: better word than "mode"? And use an enum.
@@ -446,9 +463,9 @@ def _generate_array_transformations(expr: Any, /, mode):
 
 
 @_generate_array_transformations.register(Operator)
-def _(op: Operator, /, mode):
-    bare_a, a_insns = _generate_array_transformations(op.a, mode)
-    bare_b, b_insns = _generate_array_transformations(op.b, mode)
+def _(op: Operator, /, access_type):
+    bare_a, a_insns = _generate_array_transformations(op.a, access_type)
+    bare_b, b_insns = _generate_array_transformations(op.b, access_type)
     # reconstruct?
     return (type(op)(bare_a, bare_b), a_insns + b_insns)
 
@@ -456,25 +473,22 @@ def _(op: Operator, /, mode):
 @_generate_array_transformations.register(numbers.Number)
 @_generate_array_transformations.register(AxisVar)
 @_generate_array_transformations.register(LoopIndexVar)
-def _(var, /, mode):
+def _(var, /, access_type):
     return (var, ())
 
 
 @_generate_array_transformations.register(Dat)
-def _(dat: Dat, /, mode):
-    # NOTE: In this function we assume that subst_layouts cannot contain
-    # any transformations. This is probably never going to occur but for
-    # things to work properly we should be tracking the path so as not
-    # to emit unnecessary assignments.
+def _(dat: Dat, /, access_type):
     if dat.transform:
-        bare_dat, transform_insns = _generate_array_transformations2(dat.transform, dat, mode)
-        return (bare_dat, transform_insns)
+        bare_dat, extra_insns = _generate_array_transformations2(dat.transform, dat, access_type)
+        return (bare_dat, extra_insns)
     else:
         return (dat, ())
 
 
 @_generate_array_transformations.register(AbstractMat)
 def _(mat: AbstractMat, /, mode):
+    raise NotImplementedError("TODO")
     if not any(isinstance(axes, IndexedAxisTree) for axes in {mat.raxes, mat.caxes}):
         raise NotImplementedError("Always expecting a packed matrix")
 
@@ -494,32 +508,29 @@ def _(mat: AbstractMat, /, mode):
 
 # TODO: Need a good name for this.
 @functools.singledispatch
-def _generate_array_transformations2(expr: Any, /, mode):
+def _generate_array_transformations2(expr: Any, /, access_type):
     raise TypeError(f"No handler provided for {type(expr).__name__}")
 
 
 @_generate_array_transformations2.register(DatReshape)
-def _(reshape: DatReshape, /, dat, mode):
+def _(reshape: DatReshape, /, dat, access_type):
     temp_initial_axes = AxisTree(reshape.initial.axes.node_map)
     temp_initial = Dat(temp_initial_axes, data=NullBuffer(dat.dtype), prefix="t")
 
-    # temp_axes_reshaped = AxisTree(dat.axes.node_map)
     temp_reshaped = temp_initial.with_axes(dat.axes)
 
-    # temp_reshaped = Dat(axes=dat.axes, transform=None, data=NullBuffer(dat.dtype), prefix="t")
+    transformed_dat, extra_insns = _generate_array_transformations(reshape.initial, access_type)
 
-    transformed_dat, transform_insns = _generate_array_transformations(reshape.initial, mode)
-
-    if mode == "in":
+    if access_type == ArrayAccessType.READ:
         assignment = Assignment(temp_initial, transformed_dat, "write")
     # TODO: Think hard about the access types here.
-    elif mode == AssignmentType.WRITE:
+    elif access_type == ArrayAccessType.WRITE:
         assignment = Assignment(transformed_dat, temp_initial, "write")
     else:
-        assert mode == AssignmentType.INC
+        assert access_type == ArrayAccessType.INC
         assignment = Assignment(transformed_dat, temp_initial, "inc")
 
-    return (temp_reshaped, transform_insns + (assignment,))
+    return (temp_reshaped, extra_insns + (assignment,))
 
 
 
