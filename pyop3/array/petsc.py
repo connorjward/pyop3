@@ -13,6 +13,7 @@ from pyrsistent import freeze, pmap
 from pyop3.array.base import Array
 from pyop3.array.harray import Dat
 from pyop3.axtree.tree import (
+    merge_axis_trees,
     AxisTree,
     ContextSensitiveAxisTree,
     ContextFree,
@@ -20,6 +21,7 @@ from pyop3.axtree.tree import (
     as_axis_tree,
     relabel_axes,
 )
+from pyop3.buffer import DistributedBuffer
 from pyop3.dtypes import IntType, ScalarType
 from pyop3.lang import Loop, LoopList, Assignment
 from pyop3.utils import (
@@ -64,8 +66,6 @@ class AbstractMat(Array, Record):
     _row_suffix = "_row"
     _col_suffix = "_col"
 
-    # TODO: target paths and index exprs should be part of raxes, caxes
-    # def __init__(self, raxes, caxes, mat=None, *, name=None):
     def __init__(
         self,
         raxes,
@@ -74,34 +74,51 @@ class AbstractMat(Array, Record):
         mat=None,
         *,
         name=None,
+        prefix=None,
         block_shape=1,  # NOTE: Not sure about this default
         parent=None,
+        constant=False,
     ):
         raxes = as_axis_tree(raxes)
         caxes = as_axis_tree(caxes)
-        self.raxes = raxes
-        self.caxes = caxes
         if mat_type is None:
             mat_type = self.DEFAULT_MAT_TYPE
 
+        # TODO: Improve the parsing here
         if mat is None:
             # Add the elements to the rows.
             mat = self._make_mat(
-                self.raxes, self.caxes, mat_type, block_shape=block_shape
+                raxes, caxes, mat_type, block_shape=block_shape
                 )
+        elif isinstance(mat, np.ndarray):
+            mat = DistributedBuffer(
+                raxes.alloc_size * caxes.alloc_size,
+                # sf,
+                dtype=mat.dtype,
+                name="anything!",
+                data=mat,
+            )
 
-        super().__init__(name)
+        super().__init__(name=name, prefix=prefix)
+        self.raxes = raxes
+        self.caxes = caxes
         self.block_shape = block_shape
         self.mat_type = mat_type
-        self.mat = mat
+        self.buffer = mat
         self.parent = parent
+        self.constant = constant
 
 
         # self._cache = {}
 
     @property
     def _record_fields(self) -> frozenset:
-        return frozenset({"raxes", "caxes", "mat_type", "mat", "name", "parent", "block_shape"})
+        return frozenset({"raxes", "caxes", "mat_type", "buffer", "name", "parent", "constant", "block_shape"})
+
+    # old alias
+    @property
+    def mat(self):
+        return self.buffer
 
     # NOTE: This is missing out on certain fields!
     def __hash__(self) -> int:
@@ -243,7 +260,6 @@ class AbstractMat(Array, Record):
 
 
     def with_context(self, context):
-        # Need a reconstruct method!
         row_axes = self.raxes.with_context(context)
         col_axes = self.caxes.with_context(context)
         return self.reconstruct(raxes=row_axes, caxes=col_axes)
@@ -253,6 +269,10 @@ class AbstractMat(Array, Record):
         row_axes = self.raxes.context_free
         col_axes = self.caxes.context_free
         return self.reconstruct(raxes=row_axes, caxes=col_axes)
+
+    @property
+    def alloc_size(self) -> int:
+        return self.raxes.alloc_size * self.caxes.alloc_size
 
     # like Dat, bad name? handle?
     @property
@@ -490,21 +510,21 @@ class AbstractMat(Array, Record):
                 merged_axes = {}
                 cs_axes = self._merge_contexts(self.raxes.context_map, self.caxes.context_map)
                 for context, (row_axes, col_axes) in cs_axes.items():
-                    merged_axes[context] = self._merge_axes(row_axes, col_axes)
+                    merged_axes[context] = merge_axis_trees([row_axes, col_axes])
                 return ContextSensitiveAxisTree(merged_axes)
             else:
                 merged_axes = {}
                 for context, row_axes in self.raxes.context_map.items():
-                    merged_axes[context] = self._merge_axes(row_axes, self.caxes)
+                    merged_axes[context] = merge_axis_trees([row_axes, self.caxes])
                 return ContextSensitiveAxisTree(merged_axes)
         else:
             if is_context_sensitive(self.caxes):
                 merged_axes = {}
                 for context, col_axes in self.caxes.context_map.items():
-                    merged_axes[context] = self._merge_axes(self.raxes, col_axes)
+                    merged_axes[context] = merge_axis_trees([self.raxes, col_axes])
                 return ContextSensitiveAxisTree(merged_axes)
             else:
-                return self._merge_axes(self.raxes, self.caxes)
+                return merge_axis_trees([self.raxes, self.caxes])
 
     @classmethod
     def _merge_axes(cls, row_axes, col_axes):
@@ -517,6 +537,7 @@ class AbstractMat(Array, Record):
         axes = raxes_relabel
         for leaf in raxes_relabel.leaves:
             axes = axes.add_subtree(caxes_relabel, leaf, uniquify_ids=True)
+
         return axes
 
     @classmethod

@@ -7,12 +7,15 @@ import collections
 import functools
 import numbers
 import operator
+from os import access
 from typing import Any, Union
 
+import numpy as np
+from petsc4py import PETSc
 from pyrsistent import pmap, PMap
 from immutabledict import ImmutableOrderedDict
 
-from pyop3.array import Dat, AbstractMat, Array
+from pyop3.array import Dat, AbstractMat, Array, Mat
 from pyop3.array.petsc import AbstractMat
 from pyop3.axtree import Axis, AxisTree, ContextFree, ContextSensitive, ContextMismatchException, ContextAware
 from pyop3.axtree.tree import Operator, AxisVar, IndexedAxisTree
@@ -34,6 +37,7 @@ from pyop3.lang import (
     Instruction,
     Loop,
     InstructionList,
+    PetscMatAssign,
     ArrayAccessType,
 )
 from pyop3.utils import UniqueNameGenerator, checked_zip, just_one, single_valued, OrderedSet, merge_dicts, expand_collection_of_iterables
@@ -289,23 +293,31 @@ class ImplicitPackUnpackExpander(Transformer):
         for (arg, intent), shape in checked_zip(
             terminal.function_arguments, terminal.argument_shapes
         ):
-            # assert isinstance(
-            #     arg, ContextFree
-            # ), "Loop contexts should already be expanded"
-
             if isinstance(arg, DummyKernelArgument):
                 arguments.append(arg)
                 continue
 
             # unpick pack/unpack instructions
             if intent != NA and _requires_pack_unpack(arg):
-                axes = AxisTree(arg.axes.node_map)
-                temporary = Dat(
-                    # arg.axes.materialize(),  # TODO
-                    axes,
-                    data=NullBuffer(arg.dtype),  # does this need a size?
-                    prefix="t",
-                )
+                # TODO: Make generic across Array types
+                if isinstance(arg, Dat):
+                    axes = AxisTree(arg.axes.node_map)
+                    temporary = Dat(
+                        # arg.axes.materialize(),  # TODO
+                        axes,
+                        data=NullBuffer(arg.dtype),  # does this need a size?
+                        prefix="t",
+                    )
+                else:
+                    assert isinstance(arg, AbstractMat)
+                    raxes = AxisTree(arg.raxes.node_map)
+                    caxes = AxisTree(arg.caxes.node_map)
+                    temporary = Mat(
+                        raxes,
+                        caxes,
+                        mat=NullBuffer(arg.dtype),
+                        prefix="t",
+                    )
 
                 if intent == READ:
                     gathers.append(Assignment(temporary, arg, "write"))
@@ -468,16 +480,26 @@ def _(var, /, access_type):
     return (var, ())
 
 
-# NOTE: Currently specific to a Dat but needn't be really.
 @_expand_reshapes.register(Array)
 def _(array: Array, /, access_type):
     if array.parent:
-        temp_initial = Dat(
-            AxisTree(array.parent.axes.node_map),
-            data=NullBuffer(array.dtype),
-            prefix="t"
-        )
-        temp_reshaped = temp_initial.with_axes(array.axes)
+        # .materialize?
+        if isinstance(array, Dat):
+            temp_initial = Dat(
+                AxisTree(array.parent.axes.node_map),
+                data=NullBuffer(array.dtype),
+                prefix="t"
+            )
+            temp_reshaped = temp_initial.with_axes(array.axes)
+        else:
+            assert isinstance(array, AbstractMat)
+            temp_initial = Mat(
+                AxisTree(array.parent.raxes.node_map),
+                AxisTree(array.parent.caxes.node_map),
+                mat=NullBuffer(array.dtype),
+                prefix="t"
+            )
+            temp_reshaped = temp_initial.with_axes(array.raxes, array.caxes)
 
         transformed_dat, extra_insns = _expand_reshapes(array.parent, access_type)
 
@@ -497,24 +519,80 @@ def _(array: Array, /, access_type):
         return (array, ())
 
 
-@_expand_reshapes.register(AbstractMat)
-def _(mat: AbstractMat, /, mode):
-    if not any(isinstance(axes, IndexedAxisTree) for axes in {mat.raxes, mat.caxes}):
-        raise NotImplementedError("Always expecting a packed matrix")
+@functools.singledispatch
+def prepare_petsc_calls(obj: Any, /) -> InstructionList:
+    raise TypeError(f"No handler provided for {type(obj).__name__}")
 
-    temp = Dat(mat.axes, data=NullBuffer(mat.dtype), prefix="t")
 
-    # NOTE: mode must encode more information than an assignment!
-    if mode == ArrayAccessType.READ:
-        assignment = Assignment(temp, mat, "write")
-    elif mode == ArrayAccessType.WRITE:
-        assignment = Assignment(mat, temp, "write")
-    else:
-        assert mode == ArrayAccessType.INC
-        assignment = Assignment(mat, temp, "inc")
+@prepare_petsc_calls.register(InstructionList)
+def _(insn_list: InstructionList, /) -> InstructionList:
+    return InstructionList([prepare_petsc_calls(insn) for insn in insn_list])
 
-    return (temp, (assignment,))
 
+@prepare_petsc_calls.register(Loop)
+def _(loop: Loop, /) -> InstructionList:
+    return InstructionList([
+        Loop(loop.index, [
+            prepare_petsc_calls(stmt) for stmt in loop.statements
+        ])
+    ])
+
+
+@prepare_petsc_calls.register(CalledFunction)
+def _(func: CalledFunction, /) -> InstructionList:
+    return InstructionList([func])
+
+
+# NOTE: At present we assume that matrices are never part of the expression, only
+# the assignee. Ideally we should traverse the expression and emit extra READ instructions.
+@prepare_petsc_calls.register(Assignment)
+def _(assignment: Assignment, /) -> InstructionList:
+    if isinstance(assignment.assignee.buffer, PETSc.Mat):
+        mat = assignment.assignee
+
+        # If we have an expression like
+        #
+        #     mat[f(p), f(p)] <- 666
+        #
+        # then we have to convert `666` into an appropriately sized temporary
+        # for MatSetValues to work.
+        if isinstance(assignment.expression, numbers.Number):
+            expression = Mat(mat.raxes, mat.caxes, mat=np.full(mat.alloc_size, assignment.expression, dtype=mat.dtype), prefix="t", constant=True)
+        else:
+            assert (
+                isinstance(assignment.expression, Mat)
+                and isinstance(assignment.expression.buffer, NullBuffer)
+            )
+            expression = assignment.expression
+
+        if assignment.assignment_type == AssignmentType.WRITE:
+            access_type = ArrayAccessType.WRITE
+        else:
+            assert assignment.assignment_type == AssignmentType.INC
+            access_type = ArrayAccessType.INC
+
+        assignment = PetscMatAssign(mat, expression, access_type)
+
+    return InstructionList([assignment])
+
+# @_expand_reshapes.register(AbstractMat)
+# def _(mat: AbstractMat, /, mode):
+#     raise NotImplementedError("TODO")
+#     if not any(isinstance(axes, IndexedAxisTree) for axes in {mat.raxes, mat.caxes}):
+#         raise NotImplementedError("Always expecting a packed matrix")
+#
+#     temp = Dat(mat.axes, data=NullBuffer(mat.dtype), prefix="t")
+#
+#     # NOTE: mode must encode more information than an assignment!
+#     if mode == ArrayAccessType.READ:
+#         assignment = Assignment(temp, mat, "write")
+#     elif mode == ArrayAccessType.WRITE:
+#         assignment = Assignment(mat, temp, "write")
+#     else:
+#         assert mode == ArrayAccessType.INC
+#         assignment = Assignment(mat, temp, "inc")
+#
+#     return (temp, (assignment,))
 
 
 # *below is old untested code*

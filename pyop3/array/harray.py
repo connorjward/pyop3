@@ -436,7 +436,7 @@ class Dat(Array, KernelArgument, Record):
 
     @property
     def alloc_size(self):
-        return self.axes.alloc_size if not self.axes.is_empty else 1
+        return self.axes.alloc_size
 
     @property
     def size(self):

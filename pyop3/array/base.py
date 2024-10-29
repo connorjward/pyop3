@@ -34,3 +34,8 @@ class Array(ContextAware, FunctionArgument, Terminal, abc.ABC):
     @abc.abstractmethod
     def context_free(self):
         pass
+
+    @property
+    @abc.abstractmethod
+    def alloc_size(self) -> int:
+        pass

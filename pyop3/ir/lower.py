@@ -13,6 +13,7 @@ from typing import Any
 import weakref
 
 from cachetools import cachedmethod
+from petsc4py import PETSc
 
 import loopy as lp
 import numpy as np
@@ -42,6 +43,7 @@ from pyop3.lang import (
     Assignment,
     ContextAwareLoop,  # TODO: remove this class
     CalledFunction,
+    PetscMatAssign,
     PreprocessedExpression,
     UnprocessedExpressionException,
     DummyKernelArgument,
@@ -197,47 +199,35 @@ class LoopyCodegenContext(CodegenContext):
         self._args.append(lp.ValueArg(name, dtype=dtype))
 
     # TODO we pass a lot more data here than we need I think, need to use unique *buffers*
-    def add_array(self, array: Dat) -> None:
+    def add_array(self, array: Array) -> None:
         if array.name in self._seen_arrays:
             return
         self._seen_arrays.add(array.name)
 
         self.datamap[array.name] = array
 
-        # set to True to use actual names in generated code, it helps debugging
-        # but makes codegen miss cache all the time
-        debug = False
-
-        injected = array.constant and array.size < config["max_static_array_size"]
-        if isinstance(array, AbstractMat):
-            name = self.unique_name("mat") if not debug else array.name
-            arg = lp.ValueArg(name, dtype=self._dtype(array))
-        elif isinstance(array.buffer, NullBuffer) or injected:
-            name = self.unique_name("t") if not debug else array.name
+        if isinstance(array.buffer, NullBuffer):
+            name = self.unique_name("t")
             shape = self._temporary_shapes.get(array.name, (array.alloc_size,))
-
-            read_only = array.constant
-
-            initializer = array.buffer.data_ro if injected else None
-            if initializer is not None:
-                arg = lp.TemporaryVariable(
-                    name,
-                    dtype=array.dtype,
-                    initializer=initializer,
-                    address_space=lp.AddressSpace.LOCAL,
-                    read_only=read_only,
-                )
-            else:
-                arg = lp.TemporaryVariable(
-                    name, dtype=array.dtype, shape=shape, read_only=read_only, address_space=lp.AddressSpace.LOCAL,
-                )
-        else:
-            name = self.unique_name("array") if not debug else array.name
-            assert isinstance(array.buffer, DistributedBuffer)
+            arg = lp.TemporaryVariable(
+                name, dtype=array.dtype, shape=shape, read_only=array.constant, address_space=lp.AddressSpace.LOCAL,
+            )
+        elif array.constant and array.alloc_size < config["max_static_array_size"]:
+            name = self.unique_name("t")
+            arg = lp.TemporaryVariable(
+                name,
+                dtype=array.dtype,
+                initializer=array.buffer.data_ro,
+                address_space=lp.AddressSpace.LOCAL,
+                read_only=True,
+            )
+        elif isinstance(array.buffer, DistributedBuffer):
+            name = self.unique_name("buffer")
             arg = lp.GlobalArg(name, dtype=self._dtype(array), shape=None)
-
-        # if name == "array_9":
-        #     breakpoint()
+        else:
+            assert isinstance(array.buffer, PETSc.Mat)
+            name = self.unique_name("mat")
+            arg = lp.ValueArg(name, dtype=self._dtype(array))
 
         self.actual_to_kernel_rename_map[array.name] = name
         self._args.append(arg)
@@ -722,30 +712,17 @@ def parse_assignment(
     loop_indices,
     codegen_ctx,
 ):
-    if assignment.is_mat_access:
-        _compile_petscmat(assignment, loop_indices, codegen_ctx)
-    else:
-        parse_assignment_properly_this_time(
-            assignment,
-            loop_indices,
-            codegen_ctx,
-        )
+    parse_assignment_properly_this_time(
+        assignment,
+        loop_indices,
+        codegen_ctx,
+    )
 
 
+@_compile.register(PetscMatAssign)
 def _compile_petscmat(assignment, loop_indices, codegen_context):
-    if isinstance(assignment.expression, AbstractMat):
-        assert assignment.assignment_type == AssignmentType.WRITE, "INC not supported yet"
-        mat = assignment.expression
-        array = assignment.assignee
-        access_type = ArrayAccessType.READ
-    else:
-        mat = assignment.assignee
-        array = assignment.expression
-        if assignment.assignment_type == AssignmentType.WRITE:
-            access_type = ArrayAccessType.WRITE
-        else:
-            assert assignment.assignment_type == AssignmentType.INC
-            access_type = ArrayAccessType.INC
+    mat = assignment.mat
+    array = assignment.values
 
     if mat.nested:
         ridx, cidx = map(just_one, just_one(mat.nest_labels))
@@ -840,6 +817,7 @@ def _compile_petscmat(assignment, loop_indices, codegen_context):
     myargs = [
         assignment, mat_name, array_name, rsize_var, csize_var, irow, icol, blocked
     ]
+    access_type = assignment.access_type
     if access_type == ArrayAccessType.READ:
         call_str = _petsc_mat_load(*myargs)
     elif access_type == ArrayAccessType.WRITE:
@@ -1028,7 +1006,9 @@ def _(loop_var: LoopIndexVar, iname_map, context, path=None):
     return iname_map[loop_var.index.id][loop_var.axis_label]
 
 
+# aka `Array`
 @lower_expr.register(Dat)
+@lower_expr.register(AbstractMat)
 def _(dat: Dat, /, iname_map, context, path=None):
     assert not dat.parent, "Should be handled in preprocessing"
 

@@ -121,16 +121,17 @@ class Instruction(UniqueRecord, abc.ABC):
 
         # TODO: parse compiler_parameters here??? or above??? here is likely fine
 
-        from pyop3.transform import expand_implicit_pack_unpack, expand_loop_contexts, expand_assignments
+        from pyop3.transform import expand_implicit_pack_unpack, expand_loop_contexts, expand_assignments, prepare_petsc_calls
 
         insn = self
         insn = expand_loop_contexts(insn)
         insn = expand_implicit_pack_unpack(insn)
-        insn = expand_assignments(insn)
+        insn = expand_assignments(insn)  # specifically reshape bits
+        insn = prepare_petsc_calls(insn)  # specifically reshape bits
 
         # TODO: This should be a more specific optimisation option
-        if compiler_parameters.optimize:
-            insn = compress_indirection_maps(insn)
+        # if compiler_parameters.optimize:
+        #     insn = compress_indirection_maps(insn)
 
         return PreprocessedExpression(insn)
 
@@ -594,6 +595,15 @@ class Assignment(Terminal):
         self.expression = expression
         self.assignment_type = assignment_type
 
+    def __str__(self) -> str:
+        if self.assignment_type == AssignmentType.WRITE:
+            operator = "="
+        else:
+            assert self.assignment_type == AssignmentType.INC
+            operator = "+="
+
+        return f"{self.assignee} {operator} {self.expression}"
+
     @property
     def arguments(self):
         # FIXME Not sure this is right for complicated expressions
@@ -646,16 +656,27 @@ class Assignment(Terminal):
                 args.add(array.mat)
         return tuple(args)
 
-    @property
-    def is_mat_access(self) -> bool:
-        from pyop3.array import AbstractMat, Dat
 
-        # NOTE: Could also check for things like a NullBuffer `.is_temporary`?
-        return (
-            (isinstance(self.assignee, AbstractMat) and isinstance(self.expression, Dat))
-            or (isinstance(self.assignee, Dat) and isinstance(self.expression, AbstractMat))
-        )
+class PetscMatAssign(Assignment):  # AbstractAssignment?
+    def __init__(self, mat, values, access_type):
+        if access_type == ArrayAccessType.READ:
+            assignment_type = AssignmentType.WRITE
+            assignee = values
+            expression = mat
+        elif access_type == ArrayAccessType.WRITE:
+            assignee = mat
+            expression = values
+            assignment_type = AssignmentType.WRITE
+        else:
+            assert access_type == ArrayAccessType.INC
+            assignee = mat
+            expression = values
+            assignment_type = AssignmentType.INC
 
+        super().__init__(assignee, expression, assignment_type)
+        self.mat = mat
+        self.values = values
+        self.access_type = access_type
 
 # TODO: With Python 3.11 can be made a StrEnum
 class ArrayAccessType(enum.Enum):

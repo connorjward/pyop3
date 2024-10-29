@@ -1917,18 +1917,123 @@ def _(arg: numbers.Integral) -> AxisComponent:
     return AxisComponent(arg)
 
 
-def relabel_axes(axes: AxisTree, suffix: str) -> AxisTree:
-    new_node_map = {}
-    for axis_id, children in axes.node_map.items():
-        new_children = []
-        for subaxis in children:
-            if subaxis is not None:
-                new_axis = subaxis.copy(label=subaxis.label+suffix)
+def _relabel_axes(axes: AxisTree, suffix: str, *, axis: Optional[Axis] = None):
+    root = False
+    if not axis:
+        root = True
+        axis = axes.root
+
+    relabelled_axis = axis.copy(label=axis.label+suffix, id=None)
+    id_map = {axis.id: relabelled_axis.id}
+
+    node_map = {}
+    if root:
+        node_map[None] = [relabelled_axis]
+
+
+    children = []
+    for component in axis.components:
+        if subaxis := axes.child(axis, component):
+            relabelled_subaxis, subnode_map, subid_map = _relabel_axes(axes, suffix, axis=subaxis)
+            id_map |= subid_map
+            children.append(relabelled_subaxis)
+            node_map |= subnode_map
+        else:
+            children.append(None)
+
+    node_map[relabelled_axis.id] = children
+    return relabelled_axis, pmap(node_map), pmap(id_map)
+
+
+@functools.singledispatch
+def relabel_axes(axes: Any, suffix: str) -> BaseAxisTree:
+    raise TypeError(f"No handler defined for {type(axes).__name__}")
+
+
+@relabel_axes.register(AxisTree)
+def _(axes: AxisTree, suffix: str) -> BaseAxisTree:
+    _, node_map, _ = _relabel_axes(axes, suffix)
+    return AxisTree(node_map)
+
+
+@relabel_axes.register(IndexedAxisTree)
+def _(axes: IndexedAxisTree, suffix: str) -> BaseAxisTree:
+    _, node_map, id_map = _relabel_axes(axes, suffix)
+    targets = _remap_targets(axes.targets, suffix, id_map)
+    return IndexedAxisTree(node_map, unindexed=axes.unindexed, targets=targets)
+
+
+def _remap_targets(targets, suffix, id_map):
+    remapped_targets = []
+    for equivalent_target in targets:
+        remapped_target = {}
+        for key, (path, expr) in equivalent_target.items():
+            if key is not None:
+                axis_id, component_label = key
+                remapped_key = (id_map[axis_id], component_label)
             else:
-                new_axis = None
-            new_children.append(new_axis)
-        new_node_map[axis_id] = new_children
-    return AxisTree(new_node_map)
+                remapped_key = None
+            remapped_target[remapped_key] = (path, expr)
+        remapped_targets.append(remapped_target)
+
+    return tuple(remapped_targets)
+
+
+def merge_axis_trees(axis_trees):
+    if all(isinstance(axis_tree, AxisTree)for axis_tree in axis_trees):
+        root, subnode_map, _ = _merge_axis_trees(axis_trees)
+        node_map = {None: (root,)}
+        node_map.update(subnode_map)
+        # breakpoint()
+        return AxisTree(node_map)
+    else:
+        raise NotImplementedError("Need to think about targets")
+        node_map, targets = _merge_axis_trees(axis_trees)
+        unindexed = merge_axis_trees([
+            axis_tree.unindexed for axis_tree in axis_trees
+        ])
+        return IndexedAxisTree(node_map, unindexed, targets=targets)
+
+
+# NOTE: can use `count` to avoid needing parent
+def _merge_axis_trees(axis_trees, *, axis=None, parent=None, count=0):
+    axis_tree, *remaining_axis_trees = axis_trees
+
+    node_map = {}
+
+    # targets = []
+
+    if axis is None:
+        axis = axis_tree.root
+
+    relabelled_axis = axis.copy(label=f"{axis.label}_{count}", id=None)
+
+    relabelled_children = []
+    for component in axis.components:
+        if subaxis := axis_tree.child(axis, component):
+            relabelled_subaxis, subnode_map, XXX = _merge_axis_trees(axis_trees, axis=subaxis, parent=axis, count=count)
+            relabelled_children.append(relabelled_subaxis)
+            node_map |= subnode_map
+        elif remaining_axis_trees:
+            relabelled_subaxis, subnode_map, XXX = _merge_axis_trees(remaining_axis_trees, axis=None, parent=axis, count=count+1)
+            relabelled_children.append(relabelled_subaxis)
+            node_map |= subnode_map
+        else:
+            relabelled_children.append(None)
+
+    node_map[relabelled_axis.id] = relabelled_children
+
+    # return (pmap(node_map), tuple(targets))
+    return (relabelled_axis, pmap(node_map), "TODO")
+
+# @functools.singledispatch
+# def _relabel_target_expr(expr, suffix):
+#     raise TypeError()
+#
+#
+# @_relabel_target_expr.register(Operator)
+# def _(op: Operator, suffix):
+#     return type(op)(_relabel_target_expr(op.a, suffix), _relabel_target_expr(op.b, suffix))
 
 
 def merge_trees(tree1: BaseAxisTree, tree2: BaseAxisTree) -> AxisTree:
