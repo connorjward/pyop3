@@ -1005,25 +1005,21 @@ def lower_expr(obj: Any, /, *args, **kwargs):
 
 @lower_expr.register(Add)
 def _(add: Add, /, *args, **kwargs):
-    newa = lower_expr(add.a, *args, **kwargs)
-    newb = lower_expr(add.b, *args, **kwargs)
-    if isinstance(newb, pym.primitives.Subscript):
-        breakpoint()
-    return newa + newb
+    return lower_expr(add.a, *args, **kwargs) + lower_expr(add.b, *args, **kwargs)
 
 
-@lower_expr.register
-def _(mul: Mul, *args, **kwargs):
+@lower_expr.register(Mul)
+def _(mul: Mul, /, *args, **kwargs):
     return lower_expr(mul.a, *args, **kwargs) * lower_expr(mul.b, *args, **kwargs)
 
 
-@lower_expr.register
-def _(num: numbers.Number, *args, **kwargs):
+@lower_expr.register(numbers.Number)
+def _(num: numbers.Number, /, *args, **kwargs):
     return num
 
 
-@lower_expr.register
-def _(axis_var: AxisVar, iname_map, context, path=None):
+@lower_expr.register(AxisVar)
+def _(axis_var: AxisVar, /, iname_map, context, path=None):
     return iname_map[axis_var.axis_label]
 
 

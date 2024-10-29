@@ -23,6 +23,7 @@ from pyop3.axtree.tree import (
 from pyop3.dtypes import IntType, ScalarType
 from pyop3.lang import Loop, LoopList, Assignment
 from pyop3.utils import (
+    Record,
     deprecated,
     just_one,
     merge_dicts,
@@ -51,7 +52,7 @@ class PetscVecNest(PetscVec):
 
 
 # BaseMat?
-class AbstractMat(Array):
+class AbstractMat(Array, Record):
     DEFAULT_MAT_TYPE = PETSc.Mat.Type.AIJ
 
     prefix = "mat"
@@ -73,37 +74,51 @@ class AbstractMat(Array):
         mat=None,
         *,
         name=None,
-        block_shape=None,
-        transform=None,
+        block_shape=1,  # NOTE: Not sure about this default
+        parent=None,
     ):
         raxes = as_axis_tree(raxes)
         caxes = as_axis_tree(caxes)
         self.raxes = raxes
         self.caxes = caxes
-        if mat_type == "baij":
-            self.block_shape = block_shape
-            self.block_raxes = self._block_raxes
-            self.block_caxes = self._block_caxes
-        else:
-            self.block_shape = 1
-            self.block_raxes = raxes
-            self.block_caxes = caxes
         if mat_type is None:
             mat_type = self.DEFAULT_MAT_TYPE
 
         if mat is None:
             # Add the elements to the rows.
             mat = self._make_mat(
-                self.raxes, self.caxes, mat_type, block_shape=self.block_shape
+                self.raxes, self.caxes, mat_type, block_shape=block_shape
                 )
 
         super().__init__(name)
+        self.block_shape = block_shape
         self.mat_type = mat_type
         self.mat = mat
-        self.transform = transform
+        self.parent = parent
 
 
         # self._cache = {}
+
+    @property
+    def _record_fields(self) -> frozenset:
+        return frozenset({"raxes", "caxes", "mat_type", "mat", "name", "parent", "block_shape"})
+
+    # NOTE: This is missing out on certain fields!
+    def __hash__(self) -> int:
+        return hash(
+            (
+                type(self), self.axes, self.dtype, id(self.mat), self.name)
+        )
+
+    @property
+    def block_raxes(self):
+        assert self.mat_type != "baij", "FIXME"
+        return self.raxes
+
+    @property
+    def block_caxes(self):
+        assert self.mat_type != "baij", "FIXME"
+        return self.caxes
 
     def __getitem__(self, indices):
         return self.getitem(indices, strict=False)
@@ -179,15 +194,7 @@ class AbstractMat(Array):
                 indexed_raxes = just_one(indexed_raxess)
                 indexed_caxes = just_one(indexed_caxess)
 
-            mat = type(self)(
-                indexed_raxes,
-                indexed_caxes,
-                mat_type=self.mat_type,
-                mat=self.mat,
-                name=self.name,
-                block_shape=self.block_shape,
-                transform=self.transform,
-            )
+            mat = self.reconstruct(raxes=indexed_raxes, caxes=indexed_caxes)
         else:
             # Otherwise we are context-sensitive
             cs_indexed_raxess = {}
@@ -214,15 +221,7 @@ class AbstractMat(Array):
             cs_indexed_raxess = ContextSensitiveAxisTree(cs_indexed_raxess)
             cs_indexed_caxess = ContextSensitiveAxisTree(cs_indexed_caxess)
 
-            mat = type(self)(
-                cs_indexed_raxess,
-                cs_indexed_caxess,
-                mat_type=self.mat_type,
-                mat=self.mat,
-                name=self.name,
-                block_shape=self.block_shape,
-                transform=self.transform,
-            )
+            mat = self.reconstruct(raxes=cs_indexed_raxess, caxes=cs_indexed_caxess)
 
         # self._cache[cache_key] = mat
         return mat
@@ -233,49 +232,27 @@ class AbstractMat(Array):
         TODO
 
         """
-        from pyop3.array.transforms import MatReshape
+        # from pyop3.array.transforms import MatReshape
 
         assert isinstance(row_axes, AxisTree), "not indexed"
         assert isinstance(col_axes, AxisTree), "not indexed"
 
         # NOTE: This will get nicer if we have a pyop3_init special method for this
         # sort of object to facilitate reconstruction
-        return type(self)(
-            row_axes,
-            col_axes,
-            mat_type=self.mat_type,
-            mat=self.mat,
-            name=self.name,
-            block_shape=self.block_shape,
-            transform=MatReshape(self),
-        )
+        return self.reconstruct(raxes=row_axes, caxes=col_axes, parent=self)
 
 
     def with_context(self, context):
         # Need a reconstruct method!
         row_axes = self.raxes.with_context(context)
         col_axes = self.caxes.with_context(context)
-        return type(self)(
-            row_axes,
-            col_axes,
-            name=self.name,
-            mat_type=self.mat_type,
-            mat=self.mat,
-            transform=self.transform,
-        )
+        return self.reconstruct(raxes=row_axes, caxes=col_axes)
 
     @property
     def context_free(self):
         row_axes = self.raxes.context_free
         col_axes = self.caxes.context_free
-        return type(self)(
-            row_axes,
-            col_axes,
-            name=self.name,
-            mat_type=self.mat_type,
-            mat=self.mat,
-            transform=self.transform,
-        )
+        return self.reconstruct(raxes=row_axes, caxes=col_axes)
 
     # like Dat, bad name? handle?
     @property

@@ -12,7 +12,7 @@ from typing import Any, Union
 from pyrsistent import pmap, PMap
 from immutabledict import ImmutableOrderedDict
 
-from pyop3.array import Dat, AbstractMat
+from pyop3.array import Dat, AbstractMat, Array
 from pyop3.array.petsc import AbstractMat
 from pyop3.axtree import Axis, AxisTree, ContextFree, ContextSensitive, ContextMismatchException, ContextAware
 from pyop3.axtree.tree import Operator, AxisVar, IndexedAxisTree
@@ -422,9 +422,9 @@ def _(assignment: Assignment, /) -> InstructionList:
     #
     #     t1 <- t0
     #     mat[f(p), f(p)] <- t1
-    if assignment.is_mat_access:
-        raise NotImplementedError("think")
-        return InstructionList([assignment])
+    # if assignment.is_mat_access:
+    #     raise NotImplementedError("think")
+    #     return InstructionList([assignment])
 
     bare_expression, extra_input_insns = _expand_reshapes(
         assignment.expression, ArrayAccessType.READ
@@ -468,17 +468,18 @@ def _(var, /, access_type):
     return (var, ())
 
 
-@_expand_reshapes.register(Dat)
-def _(dat: Dat, /, access_type):
-    if dat.parent:
+# NOTE: Currently specific to a Dat but needn't be really.
+@_expand_reshapes.register(Array)
+def _(array: Array, /, access_type):
+    if array.parent:
         temp_initial = Dat(
-            AxisTree(dat.parent.axes.node_map),
-            data=NullBuffer(dat.dtype),
+            AxisTree(array.parent.axes.node_map),
+            data=NullBuffer(array.dtype),
             prefix="t"
         )
-        temp_reshaped = temp_initial.with_axes(dat.axes)
+        temp_reshaped = temp_initial.with_axes(array.axes)
 
-        transformed_dat, extra_insns = _expand_reshapes(dat.parent, access_type)
+        transformed_dat, extra_insns = _expand_reshapes(array.parent, access_type)
 
         if extra_insns:
             raise NotImplementedError("Pretty sure this doesn't work as is")
@@ -493,12 +494,11 @@ def _(dat: Dat, /, access_type):
 
         return (temp_reshaped, extra_insns + (assignment,))
     else:
-        return (dat, ())
+        return (array, ())
 
 
 @_expand_reshapes.register(AbstractMat)
 def _(mat: AbstractMat, /, mode):
-    raise NotImplementedError("TODO")
     if not any(isinstance(axes, IndexedAxisTree) for axes in {mat.raxes, mat.caxes}):
         raise NotImplementedError("Always expecting a packed matrix")
 

@@ -118,12 +118,20 @@ class Instruction(UniqueRecord, abc.ABC):
 
     @cachedmethod(lambda self: self._cache["Instruction.preprocess"])
     def preprocess(self, compiler_parameters=None):
+
+        # TODO: parse compiler_parameters here??? or above??? here is likely fine
+
         from pyop3.transform import expand_implicit_pack_unpack, expand_loop_contexts, expand_assignments
 
         insn = self
         insn = expand_loop_contexts(insn)
         insn = expand_implicit_pack_unpack(insn)
         insn = expand_assignments(insn)
+
+        # TODO: This should be a more specific optimisation option
+        if compiler_parameters.optimize:
+            insn = compress_indirection_maps(insn)
+
         return PreprocessedExpression(insn)
 
     @cachedmethod(lambda self: self._cache["Instruction.compile"])
