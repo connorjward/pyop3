@@ -24,7 +24,7 @@ from cachetools import cachedmethod
 from mpi4py import MPI
 from immutabledict import ImmutableOrderedDict
 from petsc4py import PETSc
-from pyrsistent import freeze, pmap, thaw
+from pyrsistent import freeze, pmap, thaw, PMap
 
 from pyop3.axtree.parallel import partition_ghost_points
 from pyop3.exceptions import Pyop3Exception
@@ -1617,29 +1617,6 @@ class IndexedAxisTree(BaseAxisTree):
 
         return axes
 
-    def relabel(self, labels: Mapping) -> IndexedAxisTree:
-        return type(self)(
-            self._relabel_node_map(labels),
-            self.unindexed,
-            target_paths=self._target_paths,
-            target_exprs=self._relabel_target_exprs(labels),
-            layout_exprs=None,  # not used anyway
-            outer_loops=self.outer_loops,
-        )
-
-    def _relabel_target_exprs(self, labels: Mapping) -> Mapping:
-        relabeler = _AxisVarRelabeler(labels)
-
-        new_target_exprs = []
-        for equiv_exprs in self._target_exprs:
-            new_equiv_exprs = {}
-            for axis_key, target_exprs in equiv_exprs.items():
-                new_equiv_exprs[axis_key] = pmap({
-                    k: relabeler(v) for k, v in target_exprs.items()
-                })
-            new_target_exprs.append(pmap(new_equiv_exprs))
-        return tuple(new_target_exprs)
-
     @cached_property
     def layout_axes(self) -> AxisTree:
         if not self.outer_loops:
@@ -1716,17 +1693,35 @@ class IndexedAxisTree(BaseAxisTree):
 
     @cached_property
     def _subst_layouts_default(self):
-        all_layouts = []
-        for t in self.targets:
-            try:
-                new_layout = subst_layouts(self, t, self.layouts)
-                all_layouts.append(new_layout)
-            except KeyError:
-                # this path does not match the layout functions
-                # there is definitely a nicer way of doing this.
-                continue
+        return subst_layouts(self, self._matching_target, self.layouts)
 
-        return just_one(all_layouts)
+    @cached_property
+    def _matching_target(self) -> PMap:
+        matching_targets = []
+        for target in self.targets:
+            all_leaves_match = True
+            for leaf in self.leaves:
+                leaf_path = self.path_with_nodes(leaf)
+
+                target_path = {}
+                target_path_, _ = target.get(None, (pmap(), pmap()))
+                target_path.update(target_path_)
+
+                for axis, component_label in leaf_path.items():
+                    target_path_, _ = target.get((axis.id, component_label), (pmap(), pmap()))
+                    target_path.update(target_path_)
+
+                # NOTE: We assume that if we get an empty target path then something has
+                # gone wrong. This is needed because of .get() calls which are needed
+                # because sometimes targets are incomplete.
+                if not target_path or not self.unindexed.is_valid_path(target_path):
+                    all_leaves_match = False
+                    break
+
+            if all_leaves_match:
+                matching_targets.append(target)
+
+        return just_one(matching_targets)
 
     @property
     def _buffer_indices(self):
@@ -1917,192 +1912,100 @@ def _(arg: numbers.Integral) -> AxisComponent:
     return AxisComponent(arg)
 
 
-def _relabel_axes(axes: AxisTree, suffix: str, *, axis: Optional[Axis] = None):
-    root = False
-    if not axis:
-        root = True
-        axis = axes.root
-
-    relabelled_axis = axis.copy(label=axis.label+suffix, id=None)
-    id_map = {axis.id: relabelled_axis.id}
-
-    node_map = {}
-    if root:
-        node_map[None] = [relabelled_axis]
-
-
-    children = []
-    for component in axis.components:
-        if subaxis := axes.child(axis, component):
-            relabelled_subaxis, subnode_map, subid_map = _relabel_axes(axes, suffix, axis=subaxis)
-            id_map |= subid_map
-            children.append(relabelled_subaxis)
-            node_map |= subnode_map
-        else:
-            children.append(None)
-
-    node_map[relabelled_axis.id] = children
-    return relabelled_axis, pmap(node_map), pmap(id_map)
-
-
-@functools.singledispatch
-def relabel_axes(axes: Any, suffix: str) -> BaseAxisTree:
-    raise TypeError(f"No handler defined for {type(axes).__name__}")
-
-
-@relabel_axes.register(AxisTree)
-def _(axes: AxisTree, suffix: str) -> BaseAxisTree:
-    _, node_map, _ = _relabel_axes(axes, suffix)
-    return AxisTree(node_map)
-
-
-@relabel_axes.register(IndexedAxisTree)
-def _(axes: IndexedAxisTree, suffix: str) -> BaseAxisTree:
-    _, node_map, id_map = _relabel_axes(axes, suffix)
-    targets = _remap_targets(axes.targets, suffix, id_map)
-    return IndexedAxisTree(node_map, unindexed=axes.unindexed, targets=targets)
-
-
-def _remap_targets(targets, suffix, id_map):
-    remapped_targets = []
-    for equivalent_target in targets:
-        remapped_target = {}
-        for key, (path, expr) in equivalent_target.items():
-            if key is not None:
-                axis_id, component_label = key
-                remapped_key = (id_map[axis_id], component_label)
-            else:
-                remapped_key = None
-            remapped_target[remapped_key] = (path, expr)
-        remapped_targets.append(remapped_target)
-
-    return tuple(remapped_targets)
-
-
 def merge_axis_trees(axis_trees):
-    if all(isinstance(axis_tree, AxisTree)for axis_tree in axis_trees):
-        root, subnode_map, _ = _merge_axis_trees(axis_trees)
-        node_map = {None: (root,)}
-        node_map.update(subnode_map)
-        # breakpoint()
+    root, subnode_map = _merge_node_maps(axis_trees)
+    node_map = {None: (root,)}
+    node_map.update(subnode_map)
+
+    if all(isinstance(axis_tree, AxisTree) for axis_tree in axis_trees):
         return AxisTree(node_map)
     else:
-        raise NotImplementedError("Need to think about targets")
-        node_map, targets = _merge_axis_trees(axis_trees)
-        unindexed = merge_axis_trees([
-            axis_tree.unindexed for axis_tree in axis_trees
-        ])
+        targets = tuple(
+            _merge_targets(axis_trees, targetss)
+            for targetss in itertools.product(*[axis_tree.targets for axis_tree in axis_trees])
+        )
+
+        unindexed = merge_axis_trees([axis_tree.unindexed for axis_tree in axis_trees])
         return IndexedAxisTree(node_map, unindexed, targets=targets)
 
 
-# NOTE: can use `count` to avoid needing parent
-def _merge_axis_trees(axis_trees, *, axis=None, parent=None, count=0):
-    axis_tree, *remaining_axis_trees = axis_trees
+def _merge_node_maps(axis_trees, *, axis_tree_index=0, axis=None, suffix="") -> tuple[Axis, PMap]:
+    assert axis_tree_index < len(axis_trees)
 
-    node_map = {}
-
-    # targets = []
+    axis_tree = axis_trees[axis_tree_index]
 
     if axis is None:
         axis = axis_tree.root
 
-    relabelled_axis = axis.copy(label=f"{axis.label}_{count}", id=None)
+    relabelled_axis = axis.copy(
+        label=f"{axis.label}_{axis_tree_index}",
+        id=f"{axis.id}{suffix}",
+    )
 
     relabelled_children = []
-    for component in axis.components:
+    relabelled_subnode_map = {}
+    for i, component in enumerate(axis.components):
         if subaxis := axis_tree.child(axis, component):
-            relabelled_subaxis, subnode_map, XXX = _merge_axis_trees(axis_trees, axis=subaxis, parent=axis, count=count)
+            relabelled_subaxis, relabelled_subnode_map_ = _merge_node_maps(
+                axis_trees, axis_tree_index=axis_tree_index, axis=subaxis, suffix=f"{suffix}_{i}"
+            )
             relabelled_children.append(relabelled_subaxis)
-            node_map |= subnode_map
-        elif remaining_axis_trees:
-            relabelled_subaxis, subnode_map, XXX = _merge_axis_trees(remaining_axis_trees, axis=None, parent=axis, count=count+1)
+            relabelled_subnode_map.update(relabelled_subnode_map_)
+        elif axis_tree_index + 1 < len(axis_trees):
+            relabelled_subaxis, relabelled_subnode_map_ = _merge_node_maps(
+                axis_trees, axis_tree_index=axis_tree_index+1, axis=None, suffix=f"{suffix}_{i}"
+            )
             relabelled_children.append(relabelled_subaxis)
-            node_map |= subnode_map
+            relabelled_subnode_map.update(relabelled_subnode_map_)
         else:
             relabelled_children.append(None)
 
-    node_map[relabelled_axis.id] = relabelled_children
-
-    # return (pmap(node_map), tuple(targets))
-    return (relabelled_axis, pmap(node_map), "TODO")
-
-# @functools.singledispatch
-# def _relabel_target_expr(expr, suffix):
-#     raise TypeError()
-#
-#
-# @_relabel_target_expr.register(Operator)
-# def _(op: Operator, suffix):
-#     return type(op)(_relabel_target_expr(op.a, suffix), _relabel_target_expr(op.b, suffix))
+    relabelled_subnode_map[relabelled_axis.id] = tuple(relabelled_children)
+    return (relabelled_axis, pmap(relabelled_subnode_map))
 
 
-def merge_trees(tree1: BaseAxisTree, tree2: BaseAxisTree) -> AxisTree:
-    """Merge two axis trees together.
+def _merge_targets(axis_trees, targetss, *, axis_tree_index=0, axis=None, suffix="") -> PMap:
+    from pyop3.expr_visitors import relabel as relabel_expression
 
-    If the second tree has no common axes (share a lable) with the first then it is
-    appended to every leaf of the first tree. Any common axes are skipped.
+    assert axis_tree_index < len(axis_trees)
 
-    Case 1:
+    axis_tree = axis_trees[axis_tree_index]
 
-        TODO: show example where 
-        axis_a = Axis({"x": 2, "y": 2}, "a")
-        axis_b = Axis({"x": 2}, "b")
-        axis_c = Axis({"x": 2}, "c")
-        AxisTree.from_nest({axis_a: [axis_b, axis_c]})
+    orig_targets = targetss[axis_tree_index]
+    relabelled_targets = {}
 
-        is added to axis_a: things should split up.
-
-    """
-    # The algorithm proceeds by visiting each element in the second tree and
-    # attempting to add it to the tree. If the axis is already present then
-    # the axis is not added.
-    subtrees = _merge_trees(tree1, tree2)
-    breakpoint()
-
-    merged = AxisTree(tree1.node_map)
-    for leaf, subtree in subtrees:
-        merged = merged.add_subtree(subtree, *leaf)
-    return merged
-
-
-def _merge_trees(tree1, tree2, *, axis1=None, parents=None):
-    if axis1 is None:  # strictly all
-        axis1 = tree1.root
-        parents = pmap()
-
-    subtrees = []
-    for component1 in axis1.components:
-        parents_ = parents | {axis1: component1}
-        if subaxis1 := tree1.child(axis1, component1):
-            subtrees_ = _merge_trees(tree1, tree2, axis1=subaxis1, parents=parents_)
-            subtrees.extend(subtrees_)
-        else:
-            # at the bottom, now visit tree2 and try to add bits
-            subtree = _build_distinct_subtree(tree2, parents_)
-            subtrees.append(((axis1, component1), subtree))
-    return tuple(subtrees)
-
-
-def _build_distinct_subtree(axes, parents, *, axis=None):
     if axis is None:
-        axis = axes.root
+        axis = axis_tree.root
 
-    if axis in parents:
-        # Axis is already visited, do not include in the new tree and make sure
-        # to only use the right component
-        if subaxis := axes.child(axis, parents[axis]):
-            return _build_distinct_subtree(axes, parents, axis=subaxis)
-        else:
-            return AxisTree()
-    else:
-        # Axis has not yet been visited, include in the new tree
-        # and traverse all subaxes
-        subtree = AxisTree(axis)
-        for component in axis.components:
-            if subaxis := axes.child(axis, component):
-                subtree_ = _build_distinct_subtree(axes, parents, axis=subaxis)
-                subtree = subtree.add_subtree(subtree_, axis, component)
-        return subtree
+    for i, component in enumerate(axis.components):
+        orig_axis_key = (axis.id, component.label)
+        orig_target = orig_targets[orig_axis_key]
+        orig_path, orig_exprs = orig_target
+
+        relabelled_path = {
+            f"{axis_label}_{axis_tree_index}": component_label
+            for axis_label, component_label in orig_path.items()
+        }
+        relabelled_exprs = {
+            f"{axis_label}_{axis_tree_index}": relabel_expression(expr, f"_{axis_tree_index}")
+            for axis_label, expr in orig_exprs.items()
+        }
+        relabelled_target = (relabelled_path, relabelled_exprs)
+        relabelled_axis_key = (f"{axis.id}{suffix}", component.label)
+        relabelled_targets[relabelled_axis_key] = relabelled_target
+
+        if subaxis := axis_tree.child(axis, component):
+            relabelled_targets_ = _merge_targets(
+                axis_trees, targetss, axis_tree_index=axis_tree_index, axis=subaxis, suffix=f"{suffix}_{i}"
+            )
+            relabelled_targets.update(relabelled_targets_)
+        elif axis_tree_index + 1 < len(axis_trees):
+            relabelled_targets_ = _merge_targets(
+                axis_trees, targetss, axis_tree_index=axis_tree_index+1, axis=None, suffix=f"{suffix}_{i}"
+            )
+            relabelled_targets.update(relabelled_targets_)
+
+    return pmap(relabelled_targets)
 
 
 def subst_layouts(
@@ -2115,22 +2018,11 @@ def subst_layouts(
     linear_axes_acc=None,
     target_paths_and_exprs_acc=None,
 ):
+    # if axis is None and not axes.is_empty and axes.root.label == "mylabel_0":
+    #     breakpoint()
+
     from pyop3 import Dat
     from pyop3.itree.tree import replace  # should move this
-
-    if isinstance(axes, Dat):
-        assert axis is None
-        axes = axes.axes
-
-
-    # TODO Don't do this every time this function is called
-    loop_exprs = {}
-    # for outer_loop in self.outer_loops:
-    #     loop_exprs[outer_loop.id] = {}
-    #     for ax in outer_loop.iterset.nodes:
-    #         key = (ax.id, ax.component.label)
-    #         for ax_, expr in outer_loop.iterset.index_exprs.get(key, {}).items():
-    #             loop_exprs[outer_loop.id][ax_] = expr
 
     layouts_subst = {}
     # if strictly_all(x is None for x in [axis, path, target_path_acc, index_exprs_acc]):
@@ -2140,11 +2032,8 @@ def subst_layouts(
         # NOTE: I think I can get rid of this if I prescribe an empty axis tree to expression
         # arrays
         linear_axes_acc = AxisTree()
-        # target_path_acc, target_exprs_acc = targets.get(None, (pmap(), pmap()))
         target_paths_and_exprs_acc = {None: targets.get(None, (pmap(), pmap()))}
-        # index_exprs_acc = index_exprs.get(None, pmap())
 
-        # replacer = IndexExpressionReplacer(index_exprs_acc, loop_exprs=loop_exprs)
         accumulated_path = merge_dicts(p for p, _ in target_paths_and_exprs_acc.values())
         layouts_subst[path] = replace(layouts[accumulated_path], linear_axes_acc, target_paths_and_exprs_acc)
 
@@ -2152,8 +2041,6 @@ def subst_layouts(
             layouts_subst.update(
                 subst_layouts(
                     axes,
-                    # target_paths,
-                    # index_exprs,
                     targets,
                     layouts,
                     axis=axes.root,
@@ -2169,12 +2056,10 @@ def subst_layouts(
             linear_axis = Axis([component], axis.label)
             linear_axes_acc_ = linear_axes_acc.add_axis(linear_axis, linear_axes_acc.leaf)
 
-            target_paths_and_exprs_acc_ = target_paths_and_exprs_acc | {(linear_axis.id, component.label): targets.get((axis.id, component.label), (pmap(), pmap()))}
-            # axis_target_path, axis_target_exprs = 
-            # target_path_acc_ = target_path_acc | axis_target_path
-            # target_exprs_acc_ = target_exprs_acc | axis_target_exprs
+            target_paths_and_exprs_acc_ = target_paths_and_exprs_acc | {
+                (linear_axis.id, component.label): targets.get((axis.id, component.label), (pmap(), pmap()))
+            }
 
-            # replacer = IndexExpressionReplacer(index_exprs_acc_)
             accumulated_path = merge_dicts(p for p, _ in target_paths_and_exprs_acc_.values())
             layouts_subst[path_] = replace(layouts[accumulated_path], linear_axes_acc_, target_paths_and_exprs_acc_)
 
@@ -2193,30 +2078,3 @@ def subst_layouts(
                     )
                 )
     return freeze(layouts_subst)
-
-
-class _AxisVarRelabeler(pym.mapper.IdentityMapper):
-    def __init__(self, relabel_map):
-        self._relabel_map = relabel_map
-
-    def map_axis_variable(self, expr):
-        return AxisVar(self._relabel_map.get(expr.axis_label, expr.axis_label))
-
-    def map_array(self, array_var):
-        indices = {ax: self.rec(expr) for ax, expr in array_var.indices.items()}
-        return type(array_var)(array_var.array, indices, array_var.path)
-
-
-@functools.singledispatch
-def _extract_axes(obj: Any) -> BaseAxisTree:
-    from pyop3.array.base import Array  # cyclic import, better overwriting in base.py?
-
-    if isinstance(obj, Array):
-        return obj.axes
-    else:
-        raise TypeError()
-
-
-@_extract_axes.register
-def _(_: numbers.Integral) -> BaseAxisTree:
-    return AxisTree()

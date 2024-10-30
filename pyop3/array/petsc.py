@@ -19,7 +19,6 @@ from pyop3.axtree.tree import (
     ContextFree,
     IndexedAxisTree,
     as_axis_tree,
-    relabel_axes,
 )
 from pyop3.buffer import DistributedBuffer
 from pyop3.dtypes import IntType, ScalarType
@@ -268,6 +267,9 @@ class AbstractMat(Array, Record):
     def context_free(self):
         row_axes = self.raxes.context_free
         col_axes = self.caxes.context_free
+        return self.reconstruct(raxes=row_axes, caxes=col_axes)
+
+    def with_axes(self, row_axes, col_axes):
         return self.reconstruct(raxes=row_axes, caxes=col_axes)
 
     @property
@@ -570,6 +572,7 @@ class AbstractMat(Array, Record):
         raise NotImplementedError("opaque type?")
 
 
+# NOTE: Is it possible to remove this? Potentially an unnecessary type...
 class Sparsity(AbstractMat):
     def materialize(self) -> PETSc.Mat:
         if not hasattr(self, "_lazy_template"):

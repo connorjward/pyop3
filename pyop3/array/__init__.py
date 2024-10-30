@@ -6,4 +6,4 @@ from .harray import (  # noqa: F401
     FancyIndexWriteException,
     Dat,
 )
-from .petsc import Mat,  AbstractMat  # noqa: F401
+from .petsc import Mat, Sparsity, AbstractMat  # noqa: F401

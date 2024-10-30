@@ -291,7 +291,6 @@ class Loop(Instruction):
         """
         from pyop3 import DistributedBuffer, Dat, Mat
         from pyop3.array.harray import ContextSensitiveDat
-        from pyop3.array.petsc import Sparsity
 
         initializers = []
         reductions = []
@@ -313,7 +312,7 @@ class Loop(Instruction):
                 # assumed to not be distributed
                 pass
             else:
-                assert isinstance(arg, (Mat, Sparsity))
+                assert isinstance(arg, Mat)
                 # just in case
                 broadcasts.append(arg.assemble)
 

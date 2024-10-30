@@ -7,7 +7,6 @@ from .tree import (  # noqa: F401
     ContextAware,
     ContextFree,
     ContextSensitive,
-    merge_trees,
     IndexedAxisTree,
     LoopIterable,
     as_axis_tree,

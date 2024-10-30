@@ -15,15 +15,14 @@ from petsc4py import PETSc
 from pyrsistent import pmap, PMap
 from immutabledict import ImmutableOrderedDict
 
-from pyop3.array import Dat, AbstractMat, Array, Mat
-from pyop3.array.petsc import AbstractMat
+from pyop3.array import Dat, Array, Mat
 from pyop3.axtree import Axis, AxisTree, ContextFree, ContextSensitive, ContextMismatchException, ContextAware
 from pyop3.axtree.tree import Operator, AxisVar, IndexedAxisTree
 from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
 from pyop3.itree import Map, TabulatedMapComponent, collect_loop_contexts
 from pyop3.itree.tree import LoopIndexVar
 from pyop3.itree.parse import _as_context_free_indices
-from pyop3.expr_visitors import collect_loops as expr_collect_loops, collect_datamap as collect_expr_datamap, restrict_to_context as restrict_expression_to_context
+from pyop3.expr_visitors import collect_loops as expr_collect_loops, restrict_to_context as restrict_expression_to_context
 from pyop3.lang import (
     INC,
     NA,
@@ -259,7 +258,7 @@ class ImplicitPackUnpackExpander(Transformer):
                 continue
 
             # emit function calls for PetscMat
-            if isinstance(arg, AbstractMat):
+            if isinstance(arg, Mat):
                 axes = AxisTree(arg.axes.node_map)
                 new_arg = Dat(
                     axes,
@@ -309,7 +308,7 @@ class ImplicitPackUnpackExpander(Transformer):
                         prefix="t",
                     )
                 else:
-                    assert isinstance(arg, AbstractMat)
+                    assert isinstance(arg, Mat)
                     raxes = AxisTree(arg.raxes.node_map)
                     caxes = AxisTree(arg.caxes.node_map)
                     temporary = Mat(
@@ -395,7 +394,7 @@ def _requires_pack_unpack(arg):
     # however, it is overly restrictive since we could pass something like dat[i0, :] directly
     # to a local kernel
     # return isinstance(arg, Dat) and arg.subst_layouts != arg.layouts
-    return isinstance(arg, (Dat, AbstractMat))
+    return isinstance(arg, (Dat, Mat))
 
 
 @functools.singledispatch
@@ -492,7 +491,7 @@ def _(array: Array, /, access_type):
             )
             temp_reshaped = temp_initial.with_axes(array.axes)
         else:
-            assert isinstance(array, AbstractMat)
+            assert isinstance(array, Mat)
             temp_initial = Mat(
                 AxisTree(array.parent.raxes.node_map),
                 AxisTree(array.parent.caxes.node_map),
@@ -575,8 +574,8 @@ def _(assignment: Assignment, /) -> InstructionList:
 
     return InstructionList([assignment])
 
-# @_expand_reshapes.register(AbstractMat)
-# def _(mat: AbstractMat, /, mode):
+# @_expand_reshapes.register(Mat)
+# def _(mat: Mat, /, mode):
 #     raise NotImplementedError("TODO")
 #     if not any(isinstance(axes, IndexedAxisTree) for axes in {mat.raxes, mat.caxes}):
 #         raise NotImplementedError("Always expecting a packed matrix")

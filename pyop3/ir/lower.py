@@ -22,7 +22,7 @@ from pyrsistent import freeze, pmap, PMap
 
 from pyop3.array import Dat
 from pyop3.array.base import Array
-from pyop3.array.petsc import AbstractMat, Sparsity
+from pyop3.array.petsc import Mat, AbstractMat
 from pyop3.axtree.tree import Add, AxisVar, Mul
 from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
 from pyop3.config import config
@@ -1008,7 +1008,7 @@ def _(loop_var: LoopIndexVar, iname_map, context, path=None):
 
 # aka `Array`
 @lower_expr.register(Dat)
-@lower_expr.register(AbstractMat)
+@lower_expr.register(Mat)
 def _(dat: Dat, /, iname_map, context, path=None):
     assert not dat.parent, "Should be handled in preprocessing"
 

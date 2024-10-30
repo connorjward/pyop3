@@ -1,61 +1,15 @@
 import functools
 import numbers
-from typing import Any
+from collections.abc import Mapping
+from typing import Any, Optional
 
-from pyrsistent import pmap
+from pyrsistent import pmap, PMap
 
 from pyop3.array import Array, Dat
 from pyop3.array.petsc import AbstractMat
-from pyop3.axtree.tree import AxisVar, Operator, Add, Mul
+from pyop3.axtree.tree import AxisVar, Operator, Add, Mul, BaseAxisTree, IndexedAxisTree, AxisTree, Axis
 from pyop3.itree.tree import LoopIndexVar
 from pyop3.utils import OrderedSet
-
-
-# TODO:
-# it makes more sense to traverse the loop expression and collect buffers
-# (kernel arguments) there!!!
-# This avoid the problem of carrying extra arguments about.
-# Also it requires a 3-way tree traversal: first the loop expression, then the axis tree,
-# then the subst_layouts()
-# It would obvs. be nice to have generic traversal code for all of these cases, but
-# I can do that later. For now do the naive datamap approach
-
-
-# NOTE: not used any more!
-@functools.singledispatch
-def collect_datamap(expr):
-    raise TypeError()
-
-
-# NOTE: should get rid of .datamap entirely
-@collect_datamap.register(Dat)
-def _(dat: Dat, /):
-    return dat.datamap
-
-
-@collect_datamap.register(AbstractMat)
-def _(mat: AbstractMat, /):
-    return mat.datamap
-
-
-@collect_datamap.register(Operator)
-def _(op: Operator, /):
-    return collect_datamap(op.a) | collect_datamap(op.b)
-
-
-@collect_datamap.register(LoopIndexVar)
-def _(loop_var: LoopIndexVar, /):
-    return loop_var.index.datamap
-
-
-@collect_datamap.register(AxisVar)
-def _(var: AxisVar, /):
-    return pmap()
-
-
-@collect_datamap.register(numbers.Number)
-def _(num: numbers.Number, /):
-    return pmap()
 
 
 # TODO: could make a postvisitor
@@ -164,3 +118,68 @@ def _(op: Operator, /, loop_context):
 @restrict_to_context.register(Array)
 def _(array: Array, /, loop_context):
     return array.with_context(loop_context)
+
+
+@functools.singledispatch
+def relabel(obj: Any, /, suffix: str):
+    raise TypeError(f"No handler defined for {type(obj).__name__}")
+
+
+@relabel.register(AxisVar)
+def _(var: AxisVar, /, suffix: str) -> AxisVar:
+    return AxisVar(var.axis_label+suffix)
+
+
+@relabel.register(Dat)
+def _(dat: Dat, /, suffix: str) -> Dat:
+    new_axes = _relabel_axes(dat.axes, suffix)
+    # return array.with_axes(new_axes)
+    return dat.reconstruct(axes=new_axes)
+
+
+@functools.singledispatch
+def _relabel_axes(obj: Any, suffix: str) -> BaseAxisTree:
+    raise TypeError(f"No handler defined for {type(obj).__name__}")
+
+
+@_relabel_axes.register(AxisTree)
+def _(axes: AxisTree, suffix: str) -> AxisTree:
+    relabelled_node_map = _relabel_node_map(axes.node_map, suffix)
+    return AxisTree(relabelled_node_map)
+
+
+@_relabel_axes.register(IndexedAxisTree)
+def _(axes: IndexedAxisTree, suffix: str) -> IndexedAxisTree:
+    relabelled_node_map = _relabel_node_map(axes.node_map, suffix)
+
+    # I think that I can leave unindexed the same here and just tweak the target expressions
+    relabelled_targetss = tuple(
+        _relabel_targets(targets, suffix)
+        for targets in axes.targets
+    )
+    return IndexedAxisTree(relabelled_node_map, unindexed=axes.unindexed, targets=relabelled_targetss)
+
+
+def _relabel_node_map(node_map: Mapping, suffix: str) -> PMap:
+    relabelled_node_map = {}
+    for parent, children in node_map.items():
+        relabelled_children = []
+        for child in children:
+            if child:
+                relabelled_child = child.copy(label=child.label+suffix)
+                relabelled_children.append(relabelled_child)
+            else:
+                relabelled_children.append(None)
+        relabelled_node_map[parent] = tuple(relabelled_children)
+    return pmap(relabelled_node_map)
+
+
+# NOTE: This only relabels the expressions. The target path is unchanged because I think that that is fine here
+def _relabel_targets(targets: Mapping, suffix: str) -> PMap:
+    relabelled_targets = {}
+    for axis_key, (path, exprs) in targets.items():
+        relabelled_exprs = {
+            axis_label: relabel(expr, suffix) for axis_label, expr in exprs.items()
+        }
+        relabelled_targets[axis_key] = (path, relabelled_exprs)
+    return pmap(relabelled_targets)

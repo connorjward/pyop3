@@ -113,10 +113,8 @@ def _(array: Array, axes, paths_and_exprs):
         new_targets.append(target_path_and_exprs)
 
     new_axes = IndexedAxisTree(axes.node_map, array.axes.unindexed, targets=new_targets)
-    # NOTE: .with_axes(...)?
-    return Dat(
-        new_axes, data=array.buffer, max_value=array.max_value, name=array.name, constant=array.constant
-    )
+    # return array.with_axes(new_axes)
+    return array.reconstruct(axes=new_axes)
 
 
 @replace.register
@@ -2504,7 +2502,6 @@ def partition_iterset(index: LoopIndex, arrays):
 
     """
     from pyop3.array import Mat
-    from pyop3.array.petsc import Sparsity
 
     # take first
     # if index.iterset.depth > 1:
@@ -2520,7 +2517,7 @@ def partition_iterset(index: LoopIndex, arrays):
     for array in arrays:
         # skip matrices
         # really nasty hack for now to handle indexed mats
-        if isinstance(array, (Mat, Sparsity)) or not hasattr(array, "buffer"):
+        if isinstance(array, Mat) or not hasattr(array, "buffer"):
             continue
 
         # skip purely local arrays
