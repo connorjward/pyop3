@@ -11,13 +11,13 @@ import numbers
 from functools import cached_property
 from typing import Iterable, Tuple
 
-from cachetools import cachedmethod
-from pyrsistent import PMap
-
+import immutabledict
 import loopy as lp
 import numpy as np
 import pytools
+from cachetools import cachedmethod
 from petsc4py import PETSc
+from pyrsistent import PMap, pmap
 
 from pyop3.axtree import Axis
 from pyop3.axtree.tree import ContextFree, ContextSensitive
@@ -33,6 +33,7 @@ from pyop3.utils import (
     just_one,
     merge_dicts,
     single_valued,
+    is_ordered_mapping,
 )
 
 
@@ -66,6 +67,72 @@ MIN_WRITE = Intent.MIN_WRITE
 MAX_RW = Intent.MAX_RW
 MAX_WRITE = Intent.MAX_WRITE
 NA = Intent.NA
+
+
+DEFAULT_COMPILER_PARAMETERS = immutabledict.ImmutableOrderedDict({
+    # Optimisation options
+
+    "compress_indirection_maps": False,
+
+    # Profiling options
+
+    "add_likwid_markers": False,
+    "add_petsc_event": False,
+})
+
+
+MACRO_COMPILER_PARAMETERS = immutabledict.ImmutableOrderedDict({
+    "optimize": {"compress_indirection_maps", True}
+})
+"""'Macro' compiler parameters that set multiple options at once."""
+# NOTE: These must be boolean options
+
+
+# TODO: This could probably be cleaned up a lot by using dataclasses
+class ParsedCompilerParameters(immutabledict.immutabledict):
+    @property
+    def compress_indirection_maps(self) -> bool:
+        return self["compress_indirection_maps"]
+
+
+def parse_compiler_parameters(compiler_parameters) -> ParsedCompilerParameters:
+    """
+    The process of parsing ``compiler_parameters`` is as follows:
+
+        1. Begin with the default options (`DEFAULT_COMPILER_PARAMETERS`).
+        2. In the order specified in ``compiler_parameters``, parse any
+           'macro' options and tweak the parameters as appropriate.
+        3. Lastly, any non-macro options are added.
+
+    By setting macro options before individual options the user can make
+    more specific overrides.
+
+    """
+    if isinstance(compiler_parameters, ParsedCompilerParameters):
+        return compiler_parameters
+
+    if compiler_parameters is None:
+        compiler_parameters = {}
+    else:
+        # TODO: nice error message
+        assert is_ordered_mapping(compiler_parameters)
+        compiler_parameters = dict(compiler_parameters)
+
+    parsed_parameters = dict(DEFAULT_COMPILER_PARAMETERS)
+
+    for macro_param, specific_params in MACRO_COMPILER_PARAMETERS.items():
+        # Do not rely on the truthiness of variables here. We want to make
+        # sure that the user has provided a boolean value.
+        if compiler_parameters.pop(macro_param, False) == True:
+            for key, value in specific_params.items():
+                parsed_parameters[key] = value
+
+    for key, value in compiler_parameters.items():
+        # TODO: If a KeyError then invalid params provided, should raise a helpful error
+        assert key in parsed_parameters
+        parsed_parameters[key] = value
+
+    return ParsedCompilerParameters(parsed_parameters)
 
 
 # TODO: This exception is not actually ever raised. We should check the
@@ -113,31 +180,33 @@ class Instruction(UniqueRecord, abc.ABC):
         self._cache = collections.defaultdict(dict)
 
     def __call__(self, *, compiler_parameters=None, **kwargs):
+        compiler_parameters = parse_compiler_parameters(compiler_parameters)
+
         executable = self.compile(compiler_parameters)
         executable(**kwargs)
 
     @cachedmethod(lambda self: self._cache["Instruction.preprocess"])
     def preprocess(self, compiler_parameters=None):
+        from pyop3.transform import expand_implicit_pack_unpack, expand_loop_contexts, expand_assignments, prepare_petsc_calls, compress_indirection_maps
 
-        # TODO: parse compiler_parameters here??? or above??? here is likely fine
-
-        from pyop3.transform import expand_implicit_pack_unpack, expand_loop_contexts, expand_assignments, prepare_petsc_calls
+        compiler_parameters = parse_compiler_parameters(compiler_parameters)
 
         insn = self
         insn = expand_loop_contexts(insn)
         insn = expand_implicit_pack_unpack(insn)
         insn = expand_assignments(insn)  # specifically reshape bits
-        insn = prepare_petsc_calls(insn)  # specifically reshape bits
+        insn = prepare_petsc_calls(insn)
 
-        # TODO: This should be a more specific optimisation option
-        # if compiler_parameters.optimize:
-        #     insn = compress_indirection_maps(insn)
+        if compiler_parameters.compress_indirection_maps:
+            insn = compress_indirection_maps(insn)
 
         return PreprocessedExpression(insn)
 
     @cachedmethod(lambda self: self._cache["Instruction.compile"])
     def compile(self, compiler_parameters=None):
         from pyop3.ir.lower import compile
+
+        compiler_parameters = parse_compiler_parameters(compiler_parameters)
 
         preprocessed = self.preprocess(compiler_parameters)
         return compile(preprocessed, compiler_parameters=compiler_parameters)
@@ -583,6 +652,9 @@ class AssignmentType(enum.Enum):
     INC = "inc"
 
 
+# TODO: This is the 'user facing' Assignment type. Internally we can parse this
+# into more specific things. Therefore, inherit from an abstract _Assignment type
+# and also have specific (underscored) classes for internal use.
 class Assignment(Terminal):
     fields = Terminal.fields | {"assignee", "expression", "assignment_type"}
 

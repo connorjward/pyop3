@@ -4,6 +4,7 @@ import abc
 import collections
 import itertools
 import warnings
+from collections.abc import Mapping
 from typing import Any, Collection, Hashable, Optional
 
 import numpy as np
@@ -45,8 +46,8 @@ class auto:
 
 
 # type aliases
-Id = Hashable
-Label = Hashable
+Id = str
+Label = str
 
 
 class Identified(abc.ABC):
@@ -396,6 +397,10 @@ def debug_assert(predicate, msg=None):
 
 
 _ordered_mapping_types = (dict, collections.OrderedDict, ImmutableOrderedDict)
+
+
+def is_ordered_mapping(obj: Mapping):
+    return isinstance(obj, _ordered_mapping_types)
 
 
 def expand_collection_of_iterables(compressed, /, *, ordered: bool = True, mapping_type=ImmutableOrderedDict) -> tuple[ImmutableOrderedDict]:

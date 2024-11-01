@@ -114,6 +114,7 @@ class Configuration(dict):
         :arg key: The parameter to set
         :arg value: The value to set it to.
         """
+        assert False, "global config should be readonly!" # and only set using env variables
         if key in Configuration.DEFAULTS:
             valid_type = Configuration.DEFAULTS[key][1]
             if not isinstance(value, valid_type):

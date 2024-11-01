@@ -574,25 +574,10 @@ def _(assignment: Assignment, /) -> InstructionList:
 
     return InstructionList([assignment])
 
-# @_expand_reshapes.register(Mat)
-# def _(mat: Mat, /, mode):
-#     raise NotImplementedError("TODO")
-#     if not any(isinstance(axes, IndexedAxisTree) for axes in {mat.raxes, mat.caxes}):
-#         raise NotImplementedError("Always expecting a packed matrix")
-#
-#     temp = Dat(mat.axes, data=NullBuffer(mat.dtype), prefix="t")
-#
-#     # NOTE: mode must encode more information than an assignment!
-#     if mode == ArrayAccessType.READ:
-#         assignment = Assignment(temp, mat, "write")
-#     elif mode == ArrayAccessType.WRITE:
-#         assignment = Assignment(mat, temp, "write")
-#     else:
-#         assert mode == ArrayAccessType.INC
-#         assignment = Assignment(mat, temp, "inc")
-#
-#     return (temp, (assignment,))
 
+@functools.singledispatch
+def compress_indirection_maps(obj: Any, /):
+    raise TypeError(f"No handler provided for {type(obj).__name__}")
 
 # *below is old untested code*
 #

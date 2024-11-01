@@ -377,22 +377,6 @@ class BinarySearchCallable(lp.ScalarCallable):
         return
 
 
-@dataclasses.dataclass(frozen=True)
-class CompilerParameters:
-    # NOTE: This sort of thing could have a default set from the config
-    # dict (but do not use PYOP3_USE_LIKWID as that's a separate option).
-    add_likwid_markers: bool = False
-    add_petsc_event: bool = False
-
-
-def parse_compiler_parameters(compiler_parameters) -> CompilerParameters:
-    if compiler_parameters is None:
-        compiler_parameters = {}
-
-    # TODO: Can do extensive error checking here, maybe loop over the dataclass fields
-    return CompilerParameters(**compiler_parameters)
-
-
 # prefer generate_code?
 def compile(expr: PreprocessedExpression, compiler_parameters=None):
     if not isinstance(expr, PreprocessedExpression):
