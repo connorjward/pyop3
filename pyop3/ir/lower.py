@@ -38,6 +38,7 @@ from pyop3.lang import (
     NA,
     READ,
     RW,
+    parse_compiler_parameters,
     WRITE,
     AssignmentType,
     Assignment,

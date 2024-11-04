@@ -69,16 +69,19 @@ MAX_WRITE = Intent.MAX_WRITE
 NA = Intent.NA
 
 
-DEFAULT_COMPILER_PARAMETERS = immutabledict.ImmutableOrderedDict({
+@dataclasses.dataclass(frozen=True)  # TODO: Add kw_only=True in Python 3.10
+class CompilerParameters:
     # Optimisation options
 
-    "compress_indirection_maps": False,
+    compress_indirection_maps: bool = False
 
     # Profiling options
 
-    "add_likwid_markers": False,
-    "add_petsc_event": False,
-})
+    add_likwid_markers: bool = False
+    add_petsc_event: bool = False
+
+
+DEFAULT_COMPILER_PARAMETERS = CompilerParameters()
 
 
 MACRO_COMPILER_PARAMETERS = immutabledict.ImmutableOrderedDict({
@@ -88,11 +91,8 @@ MACRO_COMPILER_PARAMETERS = immutabledict.ImmutableOrderedDict({
 # NOTE: These must be boolean options
 
 
-# TODO: This could probably be cleaned up a lot by using dataclasses
-class ParsedCompilerParameters(immutabledict.immutabledict):
-    @property
-    def compress_indirection_maps(self) -> bool:
-        return self["compress_indirection_maps"]
+class ParsedCompilerParameters(CompilerParameters):
+    pass
 
 
 def parse_compiler_parameters(compiler_parameters) -> ParsedCompilerParameters:
@@ -118,8 +118,7 @@ def parse_compiler_parameters(compiler_parameters) -> ParsedCompilerParameters:
         assert is_ordered_mapping(compiler_parameters)
         compiler_parameters = dict(compiler_parameters)
 
-    parsed_parameters = dict(DEFAULT_COMPILER_PARAMETERS)
-
+    parsed_parameters = dataclasses.asdict(DEFAULT_COMPILER_PARAMETERS)
     for macro_param, specific_params in MACRO_COMPILER_PARAMETERS.items():
         # Do not rely on the truthiness of variables here. We want to make
         # sure that the user has provided a boolean value.
@@ -132,7 +131,7 @@ def parse_compiler_parameters(compiler_parameters) -> ParsedCompilerParameters:
         assert key in parsed_parameters
         parsed_parameters[key] = value
 
-    return ParsedCompilerParameters(parsed_parameters)
+    return ParsedCompilerParameters(**parsed_parameters)
 
 
 # TODO: This exception is not actually ever raised. We should check the
