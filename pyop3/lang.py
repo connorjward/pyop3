@@ -85,7 +85,7 @@ DEFAULT_COMPILER_PARAMETERS = CompilerParameters()
 
 
 MACRO_COMPILER_PARAMETERS = immutabledict.ImmutableOrderedDict({
-    "optimize": {"compress_indirection_maps", True}
+    "optimize": {"compress_indirection_maps": True}
 })
 """'Macro' compiler parameters that set multiple options at once."""
 # NOTE: These must be boolean options
@@ -186,7 +186,14 @@ class Instruction(UniqueRecord, abc.ABC):
 
     @cachedmethod(lambda self: self._cache["Instruction.preprocess"])
     def preprocess(self, compiler_parameters=None):
-        from pyop3.transform import expand_implicit_pack_unpack, expand_loop_contexts, expand_assignments, prepare_petsc_calls, compress_indirection_maps
+        from pyop3.transform import (
+            expand_implicit_pack_unpack,
+            expand_loop_contexts,
+            expand_assignments,
+            prepare_petsc_calls,
+            compress_indirection_maps,
+            concretize_array_accesses,
+        )
 
         compiler_parameters = parse_compiler_parameters(compiler_parameters)
 
@@ -195,6 +202,8 @@ class Instruction(UniqueRecord, abc.ABC):
         insn = expand_implicit_pack_unpack(insn)
         insn = expand_assignments(insn)  # specifically reshape bits
         insn = prepare_petsc_calls(insn)
+
+        insn = concretize_array_accesses(insn)
 
         if compiler_parameters.compress_indirection_maps:
             insn = compress_indirection_maps(insn)
@@ -249,6 +258,8 @@ class Loop(Instruction):
         # TODO just parse into ContextAwareLoop and call that
         from pyop3.ir.lower import compile
         from pyop3.itree.tree import partition_iterset
+
+        compiler_parameters = parse_compiler_parameters(compiler_parameters)
 
         code = self.compile(compiler_parameters)
 

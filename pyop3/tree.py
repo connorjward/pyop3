@@ -460,6 +460,10 @@ class LabelledTree(AbstractTree):
     def leaf_paths(self):
         return tuple(self.path(*leaf) for leaf in self.leaves)
 
+    @property
+    def leaf_path(self):
+        return just_one(self.leaf_paths)
+
     @cached_property
     def ordered_leaf_paths(self):
         return tuple(self.path(*leaf, ordered=True) for leaf in self.leaves)

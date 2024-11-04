@@ -13,7 +13,7 @@ import numpy as np
 import pymbolic as pym
 from pyrsistent import PMap, freeze, pmap
 
-from pyop3.array.harray import Dat
+# from pyop3.array.harray import Dat
 from pyop3.axtree.tree import (
     Axis,
     AxisComponent,
@@ -94,6 +94,9 @@ def tabulate_again(axes, *, axis=None):
 
 
 def _tabulate_offsets(axes, axis, component):
+    from pyop3.array import Dat
+    from pyop3.expr_visitors import _LayoutDat
+
     # First we build the right data structure to store the offsets. We can find the
     # axes that we need by combining the current axis with those needed by subaxes
     # along with the count of the current component (if ragged).
@@ -106,7 +109,6 @@ def _tabulate_offsets(axes, axis, component):
     axes_iter.add(axis)
     offset_axes = AxisTree.from_iterable(axes_iter)
     offsets = Dat(offset_axes, data=np.full(offset_axes.size, -1, dtype=IntType))
-    # offsets = Dat(axes, dtype=IntType)  # debug
 
     # this is really bloody close - just need the Python iteration to be less rubbish
     # TODO: handle iteration over empty trees
@@ -141,7 +143,8 @@ def _tabulate_offsets(axes, axis, component):
     # myindices = merge_dicts(
     #     just_one(offset_axes.index_exprs).values()
     # )
-    return offsets
+    # return offsets
+    return _LayoutDat(offsets, [offset_axes.subst_layouts()[offset_axes.leaf_path]])
     # return ArrayVar(offsets, myindices, mytargetpath)
 
 
@@ -637,6 +640,7 @@ def _create_count_array_tree(
     path=pmap(),
 ):
     from pyop3.array import Dat
+    from pyop3.expr_visitors import _LayoutDat
 
     if strictly_all(x is None for x in [axis, axes_acc]):
         axis = ctree.root
@@ -687,6 +691,8 @@ def _create_count_array_tree(
                 data=np.full(axtree.global_size, -1, dtype=IntType),
                 prefix="offset",
             )
+            mylayout = countarray.axes.subst_layouts()[axtree.leaf_path]
+            countarray = _LayoutDat(countarray, [mylayout])
             arrays[path_] = countarray
 
     return arrays

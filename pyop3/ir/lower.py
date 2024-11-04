@@ -27,6 +27,7 @@ from pyop3.axtree.tree import Add, AxisVar, Mul
 from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
 from pyop3.config import config
 from pyop3.dtypes import IntType
+from pyop3.expr_visitors import _ConcretizedDat, _LayoutDat
 from pyop3.ir.transform import with_likwid_markers, with_petsc_event
 from pyop3.itree.tree import LoopIndexVar, replace as replace_expr
 from pyop3.lang import (
@@ -271,7 +272,7 @@ class LoopyCodegenContext(CodegenContext):
         """
         raise TypeError(f"No handler provided for {type(array).__name__}")
 
-    @_dtype.register(Dat)
+    @_dtype.register(_ConcretizedDat)
     def _(self, array):
         return self._dtype(array.buffer)
 
@@ -934,8 +935,7 @@ def make_array_expr(array, path, inames, ctx):
     ctx.add_array(array)  # (lower_expr registers the rest)
 
     array_offset = lower_expr(
-        # array.axes.subst_layouts(optimize=True)[path],
-        array.axes.subst_layouts(optimize=False)[path],
+        array.layouts[path],
         inames,
         ctx,
     )
@@ -991,11 +991,12 @@ def _(loop_var: LoopIndexVar, iname_map, context, path=None):
     return iname_map[loop_var.index.id][loop_var.axis_label]
 
 
+# NOTE: Here should not accept Dat because we need to have special layouts!!!
 # aka `Array`
-@lower_expr.register(Dat)
+@lower_expr.register(_ConcretizedDat)
 @lower_expr.register(Mat)
 def _(dat: Dat, /, iname_map, context, path=None):
-    assert not dat.parent, "Should be handled in preprocessing"
+    # assert not dat.parent, "Should be handled in preprocessing"
 
     context.add_array(dat)
 
@@ -1004,8 +1005,13 @@ def _(dat: Dat, /, iname_map, context, path=None):
     if path is None:
         assert dat.axes.is_linear
         path = dat.axes.path(dat.axes.leaf)
+    if isinstance(dat, _LayoutDat):
+        layout_expr = just_one(dat.layouts)
+    else:
+        layout_expr = dat.layouts[path]
 
-    offset_expr = lower_expr(dat.axes.subst_layouts()[path], iname_map, context)
+
+    offset_expr = lower_expr(layout_expr, iname_map, context)
 
     # hack to handle the fact that temporaries can have shape but we want to
     # linearly index it here
@@ -1025,6 +1031,25 @@ def _(dat: Dat, /, iname_map, context, path=None):
         indices = (offset_expr,)
 
     rexpr = pym.subscript(pym.var(new_name), indices)
+    return rexpr
+
+
+@lower_expr.register(_ConcretizedDat)
+def _(dat: _ConcretizedDat, /, iname_map, context, path=None):
+    # assert not dat.parent, "Should be handled in preprocessing"
+
+    context.add_array(dat)
+
+    new_name = context.actual_to_kernel_rename_map[dat.name]
+
+    if isinstance(dat, _LayoutDat):
+        layout_expr = just_one(dat.layouts)
+    else:
+        layout_expr = dat.layouts[path]
+
+    offset_expr = lower_expr(layout_expr, iname_map, context)
+
+    rexpr = pym.subscript(pym.var(new_name), (offset_expr,))
     return rexpr
 
 
@@ -1069,7 +1094,7 @@ def _(arg: np.ndarray):
 
 
 @_as_pointer.register
-def _(arg: Dat):
+def _(arg: _ConcretizedDat):
     # TODO if we use the right accessor here we modify the state appropriately
     return _as_pointer(arg.buffer)
 

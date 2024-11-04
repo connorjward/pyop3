@@ -22,7 +22,12 @@ from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
 from pyop3.itree import Map, TabulatedMapComponent, collect_loop_contexts
 from pyop3.itree.tree import LoopIndexVar
 from pyop3.itree.parse import _as_context_free_indices
-from pyop3.expr_visitors import collect_loops as expr_collect_loops, restrict_to_context as restrict_expression_to_context
+from pyop3.expr_visitors import (
+    collect_loops as expr_collect_loops,
+    restrict_to_context as restrict_expression_to_context,
+    compress_indirection_maps as compress_expression_indirection_maps,
+    concretize_layouts as concretize_expression_layouts,
+)
 from pyop3.lang import (
     INC,
     NA,
@@ -579,115 +584,56 @@ def _(assignment: Assignment, /) -> InstructionList:
 def compress_indirection_maps(obj: Any, /):
     raise TypeError(f"No handler provided for {type(obj).__name__}")
 
-# *below is old untested code*
-#
-# def compress(iterset, map_func, *, uniquify=False):
-#     # TODO Ultimately we should be able to generate code for this set of
-#     # loops. We would need to have a construct to describe "unique packing"
-#     # with hash sets like we do in the Python version. PETSc have PetscHSetI
-#     # which I think would be suitable.
-#
-#     if not uniquify:
-#         raise NotImplementedError("TODO")
-#
-#     iterset = iterset.as_tree()
-#
-#     # prepare size arrays, we want an array per target path per iterset path
-#     sizess = {}
-#     for leaf_axis, leaf_clabel in iterset.leaves:
-#         iterset_path = iterset.path(leaf_axis, leaf_clabel)
-#
-#         # bit unpleasant to have to create a loop index for this
-#         sizes = {}
-#         index = iterset.index()
-#         cf_map = map_func(index).with_context({index.id: iterset_path})
-#         for target_path in cf_map.leaf_target_paths:
-#             if iterset.depth != 1:
-#                 # TODO For now we assume iterset to have depth 1
-#                 raise NotImplementedError
-#             # The axes of the size array correspond only to the specific
-#             # components selected from iterset by iterset_path.
-#             clabels = (just_one(iterset_path.values()),)
-#             subiterset = iterset[clabels]
-#
-#             # subiterset is an axis tree with depth 1, we only want the axis
-#             assert subiterset.depth == 1
-#             subiterset = subiterset.root
-#
-#             sizes[target_path] = Dat(
-#                 subiterset, dtype=IntType, prefix="nnz"
-#             )
-#         sizess[iterset_path] = sizes
-#     sizess = freeze(sizess)
-#
-#     # count sizes
-#     for p in iterset.iter():
-#         entries = collections.defaultdict(set)
-#         for q in map_func(p.index).iter({p}):
-#             # we expect maps to only output a single target index
-#             q_value = just_one(q.target_exprs.values())
-#             entries[q.target_path].add(q_value)
-#
-#         for target_path, points in entries.items():
-#             npoints = len(points)
-#             nnz = sizess[p.source_path][target_path]
-#             nnz.set_value(p.source_path, p.source_exprs, npoints)
-#
-#     # prepare map arrays
-#     flat_mapss = {}
-#     for iterset_path, sizes in sizess.items():
-#         flat_maps = {}
-#         for target_path, nnz in sizes.items():
-#             subiterset = nnz.axes.root
-#             map_axes = AxisTree.from_nest({subiterset: Axis(nnz)})
-#             flat_maps[target_path] = Dat(
-#                 map_axes, dtype=IntType, prefix="map"
-#             )
-#         flat_mapss[iterset_path] = flat_maps
-#     flat_mapss = freeze(flat_mapss)
-#
-#     # populate compressed maps
-#     for p in iterset.iter():
-#         entries = collections.defaultdict(set)
-#         for q in map_func(p.index).iter({p}):
-#             # we expect maps to only output a single target index
-#             q_value = just_one(q.target_exprs.values())
-#             entries[q.target_path].add(q_value)
-#
-#         for target_path, points in entries.items():
-#             flat_map = flat_mapss[p.source_path][target_path]
-#             leaf_axis, leaf_clabel = flat_map.axes.leaf
-#             for i, pt in enumerate(sorted(points)):
-#                 path = p.source_path | {leaf_axis.label: leaf_clabel}
-#                 indices = p.source_exprs | {leaf_axis.label: i}
-#                 flat_map.set_value(path, indices, pt)
-#
-#     # build the actual map
-#     connectivity = {}
-#     for iterset_path, flat_maps in flat_mapss.items():
-#         map_components = []
-#         for target_path, flat_map in flat_maps.items():
-#             # since maps only target a single axis, component pair
-#             target_axlabel, target_clabel = just_one(target_path.items())
-#             map_component = TabulatedMapComponent(
-#                 target_axlabel, target_clabel, flat_map
-#             )
-#             map_components.append(map_component)
-#         connectivity[iterset_path] = map_components
-#     return Map(connectivity)
-#
-#
-# def split_loop(loop: Loop, path, tile_size: int) -> Loop:
-#     orig_loop_index = loop.index
-#
-#     # I think I need to transform the index expressions of the iterset?
-#     # or get a new iterset? let's try that
-#     # It will not work because then the target path would change and the
-#     # data structures would not know what to do.
-#
-#     orig_index_exprs = orig_loop_index.index_exprs
-#     breakpoint()
-#     # new_index_exprs
-#
-#     new_loop_index = orig_loop_index.copy(index_exprs=new_index_exprs)
-#     return loop.copy(index=new_loop_index)
+
+@compress_indirection_maps.register(InstructionList)
+def _(insn_list: InstructionList, /) -> InstructionList:
+    return InstructionList([compress_indirection_maps(insn) for insn in insn_list])
+
+
+@compress_indirection_maps.register(Loop)
+def _(loop: Loop, /) -> Loop:
+    return loop.copy(statements=[compress_indirection_maps(stmt) for stmt in loop.statements])
+
+
+@compress_indirection_maps.register(Assignment)
+def _(assignment: Assignment, /) -> Assignment:
+    return Assignment(
+        compress_expression_indirection_maps(assignment.assignee),
+        compress_expression_indirection_maps(assignment.expression),
+        assignment.assignment_type,
+    )
+
+
+@compress_indirection_maps.register(CalledFunction)
+def _(func: CalledFunction, /):
+    return func.copy(arguments=[compress_expression_indirection_maps(arg) for arg in func.arguments])
+
+
+# NOTE: I think this is a bit redundant - should do this much earlier!
+@functools.singledispatch
+def concretize_array_accesses(obj: Any, /) -> Instruction:
+    raise TypeError(f"No handler provided for {type(obj).__name__}")
+
+
+@concretize_array_accesses.register(InstructionList)
+def _(insn_list: InstructionList, /) -> InstructionList:
+    return InstructionList([concretize_array_accesses(insn) for insn in insn_list])
+
+
+@concretize_array_accesses.register(Loop)
+def _(loop: Loop, /) -> Loop:
+    return loop.copy(statements=[concretize_array_accesses(stmt) for stmt in loop.statements])
+
+
+@concretize_array_accesses.register(Assignment)
+def _(assignment: Assignment, /) -> Assignment:
+    return Assignment(
+        concretize_expression_layouts(assignment.assignee),
+        concretize_expression_layouts(assignment.expression),
+        assignment.assignment_type,
+    )
+
+
+@concretize_array_accesses.register(CalledFunction)
+def _(func: CalledFunction, /):
+    return func.copy(arguments=[concretize_expression_layouts(arg) for arg in func.arguments])

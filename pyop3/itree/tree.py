@@ -37,8 +37,10 @@ from pyop3.axtree.tree import (
     AxisVar, Operator,
     ContextSensitiveLoopIterable,
     IndexedAxisTree,
+    LoopIndexVar,
 )
 from pyop3.dtypes import IntType, get_mpi_dtype
+from pyop3.expr_visitors import replace
 from pyop3.lang import KernelArgument
 from pyop3.tree import (
     LabelledNodeComponent,
@@ -62,64 +64,11 @@ from pyop3.utils import (
 
 bsearch = pym.var("mybsearch")
 
-class LoopIndexVar(Expression):
-    def __init__(self, index, axis_label) -> None:
-        self.index = index
-        self.axis_label = axis_label
-
-    def __repr__(self) -> str:
-        return f"{type(self).__name__}({self.index!r}, {self.axis_label!r})"
-
-
 class InvalidIndexTargetException(Pyop3Exception):
     """Exception raised when we try to match index information to a mismatching axis tree."""
 
 
 
-
-# TODO: make this a nice generic traversal
-@functools.singledispatch
-def replace(obj: Any, axes, paths_and_exprs):
-    raise TypeError()
-
-
-@replace.register(AxisVar)
-@replace.register(LoopIndexVar)
-def _(var, axes, pathsandexprs):
-    assert axes.is_linear
-    # NOTE: The commented out bit will not work for None as part of the path
-    # replace_map = merge_dicts(pathsandexprs[axis.id, component_label] for axis, component_label in axes.path_with_nodes(axes.leaf).items())
-    replace_map = merge_dicts(e for _, e in pathsandexprs.values())
-    return replace_map.get(var.axis_label, var)
-
-
-@replace.register
-def _(num: numbers.Number, axes, pathsandexprs):
-    return num
-
-
-@replace.register
-def _(array: Array, axes, paths_and_exprs):
-    if array.parent:
-        raise NotImplementedError
-    # breakpoint()
-    if not isinstance(array, Dat):
-        raise NotImplementedError
-
-    # NOTE: identical to index_axes()
-    new_targets = []
-    for orig_path in array.axes.paths_and_exprs:
-        target_path_and_exprs = compose_targets(array.axes, orig_path, axes, paths_and_exprs)
-        new_targets.append(target_path_and_exprs)
-
-    new_axes = IndexedAxisTree(axes.node_map, array.axes.unindexed, targets=new_targets)
-    # return array.with_axes(new_axes)
-    return array.reconstruct(axes=new_axes)
-
-
-@replace.register
-def _(op: Operator, *args):
-    return type(op)(replace(op.a, *args), replace(op.b, *args))
 
 
 # NOTE: index trees are not really labelled trees. The component labels are always
@@ -1456,13 +1405,16 @@ def _(slice_: Slice, *, prev_axes, **_):
                 replace_path = {subset_axis.label: subset_axis.component.label}
                 replace_exprs = {subset_axis.label: AxisVar(axis_label)}
                 replace_bits = {(linear_axis.id, axis.components[i].label): (replace_path, replace_exprs)}
+
+                from pyop3.expr_visitors import _LayoutDat
+
                 subset_var = replace(slice_component.array, linear_axes, replace_bits)
+                myleafpath = subset_var.axes.leaf_path
+                subset_layout = subset_var.axes.subst_layouts()[myleafpath]
+                subsetlayoutdat = _LayoutDat(subset_var, [subset_layout])
 
-                # print(subset_var)
 
-                # breakpoint()
-
-                index_exprs_per_subslice.append(freeze({slice_.axis: subset_var}))
+                index_exprs_per_subslice.append(freeze({slice_.axis: subsetlayoutdat}))
                 layout_exprs_per_subslice.append(
                     pmap({slice_.label: bsearch(subset_var, layout_var)})
                 )
@@ -1477,7 +1429,6 @@ def _(slice_: Slice, *, prev_axes, **_):
         layout_exprs_per_subslice,
     ):
         target_path_per_component[axis.id, cpt.label] = ((freeze(target_path), freeze(index_exprs)),)
-        # index_exprs_per_component[axis.id, cpt.label] = (f
         layout_exprs_per_component[axis.id, cpt.label] = (freeze(layout_exprs),)
 
     return (
@@ -1502,96 +1453,6 @@ def _(
         compressed_targets[leaf_key] = tuple(t[leaf_key] for t in called_map.axes.targets)
 
     return called_map.axes, compressed_targets, {}, (), {}
-    # (
-    #     prior_axes,
-    #     prior_target_path_per_cpt,
-    #     # prior_index_exprs_per_cpt,
-    #     _,
-    #     outer_loops,
-    #     prior_extra_index_exprs,
-    # ) = _index_axes_index(
-    #     called_map.index,
-    #     prev_axes=prev_axes,
-    # )
-    #
-    # # In general every (context-free) index stores multiple target paths and
-    # # index expressions. This lets us for example have a loop that looks like:
-    # #
-    # #     loop(p := axes[subset].index(), ...)
-    # #
-    # # This loop index will have two sets of index expressions: one over the
-    # # indexed axis tree (source) and another over the original one (target).
-    # # This is convenient until one needs to introduce a map from p to something
-    # # else.
-    #
-    # # needed?
-    # extra_index_exprs = dict(prior_extra_index_exprs)
-    #
-    # if not prior_axes:
-    #     # TODO: not used!
-    #     # prior_target_path_and_exprs = prior_target_path_per_cpt[None]
-    #     # prior_index_exprs = just_one(prior_index_exprs_per_cpt[None])
-    #     (
-    #         axis,
-    #         target_path_per_cpt,
-    #     ) = _make_leaf_axis_from_called_map(
-    #         called_map.name,
-    #         output_spec, linear_input_axes, input_targets...
-    #     )
-    #     axes = AxisTree(axis)
-    #
-    # else:
-    #     axes = AxisTree(prior_axes.node_map)
-    #     target_path_per_cpt = {}
-    #     # index_exprs_per_cpt = {}
-    #     layout_exprs_per_cpt = {}
-    #     for prior_leaf_axis, prior_leaf_cpt in prior_axes.leaves:
-    #         # prior_target_path_and_exprs = just_one(prior_target_path_per_cpt.get(None, (pmap(),)))
-    #         # prior_index_exprs = just_one(prior_index_exprs_per_cpt.get(None, (pmap(),)))
-    #
-    #         # for myaxis, mycomponent_label in prior_axes.path_with_nodes(
-    #         #     prior_leaf_axis.id, prior_leaf_cpt
-    #         # ).items():
-    #         #     prior_target_path_and_exprs |= prior_target_path_per_cpt.get(
-    #         #         (myaxis.id, mycomponent_label), {}
-    #         #     )
-    #             # prior_index_exprs |= prior_index_exprs_per_cpt.get(
-    #             #     (myaxis.id, mycomponent_label), {}
-    #             # )
-    #
-    #         (
-    #             subaxis,
-    #             subtarget_paths,
-    #             # subindex_exprs,
-    #             sublayout_exprs,
-    #             subextra_index_exprs,
-    #         ) = _make_leaf_axis_from_called_map(
-    #             called_map,
-    #             # prior_target_path_and_exprs,
-    #             "anything!",
-    #             # prior_index_exprs,
-    #             prev_axes,
-    #         )
-    #         breakpoint()
-    #
-    #         axes = axes.add_subtree(
-    #             AxisTree(subaxis),
-    #             prior_leaf_axis,
-    #             prior_leaf_cpt,
-    #         )
-    #         target_path_per_cpt.update(subtarget_paths)
-    #         # index_exprs_per_cpt.update(subindex_exprs)
-    #         layout_exprs_per_cpt.update(sublayout_exprs)
-    #         extra_index_exprs.update(subextra_index_exprs)
-
-    return (
-        axes,
-        freeze(target_path_per_cpt),
-        # freeze(index_exprs_per_cpt),
-        freeze(layout_exprs_per_cpt),
-        outer_loops,
-        freeze(extra_index_exprs),
-    )
 
 
 def _make_leaf_axis_from_called_map_new(map_name, output_spec, linear_input_axes, input_paths_and_exprs):
@@ -1617,166 +1478,20 @@ def _make_leaf_axis_from_called_map_new(map_name, output_spec, linear_input_axes
         paths_and_exprs = input_paths_and_exprs | {(linear_axis.id, component.label): (pmap({leaf_axis.label: leaf_component_label}), pmap({leaf_axis.label: AxisVar(leaf_axis.label)}))}
 
         target_path = pmap({map_output.target_axis: map_output.target_component})
-        target_exprs = pmap({map_output.target_axis: replace(map_output.array, linear_axes, paths_and_exprs)})
+
+        # Dats used in layouts are *slightly* different to regular Dats (e.g. they always
+        # have a defined path). Therefore we want a special type to represent this.
+        from pyop3.expr_visitors import _LayoutDat
+
+        # target_exprs = pmap({map_output.target_axis: replace(map_output.array, linear_axes, paths_and_exprs)})
+        replaced = replace(map_output.array, linear_axes, paths_and_exprs)
+        myreplacedpath = replaced.axes.path(replaced.axes.leaf)
+        replaced_layout_dat = _LayoutDat(replaced, [replaced.axes.subst_layouts()[myreplacedpath]])
+        target_exprs = pmap({map_output.target_axis: replaced_layout_dat})
         targets[axis.id, component.label] = (target_path, target_exprs)
     targets = pmap(targets)
 
     return (axis, targets)
-
-
-def _make_leaf_axis_from_called_map(
-    called_map,
-    inner_target_paths,
-    # inner_target_exprss,
-    prev_axes,
-):
-    # Note that we want to return the mapping
-    #
-    #   {
-    #     (axis_id, component_label): [(path0, exprs0), (path1, exprs1), ...],
-    #     ...
-    #   }
-    #
-    # Also recall that the connectivity of a map goes like:
-    #
-    #   [
-    #     {src00: [XXX],
-    #      src01: [YYY]},
-    #     {src10: [AAA],
-    #      src11: [BBB]},
-    #   ]
-    #
-    # where src00 and src01 are *equivalent* mappings.
-
-    axis_id = Axis.unique_id()
-    components = []
-    target_path_and_exprs_outer = {}
-
-    all_skipped = True
-    for equivalent_map_components in called_map.targets:
-        # The new axis is built from the most recent map component
-        # NOTE: I don't have a good explanation for this yet
-        my_map_cpt = equivalent_map_components[-1]
-
-        all_skipped = False
-        if isinstance(my_map_cpt.arity, Dat):
-            arity = my_map_cpt.arity[called_map.from_index]
-        else:
-            arity = my_map_cpt.arity
-        cpt = AxisComponent(arity, label=my_map_cpt.label)
-        components.append(cpt)
-
-        target_path_and_exprs = []
-        # Now loop over equivalent map components and build the right (path, expr) tuples
-        # and stack them together
-        for map_cpt in equivalent_map_components:
-            target_path = pmap({map_cpt.target_axis: map_cpt.target_component})
-
-            axisvar = AxisVar(called_map.map.name)
-
-            if not isinstance(map_cpt, TabulatedMapComponent):
-                raise NotImplementedError("Currently we assume only arrays here")
-
-            map_array = map_cpt.array
-            map_axes = map_array.axes
-
-            # should already be indexed!
-            assert map_axes.depth == 1
-
-            # the first index is provided from inner index whereas the second one requires
-            # a replacement
-            # map_leaf_axis, map_leaf_component = map_axes.leaf
-            # old_inner_index_expr = just_one(map_array.axes.index_exprs)[
-            #     map_leaf_axis.id, map_leaf_component
-            # ]
-            #
-            # # I am sceptical that this replacement is necessary - isn't the replace map for a brand new axis label?
-            # my_index_exprs = {}
-            # index_expr_replace_map = {map_axes.leaf_axis.label: axisvar}
-            # replacer = IndexExpressionReplacer(index_expr_replace_map)
-            # for axlabel, index_expr in old_inner_index_expr.items():
-            #     my_index_exprs[axlabel] = replacer(index_expr)
-            # new_inner_index_expr = my_index_exprs
-
-            # The map variable has the form map0[X, Y] where X is the "call index" (it itself
-            # could be a map), and Y is the new "arity" index.
-
-            # one of paths_and_exprs should be suitable for indexing the map, this will get cleaned up later.
-            myleafpath =  map_axes.path_with_nodes(*map_axes.leaf)
-
-            map_path = {}
-            map_exprs = {}
-            map_path.update(map_axes.target_path.get(None, {}))
-            map_exprs.update(map_axes.target_exprs.get(None, {}))
-            for axis, component_label in myleafpath.items():
-                axis_key = (axis.id, component_label)
-                map_path.update(map_axes.target_path.get(axis_key, {}))
-                map_exprs.update(map_axes.target_exprs.get(axis_key, {}))
-
-            # breakpoint()
-            #
-            # map_path = None
-            # map_exprs = None
-            # for paths_and_exprs in map_axes.paths_and_exprs:
-            #     matching = True
-            #     for key, (mypath, myexprs) in paths_and_exprs.items():
-            #         if not (dict(mypath).items() <= dict(myleafpath).items()):  # subset check
-            #             matching = False
-            #             break
-            #
-            #     if not matching:
-            #         continue
-            #
-            #     assert map_path is None and map_exprs is None
-            #     # do an accumulation
-            #     map_path = {}
-            #     map_exprs = {}
-            #     for key, (mypath, myexprs) in paths_and_exprs.items():
-            #         map_path.update(mypath)
-            #         map_exprs.update(myexprs)
-            # assert map_path is not None and map_exprs is not None
-
-
-            # my_leaf_axis, my_leaf_component_label = map_axes.leaf
-            # leaf_key = (my_leaf_axis.id, my_leaf_component_label)
-            #
-            # # NOTE: these used to be accumulated, are they still?
-            # breakpoint()
-            # map_path = map_axes.target_path[leaf_key]
-            # map_exprs = map_axes.target_exprs[leaf_key]
-
-            # breakpoint()
-
-            # NOTE: we should be able to get away with just indexing the map array here.
-            map_var = map_cpt.array
-            # map_var = ArrayVar(map_cpt.array,
-            #     # order is important to avoid overwriting prior, cleanup
-            #     # merge_dicts([prior_index_exprs, new_inner_index_expr]),
-            #     # merge_dicts([new_inner_index_expr, inner_target_exprss[connectivity_index]]),
-            #     map_exprs,
-            #     # path should be allowed to be None
-            #                    map_path,
-            # )
-
-            target_expr = pmap({map_cpt.target_axis: map_var})
-
-            target_path_and_exprs.append((target_path, target_expr))
-
-        target_path_and_exprs_outer[axis_id, cpt.label] = tuple(target_path_and_exprs)
-
-    axis = Axis(
-        components,
-        label=called_map.map.name,
-        id=axis_id,
-    )
-
-    return (
-        axis,
-        target_path_and_exprs_outer,
-        # index_exprs_per_cpt,
-        {},  # not used
-        {},  # not used
-    )
 
 
 def index_axes(

@@ -790,7 +790,9 @@ class Operator(Expression):
 
     @cached_property
     def axes(self):
-        return merge_trees(_extract_axes(self.a), _extract_axes(self.b))
+        from pyop3.expr_visitors import extract_axes
+
+        return merge_axis_trees([extract_axes(self.a), extract_axes(self.b)])
 
 
 class AxisVar(Terminal):
@@ -802,6 +804,15 @@ class AxisVar(Terminal):
 
     def __str__(self) -> str:
         return f"i{{{self.axis_label}}}"
+
+
+class LoopIndexVar(Terminal):
+    def __init__(self, index, axis_label) -> None:
+        self.index = index
+        self.axis_label = axis_label
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({self.index!r}, {self.axis_label!r})"
 
 
 class Add(Operator):
@@ -991,8 +1002,13 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
 
     @property
     @abc.abstractmethod
-    def _subst_layouts_default(self):
+    def _matching_target(self):
         pass
+
+    @cached_property
+    def _subst_layouts_default(self):
+        return subst_layouts(self, self._matching_target, self.layouts)
+
 
     # NOTE: Shouldn't be a boolean here as there are different optimisation options.
     # In particular we can choose to compress multiple maps either only with non-increasing
@@ -1463,8 +1479,8 @@ class AxisTree(MutableLabelledTreeMixin, BaseAxisTree):
         return freeze(layouts_)
 
     @property
-    def _subst_layouts_default(self):
-        return subst_layouts(self, self._source_path_and_exprs, self.layouts)
+    def _matching_target(self):
+        return self._source_path_and_exprs
 
     @cached_property
     def _buffer_indices(self):
@@ -1692,10 +1708,6 @@ class IndexedAxisTree(BaseAxisTree):
 
 
     @cached_property
-    def _subst_layouts_default(self):
-        return subst_layouts(self, self._matching_target, self.layouts)
-
-    @cached_property
     def _matching_target(self) -> PMap:
         matching_targets = []
         for target in self.targets:
@@ -1913,9 +1925,13 @@ def _(arg: numbers.Integral) -> AxisComponent:
 
 
 def merge_axis_trees(axis_trees):
-    root, subnode_map = _merge_node_maps(axis_trees)
-    node_map = {None: (root,)}
-    node_map.update(subnode_map)
+    nonempty_axis_trees = tuple(axis_tree for axis_tree in axis_trees if not axis_tree.is_empty)
+    if nonempty_axis_trees:
+        root, subnode_map = _merge_node_maps(axis_trees)
+        node_map = {None: (root,)}
+        node_map.update(subnode_map)
+    else:
+        node_map = None
 
     if all(isinstance(axis_tree, AxisTree) for axis_tree in axis_trees):
         return AxisTree(node_map)
@@ -1933,6 +1949,7 @@ def _merge_node_maps(axis_trees, *, axis_tree_index=0, axis=None, suffix="") -> 
     assert axis_tree_index < len(axis_trees)
 
     axis_tree = axis_trees[axis_tree_index]
+    assert not axis_tree.is_empty
 
     if axis is None:
         axis = axis_tree.root
