@@ -189,6 +189,7 @@ def extract_axes(obj: Any, /) -> BaseAxisTree:
 
 
 @extract_axes.register(AxisVar)
+@extract_axes.register(LoopIndexVar)
 @extract_axes.register(numbers.Number)
 def _(var: Any, /) -> AxisTree:
     return AxisTree()
@@ -377,6 +378,7 @@ def compress_indirection_maps(obj: Any, /, **kwargs) -> tuple:
 
 
 @compress_indirection_maps.register(AxisVar)
+@compress_indirection_maps.register(LoopIndexVar)
 @compress_indirection_maps.register(numbers.Number)
 def _(var: Any, /, **kwargs) -> tuple:
     return ((var, 0),)
@@ -409,7 +411,7 @@ def _(op: Operator, /, *, topdat=True) -> tuple:
 def _(dat: _LayoutDat, /, *, topdat) -> tuple:
     assert not topdat
 
-    compress_indirection_maps(just_one(dat.layouts), topdat=topdat).values()
+    result = compress_indirection_maps(just_one(dat.layouts), topdat=topdat)
 
     breakpoint()
     # for subcandidate in subcandidates:
