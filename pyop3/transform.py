@@ -26,7 +26,7 @@ from pyop3.expr_visitors import (
     collect_loops as expr_collect_loops,
     restrict_to_context as restrict_expression_to_context,
     compress_indirection_maps as compress_expression_indirection_maps,
-    concretize_layouts as concretize_expression_layouts,
+    concretize_arrays as concretize_expression_layouts,
 )
 from pyop3.lang import (
     INC,
@@ -580,35 +580,6 @@ def _(assignment: Assignment, /) -> InstructionList:
     return InstructionList([assignment])
 
 
-@functools.singledispatch
-def compress_indirection_maps(obj: Any, /):
-    raise TypeError(f"No handler provided for {type(obj).__name__}")
-
-
-@compress_indirection_maps.register(InstructionList)
-def _(insn_list: InstructionList, /) -> InstructionList:
-    return InstructionList([compress_indirection_maps(insn) for insn in insn_list])
-
-
-@compress_indirection_maps.register(Loop)
-def _(loop: Loop, /) -> Loop:
-    return loop.copy(statements=[compress_indirection_maps(stmt) for stmt in loop.statements])
-
-
-@compress_indirection_maps.register(Assignment)
-def _(assignment: Assignment, /) -> Assignment:
-    return Assignment(
-        compress_expression_indirection_maps(assignment.assignee),
-        compress_expression_indirection_maps(assignment.expression),
-        assignment.assignment_type,
-    )
-
-
-@compress_indirection_maps.register(CalledFunction)
-def _(func: CalledFunction, /):
-    return func.copy(arguments=[compress_expression_indirection_maps(arg) for arg in func.arguments])
-
-
 # NOTE: I think this is a bit redundant - should do this much earlier!
 @functools.singledispatch
 def concretize_array_accesses(obj: Any, /) -> Instruction:
@@ -637,3 +608,51 @@ def _(assignment: Assignment, /) -> Assignment:
 @concretize_array_accesses.register(CalledFunction)
 def _(func: CalledFunction, /):
     return func.copy(arguments=[concretize_expression_layouts(arg) for arg in func.arguments])
+
+
+@functools.singledispatch
+def compress_indirection_maps(obj: Any, /):
+    raise TypeError(f"No handler provided for {type(obj).__name__}")
+
+
+@compress_indirection_maps.register(InstructionList)
+def _(insn_list: InstructionList, /) -> InstructionList:
+    return InstructionList([compress_indirection_maps(insn) for insn in insn_list])
+
+
+@compress_indirection_maps.register(Loop)
+def _(loop: Loop, /) -> Loop:
+    return loop.copy(statements=[compress_indirection_maps(stmt) for stmt in loop.statements])
+
+
+@compress_indirection_maps.register(Assignment)
+def _(assignment: Assignment, /) -> Assignment:
+    return Assignment(
+        _compress_array_indirection_maps(assignment.assignee),
+        _compress_array_indirection_maps(assignment.expression),
+        assignment.assignment_type,
+    )
+
+
+@compress_indirection_maps.register(CalledFunction)
+def _(func: CalledFunction, /):
+    return func.copy(arguments=[_compress_array_indirection_maps(arg) for arg in func.arguments])
+
+
+def _compress_array_indirection_maps(dat):
+    from pyop3.expr_visitors import _ConcretizedDat
+
+    if not isinstance(dat, _ConcretizedDat):
+        return dat
+
+    layouts = {}
+    for leaf_path in dat.layouts.keys():
+        candidate_layouts = compress_expression_indirection_maps(dat.layouts[leaf_path])
+
+        # Now choose the candidate layout with the lowest cost, breaking ties
+        # by choosing the left-most entry with a given cost.
+        chosen_layout = min(candidate_layouts, key=lambda item: item[1])[0]
+        breakpoint()
+        layouts[leaf_path] = chosen_layout
+
+    return _ConcretizedDat(dat.dat, layouts)

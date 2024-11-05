@@ -13,7 +13,7 @@ import numpy as np
 import pymbolic as pym
 from pyrsistent import PMap, freeze, pmap
 
-# from pyop3.array.harray import Dat
+from pyop3.array.harray import _ConcretizedDat
 from pyop3.axtree.tree import (
     Axis,
     AxisComponent,
@@ -74,7 +74,7 @@ def tabulate_again(axes, *, axis=None):
         # 1. Constant stride
         if has_constant_step(axes, axis, component, "old"):
             step = step_size(axes, axis, component)
-            layouts[(axis, component)] = AxisVar(axis.label) * step + start
+            layouts[(axis, component)] = AxisVar(axis) * step + start
 
 
         # 2. Ragged inside - must tabulate
@@ -94,9 +94,6 @@ def tabulate_again(axes, *, axis=None):
 
 
 def _tabulate_offsets(axes, axis, component):
-    from pyop3.array import Dat
-    from pyop3.expr_visitors import _LayoutDat
-
     # First we build the right data structure to store the offsets. We can find the
     # axes that we need by combining the current axis with those needed by subaxes
     # along with the count of the current component (if ragged).
@@ -108,7 +105,7 @@ def _tabulate_offsets(axes, axis, component):
     # NOTE: This code is quite unclear (partial axes made then axes_iter further modified)
     axes_iter.add(axis)
     offset_axes = AxisTree.from_iterable(axes_iter)
-    offsets = Dat(offset_axes, data=np.full(offset_axes.size, -1, dtype=IntType))
+    offsets = _ConcretizedDat(offset_axes, data=np.full(offset_axes.size, -1, dtype=IntType))
 
     # this is really bloody close - just need the Python iteration to be less rubbish
     # TODO: handle iteration over empty trees
@@ -136,16 +133,7 @@ def _tabulate_offsets(axes, axis, component):
                     indices=multiindex.source_exprs|axindex.source_exprs,
                 )
 
-    # copied from elsewhere, should just go
-    # mytargetpath = merge_dicts(
-    #     just_one(offset_axes.paths).values()
-    # )
-    # myindices = merge_dicts(
-    #     just_one(offset_axes.index_exprs).values()
-    # )
-    # return offsets
-    return _LayoutDat(offsets, [offset_axes.subst_layouts()[offset_axes.leaf_path]])
-    # return ArrayVar(offsets, myindices, mytargetpath)
+    return offsets
 
 
 
@@ -297,7 +285,7 @@ def _make_layout_per_axis_component(
                 if (axis.id, c.label) in loop_vars:
                     axis_var = loop_vars[axis.id, c.label][axis.label]
                 else:
-                    axis_var = AxisVar(axis.label)
+                    axis_var = AxisVar(axis)
                 layouts.update({layout_path | {axis.label: c.label}: axis_var * step})
 
         return (layouts, ctree)
@@ -372,7 +360,7 @@ def _make_layout_per_axis_component(
             for cidx, step in enumerate(steps):
                 mycomponent = axis.components[cidx]
 
-                axis_var = AxisVar(axis.label)
+                axis_var = AxisVar(axis)
                 new_layout = axis_var * step + start
 
                 layouts[layout_path | {axis.label: mycomponent.label}] = new_layout
@@ -639,9 +627,6 @@ def _create_count_array_tree(
     axes_acc=None,
     path=pmap(),
 ):
-    from pyop3.array import Dat
-    from pyop3.expr_visitors import _LayoutDat
-
     if strictly_all(x is None for x in [axis, axes_acc]):
         axis = ctree.root
         axes_acc = ()
@@ -681,18 +666,16 @@ def _create_count_array_tree(
                         loop_var = loop_vars[myaxis.label]
                         index_expr = {myaxis.label: loop_var}
                     else:
-                        index_expr = {myaxis.label: AxisVar(myaxis.label)}
+                        index_expr = {myaxis.label: AxisVar(myaxis)}
                     index_exprs[key] = index_expr
             else:
                 index_exprs = axtree.index_exprs
 
-            countarray = Dat(
+            countarray = _ConcretizedDat(
                 axtree,
                 data=np.full(axtree.global_size, -1, dtype=IntType),
                 prefix="offset",
             )
-            mylayout = countarray.axes.subst_layouts()[axtree.leaf_path]
-            countarray = _LayoutDat(countarray, [mylayout])
             arrays[path_] = countarray
 
     return arrays
@@ -844,48 +827,22 @@ def axis_tree_size(axes: AxisTree) -> int:
     outer_loops = axes.outer_loops
 
     if axes.is_empty:
-        return 1
+        return 0
 
     if all(
         has_fixed_size(axes, axes.root, cpt, outer_loops)
         for cpt in axes.root.components
     ):
-        # if not outer_loops:
-        # return _axis_size(axes, axes.root, loop_exprs=loop_exprs)
         return _axis_size(axes, axes.root)
 
     sizes = []
 
-    # for idxs in itertools.product(*outer_loops_iter):
     for idxs in my_product(outer_loops):
-        print(idxs)
-        # for idx in size_axes.iter():
-        # idxs = [idx]
         source_indices = merge_dicts(idx.source_exprs for idx in idxs)
         target_indices = merge_dicts(idx.target_exprs for idx in idxs)
 
-        # indices = {}
-        # target_indices = {}
-        # # myindices = {}
-        # for axis in size_axes.nodes:
-        #     loop_var = outer_loop_map[axis]
-        #     idx = just_one(idx for idx in idxs if idx.index == loop_var.index)
-        #     # myindices[axis.label] = just_one(sum(idx.source_exprs.values()))
-        #
-        #     axlabel = just_one(idx.index.iterset.nodes).label
-        #     value = just_one(idx.target_exprs.values())
-        # indices[loop_var.index.id] = {axlabel: value}
-
-        # target_indices[just_one(idx.target_path.keys())] = just_one(idx.target_exprs.values())
-
-        # this is a hack
-        if axes.is_empty:
-            size = 1
-        else:
-            size = _axis_size(axes, axes.root, target_indices)
-        # sizes.set_value(source_indices, size)
+        size = _axis_size(axes, axes.root, target_indices)
         sizes.append(size)
-    # return sizes
     return np.asarray(sizes, dtype=IntType)
 
 

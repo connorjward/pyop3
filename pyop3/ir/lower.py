@@ -27,7 +27,7 @@ from pyop3.axtree.tree import Add, AxisVar, Mul
 from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
 from pyop3.config import config
 from pyop3.dtypes import IntType
-from pyop3.expr_visitors import _ConcretizedDat, _LayoutDat
+from pyop3.expr_visitors import _ConcretizedDat
 from pyop3.ir.transform import with_likwid_markers, with_petsc_event
 from pyop3.itree.tree import LoopIndexVar, replace as replace_expr
 from pyop3.lang import (
@@ -650,7 +650,7 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
 
             # Register data
             # TODO This might be bad for temporaries
-            if isinstance(arg, Dat):
+            if isinstance(arg, _ConcretizedDat):
                 ctx.add_array(arg)
 
             # this should already be done in an assignment
@@ -1005,10 +1005,7 @@ def _(dat: Dat, /, iname_map, context, path=None):
     if path is None:
         assert dat.axes.is_linear
         path = dat.axes.path(dat.axes.leaf)
-    if isinstance(dat, _LayoutDat):
-        layout_expr = just_one(dat.layouts)
-    else:
-        layout_expr = dat.layouts[path]
+    layout_expr = dat.layouts[path]
 
 
     offset_expr = lower_expr(layout_expr, iname_map, context)
@@ -1042,10 +1039,10 @@ def _(dat: _ConcretizedDat, /, iname_map, context, path=None):
 
     new_name = context.actual_to_kernel_rename_map[dat.name]
 
-    if isinstance(dat, _LayoutDat):
-        layout_expr = just_one(dat.layouts)
-    else:
+    if path:
         layout_expr = dat.layouts[path]
+    else:
+        layout_expr = just_one(dat.layouts.values())
 
     offset_expr = lower_expr(layout_expr, iname_map, context)
 

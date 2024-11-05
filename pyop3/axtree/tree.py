@@ -276,34 +276,6 @@ def eval_expr(expr):
     return result
 
 
-# NOTE: This is a horrendous hack to rebuild structure from expressions. The
-# right way to do this is to have a pyop3 symbolic language where constructs
-# like Sum carries information about things like shape and dtype.
-class AxisBuilder(pym.mapper.Mapper):
-    def map_constant(self, expr):
-        return None, None
-
-    def map_array(self, expr):
-        if len(expr.indices) == 1:
-            return self.rec(just_one(expr.indices.values()))
-        else:
-            # For now limit ourselves to these cases - ultimately this should
-            # all go.
-            assert len(expr.indices) == 2
-
-            shape = expr.array.axes.leaf_component.count
-            subresult = self.rec(just_one([i for i in expr.indices.values() if not isinstance(i, AxisVariable)]))
-            return (subresult[0] + (shape,), subresult[1])
-
-    def map_loop_index(self, expr):
-        assert expr.index.iterset.depth == 1  # for now
-        return ((expr.index.iterset.materialize().root,), expr.index)
-
-
-def axes_from_expr(expr):
-    return AxisBuilder()(expr)
-
-
 # NOTE: I have identical classes all over the place for this
 class ExpressionReplacer(pym.mapper.IdentityMapper):
     def __init__(self, replace_map):
@@ -796,14 +768,19 @@ class Operator(Expression):
 
 
 class AxisVar(Terminal):
-    def __init__(self, axis_label) -> None:
-        self.axis_label = axis_label
+    def __init__(self, axis: Axis) -> None:
+        assert isinstance(axis, Axis)
+        self.axis = axis
+
+    @property
+    def axis_label(self):
+        return self.axis.label
 
     def __repr__(self) -> str:
-        return f"{type(self).__name__}({self.axis_label!r})"
+        return f"{type(self).__name__}({self.axis!r})"
 
     def __str__(self) -> str:
-        return f"i{{{self.axis_label}}}"
+        return f"i_{{{self.axis_label}}}"
 
 
 class LoopIndexVar(Terminal):
@@ -816,10 +793,7 @@ class LoopIndexVar(Terminal):
 
 
 class Add(Operator):
-    def __init__(self, a, b):
-        if a is b:
-            breakpoint()
-        super().__init__(a, b)
+    pass
 
 
 class Sub(Operator):
@@ -832,32 +806,6 @@ class Mul(Operator):
 
 class FloorDiv(Operator):
     pass
-
-
-# hacky class for index_exprs to work, needs cleaning up
-# class AxisVar(pym.primitives.Variable):
-#     init_arg_names = ("axis",)
-#
-#     mapper_method = sys.intern("map_axis_variable")
-#
-#     mycounter = 0
-#
-#     def __init__(self, axis):
-#         super().__init__(f"var{self.mycounter}")
-#         self.__class__.mycounter += 1  # ugly
-#         self.axis_label = axis
-#
-#     def __getinitargs__(self):
-#         # not very happy about this, is the name required?
-#         return (self.axis,)
-#
-#     @property
-#     def axis(self):
-#         return self.axis_label
-#
-#     @property
-#     def datamap(self):
-#         return pmap()
 
 
 # NOTE: More consistent to be AbstractAxisTree I think
@@ -1010,27 +958,13 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
         return subst_layouts(self, self._matching_target, self.layouts)
 
 
-    # NOTE: Shouldn't be a boolean here as there are different optimisation options.
-    # In particular we can choose to compress multiple maps either only with non-increasing
-    # arity (arity * 1), or not (which leads to a larger array: arity * arity).
-    # @cachedmethod(cache=lambda self: self._cache)
-    def subst_layouts(self, optimize=False):
-        if optimize:
-            layouts_opt = {}
-            collector = ExpressionFlatteningCollector()
-            for key, layout in self._subst_layouts_default.items():
-                replace_expr, needs_flattening = collector(layout)
-                if needs_flattening:
-                    target_expr = eval_expr(replace_expr)
-                    replace_map = {replace_expr: target_expr}
-                    breakpoint()
-                    layout_opt = ExpressionReplacer(replace_map)(layout)
-                else:
-                    layout_opt = layout
-                layouts_opt[key] = layout_opt
-            return freeze(layouts_opt)
-        else:
-            return self._subst_layouts_default
+    def subst_layouts(self):
+        return self._subst_layouts_default
+
+    # NOTE: Do we ever want non-leaf subst_layouts?
+    @property
+    def leaf_subst_layouts(self) -> PMap:
+        return pmap({leaf_path: self.subst_layouts()[leaf_path] for leaf_path in self.leaf_paths})
 
     # TODO: rename to iter
     def index(self) -> LoopIndex:
@@ -1093,7 +1027,7 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
 
         source_exprs = {}
         for component in axis.components:
-            source_exprs_acc_ = source_exprs_acc | {axis.label: AxisVar(axis.label)}
+            source_exprs_acc_ = source_exprs_acc | {axis.label: AxisVar(axis)}
             source_exprs[axis.id, component.label] = source_exprs_acc_
 
             if subaxis := self.child(axis, component):
@@ -1103,29 +1037,6 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
     @property
     def axes(self):
         return self
-
-    @cached_property
-    def datamap(self):
-        from pyop3.expr_visitors import collect_datamap
-
-        if self.is_empty:
-            dmap = {}
-        else:
-            dmap = postvisit(self, _collect_datamap, axes=self)
-
-        for index_exprs_per_axis in self.index_exprs:
-            for index_exprs in index_exprs_per_axis.values():
-                for expr in index_exprs.values():
-                    dmap.update(collect_datamap(expr))
-                    # for array in MultiArrayCollector()(expr):
-                    #     dmap.update(array.datamap)
-        # TODO: cleanup, indexed axis trees (from map.index()) do not have layouts
-        if not isinstance(self, IndexedAxisTree) or self.unindexed is not None:
-            for layout_expr in self.layouts.values():
-                # for array in MultiArrayCollector()(layout_expr):
-                #     dmap.update(array.datamap)
-                dmap.update(collect_datamap(layout_expr))
-        return pmap(dmap)
 
     def as_tree(self):
         return self
@@ -1219,6 +1130,25 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
         from pyop3.axtree.layout import axis_tree_size
 
         return axis_tree_size(self)
+
+    # TODO: Get this working properly. Care has to be taken for ragged things.
+    # Likely need to consider 'dependent' axes and such. And use codegen.
+    #
+    # @cached_property
+    # def _component_sizes(self):
+    #     sizes = {}
+    #     return sizes
+    #
+    # def _compute_component_sizes(self, *, axis):
+    #     sizes = {}
+    #     for component in axis.components:
+    #         if subaxis := self.child(axis, component):
+    #             subsizes = self._compute_component_sizes(axis=subaxis)
+    #             ...
+    #         else:
+    #             sizes[axis.id, component.label] = component.count
+    #     return pmap(sizes)
+
 
     @cached_property
     def global_size(self):
@@ -1758,7 +1688,8 @@ class IndexedAxisTree(BaseAxisTree):
         # TODO: Generate code for this.
         for i, p in enumerate(self.iter()):
             # indices[i] = evaluate(self.offset(p.source_exprs, p.source_path)
-            indices[i] = evaluate(self.subst_layouts()[p.source_path], p.source_exprs)
+            layout_expr = self.subst_layouts()[p.source_path]
+            indices[i] = evaluate(layout_expr, p.source_exprs)
         debug_assert(lambda: (indices >= 0).all())
 
         # The packed indices are collected component-by-component so, for
@@ -1927,7 +1858,7 @@ def _(arg: numbers.Integral) -> AxisComponent:
 def merge_axis_trees(axis_trees):
     nonempty_axis_trees = tuple(axis_tree for axis_tree in axis_trees if not axis_tree.is_empty)
     if nonempty_axis_trees:
-        root, subnode_map = _merge_node_maps(axis_trees)
+        root, subnode_map = _merge_node_maps(nonempty_axis_trees)
         node_map = {None: (root,)}
         node_map.update(subnode_map)
     else:

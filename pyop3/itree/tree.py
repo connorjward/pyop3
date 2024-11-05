@@ -383,217 +383,6 @@ class InvalidIterationSetException(Pyop3Exception):
     pass
 
 
-# FIXME class hierarchy is very confusing
-# class ContextFreeLoopIndex(ContextFreeIndex, AxisIndependentIndex):
-#     fields = {"iterset", "id"}
-#
-#     def __init__(self, iterset, *, id=None):
-#         if iterset.is_empty:
-#             raise InvalidIterationSetException("Cannot iterate over an empty axis tree")
-#         if len(iterset.leaves) > 1:
-#             raise InvalidIterationSetException("Context-free loop indices must be over linear axis trees")
-#
-#         super().__init__(id=id, label=id)
-#         self.iterset = iterset
-#
-#     @property
-#     def is_context_free(self) -> bool:
-#         # NOTE: when this class goes I will actually have to think about how to do this.
-#         # something like making sure the iterset is a linear tree and not multi-component or a forest
-#         return True
-#
-#     @property
-#     def component_labels(self) -> tuple:
-#         return (0,)
-#
-#     @cached_property
-#     def axes(self) -> IndexedAxisTree:
-#         if not self.is_context_free:
-#             raise ContextSensitiveException("Expected a context-free index")
-#
-#         # NOTE: same as _index_axes_index
-#
-#         # Example:
-#         # If we assume that the loop index has target expressions
-#         #     AxisVar("a") * 2     and       AxisVar("b")
-#         # then this will return
-#         #     LoopIndexVar(p, "a") * 2      and LoopIndexVar(p, "b")
-#         # replace_map = {
-#         #     (axis.id, component_label): (
-#         #         {axis.label: component_label},
-#         #         {axis.label: LoopIndexVar(self.id, axis.label)},
-#         #     )
-#         #     for axis, component_label in self.iterset.path_with_nodes(self.iterset.leaf).items()
-#         # }
-#         # replace_map = {
-#         #     axis.label: LoopIndexVar(self, axis.label)
-#         #     for axis in self.iterset.path_with_nodes(self.iterset.leaf)
-#         # }
-#         replace_map = {
-#             None: (
-#                 {axis.label: component_label for axis, component_label in self.iterset.path_with_nodes(self.iterset.leaf).items()},
-#                 {axis.label: LoopIndexVar(self, axis.label) for axis, component_label in self.iterset.path_with_nodes(self.iterset.leaf).items()},
-#             )
-#         }
-#
-#         targets = []
-#         for equivalent_targets in self.iterset.paths_and_exprs:
-#             new_path = {}
-#             new_exprs = {}
-#             for (orig_path, orig_exprs) in equivalent_targets.values():
-#                 new_path.update(orig_path)
-#                 for axis_label, orig_expr in orig_exprs.items():
-#                     new_exprs[axis_label] = replace(orig_expr, AxisTree(), replace_map)
-#             new_path = pmap(new_path)
-#             new_exprs = pmap(new_exprs)
-#             targets.append(pmap({None: (new_path, new_exprs)}))
-#         return IndexedAxisTree({}, unindexed=None, targets=targets)
-#
-#     def restrict(self, paths):
-#         # Since context-free loop indices are linear the restriction must be trivial
-#         if tuple(paths) != (None,):
-#             raise ValueError
-#         return self
-#
-#     @cached_property
-#     def expanded(self):
-#         return self
-#
-#     # parent class thing?
-#     def with_context(self, context, *args):
-#         return self
-#
-#     # TODO: don't think this is useful any more, certainly a confusing name
-#     @property
-#     def leaf_target_paths(self):
-#         """
-#
-#         Unlike with maps and slices, loop indices are single-component (so return a 1-tuple)
-#         but that component can target differently labelled axes (so the tuple entry is an n-tuple).
-#
-#         """
-#         equivalent_paths = []
-#         leaf_axis, leaf_component_label = self.iterset.leaf
-#         leaf_key = (leaf_axis.id, leaf_component_label)
-#         for targets_acc in self.iterset.targets_acc:
-#             equivalent_path, _ = targets_acc[leaf_key]
-#             equivalent_paths.append(equivalent_path)
-#         equivalent_paths = tuple(equivalent_paths)
-#
-#         return (equivalent_paths,)
-#
-#     @property
-#     def leaf_index_exprss(self):
-#         leaf_axis, leaf_component_label = self.iterset.leaf
-#         leaf_key = leaf_axis.id, leaf_component_label
-#         # NOTE: think this should be a 1-tuple (like leaf_target_paths)
-#         return tuple(e[leaf_key] for e in self.iterset.index_exprs)
-#         # return (tuple(e[leaf_key] for e in self.iterset.index_exprs),)
-#
-#     @property
-#     def leaf_target_paths_and_exprss(self):
-#         return self.iterset._targets
-#         # NOTE: This attribute must be a tuple of tuples as other index types return multiple leaves
-#         retval = set()
-#         for path, exprs in checked_zip(self.leaf_target_paths[0], self.leaf_index_exprss):
-#             merged = freeze({key: (path[key], exprs[key]) for key in path})
-#             retval.add(merged)
-#         return frozenset(retval)
-#
-#     # shouldn't need any more
-#     # @cached_property
-#     # def local_index(self):
-#     #     return ContextFreeLocalLoopIndex(
-#     #         self.iterset, self.source_path, self.source_path, id=self.id
-#     #     )
-#
-#     # should now be ignored
-#     @property
-#     def index_exprs(self):
-#         # if self.source_path != self.path and len(self.path) != 1:
-#         #     raise NotImplementedError("no idea what to do here")
-#
-#         # Need to replace the index_exprs with LocalLoopIndexVariable equivs
-#         assert False, "is this used?"
-#         flat_index_exprs = {}
-#         replacer = LoopIndexReplacer(self)
-#         for axis in self.iterset.nodes:
-#             key = axis.id, axis.component.label
-#             for axis_label, orig_expr in self.iterset.index_exprs[key].items():
-#                 new_expr = replacer(orig_expr)
-#                 flat_index_exprs[axis_label] = new_expr
-#
-#         return freeze({None: flat_index_exprs})
-#
-#     @property
-#     def loops(self):
-#         # return self.iterset.outer_loops | {
-#         #     LocalLoopIndexVariable(self, axis)
-#         #     for axis in self.iterset.path(*self.iterset.leaf).keys()
-#         # }
-#         # return self.iterset.outer_loops + (self,)
-#         return (self,)
-#
-#     @property
-#     def layout_exprs(self):
-#         # FIXME, no clue if this is right or not
-#         return freeze({None: 0})
-#
-#     @property
-#     def datamap(self):
-#         return self.iterset.datamap
-#
-#     def iter(self, stuff=pmap()):
-#         return iter_axis_tree(
-#             self,
-#             self.iterset,
-#             self.iterset.target_paths,
-#             self.iterset.index_exprs,
-#             stuff,
-#         )
-#
-#
-# # TODO This is properly awful, needs a big cleanup
-# class ContextFreeLocalLoopIndex(ContextFreeLoopIndex):
-#     @property
-#     def index_exprs(self):
-#         return freeze(
-#             {
-#                 None: {
-#                     axis: LocalLoopIndexVariable(self, axis)
-#                     for axis in self.path.keys()
-#                 }
-#             }
-#         )
-
-
-# class LocalLoopIndex(AbstractLoopIndex):
-# class LocalLoopIndex:
-#     """Class representing a 'local' index."""
-#
-#     def __init__(self, loop_index: LoopIndex):
-#         # super().__init__(id)
-#         self.loop_index = loop_index
-#
-#     # @property
-#     # def id(self):
-#     #     return self.loop_index.id
-#
-#     @property
-#     def iterset(self):
-#         return self.loop_index.iterset
-#
-#     def with_context(self, context, axes=None):
-#         # not sure about this
-#         iterset = self.loop_index.iterset.with_context(context)
-#         path, _ = context[self.loop_index.id]  # here different from LoopIndex
-#         return ContextFreeLocalLoopIndex(iterset, path, path, id=self.loop_index.id)
-#
-#     @property
-#     def datamap(self):
-#         return self.loop_index.datamap
-
-
 class ScalarIndex(Index):
     fields = {"axis", "component", "value", "id"}
 
@@ -1361,8 +1150,8 @@ def _(slice_: Slice, *, prev_axes, **_):
         else:
             target_path_per_subslice.append(pmap({slice_.axis: slice_component.component}))
 
-            newvar = AxisVar(axis_label)
-            layout_var = AxisVar(slice_.axis)
+            newvar = AxisVar(axis)
+            # layout_var = AxisVar()
             if isinstance(slice_component, AffineSliceComponent):
                 index_exprs_per_subslice.append(
                     freeze(
@@ -1371,9 +1160,9 @@ def _(slice_: Slice, *, prev_axes, **_):
                         }
                     )
                 )
-                layout_exprs_per_subslice.append(
-                    pmap({slice_.label: (layout_var - slice_component.start) // slice_component.step})
-                )
+                # layout_exprs_per_subslice.append(
+                #     pmap({slice_.label: (layout_var - slice_component.start) // slice_component.step})
+                # )
             else:
                 assert isinstance(slice_component, Subset)
 
@@ -1403,39 +1192,25 @@ def _(slice_: Slice, *, prev_axes, **_):
                 linear_axis = Axis([axis.components[i]], axis.label)
                 linear_axes = AxisTree(linear_axis)
                 replace_path = {subset_axis.label: subset_axis.component.label}
-                replace_exprs = {subset_axis.label: AxisVar(axis_label)}
+                replace_exprs = {subset_axis.label: AxisVar(axis)}
                 replace_bits = {(linear_axis.id, axis.components[i].label): (replace_path, replace_exprs)}
 
-                from pyop3.expr_visitors import _LayoutDat
-
-                subset_var = replace(slice_component.array, linear_axes, replace_bits)
-                myleafpath = subset_var.axes.leaf_path
-                subset_layout = subset_var.axes.subst_layouts()[myleafpath]
-                subsetlayoutdat = _LayoutDat(subset_var, [subset_layout])
-
-
-                index_exprs_per_subslice.append(freeze({slice_.axis: subsetlayoutdat}))
-                layout_exprs_per_subslice.append(
-                    pmap({slice_.label: bsearch(subset_var, layout_var)})
-                )
+                index_exprs_per_subslice.append(freeze({slice_.axis: replace(slice_component.array, linear_axes, replace_bits)}))
 
     target_path_per_component = {}
     index_exprs_per_component = {}
-    layout_exprs_per_component = {}
-    for cpt, target_path, index_exprs, layout_exprs in strict_zip(
+    # layout_exprs_per_component = {}
+    for cpt, target_path, index_exprs in strict_zip(
         components,
         target_path_per_subslice,
         index_exprs_per_subslice,
-        layout_exprs_per_subslice,
     ):
         target_path_per_component[axis.id, cpt.label] = ((freeze(target_path), freeze(index_exprs)),)
-        layout_exprs_per_component[axis.id, cpt.label] = (freeze(layout_exprs),)
 
     return (
         axes,
         target_path_per_component,
-        # index_exprs_per_component,
-        layout_exprs_per_component,
+        {},
         (),  # no outer loops
         {},
     )
@@ -1475,19 +1250,12 @@ def _make_leaf_axis_from_called_map_new(map_name, output_spec, linear_input_axes
         map_output_leaf = map_output.array.axes.leaf
         leaf_axis, leaf_component_label = map_output_leaf
 
-        paths_and_exprs = input_paths_and_exprs | {(linear_axis.id, component.label): (pmap({leaf_axis.label: leaf_component_label}), pmap({leaf_axis.label: AxisVar(leaf_axis.label)}))}
+        paths_and_exprs = input_paths_and_exprs | {(linear_axis.id, component.label): (pmap({leaf_axis.label: leaf_component_label}), pmap({leaf_axis.label: AxisVar(leaf_axis)}))}
 
         target_path = pmap({map_output.target_axis: map_output.target_component})
 
-        # Dats used in layouts are *slightly* different to regular Dats (e.g. they always
-        # have a defined path). Therefore we want a special type to represent this.
-        from pyop3.expr_visitors import _LayoutDat
-
         # target_exprs = pmap({map_output.target_axis: replace(map_output.array, linear_axes, paths_and_exprs)})
-        replaced = replace(map_output.array, linear_axes, paths_and_exprs)
-        myreplacedpath = replaced.axes.path(replaced.axes.leaf)
-        replaced_layout_dat = _LayoutDat(replaced, [replaced.axes.subst_layouts()[myreplacedpath]])
-        target_exprs = pmap({map_output.target_axis: replaced_layout_dat})
+        target_exprs = pmap({map_output.target_axis: replace(map_output.array, linear_axes, paths_and_exprs)})
         targets[axis.id, component.label] = (target_path, target_exprs)
     targets = pmap(targets)
 

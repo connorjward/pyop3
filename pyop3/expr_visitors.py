@@ -8,59 +8,64 @@ from typing import Any, Optional
 from immutabledict import ImmutableOrderedDict
 from pyrsistent import pmap, PMap
 
-from pyop3.array import Array, Dat
+from pyop3.array import Array, Dat, _ConcretizedDat
 from pyop3.array.petsc import AbstractMat
-from pyop3.axtree.tree import AxisVar, Expression, Operator, Add, Mul, BaseAxisTree, IndexedAxisTree, AxisTree, Axis, LoopIndexVar
+from pyop3.axtree.tree import AxisVar, Expression, Operator, Add, Mul, BaseAxisTree, IndexedAxisTree, AxisTree, Axis, LoopIndexVar, merge_axis_trees
 from pyop3.utils import OrderedSet, merge_dicts, just_one
 
 
 # TODO: Inherit from _Dat or something? YESSS
-class _ConcretizedDat:
-    """A dat with fixed layout functions.
-
-    It cannot be indexed any further.
-
-    This class is important for when we want to optimise the indirection maps.
-
-    (Previously this was done lazily which inhibited optimisation).
-
-    """
-    def __init__(self, dat, layouts):
-        self.dat = dat
-        self.layouts = layouts
-
-    @property
-    def dtype(self):
-        return self.dat.dtype
-
-    @property
-    def axes(self):
-        return self.dat.axes
-
-    @property
-    def name(self):
-        return self.dat.name
-
-    @property
-    def buffer(self):
-        return self.dat.buffer
-
-    @property
-    def constant(self):
-        return self.dat.constant
-
-
-    @property
-    def alloc_size(self):
-        return self.dat.alloc_size
-
-    def __add__(self, other):
-        return Add(self, other)
-
-
-class _LayoutDat(_ConcretizedDat):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+# class _ConcretizedDat:
+#     """A dat with fixed layout functions.
+#
+#     It cannot be indexed any further.
+#
+#     This class is important for when we want to optimise the indirection maps.
+#
+#     (Previously this was done lazily which inhibited optimisation).
+#
+#     """
+#     def __init__(self, dat, layouts):
+#         self.dat = dat
+#         self.layouts = layouts
+#
+#     @property
+#     def dtype(self):
+#         return self.dat.dtype
+#
+#     @property
+#     def axes(self):
+#         return self.dat.axes
+#
+#     @property
+#     def name(self):
+#         return self.dat.name
+#
+#     @property
+#     def buffer(self):
+#         return self.dat.buffer
+#
+#     @property
+#     def constant(self):
+#         return self.dat.constant
+#
+#
+#     @property
+#     def alloc_size(self):
+#         return self.dat.alloc_size
+#
+#     def __add__(self, other):
+#         return Add(self, other)
+#
+#
+# class _LayoutDat(_ConcretizedDat):
+#     def __init__(self, *args, **kwargs):
+#         super().__init__(*args, **kwargs)
+#
+#     # FIXME: Awful overwrite!
+#     @property
+#     def axes(self):
+#         return merge_axis_trees([AxisTree(self.dat.axes.node_map), just_one(self.layouts).axes])
 
 
 
@@ -84,9 +89,11 @@ def _(dat: Dat, indices):
     return dat.buffer.data_ro_with_halos[offset]
 
 
-@evaluate.register(_LayoutDat)
-def _(dat: Dat, indices):
-    offset = evaluate(just_one(dat.layouts), indices)
+@evaluate.register(_ConcretizedDat)
+def _(dat: _ConcretizedDat, indices):
+    # assumes linear
+    layout_expr = just_one(dat.layouts.values())
+    offset = evaluate(layout_expr, indices)
     return dat.buffer.data_ro_with_halos[offset]
 
 
@@ -143,9 +150,12 @@ def _(dat: Dat, /) -> OrderedSet:
     return loop_indices
 
 
-@collect_loops.register(_LayoutDat)
-def _(dat: Dat, /) -> OrderedSet:
-    return collect_loops(just_one(dat.layouts))
+@collect_loops.register(_ConcretizedDat)
+def _(dat: _ConcretizedDat, /) -> OrderedSet:
+    loop_indices = OrderedSet()
+    for layout_expr in dat.layouts.values():
+        loop_indices |= collect_loops(layout_expr)
+    return loop_indices
 
 
 @collect_loops.register(AbstractMat)
@@ -188,21 +198,37 @@ def extract_axes(obj: Any, /) -> BaseAxisTree:
     raise TypeError(f"No handler defined for {type(obj).__name__}")
 
 
-@extract_axes.register(AxisVar)
-@extract_axes.register(LoopIndexVar)
 @extract_axes.register(numbers.Number)
 def _(var: Any, /) -> AxisTree:
     return AxisTree()
 
 
+@extract_axes.register(LoopIndexVar)
+def _(loop_index: LoopIndexVar, /) -> AxisTree:
+    if len(collect_loops(loop_index)) > 1:
+        raise NotImplementedError("Make sure to include indexed bits in the axes")
+    return AxisTree(loop_index.index.iterset.node_map)
+
+
+@extract_axes.register(AxisVar)
+def _(var: Any, /) -> AxisTree:
+    return var.axis.as_tree()
+
+
 @extract_axes.register(Operator)
 def _(op: Operator, /):
+    # ick, move logic here
     return op.axes
 
 
 @extract_axes.register(Array)
 def _(array: Array, /):
     return array.axes
+
+
+@extract_axes.register(_ConcretizedDat)
+def _(dat):
+    return dat.axes
 
 
 @functools.singledispatch
@@ -212,7 +238,8 @@ def relabel(obj: Any, /, suffix: str):
 
 @relabel.register(AxisVar)
 def _(var: AxisVar, /, suffix: str) -> AxisVar:
-    return AxisVar(var.axis_label+suffix)
+    relabelled_axis = var.axis.copy(label=var.axis.label+suffix)
+    return AxisVar(relabelled_axis)
 
 
 @relabel.register(Dat)
@@ -291,40 +318,38 @@ def _(num: numbers.Number, axes, pathsandexprs):
     return num
 
 
+# @replace.register(Dat)
+# def _(array: Array, axes, paths_and_exprs):
+#     from pyop3.itree.tree import compose_targets
+#
+#     if array.parent:
+#         raise NotImplementedError
+#     # breakpoint()
+#     if not isinstance(array, Dat):
+#         raise NotImplementedError
+#
+#     # NOTE: identical to index_axes()
+#     new_targets = []
+#     for orig_path in array.axes.paths_and_exprs:
+#         target_path_and_exprs = compose_targets(array.axes, orig_path, axes, paths_and_exprs)
+#         new_targets.append(target_path_and_exprs)
+#
+#     new_axes = IndexedAxisTree(axes.node_map, array.axes.unindexed, targets=new_targets)
+#     # return array.with_axes(new_axes)
+#     return array.reconstruct(axes=new_axes)
+
 @replace.register(Dat)
-def _(array: Array, axes, paths_and_exprs):
-    from pyop3.itree.tree import compose_targets
-
-    if array.parent:
-        raise NotImplementedError
-    # breakpoint()
-    if not isinstance(array, Dat):
-        raise NotImplementedError
-
-    # NOTE: identical to index_axes()
-    new_targets = []
-    for orig_path in array.axes.paths_and_exprs:
-        target_path_and_exprs = compose_targets(array.axes, orig_path, axes, paths_and_exprs)
-        new_targets.append(target_path_and_exprs)
-
-    new_axes = IndexedAxisTree(axes.node_map, array.axes.unindexed, targets=new_targets)
-    # return array.with_axes(new_axes)
-    return array.reconstruct(axes=new_axes)
+def _(dat: Dat, *args):
+    return replace(dat.concretize(), *args)
 
 
-@replace.register(_LayoutDat)
-def _(array: Array, axes, paths_and_exprs):
-    from pyop3.itree.tree import compose_targets
-
-    new_layouts = []  # length 1 always??
-    orig_layout = just_one(array.layouts)
-    new_layout = replace(orig_layout, axes, paths_and_exprs)
-    new_layouts.append(new_layout)
-
-    # new_axes = IndexedAxisTree(axes.node_map, array.axes.unindexed, targets=new_targets)
-    # return array.with_axes(new_axes)
-    # return array.reconstruct(axes=new_axes)
-    return _LayoutDat(array.dat, new_layouts)
+@replace.register(_ConcretizedDat)
+def _(dat: _ConcretizedDat, axes, paths_and_exprs):
+    layouts = pmap({
+        leaf_path: replace(orig_layout, axes, paths_and_exprs)
+        for leaf_path, orig_layout in dat.layouts.items()
+    })
+    return dat.reconstruct(layouts=layouts)
 
 
 @replace.register
@@ -334,110 +359,96 @@ def _(op: Operator, *args):
 
 # TODO: rename to concretize_array_accesses or concretize_arrays
 @functools.singledispatch
-def concretize_layouts(obj: Any, /, **kwargs) -> Expression:
+def concretize_arrays(obj: Any, /, **kwargs) -> Expression:
     raise TypeError(f"No handler defined for {type(obj).__name__}")
 
 
-# NOTE: the layouts are already concrete! Here we just mark the top level thing as fixed
-@concretize_layouts.register(Dat)
-def _(dat: Dat, /, *, topdat=True) -> _ConcretizedDat:
-    layouts = {}
-    if dat.axes.is_empty:
-        leaf_layout = dat.axes.subst_layouts()[pmap()]
-        # layouts[pmap()] = concretize_layouts(leaf_layout, topdat=False)
-        layouts[pmap()] = leaf_layout
-    else:
-        for leaf_path in dat.axes.leaf_paths:
-            leaf_layout = dat.axes.subst_layouts()[leaf_path]
-            # layouts[leaf_path] = concretize_layouts(leaf_layout, topdat=False)
-            layouts[leaf_path] = leaf_layout
-
-    if topdat:
-        return _ConcretizedDat(dat, layouts)
-    else:
-        # bleghghgh, dict in one place, list in another!
-        layouts = [just_one(layouts.values())]
-        return _LayoutDat(dat, layouts)
+@concretize_arrays.register(Dat)
+def _(dat: Dat, /) -> _ConcretizedDat:
+    return dat.concretize()
 
 
-@concretize_layouts.register(numbers.Number)
-@concretize_layouts.register(AxisVar)
-@concretize_layouts.register(LoopIndexVar)
-def _(var: Any, /, **kwargs) -> Any:
+@concretize_arrays.register(numbers.Number)
+@concretize_arrays.register(AxisVar)
+@concretize_arrays.register(LoopIndexVar)
+def _(var: Any, /) -> Any:
     return var
 
 
-@concretize_layouts.register(Operator)
-def _(op: Operator, /, **kwargs) -> Operator:
-    return type(op)(concretize_layouts(op.a, **kwargs), concretize_layouts(op.b, **kwargs))
+@concretize_arrays.register(Operator)
+def _(op: Operator, /) -> Operator:
+    return type(op)(concretize_arrays(op.a), concretize_arrays(op.b))
+
+
+# should inherit from _Dat
+class _CompositeDat:
+    def __init__(self, expr):
+        self.expr = expr
+
+    @property
+    def axes(self):
+        return self.expr.axes
+
+
+INDIRECTION_PENALTY_FACTOR = 5
 
 
 @functools.singledispatch
-def compress_indirection_maps(obj: Any, /, **kwargs) -> tuple:
+def compress_indirection_maps(obj: Any, /) -> tuple:
     raise TypeError(f"No handler defined for {type(obj).__name__}")
 
 
 @compress_indirection_maps.register(AxisVar)
 @compress_indirection_maps.register(LoopIndexVar)
 @compress_indirection_maps.register(numbers.Number)
-def _(var: Any, /, **kwargs) -> tuple:
+def _(var: Any, /) -> tuple:
     return ((var, 0),)
 
 
 @compress_indirection_maps.register(Operator)
-def _(op: Operator, /, *, topdat=True) -> tuple:
-    a_result = compress_indirection_maps(op.a, topdat=topdat)
-    b_result = compress_indirection_maps(op.b, topdat=topdat)
-
-    if topdat:
-        raise NotImplementedError
+def _(op: Operator, /) -> tuple:
+    a_result = compress_indirection_maps(op.a)
+    b_result = compress_indirection_maps(op.b)
 
     candidates = []
     for (a_expr, a_cost), (b_expr, b_cost) in itertools.product(a_result, b_result):
-        uncompressed = type(op)(a_expr, b_expr)
-        uncompressed_cost = a_cost + b_cost
+        candidate_expr = type(op)(a_expr, b_expr)
+        candidate_cost = a_cost + b_cost
+        candidates.append((candidate_expr, candidate_cost))
 
-        candidates.append((uncompressed, uncompressed_cost))
-
-        if op.axes:
-            raise NotImplementedError
-            compressed = CompressedDat(uncompressed)
-            compressed_cost = uncompressed.axes.size
+    # Now also include a candidate representing the packing of the expression
+    # into a Dat. The cost for this is simply the size of the resulting array.
+    candidates.append((_CompositeDat(op), op.axes.size))
 
     return tuple(candidates)
 
 
-@compress_indirection_maps.register(_LayoutDat)
-def _(dat: _LayoutDat, /, *, topdat) -> tuple:
-    assert not topdat
-
-    result = compress_indirection_maps(just_one(dat.layouts), topdat=topdat)
+@compress_indirection_maps.register(_ConcretizedDat)
+def _(dat: _ConcretizedDat, /) -> tuple:
+    candidates = []
+    for layout_expr, layout_cost in compress_indirection_maps(just_one(dat.layouts)):
+        candidate_expr = _ConcretizedDat(dat.dat, layout_expr)
+        # candidate_cost = dat.dat.axes.size + layout_cost * INDIRECTION_PENALTY_FACTOR
+        candidate_cost = dat.dat.axes.size + layout_cost
+        candidates.append((candidate_expr, candidate_cost))
 
     breakpoint()
-    # for subcandidate in subcandidates:
-    #     candidate = _ConcretizedDat(dat, 
-    #     candidates[leaf_path].append(XXX)
+    candidates.append((_CompositeDat(dat), dat.axes.size))
+
+    return tuple(candidates)
 
 
-    return _LayoutDat(dat.dat, layouts)
-
-
+# NOTE: This is sort of a top-level function call - bad to include really
 # TODO: For PETSc matrices this is unnecessary - or *always* necessary?
-@compress_indirection_maps.register(_ConcretizedDat)
-def _(dat: _ConcretizedDat, /, *, topdat=True) -> tuple:
-    assert topdat
-
-    layouts = {}
-    for leaf_path in dat.layouts.keys():
-        candidates = compress_indirection_maps(dat.layouts[leaf_path], topdat=False)
-
-        # now choose the best candidate
-        if len(candidates) > 1:
-            raise NotImplementedError
-
-        candidate_layout, _ = just_one(candidates)
-
-        chosen_layout = candidate_layout
-        layouts[leaf_path] = chosen_layout
-
-    return _ConcretizedDat(dat.dat, layouts)
+# @compress_indirection_maps.register(_ConcretizedDat)
+# def _(dat: _ConcretizedDat, /) -> tuple:
+#     layouts = {}
+#     for leaf_path in dat.layouts.keys():
+#         candidate_layouts = compress_indirection_maps(dat.layouts[leaf_path])
+#
+#         # Now choose the candidate layout with the lowest cost, breaking ties
+#         # by choosing the left-most entry with a given cost.
+#         chosen_layout = min(candidate_layouts, key=lambda item: item[1])[0]
+#         layouts[leaf_path] = chosen_layout
+#
+#     return _ConcretizedDat(dat.dat, layouts)

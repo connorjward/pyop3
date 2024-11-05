@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import abc
 import collections
 import contextlib
 import sys
@@ -18,7 +19,7 @@ from pyop3.axtree import (
     AxisTree,
     as_axis_tree,
 )
-from pyop3.axtree.tree import ContextSensitiveAxisTree
+from pyop3.axtree.tree import ContextSensitiveAxisTree, subst_layouts
 from pyop3.buffer import Buffer, DistributedBuffer
 from pyop3.dtypes import ScalarType
 from pyop3.exceptions import Pyop3Exception
@@ -41,57 +42,150 @@ class AxisMismatchException(Pyop3Exception):
     pass
 
 
-# TODO: not sure this is needed, can a Dat just be one of these?
-# class ArrayVar(pym.primitives.AlgebraicLeaf):
-#     mapper_method = sys.intern("map_array")
-#
-#     def __init__(self, array, indices, path=None):
-#         assert path is not None
-#         if path is None:
-#             if array.axes.is_empty:
-#                 path = pmap()
-#             else:
-#                 path = just_one(array.axes.leaf_paths)
-#
-#         super().__init__()
-#         self.array = array
-#         self.indices = freeze(indices)
-#         self.path = freeze(path)
-#
-#     def __getinitargs__(self):
-#         return (self.array, self.indices, self.path)
-
-
-from pymbolic.mapper.stringifier import PREC_CALL, PREC_NONE, StringifyMapper
-
-
-# This was adapted from pymbolic's map_subscript
-def stringify_array(self, array, enclosing_prec, *args, **kwargs):
-    index_str = self.join_rec(
-        ", ", array.indices.values(), PREC_NONE, *args, **kwargs
-    )
-
-    return self.parenthesize_if_needed(
-        self.format("%s[%s]", array.array.name, index_str), enclosing_prec, PREC_CALL
-    )
-
-
-pym.mapper.stringifier.StringifyMapper.map_array = stringify_array
-
-
 class FancyIndexWriteException(Exception):
     pass
 
 
-class Dat(Array, KernelArgument, Record):
+class _Dat(Array, KernelArgument, Record, abc.ABC):
+
+    DEFAULT_DTYPE = Buffer.DEFAULT_DTYPE
+
+    @classmethod
+    def _parse_buffer(cls, data, dtype, size, name):
+        if data is not None:
+            if isinstance(data, Buffer):
+                return data
+
+
+            assert isinstance(data, np.ndarray)
+            assert dtype is None or dtype == data.dtype
+
+            dtype = data.dtype
+
+            # always deal with flattened data
+            if len(data.shape) > 1:
+                data = data.flatten()
+        elif dtype is None:
+            data = np.zeros(size, dtype=dtype)
+        else:
+            dtype = cls.DEFAULT_DTYPE
+            data = np.zeros(size, dtype=dtype)
+
+        buffer = DistributedBuffer(
+            data.size,  # not a useful property anymore
+            dtype,
+            name=name,
+            data=data,
+        )
+
+        return buffer
+
+    @property
+    def alloc_size(self):
+        return self.axes.alloc_size
+
+    @property
+    def size(self):
+        return self.axes.size
+
+    @property
+    def kernel_dtype(self):
+        # TODO Think about the fact that the dtype refers to either to dtype of the
+        # array entries (e.g. double), or the dtype of the whole thing (double*)
+        return self.dtype
+
+    @classmethod
+    def from_list(cls, data, axis_labels, name=None, dtype=ScalarType, inc=0):
+        """Return a multi-array formed from a list of lists.
+
+        The returned array must have one axis component per axis. These are
+        permitted to be ragged.
+
+        """
+        flat, count = cls._get_count_data(data)
+        flat = np.array(flat, dtype=dtype)
+
+        if isinstance(count, Sequence):
+            count = cls.from_list(count, axis_labels[:-1], name, dtype, inc + 1)
+            subaxis = Axis(count, axis_labels[-1])
+            axes = count.axes.add_axis(subaxis, count.axes.leaf)
+        else:
+            axes = AxisTree(Axis(count, axis_labels[-1]))
+
+        assert axes.depth == len(axis_labels)
+        return cls(axes, data=flat, dtype=dtype)
+
+    @classmethod
+    def _get_count_data(cls, data):
+        # recurse if list of lists
+        if not strictly_all(isinstance(d, collections.abc.Iterable) for d in data):
+            return data, len(data)
+        else:
+            flattened = []
+            count = []
+            for d in data:
+                x, y = cls._get_count_data(d)
+                flattened.extend(x)
+                count.append(y)
+            return flattened, count
+
+    def get_value(self, indices, path=None, *, loop_exprs=pmap()):
+        offset = self.axes.offset(indices, path, loop_exprs=loop_exprs)
+        return self.buffer.data_ro[offset]
+
+    def set_value(self, indices, value, path=None, *, loop_exprs=pmap()):
+        offset = self.axes.offset(indices, path, loop_exprs=loop_exprs)
+        self.buffer.data_wo[offset] = value
+
+    def select_axes(self, indices):
+        selected = []
+        current_axis = self.axes
+        for idx in indices:
+            selected.append(current_axis)
+            current_axis = current_axis.get_part(idx.npart).subaxis
+        return tuple(selected)
+
+    # better to call copy
+    def copy2(self):
+        assert False, "old?"
+        return type(self)(
+            self.axes,
+            data=self.buffer.copy(),
+            max_value=self.max_value,
+            name=f"{self.name}_copy",
+            constant=self.constant,
+        )
+
+    # assign is a much better name for this
+    def copy(self, other, subset=Ellipsis):
+        """Copy the contents of the array into another."""
+        # NOTE: Is copy_to/copy_into a clearer name for this?
+        # TODO: Check that self and other are compatible, should have same axes and dtype
+        # for sure
+        # TODO: We can optimise here and copy the private data attribute and set halo
+        # validity. Here we do the simple but hopefully correct thing.
+        # None is an old potential argument here.
+        if subset is Ellipsis or subset is None:
+            other.data_wo[...] = self.data_ro
+        else:
+            self[subset].assign(other[subset])
+
+    def zero(self, *, subset=Ellipsis, eager=False):
+        # old Firedrake code may hit this, should probably raise a warning
+        if subset is None:
+            subset = Ellipsis
+
+        expr = Assignment(self[subset], 0, "write")
+        return expr() if eager else expr
+
+
+class Dat(_Dat):
     """Multi-dimensional, hierarchical array.
 
     Parameters
     ----------
 
     """
-
-    DEFAULT_DTYPE = Buffer.DEFAULT_DTYPE
 
     def __init__(
         self,
@@ -109,46 +203,7 @@ class Dat(Array, KernelArgument, Record):
 
         axes = as_axis_tree(axes)
 
-        if isinstance(data, Buffer):
-            # disable for now, temporaries hit this in an annoying way
-            # if data.sf is not axes.sf:
-            #     raise ValueError("Star forests do not match")
-            if dtype is not None:
-                raise ValueError("If data is a Buffer, dtype should not be provided")
-            pass
-        else:
-            if isinstance(data, np.ndarray):
-                dtype = dtype or data.dtype
-            else:
-                dtype = dtype or self.DEFAULT_DTYPE
-
-            if data is not None:
-                data = np.asarray(data, dtype=dtype)
-
-                # always deal with flattened data
-                if len(data.shape) > 1:
-                    data = data.flatten()
-                if data.size != axes.unindexed.global_size:
-                    raise ValueError("Data shape does not match axes")
-
-            # FIXME: Parallel sf stuff
-            # IndexedAxisTrees do not currently have SFs, so create a dummy one here
-            # if isinstance(axes, AxisTree):
-            #     sf = axes.sf
-            # else:
-            #     assert isinstance(axes, (ContextSensitiveAxisTree, IndexedAxisTree))
-            #     # not sure this is the right thing to do
-            #     sf = serial_forest(axes.unindexed.global_size)
-
-            data = DistributedBuffer(
-                axes.unindexed.global_size,  # not a useful property anymore
-                # sf,
-                dtype,
-                name=self.name,
-                data=data,
-            )
-
-        self.buffer = data
+        self.buffer = self._parse_buffer(data, dtype, axes.size, self.name)
         self.axes = axes
         self.max_value = max_value
 
@@ -238,25 +293,12 @@ class Dat(Array, KernelArgument, Record):
         return self.reconstruct(axes=self.axes.with_context(context))
 
     @property
-    def context_free(self, context):
+    def context_free(self):
         return self.reconstruct(axes=self.axes.context_free)
-        return type(self)(
-            self.axes.context_free,
-            name=self.name,
-            data=self.buffer,
-            max_value=self.max_value,
-            constant=self.constant,
-        )
 
     @property
     def dtype(self):
         return self.buffer.dtype
-
-    @property
-    def kernel_dtype(self):
-        # TODO Think about the fact that the dtype refers to either to dtype of the
-        # array entries (e.g. double), or the dtype of the whole thing (double*)
-        return self.dtype
 
     @property
     @deprecated(".data_rw")
@@ -359,6 +401,9 @@ class Dat(Array, KernelArgument, Record):
     def vec(self):
         return self.vec_rw
 
+    def concretize(self):
+        return _ConcretizedDat(self.axes, self.axes.leaf_subst_layouts, data=self.buffer, name=self.name)
+
     def _check_vec_dtype(self):
         if self.dtype != PETSc.ScalarType:
             raise RuntimeError(
@@ -377,30 +422,6 @@ class Dat(Array, KernelArgument, Record):
     @property
     def comm(self):
         return self.buffer.comm
-
-    @cached_property
-    def datamap(self):
-        from pyop3.expr_visitors import collect_datamap
-
-        datamap_ = {}
-        datamap_.update(self.buffer.datamap)
-        datamap_.update(self.axes.datamap)
-
-
-        # I reckon instead use subst_layouts here!!!
-
-        # FIXME, deleting this breaks stuff...
-        for index_exprs_per_axis in self.axes.index_exprs:
-            for index_exprs in index_exprs_per_axis.values():
-                for expr in index_exprs.values():
-                    # for array in MultiArrayCollector()(expr):
-                    #     datamap_.update(array.datamap)
-                    datamap_.update(collect_datamap(expr))
-        for layout_expr in self.axes.layouts.values():
-            # for array in MultiArrayCollector()(layout_expr):
-            #     datamap_.update(array.datamap)
-            datamap_.update(collect_datamap(layout_expr))
-        return freeze(datamap_)
 
     # TODO update docstring
     # TODO is this a property of the buffer?
@@ -423,108 +444,6 @@ class Dat(Array, KernelArgument, Record):
         assert False, "old code"
         return type(self)(self.axes.materialize(), dtype=self.dtype)
 
-    def iter_indices(self, outer_map):
-        from pyop3.itree.tree import iter_axis_tree
-
-        return iter_axis_tree(
-            self.axes.index(),
-            self.axes,
-            self.target_paths,
-            self.index_exprs,
-            outer_map,
-        )
-
-    @property
-    def alloc_size(self):
-        return self.axes.alloc_size
-
-    @property
-    def size(self):
-        return self.axes.size
-
-    @classmethod
-    def from_list(cls, data, axis_labels, name=None, dtype=ScalarType, inc=0):
-        """Return a multi-array formed from a list of lists.
-
-        The returned array must have one axis component per axis. These are
-        permitted to be ragged.
-
-        """
-        flat, count = cls._get_count_data(data)
-        flat = np.array(flat, dtype=dtype)
-
-        if isinstance(count, Sequence):
-            count = cls.from_list(count, axis_labels[:-1], name, dtype, inc + 1)
-            subaxis = Axis(count, axis_labels[-1])
-            axes = count.axes.add_axis(subaxis, count.axes.leaf)
-        else:
-            axes = AxisTree(Axis(count, axis_labels[-1]))
-
-        assert axes.depth == len(axis_labels)
-        return cls(axes, data=flat, dtype=dtype)
-
-    @classmethod
-    def _get_count_data(cls, data):
-        # recurse if list of lists
-        if not strictly_all(isinstance(d, collections.abc.Iterable) for d in data):
-            return data, len(data)
-        else:
-            flattened = []
-            count = []
-            for d in data:
-                x, y = cls._get_count_data(d)
-                flattened.extend(x)
-                count.append(y)
-            return flattened, count
-
-    def get_value(self, indices, path=None, *, loop_exprs=pmap()):
-        offset = self.axes.offset(indices, path, loop_exprs=loop_exprs)
-        return self.buffer.data_ro[offset]
-
-    def set_value(self, indices, value, path=None, *, loop_exprs=pmap()):
-        offset = self.axes.offset(indices, path, loop_exprs=loop_exprs)
-        self.buffer.data_wo[offset] = value
-
-    def select_axes(self, indices):
-        selected = []
-        current_axis = self.axes
-        for idx in indices:
-            selected.append(current_axis)
-            current_axis = current_axis.get_part(idx.npart).subaxis
-        return tuple(selected)
-
-    # better to call copy
-    def copy2(self):
-        assert False, "old?"
-        return type(self)(
-            self.axes,
-            data=self.buffer.copy(),
-            max_value=self.max_value,
-            name=f"{self.name}_copy",
-            constant=self.constant,
-        )
-
-    # assign is a much better name for this
-    def copy(self, other, subset=Ellipsis):
-        """Copy the contents of the array into another."""
-        # NOTE: Is copy_to/copy_into a clearer name for this?
-        # TODO: Check that self and other are compatible, should have same axes and dtype
-        # for sure
-        # TODO: We can optimise here and copy the private data attribute and set halo
-        # validity. Here we do the simple but hopefully correct thing.
-        # None is an old potential argument here.
-        if subset is Ellipsis or subset is None:
-            other.data_wo[...] = self.data_ro
-        else:
-            self[subset].assign(other[subset])
-
-    def zero(self, *, subset=Ellipsis, eager=False):
-        # old Firedrake code may hit this, should probably raise a warning
-        if subset is None:
-            subset = Ellipsis
-
-        expr = Assignment(self[subset], 0, "write")
-        return expr() if eager else expr
 
     def reshape(self, axes: AxisTree) -> Dat:
         """Return a reshaped view of the `Dat`.
@@ -558,3 +477,53 @@ class Dat(Array, KernelArgument, Record):
             )
 
         return self.reconstruct(axes=axes)
+
+
+class _ConcretizedDat(_Dat):
+    """A dat with fixed (?) layout.
+
+    It cannot be indexed.
+
+    This class is useful for describing arrays used in index expressions, at which
+    point it has a fixed set of axes.
+
+    """
+    def __init__(self, axes, layouts=None, *, data=None, dtype=None, name: str = None, prefix: str = None, constant: bool = False):
+        if layouts is None:
+            layouts = {
+                leaf_path: axes.layouts[leaf_path] for leaf_path in axes.leaf_paths
+            }
+        layouts = pmap(layouts)
+
+
+        super().__init__(name=name, prefix=prefix, parent=None)
+
+        buffer = self._parse_buffer(data, dtype, axes.size, self.name)
+
+        self.axes = axes
+        self.layouts = layouts
+        self.buffer = buffer
+        self.constant = constant
+
+    # TODO: redo now that we have Record?
+    def __hash__(self) -> int:
+        return hash((type(self), self.axes, self.layouts, self.buffer, self.constant))
+
+    @property
+    def dtype(self):
+        return self.buffer.dtype
+
+    @property
+    def layout(self):
+        return just_one(self.layouts.values())
+
+    def with_context(self, context):
+        assert False, "not appropriate"
+
+    @property
+    def context_free(self):
+        assert False, "not appropriate"
+
+    @property
+    def _record_fields(self) -> frozenset:
+        return frozenset({"axes", "layouts", "buffer", "name", "constant"})
