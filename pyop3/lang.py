@@ -192,7 +192,7 @@ class Instruction(UniqueRecord, abc.ABC):
             expand_assignments,
             prepare_petsc_calls,
             compress_indirection_maps,
-            concretize_array_accesses,
+            # concretize_array_accesses,
         )
 
         compiler_parameters = parse_compiler_parameters(compiler_parameters)
@@ -203,7 +203,8 @@ class Instruction(UniqueRecord, abc.ABC):
         insn = expand_assignments(insn)  # specifically reshape bits
         insn = prepare_petsc_calls(insn)
 
-        insn = concretize_array_accesses(insn)
+        # don't really think that this is needed
+        # insn = concretize_array_accesses(insn)
 
         if compiler_parameters.compress_indirection_maps:
             insn = compress_indirection_maps(insn)

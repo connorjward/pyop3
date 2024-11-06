@@ -401,8 +401,10 @@ class Dat(_Dat):
     def vec(self):
         return self.vec_rw
 
-    def concretize(self):
-        return _ConcretizedDat(self.axes, self.axes.leaf_subst_layouts, data=self.buffer, name=self.name)
+    def _as_expression_dat(self):
+        assert self.axes.is_linear
+        layout = just_one(self.axes.leaf_subst_layouts.values())
+        return _ExpressionDat(self, layout)
 
     def _check_vec_dtype(self):
         if self.dtype != PETSc.ScalarType:
@@ -480,6 +482,31 @@ class Dat(_Dat):
 
 
 class _ConcretizedDat(_Dat):
+    """A dat with fixed layouts.
+
+    This class is useful for describing dats whose layouts have been optimised.
+
+    Unlike `_ExpressionDat` a `_ConcretizedDat` is permitted to be multi-component.
+
+    """
+    def __init__(self, dat, layouts):
+        self.dat = dat
+        self.layouts = pmap(layouts)
+
+    @property
+    def _record_fields(self) -> frozenset:
+        return frozenset({"dat", "layouts"})
+
+    def with_context(self, context):
+        assert False, "not appropriate"
+
+    @property
+    def context_free(self):
+        assert False, "not appropriate"
+
+
+
+class _ExpressionDat(_Dat):
     """A dat with fixed (?) layout.
 
     It cannot be indexed.
@@ -488,34 +515,37 @@ class _ConcretizedDat(_Dat):
     point it has a fixed set of axes.
 
     """
-    def __init__(self, axes, layouts=None, *, data=None, dtype=None, name: str = None, prefix: str = None, constant: bool = False):
-        if layouts is None:
-            layouts = {
-                leaf_path: axes.layouts[leaf_path] for leaf_path in axes.leaf_paths
-            }
-        layouts = pmap(layouts)
+    def __init__(self, dat, layout):
+        super().__init__(name=dat.name, parent=None)
 
+        self.dat = dat
+        self.layout = layout
 
-        super().__init__(name=name, prefix=prefix, parent=None)
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({self.dat!r}, {self.layout!r})"
 
-        buffer = self._parse_buffer(data, dtype, axes.size, self.name)
-
-        self.axes = axes
-        self.layouts = layouts
-        self.buffer = buffer
-        self.constant = constant
+    def __str__(self) -> str:
+        return f"{self.name}[{self.layout}]"
 
     # TODO: redo now that we have Record?
     def __hash__(self) -> int:
-        return hash((type(self), self.axes, self.layouts, self.buffer, self.constant))
+        return hash((type(self), self.dat, self.layout))
+
+    @property
+    def axes(self):
+        return self.layout.axes  # will not work if layout is just an int
+
+    @property
+    def buffer(self):
+        return self.dat.buffer
 
     @property
     def dtype(self):
-        return self.buffer.dtype
+        return self.dat.dtype
 
     @property
-    def layout(self):
-        return just_one(self.layouts.values())
+    def constant(self):
+        return self.dat.constant
 
     def with_context(self, context):
         assert False, "not appropriate"
@@ -526,4 +556,5 @@ class _ConcretizedDat(_Dat):
 
     @property
     def _record_fields(self) -> frozenset:
-        return frozenset({"axes", "layouts", "buffer", "name", "constant"})
+        # NOTE: Including 'name' is a hack because of inheritance...
+        return frozenset({"dat", "layout", "name"})

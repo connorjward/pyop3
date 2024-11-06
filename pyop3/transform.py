@@ -15,7 +15,7 @@ from petsc4py import PETSc
 from pyrsistent import pmap, PMap
 from immutabledict import ImmutableOrderedDict
 
-from pyop3.array import Dat, Array, Mat
+from pyop3.array import Dat, Array, Mat, _ConcretizedDat
 from pyop3.axtree import Axis, AxisTree, ContextFree, ContextSensitive, ContextMismatchException, ContextAware
 from pyop3.axtree.tree import Operator, AxisVar, IndexedAxisTree
 from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
@@ -640,19 +640,19 @@ def _(func: CalledFunction, /):
 
 
 def _compress_array_indirection_maps(dat):
-    from pyop3.expr_visitors import _ConcretizedDat
-
-    if not isinstance(dat, _ConcretizedDat):
+    if not isinstance(dat, Array):
         return dat
 
+    if not isinstance(dat, Dat):
+        raise NotImplementedError
+
     layouts = {}
-    for leaf_path in dat.layouts.keys():
-        candidate_layouts = compress_expression_indirection_maps(dat.layouts[leaf_path])
+    for leaf_path, orig_layout in dat.axes.subst_layouts().items():
+        candidate_layouts = compress_expression_indirection_maps(orig_layout)
 
         # Now choose the candidate layout with the lowest cost, breaking ties
         # by choosing the left-most entry with a given cost.
         chosen_layout = min(candidate_layouts, key=lambda item: item[1])[0]
-        breakpoint()
         layouts[leaf_path] = chosen_layout
 
-    return _ConcretizedDat(dat.dat, layouts)
+    return _ConcretizedDat(dat, layouts)

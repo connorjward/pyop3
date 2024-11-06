@@ -760,6 +760,15 @@ class Operator(Expression):
     def __repr__(self) -> str:
         return f"{type(self).__name__}({self.a!r}, {self.b!r})"
 
+    def __str__(self) -> str:
+        # Always use brackets to avoid having to deal with operator precedence rules
+        return f"({self.a} {self._symbol} {self.b})"
+
+    @property
+    @abc.abstractmethod
+    def _symbol(self) -> str:
+        pass
+
     @cached_property
     def axes(self):
         from pyop3.expr_visitors import extract_axes
@@ -791,21 +800,32 @@ class LoopIndexVar(Terminal):
     def __repr__(self) -> str:
         return f"{type(self).__name__}({self.index!r}, {self.axis_label!r})"
 
+    def __str__(self) -> str:
+        return f"L_{{{self.index.id}, {self.axis_label}}}"
+
 
 class Add(Operator):
-    pass
+    @property
+    def _symbol(self) -> str:
+        return "+"
 
 
 class Sub(Operator):
-    pass
+    @property
+    def _symbol(self) -> str:
+        return "-"
 
 
 class Mul(Operator):
-    pass
+    @property
+    def _symbol(self) -> str:
+        return "*"
 
 
 class FloorDiv(Operator):
-    pass
+    @property
+    def _symbol(self) -> str:
+        return "//"
 
 
 # NOTE: More consistent to be AbstractAxisTree I think

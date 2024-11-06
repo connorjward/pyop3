@@ -8,71 +8,16 @@ from typing import Any, Optional
 from immutabledict import ImmutableOrderedDict
 from pyrsistent import pmap, PMap
 
-from pyop3.array import Array, Dat, _ConcretizedDat
+from pyop3.array import Array, Dat, _ExpressionDat
 from pyop3.array.petsc import AbstractMat
 from pyop3.axtree.tree import AxisVar, Expression, Operator, Add, Mul, BaseAxisTree, IndexedAxisTree, AxisTree, Axis, LoopIndexVar, merge_axis_trees
 from pyop3.utils import OrderedSet, merge_dicts, just_one
 
 
-# TODO: Inherit from _Dat or something? YESSS
-# class _ConcretizedDat:
-#     """A dat with fixed layout functions.
-#
-#     It cannot be indexed any further.
-#
-#     This class is important for when we want to optimise the indirection maps.
-#
-#     (Previously this was done lazily which inhibited optimisation).
-#
-#     """
-#     def __init__(self, dat, layouts):
-#         self.dat = dat
-#         self.layouts = layouts
-#
-#     @property
-#     def dtype(self):
-#         return self.dat.dtype
-#
-#     @property
-#     def axes(self):
-#         return self.dat.axes
-#
-#     @property
-#     def name(self):
-#         return self.dat.name
-#
-#     @property
-#     def buffer(self):
-#         return self.dat.buffer
-#
-#     @property
-#     def constant(self):
-#         return self.dat.constant
-#
-#
-#     @property
-#     def alloc_size(self):
-#         return self.dat.alloc_size
-#
-#     def __add__(self, other):
-#         return Add(self, other)
-#
-#
-# class _LayoutDat(_ConcretizedDat):
-#     def __init__(self, *args, **kwargs):
-#         super().__init__(*args, **kwargs)
-#
-#     # FIXME: Awful overwrite!
-#     @property
-#     def axes(self):
-#         return merge_axis_trees([AxisTree(self.dat.axes.node_map), just_one(self.layouts).axes])
-
-
-
 # TODO: could make a postvisitor
 @functools.singledispatch
-def evaluate(expr: Any, *args, **kwargs):
-    raise TypeError
+def evaluate(obj: Any, /, *args, **kwargs):
+    raise TypeError(f"No handler defined for {type(obj).__name__}")
 
 
 @evaluate.register
@@ -89,11 +34,9 @@ def _(dat: Dat, indices):
     return dat.buffer.data_ro_with_halos[offset]
 
 
-@evaluate.register(_ConcretizedDat)
-def _(dat: _ConcretizedDat, indices):
-    # assumes linear
-    layout_expr = just_one(dat.layouts.values())
-    offset = evaluate(layout_expr, indices)
+@evaluate.register(_ExpressionDat)
+def _(dat: _ExpressionDat, indices):
+    offset = evaluate(dat.layout, indices)
     return dat.buffer.data_ro_with_halos[offset]
 
 
@@ -118,8 +61,8 @@ def _(var: AxisVar, indices):
 
 
 @functools.singledispatch
-def collect_loops(expr: Any):
-    raise TypeError
+def collect_loops(obj: Any, /) -> OrderedSet:
+    raise TypeError(f"No handler defined for {type(obj).__name__}")
 
 
 @collect_loops.register(LoopIndexVar)
@@ -150,12 +93,9 @@ def _(dat: Dat, /) -> OrderedSet:
     return loop_indices
 
 
-@collect_loops.register(_ConcretizedDat)
-def _(dat: _ConcretizedDat, /) -> OrderedSet:
-    loop_indices = OrderedSet()
-    for layout_expr in dat.layouts.values():
-        loop_indices |= collect_loops(layout_expr)
-    return loop_indices
+@collect_loops.register(_ExpressionDat)
+def _(dat: _ExpressionDat, /) -> OrderedSet:
+    return collect_loops(dat.layout)
 
 
 @collect_loops.register(AbstractMat)
@@ -226,7 +166,7 @@ def _(array: Array, /):
     return array.axes
 
 
-@extract_axes.register(_ConcretizedDat)
+@extract_axes.register(_ExpressionDat)
 def _(dat):
     return dat.axes
 
@@ -340,16 +280,13 @@ def _(num: numbers.Number, axes, pathsandexprs):
 
 @replace.register(Dat)
 def _(dat: Dat, *args):
-    return replace(dat.concretize(), *args)
+    return replace(dat._as_expression_dat(), *args)
 
 
-@replace.register(_ConcretizedDat)
-def _(dat: _ConcretizedDat, axes, paths_and_exprs):
-    layouts = pmap({
-        leaf_path: replace(orig_layout, axes, paths_and_exprs)
-        for leaf_path, orig_layout in dat.layouts.items()
-    })
-    return dat.reconstruct(layouts=layouts)
+@replace.register(_ExpressionDat)
+def _(dat: _ExpressionDat, axes, paths_and_exprs):
+    replaced_layout = replace(dat.layout, axes, paths_and_exprs)
+    return dat.reconstruct(layout=replaced_layout)
 
 
 @replace.register
@@ -364,7 +301,7 @@ def concretize_arrays(obj: Any, /, **kwargs) -> Expression:
 
 
 @concretize_arrays.register(Dat)
-def _(dat: Dat, /) -> _ConcretizedDat:
+def _(dat: Dat, /) -> _ExpressionDat:
     return dat.concretize()
 
 
@@ -423,11 +360,11 @@ def _(op: Operator, /) -> tuple:
     return tuple(candidates)
 
 
-@compress_indirection_maps.register(_ConcretizedDat)
-def _(dat: _ConcretizedDat, /) -> tuple:
+@compress_indirection_maps.register(_ExpressionDat)
+def _(dat: _ExpressionDat, /) -> tuple:
     candidates = []
-    for layout_expr, layout_cost in compress_indirection_maps(just_one(dat.layouts)):
-        candidate_expr = _ConcretizedDat(dat.dat, layout_expr)
+    for layout_expr, layout_cost in compress_indirection_maps(dat.layout):
+        candidate_expr = _ExpressionDat(dat.dat, layout_expr)
         # candidate_cost = dat.dat.axes.size + layout_cost * INDIRECTION_PENALTY_FACTOR
         candidate_cost = dat.dat.axes.size + layout_cost
         candidates.append((candidate_expr, candidate_cost))

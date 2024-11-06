@@ -13,7 +13,7 @@ import numpy as np
 import pymbolic as pym
 from pyrsistent import PMap, freeze, pmap
 
-from pyop3.array.harray import _ConcretizedDat
+from pyop3.array.harray import Dat
 from pyop3.axtree.tree import (
     Axis,
     AxisComponent,
@@ -105,7 +105,7 @@ def _tabulate_offsets(axes, axis, component):
     # NOTE: This code is quite unclear (partial axes made then axes_iter further modified)
     axes_iter.add(axis)
     offset_axes = AxisTree.from_iterable(axes_iter)
-    offsets = _ConcretizedDat(offset_axes, data=np.full(offset_axes.size, -1, dtype=IntType))
+    offsets = Dat(offset_axes, data=np.full(offset_axes.size, -1, dtype=IntType))
 
     # this is really bloody close - just need the Python iteration to be less rubbish
     # TODO: handle iteration over empty trees
@@ -671,7 +671,7 @@ def _create_count_array_tree(
             else:
                 index_exprs = axtree.index_exprs
 
-            countarray = _ConcretizedDat(
+            countarray = Dat(
                 axtree,
                 data=np.full(axtree.global_size, -1, dtype=IntType),
                 prefix="offset",

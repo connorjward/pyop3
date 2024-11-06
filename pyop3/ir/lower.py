@@ -20,14 +20,13 @@ import numpy as np
 import pymbolic as pym
 from pyrsistent import freeze, pmap, PMap
 
-from pyop3.array import Dat
+from pyop3.array import Dat, _Dat, _ExpressionDat
 from pyop3.array.base import Array
 from pyop3.array.petsc import Mat, AbstractMat
 from pyop3.axtree.tree import Add, AxisVar, Mul
 from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
 from pyop3.config import config
 from pyop3.dtypes import IntType
-from pyop3.expr_visitors import _ConcretizedDat
 from pyop3.ir.transform import with_likwid_markers, with_petsc_event
 from pyop3.itree.tree import LoopIndexVar, replace as replace_expr
 from pyop3.lang import (
@@ -272,7 +271,7 @@ class LoopyCodegenContext(CodegenContext):
         """
         raise TypeError(f"No handler provided for {type(array).__name__}")
 
-    @_dtype.register(_ConcretizedDat)
+    @_dtype.register(_Dat)
     def _(self, array):
         return self._dtype(array.buffer)
 
@@ -650,7 +649,7 @@ def _(call: CalledFunction, loop_indices, ctx: LoopyCodegenContext) -> None:
 
             # Register data
             # TODO This might be bad for temporaries
-            if isinstance(arg, _ConcretizedDat):
+            if isinstance(arg, _Dat):
                 ctx.add_array(arg)
 
             # this should already be done in an assignment
@@ -993,7 +992,7 @@ def _(loop_var: LoopIndexVar, iname_map, context, path=None):
 
 # NOTE: Here should not accept Dat because we need to have special layouts!!!
 # aka `Array`
-@lower_expr.register(_ConcretizedDat)
+@lower_expr.register(Dat)
 @lower_expr.register(Mat)
 def _(dat: Dat, /, iname_map, context, path=None):
     # assert not dat.parent, "Should be handled in preprocessing"
@@ -1005,9 +1004,8 @@ def _(dat: Dat, /, iname_map, context, path=None):
     if path is None:
         assert dat.axes.is_linear
         path = dat.axes.path(dat.axes.leaf)
-    layout_expr = dat.layouts[path]
 
-
+    layout_expr = dat.axes.subst_layouts()[path]
     offset_expr = lower_expr(layout_expr, iname_map, context)
 
     # hack to handle the fact that temporaries can have shape but we want to
@@ -1031,21 +1029,13 @@ def _(dat: Dat, /, iname_map, context, path=None):
     return rexpr
 
 
-@lower_expr.register(_ConcretizedDat)
-def _(dat: _ConcretizedDat, /, iname_map, context, path=None):
-    # assert not dat.parent, "Should be handled in preprocessing"
-
+@lower_expr.register(_ExpressionDat)
+def _(dat: _ExpressionDat, /, iname_map, context, path=None):
     context.add_array(dat)
 
     new_name = context.actual_to_kernel_rename_map[dat.name]
 
-    if path:
-        layout_expr = dat.layouts[path]
-    else:
-        layout_expr = just_one(dat.layouts.values())
-
-    offset_expr = lower_expr(layout_expr, iname_map, context)
-
+    offset_expr = lower_expr(dat.layout, iname_map, context)
     rexpr = pym.subscript(pym.var(new_name), (offset_expr,))
     return rexpr
 
@@ -1091,7 +1081,7 @@ def _(arg: np.ndarray):
 
 
 @_as_pointer.register
-def _(arg: _ConcretizedDat):
+def _(arg: _Dat):
     # TODO if we use the right accessor here we modify the state appropriately
     return _as_pointer(arg.buffer)
 
