@@ -1192,10 +1192,12 @@ def _(slice_: Slice, *, prev_axes, **_):
                 linear_axis = Axis([axis.components[i]], axis.label)
                 linear_axes = AxisTree(linear_axis)
                 replace_path = {subset_axis.label: subset_axis.component.label}
-                replace_exprs = {subset_axis.label: AxisVar(axis)}
-                replace_bits = {(linear_axis.id, axis.components[i].label): (replace_path, replace_exprs)}
+                # replace_exprs = {subset_axis.label: AxisVar(axis)}
+                replace_map = {AxisVar(subset_axis): AxisVar(axis)}
+                # replace_bits = {(linear_axis.id, axis.components[i].label): (replace_path, replace_exprs)}
 
-                index_exprs_per_subslice.append(freeze({slice_.axis: replace(slice_component.array, linear_axes, replace_bits)}))
+                # index_exprs_per_subslice.append(freeze({slice_.axis: replace(slice_component.array, linear_axes, replace_bits)}))
+                index_exprs_per_subslice.append(freeze({slice_.axis: replace(slice_component.array, replace_map)}))
 
     target_path_per_component = {}
     index_exprs_per_component = {}

@@ -481,21 +481,18 @@ class Dat(_Dat):
         return self.reconstruct(axes=axes)
 
 
-class _ConcretizedDat(_Dat):
-    """A dat with fixed layouts.
-
-    This class is useful for describing dats whose layouts have been optimised.
-
-    Unlike `_ExpressionDat` a `_ConcretizedDat` is permitted to be multi-component.
-
-    """
-    def __init__(self, dat, layouts):
-        self.dat = dat
-        self.layouts = pmap(layouts)
+class _ConcretizedDat2(_Dat, abc.ABC):
+    @property
+    def buffer(self):
+        return self.dat.buffer
 
     @property
-    def _record_fields(self) -> frozenset:
-        return frozenset({"dat", "layouts"})
+    def dtype(self):
+        return self.dat.dtype
+
+    @property
+    def constant(self):
+        return self.dat.constant
 
     def with_context(self, context):
         assert False, "not appropriate"
@@ -505,8 +502,38 @@ class _ConcretizedDat(_Dat):
         assert False, "not appropriate"
 
 
+class _ConcretizedDat(_ConcretizedDat2):
+    """A dat with fixed layouts.
 
-class _ExpressionDat(_Dat):
+    This class is useful for describing dats whose layouts have been optimised.
+
+    Unlike `_ExpressionDat` a `_ConcretizedDat` is permitted to be multi-component.
+
+    """
+    def __init__(self, dat, layouts):
+        super().__init__(name=dat.name)
+        self.dat = dat
+        self.layouts = pmap(layouts)
+
+    @property
+    def axes(self):
+        return self.dat.axes
+
+    @property
+    def _record_fields(self) -> frozenset:
+        return frozenset({"dat", "layouts", "name"})
+
+    def with_context(self, context):
+        assert False, "not appropriate"
+
+    @property
+    def context_free(self):
+        assert False, "not appropriate"
+
+
+# NOTE: I think that this is a bad name for this class. Dats and _ConcretizedDats
+# can also appear in expressions.
+class _ExpressionDat(_ConcretizedDat2):
     """A dat with fixed (?) layout.
 
     It cannot be indexed.
@@ -534,25 +561,6 @@ class _ExpressionDat(_Dat):
     @property
     def axes(self):
         return self.layout.axes  # will not work if layout is just an int
-
-    @property
-    def buffer(self):
-        return self.dat.buffer
-
-    @property
-    def dtype(self):
-        return self.dat.dtype
-
-    @property
-    def constant(self):
-        return self.dat.constant
-
-    def with_context(self, context):
-        assert False, "not appropriate"
-
-    @property
-    def context_free(self):
-        assert False, "not appropriate"
 
     @property
     def _record_fields(self) -> frozenset:

@@ -147,7 +147,11 @@ def _(var: Any, /) -> AxisTree:
 def _(loop_index: LoopIndexVar, /) -> AxisTree:
     if len(collect_loops(loop_index)) > 1:
         raise NotImplementedError("Make sure to include indexed bits in the axes")
-    return AxisTree(loop_index.index.iterset.node_map)
+
+    # The idea is to return a relabelled set of axes that are unique to the
+    # loop index.
+    iterset = AxisTree(loop_index.index.iterset.node_map)
+    return _relabel_axes(iterset, suffix=loop_index.id)
 
 
 @extract_axes.register(AxisVar)
@@ -239,59 +243,36 @@ def _relabel_targets(targets: Mapping, suffix: str) -> PMap:
 
 # TODO: make this a nice generic traversal
 @functools.singledispatch
-def replace(obj: Any, /, axes, paths_and_exprs):
+def replace(obj: Any, /, replace_map):
     raise TypeError(f"No handler defined for {type(obj).__name__}")
 
 
 @replace.register(AxisVar)
 @replace.register(LoopIndexVar)
-def _(var, axes, pathsandexprs):
-    assert axes.is_linear
-    # NOTE: The commented out bit will not work for None as part of the path
-    # replace_map = merge_dicts(pathsandexprs[axis.id, component_label] for axis, component_label in axes.path_with_nodes(axes.leaf).items())
-    replace_map = merge_dicts(e for _, e in pathsandexprs.values())
-    return replace_map.get(var.axis_label, var)
+def _(var: Any, /, replace_map):
+    return replace_map.get(var, var)
 
 
-@replace.register
-def _(num: numbers.Number, axes, pathsandexprs):
+@replace.register(numbers.Number)
+def _(num: numbers.Number, /, replace_map) -> numbers.Number:
     return num
 
 
-# @replace.register(Dat)
-# def _(array: Array, axes, paths_and_exprs):
-#     from pyop3.itree.tree import compose_targets
-#
-#     if array.parent:
-#         raise NotImplementedError
-#     # breakpoint()
-#     if not isinstance(array, Dat):
-#         raise NotImplementedError
-#
-#     # NOTE: identical to index_axes()
-#     new_targets = []
-#     for orig_path in array.axes.paths_and_exprs:
-#         target_path_and_exprs = compose_targets(array.axes, orig_path, axes, paths_and_exprs)
-#         new_targets.append(target_path_and_exprs)
-#
-#     new_axes = IndexedAxisTree(axes.node_map, array.axes.unindexed, targets=new_targets)
-#     # return array.with_axes(new_axes)
-#     return array.reconstruct(axes=new_axes)
-
 @replace.register(Dat)
-def _(dat: Dat, *args):
-    return replace(dat._as_expression_dat(), *args)
+def _(dat: Dat, /, replace_map):
+    return replace(dat._as_expression_dat(), replace_map)
 
 
 @replace.register(_ExpressionDat)
-def _(dat: _ExpressionDat, axes, paths_and_exprs):
-    replaced_layout = replace(dat.layout, axes, paths_and_exprs)
-    return dat.reconstruct(layout=replaced_layout)
+def _(dat: _ExpressionDat, /, replace_map):
+    replaced_dat = replace_map.get(dat, dat)
+    replaced_layout = replace(replaced_dat.layout, replace_map)
+    return replaced_dat.reconstruct(layout=replaced_layout)
 
 
-@replace.register
-def _(op: Operator, *args):
-    return type(op)(replace(op.a, *args), replace(op.b, *args))
+@replace.register(Operator)
+def _(op: Operator, /, replace_map):
+    return type(op)(replace(op.a, replace_map), replace(op.b, replace_map))
 
 
 # TODO: rename to concretize_array_accesses or concretize_arrays
@@ -369,9 +350,7 @@ def _(dat: _ExpressionDat, /) -> tuple:
         candidate_cost = dat.dat.axes.size + layout_cost
         candidates.append((candidate_expr, candidate_cost))
 
-    breakpoint()
     candidates.append((_CompositeDat(dat), dat.axes.size))
-
     return tuple(candidates)
 
 

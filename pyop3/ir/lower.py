@@ -20,7 +20,7 @@ import numpy as np
 import pymbolic as pym
 from pyrsistent import freeze, pmap, PMap
 
-from pyop3.array import Dat, _Dat, _ExpressionDat
+from pyop3.array import Dat, _Dat, _ExpressionDat, _ConcretizedDat
 from pyop3.array.base import Array
 from pyop3.array.petsc import Mat, AbstractMat
 from pyop3.axtree.tree import Add, AxisVar, Mul
@@ -1026,6 +1026,23 @@ def _(dat: Dat, /, iname_map, context, path=None):
         indices = (offset_expr,)
 
     rexpr = pym.subscript(pym.var(new_name), indices)
+    return rexpr
+
+
+@lower_expr.register(_ConcretizedDat)
+def _(dat: _ConcretizedDat, /, iname_map, context, path=None):
+    context.add_array(dat)
+
+    new_name = context.actual_to_kernel_rename_map[dat.name]
+
+    if path is None:
+        assert dat.axes.is_linear
+        path = dat.axes.path(dat.axes.leaf)
+
+    layout_expr = dat.layouts[path]
+    offset_expr = lower_expr(layout_expr, iname_map, context)
+
+    rexpr = pym.subscript(pym.var(new_name), (offset_expr,))
     return rexpr
 
 

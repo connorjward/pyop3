@@ -24,6 +24,7 @@ from pyop3.itree.tree import LoopIndexVar
 from pyop3.itree.parse import _as_context_free_indices
 from pyop3.expr_visitors import (
     collect_loops as expr_collect_loops,
+    extract_axes,
     restrict_to_context as restrict_expression_to_context,
     compress_indirection_maps as compress_expression_indirection_maps,
     concretize_arrays as concretize_expression_layouts,
@@ -648,11 +649,18 @@ def _compress_array_indirection_maps(dat):
 
     layouts = {}
     for leaf_path, orig_layout in dat.axes.subst_layouts().items():
-        candidate_layouts = compress_expression_indirection_maps(orig_layout)
+        if extract_axes(orig_layout).size == 0:
+            chosen_layout = -1
+        else:
+            candidate_layouts = compress_expression_indirection_maps(orig_layout)
 
-        # Now choose the candidate layout with the lowest cost, breaking ties
-        # by choosing the left-most entry with a given cost.
-        chosen_layout = min(candidate_layouts, key=lambda item: item[1])[0]
+            # Now choose the candidate layout with the lowest cost, breaking ties
+            # by choosing the left-most entry with a given cost.
+            chosen_layout = min(candidate_layouts, key=lambda item: item[1])[0]
+            breakpoint()
+
+            # TODO: Check for affine layouts and penalise...
+
         layouts[leaf_path] = chosen_layout
 
     return _ConcretizedDat(dat, layouts)
