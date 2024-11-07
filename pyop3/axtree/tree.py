@@ -693,20 +693,22 @@ class AxisVar(Terminal):
         return self.axis_label
 
 
+# TODO: Refactor so loop ID passed in not the actual index
 class LoopIndexVar(Terminal):
     def __init__(self, index, axis_label) -> None:
-        self.index = index
+        # self.index = index
+        self.loop_id = index.id
         self.axis_label = axis_label
 
     def __repr__(self) -> str:
-        return f"{type(self).__name__}({self.index!r}, {self.axis_label!r})"
+        return f"{type(self).__name__}({self.loop_id!r}, {self.axis_label!r})"
 
     def __str__(self) -> str:
-        return f"L_{{{self.index.id}, {self.axis_label}}}"
+        return f"L_{{{self.loop_id}, {self.axis_label}}}"
 
     @property
     def terminal_key(self) -> tuple:
-        return (self.index.id, self.axis_label)
+        return (self.loop_id, self.axis_label)
 
 
 # typing

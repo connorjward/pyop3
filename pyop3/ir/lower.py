@@ -983,7 +983,7 @@ def _(axis_var: AxisVar, /, iname_map, context, path=None):
 
 @lower_expr.register
 def _(loop_var: LoopIndexVar, iname_map, context, path=None):
-    return iname_map[(loop_var.index.id, loop_var.axis_label)]
+    return iname_map[(loop_var.loop_id, loop_var.axis_label)]
 
 
 # NOTE: Here should not accept Dat because we need to have special layouts!!!

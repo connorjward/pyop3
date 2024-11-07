@@ -11,7 +11,18 @@ from pyrsistent import pmap, PMap
 from pyop3.array import Array, Dat, _ExpressionDat
 from pyop3.array.petsc import AbstractMat
 from pyop3.axtree.tree import AxisVar, Expression, Operator, Add, Mul, BaseAxisTree, IndexedAxisTree, AxisTree, Axis, LoopIndexVar, merge_axis_trees, ExpressionT, Terminal
+from pyop3.dtypes import IntType
 from pyop3.utils import OrderedSet, merge_dicts, just_one
+
+
+# maybe works
+from pyop3.lang import do_loop
+
+
+# should inherit from _Dat
+class _CompositeDat:
+    def __init__(self, expr):
+        self.expr = expr
 
 
 # TODO: could make a postvisitor
@@ -138,36 +149,31 @@ def _(array: Array, /, loop_context):
 
 # NOTE: visited_axes is more like visited_components! Only need axis labels and component information
 @functools.singledispatch
-def extract_axes(obj: Any, /, visited_axes) -> BaseAxisTree:
+def extract_axes(obj: Any, /, visited_axes, loop_axes) -> BaseAxisTree:
     raise TypeError(f"No handler defined for {type(obj).__name__}")
 
 
 @extract_axes.register(numbers.Number)
-def _(var: Any, /, visited_axes) -> AxisTree:
+def _(var: Any, /, visited_axes, loop_axes) -> AxisTree:
     return AxisTree()
 
 
 @extract_axes.register(LoopIndexVar)
-def _(loop_index: LoopIndexVar, /, visited_axes) -> AxisTree:
-    raise NotImplementedError
-    if len(collect_loops(loop_index)) > 1:
-        raise NotImplementedError("Make sure to include indexed bits in the axes")
+def _(loop_var: LoopIndexVar, /, visited_axes, loop_axes) -> AxisTree:
+    axis = just_one(axis for axis in loop_axes[loop_var.loop_id].nodes if axis.label == loop_var.axis_label)
 
-    # The idea is to return a relabelled set of axes that are unique to the
-    # loop index.
-    iterset = AxisTree(loop_index.index.iterset.node_map)
-    return _relabel_axes(iterset, suffix=loop_index.id)
+    return axis.copy(label=f"{axis.label}_{loop_var.loop_id}").as_tree()
 
 
 @extract_axes.register(AxisVar)
-def _(var: AxisVar, /, visited_axes) -> AxisTree:
+def _(var: AxisVar, /, visited_axes, loop_axes) -> AxisTree:
     axis, component = just_one((a, c) for a, c in visited_axes.items() if a.label == var.axis_label)
     return AxisTree(Axis(component))
 
 
 @extract_axes.register(Operator)
-def _(op: Operator, /, visited_axes):
-    return merge_axis_trees([extract_axes(op.a, visited_axes), extract_axes(op.b, visited_axes)])
+def _(op: Operator, /, visited_axes, loop_axes):
+    return merge_axis_trees([extract_axes(op.a, visited_axes, loop_axes), extract_axes(op.b, visited_axes, loop_axes)])
 
 
 # is this needed?
@@ -177,9 +183,13 @@ def _(op: Operator, /, visited_axes):
 
 
 @extract_axes.register(_ExpressionDat)
-def _(dat, /, visited_axes):
-    raise NotImplementedError
-    return dat.axes
+def _(dat, /, visited_axes, loop_axes):
+    return extract_axes(dat.layout, visited_axes, loop_axes)
+
+
+@extract_axes.register(_CompositeDat)
+def _(dat, /, visited_axes, loop_axes):
+    return extract_axes(dat.expr, visited_axes, loop_axes)
 
 
 @functools.singledispatch
@@ -341,35 +351,25 @@ def _(op: Operator, /) -> Operator:
     return type(op)(concretize_arrays(op.a), concretize_arrays(op.b))
 
 
-# should inherit from _Dat
-class _CompositeDat:
-    def __init__(self, expr):
-        self.expr = expr
-
-    @property
-    def axes(self):
-        return self.expr.axes
-
-
 INDIRECTION_PENALTY_FACTOR = 5
 
 
 @functools.singledispatch
-def compress_indirection_maps(obj: Any, /, visited_axes) -> tuple:
+def compress_indirection_maps(obj: Any, /, visited_axes, loop_axes) -> tuple:
     raise TypeError(f"No handler defined for {type(obj).__name__}")
 
 
 @compress_indirection_maps.register(AxisVar)
 @compress_indirection_maps.register(LoopIndexVar)
 @compress_indirection_maps.register(numbers.Number)
-def _(var: Any, /, visited_axes) -> tuple:
+def _(var: Any, /, visited_axes, loop_axes) -> tuple:
     return ((var, 0),)
 
 
 @compress_indirection_maps.register(Operator)
-def _(op: Operator, /, visited_axes) -> tuple:
-    a_result = compress_indirection_maps(op.a, visited_axes)
-    b_result = compress_indirection_maps(op.b, visited_axes)
+def _(op: Operator, /, visited_axes, loop_axes) -> tuple:
+    a_result = compress_indirection_maps(op.a, visited_axes, loop_axes)
+    b_result = compress_indirection_maps(op.b, visited_axes, loop_axes)
 
     candidates = []
     for (a_expr, a_cost), (b_expr, b_cost) in itertools.product(a_result, b_result):
@@ -380,21 +380,56 @@ def _(op: Operator, /, visited_axes) -> tuple:
     # Now also include a candidate representing the packing of the expression
     # into a Dat. The cost for this is simply the size of the resulting array.
     compressed_expr = _CompositeDat(op)
-    compressed_cost = extract_axes(op, visited_axes).size
+    compressed_cost = extract_axes(op, visited_axes, loop_axes).size
     candidates.append((compressed_expr, compressed_cost))
 
     return tuple(candidates)
 
 
 @compress_indirection_maps.register(_ExpressionDat)
-def _(dat: _ExpressionDat, /, visited_axes) -> tuple:
+def _(dat: _ExpressionDat, /, visited_axes, loop_axes) -> tuple:
     candidates = []
-    for layout_expr, layout_cost in compress_indirection_maps(dat.layout, visited_axes):
+    for layout_expr, layout_cost in compress_indirection_maps(dat.layout, visited_axes, loop_axes):
         candidate_expr = _ExpressionDat(dat.dat, layout_expr)
-        # TODO: Undo this once I am confident things are being calculated correctly
-        # candidate_cost = dat.dat.axes.size + layout_cost * INDIRECTION_PENALTY_FACTOR
-        candidate_cost = dat.dat.axes.size + layout_cost
+        candidate_cost = dat.dat.axes.size + layout_cost * INDIRECTION_PENALTY_FACTOR
         candidates.append((candidate_expr, candidate_cost))
 
-    candidates.append((_CompositeDat(dat), dat.axes.size))
+    compressed_cost = extract_axes(dat, visited_axes, loop_axes).size
+    candidates.append((_CompositeDat(dat), compressed_cost))
     return tuple(candidates)
+
+
+@functools.singledispatch
+def materialize(obj: Any, /, *args, **kwargs) -> ExpressionT:
+    raise TypeError
+
+
+@materialize.register(AxisVar)
+@materialize.register(LoopIndexVar)
+@materialize.register(numbers.Number)
+def _(var: Any, /, *args, **kwargs):
+    return var
+
+
+@materialize.register(Operator)
+def _(op: Operator, /, *args, **kwargs) -> Operator:
+    return type(op)(materialize(op.a, *args, **kwargs), materialize(op.b, *args, **kwargs))
+
+
+@materialize.register(_CompositeDat)
+def _(dat: _CompositeDat, /, visited_axes, loop_axes) -> _ExpressionDat:
+    axes = extract_axes(dat, visited_axes, loop_axes)
+
+    # dtype correct?
+    result = Dat(axes, dtype=IntType)
+
+    # replace LoopIndexVars in the expression with AxisVars
+    loop_index_replace_map = {}
+    for loop_id, iterset in loop_axes.items():
+        for axis in iterset.nodes:
+            loop_index_replace_map[(loop_id, axis.label)] = AxisVar(f"{axis.label}_{loop_id}")
+    expr = replace_terminals(dat.expr, loop_index_replace_map)
+
+    result.assign(expr, eager=True)
+    breakpoint()
+    return result

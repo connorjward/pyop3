@@ -166,12 +166,6 @@ class PreprocessedExpression:
     """Wrapper for an expression indicating that it has been prepared for code generation."""
     expression: Instruction
 
-    @cached_property
-    def datamap(self):
-        from pyop3.transform import collect_datamap
-
-        return collect_datamap(self.expression)
-
 
 class Instruction(UniqueRecord, abc.ABC):
     def __init__(self, *args, **kwargs) -> None:
@@ -186,7 +180,7 @@ class Instruction(UniqueRecord, abc.ABC):
 
     @cachedmethod(lambda self: self._cache["Instruction.preprocess"])
     def preprocess(self, compiler_parameters=None):
-        from pyop3.transform import (
+        from pyop3.insn_visitors import (
             expand_implicit_pack_unpack,
             expand_loop_contexts,
             expand_assignments,

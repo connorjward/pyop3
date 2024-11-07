@@ -34,7 +34,7 @@ del _init_likwid
 
 
 import pyop3.ir
-import pyop3.transform
+import pyop3.insn_visitors
 # TODO: delete old aliases
 from pyop3.array import Array, FancyIndexWriteException, Dat
 from pyop3.array.petsc import Mat, Sparsity  # noqa: F401

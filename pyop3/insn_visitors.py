@@ -25,6 +25,7 @@ from pyop3.itree.parse import _as_context_free_indices
 from pyop3.expr_visitors import (
     collect_loops as expr_collect_loops,
     extract_axes,
+    materialize,
     restrict_to_context as restrict_expression_to_context,
     compress_indirection_maps as compress_expression_indirection_maps,
     concretize_arrays as concretize_expression_layouts,
@@ -48,46 +49,11 @@ from pyop3.lang import (
 from pyop3.utils import UniqueNameGenerator, checked_zip, just_one, single_valued, OrderedSet, merge_dicts, expand_collection_of_iterables
 
 
-@functools.singledispatch
-def collect_loop_indices(obj: Any, /) -> OrderedSet:
-    raise TypeError(f"No handler provided for {type(obj).__name__}")
+# NOTE: A sensible pattern is to have a public and private (rec) implementations of a
+# transformation. Then the outer one can also drop extra instruction lists.
 
 
-@collect_loop_indices.register(InstructionList)
-def _(insn_list: InstructionList, /) -> OrderedSet:
-    loop_indices = OrderedSet()
-    for insn in insn_list:
-        loop_indices |= collect_loop_indices(insn)
-    return loop_indices
-
-
-@collect_loop_indices.register(Loop)
-def _(loop: Loop, /) -> OrderedSet:
-    # NOTE: Need to look at loop index in more detail to extract other indices
-    loop_indices = OrderedSet([loop.index])
-    for stmt in loop.statements:
-        loop_indices |= collect_loop_indices(stmt)
-    return loop_indices
-
-
-@collect_loop_indices.register(Assignment)
-def _(assignment: Assignment, /) -> OrderedSet:
-    return expr_collect_loops(assignment.assignee) | expr_collect_loops(assignment.expression)
-
-
-# @collect_loop_indices.register(PetscMatAccess)
-# def _(mat_access: PetscMatAccess, /) -> OrderedSet:
-#     return expr_collect_loops(mat_access.mat_arg) | expr_collect_loops(mat_access.array_arg)
-
-
-@collect_loop_indices.register(CalledFunction)
-def _(func: CalledFunction, /) -> OrderedSet:
-    loop_indices = OrderedSet()
-    for arg in func.arguments:
-        loop_indices |= expr_collect_loops(arg)
-    return loop_indices
-
-
+# GET RID OF THIS
 # TODO Is this generic for other parsers/transformers? Esp. lower.py
 class Transformer(abc.ABC):
     @abc.abstractmethod
@@ -95,103 +61,109 @@ class Transformer(abc.ABC):
         pass
 
 
-"""
-TODO
-We sometimes want to pass loop indices to functions even without an external loop.
-This is particularly useful when we only want to generate code. We should (?) unpick
-this so that there is an outer set of loop contexts that applies at the highest level.
-
-Alternatively, we enforce that this loop exists. But I don't think that that's feasible
-right now.
-"""
-
-
-# class LoopContextExpander(Transformer):
-
-    # @_apply.register
-    # def _(self, terminal: Assignment, *, context):
-    #     # FIXME for now we assume an outer context of {}. In other words anything
-    #     # context sensitive in the assignment is completely handled by the existing
-    #     # outer loops.
-    #     # This is meaningful if the kernel accepts a loop index as an argument.
-    #
-    #     cf_args = []
-    #     for arg in terminal.arguments:
-    #         if isinstance(arg, ContextAware):
-    #             try:
-    #                 cf_args.append(arg.with_context(context))
-    #             except ContextMismatchException:
-    #                 # assignment is not valid in this context, do nothing
-    #                 return ((pmap(), None),)
-    #         else:
-    #             cf_args.append(arg)
-    #     return ((pmap(), terminal.with_arguments(cf_args)),)
-
-    # # TODO: this is just an assignment, fix inheritance
-    # @_apply.register
-    # def _(self, terminal: PetscMatInstruction, *, context):
-    #     try:
-    #         mat = terminal.mat_arg.with_context(context)
-    #         array = terminal.array_arg.with_context(context)
-    #         return ((pmap(), terminal.copy(mat_arg=mat, array_arg=array)),)
-    #     except ContextMismatchException:
-    #         return ((pmap(), None),)
-
-
+# NOTE: This is a bad name for this transformation. 'expand_multi_component_loops'?
 def expand_loop_contexts(insn: Instruction, /) -> InstructionList:
-    insns = []
-
-    loop_indices = collect_loop_indices(insn)
-    compressed_loop_contexts = collect_loop_contexts(loop_indices)
-    # Pass `pmap` as the mapping type because we do not care about the ordering
-    # of `loop_context` (though we *do* care about the order of iteration).
-    for loop_context in expand_collection_of_iterables(compressed_loop_contexts, mapping_type=pmap):
-        cf_insn = _restrict_instruction_to_loop_context(insn, loop_context)
-        insns.append(cf_insn)
-
-    return InstructionList(insns)
+    """
+    This function also drops zero-sized loops.
+    """
+    return _expand_loop_contexts_rec(insn, loop_context_acc=pmap())
 
 
 @functools.singledispatch
-def _restrict_instruction_to_loop_context(obj: Any, /, loop_context) -> Instruction:
-    raise TypeError(f"No handler defined for {type(obj).__name__}")
+def _expand_loop_contexts_rec(obj: Any, /, *, loop_context_acc) -> InstructionList:
+    raise TypeError
 
 
-@_restrict_instruction_to_loop_context.register(InstructionList)
-def _(insn_list: InstructionList, /, loop_context) -> InstructionList:
-    return InstructionList([
-        _restrict_instruction_to_loop_context(insn, loop_context)
-        for insn in insn_list
-    ])
+@_expand_loop_contexts_rec.register(InstructionList)
+def _(insn_list: InstructionList, /, **kwargs) -> InstructionList:
+    return InstructionList([_expand_loop_contexts_rec(insn, **kwargs) for insn in insn_list])
 
 
-@_restrict_instruction_to_loop_context.register(Loop)
-def _(loop: Loop, /, loop_context) -> Loop:
-    cf_loop_index = just_one(_as_context_free_indices(loop.index, loop_context))
-    return Loop(
-        cf_loop_index,
-        [
-            _restrict_instruction_to_loop_context(stmt, loop_context)
-            for stmt in loop.statements
-        ],
-    )
+@_expand_loop_contexts_rec.register(Loop)
+def _(loop: Loop, /, *, loop_context_acc) -> InstructionList:
+    expanded_loops = []
+    for axis, component_label in loop.index.iterset.leaves:
+        # NOTE: I think that this should always just be the axis tree!? indexed bits
+        # can be discarded by this point
+        path = loop.index.iterset.source_path[axis.id, component_label]
+        loop_context = {loop.index.id: path}
+
+        restricted_loop_index = just_one(_as_context_free_indices(loop.index, loop_context))
+
+        # skip empty loops
+        if restricted_loop_index.iterset.size == 0:
+            continue
+
+        loop_context_acc_ = loop_context_acc | loop_context
+        expanded_loop = type(loop)(
+            restricted_loop_index,
+            [
+                _expand_loop_contexts_rec(stmt, loop_context_acc=loop_context_acc_)
+                for stmt in loop.statements
+            ]
+        )
+        expanded_loops.append(expanded_loop)
+    return InstructionList(expanded_loops)
 
 
-@_restrict_instruction_to_loop_context.register(CalledFunction)
-def _(func: CalledFunction, /, loop_context) -> CalledFunction:
+@_expand_loop_contexts_rec.register(CalledFunction)
+def _(func: CalledFunction, /, *, loop_context_acc) -> CalledFunction:
     return CalledFunction(
         func.function,
-        [arg.with_context(loop_context) for arg in func.arguments],
+        [arg.with_context(loop_context_acc) for arg in func.arguments],
     )
 
 
-@_restrict_instruction_to_loop_context.register(Assignment)
-def _(assignment: Assignment, /, loop_context) -> Assignment:
+@_expand_loop_contexts_rec.register(Assignment)
+def _(assignment: Assignment, /, *, loop_context_acc) -> Assignment:
     return Assignment(
-        restrict_expression_to_context(assignment.assignee, loop_context),
-        restrict_expression_to_context(assignment.expression, loop_context),
+        restrict_expression_to_context(assignment.assignee, loop_context_acc),
+        restrict_expression_to_context(assignment.expression, loop_context_acc),
         assignment.assignment_type,
     )
+
+
+
+# @functools.singledispatch
+# def _restrict_instruction_to_loop_context(obj: Any, /, loop_context) -> Instruction:
+#     raise TypeError(f"No handler defined for {type(obj).__name__}")
+#
+#
+# @_restrict_instruction_to_loop_context.register(InstructionList)
+# def _(insn_list: InstructionList, /, loop_context) -> InstructionList:
+#     return InstructionList([
+#         _restrict_instruction_to_loop_context(insn, loop_context)
+#         for insn in insn_list
+#     ])
+#
+#
+# @_restrict_instruction_to_loop_context.register(Loop)
+# def _(loop: Loop, /, loop_context) -> Loop:
+#     cf_loop_index = just_one(_as_context_free_indices(loop.index, loop_context))
+#     return Loop(
+#         cf_loop_index,
+#         [
+#             _restrict_instruction_to_loop_context(stmt, loop_context)
+#             for stmt in loop.statements
+#         ],
+#     )
+
+
+# @_restrict_instruction_to_loop_context.register(CalledFunction)
+# def _(func: CalledFunction, /, loop_context) -> CalledFunction:
+#     return CalledFunction(
+#         func.function,
+#         [arg.with_context(loop_context) for arg in func.arguments],
+#     )
+#
+#
+# @_restrict_instruction_to_loop_context.register(Assignment)
+# def _(assignment: Assignment, /, loop_context) -> Assignment:
+#     return Assignment(
+#         restrict_expression_to_context(assignment.assignee, loop_context),
+#         restrict_expression_to_context(assignment.expression, loop_context),
+#         assignment.assignment_type,
+#     )
 
 
 def context_product(contexts, acc=pmap()):
@@ -611,36 +583,46 @@ def _(func: CalledFunction, /):
     return func.copy(arguments=[concretize_expression_layouts(arg) for arg in func.arguments])
 
 
+def compress_indirection_maps(insn: Instruction) -> Instruction:
+    return _compress_indirection_maps_rec(insn, loop_axes_acc=pmap())
+
+
 @functools.singledispatch
-def compress_indirection_maps(obj: Any, /):
+def _compress_indirection_maps_rec(obj: Any, /, *, loop_axes_acc) -> Instruction:
     raise TypeError(f"No handler provided for {type(obj).__name__}")
 
 
-@compress_indirection_maps.register(InstructionList)
-def _(insn_list: InstructionList, /) -> InstructionList:
-    return InstructionList([compress_indirection_maps(insn) for insn in insn_list])
+@_compress_indirection_maps_rec.register(InstructionList)
+def _(insn_list: InstructionList, /, **kwargs) -> InstructionList:
+    return InstructionList([_compress_indirection_maps_rec(insn, **kwargs) for insn in insn_list])
 
 
-@compress_indirection_maps.register(Loop)
-def _(loop: Loop, /) -> Loop:
-    return loop.copy(statements=[compress_indirection_maps(stmt) for stmt in loop.statements])
+@_compress_indirection_maps_rec.register(Loop)
+def _(loop: Loop, /, *, loop_axes_acc) -> Loop:
+    # NOTE: I think that this should always just be the axis tree!?
+    loop_axes_acc_ = loop_axes_acc | {loop.index.id: loop.index.iterset}
+    return loop.copy(
+        statements=[_compress_indirection_maps_rec(stmt, loop_axes_acc=loop_axes_acc_) for stmt in loop.statements]
+    )
 
 
-@compress_indirection_maps.register(Assignment)
-def _(assignment: Assignment, /) -> Assignment:
+@_compress_indirection_maps_rec.register(Assignment)
+def _(assignment: Assignment, /, *, loop_axes_acc) -> Assignment:
     return Assignment(
-        _compress_array_indirection_maps(assignment.assignee),
-        _compress_array_indirection_maps(assignment.expression),
+        _compress_array_indirection_maps(assignment.assignee, loop_axes_acc),
+        _compress_array_indirection_maps(assignment.expression, loop_axes_acc),
         assignment.assignment_type,
     )
 
 
-@compress_indirection_maps.register(CalledFunction)
-def _(func: CalledFunction, /):
-    return func.copy(arguments=[_compress_array_indirection_maps(arg) for arg in func.arguments])
+@_compress_indirection_maps_rec.register(CalledFunction)
+def _(func: CalledFunction, /, *, loop_axes_acc):
+    return func.copy(arguments=[_compress_array_indirection_maps(arg, loop_axes_acc) for arg in func.arguments])
 
 
-def _compress_array_indirection_maps(dat):
+# NOTE: This is technically suboptimal. We want to optimise the access patterns
+# across all arrays, not just on a per-array basis.
+def _compress_array_indirection_maps(dat, loop_axes):
     if not isinstance(dat, Array):
         return dat
 
@@ -651,16 +633,18 @@ def _compress_array_indirection_maps(dat):
     for leaf_path, orig_layout in dat.axes.leaf_subst_layouts.items():
         visited_axes = dat.axes.path_with_nodes(dat.axes._node_from_path(leaf_path), and_components=True)
 
-        # if extract_axes(orig_layout).size == 0:
-        if False:  # needed?
+        if extract_axes(orig_layout, visited_axes, loop_axes).size == 0:
             chosen_layout = -1
         else:
-            candidate_layouts = compress_expression_indirection_maps(orig_layout, visited_axes)
+            candidate_layouts = compress_expression_indirection_maps(orig_layout, visited_axes, loop_axes)
 
             # Now choose the candidate layout with the lowest cost, breaking ties
             # by choosing the left-most entry with a given cost.
             chosen_layout = min(candidate_layouts, key=lambda item: item[1])[0]
-            breakpoint()
+
+            # evaluate CompositeDats (bad name?)
+            # do as part of compress_expression_indirection_maps?
+            chosen_layout = materialize(chosen_layout, visited_axes, loop_axes)
 
             # TODO: Check for affine layouts and penalise...
 

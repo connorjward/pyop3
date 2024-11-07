@@ -19,7 +19,7 @@ from pyop3.axtree import (
     AxisTree,
     as_axis_tree,
 )
-from pyop3.axtree.tree import ContextSensitiveAxisTree, subst_layouts
+from pyop3.axtree.tree import ContextFree, ContextSensitiveAxisTree, subst_layouts
 from pyop3.buffer import Buffer, DistributedBuffer
 from pyop3.dtypes import ScalarType
 from pyop3.exceptions import Pyop3Exception
@@ -481,7 +481,10 @@ class Dat(_Dat):
         return self.reconstruct(axes=axes)
 
 
-class _ConcretizedDat2(_Dat, abc.ABC):
+class _ConcretizedDat2(_Dat, ContextFree, abc.ABC):
+
+    parent = None
+
     @property
     def buffer(self):
         return self.dat.buffer
@@ -495,11 +498,18 @@ class _ConcretizedDat2(_Dat, abc.ABC):
         return self.dat.constant
 
     def with_context(self, context):
-        assert False, "not appropriate"
+        return self
 
     @property
     def context_free(self):
-        assert False, "not appropriate"
+        return self
+
+    def filter_context(self, context):
+        return pmap()
+
+    # @property
+    # def context_map(self):
+    #     return ImmutableOrderedDict({pmap(): self})
 
 
 class _ConcretizedDat(_ConcretizedDat2):
@@ -522,13 +532,6 @@ class _ConcretizedDat(_ConcretizedDat2):
     @property
     def _record_fields(self) -> frozenset:
         return frozenset({"dat", "layouts", "name"})
-
-    def with_context(self, context):
-        assert False, "not appropriate"
-
-    @property
-    def context_free(self):
-        assert False, "not appropriate"
 
 
 # NOTE: I think that this is a bad name for this class. Dats and _ConcretizedDats
