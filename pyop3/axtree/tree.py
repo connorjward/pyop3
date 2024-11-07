@@ -695,9 +695,11 @@ class AxisVar(Terminal):
 
 # TODO: Refactor so loop ID passed in not the actual index
 class LoopIndexVar(Terminal):
-    def __init__(self, index, axis_label) -> None:
-        # self.index = index
-        self.loop_id = index.id
+    def __init__(self, loop_id, axis_label) -> None:
+        # debug
+        from pyop3.itree import LoopIndex
+        assert not isinstance(loop_id, LoopIndex)
+        self.loop_id = loop_id
         self.axis_label = axis_label
 
     def __repr__(self) -> str:
@@ -1862,6 +1864,81 @@ def _merge_targets(axis_trees, targetss, *, axis_tree_index=0, axis=None, suffix
             relabelled_targets.update(relabelled_targets_)
 
     return pmap(relabelled_targets)
+
+
+def merge_trees2(tree1: AxisTree, tree2: AxisTree) -> AxisTree:
+    """Merge two axis trees together.
+
+    If the second tree has no common axes (share a lable) with the first then it is
+    appended to every leaf of the first tree. Any common axes are skipped.
+
+    Case 1:
+
+        TODO: show example where 
+        axis_a = Axis({"x": 2, "y": 2}, "a")
+        axis_b = Axis({"x": 2}, "b")
+        axis_c = Axis({"x": 2}, "c")
+        AxisTree.from_nest({axis_a: [axis_b, axis_c]})
+
+        is added to axis_a: things should split up.
+
+    """
+    if tree1:
+        if tree2:
+            subtrees = _merge_trees(tree1, tree2)
+
+            # The algorithm proceeds by visiting each element in the second tree and
+            # attempting to add it to the tree. If the axis is already present then
+            # the axis is not added.
+            merged = AxisTree(tree1.node_map)
+            for leaf, subtree in subtrees:
+                merged = merged.add_subtree(subtree, *leaf)
+        else:
+            merged = tree1
+    else:
+        merged = tree2
+
+    return merged
+
+
+def _merge_trees(tree1, tree2, *, axis1=None, parents=None):
+    if axis1 is None:  # strictly all
+        axis1 = tree1.root
+        parents = pmap()
+
+    subtrees = []
+    for component1 in axis1.components:
+        parents_ = parents | {axis1: component1}
+        if subaxis1 := tree1.child(axis1, component1):
+            subtrees_ = _merge_trees(tree1, tree2, axis1=subaxis1, parents=parents_)
+            subtrees.extend(subtrees_)
+        else:
+            # at the bottom, now visit tree2 and try to add bits
+            subtree = _build_distinct_subtree(tree2, parents_)
+            subtrees.append(((axis1, component1), subtree))
+    return tuple(subtrees)
+
+
+def _build_distinct_subtree(axes, parents, *, axis=None):
+    if axis is None:
+        axis = axes.root
+
+    if axis in parents:
+        # Axis is already visited, do not include in the new tree and make sure
+        # to only use the right component
+        if subaxis := axes.child(axis, parents[axis]):
+            return _build_distinct_subtree(axes, parents, axis=subaxis)
+        else:
+            return AxisTree()
+    else:
+        # Axis has not yet been visited, include in the new tree
+        # and traverse all subaxes
+        subtree = AxisTree(axis)
+        for component in axis.components:
+            if subaxis := axes.child(axis, component):
+                subtree_ = _build_distinct_subtree(axes, parents, axis=subaxis)
+                subtree = subtree.add_subtree(subtree_, axis, component)
+        return subtree
 
 
 # TODO: Move this function into another file.

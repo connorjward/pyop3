@@ -66,9 +66,9 @@ class _Dat(Array, KernelArgument, Record, abc.ABC):
             if len(data.shape) > 1:
                 data = data.flatten()
         elif dtype is None:
+            dtype = cls.DEFAULT_DTYPE
             data = np.zeros(size, dtype=dtype)
         else:
-            dtype = cls.DEFAULT_DTYPE
             data = np.zeros(size, dtype=dtype)
 
         buffer = DistributedBuffer(
@@ -524,6 +524,10 @@ class _ConcretizedDat(_ConcretizedDat2):
         super().__init__(name=dat.name)
         self.dat = dat
         self.layouts = pmap(layouts)
+
+    # TODO: redo now that we have Record?
+    def __hash__(self) -> int:
+        return hash((type(self), self.dat, self.layouts))
 
     @property
     def axes(self):

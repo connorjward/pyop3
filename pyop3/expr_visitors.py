@@ -10,9 +10,9 @@ from pyrsistent import pmap, PMap
 
 from pyop3.array import Array, Dat, _ExpressionDat
 from pyop3.array.petsc import AbstractMat
-from pyop3.axtree.tree import AxisVar, Expression, Operator, Add, Mul, BaseAxisTree, IndexedAxisTree, AxisTree, Axis, LoopIndexVar, merge_axis_trees, ExpressionT, Terminal
+from pyop3.axtree.tree import AxisVar, Expression, Operator, Add, Mul, BaseAxisTree, IndexedAxisTree, AxisTree, Axis, LoopIndexVar, merge_trees2, ExpressionT, Terminal
 from pyop3.dtypes import IntType
-from pyop3.utils import OrderedSet, merge_dicts, just_one
+from pyop3.utils import OrderedSet, just_one
 
 
 # maybe works
@@ -168,12 +168,12 @@ def _(loop_var: LoopIndexVar, /, visited_axes, loop_axes) -> AxisTree:
 @extract_axes.register(AxisVar)
 def _(var: AxisVar, /, visited_axes, loop_axes) -> AxisTree:
     axis, component = just_one((a, c) for a, c in visited_axes.items() if a.label == var.axis_label)
-    return AxisTree(Axis(component))
+    return AxisTree(Axis(component, label=axis.label))
 
 
 @extract_axes.register(Operator)
 def _(op: Operator, /, visited_axes, loop_axes):
-    return merge_axis_trees([extract_axes(op.a, visited_axes, loop_axes), extract_axes(op.b, visited_axes, loop_axes)])
+    return merge_trees2(extract_axes(op.a, visited_axes, loop_axes), extract_axes(op.b, visited_axes, loop_axes))
 
 
 # is this needed?
@@ -431,5 +431,10 @@ def _(dat: _CompositeDat, /, visited_axes, loop_axes) -> _ExpressionDat:
     expr = replace_terminals(dat.expr, loop_index_replace_map)
 
     result.assign(expr, eager=True)
-    breakpoint()
-    return result
+
+    # now put the loop indices back
+    inv_map = {axis_var.axis_label: LoopIndexVar(loop_id, axis_label) for (loop_id, axis_label), axis_var in loop_index_replace_map.items()}
+    layout = just_one(result.axes.leaf_subst_layouts.values())
+    newlayout = replace_terminals(layout, inv_map)
+
+    return _ExpressionDat(result, newlayout)

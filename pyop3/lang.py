@@ -178,8 +178,12 @@ class Instruction(UniqueRecord, abc.ABC):
         executable = self.compile(compiler_parameters)
         executable(**kwargs)
 
-    @cachedmethod(lambda self: self._cache["Instruction.preprocess"])
     def preprocess(self, compiler_parameters=None):
+        compiler_parameters = parse_compiler_parameters(compiler_parameters)
+        return self._preprocess(compiler_parameters)
+
+    @cachedmethod(lambda self: self._cache["Instruction._preprocess"])
+    def _preprocess(self, compiler_parameters: ParsedCompilerParameters):
         from pyop3.insn_visitors import (
             expand_implicit_pack_unpack,
             expand_loop_contexts,
@@ -188,8 +192,6 @@ class Instruction(UniqueRecord, abc.ABC):
             compress_indirection_maps,
             # concretize_array_accesses,
         )
-
-        compiler_parameters = parse_compiler_parameters(compiler_parameters)
 
         insn = self
         insn = expand_loop_contexts(insn)
@@ -205,11 +207,13 @@ class Instruction(UniqueRecord, abc.ABC):
 
         return PreprocessedExpression(insn)
 
-    @cachedmethod(lambda self: self._cache["Instruction.compile"])
     def compile(self, compiler_parameters=None):
-        from pyop3.ir.lower import compile
-
         compiler_parameters = parse_compiler_parameters(compiler_parameters)
+        return self._compile(compiler_parameters)
+
+    @cachedmethod(lambda self: self._cache["Instruction._compile"])
+    def _compile(self, compiler_parameters: ParsedCompilerParameters):
+        from pyop3.ir.lower import compile
 
         preprocessed = self.preprocess(compiler_parameters)
         return compile(preprocessed, compiler_parameters=compiler_parameters)

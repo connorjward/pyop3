@@ -293,7 +293,7 @@ class LoopIndex(Index, KernelArgument):
         replace_map = {
             None: (
                 {axis.label: component_label for axis, component_label in self.iterset.path_with_nodes(self.iterset.leaf).items()},
-                {axis.label: LoopIndexVar(self, axis.label) for axis, component_label in self.iterset.path_with_nodes(self.iterset.leaf).items()},
+                {axis.label: LoopIndexVar(self.id, axis.label) for axis, component_label in self.iterset.path_with_nodes(self.iterset.leaf).items()},
             )
         }
         replace_map = replace_map[None][1]
@@ -961,7 +961,7 @@ def _(
     replace_map = {
         (axis.id, component_label): (
             {axis.label: component_label},
-            {axis.label: LoopIndexVar(cf_loop_index, axis.label)},
+            {axis.label: LoopIndexVar(cf_loop_index.id, axis.label)},
         )
         for axis, component_label in cf_loop_index.iterset.path_with_nodes(cf_loop_index.iterset.leaf).items()
     }
