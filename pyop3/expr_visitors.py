@@ -10,7 +10,7 @@ from pyrsistent import pmap, PMap
 
 from pyop3.array import Array, Dat, _ExpressionDat
 from pyop3.array.petsc import AbstractMat
-from pyop3.axtree.tree import AxisVar, Expression, Operator, Add, Mul, BaseAxisTree, IndexedAxisTree, AxisTree, Axis, LoopIndexVar, merge_axis_trees
+from pyop3.axtree.tree import AxisVar, Expression, Operator, Add, Mul, BaseAxisTree, IndexedAxisTree, AxisTree, Axis, LoopIndexVar, merge_axis_trees, ExpressionT, Terminal
 from pyop3.utils import OrderedSet, merge_dicts, just_one
 
 
@@ -133,18 +133,23 @@ def _(array: Array, /, loop_context):
     return array.with_context(loop_context)
 
 
+# NOTE: bad name?? something 'shape'? 'make'?
+# always return an AxisTree?
+
+# NOTE: visited_axes is more like visited_components! Only need axis labels and component information
 @functools.singledispatch
-def extract_axes(obj: Any, /) -> BaseAxisTree:
+def extract_axes(obj: Any, /, visited_axes) -> BaseAxisTree:
     raise TypeError(f"No handler defined for {type(obj).__name__}")
 
 
 @extract_axes.register(numbers.Number)
-def _(var: Any, /) -> AxisTree:
+def _(var: Any, /, visited_axes) -> AxisTree:
     return AxisTree()
 
 
 @extract_axes.register(LoopIndexVar)
-def _(loop_index: LoopIndexVar, /) -> AxisTree:
+def _(loop_index: LoopIndexVar, /, visited_axes) -> AxisTree:
+    raise NotImplementedError
     if len(collect_loops(loop_index)) > 1:
         raise NotImplementedError("Make sure to include indexed bits in the axes")
 
@@ -155,23 +160,25 @@ def _(loop_index: LoopIndexVar, /) -> AxisTree:
 
 
 @extract_axes.register(AxisVar)
-def _(var: Any, /) -> AxisTree:
-    return var.axis.as_tree()
+def _(var: AxisVar, /, visited_axes) -> AxisTree:
+    axis, component = just_one((a, c) for a, c in visited_axes.items() if a.label == var.axis_label)
+    return AxisTree(Axis(component))
 
 
 @extract_axes.register(Operator)
-def _(op: Operator, /):
-    # ick, move logic here
-    return op.axes
+def _(op: Operator, /, visited_axes):
+    return merge_axis_trees([extract_axes(op.a, visited_axes), extract_axes(op.b, visited_axes)])
 
 
-@extract_axes.register(Array)
-def _(array: Array, /):
-    return array.axes
+# is this needed?
+# @extract_axes.register(Array)
+# def _(array: Array, /, visited_axes):
+#     return array.axes
 
 
 @extract_axes.register(_ExpressionDat)
-def _(dat):
+def _(dat, /, visited_axes):
+    raise NotImplementedError
     return dat.axes
 
 
@@ -243,13 +250,45 @@ def _relabel_targets(targets: Mapping, suffix: str) -> PMap:
 
 # TODO: make this a nice generic traversal
 @functools.singledispatch
-def replace(obj: Any, /, replace_map):
+def replace_terminals(obj: Any, /, replace_map) -> ExpressionT:
+    raise TypeError(f"No handler defined for {type(obj).__name__}")
+
+
+@replace_terminals.register(Terminal)
+def _(terminal: Terminal, /, replace_map) -> ExpressionT:
+    return replace_map.get(terminal.terminal_key, terminal)
+
+
+@replace_terminals.register(numbers.Number)
+def _(var: ExpressionT, /, replace_map) -> ExpressionT:
+    return var
+
+
+# I don't like doing this.
+@replace_terminals.register(Dat)
+def _(dat: Dat, /, replace_map):
+    return replace_terminals(dat._as_expression_dat(), replace_map)
+
+
+@replace_terminals.register(_ExpressionDat)
+def _(dat: _ExpressionDat, /, replace_map) -> _ExpressionDat:
+    replaced_layout = replace_terminals(dat.layout, replace_map)
+    return dat.reconstruct(layout=replaced_layout)
+
+
+@replace_terminals.register(Operator)
+def _(op: Operator, /, replace_map) -> Operator:
+    return type(op)(replace_terminals(op.a, replace_map), replace_terminals(op.b, replace_map))
+
+
+@functools.singledispatch
+def replace(obj: Any, /, replace_map) -> ExpressionT:
     raise TypeError(f"No handler defined for {type(obj).__name__}")
 
 
 @replace.register(AxisVar)
 @replace.register(LoopIndexVar)
-def _(var: Any, /, replace_map):
+def _(var: Any, /, replace_map) -> ExpressionT:
     return replace_map.get(var, var)
 
 
@@ -258,6 +297,7 @@ def _(num: numbers.Number, /, replace_map) -> numbers.Number:
     return num
 
 
+# I don't like doing this.
 @replace.register(Dat)
 def _(dat: Dat, /, replace_map):
     return replace(dat._as_expression_dat(), replace_map)
@@ -265,13 +305,16 @@ def _(dat: Dat, /, replace_map):
 
 @replace.register(_ExpressionDat)
 def _(dat: _ExpressionDat, /, replace_map):
-    replaced_dat = replace_map.get(dat, dat)
-    replaced_layout = replace(replaced_dat.layout, replace_map)
-    return replaced_dat.reconstruct(layout=replaced_layout)
+    # TODO: Can have a flag that determines the replacement order (pre/post)
+    if dat in replace_map:
+        return replace_map.get(dat, dat)
+    else:
+        replaced_layout = replace(dat.layout, replace_map)
+        return dat.reconstruct(layout=replaced_layout)
 
 
 @replace.register(Operator)
-def _(op: Operator, /, replace_map):
+def _(op: Operator, /, replace_map) -> Operator:
     return type(op)(replace(op.a, replace_map), replace(op.b, replace_map))
 
 
@@ -312,21 +355,21 @@ INDIRECTION_PENALTY_FACTOR = 5
 
 
 @functools.singledispatch
-def compress_indirection_maps(obj: Any, /) -> tuple:
+def compress_indirection_maps(obj: Any, /, visited_axes) -> tuple:
     raise TypeError(f"No handler defined for {type(obj).__name__}")
 
 
 @compress_indirection_maps.register(AxisVar)
 @compress_indirection_maps.register(LoopIndexVar)
 @compress_indirection_maps.register(numbers.Number)
-def _(var: Any, /) -> tuple:
+def _(var: Any, /, visited_axes) -> tuple:
     return ((var, 0),)
 
 
 @compress_indirection_maps.register(Operator)
-def _(op: Operator, /) -> tuple:
-    a_result = compress_indirection_maps(op.a)
-    b_result = compress_indirection_maps(op.b)
+def _(op: Operator, /, visited_axes) -> tuple:
+    a_result = compress_indirection_maps(op.a, visited_axes)
+    b_result = compress_indirection_maps(op.b, visited_axes)
 
     candidates = []
     for (a_expr, a_cost), (b_expr, b_cost) in itertools.product(a_result, b_result):
@@ -336,35 +379,22 @@ def _(op: Operator, /) -> tuple:
 
     # Now also include a candidate representing the packing of the expression
     # into a Dat. The cost for this is simply the size of the resulting array.
-    candidates.append((_CompositeDat(op), op.axes.size))
+    compressed_expr = _CompositeDat(op)
+    compressed_cost = extract_axes(op, visited_axes).size
+    candidates.append((compressed_expr, compressed_cost))
 
     return tuple(candidates)
 
 
 @compress_indirection_maps.register(_ExpressionDat)
-def _(dat: _ExpressionDat, /) -> tuple:
+def _(dat: _ExpressionDat, /, visited_axes) -> tuple:
     candidates = []
-    for layout_expr, layout_cost in compress_indirection_maps(dat.layout):
+    for layout_expr, layout_cost in compress_indirection_maps(dat.layout, visited_axes):
         candidate_expr = _ExpressionDat(dat.dat, layout_expr)
+        # TODO: Undo this once I am confident things are being calculated correctly
         # candidate_cost = dat.dat.axes.size + layout_cost * INDIRECTION_PENALTY_FACTOR
         candidate_cost = dat.dat.axes.size + layout_cost
         candidates.append((candidate_expr, candidate_cost))
 
     candidates.append((_CompositeDat(dat), dat.axes.size))
     return tuple(candidates)
-
-
-# NOTE: This is sort of a top-level function call - bad to include really
-# TODO: For PETSc matrices this is unnecessary - or *always* necessary?
-# @compress_indirection_maps.register(_ConcretizedDat)
-# def _(dat: _ConcretizedDat, /) -> tuple:
-#     layouts = {}
-#     for leaf_path in dat.layouts.keys():
-#         candidate_layouts = compress_indirection_maps(dat.layouts[leaf_path])
-#
-#         # Now choose the candidate layout with the lowest cost, breaking ties
-#         # by choosing the left-most entry with a given cost.
-#         chosen_layout = min(candidate_layouts, key=lambda item: item[1])[0]
-#         layouts[leaf_path] = chosen_layout
-#
-#     return _ConcretizedDat(dat.dat, layouts)

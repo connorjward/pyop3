@@ -28,7 +28,7 @@ from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
 from pyop3.config import config
 from pyop3.dtypes import IntType
 from pyop3.ir.transform import with_likwid_markers, with_petsc_event
-from pyop3.itree.tree import LoopIndexVar, replace as replace_expr
+from pyop3.itree.tree import LoopIndexVar
 from pyop3.lang import (
     INC,
     MAX_RW,
@@ -602,17 +602,13 @@ def parse_loop_properly_this_time(
                 axis_key = (axis.id, component.label)
                 for index_exprs in axes.index_exprs:
                     for axis_label, index_expr in index_exprs.get(axis_key).items():
-                        # loop_exprs[axis_label] = substitutor(index_expr)
-                        loop_exprs[axis_label] = lower_expr(index_expr, iname_map, codegen_context, path=path_)
+                        loop_exprs[(loop.index.id, axis_label)] = lower_expr(index_expr, iname_map, codegen_context, path=path_)
                 loop_exprs = pmap(loop_exprs)
 
                 for stmt in loop.statements:
                     _compile(
                         stmt,
-                        loop_indices
-                        | {
-                            loop.index.id: loop_exprs
-                        },
+                        loop_indices | dict(loop_exprs),
                         codegen_context,
                     )
 
@@ -987,7 +983,7 @@ def _(axis_var: AxisVar, /, iname_map, context, path=None):
 
 @lower_expr.register
 def _(loop_var: LoopIndexVar, iname_map, context, path=None):
-    return iname_map[loop_var.index.id][loop_var.axis_label]
+    return iname_map[(loop_var.index.id, loop_var.axis_label)]
 
 
 # NOTE: Here should not accept Dat because we need to have special layouts!!!

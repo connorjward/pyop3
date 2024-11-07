@@ -179,122 +179,6 @@ class UnrecognisedAxisException(ValueError):
     pass
 
 
-# class ExpressionEvaluator(pym.mapper.evaluator.EvaluationMapper):
-#     def __init__(self, context, loop_exprs):
-#         super().__init__(context)
-#         self._loop_exprs = loop_exprs
-#
-#     def map_axis_variable(self, expr):
-#         try:
-#             return self.context[expr.axis_label]
-#         except KeyError as e:
-#             raise UnrecognisedAxisException from e
-#
-#     def map_array(self, array_var):
-#         from pyop3.itree.tree import ExpressionEvaluator, IndexExpressionReplacer
-#
-#         array = array_var.array
-#
-#         indices = {ax: self.rec(idx) for ax, idx in array_var.indices.items()}
-#         # replacer = IndexExpressionReplacer(indices, self._loop_exprs)
-#         # layout_orig = array.axes.layouts[freeze(array_var.path)]
-#         # layout_subst = replacer(layout_orig)
-#         # nor
-#         # layout_subst = array.axes.subst_layouts[array_var.path]
-#
-#         path, = array.axes.leaf_paths
-#         layout_subst = array.axes.subst_layouts()[path]
-#
-#         # offset = ExpressionEvaluator(indices, self._loop_exprs)(layout_subst)
-#         # offset = ExpressionEvaluator(self.context | indices, self._loop_exprs)(layout_subst)
-#         offset = ExpressionEvaluator(indices, self._loop_exprs)(layout_subst)
-#         offset = strict_int(offset)
-#
-#         # return array_var.array.get_value(
-#         #     self.context,
-#         #     array_var.target_path,  # should be source path
-#         #     # index_exprs=array_var.index_exprs,
-#         #     loop_exprs=self._loop_exprs,
-#         # )
-#         return array.buffer.data_ro[offset]
-#
-#     def map_loop_index(self, expr):
-#         return self._loop_exprs[expr.id][expr.axis]
-
-
-class ExpressionFlatteningCollector(pym.mapper.Mapper):
-    def map_array(self, expr):
-        needs_flattening = False
-        for index_expr in expr.indices.values():
-            subexpr, _ = self.rec(index_expr)
-            needs_flattening = needs_flattening or subexpr is not None
-        return (expr, needs_flattening)
-
-    def map_axis_variable(self, var):
-        return (None, False)
-
-    map_constant = map_axis_variable
-    map_loop_index = map_axis_variable
-
-    def map_sum(self, expr):
-        replace_expr = None
-        needs_flattening = False
-        for child in expr.children:
-            subexpr, needs_flattening_ = self.rec(child)
-            if subexpr is not None:
-                if replace_expr is None:
-                    replace_expr = subexpr
-                    needs_flattening = needs_flattening_
-                else:
-                    replace_expr = expr
-                    needs_flattening = needs_flattening or needs_flattening_
-
-        return (replace_expr, needs_flattening)
-
-    map_product = map_sum
-
-
-# TODO: This is not the right way to do this - pymbolic is not an adequate
-# symbolic language for pyop3.
-def eval_expr(expr):
-    """Convert an array expression into an array."""
-    from pyop3 import Dat
-    from pyop3.expr_visitors import evaluate
-
-    axes_iter, loop_index = axes_from_expr(expr)
-    axes = AxisTree.from_iterable(axes_iter)
-
-    result = Dat(axes, dtype=IntType)
-    for ploop in loop_index.iter():
-        for p in axes.iter({ploop}):
-            # evaluator = ExpressionEvaluator(p.source_exprs, loop_exprs=ploop.replace_map)
-            num = evaluate(expr, p.source_path, p.source_exprs)
-            # num = evaluator(expr)
-            breakpoint()
-            result.set_value(p.source_exprs, num)
-    breakpoint()
-    return result
-
-
-# NOTE: I have identical classes all over the place for this
-class ExpressionReplacer(pym.mapper.IdentityMapper):
-    def __init__(self, replace_map):
-        self._replace_map = replace_map
-
-    def map_variable(self, var):
-        return self._replace_map.get(var, var)
-
-
-# This can just be replaced by component.datamap
-def _collect_datamap(axis, *subdatamaps, axes):
-    datamap = {}
-    for component in axis.components:
-        datamap.update(component.datamap)
-
-    datamap.update(merge_dicts(subdatamaps))
-    return datamap
-
-
 class AxisComponent(LabelledNodeComponent):
     # NOTE: rank_equal is implied by the presence of an SF
     # fields = LabelledNodeComponent.fields | {"size", "unit", "sf", "rank_equal"}
@@ -698,17 +582,7 @@ def component_offsets(axis, context):
     return steps([_as_int(c.count, context) for c in axis.components])
 
 
-# class MultiArrayCollector(pym.mapper.Collector):
-#     def map_array(self, array_var):
-#         return {array_var.array}.union(
-#             *(self.rec(expr) for expr in array_var.indices.values())
-#         )
-#
-#     def map_nan(self, nan):
-#         return set()
-
-
-# NOTE: does this sort of expression stuff live in here? Or expr.py perhaps?
+# NOTE: does this sort of expression stuff live in here? Or expr.py perhaps? Definitely
 class Expression(abc.ABC):
     def __add__(self, other):
         if other == 0:
@@ -748,11 +622,7 @@ class Expression(abc.ABC):
 
 
 
-class Terminal(Expression, abc.ABC):
-    pass
-
-
-class Operator(Expression):
+class Operator(Expression, abc.ABC):
     def __init__(self, a, b, /):
         self.a = a
         self.b = b
@@ -769,39 +639,11 @@ class Operator(Expression):
     def _symbol(self) -> str:
         pass
 
-    @cached_property
-    def axes(self):
-        from pyop3.expr_visitors import extract_axes
-
-        return merge_axis_trees([extract_axes(self.a), extract_axes(self.b)])
-
-
-class AxisVar(Terminal):
-    def __init__(self, axis: Axis) -> None:
-        assert isinstance(axis, Axis)
-        self.axis = axis
-
-    @property
-    def axis_label(self):
-        return self.axis.label
-
-    def __repr__(self) -> str:
-        return f"{type(self).__name__}({self.axis!r})"
-
-    def __str__(self) -> str:
-        return f"i_{{{self.axis_label}}}"
-
-
-class LoopIndexVar(Terminal):
-    def __init__(self, index, axis_label) -> None:
-        self.index = index
-        self.axis_label = axis_label
-
-    def __repr__(self) -> str:
-        return f"{type(self).__name__}({self.index!r}, {self.axis_label!r})"
-
-    def __str__(self) -> str:
-        return f"L_{{{self.index.id}, {self.axis_label}}}"
+    # @cached_property
+    # def axes(self):
+    #     from pyop3.expr_visitors import extract_axes
+    #
+    #     return merge_axis_trees([extract_axes(self.a), extract_axes(self.b)])
 
 
 class Add(Operator):
@@ -826,6 +668,50 @@ class FloorDiv(Operator):
     @property
     def _symbol(self) -> str:
         return "//"
+
+
+class Terminal(Expression, abc.ABC):
+    @property
+    @abc.abstractmethod
+    def terminal_key(self):
+        # used in `replace_terminals()`
+        pass
+
+
+class AxisVar(Terminal):
+    def __init__(self, axis_label: str) -> None:
+        self.axis_label = axis_label
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({self.axis_label!r})"
+
+    def __str__(self) -> str:
+        return f"i_{{{self.axis_label}}}"
+
+    @property
+    def terminal_key(self) -> str:
+        return self.axis_label
+
+
+class LoopIndexVar(Terminal):
+    def __init__(self, index, axis_label) -> None:
+        self.index = index
+        self.axis_label = axis_label
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({self.index!r}, {self.axis_label!r})"
+
+    def __str__(self) -> str:
+        return f"L_{{{self.index.id}, {self.axis_label}}}"
+
+    @property
+    def terminal_key(self) -> tuple:
+        return (self.index.id, self.axis_label)
+
+
+# typing
+# ExpressionT = Expression | numbers.Number  (in 3.10)
+ExpressionT = Union[Expression, numbers.Number]
 
 
 # NOTE: More consistent to be AbstractAxisTree I think
@@ -1047,7 +933,7 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
 
         source_exprs = {}
         for component in axis.components:
-            source_exprs_acc_ = source_exprs_acc | {axis.label: AxisVar(axis)}
+            source_exprs_acc_ = source_exprs_acc | {axis.label: AxisVar(axis.label)}
             source_exprs[axis.id, component.label] = source_exprs_acc_
 
             if subaxis := self.child(axis, component):
@@ -1976,6 +1862,7 @@ def _merge_targets(axis_trees, targetss, *, axis_tree_index=0, axis=None, suffix
     return pmap(relabelled_targets)
 
 
+# TODO: Move this function into another file.
 def subst_layouts(
     axes,
     targets,
@@ -1986,11 +1873,7 @@ def subst_layouts(
     linear_axes_acc=None,
     target_paths_and_exprs_acc=None,
 ):
-    # if axis is None and not axes.is_empty and axes.root.label == "mylabel_0":
-    #     breakpoint()
-
-    from pyop3 import Dat
-    from pyop3.itree.tree import replace  # should move this
+    from pyop3.expr_visitors import replace_terminals
 
     layouts_subst = {}
     # if strictly_all(x is None for x in [axis, path, target_path_acc, index_exprs_acc]):
@@ -2003,7 +1886,10 @@ def subst_layouts(
         target_paths_and_exprs_acc = {None: targets.get(None, (pmap(), pmap()))}
 
         accumulated_path = merge_dicts(p for p, _ in target_paths_and_exprs_acc.values())
-        layouts_subst[path] = replace(layouts[accumulated_path], linear_axes_acc, target_paths_and_exprs_acc)
+
+        # layouts_subst[path] = replace(layouts[accumulated_path], linear_axes_acc, target_paths_and_exprs_acc)
+        replace_map = merge_dicts(t for _, t in target_paths_and_exprs_acc.values())
+        layouts_subst[path] = replace_terminals(layouts[accumulated_path], replace_map)
 
         if not axes.is_empty:
             layouts_subst.update(
@@ -2029,7 +1915,10 @@ def subst_layouts(
             }
 
             accumulated_path = merge_dicts(p for p, _ in target_paths_and_exprs_acc_.values())
-            layouts_subst[path_] = replace(layouts[accumulated_path], linear_axes_acc_, target_paths_and_exprs_acc_)
+            # layouts_subst[path_] = replace(layouts[accumulated_path], linear_axes_acc_, target_paths_and_exprs_acc_)
+            # breakpoint()
+            replace_map = merge_dicts(t for _, t in target_paths_and_exprs_acc_.values())
+            layouts_subst[path_] = replace_terminals(layouts[accumulated_path], replace_map)
 
             if subaxis := axes.child(axis, component):
                 layouts_subst.update(
@@ -2039,8 +1928,6 @@ def subst_layouts(
                         layouts,
                         axis=subaxis,
                         path=path_,
-                        # target_path_acc_,
-                        # target_exprs_acc_,
                         linear_axes_acc=linear_axes_acc_,
                         target_paths_and_exprs_acc=target_paths_and_exprs_acc_,
                     )

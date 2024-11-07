@@ -648,11 +648,14 @@ def _compress_array_indirection_maps(dat):
         raise NotImplementedError
 
     layouts = {}
-    for leaf_path, orig_layout in dat.axes.subst_layouts().items():
-        if extract_axes(orig_layout).size == 0:
+    for leaf_path, orig_layout in dat.axes.leaf_subst_layouts.items():
+        visited_axes = dat.axes.path_with_nodes(dat.axes._node_from_path(leaf_path), and_components=True)
+
+        # if extract_axes(orig_layout).size == 0:
+        if False:  # needed?
             chosen_layout = -1
         else:
-            candidate_layouts = compress_expression_indirection_maps(orig_layout)
+            candidate_layouts = compress_expression_indirection_maps(orig_layout, visited_axes)
 
             # Now choose the candidate layout with the lowest cost, breaking ties
             # by choosing the left-most entry with a given cost.

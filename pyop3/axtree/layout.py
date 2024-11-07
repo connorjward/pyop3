@@ -74,7 +74,7 @@ def tabulate_again(axes, *, axis=None):
         # 1. Constant stride
         if has_constant_step(axes, axis, component, "old"):
             step = step_size(axes, axis, component)
-            layouts[(axis, component)] = AxisVar(axis) * step + start
+            layouts[(axis, component)] = AxisVar(axis.label) * step + start
 
 
         # 2. Ragged inside - must tabulate
@@ -285,7 +285,7 @@ def _make_layout_per_axis_component(
                 if (axis.id, c.label) in loop_vars:
                     axis_var = loop_vars[axis.id, c.label][axis.label]
                 else:
-                    axis_var = AxisVar(axis)
+                    axis_var = AxisVar(axis.label)
                 layouts.update({layout_path | {axis.label: c.label}: axis_var * step})
 
         return (layouts, ctree)
@@ -360,7 +360,7 @@ def _make_layout_per_axis_component(
             for cidx, step in enumerate(steps):
                 mycomponent = axis.components[cidx]
 
-                axis_var = AxisVar(axis)
+                axis_var = AxisVar(axis.label)
                 new_layout = axis_var * step + start
 
                 layouts[layout_path | {axis.label: mycomponent.label}] = new_layout
@@ -666,7 +666,7 @@ def _create_count_array_tree(
                         loop_var = loop_vars[myaxis.label]
                         index_expr = {myaxis.label: loop_var}
                     else:
-                        index_expr = {myaxis.label: AxisVar(myaxis)}
+                        index_expr = {myaxis.label: AxisVar(myaxis.label)}
                     index_exprs[key] = index_expr
             else:
                 index_exprs = axtree.index_exprs

@@ -27,27 +27,22 @@ from pyop3.axtree import (
     AxisTree,
     AxisForest,
     AxisVar,
-    ContextSensitive,
     LoopIterable,
 )
 from pyop3.axtree.layout import _as_int
 from pyop3.axtree.tree import (
-    AxisTree,
-    Expression,
-    AxisVar, Operator,
     ContextSensitiveLoopIterable,
     IndexedAxisTree,
     LoopIndexVar,
 )
-from pyop3.dtypes import IntType, get_mpi_dtype
-from pyop3.expr_visitors import replace
+from pyop3.dtypes import IntType
+from pyop3.expr_visitors import replace_terminals
 from pyop3.lang import KernelArgument
 from pyop3.tree import (
     LabelledNodeComponent,
     LabelledTree,
     MultiComponentLabelledNode,
     MutableLabelledTreeMixin,
-    postvisit,
 )
 from pyop3.utils import (
     Identified,
@@ -57,7 +52,6 @@ from pyop3.utils import (
     strict_zip,
     single_valued,
     just_one,
-    checked_zip,
     merge_dicts,
     strictly_all,
 )
@@ -302,6 +296,7 @@ class LoopIndex(Index, KernelArgument):
                 {axis.label: LoopIndexVar(self, axis.label) for axis, component_label in self.iterset.path_with_nodes(self.iterset.leaf).items()},
             )
         }
+        replace_map = replace_map[None][1]
 
         targets = []
         for equivalent_targets in self.iterset.paths_and_exprs:
@@ -310,7 +305,7 @@ class LoopIndex(Index, KernelArgument):
             for (orig_path, orig_exprs) in equivalent_targets.values():
                 new_path.update(orig_path)
                 for axis_label, orig_expr in orig_exprs.items():
-                    new_exprs[axis_label] = replace(orig_expr, AxisTree(), replace_map)
+                    new_exprs[axis_label] = replace_terminals(orig_expr, replace_map)
             new_path = pmap(new_path)
             new_exprs = pmap(new_exprs)
             targets.append(pmap({None: (new_path, new_exprs)}))
@@ -977,7 +972,7 @@ def _(
         for (orig_path, orig_exprs) in equivalent_targets.values():
             new_path.update(orig_path)
             for axis_label, orig_expr in orig_exprs.items():
-                new_exprs[axis_label] = replace(orig_expr, cf_loop_index.iterset, replace_map)
+                new_exprs[axis_label] = replace_terminals(orig_expr, cf_loop_index.iterset, replace_map)
         new_path = pmap(new_path)
         new_exprs = pmap(new_exprs)
         targets[None].append((new_path, new_exprs))
@@ -1123,9 +1118,6 @@ def _(slice_: Slice, *, prev_axes, **_):
             assert isinstance(slice_component, Subset)
             size = slice_component.array.axes.leaf_component.count
 
-        # if slice_.label == "closure":
-        #     breakpoint()
-
         if is_full:
             component_label = slice_component.component
         else:
@@ -1150,8 +1142,7 @@ def _(slice_: Slice, *, prev_axes, **_):
         else:
             target_path_per_subslice.append(pmap({slice_.axis: slice_component.component}))
 
-            newvar = AxisVar(axis)
-            # layout_var = AxisVar()
+            newvar = AxisVar(axis.label)
             if isinstance(slice_component, AffineSliceComponent):
                 index_exprs_per_subslice.append(
                     freeze(
@@ -1193,11 +1184,11 @@ def _(slice_: Slice, *, prev_axes, **_):
                 linear_axes = AxisTree(linear_axis)
                 replace_path = {subset_axis.label: subset_axis.component.label}
                 # replace_exprs = {subset_axis.label: AxisVar(axis)}
-                replace_map = {AxisVar(subset_axis): AxisVar(axis)}
+                replace_map = {subset_axis.label: AxisVar(axis.label)}
                 # replace_bits = {(linear_axis.id, axis.components[i].label): (replace_path, replace_exprs)}
 
                 # index_exprs_per_subslice.append(freeze({slice_.axis: replace(slice_component.array, linear_axes, replace_bits)}))
-                index_exprs_per_subslice.append(freeze({slice_.axis: replace(slice_component.array, replace_map)}))
+                index_exprs_per_subslice.append(freeze({slice_.axis: replace_terminals(slice_component.array, replace_map)}))
 
     target_path_per_component = {}
     index_exprs_per_component = {}
@@ -1234,9 +1225,11 @@ def _(
 
 def _make_leaf_axis_from_called_map_new(map_name, output_spec, linear_input_axes, input_paths_and_exprs):
     components = []
+    replace_map = merge_dicts(t for _, t in input_paths_and_exprs.values())
     for map_output in output_spec:
         # NOTE: This could probably be done more eagerly.
-        arity = replace(map_output.arity, linear_input_axes, input_paths_and_exprs)
+        # arity = replace(map_output.arity, linear_input_axes, input_paths_and_exprs)
+        arity = replace_terminals(map_output.arity, replace_map)
         component = AxisComponent(arity, label=map_output.label)
         components.append(component)
     axis = Axis(components, label=map_name)
@@ -1252,12 +1245,15 @@ def _make_leaf_axis_from_called_map_new(map_name, output_spec, linear_input_axes
         map_output_leaf = map_output.array.axes.leaf
         leaf_axis, leaf_component_label = map_output_leaf
 
-        paths_and_exprs = input_paths_and_exprs | {(linear_axis.id, component.label): (pmap({leaf_axis.label: leaf_component_label}), pmap({leaf_axis.label: AxisVar(leaf_axis)}))}
+        # paths_and_exprs = input_paths_and_exprs | {(linear_axis.id, component.label): (pmap({leaf_axis.label: leaf_component_label}), pmap({leaf_axis.label: AxisVar(leaf_axis)}))}
+        paths_and_exprs = input_paths_and_exprs | {(linear_axis.id, component.label): (pmap({leaf_axis.label: leaf_component_label}), pmap({leaf_axis: AxisVar(leaf_axis.label)}))}
 
         target_path = pmap({map_output.target_axis: map_output.target_component})
 
         # target_exprs = pmap({map_output.target_axis: replace(map_output.array, linear_axes, paths_and_exprs)})
-        target_exprs = pmap({map_output.target_axis: replace(map_output.array, linear_axes, paths_and_exprs)})
+        # target_exprs = pmap({map_output.target_axis: replace(map_output.array, linear_axes, paths_and_exprs)})
+        replace_map = merge_dicts(t for _, t in paths_and_exprs.values())
+        target_exprs = pmap({map_output.target_axis: replace_terminals(map_output.array, replace_map)})
         targets[axis.id, component.label] = (target_path, target_exprs)
     targets = pmap(targets)
 
@@ -1529,7 +1525,7 @@ def compose_targets(orig_axes, orig_target_paths_and_exprs, indexed_axes, indexe
 
         none_mapped_target_path |= orig_none_mapped_target_path
         for orig_axis_label, orig_index_expr in orig_none_mapped_target_exprs.items():
-            none_mapped_target_exprs[orig_axis_label] = replace(orig_index_expr, indexed_axes_acc, indexed_target_paths_and_exprs_acc)
+            none_mapped_target_exprs[orig_axis_label] = replace_terminals(orig_index_expr, indexed_axes_acc, indexed_target_paths_and_exprs_acc)
 
         # make sure to add existing None entries - these will not require composition I think?
 
@@ -1556,7 +1552,7 @@ def compose_targets(orig_axes, orig_target_paths_and_exprs, indexed_axes, indexe
 
                     none_mapped_target_path |= orig_target_path
                     for orig_axis_label, orig_index_expr in orig_target_exprs.items():
-                        none_mapped_target_exprs[orig_axis_label] = replace(orig_index_expr, indexed_axes_acc, indexed_target_paths_and_exprs_acc)
+                        none_mapped_target_exprs[orig_axis_label] = replace_terminals(orig_index_expr, indexed_axes_acc, indexed_target_paths_and_exprs_acc)
 
         composed_target_paths_and_exprs[None] = (
             pmap(none_mapped_target_path), pmap(none_mapped_target_exprs)
@@ -1596,12 +1592,10 @@ def compose_targets(orig_axes, orig_target_paths_and_exprs, indexed_axes, indexe
                     orig_target_path, orig_target_exprs = orig_target_paths_and_exprs[orig_key]
 
                     # now index exprs
+                    replace_map = merge_dicts(t for _, t in indexed_target_paths_and_exprs_acc_.values())
                     new_exprs = {}
                     for orig_axis_label, orig_index_expr in orig_target_exprs.items():
-                        # orig_index_expr_new = apply_index_tree_to_expr(orig_index_expr, partial_index_tree)
-                        # orig_index_expr_new = replace(orig_index_expr, indexed_axes_acc_, indexed_target_paths_and_exprs)
-                        # new_exprs[orig_axis_label] = replacer(orig_index_expr)
-                        new_exprs[orig_axis_label] = replace(orig_index_expr, indexed_axes_acc_, indexed_target_paths_and_exprs_acc_)
+                        new_exprs[orig_axis_label] = replace_terminals(orig_index_expr, replace_map)
 
                     composed_target_paths_and_exprs[axis.id, component.label] = (orig_target_path, freeze(new_exprs))
 
@@ -1612,7 +1606,6 @@ def compose_targets(orig_axes, orig_target_paths_and_exprs, indexed_axes, indexe
                 orig_target_paths_and_exprs,
                 indexed_axes,
                 indexed_target_paths_and_exprs,
-                # partial_linear_index_trees,
                 axis=subaxis,
                 indexed_axes_acc=indexed_axes_acc_,
                 indexed_target_paths_and_exprs_acc=indexed_target_paths_and_exprs_acc_,
@@ -1646,20 +1639,6 @@ def _index_info_targets_axes(indexed_axes, index_info, orig_axes) -> bool:
 # TODO: just get rid of this, assuming the new system works
 def expand_compressed_target_paths(compressed_target_paths):
     return expand_collection_of_iterables(compressed_target_paths)
-
-
-# NOTE: Think this should just be a replace
-@functools.singledispatch
-def apply_index_tree_to_expr(obj, indices):
-    if isinstance(obj, Dat):
-        return obj[indices]
-    else:
-        raise TypeError
-
-
-@apply_index_tree_to_expr.register
-def _(var: AxisVar, indices):
-    return var
 
 
 def compose_axes(orig_axes, indexed_axes, indexed_target_paths, indexed_target_exprs):
@@ -1725,7 +1704,7 @@ def _compose_axes(
             # replacer = IndexExpressionReplacer(indexed_target_exprs)
             for orig_axis_label, orig_index_expr in orig_index_exprs.items():
                 # composed_target_exprss[None][orig_axis_label] = replacer(orig_index_expr)
-                composed_target_exprss[None][orig_axis_label] = replace(orig_index_expr, indexed_target_path, indexed_target_exprs)
+                composed_target_exprss[None][orig_axis_label] = replace_terminals(orig_index_expr, indexed_target_path, indexed_target_exprs)
                 print("DDD", composed_target_exprss[None][orig_axis_label])
 
         if indexed_axes.is_empty:
@@ -1750,7 +1729,7 @@ def _compose_axes(
             orig_index_exprs = orig_index_exprss.get(orig_key, {})
             # replacer = IndexExpressionReplacer(indexed_target_exprs)
             for orig_axis_label, orig_index_expr in orig_index_exprs.items():
-                composed_target_exprss[indexed_key][orig_axis_label] = replace(orig_index_expr, indexed_target_path, indexed_target_exprs)
+                composed_target_exprss[indexed_key][orig_axis_label] = replace_terminals(orig_index_expr, indexed_target_path, indexed_target_exprs)
 
             # 3. Determine layout_exprs...
             # ...

@@ -1,12 +1,12 @@
 import abc
 
 from pyop3.axtree import ContextAware
-from pyop3.axtree.tree import Terminal
+from pyop3.axtree.tree import Expression
 from pyop3.lang import FunctionArgument, Assignment
 from pyop3.utils import UniqueNameGenerator
 
 
-class Array(ContextAware, FunctionArgument, Terminal, abc.ABC):
+class Array(ContextAware, FunctionArgument, Expression, abc.ABC):
     _prefix = "array"
     _name_generator = UniqueNameGenerator()
 
