@@ -211,11 +211,13 @@ single_valued = pytools.single_valued
 is_single_valued = pytools.is_single_valued
 
 
-def merge_dicts(dicts, persistent=True):
+def merge_dicts(dicts, *, ordered=False):
     merged = {}
     for dict_ in dicts:
         merged.update(dict_)
-    return pmap(merged) if persistent else merged
+
+    mapping_type = ImmutableOrderedDict if ordered else pmap
+    return mapping_type(merged)
 
 
 def unique(iterable):
@@ -403,7 +405,7 @@ def is_ordered_mapping(obj: Mapping):
     return isinstance(obj, _ordered_mapping_types)
 
 
-def expand_collection_of_iterables(compressed, /, *, ordered: bool = True, mapping_type=ImmutableOrderedDict) -> tuple[ImmutableOrderedDict]:
+def expand_collection_of_iterables(compressed, /, *, ordered: bool = True) -> tuple:
     """
     Expand target paths written in 'compressed' form like:
 
@@ -417,32 +419,31 @@ def expand_collection_of_iterables(compressed, /, *, ordered: bool = True, mappi
     of 2-tuples (i.e. things that can be parsed into a `dict`).
 
     """
-    if not ordered:
-        raise NotImplementedError("Need to think about valid classes")
-
     # If `compressed` is not already a mapping then parse it to one
-    if not isinstance(compressed, collections.abc.Mapping):
+    if not isinstance(compressed, Mapping):
         compressed = dict(compressed)
 
-    if not any(isinstance(compressed, type_) for type_ in _ordered_mapping_types):
+    if ordered and not is_ordered_mapping(compressed):
         raise UnorderedCollectionException(
             "Expected an ordered mapping, valid options include: "
             f"{{{', '.join(type_.__name__ for type_ in _ordered_mapping_types)}}}"
         )
 
+    mapping_type = ImmutableOrderedDict if ordered else pmap
+
     if not compressed:
         return (mapping_type(),)
     else:
         compressed_mut = dict(compressed)
-        return _expand_dict_of_iterables_rec(compressed_mut, ordered=ordered, mapping_type=mapping_type)
+        return _expand_dict_of_iterables_rec(compressed_mut, mapping_type=mapping_type)
 
 
-def _expand_dict_of_iterables_rec(compressed_mut, /, *, ordered, mapping_type):
+def _expand_dict_of_iterables_rec(compressed_mut, /, *, mapping_type):
     expanded = []
     key, items = popfirst(compressed_mut)
 
     if compressed_mut:
-        subexpanded = _expand_dict_of_iterables_rec(compressed_mut, ordered=ordered, mapping_type=mapping_type)
+        subexpanded = _expand_dict_of_iterables_rec(compressed_mut, mapping_type=mapping_type)
         for item in items:
             entry = mapping_type({key: item})
             for subentry in subexpanded:

@@ -27,7 +27,8 @@ from pyop3.expr_visitors import (
     extract_axes,
     materialize,
     restrict_to_context as restrict_expression_to_context,
-    compress_indirection_maps as compress_expression_indirection_maps,
+    collect_candidate_indirections as collect_expression_candidate_indirections,
+    compute_indirection_cost as compute_expression_indirection_cost,
     concretize_arrays as concretize_expression_layouts,
 )
 from pyop3.lang import (
@@ -583,71 +584,215 @@ def _(func: CalledFunction, /):
     return func.copy(arguments=[concretize_expression_layouts(arg) for arg in func.arguments])
 
 
+# NOTE: Should perhaps take a different input type to ensure that always called at root?
+# E.g. PreprocessedInstruction?
 def compress_indirection_maps(insn: Instruction) -> Instruction:
-    return _compress_indirection_maps_rec(insn, loop_axes_acc=pmap())
+    arg_candidatess = _collect_candidate_indirections(insn, loop_axes_acc=pmap())
+
+    # Start by combining the best per-arg candidates into the initial overall best candidate
+    best_candidate = {}
+    max_cost = 0
+    for arg_id, arg_candidates in arg_candidatess.items():
+        best_candidate[arg_id], cost = min(arg_candidates, key=lambda item: item[1])
+        max_cost += cost
+
+    # Optimise by dropping any immediately bad candidates. We do this by dropping
+    # any candidates whose cost (per-arg) is greater than the current best candidate.
+    # NOTE: It is not clear (use the same variable name) but we drop the cost here
+    arg_candidatess = {
+        arg_id: tuple(
+            arg_candidate
+            for arg_candidate, cost in arg_candidates
+            if cost <= max_cost
+        )
+        for arg_id, arg_candidates in arg_candidatess.items()
+    }
+
+    # Now select the combination with the lowest combined cost. We can make savings here
+    # by sharing indirection maps between different arguments. For example, if we have
+    #
+    #     dat1[mapA[mapB[mapC[i]]]]
+    #     dat2[mapB[mapC[i]]]
+    #
+    # then we can (sometimes) minimise the data cost by having
+    #     dat1[mapA[mapBC[i]]]
+    #     dat2[mapBC[i]]
+    #
+    # instead of
+    #
+    #     dat1[mapABC[i]]
+    #     dat2[mapBC[i]]
+    min_cost = max_cost
+    for shared_candidate in expand_collection_of_iterables(arg_candidatess):
+        cost = _compute_indirection_cost(insn, shared_candidate)
+        if cost < min_cost:
+            best_candidate = shared_candidate
+            min_cost = cost
+
+    breakpoint()
+
+    # Now materialise any symbolic (composite) dats and propagate the
+    # decision back to the tree.
+    ...
+
+
+    return _collect_candidate_indirections(insn, loop_axes_acc=pmap())
 
 
 @functools.singledispatch
-def _compress_indirection_maps_rec(obj: Any, /, *, loop_axes_acc) -> Instruction:
+def _collect_candidate_indirections(obj: Any, /, *, loop_axes_acc) -> ImmutableOrderedDict:
     raise TypeError(f"No handler provided for {type(obj).__name__}")
 
 
-@_compress_indirection_maps_rec.register(InstructionList)
-def _(insn_list: InstructionList, /, **kwargs) -> InstructionList:
-    return InstructionList([_compress_indirection_maps_rec(insn, **kwargs) for insn in insn_list])
+@_collect_candidate_indirections.register(InstructionList)
+def _(insn_list: InstructionList, /, **kwargs) -> ImmutableOrderedDict:
+    return merge_dicts(
+        [_collect_candidate_indirections(insn, **kwargs) for insn in insn_list],
+        ordered=True,
+    )
 
 
-@_compress_indirection_maps_rec.register(Loop)
-def _(loop: Loop, /, *, loop_axes_acc) -> Loop:
-    # NOTE: I think that this should always just be the axis tree!?
+@_collect_candidate_indirections.register(Loop)
+def _(loop: Loop, /, *, loop_axes_acc) -> ImmutableOrderedDict:
     loop_axes_acc_ = loop_axes_acc | {loop.index.id: loop.index.iterset}
-    return loop.copy(
-        statements=[_compress_indirection_maps_rec(stmt, loop_axes_acc=loop_axes_acc_) for stmt in loop.statements]
+    return merge_dicts(
+        [
+            _collect_candidate_indirections(stmt, loop_axes_acc=loop_axes_acc_)
+            for stmt in loop.statements
+        ],
+        ordered=True,
     )
 
 
-@_compress_indirection_maps_rec.register(Assignment)
-def _(assignment: Assignment, /, *, loop_axes_acc) -> Assignment:
-    return Assignment(
-        _compress_array_indirection_maps(assignment.assignee, loop_axes_acc),
-        _compress_array_indirection_maps(assignment.expression, loop_axes_acc),
-        assignment.assignment_type,
+@_collect_candidate_indirections.register(Assignment)
+def _(assignment: Assignment, /, *, loop_axes_acc) -> ImmutableOrderedDict:
+    candidates = {}
+    for i, arg in enumerate([assignment.assignee, assignment.expression]):
+        for key, value in _collect_array_candidate_indirections(arg, loop_axes_acc).items():
+            candidates[assignment.id, i, key] = value
+    return ImmutableOrderedDict(candidates)
+
+
+@_collect_candidate_indirections.register(CalledFunction)
+def _(func: CalledFunction, /, *, loop_axes_acc) -> ImmutableOrderedDict:
+    candidates = {}
+    for i, arg in enumerate(func.arguments):
+        for key, value in _collect_array_candidate_indirections(arg, loop_axes_acc).items():
+            candidates[func.id, i, key] = value
+    return ImmutableOrderedDict(candidates)
+
+
+def _compute_indirection_cost(insn: Instruction, arg_layouts) -> int:
+    seen_exprs_mut = set()
+    return _compute_indirection_cost_rec(insn, arg_layouts, seen_exprs_mut, loop_axes_acc=pmap())
+
+
+@functools.singledispatch
+def _compute_indirection_cost_rec(obj: Any, /, arg_layouts, seen_exprs_mut, *, loop_axes_acc) -> int:
+    raise TypeError(f"No handler provided for {type(obj).__name__}")
+
+
+@_compute_indirection_cost_rec.register(InstructionList)
+def _(insn_list: InstructionList, /, *args, **kwargs) -> int:
+    return sum(_compute_indirection_cost_rec(insn, *args, **kwargs) for insn in insn_list)
+
+
+@_compute_indirection_cost_rec.register(Loop)
+def _(loop: Loop, /, arg_layouts, seen_exprs_mut, *, loop_axes_acc) -> int:
+    loop_axes_acc_ = loop_axes_acc | {loop.index.id: loop.index.iterset}
+    return sum(
+        _compute_indirection_cost_rec(stmt, arg_layouts, seen_exprs_mut, loop_axes_acc=loop_axes_acc_)
+        for stmt in loop.statements
     )
 
 
-@_compress_indirection_maps_rec.register(CalledFunction)
-def _(func: CalledFunction, /, *, loop_axes_acc):
-    return func.copy(arguments=[_compress_array_indirection_maps(arg, loop_axes_acc) for arg in func.arguments])
+@_compute_indirection_cost_rec.register(Assignment)
+def _(assignment: Assignment, /, arg_layouts, seen_exprs_mut, *, loop_axes_acc) -> int:
+    return sum(
+        _compute_array_indirection_cost(arg, arg_layouts, seen_exprs_mut, loop_axes_acc, (assignment.id, i))
+        for i, arg in enumerate([assignment.assignee, assignment.expression])
+    )
 
 
-# NOTE: This is technically suboptimal. We want to optimise the access patterns
-# across all arrays, not just on a per-array basis.
-def _compress_array_indirection_maps(dat, loop_axes):
+@_compute_indirection_cost_rec.register(CalledFunction)
+def _(func: CalledFunction, /, arg_layouts, seen_exprs_mut, *, loop_axes_acc) -> int:
+    return sum(
+        _compute_array_indirection_cost(arg, arg_layouts, seen_exprs_mut, loop_axes_acc, (func.id, i))
+        for i, arg in enumerate(func.arguments)
+    )
+
+
+def _collect_array_candidate_indirections(dat, loop_axes) -> ImmutableOrderedDict:
     if not isinstance(dat, Array):
-        return dat
+        return ImmutableOrderedDict()
 
     if not isinstance(dat, Dat):
         raise NotImplementedError
 
-    layouts = {}
+    candidatess = {}
     for leaf_path, orig_layout in dat.axes.leaf_subst_layouts.items():
         visited_axes = dat.axes.path_with_nodes(dat.axes._node_from_path(leaf_path), and_components=True)
 
         if extract_axes(orig_layout, visited_axes, loop_axes).size == 0:
-            chosen_layout = -1
-        else:
-            candidate_layouts = compress_expression_indirection_maps(orig_layout, visited_axes, loop_axes)
+            continue
 
-            # Now choose the candidate layout with the lowest cost, breaking ties
-            # by choosing the left-most entry with a given cost.
-            chosen_layout = min(candidate_layouts, key=lambda item: item[1])[0]
+        candidatess[(dat, leaf_path)] = collect_expression_candidate_indirections(
+            orig_layout, visited_axes, loop_axes
+        )
 
-            # evaluate CompositeDats (bad name?)
-            # do as part of compress_expression_indirection_maps?
-            chosen_layout = materialize(chosen_layout, visited_axes, loop_axes)
+    return ImmutableOrderedDict(candidatess)
 
-            # TODO: Check for affine layouts and penalise...
 
-        layouts[leaf_path] = chosen_layout
+def _compute_array_indirection_cost(dat, arg_layouts, seen_exprs_mut, loop_axes, outer_key) -> int:
+    if not isinstance(dat, Array):
+        return 0
 
-    return _ConcretizedDat(dat, layouts)
+    if not isinstance(dat, Dat):
+        raise NotImplementedError
+
+    cost = 0
+    for leaf_path in dat.axes.leaf_paths:
+        visited_axes = dat.axes.path_with_nodes(dat.axes._node_from_path(leaf_path), and_components=True)
+
+        try:
+            layout = arg_layouts[outer_key + ((dat, leaf_path),)]
+        except KeyError:
+            continue
+
+        if extract_axes(layout, visited_axes, loop_axes).size == 0:
+            continue
+
+        cost += compute_expression_indirection_cost(layout, visited_axes, loop_axes, seen_exprs_mut)
+
+    return cost
+
+
+# def _compress_array_indirection_maps(dat, loop_axes):
+#     if not isinstance(dat, Array):
+#         return dat
+#
+#     if not isinstance(dat, Dat):
+#         raise NotImplementedError
+#
+#     layouts = {}
+#     for leaf_path, orig_layout in dat.axes.leaf_subst_layouts.items():
+#         visited_axes = dat.axes.path_with_nodes(dat.axes._node_from_path(leaf_path), and_components=True)
+#
+#         if extract_axes(orig_layout, visited_axes, loop_axes).size == 0:
+#             chosen_layout = -1
+#         else:
+#             candidate_layouts = compress_expression_indirection_maps(orig_layout, visited_axes, loop_axes)
+#
+#             # Now choose the candidate layout with the lowest cost, breaking ties
+#             # by choosing the left-most entry with a given cost.
+#             chosen_layout = min(candidate_layouts, key=lambda item: item[1])[0]
+#
+#             # evaluate CompositeDats (bad name?)
+#             # do as part of compress_expression_indirection_maps?
+#             chosen_layout = materialize(chosen_layout, visited_axes, loop_axes)
+#
+#             # TODO: Check for affine layouts and penalise...
+#
+#         layouts[leaf_path] = chosen_layout
+#
+#     return _ConcretizedDat(dat, layouts)

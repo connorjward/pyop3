@@ -20,9 +20,22 @@ from pyop3.lang import do_loop
 
 
 # should inherit from _Dat
+# or at least be an Expression!
 class _CompositeDat:
     def __init__(self, expr):
         self.expr = expr
+
+    def __hash__(self) -> int:
+        return hash((self.expr,))
+
+    def __eq__(self, other, /) -> bool:
+        return type(self) is type(other) and other.expr == self.expr
+
+    def __repr__(self) -> str:
+        return f"{type(self).__name__}({self.expr!r})"
+
+    def __str__(self) -> str:
+        return f"acc({self.expr})"
 
 
 # TODO: could make a postvisitor
@@ -351,25 +364,36 @@ def _(op: Operator, /) -> Operator:
     return type(op)(concretize_arrays(op.a), concretize_arrays(op.b))
 
 
+# TODO: account for non-affine accesses in arrays and selectively apply this
 INDIRECTION_PENALTY_FACTOR = 5
 
+MINIMUM_COST_TABULATION_THRESHOLD = 128
+"""The minimum cost below which tabulation will not be considered.
 
+Indirections with a cost below this are considered as fitting into cache and
+so memory optimisations are ineffectual.
+
+"""
+
+
+# TODO: Return the minimum each time, not all candidates
+# TODO: penalise non-affine accesses (inspect layout func and compare)
 @functools.singledispatch
-def compress_indirection_maps(obj: Any, /, visited_axes, loop_axes) -> tuple:
+def collect_candidate_indirections(obj: Any, /, visited_axes, loop_axes) -> tuple:
     raise TypeError(f"No handler defined for {type(obj).__name__}")
 
 
-@compress_indirection_maps.register(AxisVar)
-@compress_indirection_maps.register(LoopIndexVar)
-@compress_indirection_maps.register(numbers.Number)
+@collect_candidate_indirections.register(AxisVar)
+@collect_candidate_indirections.register(LoopIndexVar)
+@collect_candidate_indirections.register(numbers.Number)
 def _(var: Any, /, visited_axes, loop_axes) -> tuple:
     return ((var, 0),)
 
 
-@compress_indirection_maps.register(Operator)
+@collect_candidate_indirections.register(Operator)
 def _(op: Operator, /, visited_axes, loop_axes) -> tuple:
-    a_result = compress_indirection_maps(op.a, visited_axes, loop_axes)
-    b_result = compress_indirection_maps(op.b, visited_axes, loop_axes)
+    a_result = collect_candidate_indirections(op.a, visited_axes, loop_axes)
+    b_result = collect_candidate_indirections(op.b, visited_axes, loop_axes)
 
     candidates = []
     for (a_expr, a_cost), (b_expr, b_cost) in itertools.product(a_result, b_result):
@@ -379,24 +403,90 @@ def _(op: Operator, /, visited_axes, loop_axes) -> tuple:
 
     # Now also include a candidate representing the packing of the expression
     # into a Dat. The cost for this is simply the size of the resulting array.
-    compressed_expr = _CompositeDat(op)
-    compressed_cost = extract_axes(op, visited_axes, loop_axes).size
-    candidates.append((compressed_expr, compressed_cost))
+    # Only do this when the cost is large as small arrays will fit in cache
+    # and not benefit from the optimisation.
+    if any(cost > MINIMUM_COST_TABULATION_THRESHOLD for _, cost in candidates):
+        compressed_expr = _CompositeDat(op)
+        compressed_cost = extract_axes(op, visited_axes, loop_axes).size
+        candidates.append((compressed_expr, compressed_cost))
 
     return tuple(candidates)
 
 
-@compress_indirection_maps.register(_ExpressionDat)
+@collect_candidate_indirections.register(_ExpressionDat)
 def _(dat: _ExpressionDat, /, visited_axes, loop_axes) -> tuple:
     candidates = []
-    for layout_expr, layout_cost in compress_indirection_maps(dat.layout, visited_axes, loop_axes):
+    for layout_expr, layout_cost in collect_candidate_indirections(dat.layout, visited_axes, loop_axes):
         candidate_expr = _ExpressionDat(dat.dat, layout_expr)
-        candidate_cost = dat.dat.axes.size + layout_cost * INDIRECTION_PENALTY_FACTOR
+        # FIXME: I am sure that this is wrong
+        # dat_cost = extract_axes(dat.layout, visited_axes, loop_axes).size
+        dat_cost = dat.dat.axes.size
+        candidate_cost = dat_cost + layout_cost * INDIRECTION_PENALTY_FACTOR
         candidates.append((candidate_expr, candidate_cost))
 
-    compressed_cost = extract_axes(dat, visited_axes, loop_axes).size
-    candidates.append((_CompositeDat(dat), compressed_cost))
+    if any(cost > MINIMUM_COST_TABULATION_THRESHOLD for _, cost in candidates):
+        compressed_cost = extract_axes(dat, visited_axes, loop_axes).size
+        candidates.append((_CompositeDat(dat), compressed_cost))
     return tuple(candidates)
+
+
+@functools.singledispatch
+def compute_indirection_cost(obj: Any, /, visited_axes, loop_axes, seen_exprs_mut) -> int:
+    raise TypeError(f"No handler defined for {type(obj).__name__}")
+
+
+@compute_indirection_cost.register(AxisVar)
+@compute_indirection_cost.register(LoopIndexVar)
+@compute_indirection_cost.register(numbers.Number)
+def _(var: Any, /, visited_axes, loop_axes, seen_exprs_mut) -> int:
+    return 0
+
+
+@compute_indirection_cost.register(Operator)
+def _(op: Operator, /, visited_axes, loop_axes, seen_exprs_mut) -> int:
+    cost = (
+        compute_indirection_cost(op.a, visited_axes, loop_axes, seen_exprs_mut)
+        + compute_indirection_cost(op.b, visited_axes, loop_axes, seen_exprs_mut)
+    )
+    if seen_exprs_mut is not None:
+        if op in seen_exprs_mut:
+            return 0
+        else:
+            seen_exprs_mut.add(op)
+            return cost
+    else:
+        return cost
+
+
+@compute_indirection_cost.register(_ExpressionDat)
+def _(dat: _ExpressionDat, /, visited_axes, loop_axes, seen_exprs_mut) -> int:
+    # only apply penalty factor if non-affine access
+    # FIXME: I am sure that this is wrong
+    # dat_cost = extract_axes(dat.layout, visited_axes, loop_axes).size
+    dat_cost = dat.dat.axes.size
+    layout_cost = compute_indirection_cost(dat.layout, visited_axes, loop_axes, seen_exprs_mut)
+    cost = dat_cost + layout_cost * INDIRECTION_PENALTY_FACTOR
+    if seen_exprs_mut is not None:
+        if dat in seen_exprs_mut:
+            return 0
+        else:
+            seen_exprs_mut.add(dat)
+            return cost
+    else:
+        return cost
+
+
+@compute_indirection_cost.register(_CompositeDat)
+def _(dat: _CompositeDat, /, visited_axes, loop_axes, seen_exprs_mut) -> int:
+    cost = extract_axes(dat.expr, visited_axes, loop_axes).size
+    if seen_exprs_mut is not None:
+        if dat in seen_exprs_mut:
+            return 0
+        else:
+            seen_exprs_mut.add(dat)
+            return cost
+    else:
+        return cost
 
 
 @functools.singledispatch

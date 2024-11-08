@@ -627,6 +627,12 @@ class Operator(Expression, abc.ABC):
         self.a = a
         self.b = b
 
+    def __hash__(self) -> int:
+        return hash((type(self), self.a, self.b))
+
+    def __eq__(self, other, /) -> bool:
+        return type(self) == type(other) and other.a == self.a  and other.b == self.b
+
     def __repr__(self) -> str:
         return f"{type(self).__name__}({self.a!r}, {self.b!r})"
 
@@ -638,12 +644,6 @@ class Operator(Expression, abc.ABC):
     @abc.abstractmethod
     def _symbol(self) -> str:
         pass
-
-    # @cached_property
-    # def axes(self):
-    #     from pyop3.expr_visitors import extract_axes
-    #
-    #     return merge_axis_trees([extract_axes(self.a), extract_axes(self.b)])
 
 
 class Add(Operator):
@@ -671,6 +671,13 @@ class FloorDiv(Operator):
 
 
 class Terminal(Expression, abc.ABC):
+
+    def __hash__(self) -> int:
+        return hash((type(self), self.terminal_key))
+
+    def __eq__(self, other, /) -> bool:
+        return type(self) == type(other) and other.terminal_key == self.terminal_key
+
     @property
     @abc.abstractmethod
     def terminal_key(self):

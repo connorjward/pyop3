@@ -51,9 +51,9 @@ def as_index_forests(forest: Any, /, axes: BaseAxisTree, *, strict: bool = False
 
     forests = {}
     compressed_loop_contexts = collect_loop_contexts(forest)
-    # Pass `pmap` as the mapping type because we do not care about the ordering
-    # of `loop_context` (though we *do* care about the order of iteration).
-    for loop_context in expand_collection_of_iterables(compressed_loop_contexts, mapping_type=pmap):
+    # We do not care about the ordering of `loop_context` (though we *do* care about
+    # the order of iteration).
+    for loop_context in expand_collection_of_iterables(compressed_loop_contexts, ordered=False):
         forest_ = _as_index_forest(forest, axes, loop_context)
         matched_forest = []
 
