@@ -15,15 +15,17 @@ from pyop3.dtypes import IntType
 from pyop3.utils import OrderedSet, just_one
 
 
-# maybe works
-from pyop3.lang import do_loop
-
-
 # should inherit from _Dat
 # or at least be an Expression!
 class _CompositeDat:
-    def __init__(self, expr):
+    def __init__(self, expr, visited_axes, loop_axes):
         self.expr = expr
+
+        # we need to track these somehow so we can differentiate _CompositeDats
+        # that are within different loops that have the same axis labels
+        # perhaps better to not tie to it but instead return together as some sort of context
+        self.visited_axes = visited_axes
+        self.loop_axes = loop_axes
 
     def __hash__(self) -> int:
         return hash((self.expr,))
@@ -202,6 +204,8 @@ def _(dat, /, visited_axes, loop_axes):
 
 @extract_axes.register(_CompositeDat)
 def _(dat, /, visited_axes, loop_axes):
+    assert visited_axes == dat.visited_axes
+    assert loop_axes == dat.loop_axes
     return extract_axes(dat.expr, visited_axes, loop_axes)
 
 
@@ -330,8 +334,19 @@ def _(dat: Dat, /, replace_map):
 def _(dat: _ExpressionDat, /, replace_map):
     # TODO: Can have a flag that determines the replacement order (pre/post)
     if dat in replace_map:
-        return replace_map.get(dat, dat)
+        return replace_map[dat]
     else:
+        replaced_layout = replace(dat.layout, replace_map)
+        return dat.reconstruct(layout=replaced_layout)
+
+
+@replace.register(_CompositeDat)
+def _(dat: _CompositeDat, /, replace_map):
+    # TODO: Can have a flag that determines the replacement order (pre/post)
+    if dat in replace_map:
+        return replace_map[dat]
+    else:
+        raise AssertionError("Not sure about this here...")
         replaced_layout = replace(dat.layout, replace_map)
         return dat.reconstruct(layout=replaced_layout)
 
@@ -406,7 +421,7 @@ def _(op: Operator, /, visited_axes, loop_axes) -> tuple:
     # Only do this when the cost is large as small arrays will fit in cache
     # and not benefit from the optimisation.
     if any(cost > MINIMUM_COST_TABULATION_THRESHOLD for _, cost in candidates):
-        compressed_expr = _CompositeDat(op)
+        compressed_expr = _CompositeDat(op, visited_axes, loop_axes)
         compressed_cost = extract_axes(op, visited_axes, loop_axes).size
         candidates.append((compressed_expr, compressed_cost))
 
@@ -426,7 +441,7 @@ def _(dat: _ExpressionDat, /, visited_axes, loop_axes) -> tuple:
 
     if any(cost > MINIMUM_COST_TABULATION_THRESHOLD for _, cost in candidates):
         compressed_cost = extract_axes(dat, visited_axes, loop_axes).size
-        candidates.append((_CompositeDat(dat), compressed_cost))
+        candidates.append((_CompositeDat(dat, visited_axes, loop_axes), compressed_cost))
     return tuple(candidates)
 
 

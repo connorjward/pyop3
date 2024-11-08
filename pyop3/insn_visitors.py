@@ -15,14 +15,18 @@ from petsc4py import PETSc
 from pyrsistent import pmap, PMap
 from immutabledict import ImmutableOrderedDict
 
-from pyop3.array import Dat, Array, Mat, _ConcretizedDat
+from pyop3.array import Dat, Array, Mat, _ConcretizedDat, _ExpressionDat
 from pyop3.axtree import Axis, AxisTree, ContextFree, ContextSensitive, ContextMismatchException, ContextAware
 from pyop3.axtree.tree import Operator, AxisVar, IndexedAxisTree
 from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
+from pyop3.dtypes import IntType
 from pyop3.itree import Map, TabulatedMapComponent, collect_loop_contexts
 from pyop3.itree.tree import LoopIndexVar
 from pyop3.itree.parse import _as_context_free_indices
 from pyop3.expr_visitors import (
+    replace as replace_expression,
+    replace_terminals,
+    _CompositeDat,
     collect_loops as expr_collect_loops,
     extract_axes,
     materialize,
@@ -122,49 +126,6 @@ def _(assignment: Assignment, /, *, loop_context_acc) -> Assignment:
         restrict_expression_to_context(assignment.expression, loop_context_acc),
         assignment.assignment_type,
     )
-
-
-
-# @functools.singledispatch
-# def _restrict_instruction_to_loop_context(obj: Any, /, loop_context) -> Instruction:
-#     raise TypeError(f"No handler defined for {type(obj).__name__}")
-#
-#
-# @_restrict_instruction_to_loop_context.register(InstructionList)
-# def _(insn_list: InstructionList, /, loop_context) -> InstructionList:
-#     return InstructionList([
-#         _restrict_instruction_to_loop_context(insn, loop_context)
-#         for insn in insn_list
-#     ])
-#
-#
-# @_restrict_instruction_to_loop_context.register(Loop)
-# def _(loop: Loop, /, loop_context) -> Loop:
-#     cf_loop_index = just_one(_as_context_free_indices(loop.index, loop_context))
-#     return Loop(
-#         cf_loop_index,
-#         [
-#             _restrict_instruction_to_loop_context(stmt, loop_context)
-#             for stmt in loop.statements
-#         ],
-#     )
-
-
-# @_restrict_instruction_to_loop_context.register(CalledFunction)
-# def _(func: CalledFunction, /, loop_context) -> CalledFunction:
-#     return CalledFunction(
-#         func.function,
-#         [arg.with_context(loop_context) for arg in func.arguments],
-#     )
-#
-#
-# @_restrict_instruction_to_loop_context.register(Assignment)
-# def _(assignment: Assignment, /, loop_context) -> Assignment:
-#     return Assignment(
-#         restrict_expression_to_context(assignment.assignee, loop_context),
-#         restrict_expression_to_context(assignment.expression, loop_context),
-#         assignment.assignment_type,
-#     )
 
 
 def context_product(contexts, acc=pmap()):
@@ -629,14 +590,26 @@ def compress_indirection_maps(insn: Instruction) -> Instruction:
             best_candidate = shared_candidate
             min_cost = cost
 
-    breakpoint()
-
     # Now materialise any symbolic (composite) dats and propagate the
     # decision back to the tree.
-    ...
+    composite_dats = frozenset.union(
+        *(_collect_composite_dats(expr) for expr in best_candidate.values())
+    )
+    replace_map = {
+        comp_dat: _materialize_composite_dat(comp_dat)
+        for comp_dat in composite_dats
+    }
 
+    # now apply to best layout candidate
+    best_layouts = {
+        key: replace_expression(expr, replace_map)
+        for key, expr in best_candidate.items()
+    }
 
-    return _collect_candidate_indirections(insn, loop_axes_acc=pmap())
+    # now traverse the instruction tree and replace the layouts.
+    optimised_insn = _replace_with_real_dats(insn, best_layouts)
+
+    return optimised_insn
 
 
 @functools.singledispatch
@@ -767,32 +740,99 @@ def _compute_array_indirection_cost(dat, arg_layouts, seen_exprs_mut, loop_axes,
     return cost
 
 
-# def _compress_array_indirection_maps(dat, loop_axes):
-#     if not isinstance(dat, Array):
-#         return dat
-#
-#     if not isinstance(dat, Dat):
-#         raise NotImplementedError
-#
-#     layouts = {}
-#     for leaf_path, orig_layout in dat.axes.leaf_subst_layouts.items():
-#         visited_axes = dat.axes.path_with_nodes(dat.axes._node_from_path(leaf_path), and_components=True)
-#
-#         if extract_axes(orig_layout, visited_axes, loop_axes).size == 0:
-#             chosen_layout = -1
-#         else:
-#             candidate_layouts = compress_expression_indirection_maps(orig_layout, visited_axes, loop_axes)
-#
-#             # Now choose the candidate layout with the lowest cost, breaking ties
-#             # by choosing the left-most entry with a given cost.
-#             chosen_layout = min(candidate_layouts, key=lambda item: item[1])[0]
-#
-#             # evaluate CompositeDats (bad name?)
-#             # do as part of compress_expression_indirection_maps?
-#             chosen_layout = materialize(chosen_layout, visited_axes, loop_axes)
-#
-#             # TODO: Check for affine layouts and penalise...
-#
-#         layouts[leaf_path] = chosen_layout
-#
-#     return _ConcretizedDat(dat, layouts)
+@functools.singledispatch
+def _collect_composite_dats(obj: Any) -> frozenset:
+    raise TypeError
+
+
+@_collect_composite_dats.register(Operator)
+def _(op, /) -> frozenset:
+    return _collect_composite_dats(op.a) | _collect_composite_dats(op.b)
+
+
+@_collect_composite_dats.register(AxisVar)
+@_collect_composite_dats.register(LoopIndexVar)
+@_collect_composite_dats.register(numbers.Number)
+def _(op, /) -> frozenset:
+    return frozenset()
+
+
+@_collect_composite_dats.register(_ExpressionDat)
+def _(dat, /) -> frozenset:
+    return _collect_composite_dats(dat.layout)
+
+
+@_collect_composite_dats.register(_CompositeDat)
+def _(dat, /) -> frozenset:
+    return frozenset({dat})
+
+
+def _materialize_composite_dat(dat: _CompositeDat) -> _ExpressionDat:
+    axes = extract_axes(dat, dat.visited_axes, dat.loop_axes)
+
+    # FIXME: This is almost certainly wrong in general
+    result = Dat(axes, dtype=IntType)
+
+    # replace LoopIndexVars in the expression with AxisVars
+    loop_index_replace_map = {}
+    for loop_id, iterset in dat.loop_axes.items():
+        for axis in iterset.nodes:
+            loop_index_replace_map[(loop_id, axis.label)] = AxisVar(f"{axis.label}_{loop_id}")
+    expr = replace_terminals(dat.expr, loop_index_replace_map)
+
+    result.assign(expr, eager=True)
+
+    # now put the loop indices back
+    inv_map = {axis_var.axis_label: LoopIndexVar(loop_id, axis_label) for (loop_id, axis_label), axis_var in loop_index_replace_map.items()}
+    layout = just_one(result.axes.leaf_subst_layouts.values())
+    newlayout = replace_terminals(layout, inv_map)
+
+    return _ExpressionDat(result, newlayout)
+
+
+@functools.singledispatch
+def _replace_with_real_dats(obj, layouts) -> Instruction:
+    raise TypeError
+
+
+@_replace_with_real_dats.register(InstructionList)
+def _(insn_list: InstructionList, /, layouts) -> InstructionList:
+    return InstructionList([_replace_with_real_dats(insn, layouts) for insn in insn_list])
+
+
+@_replace_with_real_dats.register(Loop)
+def _(loop: Loop, /, layouts) -> Loop:
+    return loop.copy(statements=[_replace_with_real_dats(stmt, layouts) for stmt in loop.statements])
+
+
+@_replace_with_real_dats.register(Assignment)
+def _(assignment: Assignment, /, layouts) -> Assignment:
+    return Assignment(
+        _compress_array_indirection_maps(assignment.assignee, layouts, (assignment.id, 0)),
+        _compress_array_indirection_maps(assignment.expression, layouts, (assignment.id, 1)),
+        assignment.assignment_type,
+    )
+
+
+@_replace_with_real_dats.register(CalledFunction)
+def _(func: CalledFunction, /, layouts) -> CalledFunction:
+    return func.copy(arguments=[_compress_array_indirection_maps(arg, layouts, (func.id, i))
+                                for i, arg in enumerate(func.arguments)])
+
+
+def _compress_array_indirection_maps(dat, layouts, outer_key):
+    if not isinstance(dat, Array):
+        return dat
+
+    if not isinstance(dat, Dat):
+        raise NotImplementedError
+
+    newlayouts = {}
+    for leaf_path in dat.axes.leaf_paths:
+        try:
+            chosen_layout = layouts[outer_key + ((dat, leaf_path),)]
+        except KeyError:
+            chosen_layout = -1
+        newlayouts[leaf_path] = chosen_layout
+
+    return _ConcretizedDat(dat, newlayouts)
