@@ -570,9 +570,8 @@ class _ExpressionDat(_ConcretizedDat2):
     def __hash__(self) -> int:
         return hash((type(self), self.dat, self.layout))
 
-    @property
-    def axes(self):
-        return self.layout.axes  # will not work if layout is just an int
+    def __eq__(self, other) -> bool:
+        return type(other) is type(self) and other.dat == self.dat and other.layout == self.layout and other.name == self.name
 
     @property
     def _record_fields(self) -> frozenset:

@@ -443,9 +443,12 @@ def _(dat: _ExpressionDat, /, visited_axes, loop_axes) -> tuple:
     candidates = []
     for layout_expr, layout_cost in collect_candidate_indirections(dat.layout, visited_axes, loop_axes):
         candidate_expr = _ExpressionDat(dat.dat, layout_expr)
-        # FIXME: I am sure that this is wrong
-        # dat_cost = extract_axes(dat.layout, visited_axes, loop_axes).size
-        dat_cost = dat.dat.axes.size
+        # The cost of an expression dat (i.e. the memory volume) is given by...
+        # Remember that the axes here described the outer loops that exist and that
+        # index expressions that do not access data (e.g. 2i+j) have a cost of zero.
+        # dat[2i+j] would have a cost equal to ni*nj as those would be the outer loops
+        dat_cost = extract_axes(dat.layout, visited_axes, loop_axes, cache={}).size
+        # TODO: Only apply penalty for non-affine layouts
         candidate_cost = dat_cost + layout_cost * INDIRECTION_PENALTY_FACTOR
         candidates.append((candidate_expr, candidate_cost))
 
@@ -469,14 +472,14 @@ def _(var: Any, /, visited_axes, loop_axes, seen_exprs_mut, cache) -> int:
 
 @compute_indirection_cost.register(Operator)
 def _(op: Operator, /, visited_axes, loop_axes, seen_exprs_mut, cache) -> int:
-    cost = (
-        compute_indirection_cost(op.a, visited_axes, loop_axes, seen_exprs_mut, cache)
-        + compute_indirection_cost(op.b, visited_axes, loop_axes, seen_exprs_mut, cache)
-    )
     if seen_exprs_mut is not None:
         if op in seen_exprs_mut:
             return 0
         else:
+            cost = (
+                compute_indirection_cost(op.a, visited_axes, loop_axes, seen_exprs_mut, cache)
+                + compute_indirection_cost(op.b, visited_axes, loop_axes, seen_exprs_mut, cache)
+            )
             seen_exprs_mut.add(op)
             return cost
     else:
@@ -485,16 +488,19 @@ def _(op: Operator, /, visited_axes, loop_axes, seen_exprs_mut, cache) -> int:
 
 @compute_indirection_cost.register(_ExpressionDat)
 def _(dat: _ExpressionDat, /, visited_axes, loop_axes, seen_exprs_mut, cache) -> int:
-    # only apply penalty factor if non-affine access
-    # FIXME: I am sure that this is wrong
-    # dat_cost = extract_axes(dat.layout, visited_axes, loop_axes).size
-    dat_cost = dat.dat.axes.size
-    layout_cost = compute_indirection_cost(dat.layout, visited_axes, loop_axes, seen_exprs_mut, cache)
-    cost = dat_cost + layout_cost * INDIRECTION_PENALTY_FACTOR
     if seen_exprs_mut is not None:
         if dat in seen_exprs_mut:
             return 0
         else:
+            # The cost of an expression dat (i.e. the memory volume) is given by...
+            # Remember that the axes here described the outer loops that exist and that
+            # index expressions that do not access data (e.g. 2i+j) have a cost of zero.
+            # dat[2i+j] would have a cost equal to ni*nj as those would be the outer loops
+            # TODO: Add penalty for non-affine layouts
+            layout_cost = compute_indirection_cost(dat.layout, visited_axes, loop_axes, seen_exprs_mut, cache)
+            dat_cost = extract_axes(dat.layout, visited_axes, loop_axes, cache=cache).size
+            candidate_cost = dat_cost + layout_cost * INDIRECTION_PENALTY_FACTOR
+
             seen_exprs_mut.add(dat)
             return cost
     else:
@@ -503,11 +509,11 @@ def _(dat: _ExpressionDat, /, visited_axes, loop_axes, seen_exprs_mut, cache) ->
 
 @compute_indirection_cost.register(_CompositeDat)
 def _(dat: _CompositeDat, /, visited_axes, loop_axes, seen_exprs_mut, cache) -> int:
-    cost = extract_axes(dat.expr, visited_axes, loop_axes, cache).size
     if seen_exprs_mut is not None:
         if dat in seen_exprs_mut:
             return 0
         else:
+            cost = extract_axes(dat.expr, visited_axes, loop_axes, cache).size
             seen_exprs_mut.add(dat)
             return cost
     else:
