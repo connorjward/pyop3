@@ -213,7 +213,10 @@ class LoopyCodegenContext(CodegenContext):
             arg = lp.TemporaryVariable(
                 name, dtype=array.dtype, shape=shape, read_only=array.constant, address_space=lp.AddressSpace.LOCAL,
             )
-        elif array.constant and array.alloc_size < config["max_static_array_size"]:
+        # NOTE: It only makes sense to inject *buffers*, not, say, Dats
+        # except that isn't totally true. One could have dat[::2] as a constant and only
+        # want to inject the used entries
+        elif array.constant and array.buffer.shape[0] < config["max_static_array_size"]:
             name = self.unique_name("t")
             arg = lp.TemporaryVariable(
                 name,
