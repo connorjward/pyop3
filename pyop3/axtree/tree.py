@@ -27,6 +27,7 @@ from petsc4py import PETSc
 from pyrsistent import freeze, pmap, thaw, PMap
 
 from pyop3.axtree.parallel import partition_ghost_points
+from pyop3.cache import cached_on, CacheMixin
 from pyop3.exceptions import Pyop3Exception
 from pyop3.dtypes import IntType
 from pyop3.sf import StarForest, serial_forest
@@ -726,7 +727,11 @@ ExpressionT = Union[Expression, numbers.Number]
 
 
 # NOTE: More consistent to be AbstractAxisTree I think
-class BaseAxisTree(ContextFreeLoopIterable, LabelledTree):
+class BaseAxisTree(ContextFreeLoopIterable, LabelledTree, CacheMixin):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        CacheMixin.__init__(self)
+
     def __getitem__(self, indices):
         return self.getitem(indices, strict=False)
 
@@ -1772,7 +1777,15 @@ def _(arg: numbers.Integral) -> AxisComponent:
     return AxisComponent(arg)
 
 
+@cached_on(lambda trees: trees[0], key=lambda trees: trees[1:])
 def merge_axis_trees(axis_trees):
+    """
+
+    Notes
+    -----
+    The result of this function is cached on the first axis tree.
+
+    """
     nonempty_axis_trees = tuple(axis_tree for axis_tree in axis_trees if not axis_tree.is_empty)
     if nonempty_axis_trees:
         root, subnode_map = _merge_node_maps(nonempty_axis_trees)
@@ -1873,6 +1886,7 @@ def _merge_targets(axis_trees, targetss, *, axis_tree_index=0, axis=None, suffix
     return pmap(relabelled_targets)
 
 
+@cached_on(lambda t1, t2: t1, key=lambda t1, t2: t2)
 def merge_trees2(tree1: AxisTree, tree2: AxisTree) -> AxisTree:
     """Merge two axis trees together.
 

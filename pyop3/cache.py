@@ -5,7 +5,7 @@ from pathlib import Path
 
 import cachetools
 from pyop2.configuration import configuration
-from pyop2.mpi import hash_comm
+# from pyop2.mpi import hash_comm
 from pyop2.utils import cached_property
 
 
@@ -38,6 +38,35 @@ def report_cache(typ):
         else:
             name = k.__name__
         print("%s: %d" % (name, v))
+
+
+class CacheMixin:
+    """Mixin class for objects that may be treated as a cache."""
+    def __init__(self):
+        self._cache = {}
+
+    def cache_get(self, key):
+        return self._cache[key]
+
+    def cache_set(self, key, value):
+        self._cache[key] = value
+
+
+def cached_on(obj, key=cachetools.keys.hashkey):
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            cache = obj(*args, **kwargs)
+            assert isinstance(cache, CacheMixin)
+
+            k = key(*args, **kwargs)
+            try:
+                return cache.cache_get(k)
+            except KeyError:
+                value = func(*args, **kwargs)
+                cache.cache_set(k, value)
+                return value
+        return wrapper
+    return decorator
 
 
 class ObjectCached(object):

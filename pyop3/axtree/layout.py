@@ -11,6 +11,7 @@ from typing import Optional
 
 import numpy as np
 import pymbolic as pym
+from petsc4py import PETSc
 from pyrsistent import PMap, freeze, pmap
 
 from pyop3.array.harray import Dat
@@ -817,6 +818,7 @@ def _accumulate_axis_component_layouts(
     return freeze(layouts)
 
 
+@PETSc.Log.EventDecorator()
 def axis_tree_size(axes: AxisTree) -> int:
     """Return the size of an axis tree.
 

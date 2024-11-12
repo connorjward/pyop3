@@ -164,31 +164,41 @@ def _(array: Array, /, loop_context):
 
 # NOTE: visited_axes is more like visited_components! Only need axis labels and component information
 @functools.singledispatch
-def extract_axes(obj: Any, /, visited_axes, loop_axes) -> BaseAxisTree:
+def extract_axes(obj: Any, /, visited_axes, loop_axes, cache) -> BaseAxisTree:
     raise TypeError(f"No handler defined for {type(obj).__name__}")
 
 
 @extract_axes.register(numbers.Number)
-def _(var: Any, /, visited_axes, loop_axes) -> AxisTree:
-    return AxisTree()
+def _(var: Any, /, visited_axes, loop_axes, cache) -> AxisTree:
+    try:
+        return cache[var]
+    except KeyError:
+        return cache.setdefault(var, AxisTree())
 
 
 @extract_axes.register(LoopIndexVar)
-def _(loop_var: LoopIndexVar, /, visited_axes, loop_axes) -> AxisTree:
-    axis = just_one(axis for axis in loop_axes[loop_var.loop_id].nodes if axis.label == loop_var.axis_label)
-
-    return axis.copy(label=f"{axis.label}_{loop_var.loop_id}").as_tree()
+def _(loop_var: LoopIndexVar, /, visited_axes, loop_axes, cache) -> AxisTree:
+    try:
+        return cache[loop_var]
+    except KeyError:
+        axis = just_one(axis for axis in loop_axes[loop_var.loop_id].nodes if axis.label == loop_var.axis_label)
+        axis = axis.copy(label=f"{axis.label}_{loop_var.loop_id}").as_tree()
+        return cache.setdefault(loop_var, axis)
 
 
 @extract_axes.register(AxisVar)
-def _(var: AxisVar, /, visited_axes, loop_axes) -> AxisTree:
-    axis, component = just_one((a, c) for a, c in visited_axes.items() if a.label == var.axis_label)
-    return AxisTree(Axis(component, label=axis.label))
+def _(var: AxisVar, /, visited_axes, loop_axes, cache) -> AxisTree:
+    try:
+        return cache[var]
+    except KeyError:
+        axis, component = just_one((a, c) for a, c in visited_axes.items() if a.label == var.axis_label)
+        tree = AxisTree(Axis(component, label=axis.label))
+        return cache.setdefault(var, tree)
 
 
 @extract_axes.register(Operator)
-def _(op: Operator, /, visited_axes, loop_axes):
-    return merge_trees2(extract_axes(op.a, visited_axes, loop_axes), extract_axes(op.b, visited_axes, loop_axes))
+def _(op: Operator, /, visited_axes, loop_axes, cache):
+    return merge_trees2(extract_axes(op.a, visited_axes, loop_axes, cache), extract_axes(op.b, visited_axes, loop_axes, cache))
 
 
 # is this needed?
@@ -198,15 +208,15 @@ def _(op: Operator, /, visited_axes, loop_axes):
 
 
 @extract_axes.register(_ExpressionDat)
-def _(dat, /, visited_axes, loop_axes):
-    return extract_axes(dat.layout, visited_axes, loop_axes)
+def _(dat, /, visited_axes, loop_axes, cache):
+    return extract_axes(dat.layout, visited_axes, loop_axes, cache)
 
 
 @extract_axes.register(_CompositeDat)
-def _(dat, /, visited_axes, loop_axes):
+def _(dat, /, visited_axes, loop_axes, cache):
     assert visited_axes == dat.visited_axes
     assert loop_axes == dat.loop_axes
-    return extract_axes(dat.expr, visited_axes, loop_axes)
+    return extract_axes(dat.expr, visited_axes, loop_axes, cache)
 
 
 @functools.singledispatch
@@ -422,7 +432,7 @@ def _(op: Operator, /, visited_axes, loop_axes) -> tuple:
     # and not benefit from the optimisation.
     if any(cost > MINIMUM_COST_TABULATION_THRESHOLD for _, cost in candidates):
         compressed_expr = _CompositeDat(op, visited_axes, loop_axes)
-        compressed_cost = extract_axes(op, visited_axes, loop_axes).size
+        compressed_cost = extract_axes(op, visited_axes, loop_axes, {}).size
         candidates.append((compressed_expr, compressed_cost))
 
     return tuple(candidates)
@@ -440,28 +450,28 @@ def _(dat: _ExpressionDat, /, visited_axes, loop_axes) -> tuple:
         candidates.append((candidate_expr, candidate_cost))
 
     if any(cost > MINIMUM_COST_TABULATION_THRESHOLD for _, cost in candidates):
-        compressed_cost = extract_axes(dat, visited_axes, loop_axes).size
+        compressed_cost = extract_axes(dat, visited_axes, loop_axes, {}).size
         candidates.append((_CompositeDat(dat, visited_axes, loop_axes), compressed_cost))
     return tuple(candidates)
 
 
 @functools.singledispatch
-def compute_indirection_cost(obj: Any, /, visited_axes, loop_axes, seen_exprs_mut) -> int:
+def compute_indirection_cost(obj: Any, /, visited_axes, loop_axes, seen_exprs_mut, cache) -> int:
     raise TypeError(f"No handler defined for {type(obj).__name__}")
 
 
 @compute_indirection_cost.register(AxisVar)
 @compute_indirection_cost.register(LoopIndexVar)
 @compute_indirection_cost.register(numbers.Number)
-def _(var: Any, /, visited_axes, loop_axes, seen_exprs_mut) -> int:
+def _(var: Any, /, visited_axes, loop_axes, seen_exprs_mut, cache) -> int:
     return 0
 
 
 @compute_indirection_cost.register(Operator)
-def _(op: Operator, /, visited_axes, loop_axes, seen_exprs_mut) -> int:
+def _(op: Operator, /, visited_axes, loop_axes, seen_exprs_mut, cache) -> int:
     cost = (
-        compute_indirection_cost(op.a, visited_axes, loop_axes, seen_exprs_mut)
-        + compute_indirection_cost(op.b, visited_axes, loop_axes, seen_exprs_mut)
+        compute_indirection_cost(op.a, visited_axes, loop_axes, seen_exprs_mut, cache)
+        + compute_indirection_cost(op.b, visited_axes, loop_axes, seen_exprs_mut, cache)
     )
     if seen_exprs_mut is not None:
         if op in seen_exprs_mut:
@@ -474,12 +484,12 @@ def _(op: Operator, /, visited_axes, loop_axes, seen_exprs_mut) -> int:
 
 
 @compute_indirection_cost.register(_ExpressionDat)
-def _(dat: _ExpressionDat, /, visited_axes, loop_axes, seen_exprs_mut) -> int:
+def _(dat: _ExpressionDat, /, visited_axes, loop_axes, seen_exprs_mut, cache) -> int:
     # only apply penalty factor if non-affine access
     # FIXME: I am sure that this is wrong
     # dat_cost = extract_axes(dat.layout, visited_axes, loop_axes).size
     dat_cost = dat.dat.axes.size
-    layout_cost = compute_indirection_cost(dat.layout, visited_axes, loop_axes, seen_exprs_mut)
+    layout_cost = compute_indirection_cost(dat.layout, visited_axes, loop_axes, seen_exprs_mut, cache)
     cost = dat_cost + layout_cost * INDIRECTION_PENALTY_FACTOR
     if seen_exprs_mut is not None:
         if dat in seen_exprs_mut:
@@ -492,8 +502,8 @@ def _(dat: _ExpressionDat, /, visited_axes, loop_axes, seen_exprs_mut) -> int:
 
 
 @compute_indirection_cost.register(_CompositeDat)
-def _(dat: _CompositeDat, /, visited_axes, loop_axes, seen_exprs_mut) -> int:
-    cost = extract_axes(dat.expr, visited_axes, loop_axes).size
+def _(dat: _CompositeDat, /, visited_axes, loop_axes, seen_exprs_mut, cache) -> int:
+    cost = extract_axes(dat.expr, visited_axes, loop_axes, cache).size
     if seen_exprs_mut is not None:
         if dat in seen_exprs_mut:
             return 0

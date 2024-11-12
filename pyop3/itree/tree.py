@@ -618,6 +618,8 @@ class UnspecialisedCalledMapException(Pyop3Exception):
 
 
 class CalledMap(AxisIndependentIndex, Identified, Labelled, LoopIterable):
+    fields = {"map", "from_index", "id", "label"}
+
     def __init__(self, map, from_index, *, id=None, label=None):
         Identified.__init__(self, id=id)
         Labelled.__init__(self, label=label)

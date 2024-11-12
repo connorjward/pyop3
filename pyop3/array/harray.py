@@ -9,6 +9,7 @@ from typing import Any, Sequence
 
 import numpy as np
 import pymbolic as pym
+from cachetools import cachedmethod
 from petsc4py import PETSc
 from pyrsistent import freeze, pmap
 
@@ -170,6 +171,7 @@ class _Dat(Array, KernelArgument, Record, abc.ABC):
         else:
             self[subset].assign(other[subset])
 
+    @PETSc.Log.EventDecorator()
     def zero(self, *, subset=Ellipsis, eager=False):
         # old Firedrake code may hit this, should probably raise a warning
         if subset is None:
@@ -222,6 +224,7 @@ class Dat(_Dat):
             for leaf in self.axes.leaves
         )
 
+    @PETSc.Log.EventDecorator()
     def __getitem__(self, indices):
         return self.getitem(indices, strict=False)
 
@@ -232,6 +235,7 @@ class Dat(_Dat):
                 type(self), self.axes, self.dtype, self.buffer, self.max_value, self.name, self.constant)
         )
 
+    @cachedmethod(lambda self: self.axes._cache)
     def getitem(self, indices, *, strict=False):
         from pyop3.itree import as_index_forest, index_axes
 
@@ -427,6 +431,7 @@ class Dat(_Dat):
 
     # TODO update docstring
     # TODO is this a property of the buffer?
+    @PETSc.Log.EventDecorator()
     def assemble(self, update_leaves=False):
         """Ensure that stored values are up-to-date.
 

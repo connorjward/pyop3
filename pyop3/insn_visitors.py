@@ -547,7 +547,13 @@ def _(func: CalledFunction, /):
 
 # NOTE: Should perhaps take a different input type to ensure that always called at root?
 # E.g. PreprocessedInstruction?
+@PETSc.Log.EventDecorator()
 def compress_indirection_maps(insn: Instruction) -> Instruction:
+
+    # try setting a 'global' cache here
+    mycache = {}
+
+    # cache this?
     arg_candidatess = _collect_candidate_indirections(insn, loop_axes_acc=pmap())
 
     # Start by combining the best per-arg candidates into the initial overall best candidate
@@ -585,7 +591,7 @@ def compress_indirection_maps(insn: Instruction) -> Instruction:
     #     dat2[mapBC[i]]
     min_cost = max_cost
     for shared_candidate in expand_collection_of_iterables(arg_candidatess):
-        cost = _compute_indirection_cost(insn, shared_candidate)
+        cost = _compute_indirection_cost(insn, shared_candidate, cache=mycache)
         if cost < min_cost:
             best_candidate = shared_candidate
             min_cost = cost
@@ -655,13 +661,14 @@ def _(func: CalledFunction, /, *, loop_axes_acc) -> ImmutableOrderedDict:
     return ImmutableOrderedDict(candidates)
 
 
-def _compute_indirection_cost(insn: Instruction, arg_layouts) -> int:
+@PETSc.Log.EventDecorator()
+def _compute_indirection_cost(insn: Instruction, arg_layouts, *, cache) -> int:
     seen_exprs_mut = set()
-    return _compute_indirection_cost_rec(insn, arg_layouts, seen_exprs_mut, loop_axes_acc=pmap())
+    return _compute_indirection_cost_rec(insn, arg_layouts, seen_exprs_mut, loop_axes_acc=pmap(), cache=cache)
 
 
 @functools.singledispatch
-def _compute_indirection_cost_rec(obj: Any, /, arg_layouts, seen_exprs_mut, *, loop_axes_acc) -> int:
+def _compute_indirection_cost_rec(obj: Any, /, arg_layouts, seen_exprs_mut, *, loop_axes_acc, cache) -> int:
     raise TypeError(f"No handler provided for {type(obj).__name__}")
 
 
@@ -671,26 +678,26 @@ def _(insn_list: InstructionList, /, *args, **kwargs) -> int:
 
 
 @_compute_indirection_cost_rec.register(Loop)
-def _(loop: Loop, /, arg_layouts, seen_exprs_mut, *, loop_axes_acc) -> int:
+def _(loop: Loop, /, arg_layouts, seen_exprs_mut, *, loop_axes_acc, **kwargs) -> int:
     loop_axes_acc_ = loop_axes_acc | {loop.index.id: loop.index.iterset}
     return sum(
-        _compute_indirection_cost_rec(stmt, arg_layouts, seen_exprs_mut, loop_axes_acc=loop_axes_acc_)
+        _compute_indirection_cost_rec(stmt, arg_layouts, seen_exprs_mut, loop_axes_acc=loop_axes_acc_, **kwargs)
         for stmt in loop.statements
     )
 
 
 @_compute_indirection_cost_rec.register(Assignment)
-def _(assignment: Assignment, /, arg_layouts, seen_exprs_mut, *, loop_axes_acc) -> int:
+def _(assignment: Assignment, /, arg_layouts, seen_exprs_mut, *, loop_axes_acc, cache) -> int:
     return sum(
-        _compute_array_indirection_cost(arg, arg_layouts, seen_exprs_mut, loop_axes_acc, (assignment.id, i))
+        _compute_array_indirection_cost(arg, arg_layouts, seen_exprs_mut, loop_axes_acc, (assignment.id, i), cache)
         for i, arg in enumerate([assignment.assignee, assignment.expression])
     )
 
 
 @_compute_indirection_cost_rec.register(CalledFunction)
-def _(func: CalledFunction, /, arg_layouts, seen_exprs_mut, *, loop_axes_acc) -> int:
+def _(func: CalledFunction, /, arg_layouts, seen_exprs_mut, *, loop_axes_acc, cache) -> int:
     return sum(
-        _compute_array_indirection_cost(arg, arg_layouts, seen_exprs_mut, loop_axes_acc, (func.id, i))
+        _compute_array_indirection_cost(arg, arg_layouts, seen_exprs_mut, loop_axes_acc, (func.id, i), cache)
         for i, arg in enumerate(func.arguments)
     )
 
@@ -706,7 +713,7 @@ def _collect_array_candidate_indirections(dat, loop_axes) -> ImmutableOrderedDic
     for leaf_path, orig_layout in dat.axes.leaf_subst_layouts.items():
         visited_axes = dat.axes.path_with_nodes(dat.axes._node_from_path(leaf_path), and_components=True)
 
-        if extract_axes(orig_layout, visited_axes, loop_axes).size == 0:
+        if extract_axes(orig_layout, visited_axes, loop_axes, {}).size == 0:
             continue
 
         candidatess[(dat, leaf_path)] = collect_expression_candidate_indirections(
@@ -716,7 +723,7 @@ def _collect_array_candidate_indirections(dat, loop_axes) -> ImmutableOrderedDic
     return ImmutableOrderedDict(candidatess)
 
 
-def _compute_array_indirection_cost(dat, arg_layouts, seen_exprs_mut, loop_axes, outer_key) -> int:
+def _compute_array_indirection_cost(dat, arg_layouts, seen_exprs_mut, loop_axes, outer_key, cache) -> int:
     if not isinstance(dat, Array):
         return 0
 
@@ -732,10 +739,10 @@ def _compute_array_indirection_cost(dat, arg_layouts, seen_exprs_mut, loop_axes,
         except KeyError:
             continue
 
-        if extract_axes(layout, visited_axes, loop_axes).size == 0:
+        if extract_axes(layout, visited_axes, loop_axes, cache).size == 0:
             continue
 
-        cost += compute_expression_indirection_cost(layout, visited_axes, loop_axes, seen_exprs_mut)
+        cost += compute_expression_indirection_cost(layout, visited_axes, loop_axes, seen_exprs_mut, cache)
 
     return cost
 
@@ -768,7 +775,7 @@ def _(dat, /) -> frozenset:
 
 
 def _materialize_composite_dat(dat: _CompositeDat) -> _ExpressionDat:
-    axes = extract_axes(dat, dat.visited_axes, dat.loop_axes)
+    axes = extract_axes(dat, dat.visited_axes, dat.loop_axes, {})
 
     # FIXME: This is almost certainly wrong in general
     result = Dat(axes, dtype=IntType)
