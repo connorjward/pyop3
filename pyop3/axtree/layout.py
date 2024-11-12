@@ -108,6 +108,8 @@ def _tabulate_offsets(axes, axis, component):
     offset_axes = AxisTree.from_iterable(axes_iter)
     offsets = Dat(offset_axes, data=np.full(offset_axes.size, -1, dtype=IntType))
 
+    trimmed_axes, extra_step = ???
+
     # this is really bloody close - just need the Python iteration to be less rubbish
     # TODO: handle iteration over empty trees
     if partial_axes.is_empty:
@@ -116,7 +118,7 @@ def _tabulate_offsets(axes, axis, component):
         for axindex in axis.iter(no_index=True):  # FIXME: Should make this single component only
             offsets.set_value(axindex.source_exprs, offset)
             offset += step_size(
-                axes,
+                trimmed_axes,
                 axis,
                 component,
                 indices=axindex.source_exprs,

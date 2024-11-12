@@ -288,7 +288,7 @@ class AxisComponent(LabelledNodeComponent):
             return pmap()
 
 
-class Axis(LoopIterable, MultiComponentLabelledNode):
+class Axis(LoopIterable, MultiComponentLabelledNode, CacheMixin):
     fields = MultiComponentLabelledNode.fields | {"components"}
 
     def __init__(
@@ -301,6 +301,8 @@ class Axis(LoopIterable, MultiComponentLabelledNode):
         components = self._parse_components(components)
 
         super().__init__(label=label, id=id)
+        CacheMixin.__init__(self)
+
         self.components = components
 
     def __eq__(self, other):
