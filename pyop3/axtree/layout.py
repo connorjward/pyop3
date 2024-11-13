@@ -27,6 +27,7 @@ from pyop3.dtypes import IntType
 from pyop3.utils import (
     StrictlyUniqueDict,
     as_tuple,
+    single_valued,
     strict_zip,
     just_one,
     OrderedSet,
@@ -55,9 +56,10 @@ def make_layouts(axes: AxisTree, loop_vars) -> PMap:
     return _accumulate_axis_component_layouts(axes, component_layouts)
 
 
-def tabulate_again(axes, *, axis=None):
+def tabulate_again(axes, *, axis=None, parent_axes_acc=None):
     if axis is None:
         axis = axes.root
+        parent_axes_acc = ()
 
     ragged = any(requires_external_index(axes, axis, c) for c in axis.components)
 
@@ -71,6 +73,7 @@ def tabulate_again(axes, *, axis=None):
     layouts = {}
     start = 0
     for component in axis.components:
+        parent_axes_acc_ = parent_axes_acc + (axis.copy(components=[component]),)
 
         # 1. Constant stride
         if has_constant_step(axes, axis, component, "old"):
@@ -80,7 +83,7 @@ def tabulate_again(axes, *, axis=None):
 
         # 2. Ragged inside - must tabulate
         else:
-            array_var = _tabulate_offsets(axes, axis, component)
+            array_var = _tabulate_offsets(axes, axis, component, parent_axes_acc_)
             layouts[(axis, component)] = array_var + start
 
         # TODO: should also do this for ragged but this breaks things currently
@@ -89,12 +92,12 @@ def tabulate_again(axes, *, axis=None):
 
         # Now traverse subaxes
         if subaxis := axes.child(axis, component):
-            layouts |= tabulate_again(axes, axis=subaxis)
+            layouts |= tabulate_again(axes, axis=subaxis, parent_axes_acc=parent_axes_acc_)
 
     return pmap(layouts)
 
 
-def _tabulate_offsets(axes, axis, component):
+def _tabulate_offsets(axes, axis, component, parent_axes):
     # First we build the right data structure to store the offsets. We can find the
     # axes that we need by combining the current axis with those needed by subaxes
     # along with the count of the current component (if ragged).
@@ -108,7 +111,10 @@ def _tabulate_offsets(axes, axis, component):
     offset_axes = AxisTree.from_iterable(axes_iter)
     offsets = Dat(offset_axes, data=np.full(offset_axes.size, -1, dtype=IntType))
 
-    trimmed_axes, extra_step = ???
+    trimmed_axes, extra_step = _truncate_axis_tree(axes, axis, component)
+
+    # think about parent_axes!
+    raise NotImplementedError
 
     # this is really bloody close - just need the Python iteration to be less rubbish
     # TODO: handle iteration over empty trees
@@ -130,13 +136,68 @@ def _tabulate_offsets(axes, axis, component):
             for axindex in axis.iter({multiindex}, no_index=True):  # FIXME: Should make this single component only
                 offsets.set_value(multiindex.source_exprs | axindex.source_exprs, offset)
                 offset += step_size(
-                    axes,
+                    trimmed_axes,
                     axis,
                     component,
                     indices=multiindex.source_exprs|axindex.source_exprs,
                 )
 
+    if extra_step != 1:
+        offsets *= extra_step
+
     return offsets
+
+
+def _truncate_axis_tree(axis_tree, axis, component) -> tuple[AxisTree, int]:
+    """Return an axis tree consisting of non-constant bits below ``axis``."""
+    if subaxis := axis_tree.child(axis, component):
+        subtree = axis_tree.subtree(subaxis)
+
+        key = ("_truncate_axis_tree", subtree)
+        try:
+            return axis.cache_get(key)
+        except KeyError:
+            pass
+
+        result = _truncate_axis_tree_rec(subtree, subaxis)
+
+        # setdefault?
+        axis.cache_set(key, result)
+        return result
+    else:
+        raise AssertionError("this path should never be touched - only for ragged things")
+
+def _truncate_axis_tree_rec(axis_tree, axis) -> tuple[AxisTree, int]:
+    # NOTE: Do a post-order traversal. Need to look at the subaxes before looking
+    # at this one.
+
+    # if len(axis.components) > 1:
+    #     raise NotImplementedError
+
+    # move this bit down below
+    # If the current axis has a variable size then all we can do is pass things on up.
+    # if any(not has_fixed_size(axis, c) for c in axis.components):
+    #     ...
+    # else:
+    candidates_per_component = []
+    for component in axis.components:
+        if subaxis := axis_tree.child(axis, component):
+            breakpoint()
+        else:
+            # there is nothing below here, cannot truncate anything
+            candidates = ((AxisTree(), 1),)
+            candidates_per_component.append(candidates)
+
+    breakpoint()
+    axis_candidates = []
+    for component_candidates in itertools.product(candidates_per_component):
+        breakpoint()
+        # We can only consider cases where all candidates have the same step.
+        try:
+            step = single_valued(step for (_, step) in component_candidates)
+        except NotImplementedError:  # TODO: correct exception!!
+            continue
+
 
 
 

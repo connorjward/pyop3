@@ -749,6 +749,20 @@ class MutableLabelledTreeMixin:
 
         return type(self)(parent_to_children)
 
+    def subtree(self, axis):
+        """Return the subtree with ``axis`` as the root."""
+        node_map = {None: (axis,)}
+        node_map.update(self._collect_tree(axis))
+        return type(self)(node_map)
+
+    def _collect_tree(self, axis) -> dict:
+        node_map = {axis.id: self.parent_to_children[axis.id]}
+        for component in axis.components:
+            if subaxis := self.child(axis, component)
+                subnode_map = self._collect_tree(subaxis)
+                node_map.update(subnode_map)
+        return node_map
+
     def relabel(self, labels: Mapping):
         node_map = self._relabel_node_map(labels)
         return type(self)(node_map)
