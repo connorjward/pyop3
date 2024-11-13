@@ -159,15 +159,19 @@ def _truncate_axis_tree(axis_tree, axis, component) -> tuple[AxisTree, int]:
         except KeyError:
             pass
 
-        result = _truncate_axis_tree_rec(subtree, subaxis)
+        results = _truncate_axis_tree_rec(subtree, subaxis)
+
+        # The best result has the largest step size (as the resulting tree is
+        # smaller and therefore more generic).
+        best_result = max(results, key=lambda result: result[1])
 
         # setdefault?
-        axis.cache_set(key, result)
-        return result
+        axis.cache_set(key, best_result)
+        return best_result
     else:
         raise AssertionError("this path should never be touched - only for ragged things")
 
-def _truncate_axis_tree_rec(axis_tree, axis) -> tuple[AxisTree, int]:
+def _truncate_axis_tree_rec(axis_tree, axis) -> tuple[tuple[AxisTree, int]]:
     # NOTE: Do a post-order traversal. Need to look at the subaxes before looking
     # at this one.
 
@@ -182,23 +186,38 @@ def _truncate_axis_tree_rec(axis_tree, axis) -> tuple[AxisTree, int]:
     candidates_per_component = []
     for component in axis.components:
         if subaxis := axis_tree.child(axis, component):
-            breakpoint()
+            candidates = _truncate_axis_tree_rec(axis_tree, subaxis)
         else:
             # there is nothing below here, cannot truncate anything
             candidates = ((AxisTree(), 1),)
-            candidates_per_component.append(candidates)
+        candidates_per_component.append(candidates)
 
-    breakpoint()
     axis_candidates = []
-    for component_candidates in itertools.product(candidates_per_component):
-        breakpoint()
+    for component_candidates in itertools.product(*candidates_per_component):
+        subaxis_trees, substeps = map(tuple, zip(*component_candidates))
+
         # We can only consider cases where all candidates have the same step.
         try:
-            step = single_valued(step for (_, step) in component_candidates)
-        except NotImplementedError:  # TODO: correct exception!!
+            substep = single_valued(substeps)
+        except ValueError:
             continue
 
+        # The new candidate consists of the per-component subtrees stuck on to the
+        # current axis.
+        candidate_axis_tree = AxisTree(axis)
+        for component, subtree in strict_zip(axis.components, subaxis_trees):
+            candidate_axis_tree = candidate_axis_tree.add_subtree(subtree, axis, component)
+        axis_candidate = (candidate_axis_tree, substep)
+        axis_candidates.append(axis_candidate)
 
+    # Lastly, we can also consider the case where the entire subtree (at this
+    # point) is dropped. This is only valid for constant-sized axes.
+    if all(has_fixed_size(axis_tree, axis, c, "any") for c in axis.components):
+        step = _axis_size(axis_tree, axis)
+        axis_candidate = (AxisTree(), step)
+        axis_candidates.append(axis_candidate)
+
+    return tuple(axis_candidates)
 
 
 def _collect_offset_subaxes(axes, axis, component, *, visited):

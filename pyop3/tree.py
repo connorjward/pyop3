@@ -756,9 +756,9 @@ class MutableLabelledTreeMixin:
         return type(self)(node_map)
 
     def _collect_tree(self, axis) -> dict:
-        node_map = {axis.id: self.parent_to_children[axis.id]}
+        node_map = {axis.id: self.node_map[axis.id]}
         for component in axis.components:
-            if subaxis := self.child(axis, component)
+            if subaxis := self.child(axis, component):
                 subnode_map = self._collect_tree(subaxis)
                 node_map.update(subnode_map)
         return node_map
