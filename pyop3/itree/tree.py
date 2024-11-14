@@ -391,6 +391,10 @@ class ScalarIndex(Index):
     def leaf_target_paths(self):
         return ((freeze({self.axis: self.component}),),)
 
+    @property
+    def component_labels(self) -> tuple:
+        return (0,)
+
 
 # TODO I want a Slice to have "bits" like a Map/CalledMap does
 class Slice(Index):
