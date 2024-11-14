@@ -82,25 +82,31 @@ def tabulate_again(axes, *, axis=None, parent_axes_acc=None):
 
         try:
             raise KeyError
-            component_layout = mystep * axis.cache_get(cache_key)
+            component_layout = axis.cache_get(cache_key)
             # breakpoint()
         except KeyError:
             # 1. Constant stride
             if has_constant_step(axes, axis, component, "old"):
                 step = step_size(axes, axis, component)
-                # assert step == mystep
-                component_layout = AxisVar(axis.label) * step + start
+
+                # the subtree bits don't exactly align with what step_size gives us
+                if step > 0:
+                    assert step == mystep
+                else:
+                    mystep = step
+                # component_layout = AxisVar(axis.label) * step + start
+                component_layout = AxisVar(axis.label)
 
 
             # 2. Ragged inside - must tabulate
             else:
                 array_var, step = _tabulate_offsets(axes, axis, component, parent_axes_acc_)
                 assert step == mystep
-                component_layout = mystep * array_var + start
+                component_layout = array_var
 
             axis.cache_set(cache_key, component_layout)
 
-        layouts[(axis, component)] = component_layout
+        layouts[(axis, component)] = mystep * component_layout + start
 
         # TODO: should also do this for ragged but this breaks things currently
         if not ragged:
