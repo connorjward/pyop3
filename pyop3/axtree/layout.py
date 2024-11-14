@@ -78,12 +78,8 @@ def tabulate_again(axes, *, axis=None, parent_axes_acc=None):
         mysubtree, mystep = _truncate_axis_tree(axes, axis, component)
         cache_key = ("tabulate_again", mysubtree)
 
-        # breakpoint()
-
         try:
-            raise KeyError
             component_layout = axis.cache_get(cache_key)
-            # breakpoint()
         except KeyError:
             # 1. Constant stride
             if has_constant_step(axes, axis, component, "old"):
