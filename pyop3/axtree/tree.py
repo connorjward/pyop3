@@ -1611,10 +1611,10 @@ class IndexedAxisTree(BaseAxisTree):
         # TODO: Handle any outer loops.
         # TODO: Generate code for this.
         for i, p in enumerate(self.iter()):
-            # indices[i] = evaluate(self.offset(p.source_exprs, p.source_path)
             layout_expr = self.subst_layouts()[p.source_path]
             indices[i] = evaluate(layout_expr, p.source_exprs)
         debug_assert(lambda: (indices >= 0).all())
+        debug_assert(lambda: max(indices) < size)
 
         # The packed indices are collected component-by-component so, for
         # numbered multi-component axes, they are not in ascending order.
