@@ -476,14 +476,12 @@ def _(op: Operator, /, visited_axes, loop_axes, seen_exprs_mut, cache) -> int:
         if op in seen_exprs_mut:
             return 0
         else:
-            cost = (
-                compute_indirection_cost(op.a, visited_axes, loop_axes, seen_exprs_mut, cache)
-                + compute_indirection_cost(op.b, visited_axes, loop_axes, seen_exprs_mut, cache)
-            )
             seen_exprs_mut.add(op)
-            return cost
-    else:
-        return cost
+
+    return (
+        compute_indirection_cost(op.a, visited_axes, loop_axes, seen_exprs_mut, cache)
+        + compute_indirection_cost(op.b, visited_axes, loop_axes, seen_exprs_mut, cache)
+    )
 
 
 @compute_indirection_cost.register(_ExpressionDat)
@@ -492,19 +490,16 @@ def _(dat: _ExpressionDat, /, visited_axes, loop_axes, seen_exprs_mut, cache) ->
         if dat in seen_exprs_mut:
             return 0
         else:
-            # The cost of an expression dat (i.e. the memory volume) is given by...
-            # Remember that the axes here described the outer loops that exist and that
-            # index expressions that do not access data (e.g. 2i+j) have a cost of zero.
-            # dat[2i+j] would have a cost equal to ni*nj as those would be the outer loops
-            # TODO: Add penalty for non-affine layouts
-            layout_cost = compute_indirection_cost(dat.layout, visited_axes, loop_axes, seen_exprs_mut, cache)
-            dat_cost = extract_axes(dat.layout, visited_axes, loop_axes, cache=cache).size
-            candidate_cost = dat_cost + layout_cost * INDIRECTION_PENALTY_FACTOR
-
             seen_exprs_mut.add(dat)
-            return cost
-    else:
-        return cost
+
+    # The cost of an expression dat (i.e. the memory volume) is given by...
+    # Remember that the axes here described the outer loops that exist and that
+    # index expressions that do not access data (e.g. 2i+j) have a cost of zero.
+    # dat[2i+j] would have a cost equal to ni*nj as those would be the outer loops
+    # TODO: Add penalty for non-affine layouts
+    layout_cost = compute_indirection_cost(dat.layout, visited_axes, loop_axes, seen_exprs_mut, cache)
+    dat_cost = extract_axes(dat.layout, visited_axes, loop_axes, cache=cache).size
+    return dat_cost + layout_cost * INDIRECTION_PENALTY_FACTOR
 
 
 @compute_indirection_cost.register(_CompositeDat)
@@ -513,11 +508,9 @@ def _(dat: _CompositeDat, /, visited_axes, loop_axes, seen_exprs_mut, cache) -> 
         if dat in seen_exprs_mut:
             return 0
         else:
-            cost = extract_axes(dat.expr, visited_axes, loop_axes, cache).size
             seen_exprs_mut.add(dat)
-            return cost
-    else:
-        return cost
+
+    return extract_axes(dat.expr, visited_axes, loop_axes, cache).size
 
 
 @functools.singledispatch
