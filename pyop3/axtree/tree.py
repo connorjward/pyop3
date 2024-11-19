@@ -12,6 +12,7 @@ import numbers
 import operator
 import sys
 import threading
+from collections.abc import Iterable
 from functools import cached_property
 from itertools import chain
 from typing import Any, FrozenSet, Hashable, Mapping, Optional, Sequence, Tuple, Union
@@ -180,53 +181,75 @@ class UnrecognisedAxisException(ValueError):
     pass
 
 
+@dataclasses.dataclass(frozen=True)
+class AxisComponentRegion:
+    label: str
+    size: Any
+
+
+@functools.singledispatch
+def _parse_regions(obj: Any) -> tuple[AxisComponentRegion]:
+    raise TypeError(f"No handler provided for {type(obj).__name__}")
+
+
+@_parse_regions.register(Iterable)
+def _(iterable: Iterable) -> tuple[AxisComponentRegion]:
+    return iterable
+
+
+@_parse_regions.register(numbers.Integral)
+@_parse_regions.register(StarForest)
+def _(val: numbers.Integral | StarForest) -> tuple[AxisComponentRegion]:
+    return (AxisComponentRegion("default", val),)
+
+
+def _expand_regions(regions: Iterable[AxisComponentRegion]) -> tuple[AxisComponentRegion]:
+    expanded_regions = []
+    for region in regions:
+        if isinstance(region.size, StarForest):
+            breakpoint()
+            owned_region = AxisComponentRegion("owned", num_owned)
+            ghost_region = AxisComponentRegion("ghost", num_ghost)
+            expanded_regions.extend([owned_region, ghost_region])
+        else:
+            expanded_regions.append(region)
+    return tuple(expanded_regions)
+
+
 class AxisComponent(LabelledNodeComponent):
-    # NOTE: rank_equal is implied by the presence of an SF
-    # fields = LabelledNodeComponent.fields | {"size", "unit", "sf", "rank_equal"}
-    fields = LabelledNodeComponent.fields | {"size", "unit", "sf"}
+    fields = LabelledNodeComponent.fields | {"regions", "unit", "rank_equal"}
 
     def __init__(
         self,
-        size,
+        regions,
         label=None,
         *,
         sf=None,
         unit=False,
     ):
-        from pyop3.array import Dat
+        regions = self._parse_regions(regions)
 
-        # if isinstance(size, collections.abc.Iterable):
-        #     assert not rank_equal  # nasty
-        #     owned_count, count = map(int, size)
-        #     distributed = True
-        #     assert isinstance(owned_count, numbers.Integral) and isinstance(count, numbers.Integral)
-        #     assert owned_count <= count
-        # else:
-        #     # numpy dtypes break things in bizarre ways
-        #     if isinstance(size, numbers.Integral):
-        #         size = int(size)
-        #
-        #     owned_count = count = size
-        #     distributed = False
+        if unit:
+            raise NotImplementedError
 
-        # if not isinstance(count, (numbers.Integral, Dat)):
-        #     raise TypeError("Invalid count type")
         # if unit and count != 1:
         #     raise ValueError(
         #         "Components may only be marked as 'unit' if they have length 1"
         #     )
 
         super().__init__(label=label)
-        self.count = size
-        # self.owned_count = owned_count
-        self.size = size
+        self.regions = regions
         self.unit = unit
-        # self.distributed = distributed
 
-        self.sf = sf
+    @cached_property
+    def _all_regions(self) -> tuple[AxisComponentRegion]:
+        """Return axis component regions having expanded star forests into owned and ghost."""
+        return _expand_regions(self.regions)
 
-        # cleanup
-        # self.rank_equal = rank_equal
+    @property
+    def rank_equal(self) -> bool:
+        """Return whether or not this axis component has constant size between ranks."""
+        raise NotImplementedError
 
     # redone because otherwise getting a bizarre error (numpy types have confusing behaviour!)
     # def __eq__(self, other):
@@ -247,6 +270,7 @@ class AxisComponent(LabelledNodeComponent):
     # def _key(self):
     #     return (self.size, self.label, self.unit)
 
+    # TODO: Should be a Global
     @cached_property
     def _collective_count(self):
         """Return the size of the axis component in a format consistent over ranks."""
@@ -279,13 +303,6 @@ class AxisComponent(LabelledNodeComponent):
         # TODO: May be excessive
         # Cast to an int as numpy integers cause loopy to break
         return strict_int(size)
-
-    @cached_property
-    def datamap(self):
-        if not isinstance(self._collective_count, numbers.Integral):
-            return self._collective_count.datamap
-        else:
-            return pmap()
 
 
 class Axis(LoopIterable, MultiComponentLabelledNode, CacheMixin):
