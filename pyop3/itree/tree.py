@@ -1056,7 +1056,6 @@ def _(slice_: Slice, *, prev_axes, **_):
     if is_full:
         axis_label = slice_.axis
     else:
-        # breakpoint()
         axis_label = slice_.label
 
     components = []
@@ -1122,7 +1121,21 @@ def _(slice_: Slice, *, prev_axes, **_):
 
         else:
             assert isinstance(slice_component, Subset)
-            size = slice_component.array.axes.leaf_component.count
+            subset = slice_component
+
+            # If we don't have an ordered subset then extracting things like dat[subset].owned becomes hard
+            # because we can no longer use slices.
+            if len(target_component.regions) > 1 and not subset.array.ordered:
+                raise NotImplementedError("Subset indices must be ordered if we have multi-region components")
+
+            # TODO: clean this up
+            subset_component = subset.array.axes.leaf_component
+            assert len(subset_component.regions) == 1, "Not allowed to index with multi-region components"
+
+            if len(target_component.regions) > 1:
+                raise NotImplementedError("TODO")
+            else:
+                size = just_one(subset_component.regions).size
 
         if is_full:
             component_label = slice_component.component

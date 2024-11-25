@@ -186,6 +186,9 @@ class AxisComponentRegion:
     label: str
     size: Any
 
+    def __str__(self) -> str:
+        return f"({self.label}, {self.size})"
+
 
 @functools.singledispatch
 def _parse_regions(obj: Any) -> tuple[AxisComponentRegion]:
@@ -217,17 +220,16 @@ def _expand_regions(regions: Iterable[AxisComponentRegion]) -> tuple[AxisCompone
 
 
 class AxisComponent(LabelledNodeComponent):
-    fields = LabelledNodeComponent.fields | {"regions", "unit", "rank_equal"}
+    fields = LabelledNodeComponent.fields | {"regions", "unit"}
 
     def __init__(
         self,
         regions,
         label=None,
         *,
-        sf=None,
         unit=False,
     ):
-        regions = self._parse_regions(regions)
+        regions = _parse_regions(regions)
 
         if unit:
             raise NotImplementedError
@@ -241,10 +243,8 @@ class AxisComponent(LabelledNodeComponent):
         self.regions = regions
         self.unit = unit
 
-    @cached_property
-    def _all_regions(self) -> tuple[AxisComponentRegion]:
-        """Return axis component regions having expanded star forests into owned and ghost."""
-        return _expand_regions(self.regions)
+    # def __str__(self) -> str:
+    #     ...
 
     @property
     def rank_equal(self) -> bool:
@@ -270,19 +270,6 @@ class AxisComponent(LabelledNodeComponent):
     # def _key(self):
     #     return (self.size, self.label, self.unit)
 
-    # TODO: Should be a Global
-    @cached_property
-    def _collective_count(self):
-        """Return the size of the axis component in a format consistent over ranks."""
-        from pyop3 import Dat
-
-        # if isinstance(self.count, numbers.Integral) and not self.rank_equal:
-        if self.sf is not None:
-            # TODO: Should be a Global here
-            return Dat(AxisTree(), data=np.asarray([self.count], dtype=IntType), prefix="size")
-        else:
-            return self.count
-
     # TODO this is just a traversal - clean up
     def alloc_size(self, axtree, axis):
         from pyop3.array import Dat
@@ -303,6 +290,25 @@ class AxisComponent(LabelledNodeComponent):
         # TODO: May be excessive
         # Cast to an int as numpy integers cause loopy to break
         return strict_int(size)
+
+
+    # TODO: Should be a Global
+    @cached_property
+    def _collective_count(self):
+        """Return the size of the axis component in a format consistent over ranks."""
+        from pyop3 import Dat
+
+        # if isinstance(self.count, numbers.Integral) and not self.rank_equal:
+        if self.sf is not None:
+            # TODO: Should be a Global here
+            return Dat(AxisTree(), data=np.asarray([self.count], dtype=IntType), prefix="size")
+        else:
+            return self.count
+
+    @cached_property
+    def _all_regions(self) -> tuple[AxisComponentRegion]:
+        """Return axis component regions having expanded star forests into owned and ghost."""
+        return _expand_regions(self.regions)
 
 
 class Axis(LoopIterable, MultiComponentLabelledNode, CacheMixin):
@@ -349,8 +355,11 @@ class Axis(LoopIterable, MultiComponentLabelledNode, CacheMixin):
 
     def __str__(self) -> str:
         return (
-            self.__class__.__name__
-            + f"({{{', '.join(f'{c.label}: {c.count}' for c in self.components)}}}, {self.label})"
+            f"{type(self).__name__}"
+            "("
+            f"{{{', '.join(f'{c.label}: {c.regions}' for c in self.components)}}}, "
+            f"{self.label}"
+            ")"
         )
 
     # TODO: This method should be reimplemented inside of Firedrake.

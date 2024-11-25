@@ -6,6 +6,7 @@ import itertools
 import numbers
 import operator
 import sys
+import typing
 from collections import defaultdict
 from typing import Optional
 
@@ -28,6 +29,7 @@ from pyop3.utils import (
     StrictlyUniqueDict,
     as_tuple,
     single_valued,
+    is_single_valued,
     strict_zip,
     just_one,
     OrderedSet,
@@ -56,12 +58,20 @@ def make_layouts(axes: AxisTree, loop_vars) -> PMap:
     return _accumulate_axis_component_layouts(axes, component_layouts)
 
 
-def tabulate_again(axes, *, axis=None, parent_axes_acc=None):
+def tabulate_again(axes):
+    offset = 0
+    layouts = {}
+    for region in _collect_regions(axes):
+        offset = tabulate_again_inner(axes, region, offset, layouts)
+    return layouts
+
+
+def tabulate_again_inner(axes, region, offset, layouts, *, axis=None, parent_axes_acc=None):
     if axis is None:
         axis = axes.root
         parent_axes_acc = ()
 
-    ragged = any(requires_external_index(axes, axis, c) for c in axis.components)
+    ragged = any(requires_external_index(axes, axis, c, region[axis, c]) for c in axis.components)
 
     if len(axis.components) > 1 and ragged:
         # Fixing this would require deciding what to do with the start variable, which
@@ -71,7 +81,6 @@ def tabulate_again(axes, *, axis=None, parent_axes_acc=None):
         )
 
     layouts = {}
-    start = 0
     for component in axis.components:
         parent_axes_acc_ = parent_axes_acc + (axis.copy(components=[component]),)
 
@@ -90,29 +99,74 @@ def tabulate_again(axes, *, axis=None, parent_axes_acc=None):
                     assert step == mystep
                 else:
                     mystep = step
-                # component_layout = AxisVar(axis.label) * step + start
                 component_layout = AxisVar(axis.label)
 
 
             # 2. Ragged inside - must tabulate
             else:
-                array_var, step = _tabulate_offsets(axes, axis, component, parent_axes_acc_)
+                array_var, step = _tabulate_offsets(axes, axis, component, region, parent_axes_acc_)
                 assert step == mystep
                 component_layout = array_var
 
             axis.cache_set(cache_key, component_layout)
 
-        layouts[(axis, component)] = mystep * component_layout + start
+        layouts[(axis, component)] = mystep * component_layout + offset
 
         # TODO: should also do this for ragged but this breaks things currently
         if not ragged:
-            start += _axis_component_size(axes, axis, component)
+            offset += _axis_component_size(axes, axis, component, region)
 
         # Now traverse subaxes
         if subaxis := axes.child(axis, component):
-            layouts |= tabulate_again(axes, axis=subaxis, parent_axes_acc=parent_axes_acc_)
+            layouts |= tabulate_again_inner(axes, axis=subaxis, parent_axes_acc=parent_axes_acc_)
 
-    return pmap(layouts)
+    return pmap(layouts), offset
+
+
+def _collect_regions(axes: AxisTree, *, axis: Axis | None = None):
+    """
+    Examples
+    --------
+
+    Axis({"x": ["A", "B"], "y": ["B"]}, "a") -> [{"a": "A"}, {"a": "B"}]
+
+    Axis({"x": ["A", "B"], "y": ["B", "A"]}, "a") -> [{"a": "A"}, {"a": "B"}]
+
+    Axis({"x": ["A", "B"], "y": ["C"]}, "a") -> [{"a": "A"}, {"a": "B"}, {"a": "C"}]
+
+    nested
+
+    (assumes y is shared)
+    Axis({"x": ["A", "B"]}, "a") / Axis({"y": ["X", "Y"]}, "b")
+
+        ->
+
+    [{"a": "A", "b": "X"}, {"a": "A", "b": "Y"}, {"a": "B", "b": "X"}, {"a": "B", "b": "Y"}]
+
+    (if y is not shared)
+    Axis({"x": ["A", "B"]}, "a") / Axis({"y": ["X", "Y"]}, "b")
+
+        ->
+
+    [{"a": "A", "b": "X"}, {"a": "A", "b": "Y"}, {"a": "B", "b": "X"}, {"a": "B", "b": "Y"}]
+
+    """
+    if axis is None:
+        axis = axes.root
+        axis = typing.cast(Axis, axis)  # make the type checker happy
+
+    merged_regions = []  # NOTE: Could be an ordered set
+    for component in axis.components:
+        for region in component.regions:
+
+            merged_region = {axis: region}
+            if subaxis := axes.child(axis, component):
+                merged_region |= _collect_regions(axes, axis=subaxis)
+
+            if merged_region not in merged_regions:
+                merged_regions.append(merged_region)
+    return tuple(merged_regions)
+
 
 
 def _tabulate_offsets(axes, axis, component, parent_axes):
@@ -256,75 +310,6 @@ def _collect_offset_subaxes(axes, axis, component, *, visited):
 
 
 
-# TODO: If an axis has size 1 then we don't need a variable for it.
-def _make_layout_per_axis_component(
-    axes: AxisTree,
-    loop_vars,
-    axis=None,
-    layout_path=pmap(),
-):
-    """
-    Parameters
-    ----------
-    axes
-        The axis tree to construct a layout for. It must not be empty.
-    loop_vars
-        Mapping from axis label to loop index variable. Needed for tabulating
-        indexed layouts because, as we go up the tree, we can identify which
-        loop indices are materialised.
-    """
-    assert not axes.is_empty
-
-    if axis is None:
-        axis = axes.root
-
-    # Collect the loop variables that are captured by this axis and those below
-    # it. This lets us determine whether or not something that is indexed is
-    # sufficiently "within" loops for us to tabulate.
-    if len(axis.components) == 1 and (subaxis := axes.child(axis, axis.component)):
-        inner_loop_vars = _collect_inner_loop_vars(axes, subaxis, loop_vars)
-    else:
-        inner_loop_vars = frozenset()
-    inner_loop_vars_with_self = _collect_inner_loop_vars(axes, axis, loop_vars)
-
-    layouts = StrictlyUniqueDict()
-
-    # for component in axis.components:
-    #     if not isinstance(component.count, numbers.Integral):
-    #         # ragged, need to tabulate something
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    # Post-order traversal
-    csubtrees = []
-    for cpt in axis.components:
-        layout_path_ = layout_path | {axis.label: cpt.label}
-
-        parents_ = parents + ((axis, component),)
-
-        if subaxis := axes.child(axis, cpt):
-            (
-                sublayouts,
-                csubtree,
-            ) = _make_layout_per_axis_component(
-                axes, loop_vars, subaxis, layout_path_, parents_
-            )
-            layouts.update(sublayouts)
-            csubtrees.append(csubtree)
-        else:
-            csubtrees.append(None)
-
     """
     There are two conditions that we need to worry about:
         1. does the axis have a fixed size (not ragged)?
@@ -352,160 +337,12 @@ def _make_layout_per_axis_component(
     a fixed size even for the non-ragged components.
     """
 
-    # 1. do we need to pass further up? i.e. are we variable size?
-    # also if we have halo data then we need to pass to the top
-    if (
-        not all(
-            has_fixed_size(axes, axis, cpt, inner_loop_vars_with_self)
-            for cpt in axis.components
-        )
-    ) or (has_halo(axes, axis) and axis != axes.root):
-        if has_halo(axes, axis) or not all(
-            has_constant_step(axes, axis, c, inner_loop_vars)
-            for c in axis.components
-        ):
-            # ctree = AxisTree(axis.copy(numbering=None))
-            ctree = AxisTree(axis)
-
-            # we enforce here that all subaxes must be tabulated, is this always
-            # needed?
-            # Since each tree is supposed to be linear I think that this bit is wrong.
-            if strictly_all(sub is not None for sub in csubtrees):
-                for component, subtree in strict_zip(axis.components, csubtrees):
-                    ctree = ctree.add_subtree(subtree, axis, component)
-        else:
-            # we must be at the bottom of a ragged patch - therefore don't
-            # add to shape of things
-            # in theory if we are ragged and permuted then we do want to include this level
-            ctree = None
-            for c in axis.components:
-                step = step_size(axes, axis, c)
-                if (axis.id, c.label) in loop_vars:
-                    axis_var = loop_vars[axis.id, c.label][axis.label]
-                else:
-                    axis_var = AxisVar(axis.label)
-                layouts.update({layout_path | {axis.label: c.label}: axis_var * step})
-
-        return (layouts, ctree)
-
-    # 2. add layouts here
-    else:
-        # 1. do we need to tabulate anything?
-        # interleaved = len(axis.components) > 1 and axis.numbering is not None
-        interleaved = False
-        if (
-            interleaved
-            or not all(
-                has_constant_step(axes, axis, c, inner_loop_vars)
-                for i, c in enumerate(axis.components)
-            )
-            or has_halo(axes, axis)
-            and axis == axes.root  # at the top
-        ):
-            # ctree = AxisTree(axis.copy(numbering=None))
-            ctree = AxisTree(axis)
-            # we enforce here that all subaxes must be tabulated, is this always
-            # needed?
-            if strictly_all(sub is not None for sub in csubtrees):
-                for component, subtree in strict_zip(axis.components, csubtrees):
-                    ctree = ctree.add_subtree(subtree, axis, component)
-
-            fulltree = _create_count_array_tree(ctree, loop_vars)
-
-            # now populate fulltree
-            offset = IntRef(0)
-            _tabulate_count_array_tree(
-                axes,
-                axis,
-                loop_vars,
-                fulltree,
-                offset,
-                setting_halo=False,
-            )
-
-            # apply ghost offset stuff, the offset from the previous pass is used
-            _tabulate_count_array_tree(
-                axes,
-                axis,
-                loop_vars,
-                fulltree,
-                offset,
-                setting_halo=True,
-            )
-
-            for subpath, offset_data in fulltree.items():
-                # mytargetpath = merge_dicts(
-                #     just_one(offset_data.axes.paths).values()
-                # )
-                # myindices = merge_dicts(
-                #     just_one(offset_data.axes.index_exprs).values()
-                # )
-                # offset_var = ArrayVar(offset_data, myindices, mytargetpath)
-                offset_var = offset_data
-
-                layouts[layout_path | subpath] = offset_var
-
-            return (layouts, None)
-
-        # must therefore be affine
-        else:
-            assert all(sub is None for sub in csubtrees)
-            steps = [
-                step_size(axes, axis, c)
-                for i, c in enumerate(axis.components)
-            ]
-            start = 0
-            for cidx, step in enumerate(steps):
-                mycomponent = axis.components[cidx]
-
-                axis_var = AxisVar(axis.label)
-                new_layout = axis_var * step + start
-
-                layouts[layout_path | {axis.label: mycomponent.label}] = new_layout
-                start += _axis_component_size(axes, axis, mycomponent)
-            return (layouts, None)
-
-
-
-def has_independently_indexed_subaxis_parts(axes, axis, cpt):
-    """
-    subaxis parts are independently indexed if they don't depend on the index from
-    ``part``.
-
-    if one sub-part needs this index to determine its extent then we need to create
-    a layout function as the step sizes will differ.
-
-    Note that we need to consider both ragged sizes and permutations here
-    """
-    if subaxis := axes.child(axis, cpt):
-        return not any(
-            requires_external_index(axes, subaxis, c) for c in subaxis.components
-        )
-    else:
-        return True
-
-
-def can_be_affine(axtree, axis, component, component_index):
-    return (
-        has_independently_indexed_subaxis_parts(
-            axtree, axis, component, component_index
-        )
-        and component.permutation is None
-    )
-
-
-def has_constant_start(
-    axtree, axis, component, component_index, outer_axes_are_all_indexed: bool
-):
-    """
-    We will have an affine layout with a constant start (usually zero) if either we are not
-    ragged or if we are ragged but everything above is indexed (i.e. a temporary).
-    """
-    assert can_be_affine(axtree, axis, component, component_index)
-    return isinstance(component.count, numbers.Integral) or outer_axes_are_all_indexed
-
 
 def has_constant_step(axes: AxisTree, axis, cpt, inner_loop_vars, path=pmap()):
+    if len(axis.components) > 1 and len(cpt.regions) > 1:
+        # must interleave
+        return False
+
     # we have a constant step if none of the internal dimensions need to index themselves
     # with the current index (numbering doesn't matter here)
     if subaxis := axes.child(axis, cpt):
@@ -522,19 +359,26 @@ def has_fixed_size(axes, axis, component, inner_loop_vars):
     return not size_requires_external_index(axes, axis, component, inner_loop_vars)
 
 
-def requires_external_index(axtree, axis, component_index):
+def requires_external_index(axtree, axis, component_index, region):
     """Return `True` if more indices are required to index the multi-axis layouts
     than exist in the given subaxis.
     """
-    return size_requires_external_index(
-        axtree, axis, component_index, set()
-    )  # or numbering_requires_external_index(axtree, axis, component_index)
+    return size_requires_external_index_region(
+        axtree, axis, component_index, region, set()
+    )
 
 
 def size_requires_external_index(axes, axis, component, inner_loop_vars, path=pmap()):
+    return any(
+        size_requires_external_index_region(axes, axis, component, region, inner_loop_vars, path=path)
+        for region in component.regions
+    )
+
+
+def size_requires_external_index_region(axes, axis, component, region, inner_loop_vars, path=pmap()):
     from pyop3.array import Dat
 
-    count = component.count
+    count = region.size
     if isinstance(count, Dat):
         if count.axes.is_empty:
             leafpath = pmap()
@@ -986,7 +830,22 @@ def _axis_component_size(
     *,
     loop_indices=pmap(),
 ):
-    count = _as_int(component.count, indices, loop_indices=loop_indices)
+    return sum(
+        _axis_component_size_region(axes, axis, component, region, indices, loop_indices=loop_indices)
+        for region in component.regions
+    )
+
+
+def _axis_component_size_region(
+    axes: AxisTree,
+    axis: Axis,
+    component: AxisComponent,
+    region,
+    indices=pmap(),
+    *,
+    loop_indices=pmap(),
+):
+    count = _as_int(region.size, indices, loop_indices=loop_indices)
     if subaxis := axes.child(axis, component):
         return sum(
             _axis_size(
