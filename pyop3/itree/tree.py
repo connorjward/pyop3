@@ -32,6 +32,7 @@ from pyop3.axtree import (
 from pyop3.axtree.layout import _as_int
 from pyop3.axtree.tree import (
     ContextSensitiveLoopIterable,
+    AxisComponentRegion,
     IndexedAxisTree,
     LoopIndexVar,
 )
@@ -168,9 +169,7 @@ class TabulatedMapComponent(MapComponent):
     def __init__(self, target_axis, target_component, array, *, arity=None, label=None):
         # determine the arity from the provided array
         if arity is None:
-            leaf_axis, leaf_clabel = array.axes.leaf
-            leaf_cidx = leaf_axis.component_index(leaf_clabel)
-            arity = leaf_axis.components[leaf_cidx].count
+            arity = just_one(array.axes.leaf_component.regions).size
 
         super().__init__(target_axis, target_component, label=label)
         self.array = array
@@ -273,6 +272,12 @@ class LoopIndex(Index, KernelArgument):
             raise ValueError("only valid (context-free) in single component case")
 
         return (0,)
+
+    # TODO: Prefer this as a traversal
+    # TODO: Include iterset outer loops
+    @property
+    def outer_loops(self):
+        return frozenset({self})
 
     @property
     def is_context_free(self):
@@ -708,6 +713,10 @@ class CalledMap(AxisIndependentIndex, Identified, Labelled, LoopIterable):
     def connectivity(self):
         return self.map.connectivity
 
+    @property
+    def outer_loops(self):
+        return self.index.outer_loops
+
     @cached_property
     def axes(self) -> IndexedAxisTree:
         if not self.is_context_free:
@@ -963,13 +972,9 @@ def _(
     #     AxisVar("a") * 2     and       AxisVar("b")
     # then this will return
     #     LoopIndexVar(p, "a") * 2      and LoopIndexVar(p, "b")
-    # replacer = LoopIndexReplacer(cf_loop_index)
     replace_map = {
-        (axis.id, component_label): (
-            {axis.label: component_label},
-            {axis.label: LoopIndexVar(cf_loop_index.id, axis.label)},
-        )
-        for axis, component_label in cf_loop_index.iterset.path_with_nodes(cf_loop_index.iterset.leaf).items()
+        axis.label: LoopIndexVar(cf_loop_index.id, axis.label)
+        for axis in cf_loop_index.iterset.path_with_nodes(cf_loop_index.iterset.leaf).keys()
     }
     targets = {None: []}
     for equivalent_targets in cf_loop_index.iterset.paths_and_exprs:
@@ -978,17 +983,20 @@ def _(
         for (orig_path, orig_exprs) in equivalent_targets.values():
             new_path.update(orig_path)
             for axis_label, orig_expr in orig_exprs.items():
-                new_exprs[axis_label] = replace_terminals(orig_expr, cf_loop_index.iterset, replace_map)
+                new_exprs[axis_label] = replace_terminals(orig_expr, replace_map)
         new_path = pmap(new_path)
         new_exprs = pmap(new_exprs)
         targets[None].append((new_path, new_exprs))
     targets[None] = tuple(targets[None])
 
+    # NOTE: If the iterset also has outer loops?
+    outer_loops = frozenset({cf_loop_index})
+
     return (
         axes,
         pmap(targets),
         {},
-        (),
+        outer_loops,
         {},
     )
 
@@ -1074,68 +1082,56 @@ def _(slice_: Slice, *, prev_axes, **_):
             c for c in target_axis.components if c.label == slice_component.component
         )
 
-        if isinstance(slice_component, AffineSliceComponent):
-            if isinstance(target_component.count, Dat):
-                if (
-                    slice_component.start != 0
-                    or slice_component.step != 1
-                ):
-                    raise NotImplementedError("TODO")
+        indexed_regions = []
+        for region in target_component._all_regions:
+            if isinstance(slice_component, AffineSliceComponent):
+                if isinstance(region.size, Dat):
+                    if (
+                        slice_component.start != 0
+                        or slice_component.step != 1
+                    ):
+                        raise NotImplementedError("Only full slices of ragged components are supported")
 
-                # need to index things using replace() instead of parent_indices
-                # NOTE: is it strictly necessary to index here?
-                size = target_component.count
+                    # need to index things using replace() instead of parent_indices
+                    # NOTE: is it strictly necessary to index here?
+                    size = region.size
 
-                if slice_component.stop is None:
-                    if len(parent_indices) == 0:
-                        size = target_component.count
+                    if slice_component.stop is None:
+                        raise NotImplementedError("This does not work")
+                        if len(parent_indices) == 0:
+                            size = target_component.count
+                        else:
+                            # It is not necessarily the case that all of parent_indices is
+                            # required to index count.
+                            # TODO: Unify with if len(parent_indices) == 0, should work for both
+                            size = target_component.count.getitem(parent_indices, allow_unused=True)
                     else:
-                        # It is not necessarily the case that all of parent_indices is
-                        # required to index count.
-                        # TODO: Unify with if len(parent_indices) == 0, should work for both
-                        size = target_component.count.getitem(parent_indices, allow_unused=True)
-                else:
-                    size = slice_component.stop
+                        size = slice_component.stop
 
-            else:
-                if slice_component.stop is None:
-                    stop = target_component.count
-                else:
-                    stop = slice_component.stop
-
-                # if target_cpt.distributed:
-                if False:
-                    pass
-                    # if subslice.start != 0 or subslice.step != 1:
-                    #     raise NotImplementedError
-                    #
-                    # owned_count = min(target_cpt.owned_count, stop)
-                    # count = stop
-                    #
-                    # if owned_count == count:
-                    #     size = count
-                    # else:
-                    #     size = (owned_count, count)
-                else:
+                else:  # region has a fixed size
+                    stop = region.size if slice_component.stop is None else slice_component.stop
                     size = math.ceil((stop - slice_component.start) / slice_component.step)
 
-        else:
-            assert isinstance(slice_component, Subset)
-            subset = slice_component
-
-            # If we don't have an ordered subset then extracting things like dat[subset].owned becomes hard
-            # because we can no longer use slices.
-            if len(target_component.regions) > 1 and not subset.array.ordered:
-                raise NotImplementedError("Subset indices must be ordered if we have multi-region components")
-
-            # TODO: clean this up
-            subset_component = subset.array.axes.leaf_component
-            assert len(subset_component.regions) == 1, "Not allowed to index with multi-region components"
-
-            if len(target_component.regions) > 1:
-                raise NotImplementedError("TODO")
             else:
-                size = just_one(subset_component.regions).size
+                assert isinstance(slice_component, Subset)
+                subset = slice_component
+
+                # If we don't have an ordered subset then extracting things like dat[subset].owned becomes hard
+                # because we can no longer use slices.
+                if len(target_component.regions) > 1 and not subset.array.ordered:
+                    raise NotImplementedError("Subset indices must be ordered if we have multi-region components")
+
+                # TODO: clean this up
+                subset_component = subset.array.axes.leaf_component
+                assert len(subset_component.regions) == 1, "Not allowed to index with multi-region components"
+
+                if len(target_component.regions) > 1:
+                    raise NotImplementedError("TODO")
+                else:
+                    size = just_one(subset_component.regions).size
+
+            indexed_region = AxisComponentRegion(size, region.label)
+            indexed_regions.append(indexed_region)
 
         if is_full:
             component_label = slice_component.component
@@ -1146,7 +1142,7 @@ def _(slice_: Slice, *, prev_axes, **_):
             # and labelling the resultant axis component.
             component_label = slice_component.label
 
-        cpt = AxisComponent(size, label=component_label, unit=target_component.unit)
+        cpt = AxisComponent(indexed_regions, label=component_label, unit=target_component.unit)
         components.append(cpt)
 
     axis = Axis(components, label=axis_label)
@@ -1223,7 +1219,7 @@ def _(slice_: Slice, *, prev_axes, **_):
         axes,
         target_path_per_component,
         {},
-        (),  # no outer loops
+        frozenset(),  # no outer loops
         {},
     )
 
@@ -1239,7 +1235,7 @@ def _(
         leaf_key = (leaf_axis.id, leaf_component_label)
         compressed_targets[leaf_key] = tuple(t[leaf_key] for t in called_map.axes.targets)
 
-    return called_map.axes, compressed_targets, {}, (), {}
+    return called_map.axes, compressed_targets, {}, called_map.outer_loops, {}
 
 
 def _make_leaf_axis_from_called_map_new(map_name, output_spec, linear_input_axes, input_paths_and_exprs):
@@ -1312,7 +1308,7 @@ def index_axes(
         indexed_axes,
         indexed_target_paths_and_exprs_compressed,
         _,
-        _,
+        outer_loops,
         partial_linear_index_trees,
     ) = _index_axes(
         index_tree,
@@ -1329,7 +1325,7 @@ def index_axes(
             axes,
             targets=indexed_target_paths_and_exprs + (indexed_axes._source_path_and_exprs,),
             layout_exprs={},
-            outer_loops=indexed_axes.outer_loops,
+            outer_loops=outer_loops,
         )
 
     all_target_paths_and_exprs = []
@@ -1354,7 +1350,7 @@ def index_axes(
         # targets=all_target_paths_and_exprs | {indexed_axes._source_path_and_exprs},
         targets=all_target_paths_and_exprs,
         layout_exprs={},
-        outer_loops=indexed_axes.outer_loops,
+        outer_loops=outer_loops,
     )
 
 
@@ -1481,7 +1477,7 @@ def _index_axes(
         else:
             target_path_per_cpt_per_index.update(subpathsandexprs)
 
-        outer_loops += subouterloops
+        outer_loops |= subouterloops
 
     target_path_per_component = ImmutableOrderedDict(target_path_per_cpt_per_index)
 
@@ -1542,9 +1538,10 @@ def compose_targets(orig_axes, orig_target_paths_and_exprs, indexed_axes, indexe
 
         orig_none_mapped_target_path, orig_none_mapped_target_exprs = orig_target_paths_and_exprs.get(None, ({}, {}))
 
+        myreplace_map = merge_dicts(e for _, e in indexed_target_paths_and_exprs_acc.values())
         none_mapped_target_path |= orig_none_mapped_target_path
         for orig_axis_label, orig_index_expr in orig_none_mapped_target_exprs.items():
-            none_mapped_target_exprs[orig_axis_label] = replace_terminals(orig_index_expr, indexed_axes_acc, indexed_target_paths_and_exprs_acc)
+            none_mapped_target_exprs[orig_axis_label] = replace_terminals(orig_index_expr, myreplace_map)
 
         # make sure to add existing None entries - these will not require composition I think?
 
@@ -1571,7 +1568,7 @@ def compose_targets(orig_axes, orig_target_paths_and_exprs, indexed_axes, indexe
 
                     none_mapped_target_path |= orig_target_path
                     for orig_axis_label, orig_index_expr in orig_target_exprs.items():
-                        none_mapped_target_exprs[orig_axis_label] = replace_terminals(orig_index_expr, indexed_axes_acc, indexed_target_paths_and_exprs_acc)
+                        none_mapped_target_exprs[orig_axis_label] = replace_terminals(orig_index_expr, myreplace_map)
 
         composed_target_paths_and_exprs[None] = (
             pmap(none_mapped_target_path), pmap(none_mapped_target_exprs)

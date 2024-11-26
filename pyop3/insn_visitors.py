@@ -602,7 +602,7 @@ def compress_indirection_maps(insn: Instruction) -> Instruction:
         *(_collect_composite_dats(expr) for expr in best_candidate.values())
     )
     replace_map = {
-        comp_dat: _materialize_composite_dat(comp_dat)
+        comp_dat: materialize_composite_dat(comp_dat)
         for comp_dat in composite_dats
     }
 
@@ -774,7 +774,8 @@ def _(dat, /) -> frozenset:
     return frozenset({dat})
 
 
-def _materialize_composite_dat(dat: _CompositeDat) -> _ExpressionDat:
+# NOTE: Think this lives in expr_visitors or something
+def materialize_composite_dat(dat: _CompositeDat) -> _ExpressionDat:
     axes = extract_axes(dat, dat.visited_axes, dat.loop_axes, {})
 
     # FIXME: This is almost certainly wrong in general

@@ -12,10 +12,10 @@ import numbers
 import operator
 import sys
 import threading
-from collections.abc import Iterable
+from collections.abc import Iterable, Sized, Sequence
 from functools import cached_property
 from itertools import chain
-from typing import Any, FrozenSet, Hashable, Mapping, Optional, Sequence, Tuple, Union
+from typing import Any, FrozenSet, Hashable, Mapping, Optional, Tuple, Union
 
 import numpy as np
 import pymbolic as pym
@@ -183,40 +183,50 @@ class UnrecognisedAxisException(ValueError):
 
 @dataclasses.dataclass(frozen=True)
 class AxisComponentRegion:
-    label: str
     size: Any
+    label: str | None = None
 
     def __str__(self) -> str:
-        return f"({self.label}, {self.size})"
+        return f"({self.size}, {self.label})"
 
 
 @functools.singledispatch
 def _parse_regions(obj: Any) -> tuple[AxisComponentRegion]:
-    raise TypeError(f"No handler provided for {type(obj).__name__}")
+    from pyop3.array import Dat
+
+    if isinstance(obj, Dat):
+        return (AxisComponentRegion(obj),)
+    else:
+        raise TypeError(f"No handler provided for {type(obj).__name__}")
 
 
-@_parse_regions.register(Iterable)
-def _(iterable: Iterable) -> tuple[AxisComponentRegion]:
-    return iterable
+@_parse_regions.register(Sequence)
+def _(iterable: Sequence) -> tuple[AxisComponentRegion]:
+    return tuple(iterable)
 
 
 @_parse_regions.register(numbers.Integral)
-@_parse_regions.register(StarForest)
-def _(val: numbers.Integral | StarForest) -> tuple[AxisComponentRegion]:
-    return (AxisComponentRegion("default", val),)
+def _(num: numbers.Integral) -> tuple[AxisComponentRegion]:
+    return (AxisComponentRegion(num),)
 
 
-def _expand_regions(regions: Iterable[AxisComponentRegion]) -> tuple[AxisComponentRegion]:
-    expanded_regions = []
+def _expand_regions(regions: Sequence[AxisComponentRegion], sf: StarForest) -> tuple[AxisComponentRegion]:
+    if len(regions) > 1:
+        raise NotImplementedError("Currently assume a star forest can only be used to split apart single region components")
+    else:
+        if regions[0].label is not None:
+            raise NotImplementedError("Currently assume no further region labels are used")
+        breakpoint()
+        # from the star forest
+        num_owned = NotImplemented
+        num_ghost = NotImplemented
+
+    owned_regions = []
+    ghost_regions = []
     for region in regions:
-        if isinstance(region.size, StarForest):
-            breakpoint()
-            owned_region = AxisComponentRegion("owned", num_owned)
-            ghost_region = AxisComponentRegion("ghost", num_ghost)
-            expanded_regions.extend([owned_region, ghost_region])
-        else:
-            expanded_regions.append(region)
-    return tuple(expanded_regions)
+        owned_regions.append(AxisComponentRegion(num_owned, "owned"))
+        ghost_regions.append(AxisComponentRegion(num_ghost, "ghost"))
+    return tuple(owned_regions + ghost_regions)
 
 
 class AxisComponent(LabelledNodeComponent):
@@ -228,6 +238,7 @@ class AxisComponent(LabelledNodeComponent):
         label=None,
         *,
         unit=False,
+        sf=None,
     ):
         regions = _parse_regions(regions)
 
@@ -242,6 +253,7 @@ class AxisComponent(LabelledNodeComponent):
         super().__init__(label=label)
         self.regions = regions
         self.unit = unit
+        self.sf = sf
 
     # def __str__(self) -> str:
     #     ...
@@ -291,8 +303,7 @@ class AxisComponent(LabelledNodeComponent):
         # Cast to an int as numpy integers cause loopy to break
         return strict_int(size)
 
-
-    # TODO: Should be a Global
+    # NOTE: I prefer `size` to `count`
     @cached_property
     def _collective_count(self):
         """Return the size of the axis component in a format consistent over ranks."""
@@ -306,9 +317,13 @@ class AxisComponent(LabelledNodeComponent):
             return self.count
 
     @cached_property
+    def count(self) -> Any:
+        return sum(reg.size for reg in self.regions)
+
+    @cached_property
     def _all_regions(self) -> tuple[AxisComponentRegion]:
         """Return axis component regions having expanded star forests into owned and ghost."""
-        return _expand_regions(self.regions)
+        return _expand_regions(self.regions, self.sf) if self.sf else self.regions
 
 
 class Axis(LoopIterable, MultiComponentLabelledNode, CacheMixin):
@@ -1657,6 +1672,7 @@ class IndexedAxisTree(BaseAxisTree):
             start = indices[0]
             stop = indices[-1] + 1
             (step,) = steps
+            assert step != 0
             return slice(start, stop, step)
         else:
             return indices

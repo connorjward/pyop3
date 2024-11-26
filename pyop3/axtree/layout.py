@@ -71,7 +71,7 @@ def tabulate_again_inner(axes, region, offset, layouts, *, axis=None, parent_axe
         axis = axes.root
         parent_axes_acc = ()
 
-    ragged = any(requires_external_index(axes, axis, c, region[axis, c]) for c in axis.components)
+    ragged = any(requires_external_index(axes, axis, c, region) for c in axis.components)
 
     if len(axis.components) > 1 and ragged:
         # Fixing this would require deciding what to do with the start variable, which
@@ -80,7 +80,6 @@ def tabulate_again_inner(axes, region, offset, layouts, *, axis=None, parent_axe
             "Cannot yet tabulate axes with multiple components if any of them are ragged"
         )
 
-    layouts = {}
     for component in axis.components:
         parent_axes_acc_ = parent_axes_acc + (axis.copy(components=[component]),)
 
@@ -110,17 +109,21 @@ def tabulate_again_inner(axes, region, offset, layouts, *, axis=None, parent_axe
 
             axis.cache_set(cache_key, component_layout)
 
-        layouts[(axis, component)] = mystep * component_layout + offset
+        if (axis.id, component) in layouts:
+            raise NotImplementedError("TODO")
+        layouts[(axis.id, component)] = mystep * component_layout + offset
 
         # TODO: should also do this for ragged but this breaks things currently
         if not ragged:
-            offset += _axis_component_size(axes, axis, component, region)
+            offset += _axis_component_size(axes, axis, component)
 
         # Now traverse subaxes
         if subaxis := axes.child(axis, component):
-            layouts |= tabulate_again_inner(axes, axis=subaxis, parent_axes_acc=parent_axes_acc_)
+            # make the offset zero as that is only needed outermost
+            # tabulate_again_inner(axes, region, offset, layouts, axis=subaxis, parent_axes_acc=parent_axes_acc_)
+            tabulate_again_inner(axes, region, 0, layouts, axis=subaxis, parent_axes_acc=parent_axes_acc_)
 
-    return pmap(layouts), offset
+    return offset
 
 
 def _collect_regions(axes: AxisTree, *, axis: Axis | None = None):
@@ -158,18 +161,27 @@ def _collect_regions(axes: AxisTree, *, axis: Axis | None = None):
     merged_regions = []  # NOTE: Could be an ordered set
     for component in axis.components:
         for region in component.regions:
+            if region.label is not None:
+                merged_region = frozenset({region.label})
+            else:
+                merged_region = frozenset()
 
-            merged_region = {axis: region}
             if subaxis := axes.child(axis, component):
-                merged_region |= _collect_regions(axes, axis=subaxis)
-
-            if merged_region not in merged_regions:
-                merged_regions.append(merged_region)
+                for submerged_region in _collect_regions(axes, axis=subaxis):
+                    merged_region_ = merged_region | submerged_region
+                    if merged_region_ not in merged_regions:
+                        merged_regions.append(merged_region_)
+            else:
+                if merged_region not in merged_regions:
+                    merged_regions.append(merged_region)
     return tuple(merged_regions)
 
 
 
-def _tabulate_offsets(axes, axis, component, parent_axes):
+def _tabulate_offsets(axes, axis, component, region, parent_axes):
+    if len(region) > 1:
+        raise NotImplementedError("TODO")
+
     # First we build the right data structure to store the offsets. We can find the
     # axes that we need by combining the current axis with those needed by subaxes
     # along with the count of the current component (if ragged).
@@ -378,21 +390,25 @@ def size_requires_external_index(axes, axis, component, inner_loop_vars, path=pm
 def size_requires_external_index_region(axes, axis, component, region, inner_loop_vars, path=pmap()):
     from pyop3.array import Dat
 
-    count = region.size
-    if isinstance(count, Dat):
-        if count.axes.is_empty:
+    if len(component.regions) > 1:
+        raise NotImplementedError("TODO")
+    else:
+        size = component.regions[0].size
+
+    if isinstance(size, Dat):
+        if size.axes.is_empty:
             leafpath = pmap()
         else:
-            leafpath = just_one(count.axes.leaf_paths)
-        layout = count.axes._subst_layouts_default[leafpath]
+            leafpath = just_one(size.axes.leaf_paths)
+        layout = size.axes._subst_layouts_default[leafpath]
         # no longer needed I believe
         # required_loop_vars = LoopIndexCollector(linear=False)(layout)
         # if not required_loop_vars.issubset(inner_loop_vars):
         #     return True
         # is the path sufficient? i.e. do we have enough externally provided indices
         # to correctly index the axis?
-        if not count.axes.is_empty:
-            for axlabel, clabel in count.axes.path(*count.axes.leaf).items():
+        if not size.axes.is_empty:
+            for axlabel, clabel in size.axes.path(*size.axes.leaf).items():
                 if axlabel in path:
                     assert path[axlabel] == clabel
                 else:
@@ -739,7 +755,7 @@ def _accumulate_axis_component_layouts(
     for component in layout_axis.components:
         # better not as a path here
         # layout_path_ = layout_path | {layout_axis.label: component.label}
-        layout_path_ = (layout_axis, component)
+        layout_path_ = (layout_axis.id, component)
         layout_expr_ = layout_expr + component_layouts.get(layout_path_, 0)
 
         if layout_axis in axes.nodes:

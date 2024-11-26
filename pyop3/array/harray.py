@@ -301,6 +301,10 @@ class Dat(_Dat):
         return self.reconstruct(axes=self.axes.context_free)
 
     @property
+    def leaf_layouts(self):
+        return self.axes.leaf_subst_layouts
+
+    @property
     def dtype(self):
         return self.buffer.dtype
 
@@ -487,6 +491,17 @@ class Dat(_Dat):
 
 
 class _ConcretizedDat2(_Dat, ContextFree, abc.ABC):
+
+    # unimplemented
+
+    @property
+    def leaf_layouts(self):
+        assert False, "shouldnt touch this I dont think"
+
+    def getitem(self, *args, **kwargs):
+        assert False, "shouldnt touch this I dont think"
+
+    # ///
 
     parent = None
 

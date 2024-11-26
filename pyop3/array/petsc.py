@@ -136,13 +136,6 @@ class AbstractMat(Array, Record):
         assert self.mat_type != "baij", "FIXME"
         return self.caxes
 
-    def __getitem__(self, indices):
-        return self.getitem(indices, strict=False)
-
-    # Since __getitem__ is implemented, this class is implicitly considered
-    # to be iterable (which it's not). This avoids some confusing behaviour.
-    __iter__ = None
-
     def getitem(self, indices, *, strict=False):
         from pyop3.itree import as_index_forest, index_axes
         # does not work as indices may not be hashable, parse first?
@@ -271,6 +264,24 @@ class AbstractMat(Array, Record):
 
     def with_axes(self, row_axes, col_axes):
         return self.reconstruct(raxes=row_axes, caxes=col_axes)
+
+    # NOTE: if this returns a 2-tuple then Dats should return a 1-tuple
+    @property
+    def leaf_layouts(self):
+        from pyop3.insn_visitors import _CompositeDat, materialize_composite_dat
+
+        # use root
+        layout_expr = self.raxes.subst_layouts()[pmap()]
+        visited_axes = {}  # guess, might be the full path
+        loop_axes = {loop.id: loop.iterset for loop in self.raxes.outer_loops}
+        composite_dat = _CompositeDat(layout_expr, visited_axes, loop_axes)
+
+        materialized_dat = materialize_composite_dat(composite_dat)
+
+        breakpoint()
+        # return (
+        #     materialize_composite_dat()
+        # )
 
     @property
     def alloc_size(self) -> int:
@@ -407,66 +418,68 @@ class AbstractMat(Array, Record):
 
     @cached_property
     def rmap(self):
-        return self._make_map_part1(self.block_raxes)
+        return self.leaf_layouts[0]
+        # return self._make_map_part1(self.block_raxes)
 
     @cached_property
     def cmap(self):
-        return self._make_map_part1(self.block_caxes)
-
-    # TODO: rename, also cache somewhere
-    def _make_map_part1(self, axes):
-        from pyop3.expr_visitors import collect_loops
-        from pyop3.itree import Slice, AffineSliceComponent, IndexTree
-
-        loop_indices = collect_loops(self)
-
-        if len(loop_indices) > 1:
-            # should be straightforward enough to do
-            raise NotImplementedError
-        else:
-            loop_index = just_one(loop_indices)
-
-        # NOTE: It is safe to discard indexing information about the iterset here
-        # because we immediately index it with the loop and reinstate all the
-        # symbolic information.
-        iterset = AxisTree(loop_index.iterset.node_map)
-
-        rmap_axes = iterset.add_subtree(axes, iterset.leaf)
-        rmap = Dat(rmap_axes, dtype=IntType, prefix="map")
-
-
-
-        # index the map so it has the same indexing information as the original expression
-        rmap = rmap[loop_index]
-        # TODO: Need a nice way to cast indexed axes to a fresh axis tree
-        assert AxisTree(rmap.axes.node_map) == AxisTree(axes.node_map)
-
-        # now populate with values
-        loops = []
-        for leaf in axes.leaves:
-            leaf_layout_expr = axes.subst_layouts()[axes.path(leaf)]
-
-            slices = [
-                Slice(axis_label, AffineSliceComponent(component_label))
-                for axis_label, component_label in axes.path(leaf, ordered=True)
-            ]
-            # TODO: Ideally index tree parsing is done inside __getitem__
-            slices_tree = IndexTree.from_iterable(slices)
-            rmap_restrict = rmap[slices_tree]
-
-            loop = Loop(
-                loop_index,
-                rmap_restrict.assign(leaf_layout_expr)
-            )
-            loops.append(loop)
-
-        # TODO: Needn't be a loop list, outer loops will always be the same
-        loop_list = LoopList(loops)
-        loop_list()
-
-        # breakpoint()
-
-        return rmap
+        return self.leaf_layouts[1]
+        # return self._make_map_part1(self.block_caxes)
+    #
+    # # TODO: rename, also cache somewhere
+    # def _make_map_part1(self, axes):
+    #     from pyop3.expr_visitors import collect_loops
+    #     from pyop3.itree import Slice, AffineSliceComponent, IndexTree
+    #
+    #     loop_indices = collect_loops(self)
+    #
+    #     if len(loop_indices) > 1:
+    #         # should be straightforward enough to do
+    #         raise NotImplementedError
+    #     else:
+    #         loop_index = just_one(loop_indices)
+    #
+    #     # NOTE: It is safe to discard indexing information about the iterset here
+    #     # because we immediately index it with the loop and reinstate all the
+    #     # symbolic information.
+    #     iterset = AxisTree(loop_index.iterset.node_map)
+    #
+    #     rmap_axes = iterset.add_subtree(axes, iterset.leaf)
+    #     rmap = Dat(rmap_axes, dtype=IntType, prefix="map")
+    #
+    #
+    #
+    #     # index the map so it has the same indexing information as the original expression
+    #     rmap = rmap[loop_index]
+    #     # TODO: Need a nice way to cast indexed axes to a fresh axis tree
+    #     assert AxisTree(rmap.axes.node_map) == AxisTree(axes.node_map)
+    #
+    #     # now populate with values
+    #     loops = []
+    #     for leaf in axes.leaves:
+    #         leaf_layout_expr = axes.subst_layouts()[axes.path(leaf)]
+    #
+    #         slices = [
+    #             Slice(axis_label, AffineSliceComponent(component_label))
+    #             for axis_label, component_label in axes.path(leaf, ordered=True)
+    #         ]
+    #         # TODO: Ideally index tree parsing is done inside __getitem__
+    #         slices_tree = IndexTree.from_iterable(slices)
+    #         rmap_restrict = rmap[slices_tree]
+    #
+    #         loop = Loop(
+    #             loop_index,
+    #             rmap_restrict.assign(leaf_layout_expr)
+    #         )
+    #         loops.append(loop)
+    #
+    #     # TODO: Needn't be a loop list, outer loops will always be the same
+    #     loop_list = LoopList(loops)
+    #     loop_list()
+    #
+    #     # breakpoint()
+    #
+    #     return rmap
 
     @cached_property
     def row_lgmap_dat(self):

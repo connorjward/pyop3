@@ -17,6 +17,13 @@ class Array(ContextAware, FunctionArgument, Expression, abc.ABC):
 
         self.parent = parent
 
+    def __getitem__(self, indices):
+        return self.getitem(indices, strict=False)
+
+    # Since __getitem__ is implemented, this class is implicitly considered
+    # to be iterable (which it's not). This avoids some confusing behaviour.
+    __iter__ = None
+
     def assign(self, other, /, *, eager=False):
         expr = Assignment(self, other, "write")
         return expr() if eager else expr
@@ -25,6 +32,10 @@ class Array(ContextAware, FunctionArgument, Expression, abc.ABC):
     # @abc.abstractmethod
     # def reshape(self, *axes):
     #     pass
+
+    @abc.abstractmethod
+    def getitem(self, indices, *, strict=False):
+        pass
 
     @abc.abstractmethod
     def with_context(self):
@@ -38,4 +49,9 @@ class Array(ContextAware, FunctionArgument, Expression, abc.ABC):
     @property
     @abc.abstractmethod
     def alloc_size(self) -> int:
+        pass
+
+    @property
+    @abc.abstractmethod
+    def leaf_layouts(self):  # or all layouts?
         pass
