@@ -12,6 +12,7 @@ import numbers
 import operator
 import sys
 import threading
+import typing
 from collections.abc import Iterable, Sized, Sequence
 from functools import cached_property
 from itertools import chain
@@ -958,22 +959,19 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree, CacheMixin):
         else:
             return self._collect_source_path()
 
-    def _collect_source_path(self, axis=None, source_path_acc=None):
+    def _collect_source_path(self, *, axis=None):
         assert not self.is_empty
 
-        if strictly_all(x is None for x in {axis, source_path_acc}):
+        if axis is None:
             axis = self.root
-            source_path_acc = pmap()
+        axis = typing.cast(Axis, axis)  # make the type checker happy
 
         source_path = {}
         for component in axis.components:
-            source_path_acc_ = source_path_acc | {axis.label: component.label}
-            source_path[axis.id, component.label] = source_path_acc_
+            source_path[axis.id, component.label] = pmap({axis.label: component.label})
 
             if subaxis := self.child(axis, component):
-                source_path.update(
-                    self._collect_source_path(subaxis, source_path_acc_)
-                )
+                source_path.update(self._collect_source_path(axis=subaxis))
         return freeze(source_path)
 
     @cached_property
@@ -983,20 +981,19 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree, CacheMixin):
         else:
             return self._collect_source_exprs()
 
-    def _collect_source_exprs(self, axis=None, source_exprs_acc=None):
+    def _collect_source_exprs(self, *, axis=None):
         assert not self.is_empty
 
-        if strictly_all(x is None for x in {axis, source_exprs_acc}):
+        if axis is None:
             axis = self.root
-            source_exprs_acc = pmap()
+        axis = typing.cast(Axis, axis)  # make the type checker happy
 
         source_exprs = {}
         for component in axis.components:
-            source_exprs_acc_ = source_exprs_acc | {axis.label: AxisVar(axis.label)}
-            source_exprs[axis.id, component.label] = source_exprs_acc_
+            source_exprs[axis.id, component.label] = pmap({axis.label: AxisVar(axis.label)})
 
             if subaxis := self.child(axis, component):
-                source_exprs.update(self._collect_source_exprs(subaxis, source_exprs_acc_))
+                source_exprs.update(self._collect_source_exprs(axis=subaxis))
         return freeze(source_exprs)
 
     @property
@@ -1607,6 +1604,7 @@ class IndexedAxisTree(BaseAxisTree):
         matching_targets = []
         for target in self.targets:
             all_leaves_match = True
+            breakpoint()
             for leaf in self.leaves:
                 leaf_path = self.path_with_nodes(leaf)
 

@@ -1354,82 +1354,13 @@ def index_axes(
 
 
 
-def restrict_targets(targets, indexed_axes: AxisTree, unindexed_axes: AxisTree, *, axis=None) -> PMap:
-    restricted = collections.defaultdict(dict)
-
-    if axis is None:
-        for target_set in targets.get(None, ()):
-            restricted[None].update(_matching_target(target_set, unindexed_axes))
-
-        if indexed_axes.is_empty:
-            # nothing more to be done
-            return freeze(restricted)
-        else:
-            axis = indexed_axes.root
-
-    # Make the type checker happy
-    axis = cast(Axis, axis)
-
-    for component in axis.components:
-        axis_key = (axis.id, component.label)
-        if axis_key in targets:
-            target_set = targets[axis_key]
-            restricted[axis_key].update(_matching_target(target_set, unindexed_axes))
-
-        if subaxis := indexed_axes.child(axis, component):
-            subrestricted = restrict_targets(targets, indexed_axes, unindexed_axes, axis=subaxis)
-            restricted.update(subrestricted)
-
-    return freeze(restricted)
-
-
-def _matching_target(targets: PMap, orig_axes: AxisTree) -> PMap:
-    # NOTE: Ideally this should return just_one(...) instead of
-    # single_valued(...) but because we don't have pass-through
-    # indexing yet we sometimes get duplicate axes inside targets.
-    # NOTE: But passthrough indexing is now wrong to try and do...
-    return single_valued(
-        t for t in targets
-        if all(ax in orig_axes.node_labels for ax in t.keys())
-    )
-
-
-# NOTE: Arguably this does not need to be done eagerly. The targets can be per-axis
-# until later.
-def accumulate_targets(targets, indexed_axes, *, axis=None, target_acc=None):
-    """Traverse indexed_axes and accumulate per-axis ``targets`` as we go down."""
-    if indexed_axes.is_empty:
-        return targets
-
-    targets_merged = {}
-
-    if strictly_all(x is None for x in {axis, target_acc}):
-        axis = indexed_axes.root
-        target_acc = targets.get(None, pmap())
-        targets_merged[None] = target_acc
-
-    # To make the type checker happy
-    axis = cast(Axis, axis)
-
-    for component in axis.components:
-        key = (axis.id, component.label)
-        target_acc_ = target_acc | targets.get(key, {})
-        targets_merged[key] = target_acc_
-
-        if subaxis := indexed_axes.child(axis, component):
-            targets_merged.update(
-                accumulate_targets(targets, indexed_axes, axis=subaxis, target_acc=target_acc_)
-            )
-    return freeze(targets_merged)
-
-
 def _index_axes(
     index_tree,
     *,
     loop_indices,  # NOTE: I don't think that this is ever needed, remove?
     prev_axes,
     index=None,
-    parent_key=None,
+    parent_key=None,  # not using this any more
 ):
     """
     parent_key :
@@ -1480,20 +1411,37 @@ def _index_axes(
         )
         subaxes[leafkey] = subtree
 
+        subpathsandexprs = dict(subpathsandexprs)
+
         if None in subpathsandexprs:
-            assert subpathsandexprs.keys() == {None}, "no other keys"
-            # in this case we need to tweak subpathsandexprs to point at the parent instead
-            existing = target_path_per_cpt_per_index.pop(parent_key_)
-            target_path_per_cpt_per_index[parent_key_] = []
+            # breakpoint()
+            # assert subpathsandexprs.keys() == {None}, "no other keys"
+            # # in this case we need to tweak subpathsandexprs to point at the parent instead
+            # existing = target_path_per_cpt_per_index.pop(parent_key_)
+            # target_path_per_cpt_per_index[parent_key_] = []
+            # for existing_path, existing_exprs in existing:
+            #     for new_path, new_exprs in subpathsandexprs[None]:
+            #         target_path_per_cpt_per_index[parent_key_].append((
+            #             merge_dicts([existing_path, new_path]),
+            #             merge_dicts([existing_exprs, new_exprs]),
+            #         ))
+            # target_path_per_cpt_per_index[parent_key_] = tuple(target_path_per_cpt_per_index[parent_key_])
+
+            if None in target_path_per_cpt_per_index:
+                existing = target_path_per_cpt_per_index.pop(None)
+            else:
+                existing = [(pmap(), pmap())]
+            new = subpathsandexprs.pop(None)
+            target_path_per_cpt_per_index[None] = []
             for existing_path, existing_exprs in existing:
-                for new_path, new_exprs in subpathsandexprs[None]:
-                    target_path_per_cpt_per_index[parent_key_].append((
+                for new_path, new_exprs in new:
+                    target_path_per_cpt_per_index[None].append((
                         merge_dicts([existing_path, new_path]),
                         merge_dicts([existing_exprs, new_exprs]),
                     ))
-            target_path_per_cpt_per_index[parent_key_] = tuple(target_path_per_cpt_per_index[parent_key_])
-        else:
-            target_path_per_cpt_per_index.update(subpathsandexprs)
+            target_path_per_cpt_per_index[None] = tuple(target_path_per_cpt_per_index[None])
+
+        target_path_per_cpt_per_index.update(subpathsandexprs)
 
         outer_loops += subouterloops
 
@@ -1518,8 +1466,6 @@ def _index_axes(
 
 
 # NOTE: should be similar to index_exprs
-# def compose_targets(orig_axes, orig_target_paths_and_exprs, indexed_axes, indexed_target_paths_and_exprs, partial_linear_index_trees, *, axis=None, indexed_target_paths_acc=None, visited_orig_axes=None):
-# def compose_targets(orig_axes, orig_target_paths_and_exprs, indexed_axes, indexed_target_paths_and_exprs, *, axis=None, indexed_target_paths_acc=None, visited_orig_axes=None, indexed_target_exprs_acc=None):
 def compose_targets(orig_axes, orig_target_paths_and_exprs, indexed_axes, indexed_target_paths_and_exprs, *, axis=None, indexed_axes_acc=None, indexed_target_paths_and_exprs_acc=None, visited_orig_axes=None):
     """
 
@@ -1556,43 +1502,42 @@ def compose_targets(orig_axes, orig_target_paths_and_exprs, indexed_axes, indexe
 
         orig_none_mapped_target_path, orig_none_mapped_target_exprs = orig_target_paths_and_exprs.get(None, ({}, {}))
 
+        # breakpoint()
+        #
+        # if None in indexed_target_paths_and_exprs:
+        #     breakpoint()
+
         myreplace_map = merge_dicts(e for _, e in indexed_target_paths_and_exprs_acc.values())
         none_mapped_target_path |= orig_none_mapped_target_path
         for orig_axis_label, orig_index_expr in orig_none_mapped_target_exprs.items():
             none_mapped_target_exprs[orig_axis_label] = replace_terminals(orig_index_expr, myreplace_map)
 
-        # make sure to add existing None entries - these will not require composition I think?
+        # Now add any extra 'None-indexed' axes.
+        for (axis_label, component_label) in merge_dicts(p for p, _ in indexed_target_paths_and_exprs_acc.values()).items():
+            # If there are multiple axes that match the slice then they must be
+            # identical (apart from their ID, which is ignored in equality checks).
+            possible_targets = [ax for ax in orig_axes.nodes if ax.label == axis_label]
+            assert single_valued(orig_target_paths_and_exprs[(t.id, component_label)] for t in possible_targets)
 
-        # copied from below, refactor
+            target_axis = single_valued(possible_targets)
 
-        # FIXME: (06/12/24)
-        # The traversal here assumes that the access order for indexed and original axes
-        # match. This is not the case for, say, when accessing a component of a vector thing
-        # where the index is thus outermost. Fixing this is difficult until axes are reusable
-        # inside a tree (i.e. visited_orig_axes will not work).
+            if target_axis.label in visited_orig_axes:
+                continue
+            visited_orig_axes |= {target_axis.label}
 
-        # does the accumulated path match a part of orig_axes?
-        accumulated_path = merge_dicts(p for p, _ in indexed_target_paths_and_exprs_acc.values())
-        # if orig_axes.is_valid_path(indexed_target_paths_acc):
-        if orig_axes.is_valid_path(accumulated_path):
-            # if so then add previously unvisited node values to the composed target path for the current axis
-            # for orig_axis, orig_component in orig_axes.detailed_path(indexed_target_paths_acc).items():
-            for orig_axis, orig_component in orig_axes.detailed_path(accumulated_path).items():
-                if orig_axis in visited_orig_axes:
-                    continue
-                visited_orig_axes |= {orig_axis}
+            orig_key = (target_axis.id, component_label)
+            if orig_key in orig_target_paths_and_exprs:
+                orig_target_path, orig_target_exprs = orig_target_paths_and_exprs[orig_key]
 
-                orig_key = (orig_axis.id, orig_component.label)
-                if orig_key in orig_target_paths_and_exprs:
-                    orig_target_path, orig_target_exprs = orig_target_paths_and_exprs[orig_key]
-
-                    none_mapped_target_path |= orig_target_path
-                    for orig_axis_label, orig_index_expr in orig_target_exprs.items():
-                        none_mapped_target_exprs[orig_axis_label] = replace_terminals(orig_index_expr, myreplace_map)
+                none_mapped_target_path |= orig_target_path
+                for orig_axis_label, orig_index_expr in orig_target_exprs.items():
+                    none_mapped_target_exprs[orig_axis_label] = replace_terminals(orig_index_expr, myreplace_map)
 
         composed_target_paths_and_exprs[None] = (
             pmap(none_mapped_target_path), pmap(none_mapped_target_exprs)
         )
+        # if none_mapped_target_path:
+        #     breakpoint()
 
         if indexed_axes.is_empty:
             return freeze(composed_target_paths_and_exprs)
@@ -1600,40 +1545,37 @@ def compose_targets(orig_axes, orig_target_paths_and_exprs, indexed_axes, indexe
             axis = indexed_axes.root
 
     for component in axis.components:
-        # partial_index_tree = partial_linear_index_trees[axis.id, component.label]
-
+        # FIXME: This is not necessary
         linear_axis = Axis([component], axis.label)
         indexed_axes_acc_ = indexed_axes_acc.add_axis(linear_axis, indexed_axes_acc.leaf)
 
         indexed_target_paths_and_exprs_acc_ = indexed_target_paths_and_exprs_acc | {(linear_axis.id, component.label): indexed_target_paths_and_exprs[axis.id, component.label]}
-        # indexed_target_paths_acc_ = indexed_target_paths_acc | indexed_target_path
-        # indexed_target_exprs_acc_ = indexed_target_exprs_acc | indexed_target_exprs
 
         visited_orig_axes_ = visited_orig_axes
 
-        # does the accumulated path match a part of orig_axes?
-        accumulated_path = merge_dicts(p for p, _ in indexed_target_paths_and_exprs_acc_.values())
-        # if orig_axes.is_valid_path(indexed_target_paths_acc_):
-        if orig_axes.is_valid_path(accumulated_path):
-            # if so then add previously unvisited node values to the composed target path for the current axis
-            # for orig_axis, orig_component in orig_axes.detailed_path(indexed_target_paths_acc_).items():
-            for orig_axis, orig_component in orig_axes.detailed_path(accumulated_path).items():
-                if orig_axis in visited_orig_axes:
-                    continue
-                visited_orig_axes_ |= {orig_axis}
+        for (axis_label, component_label) in merge_dicts(p for p, _ in indexed_target_paths_and_exprs_acc_.values()).items():
+            # If there are multiple axes that match the slice then they must be
+            # identical (apart from their ID, which is ignored in equality checks).
+            possible_targets = [ax for ax in orig_axes.nodes if ax.label == axis_label]
+            assert single_valued(orig_target_paths_and_exprs[(t.id, component_label)] for t in possible_targets)
 
-                orig_key = (orig_axis.id, orig_component.label)
+            target_axis = single_valued(possible_targets)
+            orig_key = (target_axis.id, component_label)
 
-                if orig_key in orig_target_paths_and_exprs:
-                    orig_target_path, orig_target_exprs = orig_target_paths_and_exprs[orig_key]
+            if target_axis.label in visited_orig_axes_:
+                continue
+            visited_orig_axes_ |= {target_axis.label}
 
-                    # now index exprs
-                    replace_map = merge_dicts(t for _, t in indexed_target_paths_and_exprs_acc_.values())
-                    new_exprs = {}
-                    for orig_axis_label, orig_index_expr in orig_target_exprs.items():
-                        new_exprs[orig_axis_label] = replace_terminals(orig_index_expr, replace_map)
+            if orig_key in orig_target_paths_and_exprs:  # redundant?
+                orig_target_path, orig_target_exprs = orig_target_paths_and_exprs[orig_key]
 
-                    composed_target_paths_and_exprs[axis.id, component.label] = (orig_target_path, freeze(new_exprs))
+                # now index exprs
+                replace_map = merge_dicts(t for _, t in indexed_target_paths_and_exprs_acc_.values())
+                new_exprs = {}
+                for orig_axis_label, orig_index_expr in orig_target_exprs.items():
+                    new_exprs[orig_axis_label] = replace_terminals(orig_index_expr, replace_map)
+
+                composed_target_paths_and_exprs[axis.id, component.label] = (orig_target_path, freeze(new_exprs))
 
         # now recurse
         if subaxis := indexed_axes.child(axis, component):
