@@ -1604,7 +1604,6 @@ class IndexedAxisTree(BaseAxisTree):
         matching_targets = []
         for target in self.targets:
             all_leaves_match = True
-            breakpoint()
             for leaf in self.leaves:
                 leaf_path = self.path_with_nodes(leaf)
 
@@ -2031,7 +2030,11 @@ def subst_layouts(
 
         # layouts_subst[path] = replace(layouts[accumulated_path], linear_axes_acc, target_paths_and_exprs_acc)
         replace_map = merge_dicts(t for _, t in target_paths_and_exprs_acc.values())
-        layouts_subst[path] = replace_terminals(layouts[accumulated_path], replace_map)
+
+        # If we have indexed using a different order to the initial axis tree then sometimes
+        # the accumulated path is not valid. In this case do not emit a layout function.
+        if accumulated_path in layouts:
+            layouts_subst[path] = replace_terminals(layouts[accumulated_path], replace_map)
 
         if not axes.is_empty:
             layouts_subst.update(
@@ -2060,7 +2063,11 @@ def subst_layouts(
             # layouts_subst[path_] = replace(layouts[accumulated_path], linear_axes_acc_, target_paths_and_exprs_acc_)
             # breakpoint()
             replace_map = merge_dicts(t for _, t in target_paths_and_exprs_acc_.values())
-            layouts_subst[path_] = replace_terminals(layouts[accumulated_path], replace_map)
+
+            # If we have indexed using a different order to the initial axis tree then sometimes
+            # the accumulated path is not valid. In this case do not emit a layout function.
+            if accumulated_path in layouts:
+                layouts_subst[path_] = replace_terminals(layouts[accumulated_path], replace_map)
 
             if subaxis := axes.child(axis, component):
                 layouts_subst.update(
