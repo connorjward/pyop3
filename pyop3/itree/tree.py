@@ -277,7 +277,7 @@ class LoopIndex(Index, KernelArgument):
     # TODO: Include iterset outer loops
     @property
     def outer_loops(self):
-        return frozenset({self})
+        return (self,)
 
     @property
     def is_context_free(self):
@@ -387,7 +387,7 @@ class ScalarIndex(Index):
     fields = {"axis", "component", "value", "id"}
 
     def __init__(self, axis, component, value, *, id=None):
-        super().__init__(axis, component_labels=["XXX"], id=id)
+        super().__init__(label="XXX", id=id)
         self.axis = axis
         self.component = component
         self.value = value
@@ -398,7 +398,7 @@ class ScalarIndex(Index):
 
     @property
     def component_labels(self) -> tuple:
-        return (0,)
+        return ("0",)
 
 
 # TODO I want a Slice to have "bits" like a Map/CalledMap does
@@ -1003,13 +1003,12 @@ def _(
 
 @_index_axes_index.register
 def _(index: ScalarIndex, **_):
-    target_path_and_exprs = pmap({None: ((index.leaf_target_paths, pmap({index.axis: index.value})),)})
+    target_path_and_exprs = pmap({None: ((just_one(just_one(index.leaf_target_paths)), pmap({index.axis: index.value})),)})
     # index_exprs = pmap({None: (,)})
     layout_exprs = pmap({None: 0})
     return (
         AxisTree(),
         target_path_and_exprs,
-        # index_exprs,
         layout_exprs,
         (),
         {},
@@ -1219,7 +1218,7 @@ def _(slice_: Slice, *, prev_axes, **_):
         axes,
         target_path_per_component,
         {},
-        frozenset(),  # no outer loops
+        (),  # no outer loops
         {},
     )
 
@@ -1430,21 +1429,23 @@ def _index_axes(
     loop_indices,  # NOTE: I don't think that this is ever needed, remove?
     prev_axes,
     index=None,
-    # parent_indices=None,
+    parent_key=None,
 ):
+    """
+    parent_key :
+        If the current index attaches to `None` (e.g. a loop index does not produce a new axis so cannot
+        tie to it) then attach to this instead.
+    """
     if index is None:
         index = index_tree.root
-        # parent_indices = ()
 
     # Make the type checker happy
     index = cast(Index, index)
-    # parent_indices = cast(tuple, parent_indices)
 
     axes_per_index, target_path_per_cpt_per_index, _, outer_loops, _ = _index_axes_index(
         index,
         loop_indices=loop_indices,
         prev_axes=prev_axes,
-        # parent_indices=parent_indices,
     )
 
     target_path_per_cpt_per_index = dict(target_path_per_cpt_per_index)
@@ -1455,29 +1456,46 @@ def _index_axes(
         leafkeys = [None]
 
     subaxes = {}
-    # partial_index_trees = {}
     for leafkey, subindex in strict_zip(
         leafkeys, index_tree.node_map[index.id]
     ):
         if subindex is None:
             continue
 
+        # If the current index produces an axis tree then we pass the leaf of it since
+        # that is the new possible attachment point for None-producing indices like
+        # loop indices and scalar indices.
+        if leafkey is not None:
+            _axis, _component_label = leafkey
+            parent_key_ = (_axis.id, _component_label)
+        else:
+            parent_key_ = parent_key
+
         subtree, subpathsandexprs, _, subouterloops, subpartialindextree = _index_axes(
             index_tree,
             loop_indices=loop_indices,
             prev_axes=prev_axes,
             index=subindex,
+            parent_key=parent_key_,
         )
         subaxes[leafkey] = subtree
 
         if None in subpathsandexprs:
+            assert subpathsandexprs.keys() == {None}, "no other keys"
             # in this case we need to tweak subpathsandexprs to point at the parent instead
-            breakpoint()
-
+            existing = target_path_per_cpt_per_index.pop(parent_key_)
+            target_path_per_cpt_per_index[parent_key_] = []
+            for existing_path, existing_exprs in existing:
+                for new_path, new_exprs in subpathsandexprs[None]:
+                    target_path_per_cpt_per_index[parent_key_].append((
+                        merge_dicts([existing_path, new_path]),
+                        merge_dicts([existing_exprs, new_exprs]),
+                    ))
+            target_path_per_cpt_per_index[parent_key_] = tuple(target_path_per_cpt_per_index[parent_key_])
         else:
             target_path_per_cpt_per_index.update(subpathsandexprs)
 
-        outer_loops |= subouterloops
+        outer_loops += subouterloops
 
     target_path_per_component = ImmutableOrderedDict(target_path_per_cpt_per_index)
 
@@ -1545,11 +1563,13 @@ def compose_targets(orig_axes, orig_target_paths_and_exprs, indexed_axes, indexe
 
         # make sure to add existing None entries - these will not require composition I think?
 
-        # debug
-        # if not indexed_axes.is_empty and indexed_axes.root.id == "_id_Axis_413":
-        #     breakpoint()
-
         # copied from below, refactor
+
+        # FIXME: (06/12/24)
+        # The traversal here assumes that the access order for indexed and original axes
+        # match. This is not the case for, say, when accessing a component of a vector thing
+        # where the index is thus outermost. Fixing this is difficult until axes are reusable
+        # inside a tree (i.e. visited_orig_axes will not work).
 
         # does the accumulated path match a part of orig_axes?
         accumulated_path = merge_dicts(p for p, _ in indexed_target_paths_and_exprs_acc.values())
