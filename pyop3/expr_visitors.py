@@ -198,12 +198,13 @@ def _(loop_var: LoopIndexVar, /, visited_axes, loop_axes, cache) -> AxisTree:
 
     new_components = []
     for component in axis.components:
-        # FIXME: HERE (10/12/24)
-        # I think I need to build a new axis tree for the component, using extract_axes again
-        raise NotImplementedError
-        AxisComponent(replace_terminals(c.count, loop_index_replace_map), c.label)
-        for c in axis.components
-    )
+        if isinstance(component.count, numbers.Integral):
+            new_component = component
+        else:
+            new_count_axes = extract_axes(just_one(component.count.leaf_layouts.values()), visited_axes, loop_axes, cache)
+            new_count = Dat(new_count_axes, data=component.count.buffer)
+            new_component = AxisComponent(new_count, component.label)
+        new_components.append(new_component)
     new_axis = Axis(new_components, f"{axis.label}_{loop_var.loop_id}")
     return cache.setdefault(loop_var, new_axis.as_tree())
 
