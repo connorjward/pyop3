@@ -96,8 +96,8 @@ def _(loop: Loop, /, *, loop_context_acc) -> InstructionList:
         restricted_loop_index = just_one(_as_context_free_indices(loop.index, loop_context))
 
         # skip empty loops
-        if restricted_loop_index.iterset.size == 0:
-            continue
+        # if restricted_loop_index.iterset.size == 0:
+        #     continue
 
         loop_context_acc_ = loop_context_acc | loop_context
         expanded_loop = type(loop)(

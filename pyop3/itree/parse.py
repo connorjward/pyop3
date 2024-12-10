@@ -22,7 +22,7 @@ class IncompletelyIndexedException(Pyop3Exception):
 # NOTE: Now really should be plural: 'forests'
 # NOTE: Is this definitely the case? I think at the moment I always return just a single
 # tree per context.
-def as_index_forests(forest: Any, /, axes: BaseAxisTree, *, strict: bool = False) -> PMap:
+def as_index_forests(forest: Any, /, axes: BaseAxisTree | None = None, *, strict: bool = False) -> PMap:
     """Return a collection of index trees, split by loop context.
 
     Parameters
@@ -46,6 +46,9 @@ def as_index_forests(forest: Any, /, axes: BaseAxisTree, *, strict: bool = False
         Multiple index trees are needed because maps are able to yield multiple
         equivalent index trees.
     """
+    if axes is None and strict:
+        raise ValueError("Cannot do strict checking if no axes are provided to match against")
+
     if forest is Ellipsis:
         return ImmutableOrderedDict({pmap(): (forest,)})
 
@@ -59,17 +62,18 @@ def as_index_forests(forest: Any, /, axes: BaseAxisTree, *, strict: bool = False
 
         found_match = False
         for index_tree in forest_:
-            if strict:
-                # Make sure that `axes` are completely indexed by each of the index
-                # forests. Note that, since the index trees in a forest represent
-                # 'equivalent' indexing operations, only one of them is expected to work.
-                if not _index_tree_completely_indexes_axes(index_tree, axes):
-                    continue
-            else:
-                # Add extra slices to make sure that index tree targets
-                # all the axes in `axes`
-                # FIXME: needs try-except
-                index_tree = _complete_index_tree(index_tree, axes)
+            if axes is not None:
+                if strict:
+                    # Make sure that `axes` are completely indexed by each of the index
+                    # forests. Note that, since the index trees in a forest represent
+                    # 'equivalent' indexing operations, only one of them is expected to work.
+                    if not _index_tree_completely_indexes_axes(index_tree, axes):
+                        continue
+                else:
+                    # Add extra slices to make sure that index tree targets
+                    # all the axes in `axes`
+                    # FIXME: needs try-except
+                    index_tree = _complete_index_tree(index_tree, axes)
 
             if found_match:
                 # Each of the index trees in a forest are considered

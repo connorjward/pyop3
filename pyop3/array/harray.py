@@ -130,14 +130,6 @@ class _Dat(Array, KernelArgument, Record, abc.ABC):
                 count.append(y)
             return flattened, count
 
-    def get_value(self, indices, path=None, *, loop_exprs=pmap()):
-        offset = self.axes.offset(indices, path, loop_exprs=loop_exprs)
-        return self.buffer.data_ro[offset]
-
-    def set_value(self, indices, value, path=None, *, loop_exprs=pmap()):
-        offset = self.axes.offset(indices, path, loop_exprs=loop_exprs)
-        self.buffer.data_wo[offset] = value
-
     def select_axes(self, indices):
         selected = []
         current_axis = self.axes
@@ -292,6 +284,14 @@ class Dat(_Dat):
     # Since __getitem__ is implemented, this class is implicitly considered
     # to be iterable (which it's not). This avoids some confusing behaviour.
     __iter__ = None
+
+    def get_value(self, indices, path=None, *, loop_exprs=pmap()):
+        offset = self.axes.offset(indices, path, loop_exprs=loop_exprs)
+        return self.buffer.data_ro[offset]
+
+    def set_value(self, indices, value, path=None, *, loop_exprs=pmap()):
+        offset = self.axes.offset(indices, path, loop_exprs=loop_exprs)
+        self.buffer.data_wo[offset] = value
 
     def with_context(self, context):
         return self.reconstruct(axes=self.axes.with_context(context))
@@ -587,6 +587,21 @@ class _ExpressionDat(_ConcretizedDat2):
 
     def __eq__(self, other) -> bool:
         return type(other) is type(self) and other.dat == self.dat and other.layout == self.layout and other.name == self.name
+
+    # NOTE: args, kwargs unused
+    def get_value(self, indices, *args, **kwargs):
+        offset = self._get_offset(indices)
+        return self.buffer.data_ro[offset]
+
+    # NOTE: args, kwargs unused
+    def set_value(self, indices, value, *args, **kwargs):
+        offset = self._get_offset(indices)
+        self.buffer.data_wo[offset] = value
+
+    def _get_offset(self, indices):
+        from pyop3.expr_visitors import evaluate
+
+        return evaluate(self.layout, indices)
 
     @property
     def _record_fields(self) -> frozenset:

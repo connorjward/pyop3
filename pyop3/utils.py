@@ -313,7 +313,8 @@ def popwhen(predicate, iterable):
     raise KeyError("Predicate does not hold for any items in iterable")
 
 
-def steps(sizes, drop_last=False):
+# NOTE: It might be more logical for drop_last to default to True
+def steps(sizes, *, drop_last=False):
     sizes = tuple(sizes)
     steps_ = (0,) + tuple(np.cumsum(sizes, dtype=int))
     return steps_[:-1] if drop_last else steps_

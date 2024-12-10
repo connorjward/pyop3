@@ -1061,7 +1061,7 @@ def register_extent(extent, iname_replace_map, ctx):
         return extent
 
     # actually a pymbolic expression
-    if not isinstance(extent, Dat):
+    if not isinstance(extent, (Dat, _ExpressionDat)):
         raise NotImplementedError("need to tidy up assignment logic")
 
     expr = lower_expr(extent, iname_replace_map, ctx)

@@ -685,25 +685,34 @@ class CalledMap(AxisIndependentIndex, Identified, Labelled, LoopIterable):
         #     )
         # return ContextSensitiveMultiArray(array_per_context)
 
-    # def index(self) -> LoopIndex:
-    #     context_map = {
-    #         ctx: index_axes(itree, ctx) for ctx, itree in as_index_forest(self).items()
-    #     }
-    #     context_sensitive_axes = ContextSensitiveAxisTree(context_map)
-    #     return LoopIndex(context_sensitive_axes)
+    def iter(self, *, eager=False) -> LoopIndex:
+        from pyop3.itree.parse import as_index_forests
 
-    # def iter(self, outer_loops=()):
-    #     loop_context = merge_dicts(
-    #         iter_entry.loop_context for iter_entry in outer_loops
-    #     )
-    #     cf_called_map = self.with_context(loop_context)
-    #     return iter_axis_tree(
-    #         self.index(),
-    #         cf_called_map.axes,
-    #         cf_called_map.target_paths,
-    #         cf_called_map.index_exprs,
-    #         outer_loops,
-    #     )
+        if eager:
+            raise NotImplementedError
+
+        index_forests = as_index_forests(self)
+
+        if self.is_context_free:
+            index_forest = just_one(index_forests.values())
+
+            if len(index_forest) > 1:
+                raise NotImplementedError("Need to think about this case")
+            else:
+                index_tree = just_one(index_forest)
+
+            iterset = index_axes(index_tree)
+        else:
+            context_map = {}
+            for ctx, index_forest in as_index_forests(self).items():
+                if len(index_forest) > 1:
+                    raise NotImplementedError("Need to think about this case")
+                else:
+                    index_tree = just_one(index_forest)
+
+                context_map[ctx] = index_axes(index_tree, ctx)
+            iterset = ContextSensitiveAxisTree(context_map)
+        return LoopIndex(iterset)
 
     @property
     def name(self):
@@ -862,66 +871,6 @@ class CalledMap(AxisIndependentIndex, Identified, Labelled, LoopIterable):
     def name(self) -> str:
         return self.map.name
 
-    # NOTE: This can now probably go and use .axes instead
-
-    # def iter(self, eager=False):
-    #     if eager:
-    #         raise NotImplementedError
-    #
-    #     index_forest = as_index_forest(self)
-    #     assert index_forest.keys() == {pmap()}
-    #     index_tree = index_forest[pmap()]
-    #     iterset = index_axes(index_tree, pmap())
-    #
-    #     # The loop index from a context-free map can be context-sensitive if it
-    #     # has multiple components.
-    #     if len(iterset.leaves) == 1:
-    #         path = iterset.path(*iterset.leaf)
-    #         target_path = {}
-    #         for ax, cpt in iterset.path_with_nodes(*iterset.leaf).items():
-    #             target_path.update(iterset.target_paths.get((ax.id, cpt), {}))
-    #         return ContextFreeLoopIndex(iterset, path, target_path)
-    #     else:
-    #         return LoopIndex(iterset)
-
-    def restrict(self, paths):
-        breakpoint()
-        ...
-
-    # is this ever used?
-    # @property
-    # def components(self):
-    #     return self.map.connectivity[self.index.target_paths]
-
-    # @property
-    # def leaf_target_paths(self):
-    #     return tuple(tuple(mc.target_path for mc in equiv_mcs) for equiv_mcs in self.targets)
-
-    # @cached_property
-    # def axes(self):
-    #     return self._axes_info[0]
-    #
-    # @cached_property
-    # def target_paths(self):
-    #     return self._axes_info[1]
-    #
-    # @cached_property
-    # def index_exprs(self):
-    #     return self._axes_info[2]
-    #
-    # @cached_property
-    # def layout_exprs(self):
-    #     return self._axes_info[3]
-    #
-    # # TODO This is bad design, unroll the traversal and store as properties
-    # @cached_property
-    # def _axes_info(self):
-    #     return _index_axes_index(self, (), prev_axes=None)
-
-
-# remove this old class, loop contexts are now implicit
-# ContextFreeCalledMap = CalledMap
-
 
 class ContextSensitiveCalledMap(ContextSensitiveLoopIterable):
     pass
@@ -990,7 +939,7 @@ def _(
     targets[None] = tuple(targets[None])
 
     # NOTE: If the iterset also has outer loops?
-    outer_loops = frozenset({cf_loop_index})
+    outer_loops = (cf_loop_index,)
 
     return (
         axes,
@@ -1276,7 +1225,7 @@ def _make_leaf_axis_from_called_map_new(map_name, output_spec, linear_input_axes
 
 def index_axes(
     index_tree: Union[IndexTree, Ellipsis],
-    loop_context,
+    loop_context: Mapping | None = None,
     axes: Optional[Union[AxisTree, AxisForest]] = None,
 # ) -> AxisForest:
     ):
@@ -1298,10 +1247,14 @@ def index_axes(
     plus target paths and target exprs
 
     """
-    assert isinstance(axes, (AxisTree, IndexedAxisTree))
+    if axes is not None:
+        assert isinstance(axes, (AxisTree, IndexedAxisTree))
 
     if index_tree is Ellipsis:
-        return axes
+        if axes is not None:
+            return axes
+        else:
+            raise ValueError
 
     (
         indexed_axes,
@@ -1318,7 +1271,7 @@ def index_axes(
     indexed_target_paths_and_exprs = expand_compressed_target_paths(indexed_target_paths_and_exprs_compressed)
 
     # If the original axis tree is unindexed then no composition is required.
-    if isinstance(axes, AxisTree):
+    if axes is None or isinstance(axes, AxisTree):
         return IndexedAxisTree(
             indexed_axes.node_map,
             axes,
@@ -1326,6 +1279,9 @@ def index_axes(
             layout_exprs={},
             outer_loops=outer_loops,
         )
+
+    if axes is None:
+        raise NotImplementedError("Need to think about this case")
 
     all_target_paths_and_exprs = []
     for orig_path in axes.paths_and_exprs:

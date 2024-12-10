@@ -194,8 +194,9 @@ class AxisComponentRegion:
 @functools.singledispatch
 def _parse_regions(obj: Any) -> tuple[AxisComponentRegion]:
     from pyop3.array import Dat
+    from pyop3.array.harray import _ExpressionDat
 
-    if isinstance(obj, Dat):
+    if isinstance(obj, (Dat, _ExpressionDat)):
         return (AxisComponentRegion(obj),)
     else:
         raise TypeError(f"No handler provided for {type(obj).__name__}")

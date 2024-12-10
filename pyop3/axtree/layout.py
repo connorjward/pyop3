@@ -879,8 +879,9 @@ def _axis_component_size_region(
 @functools.singledispatch
 def _as_int(arg: Any, indices, path=None, *, loop_indices=pmap()):
     from pyop3.array import Dat
+    from pyop3.array.harray import _ExpressionDat
 
-    if isinstance(arg, Dat):
+    if isinstance(arg, (Dat, _ExpressionDat)):
         # TODO this might break if we have something like [:, subset]
         # I will need to map the "source" axis (e.g. slice_label0) back
         # to the "target" axis
