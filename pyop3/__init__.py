@@ -76,7 +76,7 @@ from pyop3.lang import (  # noqa: F401
     OpaqueKernelArgument,
     Assignment,
     do_loop,
-    loop,
+    _loop as loop,
 )
 from pyop3.sf import StarForest, serial_forest, single_star
 

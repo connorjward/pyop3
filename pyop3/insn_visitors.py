@@ -713,8 +713,8 @@ def _collect_array_candidate_indirections(dat, loop_axes) -> ImmutableOrderedDic
     for leaf_path, orig_layout in dat.axes.leaf_subst_layouts.items():
         visited_axes = dat.axes.path_with_nodes(dat.axes._node_from_path(leaf_path), and_components=True)
 
-        if extract_axes(orig_layout, visited_axes, loop_axes, {}).size == 0:
-            continue
+        # if extract_axes(orig_layout, visited_axes, loop_axes, {}).size == 0:
+        #     continue
 
         candidatess[(dat, leaf_path)] = collect_expression_candidate_indirections(
             orig_layout, visited_axes, loop_axes

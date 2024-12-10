@@ -10,7 +10,7 @@ from pyrsistent import pmap, PMap
 
 from pyop3.array import Array, Dat, _ExpressionDat
 from pyop3.array.petsc import AbstractMat
-from pyop3.axtree.tree import AxisVar, Expression, Operator, Add, Mul, BaseAxisTree, IndexedAxisTree, AxisTree, Axis, LoopIndexVar, merge_trees2, ExpressionT, Terminal
+from pyop3.axtree.tree import AxisVar, Expression, Operator, Add, Mul, BaseAxisTree, IndexedAxisTree, AxisTree, Axis, LoopIndexVar, merge_trees2, ExpressionT, Terminal, AxisComponent
 from pyop3.dtypes import IntType
 from pyop3.utils import OrderedSet, just_one
 
@@ -84,6 +84,11 @@ def _(num: numbers.Number, *args, **kwargs):
 @evaluate.register
 def _(var: AxisVar, indices):
     return indices[var.axis_label]
+
+
+@evaluate.register(LoopIndexVar)
+def _(loop_var: LoopIndexVar):
+    return OrderedSet({loop_var.index})
 
 
 @functools.singledispatch
@@ -181,9 +186,26 @@ def _(loop_var: LoopIndexVar, /, visited_axes, loop_axes, cache) -> AxisTree:
     try:
         return cache[loop_var]
     except KeyError:
-        axis = just_one(axis for axis in loop_axes[loop_var.loop_id].nodes if axis.label == loop_var.axis_label)
-        axis = axis.copy(label=f"{axis.label}_{loop_var.loop_id}").as_tree()
-        return cache.setdefault(loop_var, axis)
+        pass
+
+    # replace LoopIndexVars in any component sizes with AxisVars
+    loop_index_replace_map = {}
+    for loop_id, iterset in loop_axes.items():
+        for axis in iterset.nodes:
+            loop_index_replace_map[(loop_id, axis.label)] = AxisVar(f"{axis.label}_{loop_id}")
+
+    axis = just_one(axis for axis in loop_axes[loop_var.loop_id].nodes if axis.label == loop_var.axis_label)
+
+    new_components = []
+    for component in axis.components:
+        # FIXME: HERE (10/12/24)
+        # I think I need to build a new axis tree for the component, using extract_axes again
+        raise NotImplementedError
+        AxisComponent(replace_terminals(c.count, loop_index_replace_map), c.label)
+        for c in axis.components
+    )
+    new_axis = Axis(new_components, f"{axis.label}_{loop_var.loop_id}")
+    return cache.setdefault(loop_var, new_axis.as_tree())
 
 
 @extract_axes.register(AxisVar)

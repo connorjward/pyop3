@@ -15,7 +15,7 @@ import pymbolic as pym
 from petsc4py import PETSc
 from pyrsistent import PMap, freeze, pmap
 
-from pyop3.array.harray import Dat
+from pyop3.array.harray import Dat, _ExpressionDat
 from pyop3.axtree.tree import (
     Axis,
     AxisComponent,
@@ -389,6 +389,8 @@ def size_requires_external_index(axes, axis, component, inner_loop_vars, path=pm
 
 def size_requires_external_index_region(axes, axis, component, region, inner_loop_vars, path=pmap()):
     from pyop3.array import Dat
+    from pyop3.array.harray import _ExpressionDat
+    from pyop3.expr_visitors import replace_terminals
 
     if len(component.regions) > 1:
         raise NotImplementedError("TODO")
@@ -401,10 +403,7 @@ def size_requires_external_index_region(axes, axis, component, region, inner_loo
         else:
             leafpath = just_one(size.axes.leaf_paths)
         layout = size.axes._subst_layouts_default[leafpath]
-        # no longer needed I believe
-        # required_loop_vars = LoopIndexCollector(linear=False)(layout)
-        # if not required_loop_vars.issubset(inner_loop_vars):
-        #     return True
+
         # is the path sufficient? i.e. do we have enough externally provided indices
         # to correctly index the axis?
         if not size.axes.is_empty:
@@ -414,6 +413,13 @@ def size_requires_external_index_region(axes, axis, component, region, inner_loo
                 else:
                     return True
 
+    elif isinstance(size, _ExpressionDat):
+        layout = size.layout
+
+        if set(collect_axis_vars(layout)) > path.keys():
+            return True
+
+
     if subaxis := axes.child(axis, component):
         for c in subaxis.components:
             # path_ = path | {subaxis.label: c.label}
@@ -421,6 +427,45 @@ def size_requires_external_index_region(axes, axis, component, region, inner_loo
             if size_requires_external_index(axes, subaxis, c, inner_loop_vars, path_):
                 return True
     return False
+
+
+@functools.singledispatch
+def collect_axis_vars(obj: Any, /) -> OrderedSet:
+    from pyop3.itree.tree import LoopIndexVar, Operator
+
+    if isinstance(obj, LoopIndexVar):
+        assert False
+    elif isinstance(obj, Operator):
+        return collect_axis_vars(obj.a) | collect_axis_vars(obj.b)
+
+    raise TypeError(f"No handler defined for {type(obj).__name__}")
+
+
+@collect_axis_vars.register(numbers.Number)
+def _(var):
+    return OrderedSet()
+
+@collect_axis_vars.register(AxisVar)
+def _(var):
+    return OrderedSet([var])
+
+
+@collect_axis_vars.register(Dat)
+def _(dat: Dat, /) -> OrderedSet:
+    loop_indices = OrderedSet()
+
+    if dat.parent:
+        loop_indices |= collect_axis_vars(dat.parent)
+
+    for leaf in dat.axes.leaves:
+        path = dat.axes.path(leaf)
+        loop_indices |= collect_axis_vars(dat.axes.subst_layouts()[path])
+    return loop_indices
+
+
+@collect_axis_vars.register(_ExpressionDat)
+def _(dat: _ExpressionDat, /) -> OrderedSet:
+    return collect_axis_vars(dat.layout)
 
 
 def step_size(

@@ -818,12 +818,19 @@ class DummyKernelArgument(OpaqueKernelArgument):
     """
 
 
-def loop(*args, **kwargs):
+def _loop(*args, **kwargs):
+    """
+    Notes
+    -----
+    This function has a leading underscore to avoid clashing with any variables
+    called ``loop``. It is exported as ``op3.loop``.
+
+    """
     return Loop(*args, **kwargs)
 
 
-def do_loop(*args, **kwargs):
-    loop(*args, **kwargs)()
+def do_loop(index, statements, *, compiler_parameters: Mapping | None = None):
+    _loop(index, statements)(compiler_parameters=compiler_parameters)
 
 
 def fix_intents(tunit, accesses):

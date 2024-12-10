@@ -781,7 +781,7 @@ class CalledMap(AxisIndependentIndex, Identified, Labelled, LoopIterable):
 
                     # make a method
                     subaxis, subtargets = _make_leaf_axis_from_called_map_new(
-                        self.name, output_spec, linear_input_axes, input_targets,
+                        self, self.name, output_spec, linear_input_axes, input_targets,
                     )
 
                     axes_ = axes_.add_axis(subaxis, leaf_key)
@@ -1186,13 +1186,16 @@ def _(
     return called_map.axes, compressed_targets, {}, called_map.outer_loops, {}
 
 
-def _make_leaf_axis_from_called_map_new(map_name, output_spec, linear_input_axes, input_paths_and_exprs):
+def _make_leaf_axis_from_called_map_new(map_, map_name, output_spec, linear_input_axes, input_paths_and_exprs):
     components = []
     replace_map = merge_dicts(t for _, t in input_paths_and_exprs.values())
     for map_output in output_spec:
-        # NOTE: This could probably be done more eagerly.
-        # arity = replace(map_output.arity, linear_input_axes, input_paths_and_exprs)
-        arity = replace_terminals(map_output.arity, replace_map)
+        # NOTE: This should be done more eagerly.
+        arity = map_output.arity
+        if not isinstance(arity, numbers.Integral):
+            assert isinstance(arity, Dat)
+            arity = arity[map_.index]
+        # arity = replace_terminals(map_output.arity, replace_map)
         component = AxisComponent(arity, label=map_output.label)
         components.append(component)
     axis = Axis(components, label=map_name)

@@ -438,6 +438,9 @@ class LabelledTree(AbstractTree):
     def path_with_nodes(
         self, node, component_label=None, ordered=False, and_components=False
     ):
+        if node is None:
+            return pmap()
+
         # TODO: make target always be a 2-tuple
         if isinstance(node, tuple):
             assert component_label is None
@@ -458,7 +461,7 @@ class LabelledTree(AbstractTree):
 
     @cached_property
     def leaf_paths(self):
-        return tuple(self.path(*leaf) for leaf in self.leaves)
+        return tuple(self.path(leaf) for leaf in self.leaves)
 
     @property
     def leaf_path(self):
