@@ -395,7 +395,6 @@ def compile(expr: PreprocessedExpression, compiler_parameters=None):
     if isinstance(insn, InstructionList):
         cs_expr = insn.instructions
     else:
-        assert isinstance(insn, Loop), "other types not handled yet"
         cs_expr = (insn,)
 
     ctx = LoopyCodegenContext()

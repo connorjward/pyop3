@@ -50,8 +50,10 @@ from pyop3.lang import (
     InstructionList,
     PetscMatAssign,
     ArrayAccessType,
+    enlist,
+    maybe_enlist,
 )
-from pyop3.utils import UniqueNameGenerator, checked_zip, just_one, single_valued, OrderedSet, merge_dicts, expand_collection_of_iterables
+from pyop3.utils import UniqueNameGenerator, checked_zip, just_one, single_valued, OrderedSet, merge_dicts, expand_collection_of_iterables, strictly_all
 
 
 # NOTE: A sensible pattern is to have a public and private (rec) implementations of a
@@ -81,7 +83,7 @@ def _expand_loop_contexts_rec(obj: Any, /, *, loop_context_acc) -> InstructionLi
 
 @_expand_loop_contexts_rec.register(InstructionList)
 def _(insn_list: InstructionList, /, **kwargs) -> InstructionList:
-    return InstructionList([_expand_loop_contexts_rec(insn, **kwargs) for insn in insn_list])
+    return maybe_enlist([_expand_loop_contexts_rec(insn, **kwargs) for insn in insn_list])
 
 
 @_expand_loop_contexts_rec.register(Loop)
@@ -108,7 +110,7 @@ def _(loop: Loop, /, *, loop_context_acc) -> InstructionList:
             ]
         )
         expanded_loops.append(expanded_loop)
-    return InstructionList(expanded_loops)
+    return maybe_enlist(expanded_loops)
 
 
 @_expand_loop_contexts_rec.register(CalledFunction)
@@ -158,7 +160,7 @@ class ImplicitPackUnpackExpander(Transformer):
     # TODO Can I provide a generic "operands" thing? Put in the parent class?
     @_apply.register
     def _(self, loop: Loop):
-        new_statements = [s for stmt in loop.statements for s in self._apply(stmt)]
+        new_statements = [s for stmt in loop.statements for s in enlist(self._apply(stmt))]
         return loop.copy(statements=new_statements)
 
     @_apply.register
@@ -175,7 +177,7 @@ class ImplicitPackUnpackExpander(Transformer):
     @_apply.register
     def _(self, assignment: Assignment):
         # I think this is fine...
-        return InstructionList([assignment])
+        return assignment
 
         # same as for CalledFunction
         gathers = []
@@ -221,7 +223,7 @@ class ImplicitPackUnpackExpander(Transformer):
             else:
                 arguments.append(arg)
 
-        return InstructionList([*gathers, assignment.with_arguments(arguments), *scatters])
+        return maybe_enlist((*gathers, assignment.with_arguments(arguments), *scatters))
 
     @_apply.register
     def _(self, terminal: CalledFunction):
@@ -279,7 +281,7 @@ class ImplicitPackUnpackExpander(Transformer):
             else:
                 arguments.append(arg)
 
-        return InstructionList([*gathers, terminal.with_arguments(arguments), *scatters])
+        return maybe_enlist((*gathers, terminal.with_arguments(arguments), *scatters))
 
 
 # class ExprMarker
@@ -344,22 +346,20 @@ def expand_assignments(obj: Any, /) -> InstructionList:
 
 @expand_assignments.register(InstructionList)
 def _(insn_list: InstructionList, /) -> InstructionList:
-    return InstructionList([expand_assignments(insn) for insn in insn_list])
+    return maybe_enlist((expand_assignments(insn) for insn in insn_list))
 
 
 @expand_assignments.register(Loop)
 def _(loop: Loop, /) -> InstructionList:
-    return InstructionList([
-        Loop(loop.index, [
+    return Loop(loop.index, [
             expand_assignments(stmt) for stmt in loop.statements
-        ])
     ])
 
 
 @expand_assignments.register(CalledFunction)
 def _(func: CalledFunction, /) -> InstructionList:
     # Assume that this isn't a problem here, think about this
-    return InstructionList([func])
+    return func
 
 
 @expand_assignments.register(Assignment)
@@ -396,7 +396,7 @@ def _(assignment: Assignment, /) -> InstructionList:
     else:
         bare_assignment = Assignment(bare_assignee, bare_expression, "write")
 
-    return InstructionList([*extra_input_insns, bare_assignment, *extra_output_insns])
+    return maybe_enlist((*extra_input_insns, bare_assignment, *extra_output_insns))
 
 
 # TODO: better word than "mode"? And use an enum.
@@ -465,21 +465,19 @@ def prepare_petsc_calls(obj: Any, /) -> InstructionList:
 
 @prepare_petsc_calls.register(InstructionList)
 def _(insn_list: InstructionList, /) -> InstructionList:
-    return InstructionList([prepare_petsc_calls(insn) for insn in insn_list])
+    return maybe_enlist((prepare_petsc_calls(insn) for insn in insn_list))
 
 
 @prepare_petsc_calls.register(Loop)
 def _(loop: Loop, /) -> InstructionList:
-    return InstructionList([
-        Loop(loop.index, [
-            prepare_petsc_calls(stmt) for stmt in loop.statements
-        ])
+    return Loop(loop.index, [
+        prepare_petsc_calls(stmt) for stmt in loop.statements
     ])
 
 
 @prepare_petsc_calls.register(CalledFunction)
 def _(func: CalledFunction, /) -> InstructionList:
-    return InstructionList([func])
+    return func
 
 
 # NOTE: At present we assume that matrices are never part of the expression, only
@@ -512,7 +510,7 @@ def _(assignment: Assignment, /) -> InstructionList:
 
         assignment = PetscMatAssign(mat, expression, access_type)
 
-    return InstructionList([assignment])
+    return assignment
 
 
 # NOTE: I think this is a bit redundant - should do this much earlier!
@@ -523,7 +521,7 @@ def concretize_array_accesses(obj: Any, /) -> Instruction:
 
 @concretize_array_accesses.register(InstructionList)
 def _(insn_list: InstructionList, /) -> InstructionList:
-    return InstructionList([concretize_array_accesses(insn) for insn in insn_list])
+    return maybe_enlist((concretize_array_accesses(insn) for insn in insn_list))
 
 
 @concretize_array_accesses.register(Loop)
@@ -565,10 +563,9 @@ def compress_indirection_maps(insn: Instruction) -> Instruction:
 
     # Optimise by dropping any immediately bad candidates. We do this by dropping
     # any candidates whose cost (per-arg) is greater than the current best candidate.
-    # NOTE: It is not clear (use the same variable name) but we drop the cost here
     arg_candidatess = {
         arg_id: tuple(
-            arg_candidate
+            (arg_candidate, cost)
             for arg_candidate, cost in arg_candidates
             if cost <= max_cost
         )
@@ -591,7 +588,13 @@ def compress_indirection_maps(insn: Instruction) -> Instruction:
     #     dat2[mapBC[i]]
     min_cost = max_cost
     for shared_candidate in expand_collection_of_iterables(arg_candidatess):
-        cost = _compute_indirection_cost(insn, shared_candidate, cache=mycache)
+        cost = 0
+        seen_exprs = set()
+        for expr, expr_cost in shared_candidate.values():
+            if expr not in seen_exprs:
+                cost += expr_cost
+                seen_exprs.add(expr)
+
         if cost < min_cost:
             best_candidate = shared_candidate
             min_cost = cost
@@ -599,7 +602,7 @@ def compress_indirection_maps(insn: Instruction) -> Instruction:
     # Now materialise any symbolic (composite) dats and propagate the
     # decision back to the tree.
     composite_dats = frozenset.union(
-        *(_collect_composite_dats(expr) for expr in best_candidate.values())
+        *(_collect_composite_dats(expr) for (expr, _) in best_candidate.values())
     )
     replace_map = {
         comp_dat: materialize_composite_dat(comp_dat)
@@ -609,7 +612,7 @@ def compress_indirection_maps(insn: Instruction) -> Instruction:
     # now apply to best layout candidate
     best_layouts = {
         key: replace_expression(expr, replace_map)
-        for key, expr in best_candidate.items()
+        for key, (expr, _) in best_candidate.items()
     }
 
     # now traverse the instruction tree and replace the layouts.
@@ -702,13 +705,16 @@ def _(func: CalledFunction, /, arg_layouts, seen_exprs_mut, *, loop_axes_acc, ca
     )
 
 
+@functools.singledispatch
 def _collect_array_candidate_indirections(dat, loop_axes) -> ImmutableOrderedDict:
     if not isinstance(dat, Array):
         return ImmutableOrderedDict()
 
-    if not isinstance(dat, Dat):
-        raise NotImplementedError
+    raise NotImplementedError
 
+
+@_collect_array_candidate_indirections.register(Dat)
+def _(dat: Dat, loop_axes):
     candidatess = {}
     for leaf_path, orig_layout in dat.axes.leaf_subst_layouts.items():
         visited_axes = dat.axes.path_with_nodes(dat.axes._node_from_path(leaf_path), and_components=True)
@@ -723,7 +729,35 @@ def _collect_array_candidate_indirections(dat, loop_axes) -> ImmutableOrderedDic
     return ImmutableOrderedDict(candidatess)
 
 
+@_collect_array_candidate_indirections.register(Mat)
+def _(mat: Mat, loop_axes):
+    # temporaries do not have indexed axes so we don't care, don't expect to have
+    # rows or cols indexed but not the other
+    if strictly_all(isinstance(ax, AxisTree) for ax in {mat.raxes, mat.caxes}):
+        return ImmutableOrderedDict()
+
+    candidatess = {}
+
+    if not isinstance(mat.buffer, PETSc.Mat):
+        raise NotImplementedError
+
+    # PETSc matrices need fully compressed maps, only a single candidate available
+    def add_candidate(axes, row_or_col):
+        for leaf_path, orig_layout in axes.leaf_subst_layouts.items():
+            visited_axes = axes.path_with_nodes(axes._node_from_path(leaf_path), and_components=True)
+            compressed_expr = _CompositeDat(orig_layout, visited_axes, loop_axes)
+            compressed_cost = extract_axes(orig_layout, visited_axes, loop_axes, {}).size
+            candidatess[(mat, leaf_path, row_or_col)] = ((compressed_expr, compressed_cost),)
+
+    add_candidate(mat.raxes, 0)
+    add_candidate(mat.caxes, 1)
+
+    return ImmutableOrderedDict(candidatess)
+
+
 def _compute_array_indirection_cost(dat, arg_layouts, seen_exprs_mut, loop_axes, outer_key, cache) -> int:
+    breakpoint()
+
     if not isinstance(dat, Array):
         return 0
 
@@ -805,7 +839,7 @@ def _replace_with_real_dats(obj, layouts) -> Instruction:
 
 @_replace_with_real_dats.register(InstructionList)
 def _(insn_list: InstructionList, /, layouts) -> InstructionList:
-    return InstructionList([_replace_with_real_dats(insn, layouts) for insn in insn_list])
+    return maybe_enlist((_replace_with_real_dats(insn, layouts) for insn in insn_list))
 
 
 @_replace_with_real_dats.register(Loop)

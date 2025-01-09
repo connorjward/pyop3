@@ -22,7 +22,7 @@ from pyop3.axtree.tree import (
 )
 from pyop3.buffer import DistributedBuffer
 from pyop3.dtypes import IntType, ScalarType
-from pyop3.lang import Loop, LoopList, Assignment
+from pyop3.lang import Loop, Assignment
 from pyop3.utils import (
     Record,
     deprecated,
@@ -123,7 +123,7 @@ class AbstractMat(Array, Record):
     def __hash__(self) -> int:
         return hash(
             (
-                type(self), self.axes, self.dtype, id(self.mat), self.name)
+                type(self), self.raxes, self.caxes, self.dtype, id(self.mat), self.name)
         )
 
     @property
@@ -270,13 +270,17 @@ class AbstractMat(Array, Record):
     def leaf_layouts(self):
         from pyop3.insn_visitors import _CompositeDat, materialize_composite_dat
 
-        # use root
-        layout_expr = self.raxes.subst_layouts()[pmap()]
-        visited_axes = {}  # guess, might be the full path
-        loop_axes = {loop.id: loop.iterset for loop in self.raxes.outer_loops}
-        composite_dat = _CompositeDat(layout_expr, visited_axes, loop_axes)
+        def materialize_(axes):
+            # use root
+            layout_expr = axes.subst_layouts()[pmap()]
+            visited_axes = {}  # guess, might be the full path
+            loop_axes = {loop.id: loop.iterset for loop in axes.outer_loops}
+            composite_dat = _CompositeDat(layout_expr, visited_axes, loop_axes)
 
-        materialized_dat = materialize_composite_dat(composite_dat)
+            materialized_dat = materialize_composite_dat(composite_dat)
+            return materialized_dat
+
+        return (materialize_(self.raxes), materialize_(self.caxes))
 
         breakpoint()
         # return (
@@ -618,7 +622,8 @@ class Sparsity(AbstractMat):
                 self._preallocate(subpreallocator, submat, submat_type)
         else:
             if mat_type != "dat":
-                template.preallocateWithMatPreallocator(preallocator)
+                # template.preallocateWithMatPreallocator(preallocator)
+                preallocator.preallocatorPreallocate(template)
 
     @classmethod
     def _make_monolithic_mat(cls, raxes, caxes, mat_type: str, block_shape=None):

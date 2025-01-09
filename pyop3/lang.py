@@ -8,6 +8,7 @@ import dataclasses
 import enum
 import functools
 import numbers
+import textwrap
 from functools import cached_property
 from typing import Iterable, Tuple
 
@@ -252,6 +253,15 @@ class Loop(Instruction):
         self.index = index
         self.statements = as_tuple(statements)
         self.name = name
+
+    def __str__(self) -> str:
+        stmt_strs = [textwrap.indent(str(stmt), "    ") for stmt in self.statements]
+        return f"""loop(
+  {self.index},
+  [
+{'\n'.join(stmt_strs)}
+  ]
+)"""
 
     def __call__(self, *, compiler_parameters=None, **kwargs):
         # TODO just parse into ContextAwareLoop and call that
@@ -513,11 +523,24 @@ class InstructionList(Instruction):
         return self.instructions
 
 
-# old. instruction list is more generic
-class LoopList(InstructionList):
-    @deprecated("InstructionList")
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+def enlist(insn: Instruction) -> InstructionList:
+    if not isinstance(insn, InstructionList):
+        insn = InstructionList([insn])
+    return insn
+
+
+def maybe_enlist(instructions) -> Instruction:
+    flattened_insns = []
+    for insn in instructions:
+        if isinstance(insn, InstructionList):
+            flattened_insns.extend(insn.instructions)
+        else:
+            flattened_insns.append(insn)
+
+    if len(flattened_insns) > 1:
+        return InstructionList(flattened_insns)
+    else:
+        return just_one(flattened_insns)
 
 
 # TODO singledispatch
@@ -667,6 +690,9 @@ class AssignmentType(enum.Enum):
 class Assignment(Terminal):
     fields = Terminal.fields | {"assignee", "expression", "assignment_type"}
 
+    # not really important any more
+    name = "pyop3_assignment"
+
     def __init__(self, assignee, expression, assignment_type, **kwargs):
         assignment_type = AssignmentType(assignment_type)
 
@@ -682,7 +708,32 @@ class Assignment(Terminal):
             assert self.assignment_type == AssignmentType.INC
             operator = "+="
 
-        return f"{self.assignee} {operator} {self.expression}"
+        # 'assignee' and 'expression' might be multi-component and thus have
+        # multi-line representations. We want to line these up.
+        # NOTE: This might not be the ideal solution, eagerly break the Assignment up?
+
+        assignee_strs = str(self.assignee).split("\n")
+        expression_strs = str(self.expression).split("\n")
+
+        if len(assignee_strs) > 1:
+            if len(expression_strs) > 1:
+                return "\n".join((
+                    f"{assignee} {operator} {expression}"
+                    for assignee, expression in strict_zip(assignee_strs, expression_strs)
+                ))
+            else:
+                return "\n".join((
+                    f"{assignee} {operator} {just_one(expression_strs)}"
+                    for assignee in assignee_strs
+                ))
+        else:
+            if len(expression_strs) > 1:
+                return "\n".join((
+                    f"{just_one(assignee_strs)} {operator} {expr}"
+                    for expr in expression_strs
+                ))
+            else:
+                return f"{just_one(assignee_strs)} {operator} {just_one(expression_strs)}"
 
     @property
     def arguments(self):
