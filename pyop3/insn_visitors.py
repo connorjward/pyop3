@@ -15,7 +15,7 @@ from petsc4py import PETSc
 from pyrsistent import pmap, PMap
 from immutabledict import ImmutableOrderedDict
 
-from pyop3.array import Dat, Array, Mat, _ConcretizedDat, _ExpressionDat
+from pyop3.array import Dat, Array, Mat, _ConcretizedDat, _ConcretizedMat, _ExpressionDat
 from pyop3.axtree import Axis, AxisTree, ContextFree, ContextSensitive, ContextMismatchException, ContextAware
 from pyop3.axtree.tree import Operator, AxisVar, IndexedAxisTree
 from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
@@ -756,6 +756,7 @@ def _(mat: Mat, loop_axes):
 
 
 def _compute_array_indirection_cost(dat, arg_layouts, seen_exprs_mut, loop_axes, outer_key, cache) -> int:
+    assert False, "not used any more"
     breakpoint()
 
     if not isinstance(dat, Array):
@@ -862,19 +863,43 @@ def _(func: CalledFunction, /, layouts) -> CalledFunction:
                                 for i, arg in enumerate(func.arguments)])
 
 
+@functools.singledispatch
 def _compress_array_indirection_maps(dat, layouts, outer_key):
     if not isinstance(dat, Array):
         return dat
 
-    if not isinstance(dat, Dat):
-        raise NotImplementedError
+    assert False
 
+
+@_compress_array_indirection_maps.register(Dat)
+def _(dat: Dat, layouts, outer_key):
     newlayouts = {}
     for leaf_path in dat.axes.leaf_paths:
         try:
             chosen_layout = layouts[outer_key + ((dat, leaf_path),)]
         except KeyError:
+            assert False, "huh? why?"
             chosen_layout = -1
         newlayouts[leaf_path] = chosen_layout
 
     return _ConcretizedDat(dat, newlayouts)
+
+
+@_compress_array_indirection_maps.register(Mat)
+def _(mat: Mat, layouts, outer_key):
+    def collect(axes, newlayouts, counter):
+        for leaf_path in axes.leaf_paths:
+            try:
+                chosen_layout = layouts[outer_key + ((mat, leaf_path, counter),)]
+            except KeyError:
+                assert False, "huh? why?"
+                chosen_layout = -1
+            newlayouts[leaf_path] = chosen_layout
+
+    row_layouts = {}
+    col_layouts = {}
+
+    collect(mat.raxes, row_layouts, 0)
+    collect(mat.caxes, col_layouts, 1)
+
+    return _ConcretizedMat(mat, row_layouts, col_layouts)

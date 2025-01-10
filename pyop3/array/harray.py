@@ -558,6 +558,34 @@ class _ConcretizedDat(_ConcretizedDat2):
         return frozenset({"dat", "layouts", "name"})
 
 
+class _ConcretizedMat(_ConcretizedDat2):
+    """A dat with fixed layouts.
+
+    This class is useful for describing dats whose layouts have been optimised.
+
+    Unlike `_ExpressionDat` a `_ConcretizedDat` is permitted to be multi-component.
+
+    """
+    def __init__(self, mat, row_layouts, col_layouts):
+        super().__init__(name=mat.name)
+        self.dat = dat  # only because I need to clean this up
+        self.mat = mat
+        self.row_layouts = pmap(row_layouts)
+        self.col_layouts = pmap(col_layouts)
+
+    # TODO: redo now that we have Record?
+    def __hash__(self) -> int:
+        return hash((type(self), self.dat, self.row_layouts, self.col_layouts))
+
+    # @property
+    # def axes(self):
+    #     return self.dat.axes
+
+    @property
+    def _record_fields(self) -> frozenset:
+        return frozenset({"mat", "row_layouts", "col_layouts", "name"})
+
+
 # NOTE: I think that this is a bad name for this class. Dats and _ConcretizedDats
 # can also appear in expressions.
 class _ExpressionDat(_ConcretizedDat2):

@@ -4,6 +4,7 @@ from .harray import (  # noqa: F401
     Dat,
     _Dat,
     _ConcretizedDat,
+    _ConcretizedMat,
     _ExpressionDat,
 )
 from .petsc import Mat, Sparsity, AbstractMat  # noqa: F401
