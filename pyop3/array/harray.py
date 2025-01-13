@@ -568,10 +568,14 @@ class _ConcretizedMat(_ConcretizedDat2):
     """
     def __init__(self, mat, row_layouts, col_layouts):
         super().__init__(name=mat.name)
-        self.dat = dat  # only because I need to clean this up
+        self.dat = mat  # only because I need to clean this up
         self.mat = mat
         self.row_layouts = pmap(row_layouts)
         self.col_layouts = pmap(col_layouts)
+
+    @property
+    def axes(self):
+        return self.mat.axes
 
     # TODO: redo now that we have Record?
     def __hash__(self) -> int:
@@ -584,6 +588,10 @@ class _ConcretizedMat(_ConcretizedDat2):
     @property
     def _record_fields(self) -> frozenset:
         return frozenset({"mat", "row_layouts", "col_layouts", "name"})
+
+    @property
+    def alloc_size(self) -> int:
+        return self.mat.alloc_size
 
 
 # NOTE: I think that this is a bad name for this class. Dats and _ConcretizedDats

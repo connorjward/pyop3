@@ -15,7 +15,7 @@ from petsc4py import PETSc
 from pyrsistent import pmap, PMap
 from immutabledict import ImmutableOrderedDict
 
-from pyop3.array import Dat, Array, Mat, _ConcretizedDat, _ConcretizedMat, _ExpressionDat
+from pyop3.array import Dat, Array, Mat, Sparsity, _ConcretizedDat, _ConcretizedMat, _ExpressionDat
 from pyop3.axtree import Axis, AxisTree, ContextFree, ContextSensitive, ContextMismatchException, ContextAware
 from pyop3.axtree.tree import Operator, AxisVar, IndexedAxisTree
 from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
@@ -28,6 +28,7 @@ from pyop3.expr_visitors import (
     replace_terminals,
     _CompositeDat,
     collect_loops as expr_collect_loops,
+    concretize_arrays as expr_concretize_arrays,
     extract_axes,
     materialize,
     restrict_to_context as restrict_expression_to_context,
@@ -41,6 +42,7 @@ from pyop3.lang import (
     READ,
     RW,
     WRITE,
+    AbstractAssignment,
     Assignment,
     AssignmentType,
     CalledFunction,
@@ -487,6 +489,9 @@ def _(assignment: Assignment, /) -> InstructionList:
     if isinstance(assignment.assignee.buffer, PETSc.Mat):
         mat = assignment.assignee
 
+        if isinstance(mat, _ConcretizedMat):
+            mat = mat.mat
+
         # If we have an expression like
         #
         #     mat[f(p), f(p)] <- 666
@@ -497,7 +502,7 @@ def _(assignment: Assignment, /) -> InstructionList:
             expression = Mat(mat.raxes, mat.caxes, mat=np.full(mat.alloc_size, assignment.expression, dtype=mat.dtype), prefix="t", constant=True)
         else:
             assert (
-                isinstance(assignment.expression, Mat)
+                isinstance(assignment.expression, (Mat, _ConcretizedMat))
                 and isinstance(assignment.expression.buffer, NullBuffer)
             )
             expression = assignment.expression
@@ -510,37 +515,14 @@ def _(assignment: Assignment, /) -> InstructionList:
 
         assignment = PetscMatAssign(mat, expression, access_type)
 
+    # If we are doing a non-PETSc matrix assignment then we cast the buffer to a 'Dat'
+    elif isinstance(assignment.assignee, (Sparsity, Mat)):
+        assert isinstance(assignment.assignee.buffer, NullBuffer), "Must be a temporary"
+        mat = assignment.assignee
+        dat = Dat(mat.axes, data=mat.buffer, name=mat.name)
+        assignment = Assignment(dat, assignment.expression, assignment.assignment_type)
+
     return assignment
-
-
-# NOTE: I think this is a bit redundant - should do this much earlier!
-@functools.singledispatch
-def concretize_array_accesses(obj: Any, /) -> Instruction:
-    raise TypeError(f"No handler provided for {type(obj).__name__}")
-
-
-@concretize_array_accesses.register(InstructionList)
-def _(insn_list: InstructionList, /) -> InstructionList:
-    return maybe_enlist((concretize_array_accesses(insn) for insn in insn_list))
-
-
-@concretize_array_accesses.register(Loop)
-def _(loop: Loop, /) -> Loop:
-    return loop.copy(statements=[concretize_array_accesses(stmt) for stmt in loop.statements])
-
-
-@concretize_array_accesses.register(Assignment)
-def _(assignment: Assignment, /) -> Assignment:
-    return Assignment(
-        concretize_expression_layouts(assignment.assignee),
-        concretize_expression_layouts(assignment.expression),
-        assignment.assignment_type,
-    )
-
-
-@concretize_array_accesses.register(CalledFunction)
-def _(func: CalledFunction, /):
-    return func.copy(arguments=[concretize_expression_layouts(arg) for arg in func.arguments])
 
 
 # NOTE: Should perhaps take a different input type to ensure that always called at root?
@@ -646,7 +628,7 @@ def _(loop: Loop, /, *, loop_axes_acc) -> ImmutableOrderedDict:
     )
 
 
-@_collect_candidate_indirections.register(Assignment)
+@_collect_candidate_indirections.register(AbstractAssignment)
 def _(assignment: Assignment, /, *, loop_axes_acc) -> ImmutableOrderedDict:
     candidates = {}
     for i, arg in enumerate([assignment.assignee, assignment.expression]):
@@ -731,28 +713,7 @@ def _(dat: Dat, loop_axes):
 
 @_collect_array_candidate_indirections.register(Mat)
 def _(mat: Mat, loop_axes):
-    # temporaries do not have indexed axes so we don't care, don't expect to have
-    # rows or cols indexed but not the other
-    if strictly_all(isinstance(ax, AxisTree) for ax in {mat.raxes, mat.caxes}):
-        return ImmutableOrderedDict()
-
-    candidatess = {}
-
-    if not isinstance(mat.buffer, PETSc.Mat):
-        raise NotImplementedError
-
-    # PETSc matrices need fully compressed maps, only a single candidate available
-    def add_candidate(axes, row_or_col):
-        for leaf_path, orig_layout in axes.leaf_subst_layouts.items():
-            visited_axes = axes.path_with_nodes(axes._node_from_path(leaf_path), and_components=True)
-            compressed_expr = _CompositeDat(orig_layout, visited_axes, loop_axes)
-            compressed_cost = extract_axes(orig_layout, visited_axes, loop_axes, {}).size
-            candidatess[(mat, leaf_path, row_or_col)] = ((compressed_expr, compressed_cost),)
-
-    add_candidate(mat.raxes, 0)
-    add_candidate(mat.caxes, 1)
-
-    return ImmutableOrderedDict(candidatess)
+    return mat.candidate_layouts(loop_axes)
 
 
 def _compute_array_indirection_cost(dat, arg_layouts, seen_exprs_mut, loop_axes, outer_key, cache) -> int:
@@ -857,6 +818,15 @@ def _(assignment: Assignment, /, layouts) -> Assignment:
     )
 
 
+@_replace_with_real_dats.register(PetscMatAssign)
+def _(assignment: PetscMatAssign, /, layouts) -> PetscMatAssign:
+    return PetscMatAssign(
+        _compress_array_indirection_maps(assignment.mat, layouts, (assignment.id, 0)),
+        _compress_array_indirection_maps(assignment.values, layouts, (assignment.id, 1)),
+        assignment.access_type,
+    )
+
+
 @_replace_with_real_dats.register(CalledFunction)
 def _(func: CalledFunction, /, layouts) -> CalledFunction:
     return func.copy(arguments=[_compress_array_indirection_maps(arg, layouts, (func.id, i))
@@ -878,7 +848,7 @@ def _(dat: Dat, layouts, outer_key):
         try:
             chosen_layout = layouts[outer_key + ((dat, leaf_path),)]
         except KeyError:
-            assert False, "huh? why?"
+            # zero-sized axis, no layout needed
             chosen_layout = -1
         newlayouts[leaf_path] = chosen_layout
 
@@ -886,13 +856,14 @@ def _(dat: Dat, layouts, outer_key):
 
 
 @_compress_array_indirection_maps.register(Mat)
-def _(mat: Mat, layouts, outer_key):
+@_compress_array_indirection_maps.register(Sparsity)
+def _(mat, layouts, outer_key):
     def collect(axes, newlayouts, counter):
         for leaf_path in axes.leaf_paths:
             try:
                 chosen_layout = layouts[outer_key + ((mat, leaf_path, counter),)]
             except KeyError:
-                assert False, "huh? why?"
+                # zero-sized axis, no layout needed
                 chosen_layout = -1
             newlayouts[leaf_path] = chosen_layout
 
@@ -903,3 +874,41 @@ def _(mat: Mat, layouts, outer_key):
     collect(mat.caxes, col_layouts, 1)
 
     return _ConcretizedMat(mat, row_layouts, col_layouts)
+
+
+@functools.singledispatch
+def concretize_arrays(insn: Instruction) -> Instruction:
+    raise TypeError
+
+
+@concretize_arrays.register(InstructionList)
+def _(insn_list: InstructionList):
+    return InstructionList([concretize_arrays(insn) for insn in insn_list])
+
+
+@concretize_arrays.register(Loop)
+def _(loop: Loop):
+    return loop.copy(statements=[concretize_arrays(stmt) for stmt in loop.statements])
+
+
+@concretize_arrays.register(Assignment)
+def _(assignment: Assignment, /) -> Assignment:
+    return Assignment(
+        expr_concretize_arrays(assignment.assignee),
+        expr_concretize_arrays(assignment.expression),
+        assignment.assignment_type,
+    )
+
+
+@concretize_arrays.register(PetscMatAssign)
+def _(assignment: PetscMatAssign, /) -> PetscMatAssign:
+    return PetscMatAssign(
+        expr_concretize_arrays(assignment.mat),
+        expr_concretize_arrays(assignment.values),
+        assignment.access_type,
+    )
+
+
+@concretize_arrays.register(CalledFunction)
+def _(func: CalledFunction, /) -> CalledFunction:
+    return func.copy(arguments=[expr_concretize_arrays(arg) for arg in func.arguments])

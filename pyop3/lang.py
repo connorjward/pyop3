@@ -684,15 +684,7 @@ class AssignmentType(enum.Enum):
     INC = "inc"
 
 
-# TODO: This is the 'user facing' Assignment type. Internally we can parse this
-# into more specific things. Therefore, inherit from an abstract _Assignment type
-# and also have specific (underscored) classes for internal use.
-class Assignment(Terminal):
-    fields = Terminal.fields | {"assignee", "expression", "assignment_type"}
-
-    # not really important any more
-    name = "pyop3_assignment"
-
+class AbstractAssignment(Terminal):
     def __init__(self, assignee, expression, assignment_type, **kwargs):
         assignment_type = AssignmentType(assignment_type)
 
@@ -734,6 +726,17 @@ class Assignment(Terminal):
                 ))
             else:
                 return f"{just_one(assignee_strs)} {operator} {just_one(expression_strs)}"
+
+
+
+# TODO: This is the 'user facing' Assignment type. Internally we can parse this
+# into more specific things. Therefore, inherit from an abstract _Assignment type
+# and also have specific (underscored) classes for internal use.
+class Assignment(AbstractAssignment):
+    fields = Terminal.fields | {"assignee", "expression", "assignment_type"}
+
+    # not really important any more
+    name = "pyop3_assignment"
 
     @property
     def arguments(self):
@@ -788,7 +791,7 @@ class Assignment(Terminal):
         return tuple(args)
 
 
-class PetscMatAssign(Assignment):  # AbstractAssignment?
+class PetscMatAssign(AbstractAssignment):
     def __init__(self, mat, values, access_type):
         if access_type == ArrayAccessType.READ:
             assignment_type = AssignmentType.WRITE

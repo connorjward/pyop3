@@ -20,7 +20,7 @@ import numpy as np
 import pymbolic as pym
 from pyrsistent import freeze, pmap, PMap
 
-from pyop3.array import Dat, _Dat, _ExpressionDat, _ConcretizedDat
+from pyop3.array import Dat, _Dat, _ExpressionDat, _ConcretizedDat, _ConcretizedMat
 from pyop3.array.base import Array
 from pyop3.array.petsc import Mat, AbstractMat
 from pyop3.axtree.tree import Add, AxisVar, Mul
@@ -38,6 +38,7 @@ from pyop3.lang import (
     NA,
     READ,
     RW,
+    AbstractAssignment,
     parse_compiler_parameters,
     WRITE,
     AssignmentType,
@@ -512,8 +513,8 @@ def _(loop: Loop, /):
     return shapes
 
 
-@_collect_temporary_shapes.register(Assignment)
-def _(assignment: Assignment, /) -> PMap:
+@_collect_temporary_shapes.register(AbstractAssignment)
+def _(assignment: AbstractAssignment, /) -> PMap:
     return pmap()
 
 
@@ -707,22 +708,30 @@ def _compile_petscmat(assignment, loop_indices, codegen_context):
     mat = assignment.mat
     array = assignment.values
 
-    if mat.nested:
-        ridx, cidx = map(just_one, just_one(mat.nest_labels))
-        # if ridx is None:
-        #     ridx = 0
-        # if cidx is None:
-        #     cidx = 0
+    assert isinstance(mat, _ConcretizedMat)
 
-        if mat.mat_type[ridx, cidx] == "dat":
-            # no preallocation is necessary
-            if isinstance(mat, Sparsity):
-                return
-
-            breakpoint()
+    # tidy this up
+    # if mat.mat.nested:
+    #     ridx, cidx = map(just_one, just_one(mat.nest_labels))
+    #     # if ridx is None:
+    #     #     ridx = 0
+    #     # if cidx is None:
+    #     #     cidx = 0
+    #
+    #     if mat.mat_type[ridx, cidx] == "dat":
+    #         # no preallocation is necessary
+    #         if isinstance(mat, Sparsity):
+    #             return
+    #
+    #         breakpoint()
 
     # now emit the right line of code, this should properly be a lp.ScalarCallable
     # https://petsc.org/release/manualpages/Mat/MatGetValuesLocal/
+
+    # row_layouts???
+    # need to loop over the different leaf layouts - we no longer combine things here.
+    breakpoint()
+    # here we do the concatenation I think, whereas elsewhere we do not...
 
     rmap = mat.rmap
     cmap = mat.cmap
@@ -1034,11 +1043,36 @@ def _(dat: _ConcretizedDat, /, iname_map, context, path=None):
     new_name = context.actual_to_kernel_rename_map[dat.name]
 
     if path is None:
+        assert False, "do not use?"
         assert dat.axes.is_linear
         path = dat.axes.path(dat.axes.leaf)
 
     layout_expr = dat.layouts[path]
     offset_expr = lower_expr(layout_expr, iname_map, context)
+
+    rexpr = pym.subscript(pym.var(new_name), (offset_expr,))
+    return rexpr
+
+
+@lower_expr.register(_ConcretizedMat)
+def _(mat: _ConcretizedMat, /, iname_map, context, path=None):
+    context.add_array(mat)
+
+    new_name = context.actual_to_kernel_rename_map[mat.name]
+
+    if path is None:
+        assert False, "do not use?"
+        assert mat.row_axes.is_linear
+        path = mat.row_axes.path(dat.axes.leaf)
+
+    breakpoint()
+    row_layout_expr = mat.row_layouts[path]
+    col_layout_expr = mat.col_layouts[path]
+
+    row_offset_expr = lower_expr(row_layout_expr, iname_map, context)
+    col_offset_expr = lower_expr(col_layout_expr, iname_map, context)
+
+    offset_expr = row_offset_expr * mat.mat.col_axes.size + col_offset_expr
 
     rexpr = pym.subscript(pym.var(new_name), (offset_expr,))
     return rexpr

@@ -8,7 +8,7 @@ from typing import Any, Optional
 from immutabledict import ImmutableOrderedDict
 from pyrsistent import pmap, PMap
 
-from pyop3.array import Array, Dat, _ExpressionDat
+from pyop3.array import Array, Dat, _ExpressionDat, _ConcretizedDat, _ConcretizedMat
 from pyop3.array.petsc import AbstractMat
 from pyop3.axtree.tree import AxisVar, Expression, Operator, Add, Mul, BaseAxisTree, IndexedAxisTree, AxisTree, Axis, LoopIndexVar, merge_trees2, ExpressionT, Terminal, AxisComponent
 from pyop3.dtypes import IntType
@@ -396,13 +396,20 @@ def concretize_arrays(obj: Any, /, **kwargs) -> Expression:
 
 
 @concretize_arrays.register(Dat)
-def _(dat: Dat, /) -> _ExpressionDat:
-    return dat.concretize()
+def _(dat: Dat, /) -> _ConcretizedDat:
+    breakpoint()
+
+
+@concretize_arrays.register(Mat)
+def _(dat: Dat, /) -> _ConcretizedDat:
+    breakpoint()
 
 
 @concretize_arrays.register(numbers.Number)
 @concretize_arrays.register(AxisVar)
 @concretize_arrays.register(LoopIndexVar)
+@concretize_arrays.register(_ConcretizedDat)
+@concretize_arrays.register(_ConcretizedMat)
 def _(var: Any, /) -> Any:
     return var
 

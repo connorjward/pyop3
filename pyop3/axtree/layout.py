@@ -280,7 +280,7 @@ def _truncate_axis_tree_rec(axis_tree, axis) -> tuple[tuple[AxisTree, int]]:
         # We can only consider cases where all candidates have the same step.
         try:
             substep = single_valued(substeps)
-        except ValueError:
+        except AssertionError:
             continue
 
         # The new candidate consists of the per-component subtrees stuck on to the

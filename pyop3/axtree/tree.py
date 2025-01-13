@@ -1819,7 +1819,7 @@ def _(arg: numbers.Integral) -> AxisComponent:
     return AxisComponent(arg)
 
 
-@cached_on(lambda trees: trees[0], key=lambda trees: trees[1:])
+@cached_on(lambda trees: trees[0], key=lambda trees: tuple(trees[1:]))
 def merge_axis_trees(axis_trees):
     """
 
