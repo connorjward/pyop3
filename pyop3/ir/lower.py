@@ -743,13 +743,17 @@ def _compile_petscmat(assignment, loop_indices, codegen_context):
             rmap = row_layout
             cmap = col_layout
 
+            if rmap == -1 or cmap == -1:
+                # zero sized, do nothing
+                continue
+
             codegen_context.add_array(rmap)
             codegen_context.add_array(cmap)
 
             rmap_name = codegen_context.actual_to_kernel_rename_map[rmap.name]
             cmap_name = codegen_context.actual_to_kernel_rename_map[cmap.name]
 
-    # blocked = mat.block_shape > 1
+            blocked = mat.mat.block_shape > 1
     # if mat.nested:
     #     if len(mat.nest_labels) > 1:
     #         # Need to loop over the different nest labels and emit separate calls to
@@ -804,10 +808,12 @@ def _compile_petscmat(assignment, loop_indices, codegen_context):
             else:
                 csize_var = csize
 
-            # use pmap() as the path here because we don't want to emit any loops
-            # here that do not already exist.
-            irow = str(lower_expr(rmap, loop_indices, codegen_context, path=pmap()))
-            icol = str(lower_expr(cmap, loop_indices, codegen_context, path=pmap()))
+            # replace inner bits with zeros
+            zeros = {axis.label: 0 for axis in rmap.dat.axes.nodes if axis is not rmap.dat.axes.root}
+            irow = str(lower_expr(rmap, loop_indices | zeros, codegen_context))
+
+            zeros = {axis.label: 0 for axis in cmap.dat.axes.nodes if axis is not cmap.dat.axes.root}
+            icol = str(lower_expr(cmap, loop_indices | zeros, codegen_context))
 
             # hacky
             myargs = [
@@ -876,7 +882,10 @@ def parse_assignment_properly_this_time(
         return
 
     for component in axis.components:
-        if component._collective_count != 1:
+        if component._collective_count == 0:
+            # NOTE: Should trim these earlier
+            return
+        elif component._collective_count != 1:
             iname = codegen_context.unique_name("i")
 
             extent_var = register_extent(
@@ -1001,6 +1010,27 @@ def _(loop_var: LoopIndexVar, iname_map, context, path=None):
     return iname_map[(loop_var.loop_id, loop_var.axis_label)]
 
 
+def maybe_multiindex(dat, offset_expr, context):
+    # hack to handle the fact that temporaries can have shape but we want to
+    # linearly index it here
+    if dat.name in context._temporary_shapes:
+        shape = context._temporary_shapes[dat.name]
+        assert shape is not None
+        rank = len(shape)
+        extra_indices = (0,) * (rank - 1)
+
+        # also has to be a scalar, not an expression
+        temp_offset_name = context.unique_name("j")
+        temp_offset_var = pym.var(temp_offset_name)
+        context.add_temporary(temp_offset_name)
+        context.add_assignment(temp_offset_var, offset_expr)
+        indices = extra_indices + (temp_offset_var,)
+    else:
+        indices = (offset_expr,)
+
+    return indices
+
+
 # NOTE: Here should not accept Dat because we need to have special layouts!!!
 # aka `Array`
 @lower_expr.register(Dat)
@@ -1019,22 +1049,7 @@ def _(dat: Dat, /, iname_map, context, path=None):
     layout_expr = dat.axes.subst_layouts()[path]
     offset_expr = lower_expr(layout_expr, iname_map, context)
 
-    # hack to handle the fact that temporaries can have shape but we want to
-    # linearly index it here
-    if dat.name in context._temporary_shapes:
-        shape = context._temporary_shapes[dat.name]
-        assert shape is not None
-        rank = len(shape)
-        extra_indices = (0,) * (rank - 1)
-
-        # also has to be a scalar, not an expression
-        temp_offset_name = context.unique_name("j")
-        temp_offset_var = pym.var(temp_offset_name)
-        context.add_temporary(temp_offset_name)
-        context.add_assignment(temp_offset_var, offset_expr)
-        indices = extra_indices + (temp_offset_var,)
-    else:
-        indices = (offset_expr,)
+    indices = maybe_multiindex(dat, offset_expr, context)
 
     rexpr = pym.subscript(pym.var(new_name), indices)
     return rexpr
@@ -1053,9 +1068,9 @@ def _(dat: _ConcretizedDat, /, iname_map, context, path=None):
 
     layout_expr = dat.layouts[path]
     offset_expr = lower_expr(layout_expr, iname_map, context)
+    indices = maybe_multiindex(dat, offset_expr, context)
 
-    rexpr = pym.subscript(pym.var(new_name), (offset_expr,))
-    return rexpr
+    return pym.subscript(pym.var(new_name), indices)
 
 
 @lower_expr.register(_ConcretizedMat)
@@ -1088,7 +1103,7 @@ def _(dat: _ExpressionDat, /, iname_map, context, path=None):
 
     new_name = context.actual_to_kernel_rename_map[dat.name]
 
-    offset_expr = lower_expr(dat.layouts[path], iname_map, context)
+    offset_expr = lower_expr(dat.layout, iname_map, context)
     rexpr = pym.subscript(pym.var(new_name), (offset_expr,))
     return rexpr
 
@@ -1154,3 +1169,8 @@ def _(arg: PackedBuffer):
 @_as_pointer.register
 def _(array: AbstractMat):
     return array.mat.handle
+
+
+@_as_pointer.register(PETSc.Mat)
+def _(mat):
+    return mat.handle

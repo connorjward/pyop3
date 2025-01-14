@@ -423,17 +423,37 @@ def _(dat: Dat, /, loop_axes) -> _ConcretizedDat:
 
 @concretize_arrays.register(AbstractMat)
 def _(mat: Mat, /, loop_axes) -> _ConcretizedDat:
+    from pyop3.insn_visitors import materialize_composite_dat
+
     layouts = mat.candidate_layouts(loop_axes)
     row_layouts = {}
     for leaf_path in mat.raxes.leaf_paths:
-        possible_row_layouts = layouts[(mat, leaf_path, 0)]
+        try:
+            possible_row_layouts = layouts[(mat, leaf_path, 0)]
+        except KeyError:
+            # zero-sized axis
+            row_layouts[leaf_path] = -1
+            continue
         selected_layout, _ = min(possible_row_layouts, key=lambda item: item[1])
+
+        if isinstance(selected_layout, _CompositeDat):
+            selected_layout = materialize_composite_dat(selected_layout)
+
         row_layouts[leaf_path] = selected_layout
 
     col_layouts = {}
     for leaf_path in mat.caxes.leaf_paths:
-        possible_col_layouts = layouts[(mat, leaf_path, 1)]
+        try:
+            possible_col_layouts = layouts[(mat, leaf_path, 1)]
+        except KeyError:
+            # zero-sized axis
+            col_layouts[leaf_path] = -1
+            continue
         selected_layout, _ = min(possible_col_layouts, key=lambda item: item[1])
+
+        if isinstance(selected_layout, _CompositeDat):
+            selected_layout = materialize_composite_dat(selected_layout)
+
         col_layouts[leaf_path] = selected_layout
 
     return _ConcretizedMat(mat, row_layouts, col_layouts)

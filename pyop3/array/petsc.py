@@ -309,10 +309,19 @@ class AbstractMat(Array, Record):
             for leaf_path, orig_layout in axes.leaf_subst_layouts.items():
                 visited_axes = axes.path_with_nodes(axes._node_from_path(leaf_path), and_components=True)
                 compressed_expr = _CompositeDat(orig_layout, visited_axes, loop_axes)
-                materialized_dat = materialize_composite_dat(compressed_expr)
+
+                # FIXME: do not do this here as we want to keep thinking about more global optimisations
+                # (ie the same expression may be used by a Dat)
+                # materialized_dat = materialize_composite_dat(compressed_expr)
+
                 # NOTE: Probably retrievable from the materialized_dat
-                compressed_cost = extract_axes(materialized_dat, visited_axes, loop_axes, {}).size
-                candidatess[(self, leaf_path, row_or_col)] = ((materialized_dat, compressed_cost),)
+                myaxes = extract_axes(compressed_expr, visited_axes, loop_axes, {})
+                compressed_cost = myaxes.size
+
+                if myaxes.size == 0:
+                    continue
+
+                candidatess[(self, leaf_path, row_or_col)] = ((compressed_expr, compressed_cost),)
 
         add_candidate(self.raxes, 0)
         add_candidate(self.caxes, 1)

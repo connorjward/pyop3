@@ -538,8 +538,9 @@ def compress_indirection_maps(insn: Instruction) -> Instruction:
     best_candidate = {}
     max_cost = 0
     for arg_id, arg_candidates in arg_candidatess.items():
-        best_candidate[arg_id], cost = min(arg_candidates, key=lambda item: item[1])
-        max_cost += cost
+        expr, expr_cost = min(arg_candidates, key=lambda item: item[1])
+        best_candidate[arg_id] = (expr, expr_cost)
+        max_cost += expr_cost
 
     # Optimise by dropping any immediately bad candidates. We do this by dropping
     # any candidates whose cost (per-arg) is greater than the current best candidate.
@@ -878,5 +879,5 @@ def _(assignment: PetscMatAssign, /, loop_axes_acc) -> PetscMatAssign:
 
 
 @_concretize_arrays_rec.register(CalledFunction)
-def _(func: CalledFunction, /) -> CalledFunction:
+def _(func: CalledFunction, /, loop_axes_acc) -> CalledFunction:
     return func.copy(arguments=[expr_concretize_arrays(arg, loop_axes_acc) for arg in func.arguments])
