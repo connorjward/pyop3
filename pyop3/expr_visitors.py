@@ -8,7 +8,7 @@ from typing import Any, Optional
 from immutabledict import ImmutableOrderedDict
 from pyrsistent import pmap, PMap
 
-from pyop3.array import Array, Dat, _ExpressionDat, _ConcretizedDat, _ConcretizedMat
+from pyop3.array import Array, Dat, Mat, _ExpressionDat, _ConcretizedDat, _ConcretizedMat
 from pyop3.array.petsc import AbstractMat
 from pyop3.axtree.tree import AxisVar, Expression, Operator, Add, Mul, BaseAxisTree, IndexedAxisTree, AxisTree, Axis, LoopIndexVar, merge_trees2, ExpressionT, Terminal, AxisComponent
 from pyop3.dtypes import IntType
@@ -224,10 +224,9 @@ def _(op: Operator, /, visited_axes, loop_axes, cache):
     return merge_trees2(extract_axes(op.a, visited_axes, loop_axes, cache), extract_axes(op.b, visited_axes, loop_axes, cache))
 
 
-# is this needed?
-# @extract_axes.register(Array)
-# def _(array: Array, /, visited_axes):
-#     return array.axes
+@extract_axes.register(Array)
+def _(array: Array, /, visited_axes, loop_axes, cache):
+    return array.axes
 
 
 @extract_axes.register(_ExpressionDat)
@@ -247,10 +246,20 @@ def relabel(obj: Any, /, suffix: str):
     raise TypeError(f"No handler defined for {type(obj).__name__}")
 
 
+@relabel.register(numbers.Number)
+@relabel.register(LoopIndexVar)
+def _(var: Any, /, suffix: str) -> Any:
+    return var
+
+
 @relabel.register(AxisVar)
 def _(var: AxisVar, /, suffix: str) -> AxisVar:
-    relabelled_axis = var.axis.copy(label=var.axis.label+suffix)
-    return AxisVar(relabelled_axis)
+    return AxisVar(var.axis_label+suffix)
+
+
+@relabel.register(Operator)
+def _(op: Operator, /, suffix: str) -> AxisVar:
+    return type(op)(relabel(op.a, suffix), relabel(op.b, suffix))
 
 
 @relabel.register(Dat)
@@ -258,6 +267,11 @@ def _(dat: Dat, /, suffix: str) -> Dat:
     new_axes = _relabel_axes(dat.axes, suffix)
     # return array.with_axes(new_axes)
     return dat.reconstruct(axes=new_axes)
+
+
+@relabel.register(_ExpressionDat)
+def _(dat: _ExpressionDat, /, suffix: str) -> Dat:
+    return _ExpressionDat(relabel(dat.dat, suffix), relabel(dat.layout, suffix))
 
 
 @functools.singledispatch
@@ -391,32 +405,53 @@ def _(op: Operator, /, replace_map) -> Operator:
 
 # TODO: rename to concretize_array_accesses or concretize_arrays
 @functools.singledispatch
-def concretize_arrays(obj: Any, /, **kwargs) -> Expression:
+def concretize_arrays(obj: Any, /, *args, **kwargs) -> Expression:
     raise TypeError(f"No handler defined for {type(obj).__name__}")
 
 
 @concretize_arrays.register(Dat)
-def _(dat: Dat, /) -> _ConcretizedDat:
-    breakpoint()
+def _(dat: Dat, /, loop_axes) -> _ConcretizedDat:
+    candidate_layouts = dat.candidate_layouts(loop_axes)
+    selected_layouts = {}
+    for leaf_path in dat.axes.leaf_paths:
+        possible_layouts = candidate_layouts[(dat, leaf_path)]
+        selected_layout, _ = min(possible_layouts, key=lambda item: item[1])
+        selected_layouts[leaf_path] = selected_layout
+
+    return _ConcretizedDat(dat, selected_layouts)
 
 
-@concretize_arrays.register(Mat)
-def _(dat: Dat, /) -> _ConcretizedDat:
-    breakpoint()
+@concretize_arrays.register(AbstractMat)
+def _(mat: Mat, /, loop_axes) -> _ConcretizedDat:
+    layouts = mat.candidate_layouts(loop_axes)
+    row_layouts = {}
+    for leaf_path in mat.raxes.leaf_paths:
+        possible_row_layouts = layouts[(mat, leaf_path, 0)]
+        selected_layout, _ = min(possible_row_layouts, key=lambda item: item[1])
+        row_layouts[leaf_path] = selected_layout
+
+    col_layouts = {}
+    for leaf_path in mat.caxes.leaf_paths:
+        possible_col_layouts = layouts[(mat, leaf_path, 1)]
+        selected_layout, _ = min(possible_col_layouts, key=lambda item: item[1])
+        col_layouts[leaf_path] = selected_layout
+
+    return _ConcretizedMat(mat, row_layouts, col_layouts)
 
 
 @concretize_arrays.register(numbers.Number)
 @concretize_arrays.register(AxisVar)
 @concretize_arrays.register(LoopIndexVar)
 @concretize_arrays.register(_ConcretizedDat)
+@concretize_arrays.register(_ExpressionDat)
 @concretize_arrays.register(_ConcretizedMat)
-def _(var: Any, /) -> Any:
+def _(var: Any, /, loop_axes) -> Any:
     return var
 
 
 @concretize_arrays.register(Operator)
-def _(op: Operator, /) -> Operator:
-    return type(op)(concretize_arrays(op.a), concretize_arrays(op.b))
+def _(op: Operator, /, loop_axes) -> Operator:
+    return type(op)(concretize_arrays(op.a, loop_axes), concretize_arrays(op.b, loop_axes))
 
 
 # TODO: account for non-affine accesses in arrays and selectively apply this

@@ -15,7 +15,7 @@ from petsc4py import PETSc
 from pyrsistent import pmap, PMap
 from immutabledict import ImmutableOrderedDict
 
-from pyop3.array import Dat, Array, Mat, Sparsity, _ConcretizedDat, _ConcretizedMat, _ExpressionDat
+from pyop3.array import Dat, Array, Mat, Sparsity, _ConcretizedDat, _ConcretizedMat, _ExpressionDat, AbstractMat
 from pyop3.axtree import Axis, AxisTree, ContextFree, ContextSensitive, ContextMismatchException, ContextAware
 from pyop3.axtree.tree import Operator, AxisVar, IndexedAxisTree
 from pyop3.buffer import DistributedBuffer, NullBuffer, PackedBuffer
@@ -43,6 +43,7 @@ from pyop3.lang import (
     RW,
     WRITE,
     AbstractAssignment,
+    NullInstruction,
     Assignment,
     AssignmentType,
     CalledFunction,
@@ -125,27 +126,19 @@ def _(func: CalledFunction, /, *, loop_context_acc) -> CalledFunction:
 
 @_expand_loop_contexts_rec.register(Assignment)
 def _(assignment: Assignment, /, *, loop_context_acc) -> Assignment:
-    return Assignment(
-        restrict_expression_to_context(assignment.assignee, loop_context_acc),
-        restrict_expression_to_context(assignment.expression, loop_context_acc),
-        assignment.assignment_type,
-    )
+    assignee = restrict_expression_to_context(assignment.assignee, loop_context_acc)
+    expression = restrict_expression_to_context(assignment.expression, loop_context_acc)
 
+    try:
+        size = assignee.size
+    except AttributeError:
+        size = expression.size
+        # still might fail?
 
-def context_product(contexts, acc=pmap()):
-    contexts = tuple(contexts)
-
-    if not contexts:
-        return acc
-
-    ctx, *subctxs = contexts
-    index, pathss = ctx
-    for paths in pathss:
-        acc_ = acc | {index: paths}
-        if subctxs:
-            yield from context_product(subctxs, acc_)
-        else:
-            yield acc_
+    if size == 0:
+        return NullInstruction()
+    else:
+        return Assignment(assignee, expression, assignment.assignment_type)
 
 
 class ImplicitPackUnpackExpander(Transformer):
@@ -159,15 +152,19 @@ class ImplicitPackUnpackExpander(Transformer):
     def _apply(self, expr: Any):
         raise NotImplementedError(f"No handler provided for {type(expr).__name__}")
 
+    @_apply.register(NullInstruction)
+    def _(self, /, expr):
+        return NullInstruction()
+
     # TODO Can I provide a generic "operands" thing? Put in the parent class?
-    @_apply.register
+    @_apply.register(Loop)
     def _(self, loop: Loop):
         new_statements = [s for stmt in loop.statements for s in enlist(self._apply(stmt))]
         return loop.copy(statements=new_statements)
 
     @_apply.register
     def _(self, insn_list: InstructionList):
-        return insn_list.copy(instructions=[self._apply(insn) for insn in insn_list])
+        return type(insn_list)([insn_ for insn in insn_list for insn_ in enlist(self._apply(insn))])
 
     # # TODO: Should be the same as Assignment
     # @_apply.register
@@ -467,11 +464,11 @@ def prepare_petsc_calls(obj: Any, /) -> InstructionList:
 
 @prepare_petsc_calls.register(InstructionList)
 def _(insn_list: InstructionList, /) -> InstructionList:
-    return maybe_enlist((prepare_petsc_calls(insn) for insn in insn_list))
+    return type(insn_list)((prepare_petsc_calls(insn) for insn in insn_list))
 
 
 @prepare_petsc_calls.register(Loop)
-def _(loop: Loop, /) -> InstructionList:
+def _(loop: Loop, /) -> Loop:
     return Loop(loop.index, [
         prepare_petsc_calls(stmt) for stmt in loop.statements
     ])
@@ -499,7 +496,8 @@ def _(assignment: Assignment, /) -> InstructionList:
         # then we have to convert `666` into an appropriately sized temporary
         # for MatSetValues to work.
         if isinstance(assignment.expression, numbers.Number):
-            expression = Mat(mat.raxes, mat.caxes, mat=np.full(mat.alloc_size, assignment.expression, dtype=mat.dtype), prefix="t", constant=True)
+            # TODO: There must be a more elegant way of doing this
+            expression = Dat(AxisTree(mat.axes.node_map), data=np.full(mat.alloc_size, assignment.expression, dtype=mat.dtype), prefix="t", constant=True)
         else:
             assert (
                 isinstance(assignment.expression, (Mat, _ConcretizedMat))
@@ -697,50 +695,12 @@ def _collect_array_candidate_indirections(dat, loop_axes) -> ImmutableOrderedDic
 
 @_collect_array_candidate_indirections.register(Dat)
 def _(dat: Dat, loop_axes):
-    candidatess = {}
-    for leaf_path, orig_layout in dat.axes.leaf_subst_layouts.items():
-        visited_axes = dat.axes.path_with_nodes(dat.axes._node_from_path(leaf_path), and_components=True)
-
-        # if extract_axes(orig_layout, visited_axes, loop_axes, {}).size == 0:
-        #     continue
-
-        candidatess[(dat, leaf_path)] = collect_expression_candidate_indirections(
-            orig_layout, visited_axes, loop_axes
-        )
-
-    return ImmutableOrderedDict(candidatess)
+    return dat.candidate_layouts(loop_axes)
 
 
-@_collect_array_candidate_indirections.register(Mat)
+@_collect_array_candidate_indirections.register(AbstractMat)
 def _(mat: Mat, loop_axes):
     return mat.candidate_layouts(loop_axes)
-
-
-def _compute_array_indirection_cost(dat, arg_layouts, seen_exprs_mut, loop_axes, outer_key, cache) -> int:
-    assert False, "not used any more"
-    breakpoint()
-
-    if not isinstance(dat, Array):
-        return 0
-
-    if not isinstance(dat, Dat):
-        raise NotImplementedError
-
-    cost = 0
-    for leaf_path in dat.axes.leaf_paths:
-        visited_axes = dat.axes.path_with_nodes(dat.axes._node_from_path(leaf_path), and_components=True)
-
-        try:
-            layout = arg_layouts[outer_key + ((dat, leaf_path),)]
-        except KeyError:
-            continue
-
-        if extract_axes(layout, visited_axes, loop_axes, cache).size == 0:
-            continue
-
-        cost += compute_expression_indirection_cost(layout, visited_axes, loop_axes, seen_exprs_mut, cache)
-
-    return cost
 
 
 @functools.singledispatch
@@ -773,6 +733,9 @@ def _(dat, /) -> frozenset:
 # NOTE: Think this lives in expr_visitors or something
 def materialize_composite_dat(dat: _CompositeDat) -> _ExpressionDat:
     axes = extract_axes(dat, dat.visited_axes, dat.loop_axes, {})
+
+    if axes.size == 0:
+        return None
 
     # FIXME: This is almost certainly wrong in general
     result = Dat(axes, dtype=IntType)
@@ -876,39 +839,44 @@ def _(mat, layouts, outer_key):
     return _ConcretizedMat(mat, row_layouts, col_layouts)
 
 
+def concretize_arrays(insn: Instruction, /) -> Instruction:
+    return _concretize_arrays_rec(insn, pmap())
+
+
 @functools.singledispatch
-def concretize_arrays(insn: Instruction) -> Instruction:
+def _concretize_arrays_rec(insn:Instruction, /, loop_axes_acc) -> Instruction:
     raise TypeError
 
 
-@concretize_arrays.register(InstructionList)
-def _(insn_list: InstructionList):
-    return InstructionList([concretize_arrays(insn) for insn in insn_list])
+@_concretize_arrays_rec.register(InstructionList)
+def _(insn_list: InstructionList, /, loop_axes_acc):
+    return InstructionList([_concretize_arrays_rec(insn, loop_axes_acc) for insn in insn_list])
 
 
-@concretize_arrays.register(Loop)
-def _(loop: Loop):
-    return loop.copy(statements=[concretize_arrays(stmt) for stmt in loop.statements])
+@_concretize_arrays_rec.register(Loop)
+def _(loop: Loop, /, loop_axes_acc) -> Loop:
+    loop_axes_acc_ = loop_axes_acc | {loop.index.id: loop.index.iterset}
+    return loop.copy(statements=[_concretize_arrays_rec(stmt, loop_axes_acc_) for stmt in loop.statements])
 
 
-@concretize_arrays.register(Assignment)
-def _(assignment: Assignment, /) -> Assignment:
+@_concretize_arrays_rec.register(Assignment)
+def _(assignment: Assignment, /, loop_axes_acc) -> Assignment:
     return Assignment(
-        expr_concretize_arrays(assignment.assignee),
-        expr_concretize_arrays(assignment.expression),
+        expr_concretize_arrays(assignment.assignee, loop_axes_acc),
+        expr_concretize_arrays(assignment.expression, loop_axes_acc),
         assignment.assignment_type,
     )
 
 
-@concretize_arrays.register(PetscMatAssign)
-def _(assignment: PetscMatAssign, /) -> PetscMatAssign:
+@_concretize_arrays_rec.register(PetscMatAssign)
+def _(assignment: PetscMatAssign, /, loop_axes_acc) -> PetscMatAssign:
     return PetscMatAssign(
-        expr_concretize_arrays(assignment.mat),
-        expr_concretize_arrays(assignment.values),
+        expr_concretize_arrays(assignment.mat, loop_axes_acc),
+        expr_concretize_arrays(assignment.values, loop_axes_acc),
         assignment.access_type,
     )
 
 
-@concretize_arrays.register(CalledFunction)
+@_concretize_arrays_rec.register(CalledFunction)
 def _(func: CalledFunction, /) -> CalledFunction:
-    return func.copy(arguments=[expr_concretize_arrays(arg) for arg in func.arguments])
+    return func.copy(arguments=[expr_concretize_arrays(arg, loop_axes_acc) for arg in func.arguments])

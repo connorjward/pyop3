@@ -291,6 +291,10 @@ class LoopyCodegenContext(CodegenContext):
     def _(self, array: AbstractMat):
         return OpaqueType("Mat")
 
+    @_dtype.register(PETSc.Mat)
+    def _(self, mat):
+        return OpaqueType("Mat")
+
     def _add_instruction(self, insn):
         self._insns.append(insn)
         self._last_insn_id = insn.id
@@ -727,98 +731,98 @@ def _compile_petscmat(assignment, loop_indices, codegen_context):
 
     # now emit the right line of code, this should properly be a lp.ScalarCallable
     # https://petsc.org/release/manualpages/Mat/MatGetValuesLocal/
-
-    # row_layouts???
-    # need to loop over the different leaf layouts - we no longer combine things here.
-    breakpoint()
-    # here we do the concatenation I think, whereas elsewhere we do not...
-
-    rmap = mat.rmap
-    cmap = mat.cmap
-
     codegen_context.add_array(mat)
     codegen_context.add_array(array)
-    codegen_context.add_array(rmap)
-    codegen_context.add_array(cmap)
 
     mat_name = codegen_context.actual_to_kernel_rename_map[mat.name]
     array_name = codegen_context.actual_to_kernel_rename_map[array.name]
-    rmap_name = codegen_context.actual_to_kernel_rename_map[rmap.name]
-    cmap_name = codegen_context.actual_to_kernel_rename_map[cmap.name]
-    blocked = mat.block_shape > 1
-    if mat.nested:
-        if len(mat.nest_labels) > 1:
-            # Need to loop over the different nest labels and emit separate calls to
-            # MatSetValues, maps may also be wrong.
-            raise NotImplementedError
 
-        submat_name = codegen_context.unique_name("submat")
-        ridxs, cidxs = just_one(mat.nest_labels)
+    for row_layout in mat.row_layouts.values():
+        for col_layout in mat.col_layouts.values():
+            # old aliases
+            rmap = row_layout
+            cmap = col_layout
 
-        if any(len(x) != 1 for x in {ridxs, cidxs}):
-            raise NotImplementedError
+            codegen_context.add_array(rmap)
+            codegen_context.add_array(cmap)
 
-        (ridx,) = ridxs
-        (cidx,) = cidxs
+            rmap_name = codegen_context.actual_to_kernel_rename_map[rmap.name]
+            cmap_name = codegen_context.actual_to_kernel_rename_map[cmap.name]
 
-        if ridx is None:
-            ridx = 0
-        if cidx is None:
-            cidx = 0
-
-        code = textwrap.dedent(
-            f"""
-            Mat {submat_name};
-            MatNestGetSubMat({mat_name}, {ridx}, {cidx}, &{submat_name});
-            """
-        )
-        codegen_context.add_cinstruction(code)
-        mat_name = submat_name
+    # blocked = mat.block_shape > 1
+    # if mat.nested:
+    #     if len(mat.nest_labels) > 1:
+    #         # Need to loop over the different nest labels and emit separate calls to
+    #         # MatSetValues, maps may also be wrong.
+    #         raise NotImplementedError
+    #
+    #     submat_name = codegen_context.unique_name("submat")
+    #     ridxs, cidxs = just_one(mat.nest_labels)
+    #
+    #     if any(len(x) != 1 for x in {ridxs, cidxs}):
+    #         raise NotImplementedError
+    #
+    #     (ridx,) = ridxs
+    #     (cidx,) = cidxs
+    #
+    #     if ridx is None:
+    #         ridx = 0
+    #     if cidx is None:
+    #         cidx = 0
+    #
+    #     code = textwrap.dedent(
+    #         f"""
+    #         Mat {submat_name};
+    #         MatNestGetSubMat({mat_name}, {ridx}, {cidx}, &{submat_name});
+    #         """
+    #     )
+    #     codegen_context.add_cinstruction(code)
+    #     mat_name = submat_name
 
     # TODO: The following code should be done in a loop per submat.
 
-    # these sizes can be expressions that need evaluating
-    rsize, csize = mat.shape
+            # these sizes can be expressions that need evaluating
+            rsize, csize = mat.mat.shape
 
-    if not isinstance(rsize, numbers.Integral):
-        raise NotImplementedError
-        rsize_var = register_extent(
-            rsize,
-            loop_indices,
-            codegen_context,
-        )
-    else:
-        rsize_var = rsize
+            if not isinstance(rsize, numbers.Integral):
+                raise NotImplementedError
+                rsize_var = register_extent(
+                    rsize,
+                    loop_indices,
+                    codegen_context,
+                )
+            else:
+                rsize_var = rsize
 
-    if not isinstance(csize, numbers.Integral):
-        raise NotImplementedError
-        csize_var = register_extent(
-            csize,
-            loop_indices,
-            codegen_context,
-        )
-    else:
-        csize_var = csize
+            if not isinstance(csize, numbers.Integral):
+                raise NotImplementedError
+                csize_var = register_extent(
+                    csize,
+                    loop_indices,
+                    codegen_context,
+                )
+            else:
+                csize_var = csize
 
-    # use pmap() as the path here because we don't want to emit any loops
-    # here that do not already exist.
-    irow = str(lower_expr(rmap, loop_indices, codegen_context, path=pmap()))
-    icol = str(lower_expr(cmap, loop_indices, codegen_context, path=pmap()))
+            # use pmap() as the path here because we don't want to emit any loops
+            # here that do not already exist.
+            irow = str(lower_expr(rmap, loop_indices, codegen_context, path=pmap()))
+            icol = str(lower_expr(cmap, loop_indices, codegen_context, path=pmap()))
 
-    # hacky
-    myargs = [
-        assignment, mat_name, array_name, rsize_var, csize_var, irow, icol, blocked
-    ]
-    access_type = assignment.access_type
-    if access_type == ArrayAccessType.READ:
-        call_str = _petsc_mat_load(*myargs)
-    elif access_type == ArrayAccessType.WRITE:
-        call_str = _petsc_mat_store(*myargs)
-    else:
-        assert access_type == ArrayAccessType.INC
-        call_str = _petsc_mat_add(*myargs)
+            # hacky
+            myargs = [
+                assignment, mat_name, array_name, rsize_var, csize_var, irow, icol, blocked
+            ]
+            access_type = assignment.access_type
+            if access_type == ArrayAccessType.READ:
+                call_str = _petsc_mat_load(*myargs)
+            elif access_type == ArrayAccessType.WRITE:
+                call_str = _petsc_mat_store(*myargs)
+            else:
+                assert access_type == ArrayAccessType.INC
+                call_str = _petsc_mat_add(*myargs)
 
-    codegen_context.add_cinstruction(call_str)
+            codegen_context.add_cinstruction(call_str)
 
 
 def _petsc_mat_load(assignment, mat_name, array_name, nrow, ncol, irow, icol, blocked):
@@ -1084,7 +1088,7 @@ def _(dat: _ExpressionDat, /, iname_map, context, path=None):
 
     new_name = context.actual_to_kernel_rename_map[dat.name]
 
-    offset_expr = lower_expr(dat.layout, iname_map, context)
+    offset_expr = lower_expr(dat.layouts[path], iname_map, context)
     rexpr = pym.subscript(pym.var(new_name), (offset_expr,))
     return rexpr
 

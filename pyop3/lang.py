@@ -191,7 +191,7 @@ class Instruction(UniqueRecord, abc.ABC):
             expand_assignments,
             prepare_petsc_calls,
             compress_indirection_maps,
-            # concretize_array_accesses,
+            concretize_arrays,
         )
 
         insn = self
@@ -200,11 +200,11 @@ class Instruction(UniqueRecord, abc.ABC):
         insn = expand_assignments(insn)  # specifically reshape bits
         insn = prepare_petsc_calls(insn)
 
-        # don't really think that this is needed
-        # insn = concretize_array_accesses(insn)
 
         if compiler_parameters.compress_indirection_maps:
             insn = compress_indirection_maps(insn)
+
+        insn = concretize_arrays(insn)
 
         return PreprocessedExpression(insn)
 
@@ -524,9 +524,12 @@ class InstructionList(Instruction):
 
 
 def enlist(insn: Instruction) -> InstructionList:
-    if not isinstance(insn, InstructionList):
-        insn = InstructionList([insn])
-    return insn
+    if isinstance(insn, InstructionList):
+        return insn
+    elif isinstance(insn, NullInstruction):
+        return InstructionList(())
+    else:
+        return InstructionList([insn])
 
 
 def maybe_enlist(instructions) -> Instruction:
@@ -675,6 +678,10 @@ class CalledFunction(Terminal):
 
     def with_arguments(self, arguments):
         return self.copy(arguments=arguments)
+
+
+class NullInstruction(Terminal):
+    """An instruction that does nothing."""
 
 
 

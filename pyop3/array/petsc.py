@@ -293,6 +293,7 @@ class AbstractMat(Array, Record):
     # TODO: Make this generic to all 'Array's and implement for 'Dat'
     def candidate_layouts(self, loop_axes):
         from pyop3.expr_visitors import _CompositeDat, extract_axes
+        from pyop3.insn_visitors import materialize_composite_dat
 
         # temporaries do not have indexed axes so we don't care, don't expect to have
         # rows or cols indexed but not the other
@@ -308,15 +309,21 @@ class AbstractMat(Array, Record):
             for leaf_path, orig_layout in axes.leaf_subst_layouts.items():
                 visited_axes = axes.path_with_nodes(axes._node_from_path(leaf_path), and_components=True)
                 compressed_expr = _CompositeDat(orig_layout, visited_axes, loop_axes)
-                compressed_cost = extract_axes(orig_layout, visited_axes, loop_axes, {}).size
-                candidatess[(self, leaf_path, row_or_col)] = ((compressed_expr, compressed_cost),)
+                materialized_dat = materialize_composite_dat(compressed_expr)
+                # NOTE: Probably retrievable from the materialized_dat
+                compressed_cost = extract_axes(materialized_dat, visited_axes, loop_axes, {}).size
+                candidatess[(self, leaf_path, row_or_col)] = ((materialized_dat, compressed_cost),)
 
         add_candidate(self.raxes, 0)
         add_candidate(self.caxes, 1)
 
         return ImmutableOrderedDict(candidatess)
 
-    @property
+    @cached_property
+    def size(self) -> Any:
+        return self.axes.size
+
+    @cached_property
     def alloc_size(self) -> int:
         return self.raxes.alloc_size * self.caxes.alloc_size
 

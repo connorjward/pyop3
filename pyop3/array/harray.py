@@ -10,6 +10,7 @@ from typing import Any, Sequence
 import numpy as np
 import pymbolic as pym
 from cachetools import cachedmethod
+from immutabledict import ImmutableOrderedDict
 from petsc4py import PETSc
 from pyrsistent import freeze, pmap
 
@@ -304,6 +305,23 @@ class Dat(_Dat):
     def leaf_layouts(self):
         return self.axes.leaf_subst_layouts
 
+    # TODO: Array property
+    def candidate_layouts(self, loop_axes):
+        from pyop3.expr_visitors import collect_candidate_indirections
+
+        candidatess = {}
+        for leaf_path, orig_layout in self.axes.leaf_subst_layouts.items():
+            visited_axes = self.axes.path_with_nodes(self.axes._node_from_path(leaf_path), and_components=True)
+
+            # if extract_axes(orig_layout, visited_axes, loop_axes, {}).size == 0:
+            #     continue
+
+            candidatess[(self, leaf_path)] = collect_candidate_indirections(
+                orig_layout, visited_axes, loop_axes
+            )
+
+        return ImmutableOrderedDict(candidatess)
+
     @property
     def dtype(self):
         return self.buffer.dtype
@@ -532,6 +550,7 @@ class _ConcretizedDat2(_Dat, ContextFree, abc.ABC):
     #     return ImmutableOrderedDict({pmap(): self})
 
 
+# NOTE: I think that having dat.dat is a bad design pattern, instead pass the buffer or similar
 class _ConcretizedDat(_ConcretizedDat2):
     """A dat with fixed layouts.
 
