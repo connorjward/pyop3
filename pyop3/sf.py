@@ -67,9 +67,19 @@ class StarForest:
     def nowned(self):
         return self.size - self.nleaves
 
+    # better alias
+    @property
+    def num_owned(self):
+        return self.nowned
+
     @property
     def nleaves(self):
         return len(self.ileaf)
+
+    # better alias?
+    @property
+    def num_ghost(self):
+        return self.nleaves
 
     @property
     def ilocal(self):

@@ -107,3 +107,27 @@ def test_multi_component_index_forest_inserts_extra_slices():
     # on this.
     assert all(index.label == "ax0" for index, _ in itree.leaves)
     assert len(itree.leaves) == 2
+
+
+@pytest.mark.parametrize(
+    ["regions", "start", "stop", "step", "expected"],
+    [
+        ({"a": 3, "b": 2}, None, None, None, {"a": 3, "b": 2}),
+        ({"a": 3, "b": 2}, None, None, 2, {"a": 2, "b": 1}),
+        ({"a": 3, "b": 2}, 1, None, None, {"a": 2, "b": 2}),
+        ({"a": 3, "b": 2}, 1, None, 2, {"a": 1, "b": 1}),
+        ({"a": 3, "b": 2}, None, 3, None, {"a": 3, "b": 0}),
+        ({"a": 3, "b": 2}, None, 4, 2, {"a": 2, "b": 0}),
+    ]
+)
+def test_affine_index_regions(regions, start, stop, step, expected):
+    from pyop3.axtree.tree import AxisComponentRegion
+    from pyop3.itree.tree import _index_regions
+
+    parsed_regions = [AxisComponentRegion(size, label) for label, size in regions.items()]
+    affine_component = op3.AffineSliceComponent("anything", start, stop, step)
+    indexed_regions = _index_regions(affine_component, parsed_regions)
+    assert all(
+        region.label == label and region.size == size
+        for region, (label, size) in op3.utils.strict_zip(indexed_regions, expected.items())
+    )

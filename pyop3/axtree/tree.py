@@ -44,6 +44,7 @@ from pyop3.tree import (
     previsit,
 )
 from pyop3.utils import (
+    has_unique_entries,
     strict_zip,
     debug_assert,
     deprecated,
@@ -192,9 +193,8 @@ class AxisComponentRegion:
 
 
 @functools.singledispatch
-def _parse_regions(obj: Any) -> tuple[AxisComponentRegion]:
+def _parse_regions(obj: Any) -> tuple[AxisComponentRegion, ...]:
     from pyop3.array import Dat
-    from pyop3.array.harray import _ExpressionDat
 
     if isinstance(obj, Dat):
         return (AxisComponentRegion(obj),)
@@ -203,32 +203,74 @@ def _parse_regions(obj: Any) -> tuple[AxisComponentRegion]:
 
 
 @_parse_regions.register(Sequence)
-def _(iterable: Sequence) -> tuple[AxisComponentRegion]:
-    return tuple(iterable)
+def _(regions: Sequence[AxisComponentRegion]) -> tuple[AxisComponentRegion, ...]:
+    regions = tuple(regions)
 
+    if len(regions) > 1:
+        if not has_unique_entries(r.label for r in regions):
+            raise ValueError("Regions have duplicate labels")
+        if any(r.label is None for r in regions):
+            raise ValueError("Only regions for single-region components can be labelled None")
+
+    return regions
 
 @_parse_regions.register(numbers.Integral)
-def _(num: numbers.Integral) -> tuple[AxisComponentRegion]:
+def _(num: numbers.Integral) -> tuple[AxisComponentRegion, ...]:
     return (AxisComponentRegion(num),)
 
 
-def _expand_regions(regions: Sequence[AxisComponentRegion], sf: StarForest) -> tuple[AxisComponentRegion]:
-    if len(regions) > 1:
-        raise NotImplementedError("Currently assume a star forest can only be used to split apart single region components")
+@functools.singledispatch
+def _parse_sf(obj: Any, regions) -> StarForest | None:
+    if obj is None:
+        return None
     else:
-        if regions[0].label is not None:
-            raise NotImplementedError("Currently assume no further region labels are used")
-        breakpoint()
-        # from the star forest
-        num_owned = NotImplemented
-        num_ghost = NotImplemented
+        raise TypeError(f"No handler provided for {type(obj).__name__}")
 
-    owned_regions = []
-    ghost_regions = []
-    for region in regions:
-        owned_regions.append(AxisComponentRegion(num_owned, "owned"))
-        ghost_regions.append(AxisComponentRegion(num_ghost, "ghost"))
-    return tuple(owned_regions + ghost_regions)
+
+@_parse_sf.register(StarForest)
+def _(sf: StarForest, regions) -> StarForest:
+    size = sum(region.size for region in regions)
+    if size != sf.size:
+        raise ValueError("Size mismatch between regions and SF")
+    return sf
+
+
+@_parse_sf.register(PETSc.SF)
+def _(sf: PETSc.SF, regions) -> StarForest:
+    size = sum(region.size for region in regions)
+    return StarForest(sf, size)
+
+
+def _expand_regions(regions: Sequence[AxisComponentRegion], sf: StarForest) -> tuple[AxisComponentRegion, ...]:
+    """
+    examples:
+
+    (a, 5) and sf: {2 owned and 3 ghost -> (a_owned, 2), (a_ghost, 3)
+
+    (a, 5), (b, 3) and sf: {2 owned and 6 ghost -> (a_owned, 2), (b_owned, 0), (a_ghost, 3), (b_ghost, 3)
+
+    (a, 5), (b, 3) and sf: {6 owned and 2 ghost -> (a_owned, 5), (b_owned, 1), (a_ghost, 0), (b_ghost, 2)
+    """
+    if len(regions) > 1:
+        raise NotImplementedError("Using multiple regions here is unexpected and will probably not work")
+
+    region_sizes = {}
+    ptr = 0
+    for point_type in ("owned", "ghost"):
+        for region in regions:
+            region_prefix = f"{region.label}_" if region.label is not None else ""
+
+            if point_type == "owned":
+                size = min([region.size, sf.num_owned-ptr])
+            else:
+                size = region.size - region_sizes[f"{region_prefix}owned"]
+            region_sizes[f"{region_prefix}{point_type}"] = size
+            ptr += size
+    assert ptr == sf.size
+
+    return tuple(
+        AxisComponentRegion(size, label) for label, size in region_sizes.items()
+    )
 
 
 class AxisComponent(LabelledNodeComponent):
@@ -243,6 +285,7 @@ class AxisComponent(LabelledNodeComponent):
         sf=None,
     ):
         regions = _parse_regions(regions)
+        sf = _parse_sf(sf, regions)
 
         if unit:
             raise NotImplementedError
