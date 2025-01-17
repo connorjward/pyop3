@@ -29,6 +29,7 @@ from pyop3.lang import KernelArgument, Assignment
 from pyop3.log import warning
 from pyop3.utils import (
     Record,
+    debug_assert,
     deprecated,
     just_one,
     strictly_all,
@@ -192,8 +193,13 @@ class Dat(_Dat):
         name=None,
         prefix=None,
         constant=False,
+        ordered=False,
         parent=None,
     ):
+        if ordered:
+            # TODO: Belongs on the buffer and also will fail for non-numpy arrays
+            debug_assert(lambda: (data == np.sort(data)).all())
+
         super().__init__(name=name, prefix=prefix, parent=parent)
 
         axes = as_axis_tree(axes)
@@ -205,11 +211,19 @@ class Dat(_Dat):
         # TODO This attr really belongs to the buffer not the array
         self.constant = constant
 
+        # NOTE: This is a tricky one, is it an attribute of the dat or the buffer? What
+        # if the Dat is indexed? Maybe it should be
+        #
+        #     return self.buffer.ordered and self.ordered_access
+        #
+        # where self.ordered_access would detect the use of a subset...
+        self.ordered = ordered
+
         # self._cache = {}
 
     @property
     def _record_fields(self) -> frozenset:
-        return frozenset({"axes", "buffer", "max_value", "name", "constant", "parent"})
+        return frozenset({"axes", "buffer", "max_value", "name", "constant", "ordered", "parent"})
 
     def __str__(self) -> str:
         return "\n".join(
@@ -225,7 +239,7 @@ class Dat(_Dat):
     def __hash__(self) -> int:
         return hash(
             (
-                type(self), self.axes, self.dtype, self.buffer, self.max_value, self.name, self.constant)
+                type(self), self.axes, self.dtype, self.buffer, self.max_value, self.name, self.constant, self.ordered)
         )
 
     @cachedmethod(lambda self: self.axes._cache)

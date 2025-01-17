@@ -109,7 +109,7 @@ class AffineSliceComponent(SliceComponent):
         label_was_none = label is None
 
         super().__init__(component, label=label, **kwargs)
-        # could be None here
+        # TODO: make None here and parse with `with_size()`
         self.start = start if start is not None else 0
         self.stop = stop
         # could be None here
@@ -125,6 +125,15 @@ class AffineSliceComponent(SliceComponent):
     @property
     def is_full(self):
         return self.start == 0 and self.stop is None and self.step == 1
+
+    def with_size(self, size: numbers.Integral | Dat | None = None) -> tuple:
+        if size is None and self.stop is None:
+            raise ValueError()
+
+        start = self.start if self.start is not None else 0
+        stop = self.stop if self.stop is not None else size
+        step = self.step if self.step is not None else 1
+        return start, stop, step
 
 
 class SubsetSliceComponent(SliceComponent):
@@ -1046,58 +1055,6 @@ def _(slice_: Slice, *, prev_axes, **_):
         regions = _prepare_regions_for_slice_component(slice_component, orig_regions)
 
         indexed_regions = _index_regions(slice_component, regions)
-
-        # determine size
-        # TODO: Can return (or determine) from indexed_regions
-        raise NotImplementedError("TODO below")
-        if isinstance(slice_component, AffineSliceComponent):
-            if isinstance(region.size, Dat):
-                if (
-                    slice_component.start != 0
-                    or slice_component.step != 1
-                ):
-                    raise NotImplementedError("Only full slices of ragged components are supported")
-
-                # need to index things using replace() instead of parent_indices
-                # NOTE: is it strictly necessary to index here?
-                size = region.size
-
-                if slice_component.stop is None:
-                    raise NotImplementedError("This does not work")
-                    if len(parent_indices) == 0:
-                        size = target_component.count
-                    else:
-                        # It is not necessarily the case that all of parent_indices is
-                        # required to index count.
-                        # TODO: Unify with if len(parent_indices) == 0, should work for both
-                        size = target_component.count.getitem(parent_indices, allow_unused=True)
-                else:
-                    size = slice_component.stop
-
-            else:  # region has a fixed size
-                stop = region.size if slice_component.stop is None else slice_component.stop
-                size = math.ceil((stop - slice_component.start) / slice_component.step)
-
-        else:
-            assert isinstance(slice_component, Subset)
-            subset = slice_component
-
-            # If we don't have an ordered subset then extracting things like dat[subset].owned becomes hard
-            # because we can no longer use slices.
-            if len(target_component.regions) > 1 and not subset.array.ordered:
-                raise NotImplementedError("Subset indices must be ordered if we have multi-region components")
-
-            # TODO: clean this up
-            subset_component = subset.array.axes.leaf_component
-            assert len(subset_component.regions) == 1, "Not allowed to index with multi-region components"
-
-            if len(target_component.regions) > 1:
-                raise NotImplementedError("TODO")
-            else:
-                size = just_one(subset_component.regions).size
-
-            indexed_region = AxisComponentRegion(size, region.label)
-            indexed_regions.append(indexed_region)
 
         if is_full:
             component_label = slice_component.component
@@ -2068,9 +2025,14 @@ def _(affine_component: AffineSliceComponent, regions) -> tuple[AxisComponentReg
     {"a": 3, "b": 2}[:4:2] -> {"a": 2, "b": 0} ( [0, 2] )
 
     """
-    start = affine_component.start or 0
-    stop = affine_component.stop or sum(r.size for r in regions)
-    step = affine_component.step or 1
+    size = sum(r.size for r in regions)
+    start, stop, step = affine_component.with_size(size)
+
+    if any(isinstance(r.size, Dat) for r in regions):
+        if len(regions) > 1:
+            raise NotImplementedError("Only single-region ragged components are supported")
+        region = just_one(regions)
+        return (AxisComponentRegion(stop, region.label),)
 
     indexed_regions = []
     loc = 0
@@ -2079,13 +2041,13 @@ def _(affine_component: AffineSliceComponent, regions) -> tuple[AxisComponentReg
         lower_bound = loc
         upper_bound = loc + region.size
         if upper_bound < start or lower_bound >= stop:
-            size = 0
+            region_size = 0
             offset -= region.size
         else:
-            size = math.ceil((min(region.size, stop-loc) - offset) / step)
+            region_size = math.ceil((min(region.size, stop-loc) - offset) / step)
             offset = (offset + region.size) % step
 
-        indexed_region = AxisComponentRegion(size, region.label)
+        indexed_region = AxisComponentRegion(region_size, region.label)
         indexed_regions.append(indexed_region)
         loc += region.size
     return tuple(indexed_regions)

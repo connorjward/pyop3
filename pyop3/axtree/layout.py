@@ -392,10 +392,8 @@ def size_requires_external_index_region(axes, axis, component, region, inner_loo
     from pyop3.array.harray import _ExpressionDat
     from pyop3.expr_visitors import replace_terminals
 
-    if len(component.regions) > 1:
-        raise NotImplementedError("TODO")
-    else:
-        size = component.regions[0].size
+    !!!NEXT: why is region sometimes a set?
+    size = region.size
 
     if isinstance(size, Dat):
         if size.axes.is_empty:
