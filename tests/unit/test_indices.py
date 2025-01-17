@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 from pyrsistent import freeze, pmap
 
@@ -126,7 +127,32 @@ def test_affine_index_regions(regions, start, stop, step, expected):
 
     parsed_regions = [AxisComponentRegion(size, label) for label, size in regions.items()]
     affine_component = op3.AffineSliceComponent("anything", start, stop, step)
+
     indexed_regions = _index_regions(affine_component, parsed_regions)
+    assert all(
+        region.label == label and region.size == size
+        for region, (label, size) in op3.utils.strict_zip(indexed_regions, expected.items())
+    )
+
+
+@pytest.mark.parametrize(
+    ["regions", "indices", "expected"],
+    [
+        ({"a": 3, "b": 2}, [0, 1, 2, 3, 4], {"a": 3, "b": 2}),
+        ({"a": 3, "b": 2}, [0, 1, 2], {"a": 3, "b": 0}),
+        ({"a": 3, "b": 2}, [1, 4], {"a": 1, "b": 1}),
+        ({"a": 3, "b": 2}, [3, 4], {"a": 0, "b": 2}),
+    ]
+)
+def test_subset_index_regions(regions, indices, expected):
+    from pyop3.axtree.tree import AxisComponentRegion
+    from pyop3.itree.tree import _index_regions
+
+    parsed_regions = [AxisComponentRegion(size, label) for label, size in regions.items()]
+    indices_dat = op3.Dat(op3.Axis(len(indices)), data=np.asarray(indices, dtype=int))
+    subset_component = op3.SubsetSliceComponent("anything", indices_dat)
+
+    indexed_regions = _index_regions(subset_component, parsed_regions)
     assert all(
         region.label == label and region.size == size
         for region, (label, size) in op3.utils.strict_zip(indexed_regions, expected.items())

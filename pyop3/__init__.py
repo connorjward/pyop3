@@ -56,6 +56,7 @@ from pyop3.itree import (  # noqa: F401
     Slice,
     SliceComponent,
     Subset,
+    SubsetSliceComponent,
     TabulatedMapComponent,
     ScalarIndex,
     as_index_forest,

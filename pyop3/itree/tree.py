@@ -2091,7 +2091,30 @@ def _(affine_component: AffineSliceComponent, regions) -> tuple[AxisComponentReg
     return tuple(indexed_regions)
 
 
-@_index_regions.register(Subset)
-def _(subset: Subset, regions) -> tuple:
-    ...
-    raise NotImplementedError("TODO")
+@_index_regions.register(SubsetSliceComponent)
+def _(subset: SubsetSliceComponent, regions) -> tuple:
+    """
+    IMPORTANT: This function will do a full search of the set of indices.
+
+    Examples
+    --------
+    {"a": 3, "b": 2}[0,1,2,3,4] -> {"a": 3, "b": 0}
+    {"a": 3, "b": 2}[0,1,2]     -> {"a": 3, "b": 0}
+    {"a": 3, "b": 2}[1,4]       -> {"a": 1, "b": 1}
+    {"a": 3, "b": 2}[3,4]       -> {"a": 0, "b": 2}
+
+    """
+    indices = subset.array.buffer.data_ro
+
+    indexed_regions = []
+    loc = 0
+    lower_index = 0
+    for region in regions:
+        upper_index = np.searchsorted(indices, loc+region.size)
+        size = upper_index - lower_index
+        indexed_region = AxisComponentRegion(size, region.label)
+        indexed_regions.append(indexed_region)
+
+        loc += region.size
+        lower_index = upper_index
+    return tuple(indexed_regions)

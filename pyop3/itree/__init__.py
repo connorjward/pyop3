@@ -10,6 +10,7 @@ from .tree import (  # noqa: F401
     Slice,
     SliceComponent,
     Subset,
+    SubsetSliceComponent,
     TabulatedMapComponent,
 )
 from .parse import as_index_forest, collect_loop_contexts  # noqa: F401
