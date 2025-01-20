@@ -790,6 +790,15 @@ class AxisVar(Terminal):
         return self.axis_label
 
 
+class NaN(Terminal):
+    def __repr__(self) -> str:
+        return "NaN()"
+
+    @property
+    def terminal_key(self) -> str:
+        return str(self)
+
+
 # TODO: Refactor so loop ID passed in not the actual index
 class LoopIndexVar(Terminal):
     def __init__(self, loop_id, axis_label) -> None:
