@@ -296,7 +296,7 @@ class AxisComponent(LabelledNodeComponent):
         #     )
 
         super().__init__(label=label)
-        self.regions = regions
+        self._regions = regions
         self.unit = unit
         self.sf = sf
 
@@ -365,10 +365,11 @@ class AxisComponent(LabelledNodeComponent):
     def count(self) -> Any:
         return sum(reg.size for reg in self.regions)
 
+    # NOTE: Unsure if this should be kept separate like this... just turn into component.regions?
     @cached_property
-    def _all_regions(self) -> tuple[AxisComponentRegion]:
+    def regions(self) -> tuple[AxisComponentRegion]:
         """Return axis component regions having expanded star forests into owned and ghost."""
-        return _expand_regions(self.regions, self.sf) if self.sf else self.regions
+        return _expand_regions(self._regions, self.sf) if self.sf else self._regions
 
 
 class Axis(LoopIterable, MultiComponentLabelledNode, CacheMixin):

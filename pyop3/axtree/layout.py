@@ -66,10 +66,13 @@ def tabulate_again(axes):
     return layouts
 
 
-def tabulate_again_inner(axes, region, offset, layouts, *, axis=None, parent_axes_acc=None):
+def tabulate_again_inner(axes, region_map, offset, layouts, *, axis=None, parent_axes_acc=None):
     if axis is None:
+        print("AAA", flush=True)
         axis = axes.root
         parent_axes_acc = ()
+
+    region = just_one(r for c in axis.components for r in c.regions if r.label == region_map[axis.label])
 
     ragged = any(requires_external_index(axes, axis, c, region) for c in axis.components)
 
@@ -121,13 +124,15 @@ def tabulate_again_inner(axes, region, offset, layouts, *, axis=None, parent_axe
         if subaxis := axes.child(axis, component):
             # make the offset zero as that is only needed outermost
             # tabulate_again_inner(axes, region, offset, layouts, axis=subaxis, parent_axes_acc=parent_axes_acc_)
-            tabulate_again_inner(axes, region, 0, layouts, axis=subaxis, parent_axes_acc=parent_axes_acc_)
+            tabulate_again_inner(axes, region_map, 0, layouts, axis=subaxis, parent_axes_acc=parent_axes_acc_)
 
     return offset
 
 
 def _collect_regions(axes: AxisTree, *, axis: Axis | None = None):
     """
+    (can think of as some sort of linearisation of the tree, should probably error if orders do not match)
+
     Examples
     --------
 
@@ -161,10 +166,7 @@ def _collect_regions(axes: AxisTree, *, axis: Axis | None = None):
     merged_regions = []  # NOTE: Could be an ordered set
     for component in axis.components:
         for region in component.regions:
-            if region.label is not None:
-                merged_region = frozenset({region.label})
-            else:
-                merged_region = frozenset()
+            merged_region = {axis.label: region.label}
 
             if subaxis := axes.child(axis, component):
                 for submerged_region in _collect_regions(axes, axis=subaxis):
@@ -392,7 +394,6 @@ def size_requires_external_index_region(axes, axis, component, region, inner_loo
     from pyop3.array.harray import _ExpressionDat
     from pyop3.expr_visitors import replace_terminals
 
-    !!!NEXT: why is region sometimes a set?
     size = region.size
 
     if isinstance(size, Dat):

@@ -1051,7 +1051,7 @@ def _(slice_: Slice, *, prev_axes, **_):
         # case that "owned" points preceded "ghost" points and so extracting the
         # "owned" region is no longer a trivial slice. We therefore choose to discard
         # this information.
-        orig_regions = target_component._all_regions
+        orig_regions = target_component.regions
         regions = _prepare_regions_for_slice_component(slice_component, orig_regions)
 
         indexed_regions = _index_regions(slice_component, regions)
