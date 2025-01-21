@@ -63,11 +63,11 @@ def make_layouts(axes: AxisTree, loop_vars) -> PMap:
 
 
 def tabulate_again(axes):
-    layouts, to_tabulate = _prepare_layouts(axes, axes.root, (), pmap(), 0)
-    starts = {array: 0 for array in to_tabulate.keys()}
+    layouts, to_tabulate = _prepare_layouts(axes, axes.root, pmap(), 0, ())
+    starts = {array: 0 for array in to_tabulate.values()}
     for region in _collect_regions(axes):
         for tree, offset_dat in to_tabulate.items():
-            starts[offset_dat] += _tabulate_offset_dat(offset_dat, axes, region, starts[offset_dat])
+            starts[offset_dat] += _tabulate_offset_dat(offset_dat, tree, region, starts[offset_dat])
     return layouts
 
 
@@ -94,36 +94,31 @@ def _prepare_layouts(axes: AxisTree, axis: Axis, path_acc, layout_expr_acc, free
 
         subtree, step = _drop_constant_subaxes(axes, axis, component)
 
-        # TODO: Move into _drop_constant_subaxes
         linear_axis = Axis([component], axis.label)
-        # NOTE: just for now to try and get keys right
-        trimmed_tree = AxisTree(linear_axis).add_subtree(subtree, linear_axis, component)
-        # trimmed_tree = linear_axis
+        offset_axes = AxisTree.from_iterable([*free_axes, linear_axis])
 
-        # NOTE: Maybe a better way is to collect the necessary axes and compare them?
+        free_axes_ = free_axes + (linear_axis,)
 
-        if trimmed_tree in to_tabulate:
+        if subtree in to_tabulate:
             # We have already seen an identical tree elsewhere, don't need to create a new array here
-            component_layout = to_tabulate[trimmed_tree]
+            component_layout = to_tabulate[subtree]
         else:
-            if _tabulation_needs_subaxes(axes, axis, component):
+            if _tabulation_needs_subaxes(axes, axis, component, free_axes_):
                 # 1. Needs subindices to be able to tabulate anything, pass down
                 component_layout = NaN()
-            else:
-                # NOTE: unsure about this condition!!
-                if len(axis.components) > 1 and len(component.regions) > 1 or free_axes:
-                    # 2. Non-constant stride, must tabulate
-                    offset_dat = _prepare_empty_offset_dat(axes, axis, component, free_axes)
-                    component_layout = offset_dat * step + start
-                    to_tabulate[trimmed_tree] = offset_dat
-                else:
-                    # 3. Affine access
-                    assert subtree.is_empty
+            elif subtree.is_empty:
+                # 2. Affine access
+                assert subtree.is_empty
 
-                    # FIXME: weakness in algorithm
-                    if step == 0:
-                        step = 1
-                    component_layout = AxisVar(axis.label) * step + start
+                # FIXME: weakness in algorithm
+                if step == 0:
+                    step = 1
+                component_layout = AxisVar(axis.label) * step + start
+            else:
+                # 3. Non-constant stride, must tabulate
+                offset_dat = Dat(offset_axes, data=np.full(offset_axes.size, -1, dtype=IntType))
+                to_tabulate[subtree] = offset_dat
+                component_layout = offset_dat * step + start
 
         if not isinstance(component_layout, NaN):
             layout_expr_acc_ = layout_expr_acc + component_layout
@@ -133,7 +128,6 @@ def _prepare_layouts(axes: AxisTree, axis: Axis, path_acc, layout_expr_acc, free
         else:
             layouts[path_acc_] = NaN()
             layout_expr_acc_ = layout_expr_acc
-            free_axes_ = free_axes + ((axis, component),)
 
         # NOTE: Not strictly necessary but it means we don't currently break with ragged
         if i < len(axis.components) - 1:
@@ -234,25 +228,8 @@ def _collect_regions(axes: AxisTree, *, axis: Axis | None = None):
     return tuple(merged_regions)
 
 
-def _prepare_empty_offset_dat(axes, axis, component, untabulated):
-    # First we build the right data structure to store the offsets. We can find the
-    # axes that we need by combining the current axis with those needed by subaxes
-    # along with the count of the current component (if ragged).
-    axes_iter = OrderedSet()
-    for ax in _collect_offset_subaxes(axes, axis, component, visited=(axis,)):
-        axes_iter.add(ax)
-
-    # NOTE: This code is quite unclear (partial axes made then axes_iter further modified)
-    axes_iter.add(axis)
-    offset_axes = AxisTree.from_iterable(axes_iter)
-    offsets = Dat(offset_axes, data=np.full(offset_axes.size, -1, dtype=IntType))
-
-    return offsets
-
-
-
-
-def _tabulate_offset_dat(offset_dat, axes, region):
+def _tabulate_offset_dat(offset_dat, axes, region, start):
+    # Hmm... not sure what I do about regions...
     breakpoint()
     if len(region) > 1:
         raise NotImplementedError("TODO")
@@ -357,7 +334,7 @@ def _truncate_axis_tree_rec(axis_tree, axis) -> tuple[tuple[AxisTree, int]]:
 
     # Lastly, we can also consider the case where the entire subtree (at this
     # point) is dropped. This is only valid for constant-sized axes.
-    if not _axis_needs_outer_index(axis_tree, axis):
+    if not _axis_needs_outer_index(axis_tree, axis, {axis}):
         step = _axis_size(axis_tree, axis)
         axis_candidate = (AxisTree(), step)
         axis_candidates.append(axis_candidate)
@@ -464,7 +441,7 @@ def has_constant_step(axes: AxisTree, axis, cpt, inner_loop_vars, path=pmap()):
 #         return True
 
 
-def _tabulation_needs_subaxes(axes, axis, component) -> bool:
+def _tabulation_needs_subaxes(axes, axis, component, free_axes: tuple) -> bool:
     """
     As we descend the axis tree to compute layout functions we are able to access
     more and more indices and can thus tabulate offsets into arrays with more and
@@ -488,12 +465,12 @@ def _tabulation_needs_subaxes(axes, axis, component) -> bool:
 
     """
     if subaxis := axes.child(axis, component):
-        return _axis_needs_outer_index(axes, subaxis, pmap()) or _axis_contains_multiple_regions(axes, subaxis)
+        return _axis_needs_outer_index(axes, subaxis, free_axes) or _axis_contains_multiple_regions(axes, subaxis)
     else:
         return False
 
 
-def _axis_needs_outer_index(axes, axis, visited=pmap()) -> bool:
+def _axis_needs_outer_index(axes, axis, visited) -> bool:
     for component in axis.components:
         if any(_region_size_needs_outer_index(r, visited) for r in component.regions):
             return True
@@ -554,10 +531,11 @@ def _axis_component_region_has_fixed_size(region: AxisComponentRegion) -> bool:
 #     )
 
 
-def _region_size_needs_outer_index(region, path):
+def _region_size_needs_outer_index(region, free_axes):
     from pyop3.array import Dat
     from pyop3.array.harray import _ExpressionDat
-    from pyop3.expr_visitors import replace_terminals
+
+    free_axis_labels = frozenset(ax.label for ax in free_axes)
 
     size = region.size
 
@@ -572,24 +550,15 @@ def _region_size_needs_outer_index(region, path):
         # to correctly index the axis?
         if not size.axes.is_empty:
             for axlabel, clabel in size.axes.path(*size.axes.leaf).items():
-                if axlabel in path:
-                    assert path[axlabel] == clabel
-                else:
+                if axlabel not in free_axis_labels:
                     return True
 
     elif isinstance(size, _ExpressionDat):
         layout = size.layout
 
-        if set(collect_axis_vars(layout)) > path.keys():
+        if set(collect_axis_vars(layout)) > free_axis_labels:
             return True
 
-
-    # if subaxis := axes.child(axis, component):
-    #     for c in subaxis.components:
-    #         # path_ = path | {subaxis.label: c.label}
-    #         path_ = path | {axis.label: component.label}
-    #         if size_requires_external_index(axes, subaxis, c, inner_loop_vars, path_):
-    #             return True
     return False
 
 
