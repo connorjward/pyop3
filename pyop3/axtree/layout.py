@@ -13,6 +13,7 @@ from typing import Optional
 import numpy as np
 import pymbolic as pym
 from petsc4py import PETSc
+from pyop3 import tree
 from pyrsistent import PMap, freeze, pmap
 
 from pyop3.array.harray import Dat, _ExpressionDat
@@ -38,6 +39,7 @@ from pyop3.utils import (
     merge_dicts,
     strict_int,
     strictly_all,
+    steps,
 )
 
 
@@ -229,43 +231,75 @@ def _collect_regions(axes: AxisTree, *, axis: Axis | None = None):
 
 
 def _tabulate_offset_dat(offset_dat, axes, region, start):
-    # Hmm... not sure what I do about regions...
-    breakpoint()
-    if len(region) > 1:
-        raise NotImplementedError("TODO")
 
-    trimmed_axes, extra_step = _drop_constant_subaxes(axes, axis, component)
+    # NOTE: We don't handle regions at all. What should be done?
 
-    # this is really bloody close - just need the Python iteration to be less rubbish
-    # TODO: handle iteration over empty trees
-    if partial_axes.is_empty:
-        offset = 0
+    step_expr = _axis_tree_size(axes)
+    assert not isinstance(step_expr, numbers.Integral), "Constant steps should already be handled"
 
-        for axindex in axis.iter(no_index=True):  # FIXME: Should make this single component only
-            offsets.set_value(axindex.source_exprs, offset)
-            offset += step_size(
-                trimmed_axes,
-                axis,
-                component,
-                indices=axindex.source_exprs,
-            )
-    else:
-        for multiindex in partial_axes.iter():
-            offset = 0
+    # NOTE: If the step_expr is just an array we can avoid a loop here since we
+    # would only be doing a copy.
+    step_dat = Dat(offset_dat.axes, dtype=IntType)
+    step_dat.assign(step_expr, eager=True)
 
-            for axindex in axis.iter({multiindex}, no_index=True):  # FIXME: Should make this single component only
-                offsets.set_value(multiindex.source_exprs | axindex.source_exprs, offset)
-                offset += step_size(
-                    trimmed_axes,
-                    axis,
-                    component,
-                    indices=multiindex.source_exprs|axindex.source_exprs,
-                )
+    offsets = steps(step_dat.buffer.data_ro, drop_last=False)
+    offset_dat.buffer.data_wo[...] = offsets[:-1]
 
-    # if extra_step != 1:
-    #     offsets *= extra_step
+    return offsets[-1]
 
-    return offsets, extra_step
+
+    # trimmed_axes, extra_step = _drop_constant_subaxes(axes, axis, component)
+    #
+    # # this is really bloody close - just need the Python iteration to be less rubbish
+    # # TODO: handle iteration over empty trees
+    # if partial_axes.is_empty:
+    #     offset = 0
+    #
+    #     for axindex in axis.iter(no_index=True):  # FIXME: Should make this single component only
+    #         offsets.set_value(axindex.source_exprs, offset)
+    #         offset += step_size(
+    #             trimmed_axes,
+    #             axis,
+    #             component,
+    #             indices=axindex.source_exprs,
+    #         )
+    # else:
+    #     for multiindex in partial_axes.iter():
+    #         offset = 0
+    #
+    #         for axindex in axis.iter({multiindex}, no_index=True):  # FIXME: Should make this single component only
+    #             offsets.set_value(multiindex.source_exprs | axindex.source_exprs, offset)
+    #             offset += step_size(
+    #                 trimmed_axes,
+    #                 axis,
+    #                 component,
+    #                 indices=multiindex.source_exprs|axindex.source_exprs,
+    #             )
+    #
+    # # if extra_step != 1:
+    # #     offsets *= extra_step
+    #
+    # return offsets, extra_step
+
+
+# NOTE: This is a very generic operation and I probably do something very similar elsewhere
+def _axis_tree_size(axes):
+    assert not axes.is_empty
+    return _axis_tree_size_rec(axes, axes.root)
+
+
+def _axis_tree_size_rec(axis_tree: AxisTree, axis: Axis):
+    # The size of an axis tree is simply the product of the sizes of the
+    # different nested subaxes. This remains the case even for ragged
+    # inner axes.
+    tree_size = 0
+    for component in axis.components:
+        if subaxis := axis_tree.child(axis, component):
+            subtree_size = _axis_tree_size_rec(axis_tree, subaxis)
+            tree_size += component.size * subtree_size
+        else:
+            tree_size += component.size
+    return tree_size
 
 
 def _drop_constant_subaxes(axis_tree, axis, component) -> tuple[AxisTree, int]:

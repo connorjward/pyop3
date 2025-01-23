@@ -365,6 +365,11 @@ class AxisComponent(LabelledNodeComponent):
     def count(self) -> Any:
         return sum(reg.size for reg in self.regions)
 
+    # better than 'count'?
+    @property
+    def size(self):
+        return self.count
+
     # NOTE: Unsure if this should be kept separate like this... just turn into component.regions?
     @cached_property
     def regions(self) -> tuple[AxisComponentRegion]:

@@ -315,9 +315,8 @@ def popwhen(predicate, iterable):
 
 # NOTE: It might be more logical for drop_last to default to True
 def steps(sizes, *, drop_last=False):
-    sizes = tuple(sizes)
-    steps_ = (0,) + tuple(np.cumsum(sizes, dtype=int))
-    return steps_[:-1] if drop_last else steps_
+    steps_ = np.concatenate([[0], np.cumsum(sizes)])
+    return readonly(steps_[:-1]) if drop_last else readonly(steps_)
 
 
 def pairwise(iterable):
