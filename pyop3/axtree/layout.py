@@ -59,7 +59,6 @@ def make_layouts(axes: AxisTree, loop_vars) -> PMap:
         return freeze({pmap(): 0})
 
     component_layouts = tabulate_again(axes.layout_axes)
-    breakpoint()
     return component_layouts
     # return _accumulate_axis_component_layouts(axes, component_layouts)
 
@@ -94,33 +93,44 @@ def _prepare_layouts(axes: AxisTree, axis: Axis, path_acc, layout_expr_acc, free
     for i, component in enumerate(axis.components):
         path_acc_ = path_acc | {axis.label: component.label}
 
-        subtree, step = _drop_constant_subaxes(axes, axis, component)
+        mysubaxis = axes.child(axis, component)
+        if mysubaxis:
+            mysubtree = axes.subtree(mysubaxis)
 
-        linear_axis = Axis([component], axis.label)
-        offset_axes = AxisTree.from_iterable([*free_axes, linear_axis])
-
-        free_axes_ = free_axes + (linear_axis,)
-
-        if subtree in to_tabulate:
-            # We have already seen an identical tree elsewhere, don't need to create a new array here
-            component_layout = to_tabulate[subtree]
+        # If the axis tree has zero size but is not empty then it makes no sense to give it a layout
+        if mysubaxis and not mysubtree.is_empty and _axis_tree_size(mysubtree) == 0:
+            component_layout = 0
         else:
-            if _tabulation_needs_subaxes(axes, axis, component, free_axes_):
-                # 1. Needs subindices to be able to tabulate anything, pass down
-                component_layout = NaN()
-            elif subtree.is_empty:
-                # 2. Affine access
-                assert subtree.is_empty
+            subtree, step = _drop_constant_subaxes(axes, axis, component)
 
-                # FIXME: weakness in algorithm
-                if step == 0:
-                    step = 1
-                component_layout = AxisVar(axis.label) * step + start
+            if not subtree.is_empty and subtree.root.component.size == 0:
+                breakpoint()
+
+            linear_axis = Axis([component], axis.label)
+            offset_axes = AxisTree.from_iterable([*free_axes, linear_axis])
+
+            free_axes_ = free_axes + (linear_axis,)
+
+            if subtree in to_tabulate:
+                # We have already seen an identical tree elsewhere, don't need to create a new array here
+                component_layout = to_tabulate[subtree]
             else:
-                # 3. Non-constant stride, must tabulate
-                offset_dat = Dat(offset_axes, data=np.full(offset_axes.size, -1, dtype=IntType))
-                to_tabulate[subtree] = offset_dat
-                component_layout = offset_dat * step + start
+                if _tabulation_needs_subaxes(axes, axis, component, free_axes_):
+                    # 1. Needs subindices to be able to tabulate anything, pass down
+                    component_layout = NaN()
+                elif subtree.is_empty:
+                    # 2. Affine access
+                    assert subtree.is_empty
+
+                    # FIXME: weakness in algorithm
+                    if step == 0:
+                        step = 1
+                    component_layout = AxisVar(axis.label) * step + start
+                else:
+                    # 3. Non-constant stride, must tabulate
+                    offset_dat = Dat(offset_axes, data=np.full(offset_axes.size, -1, dtype=IntType))
+                    to_tabulate[subtree] = offset_dat
+                    component_layout = offset_dat * step + start
 
         if not isinstance(component_layout, NaN):
             layout_expr_acc_ = layout_expr_acc + component_layout
@@ -318,7 +328,8 @@ def _drop_constant_subaxes(axis_tree, axis, component) -> tuple[AxisTree, int]:
 
         # The best result has the largest step size (as the resulting tree is
         # smaller and therefore more generic).
-        trimmed_tree, step = max(results, key=lambda result: result[1])
+        # Go in reverse order because the 'best' results are appended so we resolve clashes in the best way.
+        trimmed_tree, step = max(reversed(results), key=lambda result: result[1])
 
         # add current axis
         # tree = AxisTree(axis.copy(components=[component]))
@@ -368,7 +379,7 @@ def _truncate_axis_tree_rec(axis_tree, axis) -> tuple[tuple[AxisTree, int]]:
 
     # Lastly, we can also consider the case where the entire subtree (at this
     # point) is dropped. This is only valid for constant-sized axes.
-    if not _axis_needs_outer_index(axis_tree, axis, {axis}):
+    if not _axis_needs_outer_index(axis_tree, axis, (axis,)):
         step = _axis_size(axis_tree, axis)
         axis_candidate = (AxisTree(), step)
         axis_candidates.append(axis_candidate)
@@ -510,8 +521,7 @@ def _axis_needs_outer_index(axes, axis, visited) -> bool:
             return True
 
         if subaxis := axes.child(axis, component):
-            visited_ = visited | {axis: component}
-            if _axis_needs_outer_index(axes, subaxis, visited_):
+            if _axis_needs_outer_index(axes, subaxis, visited + (axis,)):
                 return True
 
     return False
@@ -1000,7 +1010,7 @@ def axis_tree_size(axes: AxisTree) -> int:
     if axes.is_empty:
         return 0
 
-    if not _axis_needs_outer_index(axes, axes.root, pmap()):
+    if not _axis_needs_outer_index(axes, axes.root, ()):
         return _axis_size(axes, axes.root)
 
     sizes = []
