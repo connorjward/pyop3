@@ -507,7 +507,7 @@ class InstructionList(Instruction):
 
     def __init__(self, instructions, *, name=_DEFAULT_LOOP_NAME, **kwargs):
         super().__init__(**kwargs)
-        self.instructions = instructions
+        self.instructions = tuple(instructions)
         self.name = name
 
     def __iter__(self):

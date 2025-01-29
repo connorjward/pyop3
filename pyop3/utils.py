@@ -15,6 +15,8 @@ from pyrsistent import pmap
 from pyop3.config import config
 from pyop3.exceptions import Pyop3Exception
 
+from mpi4py import MPI
+
 
 class UnorderedCollectionException(Pyop3Exception):
     """Exception raised when an ordered collection is required."""
@@ -490,3 +492,17 @@ class Record(abc.ABC):
         new = object.__new__(type(self))
         new._record_init(**kwargs)
         return new
+
+
+def unique_comm(iterable) -> MPI.Comm | None:
+    comm = None
+    for item in iterable:
+        if not item.comm:
+            continue
+
+        if comm is None:
+            comm = item.comm
+        elif item.comm is not comm:
+            raise ValueError("Comm mismatch")
+
+    return comm

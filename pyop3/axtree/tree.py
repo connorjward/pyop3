@@ -45,6 +45,7 @@ from pyop3.tree import (
 )
 from pyop3.utils import (
     has_unique_entries,
+    unique_comm,
     strict_zip,
     debug_assert,
     deprecated,
@@ -53,7 +54,7 @@ from pyop3.utils import (
     merge_dicts,
     pairwise,
     single_valued,
-    steps,
+    steps as steps_func,
     strict_int,
     strictly_all,
 )
@@ -300,8 +301,11 @@ class AxisComponent(LabelledNodeComponent):
         self.unit = unit
         self.sf = sf
 
-    # def __str__(self) -> str:
-    #     ...
+    def __str__(self) -> str:
+        if self.label is not None:
+            return f"{{{self.label}: [{', '.join(map(str, self.regions))}]}}"
+        else:
+            return f"{{{', '.join(map(str, self.regions))}}}"
 
     @property
     def rank_equal(self) -> bool:
@@ -376,6 +380,14 @@ class AxisComponent(LabelledNodeComponent):
         """Return axis component regions having expanded star forests into owned and ghost."""
         return _expand_regions(self._regions, self.sf) if self.sf else self._regions
 
+    @property
+    def comm(self) -> MPI.Comm | None:
+        return self.sf.comm if self.sf else None
+
+    @cached_property
+    def _all_region_labels(self) -> tuple[str]:
+        return tuple(region.label for region in self.regions)
+
 
 class Axis(LoopIterable, MultiComponentLabelledNode, CacheMixin):
     fields = MultiComponentLabelledNode.fields | {"components"}
@@ -420,13 +432,7 @@ class Axis(LoopIterable, MultiComponentLabelledNode, CacheMixin):
         return as_axis_tree(self)(*args)
 
     def __str__(self) -> str:
-        return (
-            f"{type(self).__name__}"
-            "("
-            f"{{{', '.join(f'{c.label}: {c.regions}' for c in self.components)}}}, "
-            f"{self.label}"
-            ")"
-        )
+        return f"{{{self.label}: [{', '.join(map(str, self.components))}]}}"
 
     # TODO: This method should be reimplemented inside of Firedrake.
     # @classmethod
@@ -457,12 +463,8 @@ class Axis(LoopIterable, MultiComponentLabelledNode, CacheMixin):
         return self.component_labels.index(clabel)
 
     @property
-    def comm(self):
-        # TODO: Raise a nice exception here
-        # try:
-        return single_valued(c.comm for c in self.components)
-        # except 
-        # return self.sf.comm if self.sf else MPI.COMM_SELF
+    def comm(self) -> MPI.Comm | None:
+        return unique_comm(self.components)
 
     @property
     def size(self):
@@ -476,33 +478,33 @@ class Axis(LoopIterable, MultiComponentLabelledNode, CacheMixin):
         # hacky but right (no inner shape)
         return self.size
 
-    # @parallel_only  # TODO
-    @cached_property
-    def owned_count(self):
-        return self.count - self.sf.nleaves
+    # # @parallel_only  # TODO
+    # @cached_property
+    # def owned_count(self):
+    #     return self.count - self.sf.nleaves
 
     @cached_property
     def count_per_component(self):
         return freeze({c.label: c.count for c in self.components})
 
-    @cached_property
-    def owned_count_per_component(self):
-        return freeze(
-            {
-                clabel: count - self.ghost_count_per_component[clabel]
-                for clabel, count in self.count_per_component.items()
-            }
-        )
+    # @cached_property
+    # def owned_count_per_component(self):
+    #     return freeze(
+    #         {
+    #             clabel: count - self.ghost_count_per_component[clabel]
+    #             for clabel, count in self.count_per_component.items()
+    #         }
+    #     )
 
-    @cached_property
-    def ghost_count_per_component(self):
-        counts = np.zeros_like(self.components, dtype=int)
-        if self.comm.size > 1:
-            for leaf_index in self.sf.ileaf:
-                counts[self._axis_number_to_component_index(leaf_index)] += 1
-        return freeze(
-            {cpt.label: count for cpt, count in strict_zip(self.components, counts)}
-        )
+    # @cached_property
+    # def ghost_count_per_component(self):
+    #     counts = np.zeros_like(self.components, dtype=int)
+    #     if self.comm.size > 1:
+    #         for leaf_index in self.sf.ileaf:
+    #             counts[self._axis_number_to_component_index(leaf_index)] += 1
+    #     return freeze(
+    #         {cpt.label: count for cpt, count in strict_zip(self.components, counts)}
+    #     )
 
     @cached_property
     def owned(self):
@@ -674,7 +676,7 @@ def component_number_from_offsets(axis, number, offsets):
 def component_offsets(axis, context):
     from pyop3.axtree.layout import _as_int
 
-    return steps([_as_int(c.count, context) for c in axis.components])
+    return steps_func([_as_int(c.count, context) for c in axis.components])
 
 
 # NOTE: does this sort of expression stuff live in here? Or expr.py perhaps? Definitely
@@ -861,35 +863,9 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree, CacheMixin):
             raise NotImplementedError
             return ContextSensitiveAxisTree(axis_trees)
 
-    def _accumulate_targets(self, targets_per_axis, *, axis=None, target_path_acc=None, target_exprs_acc=None):
-        """Traverse the tree and accumulate per-node targets."""
-        targets = {}
-
-        if axis is None:  # strictly_all
-            target_path_acc, target_exprs_acc = targets_per_axis.get(None, (pmap(), pmap()))
-            targets[None] = (target_path_acc, target_exprs_acc)
-
-            if self.is_empty:
-                return pmap(targets)
-            else:
-                axis = self.root
-
-        for component in axis.components:
-            axis_key = (axis.id, component.label)
-            axis_target_path, axis_target_exprs = targets_per_axis.get(axis_key, (pmap(), pmap()))
-            target_path_acc_ = target_path_acc | axis_target_path
-            target_exprs_acc_ = target_exprs_acc | axis_target_exprs
-            targets[axis.id, component.label] = (target_path_acc_, target_exprs_acc_)
-
-            if subaxis := self.child(axis, component):
-                targets_ = self._accumulate_targets(
-                    targets_per_axis,
-                    axis=subaxis,
-                    target_path_acc=target_path_acc_,
-                    target_exprs_acc=target_exprs_acc_,
-                )
-                targets.update(targets_)
-        return pmap(targets)
+    @property
+    def axes(self):
+        return self.nodes
 
     @property
     @abc.abstractmethod
@@ -910,38 +886,6 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree, CacheMixin):
     def target_path(self):
         # return self.paths[0]
         return self._match_path_and_exprs(self.unindexed)[0]
-
-    # TODO: refactor/move
-    def _match_path_and_exprs(self, tree):
-        """
-        Find the set of paths and expressions that match the given tree. This is
-        needed because we have multiple such expressions for intermediate indexing.
-
-        If we retained an order then this might be easier to index with 0 and -1.
-        """
-        map_path = None
-        map_exprs = None
-        for paths_and_exprs in self.paths_and_exprs:
-            matching = True
-            for key, (mypath, myexprs) in paths_and_exprs.items():
-                # check if mypath is consistent with the labels of tree
-                # NOTE: should probably also check component labels
-                if not (mypath.keys() <= tree.node_labels):
-                    matching = False
-                    break
-
-            if not matching:
-                continue
-
-            assert map_path is None and map_exprs is None
-            # do an accumulation
-            map_path = {}
-            map_exprs = {}
-            for key, (mypath, myexprs) in paths_and_exprs.items():
-                map_path[key] = mypath
-                map_exprs[key] = myexprs
-        assert map_path is not None and map_exprs is not None
-        return map_path, map_exprs
 
     @property
     @abc.abstractmethod
@@ -973,16 +917,6 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree, CacheMixin):
     def outer_loops(self):
         pass
 
-    @property
-    @abc.abstractmethod
-    def _matching_target(self):
-        pass
-
-    @cached_property
-    def _subst_layouts_default(self):
-        return subst_layouts(self, self._matching_target, self.layouts)
-
-
     def subst_layouts(self):
         return self._subst_layouts_default
 
@@ -1011,54 +945,6 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree, CacheMixin):
             **kwargs,
         )
 
-    @cached_property
-    def _source_path(self):
-        if self.is_empty:
-            return pmap()
-        else:
-            return self._collect_source_path()
-
-    def _collect_source_path(self, *, axis=None):
-        assert not self.is_empty
-
-        if axis is None:
-            axis = self.root
-        axis = typing.cast(Axis, axis)  # make the type checker happy
-
-        source_path = {}
-        for component in axis.components:
-            source_path[axis.id, component.label] = pmap({axis.label: component.label})
-
-            if subaxis := self.child(axis, component):
-                source_path.update(self._collect_source_path(axis=subaxis))
-        return freeze(source_path)
-
-    @cached_property
-    def _source_exprs(self):
-        if self.is_empty:
-            return pmap()
-        else:
-            return self._collect_source_exprs()
-
-    def _collect_source_exprs(self, *, axis=None):
-        assert not self.is_empty
-
-        if axis is None:
-            axis = self.root
-        axis = typing.cast(Axis, axis)  # make the type checker happy
-
-        source_exprs = {}
-        for component in axis.components:
-            source_exprs[axis.id, component.label] = pmap({axis.label: AxisVar(axis.label)})
-
-            if subaxis := self.child(axis, component):
-                source_exprs.update(self._collect_source_exprs(axis=subaxis))
-        return freeze(source_exprs)
-
-    @property
-    def axes(self):
-        return self
-
     def as_tree(self):
         return self
 
@@ -1086,34 +972,14 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree, CacheMixin):
             loop_exprs=loop_exprs,
         )
 
-    @cached_property
-    def owned_size(self):
-        nghost = self.sf.nleaves if self.sf is not None else 0
-        return self.size - nghost
-
-    def _check_labels(self):
-        def check(node, prev_labels):
-            if node == self.root:
-                return prev_labels
-            if node.label in prev_labels:
-                raise ValueError("shouldn't have the same label as above")
-            return prev_labels | {node.label}
-
-        previsit(self, check, self.root, frozenset())
-
-    @property
-    @abc.abstractmethod
-    def _buffer_indices(self):
-        pass
-
-    @property
-    @abc.abstractmethod
-    def _buffer_indices_ghost(self):
-        pass
+    # @cached_property
+    # def owned_size(self):
+    #     nghost = self.sf.nleaves if self.sf is not None else 0
+    #     return self.size - nghost
 
     @cached_property
     def global_numbering(self):
-        if self.comm.size == 1:
+        if not self.comm or self.comm.size == 1:
             numbering = np.arange(self.size, dtype=IntType)
         else:
             nowned = self.owned.size
@@ -1203,22 +1069,24 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree, CacheMixin):
     def alloc_size(self):
         return self._alloc_size()
 
-    def _alloc_size(self, axis=None):
-        if self.is_empty:
-            return 1
-        axis = axis or self.root
-        return sum(cpt.alloc_size(self, axis) for cpt in axis.components)
-
     @cached_property
     def owned(self):
         """Return the owned portion of the axis tree."""
-        if self.comm.size == 1:
+        if not self.comm or self.comm.size == 1:
             return self
 
-        indices = self._collect_owned_index_tree()
-        return self[indices]
+        return self.with_region_label("owned")
 
-    def _collect_owned_index_tree(self, axis=None):
+    def with_region_label(self, region_label: str) -> IndexedAxisTree:
+        """TODO"""
+        if region_label not in self._all_region_labels:
+            raise ValueError(f"{region_label} not found")
+
+        region_slice = self._region_slice(region_label)
+        return self[region_slice]
+
+    # NOTE: Unsure if this should be a method
+    def _region_slice(self, region_label: str, *, axis: Axis | None = None) -> "IndexTree":
         from pyop3.itree import AffineSliceComponent, IndexTree, Slice
 
         if axis is None:
@@ -1226,24 +1094,179 @@ class BaseAxisTree(ContextFreeLoopIterable, LabelledTree, CacheMixin):
 
         slice_components = []
         for component in axis.components:
-            if component.distributed:
+            if region_label in component._all_region_labels:
+                region_index = component._all_region_labels.index(region_label)
+                steps = steps_func([r.size for r in component.regions])
+                start, stop = steps[region_index:region_index+2]
+
+                # NOTE: I think slices and components should *always* preserve the axis labels
                 slice_component = AffineSliceComponent(
-                    component.label,
-                    stop=component.owned_count,
-                    label=(component.label, "owned")
+                    component.label, start=start, stop=stop, label=component.label
                 )
             else:
-                slice_component = AffineSliceComponent(component.label)
+                slice_component = AffineSliceComponent(
+                    component.label, label=component.label
+                )
             slice_components.append(slice_component)
-
         slice_ = Slice(axis.label, slice_components, label=axis.label)
 
         index_tree = IndexTree(slice_)
         for component, slice_component in strict_zip(axis.components, slice_components):
             if subaxis := self.child(axis, component):
-                subtree = self._collect_owned_index_tree(subaxis)
+                subtree = self._region_slice(region_label, axis=subaxis)
                 index_tree = index_tree.add_subtree(subtree, slice_, slice_component.label)
         return index_tree
+
+    def _accumulate_targets(self, targets_per_axis, *, axis=None, target_path_acc=None, target_exprs_acc=None):
+        """Traverse the tree and accumulate per-node targets."""
+        targets = {}
+
+        if axis is None:  # strictly_all
+            target_path_acc, target_exprs_acc = targets_per_axis.get(None, (pmap(), pmap()))
+            targets[None] = (target_path_acc, target_exprs_acc)
+
+            if self.is_empty:
+                return pmap(targets)
+            else:
+                axis = self.root
+
+        for component in axis.components:
+            axis_key = (axis.id, component.label)
+            axis_target_path, axis_target_exprs = targets_per_axis.get(axis_key, (pmap(), pmap()))
+            target_path_acc_ = target_path_acc | axis_target_path
+            target_exprs_acc_ = target_exprs_acc | axis_target_exprs
+            targets[axis.id, component.label] = (target_path_acc_, target_exprs_acc_)
+
+            if subaxis := self.child(axis, component):
+                targets_ = self._accumulate_targets(
+                    targets_per_axis,
+                    axis=subaxis,
+                    target_path_acc=target_path_acc_,
+                    target_exprs_acc=target_exprs_acc_,
+                )
+                targets.update(targets_)
+        return pmap(targets)
+
+    # TODO: refactor/move
+    def _match_path_and_exprs(self, tree):
+        """
+        Find the set of paths and expressions that match the given tree. This is
+        needed because we have multiple such expressions for intermediate indexing.
+
+        If we retained an order then this might be easier to index with 0 and -1.
+        """
+        map_path = None
+        map_exprs = None
+        for paths_and_exprs in self.paths_and_exprs:
+            matching = True
+            for key, (mypath, myexprs) in paths_and_exprs.items():
+                # check if mypath is consistent with the labels of tree
+                # NOTE: should probably also check component labels
+                if not (mypath.keys() <= tree.node_labels):
+                    matching = False
+                    break
+
+            if not matching:
+                continue
+
+            assert map_path is None and map_exprs is None
+            # do an accumulation
+            map_path = {}
+            map_exprs = {}
+            for key, (mypath, myexprs) in paths_and_exprs.items():
+                map_path[key] = mypath
+                map_exprs[key] = myexprs
+        assert map_path is not None and map_exprs is not None
+        return map_path, map_exprs
+
+    @property
+    @abc.abstractmethod
+    def _matching_target(self):
+        pass
+
+    @cached_property
+    def _subst_layouts_default(self):
+        return subst_layouts(self, self._matching_target, self.layouts)
+
+    @cached_property
+    def _source_path(self):
+        if self.is_empty:
+            return pmap()
+        else:
+            return self._collect_source_path()
+
+    def _collect_source_path(self, *, axis=None):
+        assert not self.is_empty
+
+        if axis is None:
+            axis = self.root
+        axis = typing.cast(Axis, axis)  # make the type checker happy
+
+        source_path = {}
+        for component in axis.components:
+            source_path[axis.id, component.label] = pmap({axis.label: component.label})
+
+            if subaxis := self.child(axis, component):
+                source_path.update(self._collect_source_path(axis=subaxis))
+        return freeze(source_path)
+
+    @cached_property
+    def _source_exprs(self):
+        if self.is_empty:
+            return pmap()
+        else:
+            return self._collect_source_exprs()
+
+    def _collect_source_exprs(self, *, axis=None):
+        assert not self.is_empty
+
+        if axis is None:
+            axis = self.root
+        axis = typing.cast(Axis, axis)  # make the type checker happy
+
+        source_exprs = {}
+        for component in axis.components:
+            source_exprs[axis.id, component.label] = pmap({axis.label: AxisVar(axis.label)})
+
+            if subaxis := self.child(axis, component):
+                source_exprs.update(self._collect_source_exprs(axis=subaxis))
+        return freeze(source_exprs)
+
+    def _check_labels(self):
+        def check(node, prev_labels):
+            if node == self.root:
+                return prev_labels
+            if node.label in prev_labels:
+                raise ValueError("shouldn't have the same label as above")
+            return prev_labels | {node.label}
+
+        previsit(self, check, self.root, frozenset())
+
+    @property
+    @abc.abstractmethod
+    def _buffer_indices(self):
+        pass
+
+    @property
+    @abc.abstractmethod
+    def _buffer_indices_ghost(self):
+        pass
+
+    def _alloc_size(self, axis=None):
+        if self.is_empty:
+            return 1
+        axis = axis or self.root
+        return sum(cpt.alloc_size(self, axis) for cpt in axis.components)
+
+    @cached_property
+    def _all_region_labels(self) -> frozenset[str]:
+        region_labels = set()
+        for axis in self.axes:
+            for component in axis.components:
+                for region in component.regions:
+                    if region.label is not None:
+                        region_labels.add(region.label)
+        return frozenset(region_labels)
 
 
 class AxisTree(MutableLabelledTreeMixin, BaseAxisTree):
@@ -1308,6 +1331,7 @@ class AxisTree(MutableLabelledTreeMixin, BaseAxisTree):
     @cached_property
     def sf(self) -> StarForest:
         from pyop3.axtree.parallel import collect_sf_graphs
+        breakpoint()
 
         # for now
         # NOTE: what is global_size used for? very confusing name
@@ -1335,14 +1359,8 @@ class AxisTree(MutableLabelledTreeMixin, BaseAxisTree):
             return StarForest.from_graph(self.size, nroots, ilocal, iremote, self.comm)
 
     @property
-    def comm(self):
-        # for now, need to think about combining comms
-        return COMM_SELF
-        paraxes = [axis for axis in self.nodes if axis.sf is not None]
-        if not paraxes:
-            return MPI.COMM_SELF
-        else:
-            return single_valued(ax.comm for ax in paraxes)
+    def comm(self) -> MPI.Comm | None:
+        return unique_comm(self.nodes)
 
     @cached_property
     def datamap(self):

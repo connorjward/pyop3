@@ -606,6 +606,9 @@ class _ConcretizedMat(_ConcretizedDat2):
         self.row_layouts = pmap(row_layouts)
         self.col_layouts = pmap(col_layouts)
 
+        # fix this properly
+        self.parent = mat.parent
+
     @property
     def axes(self):
         return self.mat.axes
