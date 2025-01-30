@@ -349,10 +349,13 @@ def _(insn_list: InstructionList, /) -> InstructionList:
 
 
 @expand_assignments.register(Loop)
-def _(loop: Loop, /) -> InstructionList:
-    return Loop(loop.index, [
-            expand_assignments(stmt) for stmt in loop.statements
-    ])
+def _(loop: Loop, /) -> Loop:
+    return Loop(
+        loop.index,
+        [
+            stmt_ for stmt in loop.statements for stmt_ in enlist(expand_assignments(stmt))
+        ],
+    )
 
 
 @expand_assignments.register(CalledFunction)
@@ -469,9 +472,12 @@ def _(insn_list: InstructionList, /) -> InstructionList:
 
 @prepare_petsc_calls.register(Loop)
 def _(loop: Loop, /) -> Loop:
-    return Loop(loop.index, [
-        prepare_petsc_calls(stmt) for stmt in loop.statements
-    ])
+    return Loop(
+        loop.index,
+        [
+            stmt_ for stmt in loop.statements for stmt_ in enlist(prepare_petsc_calls(stmt))
+        ]
+    )
 
 
 @prepare_petsc_calls.register(CalledFunction)
@@ -880,4 +886,38 @@ def _(assignment: PetscMatAssign, /, loop_axes_acc) -> PetscMatAssign:
 
 @_concretize_arrays_rec.register(CalledFunction)
 def _(func: CalledFunction, /, loop_axes_acc) -> CalledFunction:
+    return func.copy(arguments=[expr_concretize_arrays(arg, loop_axes_acc) for arg in func.arguments])
+
+
+@functools.singledispatch
+def drop_zero_sized_instructions(insn: Instruction, /) -> Instruction:
+    raise TypeError
+
+
+@drop_zero_sized_instructions.register(InstructionList)
+def _(insn_list: InstructionList, /) -> Instruction:
+    return maybe_enlist(
+        filter(
+            lambda insn: not isinstance(insn, NullInstruction)
+            (drop_zero_sized_instructions(insn) for insn in insn_list),
+        )
+    )
+
+
+@drop_zero_sized_instructions.register(Loop)
+def _(loop: Loop, /, loop_axes_acc) -> Loop | NullInstruction:
+    return loop.copy(statements=[drop_zero_sized_instructions(stmt) for stmt in loop.statements])
+
+
+@drop_zero_sized_instructions.register(Assignment)
+@drop_zero_sized_instructions.register(PetscMatAssign)
+def _(assignment: Assignment | PetscMatAssign, /) -> Assignment | PetscMatAssign | NullInstruction:
+    if assignment.axes.size == 0:
+        return NullInstruction()
+    else:
+        return assignment
+
+@drop_zero_sized_instructions.register(CalledFunction)
+def _(func: CalledFunction, /) -> CalledFunction:
+    raise NotImplementedError
     return func.copy(arguments=[expr_concretize_arrays(arg, loop_axes_acc) for arg in func.arguments])
